@@ -146,6 +146,12 @@ class MutationObserver:
             pending_records: List<MutationRecord>()
         )
 
+# --- Microtask entry (callback + records pair for event loop dispatch) ---
+
+class MicrotaskEntry:
+    callback_id: i64
+    records: List<MutationRecord>
+
 # --- Observer registry ---
 
 class MutationObserverRegistry:
@@ -289,9 +295,26 @@ class MutationObserverRegistry:
     fn doc_nodes_ref() -> List<DomNode>:
         List<DomNode>()
 
-    # Schedule microtask for callback delivery (not yet implemented).
-    me queue_microtask():
-        pass_todo
+    # Schedule microtask for callback delivery.
+    # Drains all observers with pending records, collecting their callback IDs
+    # and records, then clears the pending queues. Returns a list of
+    # (callback_id, records) pairs for the event loop to invoke.
+    me queue_microtask() -> List<MicrotaskEntry>:
+        var entries = List<MicrotaskEntry>()
+        var i = 0
+        while i < self.observers.len():
+            var observer = self.observers.get(i)
+            if observer.pending_records.len() > 0:
+                val entry = MicrotaskEntry(
+                    callback_id: observer.callback_id,
+                    records: observer.pending_records
+                )
+                entries.push(entry)
+                observer.pending_records = List<MutationRecord>()
+                self.observers.set(i, observer)
+                self.logger.debug("queue_microtask: observer={observer.id} records={entry.records.len()}")
+            i = i + 1
+        entries
 
     # Get the count of pending records across all observers.
     fn total_pending_records() -> i64:

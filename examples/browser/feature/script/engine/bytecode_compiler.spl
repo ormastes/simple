@@ -3,7 +3,7 @@
 
 use browser.entity.script.bytecode_types.(OpCode, BytecodeChunk, ConstantPool)
 use browser.entity.script.js_types.(JsValue, JsObject, JsProperty)
-use browser.entity.script.ast_types.(Expression, Statement)
+use browser.entity.script.ast_types.(Expression, Statement, SwitchCase)
 use browser.shared.error.(BrowserError, BrowserResult, script_error)
 use browser.shared.logging.(Logger, LogLevel)
 
@@ -79,6 +79,69 @@ class BytecodeCompiler:
                 self.compile_block(stmts)
             Statement.FnDecl(name, params, body):
                 self.compile_function_decl(name, params, body)
+            Statement.TryCatch(try_body, catch_param, catch_body, finally_body):
+                self.compile_try_catch(try_body, catch_param, catch_body, finally_body)
+            Statement.Switch(discriminant, cases):
+                self.compile_switch(discriminant, cases)
+            Statement.ForIn(binding, object, body):
+                # ForIn compiled as: get keys, iterate
+                self.compile_expression(object)
+                self.emit(OpCode.GetIterator)
+                val loop_start = self.current_offset()
+                self.emit(OpCode.Dup)
+                self.emit(OpCode.IteratorNext)
+                val exit_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
+                self._declare_local(binding)
+                val slot = self.resolve_local(binding)
+                self.emit(OpCode.StoreLocal(idx: slot))
+                var i = 0
+                while i < body.len():
+                    self.compile_statement(body.get(i))
+                    i = i + 1
+                self.emit(OpCode.Jump(offset: loop_start))
+                self.patch_jump(exit_jump)
+                self.emit(OpCode.Pop)  # pop iterator
+            Statement.ForOf(binding, iterable, body):
+                self.compile_expression(iterable)
+                self.emit(OpCode.GetIterator)
+                val loop_start = self.current_offset()
+                self.emit(OpCode.Dup)
+                self.emit(OpCode.IteratorNext)
+                val exit_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
+                self._declare_local(binding)
+                val slot = self.resolve_local(binding)
+                self.emit(OpCode.StoreLocal(idx: slot))
+                var i = 0
+                while i < body.len():
+                    self.compile_statement(body.get(i))
+                    i = i + 1
+                self.emit(OpCode.Jump(offset: loop_start))
+                self.patch_jump(exit_jump)
+                self.emit(OpCode.Pop)
+            Statement.ThrowStmt(expr):
+                self.compile_expression(expr)
+                self.emit(OpCode.Throw)
+            Statement.BreakStmt:
+                if self.loop_breaks.len() > 0:
+                    val break_jump = self.emit_jump(OpCode.Jump(offset: 0))
+                    val breaks = self.loop_breaks.get(self.loop_breaks.len() - 1)
+                    breaks.push(break_jump)
+            Statement.ContinueStmt:
+                if self.loop_starts.len() > 0:
+                    val loop_start = self.loop_starts.get(self.loop_starts.len() - 1)
+                    self.emit(OpCode.Jump(offset: loop_start))
+            Statement.ClassDecl(name, parent_name, constructor, methods):
+                # Compile class as constructor function + prototype setup
+                self.emit(OpCode.NewObject)  # prototype
+                # Compile each method onto prototype
+                var mi = 0
+                while mi < methods.len():
+                    self.emit(OpCode.Dup)  # keep prototype on stack
+                    self.compile_statement(methods.get(mi))
+                    mi = mi + 1
+                # Compile constructor
+                self.compile_statement(constructor)
+                self.emit(OpCode.StoreGlobal(name: name))
 
     me compile_var_decl(name: text, init: Expression):
         self.logger.debug("Compiling var declaration: {name}")
@@ -215,6 +278,78 @@ class BytecodeCompiler:
             i = i + 1
         self.end_scope()
 
+    me compile_try_catch(try_body: List<Statement>, catch_param: text, catch_body: List<Statement>, finally_body: List<Statement>):
+        # Push exception handler pointing to catch block
+        val handler_jump = self.emit_jump(OpCode.PushExceptionHandler(catch_offset: 0))
+        # Try body
+        self.begin_scope()
+        var i = 0
+        while i < try_body.len():
+            self.compile_statement(try_body.get(i))
+            i = i + 1
+        self.end_scope()
+        self.emit(OpCode.PopExceptionHandler)
+        val finally_jump = self.emit_jump(OpCode.Jump(offset: 0))
+        # Catch body
+        self.patch_jump(handler_jump)
+        if catch_body.len() > 0:
+            self.begin_scope()
+            if catch_param != "":
+                self._declare_local(catch_param)
+                val slot = self.resolve_local(catch_param)
+                self.emit(OpCode.StoreLocal(idx: slot))
+            var ci = 0
+            while ci < catch_body.len():
+                self.compile_statement(catch_body.get(ci))
+                ci = ci + 1
+            self.end_scope()
+        # Finally body (always runs)
+        self.patch_jump(finally_jump)
+        if finally_body.len() > 0:
+            self.begin_scope()
+            var fi = 0
+            while fi < finally_body.len():
+                self.compile_statement(finally_body.get(fi))
+                fi = fi + 1
+            self.end_scope()
+
+    me compile_switch(discriminant: Expression, cases: List<SwitchCase>):
+        self.compile_expression(discriminant)
+        # Compile as chained comparisons
+        var end_jumps = List<i64>()
+        var ci = 0
+        while ci < cases.len():
+            val sc = cases.get(ci)
+            if val Some(test) = sc.test:
+                self.emit(OpCode.Dup)  # keep discriminant
+                self.compile_expression(test)
+                self.emit(OpCode.StrictEq)
+                val skip_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
+                self.emit(OpCode.Pop)  # pop discriminant copy
+                var si = 0
+                while si < sc.consequent.len():
+                    self.compile_statement(sc.consequent.get(si))
+                    si = si + 1
+                val end_jump = self.emit_jump(OpCode.Jump(offset: 0))
+                end_jumps.push(end_jump)
+                self.patch_jump(skip_jump)
+            else:
+                # default clause
+                self.emit(OpCode.Pop)  # pop discriminant
+                var si = 0
+                while si < sc.consequent.len():
+                    self.compile_statement(sc.consequent.get(si))
+                    si = si + 1
+                val end_jump = self.emit_jump(OpCode.Jump(offset: 0))
+                end_jumps.push(end_jump)
+            ci = ci + 1
+        self.emit(OpCode.Pop)  # pop remaining discriminant
+        # Patch all end jumps
+        var ei = 0
+        while ei < end_jumps.len():
+            self.patch_jump(end_jumps.get(ei))
+            ei = ei + 1
+
     # --- Expression compilation ---
 
     me compile_expression(expr: Expression):
@@ -237,6 +372,66 @@ class BytecodeCompiler:
                 self.compile_array(elements)
             Expression.ObjectExpr(properties):
                 self.compile_object(properties)
+            Expression.Ternary(condition, consequent, alternate):
+                self.compile_expression(condition)
+                val else_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
+                self.compile_expression(consequent)
+                val end_jump = self.emit_jump(OpCode.Jump(offset: 0))
+                self.patch_jump(else_jump)
+                self.compile_expression(alternate)
+                self.patch_jump(end_jump)
+            Expression.ArrowFunction(params, body):
+                # Compile arrow as closure
+                val parent_chunk = self.chunk
+                val parent_constants = self.constants
+                self.chunk = BytecodeChunk.create("__arrow__")
+                self.constants = List<JsValue>()
+                self.begin_scope()
+                var p = 0
+                while p < params.len():
+                    self._declare_local(params.get(p))
+                    p = p + 1
+                var i = 0
+                while i < body.len():
+                    self.compile_statement(body.get(i))
+                    i = i + 1
+                self.emit_constant(JsValue.Undefined)
+                self.emit(OpCode.Return)
+                self.end_scope()
+                val fn_chunk = self.chunk
+                fn_chunk.constants = ConstantPool(values: self.constants)
+                self.chunk = parent_chunk
+                self.constants = parent_constants
+                val fn_id = self.constants.len()
+                self.constants.push(JsValue.Function(id: fn_id))
+                self.emit(OpCode.Closure(fn_idx: fn_id, upvalue_count: 0))
+            Expression.SpreadElement(argument):
+                self.compile_expression(argument)
+            Expression.TemplateLiteral(quasis, expressions):
+                # Compile as string concatenation
+                if quasis.len() > 0:
+                    self.emit_constant(JsValue.String(v: quasis.get(0)))
+                else:
+                    self.emit_constant(JsValue.String(v: ""))
+                var i = 0
+                while i < expressions.len():
+                    self.compile_expression(expressions.get(i))
+                    self.emit(OpCode.Add)
+                    if i + 1 < quasis.len():
+                        self.emit_constant(JsValue.String(v: quasis.get(i + 1)))
+                        self.emit(OpCode.Add)
+                    i = i + 1
+            Expression.Delete(del_expr):
+                # Delete: evaluate to true (simplified)
+                self.emit_constant(JsValue.Boolean(v: true))
+            Expression.InstanceOf(left, right):
+                self.compile_expression(left)
+                self.compile_expression(right)
+                self.emit(OpCode.InstanceOf)
+            Expression.InExpr(left, right):
+                self.compile_expression(left)
+                self.compile_expression(right)
+                self.emit(OpCode.InOp)
 
     me compile_literal(value: JsValue):
         self.emit_constant(value)
@@ -331,6 +526,8 @@ class BytecodeCompiler:
                 self.chunk.ops.set(location, OpCode.JumpIfFalse(offset: target))
             OpCode.Jump(_):
                 self.chunk.ops.set(location, OpCode.Jump(offset: target))
+            OpCode.PushExceptionHandler(_):
+                self.chunk.ops.set(location, OpCode.PushExceptionHandler(catch_offset: target))
             _:
                 self.logger.error("Cannot patch non-jump opcode at {location}")
 
@@ -383,6 +580,8 @@ fn op_for_binary(op: text) -> OpCode:
         "%": OpCode.Mod
         "==": OpCode.Eq
         "!=": OpCode.Ne
+        "===": OpCode.StrictEq
+        "!==": OpCode.StrictNe
         "<": OpCode.Lt
         ">": OpCode.Gt
         "<=": OpCode.Le

@@ -11,6 +11,7 @@ use browser.shared.error.script_error
 use browser.entity.script.js_types.JsValue
 use browser.entity.script.ast_types.Expression
 use browser.entity.script.ast_types.Statement
+use browser.entity.script.ast_types.SwitchCase
 use browser.feature.script.engine.lexer.JsLexer
 use browser.feature.script.engine.lexer.JsToken
 use browser.feature.script.engine.lexer.JsTokenKind
@@ -117,12 +118,12 @@ class JsParser:
         if kind == JsTokenKind.Break:
             self.advance()
             self.match_token(JsTokenKind.Semicolon)
-            return Ok(Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined)))
+            return Ok(Statement.BreakStmt)
 
         if kind == JsTokenKind.Continue:
             self.advance()
             self.match_token(JsTokenKind.Semicolon)
-            return Ok(Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined)))
+            return Ok(Statement.ContinueStmt)
 
         self.parse_expression_statement()
 
@@ -266,7 +267,7 @@ class JsParser:
         self.match_token(JsTokenKind.Semicolon)
         Ok(Statement.ExprStmt(expr: expr))
 
-    # try / catch / finally — represented as block statements
+    # try / catch / finally
     me parse_try_statement() -> BrowserResult<Statement>:
         self.advance()  # consume 'try'
         val try_body = self.parse_block()?
@@ -284,17 +285,9 @@ class JsParser:
         if self.match_token(JsTokenKind.Finally):
             finally_body = self.parse_block()?
 
-        # Encode try-catch-finally as nested blocks
-        # The interpreter can detect these by structure
-        var stmts = List<Statement>()
-        stmts.push(Statement.Block(stmts: try_body))
-        if catch_body.len() > 0:
-            stmts.push(Statement.Block(stmts: catch_body))
-        if finally_body.len() > 0:
-            stmts.push(Statement.Block(stmts: finally_body))
-        Ok(Statement.Block(stmts: stmts))
+        Ok(Statement.TryCatch(try_body: try_body, catch_param: catch_param, catch_body: catch_body, finally_body: finally_body))
 
-    # switch — represented as chained if/else
+    # switch statement with proper SwitchCase nodes
     me parse_switch_statement() -> BrowserResult<Statement>:
         self.advance()  # consume 'switch'
         self.expect(JsTokenKind.OpenParen)?
@@ -302,7 +295,7 @@ class JsParser:
         self.expect(JsTokenKind.CloseParen)?
         self.expect(JsTokenKind.OpenBrace)?
 
-        var stmts = List<Statement>()
+        var cases = List<SwitchCase>()
         while not self.check(JsTokenKind.CloseBrace) and not self.is_at_end():
             if self.match_token(JsTokenKind.Case):
                 val test_expr = self.parse_expression()?
@@ -311,38 +304,75 @@ class JsParser:
                 while not self.check(JsTokenKind.Case) and not self.check(JsTokenKind.Default) and not self.check(JsTokenKind.CloseBrace):
                     val s = self.parse_statement()?
                     case_body.push(s)
-                val cond = Expression.Binary(op: "===", left: discriminant, right: test_expr)
-                stmts.push(Statement.If(cond: cond, then_body: case_body, else_body: List<Statement>()))
+                cases.push(SwitchCase.case_clause(test_expr, case_body))
             else if self.match_token(JsTokenKind.Default):
                 self.expect(JsTokenKind.Colon)?
+                var default_body = List<Statement>()
                 while not self.check(JsTokenKind.Case) and not self.check(JsTokenKind.CloseBrace):
                     val s = self.parse_statement()?
-                    stmts.push(s)
+                    default_body.push(s)
+                cases.push(SwitchCase.default_clause(default_body))
             else:
                 self.advance()  # skip unexpected token
 
         self.expect(JsTokenKind.CloseBrace)?
-        Ok(Statement.Block(stmts: stmts))
+        Ok(Statement.Switch(discriminant: discriminant, cases: cases))
 
-    # throw — encoded as expression statement
+    # throw statement
     me parse_throw_statement() -> BrowserResult<Statement>:
         self.advance()  # consume 'throw'
         val expr = self.parse_expression()?
         self.match_token(JsTokenKind.Semicolon)
-        Ok(Statement.ExprStmt(expr: expr))
+        Ok(Statement.ThrowStmt(expr: expr))
 
-    # class declaration — placeholder
+    # class declaration: class Name [extends Parent] { constructor(...) {...} method(...) {...} }
     me parse_class_declaration() -> BrowserResult<Statement>:
-        pass_todo
-        # Consume tokens until closing brace for now
         self.advance()  # consume 'class'
+        var class_name = ""
         if self.check(JsTokenKind.Identifier):
-            self.advance()
+            class_name = self.advance().value
+
+        var parent_name = ""
         if self.match_token(JsTokenKind.Extends):
-            self.advance()  # skip parent name
-        if self.check(JsTokenKind.OpenBrace):
-            self.parse_block()?
-        Ok(Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined)))
+            if self.check(JsTokenKind.Identifier):
+                parent_name = self.advance().value
+
+        self.expect(JsTokenKind.OpenBrace)?
+
+        var constructor_decl = Statement.FnDecl(name: "constructor", params: List<text>(), body: List<Statement>())
+        var methods = List<Statement>()
+
+        while not self.check(JsTokenKind.CloseBrace) and not self.is_at_end():
+            # Parse method name
+            var method_name = ""
+            if self.check(JsTokenKind.Identifier):
+                method_name = self.advance().value
+            else:
+                self.advance()
+                continue
+
+            # Parse method params
+            self.expect(JsTokenKind.OpenParen)?
+            var params = List<text>()
+            if not self.check(JsTokenKind.CloseParen):
+                val first = self.expect(JsTokenKind.Identifier)?
+                params.push(first.value)
+                while self.match_token(JsTokenKind.Comma):
+                    val param = self.expect(JsTokenKind.Identifier)?
+                    params.push(param.value)
+            self.expect(JsTokenKind.CloseParen)?
+
+            # Parse method body
+            val body = self.parse_block()?
+            val fn_decl = Statement.FnDecl(name: method_name, params: params, body: body)
+
+            if method_name == "constructor":
+                constructor_decl = fn_decl
+            else:
+                methods.push(fn_decl)
+
+        self.expect(JsTokenKind.CloseBrace)?
+        Ok(Statement.ClassDecl(name: class_name, parent_name: parent_name, constructor: constructor_decl, methods: methods))
 
     # ── Expressions (precedence climbing) ────────────────────────────────
 
@@ -393,8 +423,7 @@ class JsParser:
             val then_expr = self.parse_assignment()?
             self.expect(JsTokenKind.Colon)?
             val else_expr = self.parse_assignment()?
-            expr = Expression.Binary(op: "?:", left: then_expr, right: else_expr)
-            # Encode ternary as Binary with "?:" op and condition stored as context
+            expr = Expression.Ternary(condition: expr, consequent: then_expr, alternate: else_expr)
 
         Ok(expr)
 
@@ -495,11 +524,11 @@ class JsParser:
             else if kind == JsTokenKind.Instanceof:
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: "instanceof", left: left, right: right)
+                left = Expression.InstanceOf(left: left, right: right)
             else if kind == JsTokenKind.In:
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: "in", left: left, right: right)
+                left = Expression.InExpr(left: left, right: right)
             else:
                 break
         Ok(left)
@@ -582,7 +611,7 @@ class JsParser:
         if kind == JsTokenKind.Delete:
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "delete", operand: operand))
+            return Ok(Expression.Delete(expr: operand))
 
         if kind == JsTokenKind.Tilde:
             self.advance()
@@ -794,21 +823,13 @@ class JsParser:
 
         if self.check(JsTokenKind.OpenBrace):
             val body = self.parse_block()?
-            # Encode arrow as a Call to a special "__arrow__" identifier
-            # with params encoded as string identifiers and body as block
-            var args = List<Expression>()
-            for p in params:
-                args.push(Expression.Identifier(name: p))
-            # Wrap body statements into a FnDecl temporarily
-            val fn_stmt = Statement.FnDecl(name: "__arrow__", params: params, body: body)
-            return Ok(Expression.Literal(value: JsValue.String(v: "__arrow__")))
+            return Ok(Expression.ArrowFunction(params: params, body: body))
         else:
             val body_expr = self.parse_assignment()?
-            var args = List<Expression>()
-            for p in params:
-                args.push(Expression.Identifier(name: p))
-            args.push(body_expr)
-            return Ok(Expression.Literal(value: JsValue.String(v: "__arrow__")))
+            # Wrap expression body as implicit return
+            var body = List<Statement>()
+            body.push(Statement.Return(value: body_expr))
+            return Ok(Expression.ArrowFunction(params: params, body: body))
 
     # Array literal: [1, 2, 3]
     me parse_array_literal() -> BrowserResult<Expression>:

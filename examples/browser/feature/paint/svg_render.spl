@@ -5,7 +5,8 @@
 # (feature/gpu/graphics.spl) for hardware-accelerated path tessellation
 # and anti-aliased vector rendering via the shared 2D rendering engine.
 
-use examples.browser.entity.dom.paint_types.(Color, PaintOp)
+use examples.browser.entity.dom.paint_types.(Color, PaintOp, from_rgb, from_rgba, black, white, transparent)
+use std.common.color.convert.(from_hex, from_name)
 use examples.browser.shared.logging.(Logger, LogLevel)
 
 # ---------------------------------------------------------------------------
@@ -180,10 +181,407 @@ fn render_text(attrs: List<Pair<text, text>>, content: text) -> List<PaintOp>:
 
     ops
 
-# Render SVG <path> element — full path parsing is complex, so this is a stub.
+# ---------------------------------------------------------------------------
+# SVG Path command representation
+# ---------------------------------------------------------------------------
+
+enum PathCommand:
+    MoveTo(x: f64, y: f64)
+    LineTo(x: f64, y: f64)
+    CubicTo(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64)
+    QuadTo(x1: f64, y1: f64, x: f64, y: f64)
+    ClosePath
+
+# A 2D point for path tessellation.
+class PathPoint:
+    x: f64
+    y: f64
+
+    static fn create(x: f64, y: f64) -> PathPoint:
+        PathPoint(x: x, y: y)
+
+# Render SVG <path> element with full path parsing and tessellation.
 fn render_path(d: text) -> List<PaintOp>:
-    pass_todo  # Full SVG path (M, L, C, Q, A, Z) parsing and tessellation
-    List<PaintOp>()
+    if d == "":
+        return List<PaintOp>()
+
+    # Parse the d attribute into path commands
+    val commands = parse_path_commands(d)
+
+    # Tessellate curves into line segments
+    val points = tessellate_path(commands)
+
+    # Convert path outline to filled rectangles via scanline fill
+    val fill_color = black()  # Default fill; caller can override via style
+    val ops = scanline_fill(points, fill_color)
+    ops
+
+# ---------------------------------------------------------------------------
+# SVG path d-attribute parser
+# ---------------------------------------------------------------------------
+
+# Parse an SVG path d-attribute string into a list of PathCommands.
+fn parse_path_commands(d: text) -> List<PathCommand>:
+    var commands = List<PathCommand>()
+    var pos = 0
+    val len = d.len()
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+
+    while pos < len:
+        # Skip whitespace and commas
+        pos = _skip_ws(d, pos)
+        if pos >= len:
+            return commands
+
+        val ch = d.slice(pos, pos + 1)
+
+        if ch == "M" or ch == "m":
+            val is_rel = ch == "m"
+            pos = pos + 1
+            val xy = _parse_two_numbers(d, pos)
+            pos = xy.second.second  # updated pos stored in second.second
+            var x = xy.first.first
+            var y = xy.first.second
+            if is_rel:
+                x = cur_x + x
+                y = cur_y + y
+            commands.push(PathCommand.MoveTo(x: x, y: y))
+            cur_x = x
+            cur_y = y
+            start_x = x
+            start_y = y
+        else if ch == "L" or ch == "l":
+            val is_rel = ch == "l"
+            pos = pos + 1
+            val xy = _parse_two_numbers(d, pos)
+            pos = xy.second.second
+            var x = xy.first.first
+            var y = xy.first.second
+            if is_rel:
+                x = cur_x + x
+                y = cur_y + y
+            commands.push(PathCommand.LineTo(x: x, y: y))
+            cur_x = x
+            cur_y = y
+        else if ch == "H" or ch == "h":
+            val is_rel = ch == "h"
+            pos = pos + 1
+            val nr = _parse_number(d, pos)
+            pos = nr.second
+            var x = nr.first
+            if is_rel:
+                x = cur_x + x
+            commands.push(PathCommand.LineTo(x: x, y: cur_y))
+            cur_x = x
+        else if ch == "V" or ch == "v":
+            val is_rel = ch == "v"
+            pos = pos + 1
+            val nr = _parse_number(d, pos)
+            pos = nr.second
+            var y = nr.first
+            if is_rel:
+                y = cur_y + y
+            commands.push(PathCommand.LineTo(x: cur_x, y: y))
+            cur_y = y
+        else if ch == "C" or ch == "c":
+            val is_rel = ch == "c"
+            pos = pos + 1
+            val n1 = _parse_two_numbers(d, pos)
+            pos = n1.second.second
+            val n2 = _parse_two_numbers(d, pos)
+            pos = n2.second.second
+            val n3 = _parse_two_numbers(d, pos)
+            pos = n3.second.second
+            var x1 = n1.first.first
+            var y1 = n1.first.second
+            var x2 = n2.first.first
+            var y2 = n2.first.second
+            var x = n3.first.first
+            var y = n3.first.second
+            if is_rel:
+                x1 = cur_x + x1
+                y1 = cur_y + y1
+                x2 = cur_x + x2
+                y2 = cur_y + y2
+                x = cur_x + x
+                y = cur_y + y
+            commands.push(PathCommand.CubicTo(x1: x1, y1: y1, x2: x2, y2: y2, x: x, y: y))
+            cur_x = x
+            cur_y = y
+        else if ch == "Q" or ch == "q":
+            val is_rel = ch == "q"
+            pos = pos + 1
+            val n1 = _parse_two_numbers(d, pos)
+            pos = n1.second.second
+            val n2 = _parse_two_numbers(d, pos)
+            pos = n2.second.second
+            var x1 = n1.first.first
+            var y1 = n1.first.second
+            var x = n2.first.first
+            var y = n2.first.second
+            if is_rel:
+                x1 = cur_x + x1
+                y1 = cur_y + y1
+                x = cur_x + x
+                y = cur_y + y
+            commands.push(PathCommand.QuadTo(x1: x1, y1: y1, x: x, y: y))
+            cur_x = x
+            cur_y = y
+        else if ch == "Z" or ch == "z":
+            pos = pos + 1
+            commands.push(PathCommand.ClosePath)
+            cur_x = start_x
+            cur_y = start_y
+        else:
+            # Skip unknown character
+            pos = pos + 1
+
+    commands
+
+# ---------------------------------------------------------------------------
+# Path tessellation — De Casteljau subdivision for Bezier curves
+# ---------------------------------------------------------------------------
+
+# Tessellate path commands into a list of line segment points.
+fn tessellate_path(commands: List<PathCommand>) -> List<PathPoint>:
+    var points = List<PathPoint>()
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+
+    for cmd in commands:
+        match cmd:
+            PathCommand.MoveTo(x, y):
+                points.push(PathPoint.create(x, y))
+                cur_x = x
+                cur_y = y
+                start_x = x
+                start_y = y
+            PathCommand.LineTo(x, y):
+                points.push(PathPoint.create(x, y))
+                cur_x = x
+                cur_y = y
+            PathCommand.CubicTo(x1, y1, x2, y2, x, y):
+                # Subdivide cubic Bezier using De Casteljau
+                val subdivided = _subdivide_cubic(cur_x, cur_y, x1, y1, x2, y2, x, y, 8)
+                for pt in subdivided:
+                    points.push(pt)
+                cur_x = x
+                cur_y = y
+            PathCommand.QuadTo(x1, y1, x, y):
+                # Subdivide quadratic Bezier using De Casteljau
+                val subdivided = _subdivide_quad(cur_x, cur_y, x1, y1, x, y, 8)
+                for pt in subdivided:
+                    points.push(pt)
+                cur_x = x
+                cur_y = y
+            PathCommand.ClosePath:
+                points.push(PathPoint.create(start_x, start_y))
+                cur_x = start_x
+                cur_y = start_y
+
+    points
+
+# Subdivide a cubic Bezier curve into line segments using De Casteljau.
+fn _subdivide_cubic(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, steps: i64) -> List<PathPoint>:
+    var result = List<PathPoint>()
+    var i = 1
+    while i <= steps:
+        val t = i.to_f64() / steps.to_f64()
+        val mt = 1.0 - t
+
+        # De Casteljau: B(t) = (1-t)^3*P0 + 3*(1-t)^2*t*P1 + 3*(1-t)*t^2*P2 + t^3*P3
+        val mt2 = mt * mt
+        val mt3 = mt2 * mt
+        val t2 = t * t
+        val t3 = t2 * t
+
+        val px = mt3 * x0 + 3.0 * mt2 * t * x1 + 3.0 * mt * t2 * x2 + t3 * x3
+        val py = mt3 * y0 + 3.0 * mt2 * t * y1 + 3.0 * mt * t2 * y2 + t3 * y3
+        result.push(PathPoint.create(px, py))
+        i = i + 1
+    result
+
+# Subdivide a quadratic Bezier curve into line segments using De Casteljau.
+fn _subdivide_quad(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, steps: i64) -> List<PathPoint>:
+    var result = List<PathPoint>()
+    var i = 1
+    while i <= steps:
+        val t = i.to_f64() / steps.to_f64()
+        val mt = 1.0 - t
+
+        # De Casteljau: B(t) = (1-t)^2*P0 + 2*(1-t)*t*P1 + t^2*P2
+        val mt2 = mt * mt
+        val t2 = t * t
+
+        val px = mt2 * x0 + 2.0 * mt * t * x1 + t2 * x2
+        val py = mt2 * y0 + 2.0 * mt * t * y1 + t2 * y2
+        result.push(PathPoint.create(px, py))
+        i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Scanline fill — convert closed path outline to filled FillRect strips
+# ---------------------------------------------------------------------------
+
+# Fill a polygon defined by points using scanline rasterization.
+fn scanline_fill(points: List<PathPoint>, fill_color: Color) -> List<PaintOp>:
+    var ops = List<PaintOp>()
+
+    if points.len() < 3:
+        return ops
+
+    # Find bounding box
+    var min_x = points.get(0).x
+    var max_x = min_x
+    var min_y = points.get(0).y
+    var max_y = min_y
+
+    for pt in points:
+        if pt.x < min_x: min_x = pt.x
+        if pt.x > max_x: max_x = pt.x
+        if pt.y < min_y: min_y = pt.y
+        if pt.y > max_y: max_y = pt.y
+
+    # Scanline from min_y to max_y in 1-pixel steps
+    val num_edges = points.len()
+    var scan_y = min_y
+    while scan_y <= max_y:
+        # Find all x-intersections of the scanline with polygon edges
+        var intersections = List<f64>()
+
+        var edge_i = 0
+        while edge_i < num_edges:
+            val next_i = (edge_i + 1) % num_edges
+            val p0 = points.get(edge_i)
+            val p1 = points.get(next_i)
+
+            val y0 = p0.y
+            val y1 = p1.y
+
+            # Check if scanline crosses this edge
+            val crosses_down = y0 <= scan_y and y1 > scan_y
+            val crosses_up = y1 <= scan_y and y0 > scan_y
+            if crosses_down or crosses_up:
+                val dy = y1 - y0
+                if dy != 0.0:
+                    val t = (scan_y - y0) / dy
+                    val ix = p0.x + t * (p1.x - p0.x)
+                    intersections.push(ix)
+
+            edge_i = edge_i + 1
+
+        # Sort intersections (simple insertion sort)
+        var si = 1
+        while si < intersections.len():
+            var sj = si
+            while sj > 0:
+                val va = intersections.get(sj - 1)
+                val vb = intersections.get(sj)
+                if va > vb:
+                    intersections.set(sj - 1, vb)
+                    intersections.set(sj, va)
+                sj = sj - 1
+            si = si + 1
+
+        # Fill between pairs of intersections (even-odd rule)
+        var pair = 0
+        while pair + 1 < intersections.len():
+            val x_start = intersections.get(pair)
+            val x_end = intersections.get(pair + 1)
+            if x_end > x_start:
+                ops.push(PaintOp.FillRect(x: x_start, y: scan_y, w: x_end - x_start, h: 1.0, color: fill_color))
+            pair = pair + 2
+
+        scan_y = scan_y + 1.0
+
+    ops
+
+# ---------------------------------------------------------------------------
+# Path parsing helpers
+# ---------------------------------------------------------------------------
+
+# Skip whitespace and commas in the path string.
+fn _skip_ws(s: text, pos: i64) -> i64:
+    var p = pos
+    val len = s.len()
+    while p < len:
+        val ch = s.slice(p, p + 1)
+        if ch == " " or ch == "," or ch == "\n" or ch == "\t" or ch == "\r":
+            p = p + 1
+        else:
+            return p
+    p
+
+# Parse a floating-point number from the path string.
+# Returns (value, new_pos).
+fn _parse_number(s: text, pos: i64) -> Pair<f64, i64>:
+    var p = _skip_ws(s, pos)
+    val len = s.len()
+    val start = p
+
+    # Optional sign
+    if p < len:
+        val ch = s.slice(p, p + 1)
+        if ch == "-" or ch == "+":
+            p = p + 1
+
+    # Digits before decimal point
+    while p < len:
+        val ch = s.slice(p, p + 1)
+        if _is_digit(ch):
+            p = p + 1
+        else:
+            if ch == ".":
+                p = p + 1
+                # Digits after decimal point
+                while p < len:
+                    val d = s.slice(p, p + 1)
+                    if _is_digit(d):
+                        p = p + 1
+                    else:
+                        return _make_num_result(s, start, p)
+                return _make_num_result(s, start, p)
+            else:
+                return _make_num_result(s, start, p)
+
+    _make_num_result(s, start, p)
+
+fn _make_num_result(s: text, start: i64, end: i64) -> Pair<f64, i64>:
+    if end <= start:
+        return Pair(first: 0.0, second: end)
+    val num_str = s.slice(start, end)
+    val parsed = num_str.to_f64()
+    if val v = parsed:
+        return Pair(first: v, second: end)
+    Pair(first: 0.0, second: end)
+
+# Parse two numbers separated by whitespace/comma.
+# Returns ((x, y), (_, new_pos)) — second.second holds the updated position.
+fn _parse_two_numbers(s: text, pos: i64) -> Pair<Pair<f64, f64>, Pair<i64, i64>>:
+    val n1 = _parse_number(s, pos)
+    val n2 = _parse_number(s, n1.second)
+    Pair(
+        first: Pair(first: n1.first, second: n2.first),
+        second: Pair(first: 0, second: n2.second)
+    )
+
+fn _is_digit(ch: text) -> bool:
+    if ch == "0": return true
+    if ch == "1": return true
+    if ch == "2": return true
+    if ch == "3": return true
+    if ch == "4": return true
+    if ch == "5": return true
+    if ch == "6": return true
+    if ch == "7": return true
+    if ch == "8": return true
+    if ch == "9": return true
+    false
 
 # ---------------------------------------------------------------------------
 # SVG attribute/value parsing helpers
@@ -197,38 +595,22 @@ fn get_attr(attrs: List<Pair<text, text>>, name: text) -> text:
     ""
 
 # Parse an SVG color string into a Color.
-# Supports: named colors, #RGB, #RRGGBB, rgb(r,g,b), and "none".
+# Supports: named colors, #RGB, #RGBA, #RRGGBB, #RRGGBBAA, rgb(r,g,b), and "none".
 fn parse_svg_color(value: text) -> Color:
     if value == "" or value == "none":
-        return Color.transparent()
+        return transparent()
 
-    # Named colors
-    match value:
-        "black": return Color.black()
-        "white": return Color.white()
-        "red": return Color.rgb(255, 0, 0)
-        "green": return Color.rgb(0, 128, 0)
-        "blue": return Color.rgb(0, 0, 255)
-        "yellow": return Color.rgb(255, 255, 0)
-        "orange": return Color.rgb(255, 165, 0)
-        "purple": return Color.rgb(128, 0, 128)
-        "gray": return Color.rgb(128, 128, 128)
-        "grey": return Color.rgb(128, 128, 128)
-        "cyan": return Color.rgb(0, 255, 255)
-        "magenta": return Color.rgb(255, 0, 255)
-        _: pass_dn
-
-    # Hex color (#RGB or #RRGGBB)
+    # Hex color (#RGB, #RGBA, #RRGGBB, #RRGGBBAA)
     if value.starts_with("#"):
-        val hex = value.slice(1, value.len())
-        if hex.len() == 3:
-            # Short hex: each digit doubled
-            return Color.rgb(128, 128, 128)  # Simplified — full hex parse is pass_todo
-        if hex.len() == 6:
-            return Color.rgb(128, 128, 128)  # Simplified — full hex parse is pass_todo
+        return from_hex(value)
+
+    # Named colors via stdlib
+    val named = from_name(value)
+    if named.a > 0 or value.to_lower() == "black":
+        return named
 
     # Default fallback
-    Color.black()
+    black()
 
 # Parse an SVG length value (e.g., "100", "50.5", "10px") to f64.
 fn parse_svg_length(value: text) -> f64:

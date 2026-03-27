@@ -2,7 +2,7 @@
 # Handles background-origin (content-box, padding-box, border-box) and
 # background-repeat modes.
 
-use examples.browser.entity.dom.paint_types.(Color, Gradient, GradientStop, PaintOp)
+use examples.browser.entity.dom.paint_types.(Color, Gradient, GradientStop, PaintOp, transparent)
 use examples.browser.entity.dom.css_types.(CSSValue)
 use examples.browser.entity.dom.box_types.(LayoutBox, BoxModel)
 use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
@@ -55,14 +55,182 @@ fn paint_background(box_node: LayoutBox, style: ComputedStyle) -> List<PaintOp>:
 
     # Paint background-color
     match style.background_color:
-        CSSValue.Color(r, g, b, a):
-            if a > 0:
-                val color = Color(r: r, g: g, b: b, a: a)
+        CSSValue.Color(color):
+            if color.a > 0:
                 val op = paint_solid_color(ax, ay, aw, ah, color)
                 ops.push(op)
         _: pass_dn
 
+    # Paint background gradient if specified via background-image
+    val gradient = _extract_gradient(style)
+    if val grad = gradient:
+        val grad_ops = paint_linear_gradient(ax, ay, aw, ah, grad)
+        for gop in grad_ops:
+            ops.push(gop)
+
     ops
+
+# Extract a gradient from the computed style's background-image/background value.
+# Returns nil if no gradient is present.
+fn _extract_gradient(style: ComputedStyle) -> Gradient?:
+    # Check background_color for gradient encoding
+    # In the CSS pipeline, gradients may be encoded as a CSSValue.Keyword
+    # with a "linear-gradient(...)" string. Parse the stops from it.
+    #
+    # A full implementation would parse from a background_image property.
+    # For now, we detect linear-gradient keywords and construct a Gradient.
+    match style.background_color:
+        CSSValue.Keyword(v):
+            if v.starts_with("linear-gradient"):
+                return _parse_gradient_value(v)
+            nil
+        _:
+            nil
+
+# Parse a linear-gradient CSS value string into a Gradient.
+# Format: "linear-gradient(angle, color1 pos1, color2 pos2, ...)"
+fn _parse_gradient_value(value: text) -> Gradient?:
+    # Strip "linear-gradient(" prefix and ")" suffix
+    val inner_start = 16  # len("linear-gradient(")
+    val inner_end = value.len() - 1
+    if inner_end <= inner_start:
+        return nil
+
+    val inner = value.slice(inner_start, inner_end)
+    val parts = _split_gradient_parts(inner)
+
+    if parts.len() < 2:
+        return nil
+
+    # First part may be an angle (e.g. "180deg", "to bottom")
+    var angle = 180.0
+    var stop_start = 0
+    val first = parts.get(0)
+    if val f = first:
+        if f.ends_with("deg"):
+            val deg_str = f.slice(0, f.len() - 3)
+            val parsed = deg_str.to_f64()
+            if val a = parsed:
+                angle = a
+            stop_start = 1
+        else if f.starts_with("to "):
+            match f:
+                "to bottom": angle = 180.0
+                "to top": angle = 0.0
+                "to right": angle = 90.0
+                "to left": angle = 270.0
+                _: angle = 180.0
+            stop_start = 1
+
+    # Parse color stops
+    var stops = List<GradientStop>()
+    val num_stops = parts.len() - stop_start
+    var i = stop_start
+    while i < parts.len():
+        val part = parts.get(i)
+        if val p = part:
+            val trimmed = p.trim()
+            # Default position: evenly spaced
+            val pos = if num_stops > 1: (i - stop_start).to_f64() / (num_stops - 1).to_f64() else: 0.0
+            val color = _parse_stop_color(trimmed)
+            stops.push(GradientStop.create(color, pos))
+        i = i + 1
+
+    if stops.len() < 2:
+        return nil
+
+    Gradient.create(stops, angle)
+
+# Split gradient arguments by comma, respecting parentheses depth.
+fn _split_gradient_parts(s: text) -> List<text>:
+    var parts = List<text>()
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        else if ch == ")":
+            depth = depth - 1
+            current = current + ch
+        else if ch == "," and depth == 0:
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.len() > 0:
+        parts.push(current.trim())
+    parts
+
+# Parse a color from a gradient stop string.
+fn _parse_stop_color(s: text) -> Color:
+    # May contain "color position" — extract just the color part
+    val space_idx = _find_space(s)
+    val color_str = if space_idx > 0: s.slice(0, space_idx) else: s
+    if color_str.starts_with("#"):
+        return _gradient_hex_color(color_str)
+    # Try named colors
+    match color_str:
+        "red": return Color(r: 255, g: 0, b: 0, a: 255)
+        "green": return Color(r: 0, g: 128, b: 0, a: 255)
+        "blue": return Color(r: 0, g: 0, b: 255, a: 255)
+        "white": return Color(r: 255, g: 255, b: 255, a: 255)
+        "black": return Color(r: 0, g: 0, b: 0, a: 255)
+        "yellow": return Color(r: 255, g: 255, b: 0, a: 255)
+        "orange": return Color(r: 255, g: 165, b: 0, a: 255)
+        "transparent": return transparent()
+        _: return Color(r: 128, g: 128, b: 128, a: 255)
+
+fn _gradient_hex_color(s: text) -> Color:
+    # Simple #RRGGBB parsing
+    if s.len() == 7:
+        val r = _hex_pair(s, 1)
+        val g = _hex_pair(s, 3)
+        val b = _hex_pair(s, 5)
+        return Color(r: r, g: g, b: b, a: 255)
+    Color(r: 128, g: 128, b: 128, a: 255)
+
+fn _hex_pair(s: text, offset: i64) -> i64:
+    val h = _hex_digit(s.slice(offset, offset + 1))
+    val l = _hex_digit(s.slice(offset + 1, offset + 2))
+    h * 16 + l
+
+fn _hex_digit(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "b": 11
+        "c": 12
+        "d": 13
+        "e": 14
+        "f": 15
+        "A": 10
+        "B": 11
+        "C": 12
+        "D": 13
+        "E": 14
+        "F": 15
+        _: 0
+
+fn _find_space(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == " ":
+            return i
+        i = i + 1
+    -1
 
 # Paint a solid color rectangle.
 fn paint_solid_color(x: f64, y: f64, w: f64, h: f64, color: Color) -> PaintOp:
@@ -102,12 +270,12 @@ fn interpolate_gradient_color(gradient: Gradient, t: f64) -> Color:
     val stops = gradient.stops
     val num = stops.len()
     if num == 0:
-        return Color.transparent()
+        return transparent()
     if num == 1:
         val s = stops.get(0)
         if val stop = s:
             return stop.color
-        return Color.transparent()
+        return transparent()
 
     # Find the two stops that bracket t
     var i = 0
@@ -128,7 +296,7 @@ fn interpolate_gradient_color(gradient: Gradient, t: f64) -> Color:
     val last = stops.get(num - 1)
     if val l = last:
         return l.color
-    Color.transparent()
+    transparent()
 
 # Linear interpolation between two colors.
 fn lerp_color(a: Color, b: Color, t: f64) -> Color:

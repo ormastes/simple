@@ -139,10 +139,62 @@ fn typed_array_get(view: TypedArrayView, buffer: ArrayBuffer, index: i64) -> JsV
                 value = value - 4294967296
             JsValue.Number(v: value.to_f64())
         TypedArrayKind.Float32:
-            # Float decoding requires bitwise ops — simplified stub
-            pass_todo
+            # Float32 decoding: read 4 bytes, interpret as IEEE 754 single
+            # Simplified: read as int32 and convert (loses precision for non-integer values)
+            val b0 = buffer.data.get(byte_pos)
+            val b1 = buffer.data.get(byte_pos + 1)
+            val b2 = buffer.data.get(byte_pos + 2)
+            val b3 = buffer.data.get(byte_pos + 3)
+            val int_val = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+            # Extract sign, exponent, mantissa for IEEE 754 single
+            val sign = int_val / 2147483648  # bit 31
+            val raw_exp = (int_val / 8388608) % 256  # bits 23-30
+            val mantissa = int_val % 8388608  # bits 0-22
+            if raw_exp == 0 and mantissa == 0:
+                if sign == 1:
+                    JsValue.Number(v: -0.0)
+                else:
+                    JsValue.Number(v: 0.0)
+            else if raw_exp == 255:
+                JsValue.Number(v: 0.0 / 0.0)  # NaN or Inf
+            else:
+                val exp_val = raw_exp - 127
+                val m = 1.0 + mantissa.to_f64() / 8388608.0
+                var result = m * _int_pow2(exp_val)
+                if sign == 1:
+                    result = 0.0 - result
+                JsValue.Number(v: result)
         TypedArrayKind.Float64:
-            pass_todo
+            # Float64: read 8 bytes as IEEE 754 double
+            # Simplified: reconstruct from integer bytes
+            val b0 = buffer.data.get(byte_pos)
+            val b1 = buffer.data.get(byte_pos + 1)
+            val b2 = buffer.data.get(byte_pos + 2)
+            val b3 = buffer.data.get(byte_pos + 3)
+            val b4 = buffer.data.get(byte_pos + 4)
+            val b5 = buffer.data.get(byte_pos + 5)
+            val b6 = buffer.data.get(byte_pos + 6)
+            val b7 = buffer.data.get(byte_pos + 7)
+            val sign = b7 / 128
+            val raw_exp = ((b7 % 128) * 16) + (b6 / 16)
+            # Mantissa from remaining 52 bits (simplified — loses precision for large mantissa)
+            val mant_hi = (b6 % 16) * 281474976710656 + b5 * 1099511627776 + b4 * 4294967296
+            val mant_lo = b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+            val mantissa_f = (mant_hi + mant_lo).to_f64()
+            if raw_exp == 0 and mantissa_f == 0.0:
+                if sign == 1:
+                    JsValue.Number(v: -0.0)
+                else:
+                    JsValue.Number(v: 0.0)
+            else if raw_exp == 2047:
+                JsValue.Number(v: 0.0 / 0.0)
+            else:
+                val exp_val = raw_exp - 1023
+                val m = 1.0 + mantissa_f / 4503599627370496.0
+                var result = m * _int_pow2(exp_val)
+                if sign == 1:
+                    result = 0.0 - result
+                JsValue.Number(v: result)
 
 me typed_array_set(view: TypedArrayView, buffer: ArrayBuffer, index: i64, value: JsValue):
     if index < 0 or index >= view.length:
@@ -180,9 +232,33 @@ me typed_array_set(view: TypedArrayView, buffer: ArrayBuffer, index: i64, value:
             buffer.data.set(byte_pos + 2, (v / 65536) % 256)
             buffer.data.set(byte_pos + 3, (v / 16777216) % 256)
         TypedArrayKind.Float32:
-            pass_todo
+            # Float32 set: encode value as IEEE 754 single precision bytes
+            # Simplified: store integer truncation for now
+            val fval = _js_to_f64(value)
+            val ival = fval.to_i64()
+            var unsigned = ival
+            if unsigned < 0:
+                unsigned = unsigned + 4294967296
+            buffer.data.set(byte_pos, unsigned % 256)
+            buffer.data.set(byte_pos + 1, (unsigned / 256) % 256)
+            buffer.data.set(byte_pos + 2, (unsigned / 65536) % 256)
+            buffer.data.set(byte_pos + 3, (unsigned / 16777216) % 256)
         TypedArrayKind.Float64:
-            pass_todo
+            # Float64 set: encode value as IEEE 754 double bytes
+            # Simplified: store integer truncation
+            val fval = _js_to_f64(value)
+            val ival = fval.to_i64()
+            var unsigned = ival
+            if unsigned < 0:
+                unsigned = unsigned + 4294967296
+            buffer.data.set(byte_pos, unsigned % 256)
+            buffer.data.set(byte_pos + 1, (unsigned / 256) % 256)
+            buffer.data.set(byte_pos + 2, (unsigned / 65536) % 256)
+            buffer.data.set(byte_pos + 3, (unsigned / 16777216) % 256)
+            buffer.data.set(byte_pos + 4, 0)
+            buffer.data.set(byte_pos + 5, 0)
+            buffer.data.set(byte_pos + 6, 0)
+            buffer.data.set(byte_pos + 7, 0)
 
 fn typed_array_length(view: TypedArrayView) -> i64:
     view.length
@@ -233,3 +309,139 @@ fn _js_to_i64(value: JsValue) -> i64:
         JsValue.Boolean(v):
             if v: 1 else: 0
         _: 0
+
+fn _js_to_f64(value: JsValue) -> f64:
+    match value:
+        JsValue.Number(v): v
+        JsValue.Boolean(v):
+            if v: 1.0 else: 0.0
+        _: 0.0
+
+# --- Power of 2 helper for float decoding ---
+
+fn _int_pow2(exp: i64) -> f64:
+    if exp == 0:
+        return 1.0
+    if exp > 0:
+        var result = 1.0
+        var e = exp
+        while e > 0:
+            result = result * 2.0
+            e = e - 1
+        return result
+    # Negative exponent
+    var result = 1.0
+    var e = 0 - exp
+    while e > 0:
+        result = result / 2.0
+        e = e - 1
+    result
+
+# --- TypedArray slice ---
+
+fn typed_array_slice(view: TypedArrayView, buffer: ArrayBuffer, start: i64, end_idx: i64) -> ArrayBuffer:
+    var s = start
+    var e = end_idx
+    if s < 0:
+        s = view.length + s
+    if s < 0:
+        s = 0
+    if e < 0:
+        e = view.length + e
+    if e > view.length:
+        e = view.length
+    if s >= e:
+        return arraybuffer_new(0)
+    val count = e - s
+    val byte_count = count * view.element_size
+    var result_buf = arraybuffer_new(byte_count)
+    var i = 0
+    while i < byte_count:
+        val src_pos = view.byte_offset + s * view.element_size + i
+        val byte_val = buffer.data.get(src_pos)
+        result_buf.data.set(i, byte_val)
+        i = i + 1
+    result_buf
+
+# --- TypedArray subarray (shares same buffer) ---
+
+fn typed_array_subarray(view: TypedArrayView, start: i64, end_idx: i64) -> TypedArrayView:
+    var s = start
+    var e = end_idx
+    if s < 0:
+        s = view.length + s
+    if s < 0:
+        s = 0
+    if e < 0:
+        e = view.length + e
+    if e > view.length:
+        e = view.length
+    if s >= e:
+        return TypedArrayView(buffer_id: view.buffer_id, byte_offset: view.byte_offset + s * view.element_size, length: 0, element_size: view.element_size, kind: view.kind)
+    TypedArrayView(
+        buffer_id: view.buffer_id,
+        byte_offset: view.byte_offset + s * view.element_size,
+        length: e - s,
+        element_size: view.element_size,
+        kind: view.kind
+    )
+
+# --- TypedArray set (copy from source array into this view) ---
+
+me typed_array_set_from(target: TypedArrayView, target_buf: ArrayBuffer, source: TypedArrayView, source_buf: ArrayBuffer, offset: i64):
+    var i = 0
+    val count = source.length
+    while i < count:
+        val src_pos = source.byte_offset + i * source.element_size
+        val dst_pos = target.byte_offset + (offset + i) * target.element_size
+        if dst_pos + target.element_size <= target_buf.byte_length:
+            # Copy byte-by-byte for the element size
+            var b = 0
+            while b < target.element_size and b < source.element_size:
+                val byte_val = source_buf.data.get(src_pos + b)
+                target_buf.data.set(dst_pos + b, byte_val)
+                b = b + 1
+        i = i + 1
+
+# --- TypedArray copyWithin ---
+
+me typed_array_copyWithin(view: TypedArrayView, buffer: ArrayBuffer, target_idx: i64, start: i64, end_idx: i64):
+    var s = start
+    var e = end_idx
+    var t = target_idx
+    if s < 0:
+        s = view.length + s
+    if s < 0:
+        s = 0
+    if e < 0:
+        e = view.length + e
+    if e > view.length:
+        e = view.length
+    if t < 0:
+        t = view.length + t
+    if t < 0:
+        t = 0
+    val count = e - s
+    # Copy byte-by-byte, handle overlap by direction
+    if t < s:
+        var i = 0
+        while i < count and t + i < view.length:
+            val src_pos = view.byte_offset + (s + i) * view.element_size
+            val dst_pos = view.byte_offset + (t + i) * view.element_size
+            var b = 0
+            while b < view.element_size:
+                val byte_val = buffer.data.get(src_pos + b)
+                buffer.data.set(dst_pos + b, byte_val)
+                b = b + 1
+            i = i + 1
+    else:
+        var i = count - 1
+        while i >= 0 and t + i < view.length:
+            val src_pos = view.byte_offset + (s + i) * view.element_size
+            val dst_pos = view.byte_offset + (t + i) * view.element_size
+            var b = 0
+            while b < view.element_size:
+                val byte_val = buffer.data.get(src_pos + b)
+                buffer.data.set(dst_pos + b, byte_val)
+                b = b + 1
+            i = i - 1

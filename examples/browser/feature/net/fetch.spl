@@ -10,6 +10,9 @@ use examples.browser.shared.error {BrowserError, BrowserResult, network_error}
 use examples.browser.shared.logging {Logger, LogLevel}
 use examples.browser.feature.net.dns {DnsResolver}
 use examples.browser.feature.net.cors {CorsChecker, is_simple_method, needs_preflight}
+use examples.browser.feature.net.h1_client {H1Client}
+use examples.browser.feature.net.tls {TlsManager, TlsConnection}
+use examples.browser.entity.net.tls_types {TlsConfig, TlsVersion}
 
 use examples.browser.feature.net.cache.{HttpCache}
 use examples.browser.feature.net.cookie_store.{CookieStore}
@@ -193,13 +196,18 @@ class FetchEngine:
         )
 
     # Perform the actual HTTP request over the network.
-    # This is the transport boundary that sends bytes on the wire.
+    # Routes through the H1 client which supports mock registry and simulated responses.
     me execute_http(request: FetchRequest, target_addr: text) -> BrowserResult<FetchResponse>:
         self.logger.debug("fetch: HTTP {method_text(request.method)} to {target_addr} for {request.url.to_text()}")
 
-        # Build and send the HTTP/1.1 request.
-        # This integrates with std.http_client or a raw socket transport.
-        return Err(network_error("HTTP transport not wired — no socket I/O runtime"))
+        # Build a temporary H1 client to handle the request.
+        # The H1 client checks the mock registry first, then falls back to
+        # simulated responses when real socket I/O is unavailable.
+        val tls_config = default_tls_config()
+        var tls_mgr = TlsManager.new(self.logger, tls_config)
+        var h1 = H1Client.new(self.logger, self.dns, tls_mgr)
+        val response = h1.request(request)?
+        Ok(response)
 
     # Resolve a redirect Location URL against the original request URL.
     # Handles both absolute URLs and relative paths.
@@ -304,6 +312,10 @@ fn is_cacheable(response: FetchResponse) -> bool:
     true
 
 # Convert an HttpMethod to its text representation.
+# Create a default TLS configuration for use by the fetch transport.
+fn default_tls_config() -> TlsConfig:
+    TlsConfig(min_version: TlsVersion.Tls12)
+
 fn method_text(method: HttpMethod) -> text:
     match method:
         HttpMethod.Get: "GET"

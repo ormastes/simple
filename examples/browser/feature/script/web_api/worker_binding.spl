@@ -37,14 +37,15 @@ class WorkerInstance:
     onmessage_callback: i64
     onerror_callback: i64
 
-    # Worker script loading is not wired — state starts as Failed.
+    # Worker script loading creates a Pending worker.
     # A real implementation would fetch and evaluate script_url in an
     # isolated execution context before transitioning to Running.
+    # Thread isolation is not yet supported, so workers remain in Pending state.
     static fn create(id: i64, script_url: text) -> WorkerInstance:
         WorkerInstance(
             id: id,
             script_url: script_url,
-            state: WorkerState.Failed,
+            state: WorkerState.Pending,
             message_queue: List<JsValue>(),
             onmessage_callback: -1,
             onerror_callback: -1,
@@ -68,7 +69,7 @@ class WorkerBinding:
 
     # ── Worker creation ─────────────────────────────────────────────
 
-    me js_new_Worker(args: List<JsValue>) -> JsValue:
+    me js_new_Worker(args: List<JsValue>, runtime: JsRuntime) -> JsValue:
         if args.len() < 1:
             return JsValue.Undefined
 
@@ -79,11 +80,20 @@ class WorkerBinding:
         val worker = WorkerInstance.create(worker_id, script_url)
         self.workers.push(worker)
 
-        self.logger.debug("Worker created: id={worker_id}, url={script_url}")
+        self.logger.warn("Worker created but thread isolation not supported: id={worker_id}, url={script_url}")
 
-        # Return a JS object representing the Worker with postMessage/terminate methods.
-        # The object id encodes the worker id for later lookup.
-        JsValue.Object(id: worker_id)
+        # Create a JS object representing the Worker
+        val obj_id = runtime.interpreter.object_store.create_object()
+
+        # Set worker metadata
+        runtime.interpreter.object_store.set_property(
+            obj_id, "__worker_id__", JsValue.Number(v: worker_id.to_f64()))
+
+        # Install postMessage and terminate methods
+        runtime._define_method_on(obj_id, "postMessage", NATIVE_WORKER_POST_MESSAGE)
+        runtime._define_method_on(obj_id, "terminate", NATIVE_WORKER_TERMINATE)
+
+        JsValue.Object(id: obj_id)
 
     # ── postMessage ─────────────────────────────────────────────────
 

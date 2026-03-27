@@ -381,6 +381,107 @@ int64_t     rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events);
 SplArray*   rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms);
 bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
 
+/* ===== Audio (miniaudio backend) ===== */
+
+int64_t  rt_audio_init(void);
+void     rt_audio_shutdown(void);
+int64_t  rt_audio_load_sound(const char* path);
+void     rt_audio_unload_sound(int64_t handle);
+int64_t  rt_audio_play(int64_t sound_handle);
+int64_t  rt_audio_play_looped(int64_t sound_handle);
+void     rt_audio_stop(int64_t playback_handle);
+void     rt_audio_pause(int64_t playback_handle);
+void     rt_audio_resume(int64_t playback_handle);
+void     rt_audio_set_volume(int64_t playback_handle, double volume);
+void     rt_audio_set_master_volume(double volume);
+double   rt_audio_get_master_volume(void);
+int64_t  rt_audio_is_playing(int64_t playback_handle);
+
+/* ===== Image Loading (stb_image backend) ===== */
+
+int64_t  rt_image_load(const char* path);
+void     rt_image_free(int64_t handle);
+int64_t  rt_image_width(int64_t handle);
+int64_t  rt_image_height(int64_t handle);
+int64_t  rt_image_channels(int64_t handle);
+int64_t  rt_image_get_pixel(int64_t handle, int64_t x, int64_t y);
+
+/* ===== Font Rendering (stb_truetype backend) ===== */
+
+int64_t  rt_font_load(const char* path);
+void     rt_font_free(int64_t handle);
+int64_t  rt_font_glyph_bitmap(int64_t font_handle, int64_t codepoint, double size);
+int64_t  rt_font_bitmap_width(int64_t bitmap_handle);
+int64_t  rt_font_bitmap_height(int64_t bitmap_handle);
+int64_t  rt_font_bitmap_get_pixel(int64_t bitmap_handle, int64_t x, int64_t y);
+void     rt_font_bitmap_free(int64_t bitmap_handle);
+int64_t  rt_font_glyph_advance(int64_t font_handle, int64_t codepoint, double size);
+int64_t  rt_font_line_height(int64_t font_handle, double size);
+
+/* ===== SDL2 Windowing Runtime ===== */
+
+/* Initialization */
+int64_t  rt_sdl2_init(void);
+void     rt_sdl2_quit(void);
+
+/* Window management */
+int64_t  rt_sdl2_create_window(const char* title, int64_t width, int64_t height);
+void     rt_sdl2_destroy_window(int64_t handle);
+int64_t  rt_sdl2_get_window_width(int64_t handle);
+int64_t  rt_sdl2_get_window_height(int64_t handle);
+void     rt_sdl2_set_window_title(int64_t handle, const char* title);
+
+/* Framebuffer present (pixels = SplArray* of packed i64 RGBA) */
+void     rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
+                               int64_t width, int64_t height);
+
+/* Event polling (returns event type code: 0=none, 1=quit, 2=keydown, etc.) */
+int64_t  rt_sdl2_poll_event(void);
+int64_t  rt_sdl2_event_key_code(void);
+int64_t  rt_sdl2_event_key_sym(void);
+int64_t  rt_sdl2_event_key_mod(void);
+int64_t  rt_sdl2_event_mouse_x(void);
+int64_t  rt_sdl2_event_mouse_y(void);
+int64_t  rt_sdl2_event_mouse_button(void);
+int64_t  rt_sdl2_event_wheel_x(void);
+int64_t  rt_sdl2_event_wheel_y(void);
+
+/* Keyboard state (polled) */
+int64_t  rt_sdl2_is_key_pressed(int64_t scancode);
+
+/* Mouse state (polled) */
+int64_t  rt_sdl2_get_mouse_x(void);
+int64_t  rt_sdl2_get_mouse_y(void);
+int64_t  rt_sdl2_is_mouse_button_pressed(int64_t button);
+
+/* Time */
+int64_t  rt_sdl2_get_ticks_ms(void);
+int64_t  rt_sdl2_get_ticks_ns(void);
+
+/* Window state */
+int64_t  rt_sdl2_window_should_close(void);
+void     rt_sdl2_clear_quit(void);
+
+/* Window events */
+int64_t  rt_sdl2_event_window_event_id(void);
+int64_t  rt_sdl2_event_window_data1(void);
+int64_t  rt_sdl2_event_window_data2(void);
+
+/* Window properties */
+void     rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable);
+void     rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen);
+void     rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height);
+void     rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y);
+int64_t  rt_sdl2_get_window_position_x(int64_t handle);
+int64_t  rt_sdl2_get_window_position_y(int64_t handle);
+void     rt_sdl2_show_window(int64_t handle);
+void     rt_sdl2_hide_window(int64_t handle);
+
+/* Cursor */
+void     rt_sdl2_set_cursor_visible(int64_t visible);
+void     rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab);
+void     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
+
 /* ===== Panic / Abort ===== */
 
 #ifdef _MSC_VER

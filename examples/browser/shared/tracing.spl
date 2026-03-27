@@ -13,27 +13,82 @@ class TraceSpan:
 
 class Tracer:
     spans: List<TraceSpan>
+    active_stack: List<i64>
     enabled: bool
     next_id: i64
+    tick_counter: i64
 
     static fn new(enabled: bool) -> Tracer:
-        Tracer(spans: List<TraceSpan>(), enabled: enabled, next_id: 1)
+        Tracer(
+            spans: List<TraceSpan>(),
+            active_stack: List<i64>(),
+            enabled: enabled,
+            next_id: 1,
+            tick_counter: 0
+        )
 
     me begin_span(name: text) -> i64:
         if not self.enabled:
             return 0
         val id = self.next_id
         self.next_id = self.next_id + 1
-        # TODO: use real monotonic clock for start_ns
-        val span = TraceSpan.create(name, 0, 0)
+        # Use tick_counter as a monotonic timestamp surrogate
+        val start = self.tick_counter
+        self.tick_counter = self.tick_counter + 1
+        # Parent is the top of the active stack, or 0 if none
+        val parent = if self.active_stack.len() > 0: self.active_stack.get(self.active_stack.len() - 1) else: 0
+        val span = TraceSpan.create(name, start, parent)
         self.spans.push(span)
+        self.active_stack.push(id)
         id
 
     me end_span(id: i64):
         if not self.enabled:
             return
-        # TODO: set end_ns on span with matching id
-        pass_todo
+        if id == 0:
+            return
+        # Set end_ns on the span matching the given id
+        val end_tick = self.tick_counter
+        self.tick_counter = self.tick_counter + 1
+        var i = 0
+        while i < self.spans.len():
+            var span = self.spans.get(i)
+            # Match by index: id is 1-based, stored sequentially
+            val span_id = i + 1
+            if span_id == id:
+                span.end_ns = end_tick
+                self.spans.set(i, span)
+                i = self.spans.len()  # break
+            i = i + 1
+        # Pop from active stack if this is the top
+        if self.active_stack.len() > 0:
+            val top = self.active_stack.get(self.active_stack.len() - 1)
+            if top == id:
+                self.active_stack.pop()
 
     fn get_spans() -> List<TraceSpan>:
         self.spans
+
+    # Get all completed spans (where end_ns > 0).
+    fn get_completed_spans() -> List<TraceSpan>:
+        var result = List<TraceSpan>()
+        for span in self.spans:
+            if span.end_ns > 0:
+                result.push(span)
+        result
+
+    # Get the duration of a span by id (1-based). Returns 0 if not found or not ended.
+    fn span_duration(id: i64) -> i64:
+        if id <= 0 or id > self.spans.len():
+            return 0
+        val span = self.spans.get(id - 1)
+        if span.end_ns > 0:
+            return span.end_ns - span.start_ns
+        0
+
+    # Reset the tracer, clearing all spans and the active stack.
+    me reset():
+        self.spans = List<TraceSpan>()
+        self.active_stack = List<i64>()
+        self.tick_counter = 0
+        self.next_id = 1

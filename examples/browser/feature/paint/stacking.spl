@@ -2,7 +2,7 @@
 # Implements CSS 2.1 Appendix E painting order by building a tree of
 # stacking contexts and flattening them in the correct composite order.
 
-use examples.browser.entity.dom.paint_types.(PaintOp, DisplayItem, Color)
+use examples.browser.entity.dom.paint_types.(PaintOp, DisplayItem, Color, transparent)
 use examples.browser.entity.dom.css_types.(CSSValue)
 use examples.browser.entity.dom.box_types.(LayoutBox, BoxKind)
 use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
@@ -75,7 +75,7 @@ class StackingOrderBuilder:
                     # No new stacking context — add display items to parent
                     val item = DisplayItem.create(0, PaintOp.FillRect(
                         x: child.x, y: child.y, w: child.width, h: child.height,
-                        color: Color.transparent()
+                        color: transparent()
                     ))
                     parent_ctx.display_items.push(item)
                     # Continue walk into children
@@ -123,17 +123,42 @@ fn creates_stacking_context(style: ComputedStyle) -> bool:
     false
 
 # Resolve z-index from ComputedStyle to an integer.
+# Handles positive, negative, and zero z-index values.
+# Negative z-index values sort before z-index: 0.
 fn resolve_z_index(style: ComputedStyle) -> i64:
     match style.z_index:
         CSSValue.Number(v):
-            val z = v
-            # Truncate to integer
-            if z >= 0.0:
-                val i = z  # implicit f64->i64 truncation
-                return 0  # safe fallback — actual value used by sort
-            return 0
+            # Convert f64 to i64 — truncate toward zero
+            if v >= 0.0:
+                val i = _z_f64_to_i64(v)
+                return i
+            # Negative z-index: truncate toward zero (e.g. -1.7 -> -1)
+            val pos = _z_f64_to_i64(-v)
+            return -pos
+        CSSValue.Keyword(v):
+            # "auto" is equivalent to z-index: 0
+            0
         _:
             0
+
+# Helper to truncate a non-negative f64 to i64.
+fn _z_f64_to_i64(v: f64) -> i64:
+    # Use iterative approach to truncate f64 to i64
+    # This handles values within the reasonable z-index range
+    if v <= 0.0:
+        return 0
+    if v >= 2147483647.0:
+        return 2147483647
+    var result = 0
+    var remaining = v
+    # Fast path: step by 1000s, then 1s
+    while remaining >= 1000.0:
+        result = result + 1000
+        remaining = remaining - 1000.0
+    while remaining >= 1.0:
+        result = result + 1
+        remaining = remaining - 1.0
+    result
 
 # ---------------------------------------------------------------------------
 # Sorting and flattening

@@ -1,30 +1,33 @@
 # Simple-Native 2D Game Engine - Known Limitations
 
 **Date:** 2026-03-24
-**Related:** [Requirements](../../plan/requirement/engine_2d.md) | [Plan](../../plan/engine_2d.md) | [Design](../../design/engine_2d.md) | [Research](../../research/engine_2d.md)
+**Related:** [Requirements](../../plan/requirements/engine_2d.md) | [Plan](../../plan/engine_2d.md) | [Design](../../design/engine_2d.md) | [Research](../../research/engine_2d.md)
 
 ---
 
 ## LIM-001: Software Renderer Only (No GPU Acceleration)
 
 **Severity:** High
+**Status:** RESOLVED — `rt_sdl2_present_rgba()` in the SDL2 C runtime provides the present path. The pixel buffer is now uploaded and displayed each frame via SDL2.
 **Description:** The engine uses a CPU-based software renderer (`SoftwareRenderer`) that writes pixels to an in-memory buffer, but the new-engine runtime path still has no connected framebuffer upload/present API. `GameLoop` can rasterize and request redraw, but that does not yet display the buffer in a real window on the Rust-driver path.
 **Workaround:** Keep game resolution at 800x600 or lower. Minimize overdraw by culling off-screen sprites. Reduce particle counts.
-**Future:** Add an explicit host present/upload API for packed RGBA frame buffers, then call it after `render_frame()`. A future GPU backend can still sit behind the same `RenderCommand` interface.
+**Future:** A future GPU backend can still sit behind the same `RenderCommand` interface.
 
 ## LIM-002: No Image File Loading
 
 **Severity:** High
+**Status:** RESOLVED — stb_image C runtime provides `rt_image_*` functions. `Texture.from_file()` now decodes PNG/JPG/BMP via the stb_image integration.
 **Description:** `Texture.from_file()` is not functional. There is no `image_ffi.spl` to decode PNG/JPG/BMP files into pixel data. Textures can only be created programmatically via `Texture.create(width, height, pixels)`.
 **Workaround:** Generate textures in code (solid colors, procedural patterns) or hard-code pixel arrays for small sprites.
-**Future:** Implement `image_ffi.spl` wrapping the `image` Rust crate to support common image formats.
+**Future:** None — resolved.
 
 ## LIM-003: No Font/Text Rendering
 
 **Severity:** Medium
+**Status:** RESOLVED — stb_truetype C runtime provides `rt_font_*` functions for TrueType font loading and glyph rasterization.
 **Description:** There is no font loading or text rendering capability. No `font_ffi.spl` exists to rasterize TrueType/OpenType fonts into glyph textures.
 **Workaround:** Use geometric shapes (rectangles, lines) for UI elements. Display text via terminal output alongside the game window.
-**Future:** Implement `font_ffi.spl` wrapping `fontdue` or `ab_glyph` for CPU-based glyph rasterization.
+**Future:** None — resolved.
 
 ## LIM-004: No Texture Sampling in DrawSprite
 

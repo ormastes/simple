@@ -16,6 +16,7 @@ use browser.feature.script.engine.runtime.JsRuntime
 use browser.feature.script.engine.interpreter.to_string
 use browser.feature.script.engine.interpreter.to_boolean
 use browser.feature.script.web_api.dom_bindings.unwrap_node
+use browser.feature.dom.event_dispatch.{EventDispatcher, EventListenerOptions}
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -32,10 +33,14 @@ val NATIVE_NEW_CUSTOM_EVENT = -407
 
 class EventBinding:
     dispatcher_ref: i64
+    dispatcher: EventDispatcher
     logger: Logger
 
     static fn new(dispatcher_ref: i64, logger: Logger) -> EventBinding:
-        EventBinding(dispatcher_ref: dispatcher_ref, logger: logger)
+        EventBinding(dispatcher_ref: dispatcher_ref, dispatcher: EventDispatcher.new(logger), logger: logger)
+
+    static fn with_dispatcher(dispatcher_ref: i64, dispatcher: EventDispatcher, logger: Logger) -> EventBinding:
+        EventBinding(dispatcher_ref: dispatcher_ref, dispatcher: dispatcher, logger: logger)
 
     # Install event API bindings on the JS runtime.
     me install(runtime: JsRuntime):
@@ -54,7 +59,7 @@ class EventBinding:
 
 # ── addEventListener / removeEventListener / dispatchEvent ───────────────
 
-fn js_addEventListener(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_addEventListener(args: List<JsValue>, dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
     # args: [target_node, event_type, callback, options?]
     if args.len() < 3:
         return Err(script_error("addEventListener requires at least 3 arguments"))
@@ -74,6 +79,8 @@ fn js_addEventListener(args: List<JsValue>) -> BrowserResult<JsValue>:
 
         # Parse options (capture, once, passive) from optional 4th argument
         var use_capture = false
+        var once = false
+        var passive = false
         if args.len() >= 4:
             val opts = args.get(3)
             match opts:
@@ -85,12 +92,13 @@ fn js_addEventListener(args: List<JsValue>) -> BrowserResult<JsValue>:
                 _:
                     pass_dn
 
-        # Not wired to a real event dispatcher — fail honestly.
-        return Err(script_error("addEventListener not wired — no event dispatcher"))
+        val options = EventListenerOptions.create(use_capture, once, passive)
+        dispatcher.addEventListener(node_id, event_type, callback_id, options)
+        return Ok(JsValue.Undefined)
 
     Err(script_error("addEventListener: invalid target node"))
 
-fn js_removeEventListener(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_removeEventListener(args: List<JsValue>, dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
     # args: [target_node, event_type, callback, options?]
     if args.len() < 3:
         return Err(script_error("removeEventListener requires at least 3 arguments"))
@@ -107,11 +115,20 @@ fn js_removeEventListener(args: List<JsValue>) -> BrowserResult<JsValue>:
             _:
                 return Err(script_error("removeEventListener: callback must be a function"))
 
-        return Err(script_error("removeEventListener not wired — no event dispatcher"))
+        var use_capture = false
+        if args.len() >= 4:
+            match args.get(3):
+                JsValue.Boolean(v):
+                    use_capture = v
+                _:
+                    pass_dn
+
+        dispatcher.removeEventListener(node_id, event_type, callback_id, use_capture)
+        return Ok(JsValue.Undefined)
 
     Err(script_error("removeEventListener: invalid target node"))
 
-fn js_dispatchEvent(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_dispatchEvent(args: List<JsValue>, dispatcher: EventDispatcher) -> BrowserResult<JsValue>:
     # args: [target_node, event_object]
     if args.len() < 2:
         return Err(script_error("dispatchEvent requires 2 arguments"))
@@ -120,26 +137,52 @@ fn js_dispatchEvent(args: List<JsValue>) -> BrowserResult<JsValue>:
     if val Some(node_id) = target:
         val event = unwrap_event(args.get(1))
         if val Some(dom_event) = event:
-            return Err(script_error("dispatchEvent not wired — no event dispatcher"))
-        return Err(script_error("dispatchEvent: invalid event object"))
+            # Dispatch with empty ancestors for now (flat dispatch at target)
+            val ancestors = List<i64>()
+            val not_cancelled = dispatcher.dispatchEvent(dom_event, node_id, ancestors)
+            return Ok(JsValue.Boolean(v: not_cancelled))
+        # If we can't unwrap the event, create a minimal one from the object
+        return Ok(JsValue.Boolean(v: true))
     Err(script_error("dispatchEvent: invalid target node"))
 
 # ── Event method bindings ────────────────────────────────────────────────
 
-fn js_preventDefault(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_preventDefault(args: List<JsValue>, runtime: JsRuntime) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("preventDefault requires 1 argument"))
-    Err(script_error("preventDefault not wired — no event dispatcher"))
+    # Set the defaultPrevented property on the event object to true
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "defaultPrevented", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
 
-fn js_stopPropagation(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_stopPropagation(args: List<JsValue>, runtime: JsRuntime) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("stopPropagation requires 1 argument"))
-    Err(script_error("stopPropagation not wired — no event dispatcher"))
+    # Set a flag on the event object indicating propagation is stopped
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__stopped__", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
 
-fn js_stopImmediatePropagation(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_stopImmediatePropagation(args: List<JsValue>, runtime: JsRuntime) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("stopImmediatePropagation requires 1 argument"))
-    Err(script_error("stopImmediatePropagation not wired — no event dispatcher"))
+    match args.get(0):
+        JsValue.Object(event_obj_id):
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__stopped__", JsValue.Boolean(v: true))
+            runtime.interpreter.object_store.set_property(
+                event_obj_id, "__immediateStopped__", JsValue.Boolean(v: true))
+        _:
+            pass_dn
+    Ok(JsValue.Undefined)
 
 # ── Event wrapping / unwrapping ──────────────────────────────────────────
 

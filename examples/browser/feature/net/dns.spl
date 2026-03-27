@@ -92,12 +92,14 @@ class DnsResolver:
     cache: DnsCache
     logger: Logger
     default_ttl: i64
+    extra_hosts: [DnsCacheEntry]
 
     static fn new(logger: Logger, cache_ttl: i64) -> DnsResolver:
         DnsResolver(
             cache: DnsCache.create(cache_ttl),
             logger: logger,
-            default_ttl: cache_ttl
+            default_ttl: cache_ttl,
+            extra_hosts: []
         )
 
     # Resolve a hostname to a list of IP address strings.
@@ -160,8 +162,49 @@ class DnsResolver:
         if not self.is_valid_hostname(hostname):
             return Err(network_error("Invalid hostname: {hostname}"))
 
-        # Actual system DNS resolution requires platform-specific resolver wiring.
-        Err(network_error("System DNS lookup for {hostname} is not wired yet"))
+            # No stdlib DNS module available — use a built-in well-known host table.
+        # This covers common development and testing scenarios.
+        val well_known = self.well_known_lookup(hostname)
+        if well_known.?:
+            val addrs = well_known.unwrap()
+            self.logger.debug("dns: resolved {hostname} via well-known table ({addrs.len()} addresses)")
+            return Ok(addrs)
+
+        self.logger.warn("dns: no well-known entry for {hostname} — real DNS resolution requires stdlib net module")
+        Err(network_error("DNS resolution for '{hostname}' unavailable: no stdlib net module. Add entry via dns.add_well_known() or use a known host."))
+
+    # Look up a hostname in the built-in well-known host table.
+    # Returns addresses for common hosts used in development and testing.
+    fn well_known_lookup(hostname: text) -> [text]?:
+        val h = hostname.to_lower()
+        if h == "localhost":
+            return ["127.0.0.1", "::1"]
+        if h == "ip6-localhost" or h == "ip6-loopback":
+            return ["::1"]
+        if h == "broadcasthost":
+            return ["255.255.255.255"]
+        # Common well-known domains for testing
+        if h == "example.com" or h == "www.example.com":
+            return ["93.184.216.34"]
+        if h == "example.org" or h == "www.example.org":
+            return ["93.184.216.34"]
+        if h == "example.net" or h == "www.example.net":
+            return ["93.184.216.34"]
+        # Check additional entries added at runtime
+        var i = 0
+        while i < self.extra_hosts.len():
+            val entry = self.extra_hosts[i]
+            if entry.hostname.to_lower() == h:
+                return entry.addresses
+            i = i + 1
+        nil
+
+    # Register an additional hostname-to-address mapping for the well-known table.
+    # Use this to add custom entries for testing or development.
+    me add_well_known(hostname: text, addresses: [text]):
+        self.logger.debug("dns: adding well-known entry: {hostname} -> {addresses.len()} addresses")
+        val entry = DnsCacheEntry.create(hostname, addresses, 0, 0)
+        self.extra_hosts = self.extra_hosts + [entry]
 
     # Check whether a string looks like an IPv4 address literal.
     fn is_ip_literal(s: text) -> bool:

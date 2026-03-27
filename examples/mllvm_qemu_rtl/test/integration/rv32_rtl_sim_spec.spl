@@ -1,0 +1,45 @@
+"""
+RV32 Native RTL Simulation Specification
+
+Exercises the initial native RTL simulation support layered on top of the
+existing RV32 emulator path.
+"""
+
+use std.spec.{describe, it, expect}
+use libwidth.lib32.{Width32Lib, Rv32RtlSimulator}
+use test.helpers.riscv_encode.{encode_addi, encode_ebreak, encode_nop, bytes_to_word}
+
+fn create_rv32_rtl(program: [i64]) -> Rv32RtlSimulator:
+    val lib = Width32Lib.new()
+    var sim = lib.create_rv32_rtl_sim()
+    sim.load_program(program)
+    sim.reset()
+    sim.load_program(program)
+    sim
+
+describe "RV32 native RTL simulator":
+    it "exposes visible architectural signals after a step":
+        val program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = create_rv32_rtl(program)
+        sim.step()
+        expect(sim.read_signal("retired_pc")).to_equal(Some(0x80000000))
+        expect(sim.read_signal("pc")).to_equal(Some(0x80000004))
+        expect(sim.read_signal("inst_word")).to_equal(Some(bytes_to_word(program)))
+        expect(sim.read_signal("a0")).to_equal(Some(42))
+
+    it "records waveform-like trace entries when enabled":
+        val program = encode_nop() + encode_ebreak()
+        var sim = create_rv32_rtl(program)
+        sim.enable_trace()
+        sim.step()
+        val waveform = sim.waveform_text()
+        expect(waveform).to_contain("pc=0x")
+        expect(waveform).to_contain("inst_word=0x")
+
+    it "reports rtl stats":
+        val program = encode_nop() + encode_ebreak()
+        var sim = create_rv32_rtl(program)
+        sim.step()
+        val stats = sim.stats_text()
+        expect(stats).to_contain("RV32 RTL")
+        expect(stats).to_contain("signals=")

@@ -13,6 +13,7 @@ use browser.entity.script.js_types.JsObject
 use browser.entity.script.js_types.JsProperty
 use browser.entity.script.ast_types.Expression
 use browser.entity.script.ast_types.Statement
+use browser.entity.script.ast_types.SwitchCase
 
 # ── Environment (scope chain) ───────────────────────────────────────────
 
@@ -118,6 +119,7 @@ class CallFrame:
     function_name: text
     env_id: i64
     line: i64
+    this_value: JsValue
 
 # ── Stored function ──────────────────────────────────────────────────────
 
@@ -264,6 +266,10 @@ class JsInterpreter:
     logger: Logger
     return_value: JsValue
     has_return: bool
+    has_break: bool
+    has_continue: bool
+    thrown_value: JsValue
+    has_thrown: bool
 
     static fn new(logger: Logger) -> JsInterpreter:
         var env_stack = EnvironmentStack.new()
@@ -277,6 +283,10 @@ class JsInterpreter:
             logger: logger,
             return_value: JsValue.Undefined,
             has_return: false,
+            has_break: false,
+            has_continue: false,
+            thrown_value: JsValue.Undefined,
+            has_thrown: false,
         )
 
     # Execute a full program (list of statements)
@@ -314,12 +324,30 @@ class JsInterpreter:
                 val slen = stmts.len()
                 while idx < slen:
                     result = self.exec_statement(stmts.get(idx), block_env)?
-                    if self.has_return:
+                    if self.has_return or self.has_break or self.has_continue or self.has_thrown:
                         break
                     idx = idx + 1
                 return Ok(result)
             Statement.FnDecl(name, params, body):
                 return self.exec_function_decl(name, params, body, env)
+            Statement.TryCatch(try_body, catch_param, catch_body, finally_body):
+                return self.exec_try_catch(try_body, catch_param, catch_body, finally_body, env)
+            Statement.Switch(discriminant, cases):
+                return self.exec_switch(discriminant, cases, env)
+            Statement.ForIn(binding, object, body):
+                return self.exec_for_in(binding, object, body, env)
+            Statement.ForOf(binding, iterable, body):
+                return self.exec_for_of(binding, iterable, body, env)
+            Statement.ThrowStmt(expr):
+                return self.exec_throw(expr, env)
+            Statement.BreakStmt:
+                self.has_break = true
+                return Ok(JsValue.Undefined)
+            Statement.ContinueStmt:
+                self.has_continue = true
+                return Ok(JsValue.Undefined)
+            Statement.ClassDecl(name, parent_name, constructor, methods):
+                return self.exec_class_decl(name, parent_name, constructor, methods, env)
 
     # Variable declaration
     me exec_var_decl(name: text, init: Expression, env: i64) -> BrowserResult<JsValue>:
@@ -366,8 +394,14 @@ class JsInterpreter:
             val len = body.len()
             while i < len:
                 result = self.exec_statement(body.get(i), loop_env)?
-                if self.has_return:
+                if self.has_return or self.has_thrown:
                     return Ok(result)
+                if self.has_break:
+                    self.has_break = false
+                    return Ok(result)
+                if self.has_continue:
+                    self.has_continue = false
+                    break
                 i = i + 1
             iteration = iteration + 1
         if iteration >= max_iterations:
@@ -391,8 +425,14 @@ class JsInterpreter:
             val len = body.len()
             while i < len:
                 result = self.exec_statement(body.get(i), iter_env)?
-                if self.has_return:
+                if self.has_return or self.has_thrown:
                     return Ok(result)
+                if self.has_break:
+                    self.has_break = false
+                    return Ok(result)
+                if self.has_continue:
+                    self.has_continue = false
+                    break
                 i = i + 1
             self.eval_expression(update, for_env)?
             iteration = iteration + 1
@@ -416,6 +456,194 @@ class JsInterpreter:
         self.env_stack.define_var(env, name, fn_val)
         Ok(fn_val)
 
+    # Try/catch/finally
+    me exec_try_catch(try_body: List<Statement>, catch_param: text, catch_body: List<Statement>, finally_body: List<Statement>, env: i64) -> BrowserResult<JsValue>:
+        val try_env = self.env_stack.create_env(env)
+        var result = JsValue.Undefined
+
+        # Execute try body
+        var i = 0
+        val tlen = try_body.len()
+        while i < tlen:
+            result = self.exec_statement(try_body.get(i), try_env)?
+            if self.has_return or self.has_break or self.has_continue:
+                break
+            if self.has_thrown:
+                break
+            i = i + 1
+
+        # If exception was thrown, execute catch body
+        if self.has_thrown and catch_body.len() > 0:
+            self.has_thrown = false
+            val caught_value = self.thrown_value
+            self.thrown_value = JsValue.Undefined
+            val catch_env = self.env_stack.create_env(env)
+            if catch_param != "":
+                self.env_stack.define_var(catch_env, catch_param, caught_value)
+            var ci = 0
+            val clen = catch_body.len()
+            while ci < clen:
+                result = self.exec_statement(catch_body.get(ci), catch_env)?
+                if self.has_return or self.has_break or self.has_continue or self.has_thrown:
+                    break
+                ci = ci + 1
+
+        # Always execute finally body
+        if finally_body.len() > 0:
+            val finally_env = self.env_stack.create_env(env)
+            var fi = 0
+            val flen = finally_body.len()
+            while fi < flen:
+                self.exec_statement(finally_body.get(fi), finally_env)?
+                if self.has_return or self.has_break or self.has_continue or self.has_thrown:
+                    break
+                fi = fi + 1
+
+        Ok(result)
+
+    # Switch statement
+    me exec_switch(discriminant: Expression, cases: List<SwitchCase>, env: i64) -> BrowserResult<JsValue>:
+        val disc_val = self.eval_expression(discriminant, env)?
+        var result = JsValue.Undefined
+        var matched = false
+        var ci = 0
+        val case_count = cases.len()
+        while ci < case_count:
+            val sc = cases.get(ci)
+            if not matched:
+                if val Some(test) = sc.test:
+                    val test_val = self.eval_expression(test, env)?
+                    if strict_equals(disc_val, test_val):
+                        matched = true
+                else:
+                    # default clause
+                    matched = true
+            if matched:
+                val case_env = self.env_stack.create_env(env)
+                var si = 0
+                val slen = sc.consequent.len()
+                while si < slen:
+                    result = self.exec_statement(sc.consequent.get(si), case_env)?
+                    if self.has_return or self.has_thrown:
+                        return Ok(result)
+                    if self.has_break:
+                        self.has_break = false
+                        return Ok(result)
+                    if self.has_continue:
+                        return Ok(result)
+                    si = si + 1
+            ci = ci + 1
+        Ok(result)
+
+    # For-in loop: iterate object keys
+    me exec_for_in(binding: text, object: Expression, body: List<Statement>, env: i64) -> BrowserResult<JsValue>:
+        val obj_val = self.eval_expression(object, env)?
+        var result = JsValue.Undefined
+        match obj_val:
+            JsValue.Object(id):
+                val obj = self.object_store.get_object(id)
+                var i = 0
+                val len = obj.properties.len()
+                while i < len:
+                    val prop = obj.properties.get(i)
+                    if prop.enumerable:
+                        val iter_env = self.env_stack.create_env(env)
+                        self.env_stack.define_var(iter_env, binding, JsValue.String(v: prop.key))
+                        var bi = 0
+                        val blen = body.len()
+                        while bi < blen:
+                            result = self.exec_statement(body.get(bi), iter_env)?
+                            if self.has_return or self.has_thrown:
+                                return Ok(result)
+                            if self.has_break:
+                                self.has_break = false
+                                return Ok(result)
+                            if self.has_continue:
+                                self.has_continue = false
+                                break
+                            bi = bi + 1
+                    i = i + 1
+            _:
+                self.logger.warn("for...in requires an object")
+        Ok(result)
+
+    # For-of loop: iterate array elements
+    me exec_for_of(binding: text, iterable: Expression, body: List<Statement>, env: i64) -> BrowserResult<JsValue>:
+        val iter_val = self.eval_expression(iterable, env)?
+        var result = JsValue.Undefined
+        match iter_val:
+            JsValue.Array(id):
+                val obj = self.object_store.get_object(id)
+                val length_prop = self.object_store.get_property(id, "length")
+                var arr_len = 0
+                if val Some(lv) = length_prop:
+                    arr_len = to_number(lv).to_i64()
+                var i = 0
+                while i < arr_len:
+                    val elem_prop = self.object_store.get_property(id, "{i}")
+                    var elem_val = JsValue.Undefined
+                    if val Some(ev) = elem_prop:
+                        elem_val = ev
+                    val iter_env = self.env_stack.create_env(env)
+                    self.env_stack.define_var(iter_env, binding, elem_val)
+                    var bi = 0
+                    val blen = body.len()
+                    while bi < blen:
+                        result = self.exec_statement(body.get(bi), iter_env)?
+                        if self.has_return or self.has_thrown:
+                            return Ok(result)
+                        if self.has_break:
+                            self.has_break = false
+                            return Ok(result)
+                        if self.has_continue:
+                            self.has_continue = false
+                            break
+                        bi = bi + 1
+                    i = i + 1
+            _:
+                self.logger.warn("for...of requires an iterable")
+        Ok(result)
+
+    # Throw statement
+    me exec_throw(expr: Expression, env: i64) -> BrowserResult<JsValue>:
+        val value = self.eval_expression(expr, env)?
+        self.thrown_value = value
+        self.has_thrown = true
+        Ok(value)
+
+    # Class declaration — register constructor and methods as functions on a prototype object
+    me exec_class_decl(name: text, parent_name: text, constructor: Statement, methods: List<Statement>, env: i64) -> BrowserResult<JsValue>:
+        # Create the prototype object
+        val proto_id = self.object_store.create_object()
+
+        # Register methods on the prototype
+        var mi = 0
+        val mlen = methods.len()
+        while mi < mlen:
+            val method = methods.get(mi)
+            match method:
+                Statement.FnDecl(mname, mparams, mbody):
+                    val fn_id = self.functions.len()
+                    val js_fn = JsFunction(name: mname, params: mparams, body: mbody, closure_env: env)
+                    self.functions.push(js_fn)
+                    self.object_store.set_property(proto_id, mname, JsValue.Function(id: fn_id))
+                _: pass_dn
+            mi = mi + 1
+
+        # Register constructor as the class function
+        match constructor:
+            Statement.FnDecl(cname, cparams, cbody):
+                val ctor_id = self.functions.len()
+                val ctor_fn = JsFunction(name: name, params: cparams, body: cbody, closure_env: env)
+                self.functions.push(ctor_fn)
+                # Store prototype id on the function for new operator
+                self.object_store.set_property(proto_id, "__constructor__", JsValue.Function(id: ctor_id))
+                val class_val = JsValue.Function(id: ctor_id)
+                self.env_stack.define_var(env, name, class_val)
+                return Ok(class_val)
+            _: pass_dn
+        Ok(JsValue.Undefined)
+
     # ── Expression evaluation ────────────────────────────────────────────
 
     me eval_expression(expr: Expression, env: i64) -> BrowserResult<JsValue>:
@@ -423,6 +651,12 @@ class JsInterpreter:
             Expression.Literal(value):
                 return Ok(value)
             Expression.Identifier(name):
+                # Check for 'this' binding
+                if name == "this":
+                    if self.call_stack.len() > 0:
+                        val frame = self.call_stack.get(self.call_stack.len() - 1)
+                        return Ok(frame.this_value)
+                    return Ok(JsValue.Undefined)
                 val lookup = self.env_stack.get_var(env, name)
                 if val Some(v) = lookup:
                     return Ok(v)
@@ -446,6 +680,51 @@ class JsInterpreter:
                 return self.eval_array(elements, env)
             Expression.ObjectExpr(properties):
                 return self.eval_object(properties, env)
+            Expression.Ternary(condition, consequent, alternate):
+                val cond_val = self.eval_expression(condition, env)?
+                if is_truthy(cond_val):
+                    return self.eval_expression(consequent, env)
+                return self.eval_expression(alternate, env)
+            Expression.ArrowFunction(params, body):
+                # Register arrow as a function
+                val fn_id = self.functions.len()
+                val js_fn = JsFunction(name: "__arrow__", params: params, body: body, closure_env: env)
+                self.functions.push(js_fn)
+                return Ok(JsValue.Function(id: fn_id))
+            Expression.SpreadElement(argument):
+                # Spread is handled at call sites; evaluate the argument
+                return self.eval_expression(argument, env)
+            Expression.TemplateLiteral(quasis, expressions):
+                return self.eval_template_literal(quasis, expressions, env)
+            Expression.Delete(del_expr):
+                return self.eval_delete(del_expr, env)
+            Expression.InstanceOf(left, right):
+                # Simplified instanceof: checks if right is a constructor function
+                val lv = self.eval_expression(left, env)?
+                val rv = self.eval_expression(right, env)?
+                # Basic: check if left is an object
+                match lv:
+                    JsValue.Object(id):
+                        return Ok(JsValue.Boolean(v: true))
+                    _:
+                        return Ok(JsValue.Boolean(v: false))
+            Expression.InExpr(left, right):
+                val key = self.eval_expression(left, env)?
+                val obj = self.eval_expression(right, env)?
+                val key_str = to_string(key)
+                match obj:
+                    JsValue.Object(id):
+                        val prop = self.object_store.get_property(id, key_str)
+                        if val Some(v) = prop:
+                            return Ok(JsValue.Boolean(v: true))
+                        return Ok(JsValue.Boolean(v: false))
+                    JsValue.Array(id):
+                        val prop = self.object_store.get_property(id, key_str)
+                        if val Some(v) = prop:
+                            return Ok(JsValue.Boolean(v: true))
+                        return Ok(JsValue.Boolean(v: false))
+                    _:
+                        return Ok(JsValue.Boolean(v: false))
 
     # Binary operators
     me eval_binary(op: text, left: Expression, right: Expression, env: i64) -> BrowserResult<JsValue>:
@@ -608,9 +887,56 @@ class JsInterpreter:
             return Ok(v)
 
         if op == "new":
-            # new Constructor(args) — create an object
-            val obj_id = self.object_store.create_object()
-            return Ok(JsValue.Object(id: obj_id))
+            # new Constructor(args) — allocate object, set prototype, call constructor, return
+            match operand:
+                Expression.Call(callee, args):
+                    val callee_val = self.eval_expression(callee, env)?
+                    var arg_vals = List<JsValue>()
+                    var ai = 0
+                    val alen = args.len()
+                    while ai < alen:
+                        val av = self.eval_expression(args.get(ai), env)?
+                        arg_vals.push(av)
+                        ai = ai + 1
+                    # Allocate new object
+                    val obj_id = self.object_store.create_object()
+                    val new_obj = JsValue.Object(id: obj_id)
+                    # Call constructor with 'this' bound to new object
+                    match callee_val:
+                        JsValue.Function(fn_id):
+                            if fn_id >= 0 and fn_id < self.functions.len():
+                                val js_fn = self.functions.get(fn_id)
+                                val fn_env = self.env_stack.create_env(js_fn.closure_env)
+                                # Bind parameters
+                                var pi = 0
+                                val plen = js_fn.params.len()
+                                while pi < plen:
+                                    val pname = js_fn.params.get(pi)
+                                    var pval = JsValue.Undefined
+                                    if pi < arg_vals.len():
+                                        pval = arg_vals.get(pi)
+                                    self.env_stack.define_var(fn_env, pname, pval)
+                                    pi = pi + 1
+                                self.env_stack.define_var(fn_env, "this", new_obj)
+                                val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: new_obj)
+                                self.call_stack.push(frame)
+                                val saved = self.has_return
+                                self.has_return = false
+                                var bi = 0
+                                val blen = js_fn.body.len()
+                                while bi < blen:
+                                    self.exec_statement(js_fn.body.get(bi), fn_env)?
+                                    if self.has_return:
+                                        break
+                                    bi = bi + 1
+                                self.call_stack.pop()
+                                self.has_return = saved
+                        _: pass_dn
+                    return Ok(new_obj)
+                _:
+                    # Simple new without call
+                    val obj_id = self.object_store.create_object()
+                    return Ok(JsValue.Object(id: obj_id))
 
         self.logger.warn("Unknown unary operator: {op}")
         Ok(JsValue.Undefined)
@@ -656,8 +982,17 @@ class JsInterpreter:
                     self.object_store.set_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
                     self.env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
 
+                    # Bind 'this' — for method calls, the receiver is tracked via callee
+                    var this_val = JsValue.Undefined
+                    match callee:
+                        Expression.Member(obj_expr, prop_name):
+                            val obj_val = self.eval_expression(obj_expr, env)?
+                            this_val = obj_val
+                        _: pass_dn
+                    self.env_stack.define_var(fn_env, "this", this_val)
+
                     # Push call frame
-                    val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0)
+                    val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
                     self.call_stack.push(frame)
 
                     # Execute body
@@ -756,3 +1091,40 @@ class JsInterpreter:
             self.object_store.set_property(obj_id, prop.first, pv)
             i = i + 1
         Ok(JsValue.Object(id: obj_id))
+
+    # Template literal: `hello ${name}!`
+    me eval_template_literal(quasis: List<text>, expressions: List<Expression>, env: i64) -> BrowserResult<JsValue>:
+        var result = ""
+        var i = 0
+        val qlen = quasis.len()
+        while i < qlen:
+            result = result + quasis.get(i)
+            if i < expressions.len():
+                val expr_val = self.eval_expression(expressions.get(i), env)?
+                result = result + to_string(expr_val)
+            i = i + 1
+        Ok(JsValue.String(v: result))
+
+    # Delete operator: delete obj.prop
+    me eval_delete(expr: Expression, env: i64) -> BrowserResult<JsValue>:
+        match expr:
+            Expression.Member(object, property):
+                val obj_val = self.eval_expression(object, env)?
+                match obj_val:
+                    JsValue.Object(id):
+                        val obj = self.object_store.get_object(id)
+                        var i = 0
+                        val len = obj.properties.len()
+                        while i < len:
+                            val prop = obj.properties.get(i)
+                            if prop.key == property:
+                                if prop.configurable:
+                                    obj.properties.remove(i)
+                                    return Ok(JsValue.Boolean(v: true))
+                                return Ok(JsValue.Boolean(v: false))
+                            i = i + 1
+                        return Ok(JsValue.Boolean(v: true))
+                    _:
+                        return Ok(JsValue.Boolean(v: true))
+            _:
+                return Ok(JsValue.Boolean(v: true))

@@ -1,431 +1,106 @@
 #![allow(primitive_api)]
-# Rodio Audio System SFFI Bindings
+# Audio FFI — miniaudio backend
 #
-# SFFI pattern for Rodio cross-platform audio playback.
-# Provides sound effects, music streaming, spatial audio, and mixing.
+# SFFI bindings for the miniaudio-based C runtime (runtime_audio.c).
+# Provides engine init/shutdown, sound loading, playback control, and volume.
 #
-# Documentation: https://docs.rs/rodio/
+# The C side uses a static global ma_engine. Sound handles and playback handles
+# are ma_sound* pointers cast to i64.
 
 # ============================================================================
 # Tier 1: Extern Declarations (Raw FFI)
 # ============================================================================
 
-# --- Audio Engine ---
+# --- Engine lifecycle ---
 extern fn rt_audio_init() -> i64
-extern fn rt_audio_shutdown(engine: i64) -> bool
-extern fn rt_audio_set_master_volume(engine: i64, volume: f64) -> bool
-extern fn rt_audio_get_master_volume(engine: i64) -> f64
-extern fn rt_audio_pause_all(engine: i64) -> bool
-extern fn rt_audio_resume_all(engine: i64) -> bool
+extern fn rt_audio_shutdown()
 
-# --- Audio Source (File Loading) ---
-extern fn rt_audio_load_from_file(engine: i64, path: text) -> i64
-extern fn rt_audio_load_from_memory(engine: i64, data: [u8]) -> i64
-extern fn rt_audio_source_free(source: i64) -> bool
-extern fn rt_audio_source_duration(source: i64) -> f64
+# --- Sound loading ---
+extern fn rt_audio_load_sound(path: text) -> i64
+extern fn rt_audio_unload_sound(handle: i64)
 
-# --- Sound Playback (One-shot) ---
-extern fn rt_audio_play_sound(engine: i64, source: i64) -> i64
-extern fn rt_audio_play_sound_with_volume(engine: i64, source: i64, volume: f64) -> i64
-extern fn rt_audio_play_sound_looped(engine: i64, source: i64) -> i64
+# --- Playback ---
+extern fn rt_audio_play(sound_handle: i64) -> i64
+extern fn rt_audio_play_looped(sound_handle: i64) -> i64
+extern fn rt_audio_stop(playback_handle: i64)
+extern fn rt_audio_pause(playback_handle: i64)
+extern fn rt_audio_resume(playback_handle: i64)
 
-# --- Music Playback (Streaming) ---
-extern fn rt_audio_play_music(engine: i64, path: text) -> i64
-extern fn rt_audio_play_music_looped(engine: i64, path: text) -> i64
-extern fn rt_audio_stop_music(handle: i64) -> bool
+# --- Volume ---
+extern fn rt_audio_set_volume(playback_handle: i64, volume: f64)
+extern fn rt_audio_set_master_volume(volume: f64)
+extern fn rt_audio_get_master_volume() -> f64
 
-# --- Playback Control ---
-extern fn rt_audio_playback_stop(handle: i64) -> bool
-extern fn rt_audio_playback_pause(handle: i64) -> bool
-extern fn rt_audio_playback_resume(handle: i64) -> bool
-extern fn rt_audio_playback_is_playing(handle: i64) -> bool
-extern fn rt_audio_playback_is_paused(handle: i64) -> bool
-extern fn rt_audio_playback_set_volume(handle: i64, volume: f64) -> bool
-extern fn rt_audio_playback_get_volume(handle: i64) -> f64
-extern fn rt_audio_playback_set_speed(handle: i64, speed: f64) -> bool
-extern fn rt_audio_playback_get_speed(handle: i64) -> f64
-
-# --- Spatial Audio (3D Positioning) ---
-extern fn rt_audio_play_sound_spatial(engine: i64, source: i64, x: f64, y: f64, z: f64) -> i64
-extern fn rt_audio_playback_set_position(handle: i64, x: f64, y: f64, z: f64) -> bool
-extern fn rt_audio_playback_get_position(handle: i64) -> (f64, f64, f64)
-extern fn rt_audio_set_listener_position(engine: i64, x: f64, y: f64, z: f64) -> bool
-extern fn rt_audio_get_listener_position(engine: i64) -> (f64, f64, f64)
-extern fn rt_audio_set_listener_orientation(engine: i64, forward_x: f64, forward_y: f64, forward_z: f64, up_x: f64, up_y: f64, up_z: f64) -> bool
-
-# --- Audio Effects ---
-extern fn rt_audio_playback_fade_in(handle: i64, duration_ms: i64) -> bool
-extern fn rt_audio_playback_fade_out(handle: i64, duration_ms: i64) -> bool
-extern fn rt_audio_playback_set_reverb(handle: i64, room_size: f64, damping: f64) -> bool
-extern fn rt_audio_playback_set_delay(handle: i64, delay_ms: i64, decay: f64) -> bool
-
-# --- Mixing and Groups ---
-extern fn rt_audio_mixer_create(engine: i64) -> i64
-extern fn rt_audio_mixer_free(mixer: i64) -> bool
-extern fn rt_audio_mixer_add_source(mixer: i64, source: i64) -> bool
-extern fn rt_audio_mixer_set_volume(mixer: i64, volume: f64) -> bool
-extern fn rt_audio_mixer_play(mixer: i64) -> i64
-
-# --- Audio Format Info ---
-extern fn rt_audio_source_get_sample_rate(source: i64) -> i64
-extern fn rt_audio_source_get_channels(source: i64) -> i64
-extern fn rt_audio_get_supported_formats() -> [text]
-
-# --- Utilities ---
-extern fn rt_audio_get_last_error() -> text
+# --- Query ---
+extern fn rt_audio_is_playing(playback_handle: i64) -> i64
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
 # ============================================================================
-
-# --- Core Types ---
-
-struct Vec3:
-    x: f64
-    y: f64
-    z: f64
-
-impl Vec3:
-    fn length() -> f64:
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-
-    fn normalize() -> Vec3:
-        val len = self.length()
-        if len > 0.0:
-            Vec3(x: self.x / len, y: self.y / len, z: self.z / len)
-        else:
-            Vec3(x: 0.0, y: 0.0, z: 0.0)
-
-    fn distance_to(other: Vec3) -> f64:
-        val dx = self.x - other.x
-        val dy = self.y - other.y
-        val dz = self.z - other.z
-        (dx * dx + dy * dy + dz * dz).sqrt()
-
-# --- Audio Engine ---
 
 struct AudioEngine:
     handle: i64
     is_valid: bool
 
 fn audio_init() -> AudioEngine:
-    val handle = rt_audio_init()
-    AudioEngine(handle: handle, is_valid: handle != 0)
+    val result = rt_audio_init()
+    AudioEngine(handle: result, is_valid: result != 0)
 
-fn audio_shutdown(engine: AudioEngine) -> bool:
+fn audio_shutdown(engine: AudioEngine):
     if engine.is_valid:
-        rt_audio_shutdown(engine.handle)
-    else:
-        true
-
-fn audio_set_master_volume(engine: AudioEngine, volume: f64) -> bool:
-    if not engine.is_valid:
-        false
-    else:
-        rt_audio_set_master_volume(engine.handle, volume)
-
-fn audio_get_master_volume(engine: AudioEngine) -> f64:
-    if not engine.is_valid:
-        0.0
-    else:
-        rt_audio_get_master_volume(engine.handle)
-
-fn audio_pause_all(engine: AudioEngine) -> bool:
-    if not engine.is_valid:
-        false
-    else:
-        rt_audio_pause_all(engine.handle)
-
-fn audio_resume_all(engine: AudioEngine) -> bool:
-    if not engine.is_valid:
-        false
-    else:
-        rt_audio_resume_all(engine.handle)
-
-# --- Audio Source ---
+        rt_audio_shutdown()
 
 struct AudioSource:
     handle: i64
-    engine: AudioEngine
     is_valid: bool
 
-fn audio_load_from_file(engine: AudioEngine, path: text) -> AudioSource:
-    if not engine.is_valid:
-        AudioSource(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_load_from_file(engine.handle, path)
-        AudioSource(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_load_sound(path: text) -> AudioSource:
+    val h = rt_audio_load_sound(path)
+    AudioSource(handle: h, is_valid: h != 0)
 
-fn audio_load_from_memory(engine: AudioEngine, data: [u8]) -> AudioSource:
-    if not engine.is_valid:
-        AudioSource(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_load_from_memory(engine.handle, data)
-        AudioSource(handle: handle, engine: engine, is_valid: handle != 0)
-
-fn audio_source_free(source: AudioSource) -> bool:
+fn audio_unload_sound(source: AudioSource):
     if source.is_valid:
-        rt_audio_source_free(source.handle)
-    else:
-        true
-
-fn audio_source_duration(source: AudioSource) -> f64:
-    if not source.is_valid:
-        0.0
-    else:
-        rt_audio_source_duration(source.handle)
-
-fn audio_source_sample_rate(source: AudioSource) -> i64:
-    if not source.is_valid:
-        0
-    else:
-        rt_audio_source_get_sample_rate(source.handle)
-
-fn audio_source_channels(source: AudioSource) -> i64:
-    if not source.is_valid:
-        0
-    else:
-        rt_audio_source_get_channels(source.handle)
-
-# --- Playback Handle ---
+        rt_audio_unload_sound(source.handle)
 
 struct AudioPlayback:
     handle: i64
-    engine: AudioEngine
     is_valid: bool
 
-# --- Sound Playback ---
+fn audio_play(source: AudioSource) -> AudioPlayback:
+    if not source.is_valid:
+        return AudioPlayback(handle: 0, is_valid: false)
+    val h = rt_audio_play(source.handle)
+    AudioPlayback(handle: h, is_valid: h != 0)
 
-fn audio_play_sound(engine: AudioEngine, source: AudioSource) -> AudioPlayback:
-    if not engine.is_valid or not source.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_sound(engine.handle, source.handle)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_play_looped(source: AudioSource) -> AudioPlayback:
+    if not source.is_valid:
+        return AudioPlayback(handle: 0, is_valid: false)
+    val h = rt_audio_play_looped(source.handle)
+    AudioPlayback(handle: h, is_valid: h != 0)
 
-fn audio_play_sound_with_volume(engine: AudioEngine, source: AudioSource, volume: f64) -> AudioPlayback:
-    if not engine.is_valid or not source.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_sound_with_volume(engine.handle, source.handle, volume)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_stop(playback: AudioPlayback):
+    if playback.is_valid:
+        rt_audio_stop(playback.handle)
 
-fn audio_play_sound_looped(engine: AudioEngine, source: AudioSource) -> AudioPlayback:
-    if not engine.is_valid or not source.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_sound_looped(engine.handle, source.handle)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_pause(playback: AudioPlayback):
+    if playback.is_valid:
+        rt_audio_pause(playback.handle)
 
-# --- Music Playback ---
+fn audio_resume(playback: AudioPlayback):
+    if playback.is_valid:
+        rt_audio_resume(playback.handle)
 
-fn audio_play_music(engine: AudioEngine, path: text) -> AudioPlayback:
-    if not engine.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_music(engine.handle, path)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_set_volume(playback: AudioPlayback, volume: f64):
+    if playback.is_valid:
+        rt_audio_set_volume(playback.handle, volume)
 
-fn audio_play_music_looped(engine: AudioEngine, path: text) -> AudioPlayback:
-    if not engine.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_music_looped(engine.handle, path)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
+fn audio_set_master_volume(volume: f64):
+    rt_audio_set_master_volume(volume)
 
-fn audio_stop_music(playback: AudioPlayback) -> bool:
+fn audio_get_master_volume() -> f64:
+    rt_audio_get_master_volume()
+
+fn audio_is_playing(playback: AudioPlayback) -> bool:
     if not playback.is_valid:
-        false
-    else:
-        rt_audio_stop_music(playback.handle)
-
-# --- Playback Control ---
-
-fn audio_playback_stop(playback: AudioPlayback) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_stop(playback.handle)
-
-fn audio_playback_pause(playback: AudioPlayback) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_pause(playback.handle)
-
-fn audio_playback_resume(playback: AudioPlayback) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_resume(playback.handle)
-
-fn audio_playback_is_playing(playback: AudioPlayback) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_is_playing(playback.handle)
-
-fn audio_playback_is_paused(playback: AudioPlayback) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_is_paused(playback.handle)
-
-fn audio_playback_set_volume(playback: AudioPlayback, volume: f64) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_set_volume(playback.handle, volume)
-
-fn audio_playback_get_volume(playback: AudioPlayback) -> f64:
-    if not playback.is_valid:
-        0.0
-    else:
-        rt_audio_playback_get_volume(playback.handle)
-
-fn audio_playback_set_speed(playback: AudioPlayback, speed: f64) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_set_speed(playback.handle, speed)
-
-fn audio_playback_get_speed(playback: AudioPlayback) -> f64:
-    if not playback.is_valid:
-        1.0
-    else:
-        rt_audio_playback_get_speed(playback.handle)
-
-# --- Spatial Audio ---
-
-fn audio_play_sound_spatial(engine: AudioEngine, source: AudioSource, position: Vec3) -> AudioPlayback:
-    if not engine.is_valid or not source.is_valid:
-        AudioPlayback(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_play_sound_spatial(engine.handle, source.handle, position.x, position.y, position.z)
-        AudioPlayback(handle: handle, engine: engine, is_valid: handle != 0)
-
-fn audio_playback_set_position(playback: AudioPlayback, position: Vec3) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_set_position(playback.handle, position.x, position.y, position.z)
-
-fn audio_playback_get_position(playback: AudioPlayback) -> Vec3:
-    if not playback.is_valid:
-        Vec3(x: 0.0, y: 0.0, z: 0.0)
-    else:
-        val result = rt_audio_playback_get_position(playback.handle)
-        Vec3(x: result.0, y: result.1, z: result.2)
-
-fn audio_set_listener_position(engine: AudioEngine, position: Vec3) -> bool:
-    if not engine.is_valid:
-        false
-    else:
-        rt_audio_set_listener_position(engine.handle, position.x, position.y, position.z)
-
-fn audio_get_listener_position(engine: AudioEngine) -> Vec3:
-    if not engine.is_valid:
-        Vec3(x: 0.0, y: 0.0, z: 0.0)
-    else:
-        val result = rt_audio_get_listener_position(engine.handle)
-        Vec3(x: result.0, y: result.1, z: result.2)
-
-struct Orientation:
-    forward: Vec3
-    up: Vec3
-
-fn audio_set_listener_orientation(engine: AudioEngine, orientation: Orientation) -> bool:
-    if not engine.is_valid:
-        false
-    else:
-        rt_audio_set_listener_orientation(
-            engine.handle,
-            orientation.forward.x, orientation.forward.y, orientation.forward.z,
-            orientation.up.x, orientation.up.y, orientation.up.z
-        )
-
-# --- Audio Effects ---
-
-fn audio_playback_fade_in(playback: AudioPlayback, duration_ms: i64) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_fade_in(playback.handle, duration_ms)
-
-fn audio_playback_fade_out(playback: AudioPlayback, duration_ms: i64) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_fade_out(playback.handle, duration_ms)
-
-struct ReverbSettings:
-    room_size: f64   # 0.0 - 1.0
-    damping: f64     # 0.0 - 1.0
-
-fn audio_playback_set_reverb(playback: AudioPlayback, settings: ReverbSettings) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_set_reverb(playback.handle, settings.room_size, settings.damping)
-
-struct DelaySettings:
-    delay_ms: i64
-    decay: f64       # 0.0 - 1.0
-
-fn audio_playback_set_delay(playback: AudioPlayback, settings: DelaySettings) -> bool:
-    if not playback.is_valid:
-        false
-    else:
-        rt_audio_playback_set_delay(playback.handle, settings.delay_ms, settings.decay)
-
-# --- Mixing ---
-
-struct AudioMixer:
-    handle: i64
-    engine: AudioEngine
-    is_valid: bool
-
-fn audio_mixer_create(engine: AudioEngine) -> AudioMixer:
-    if not engine.is_valid:
-        AudioMixer(handle: 0, engine: engine, is_valid: false)
-    else:
-        val handle = rt_audio_mixer_create(engine.handle)
-        AudioMixer(handle: handle, engine: engine, is_valid: handle != 0)
-
-fn audio_mixer_free(mixer: AudioMixer) -> bool:
-    if mixer.is_valid:
-        rt_audio_mixer_free(mixer.handle)
-    else:
-        true
-
-fn audio_mixer_add_source(mixer: AudioMixer, source: AudioSource) -> bool:
-    if not mixer.is_valid or not source.is_valid:
-        false
-    else:
-        rt_audio_mixer_add_source(mixer.handle, source.handle)
-
-fn audio_mixer_set_volume(mixer: AudioMixer, volume: f64) -> bool:
-    if not mixer.is_valid:
-        false
-    else:
-        rt_audio_mixer_set_volume(mixer.handle, volume)
-
-fn audio_mixer_play(mixer: AudioMixer) -> AudioPlayback:
-    if not mixer.is_valid:
-        AudioPlayback(handle: 0, engine: mixer.engine, is_valid: false)
-    else:
-        val handle = rt_audio_mixer_play(mixer.handle)
-        AudioPlayback(handle: handle, engine: mixer.engine, is_valid: handle != 0)
-
-# --- Utilities ---
-
-fn audio_get_supported_formats() -> [text]:
-    rt_audio_get_supported_formats()
-
-fn audio_last_error() -> text:
-    rt_audio_get_last_error()
-
-# ============================================================================
-# Exports
-# ============================================================================
-
+        return false
+    rt_audio_is_playing(playback.handle) != 0

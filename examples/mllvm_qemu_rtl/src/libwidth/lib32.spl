@@ -14,6 +14,7 @@ use guest.riscv.decoder32.{Rv32Decoder}
 use runtime.memory.{GuestMemory}
 use runtime.io.{IoController, RiscvUartIO}
 use runtime.interrupt.{InterruptController}
+use runtime.rtl_sim.{RtlSimEngine}
 
 # ============================================================================
 # Width32 Library
@@ -72,6 +73,21 @@ impl Width32Lib:
             cycle_count: 0,
             halted: false
         )
+
+    fn create_rv32_rtl_sim() -> Rv32RtlSimulator:
+        """Factory: create RV32I simulator with native RTL-style observability."""
+        val emu = self.create_rv32_emulator()
+        var rtl = RtlSimEngine.new()
+        rtl.define_signal("cycle", 64, 0, true)
+        rtl.define_signal("pc", 32, 0x80000000, true)
+        rtl.define_signal("retired_pc", 32, 0x80000000, true)
+        rtl.define_signal("inst_word", 32, 0, false)
+        rtl.define_signal("a0", 32, 0, true)
+        rtl.define_signal("sp", 32, 0, true)
+        rtl.define_signal("mem_reads", 64, 0, false)
+        rtl.define_signal("mem_writes", 64, 0, false)
+        rtl.define_signal("halted", 1, 0, true)
+        Rv32RtlSimulator(emulator: emu, rtl: rtl, last_inst_word: 0)
 
 # ============================================================================
 # RV32 Emulator
@@ -179,3 +195,88 @@ impl Rv32Emulator:
     fn stats_text() -> text:
         """Return emulation statistics as text."""
         "RV32I: {self.cycle_count} cycles, PC=0x{self.state.pc}, halted={self.halted}"
+
+# ============================================================================
+# RV32 Native RTL Simulator
+# ============================================================================
+
+class Rv32RtlSimulator:
+    """RV32I emulator wrapped with a native RTL-style signal surface."""
+    emulator: Rv32Emulator
+    rtl: RtlSimEngine
+    last_inst_word: i64
+
+impl Rv32RtlSimulator:
+    me step() -> i64:
+        """Execute one architectural step and update visible RTL signals."""
+        val pc_before = self.emulator.state.pc
+        val inst_word = self.emulator.memory.read32(pc_before)
+        self.last_inst_word = inst_word
+
+        self.rtl.begin_cycle(self.emulator.cycle_count + 1)
+        self.rtl.set_signal("retired_pc", pc_before)
+        self.rtl.set_signal("inst_word", inst_word)
+
+        val cycles = self.emulator.step()
+        self._sync_signals()
+        self.rtl.sample_all()
+        cycles
+
+    me run(max_cycles: i64):
+        var remaining = max_cycles
+        while not self.emulator.halted:
+            if remaining <= 0:
+                return
+            val used = self.step()
+            if used == 0:
+                return
+            remaining = remaining - used
+
+    me load_program(data: [i64]):
+        self.emulator.load_program(data)
+        self._sync_signals()
+
+    me load_program_at(addr: i64, data: [i64]):
+        self.emulator.load_program_at(addr, data)
+        self._sync_signals()
+
+    me reset():
+        self.emulator.reset()
+        self.last_inst_word = 0
+        self.rtl.clear_trace()
+        self._sync_signals()
+
+    fn get_reg(name: text) -> i64?:
+        self.emulator.get_reg(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        val ok = self.emulator.set_reg(name, value)
+        self._sync_signals()
+        ok
+
+    me enable_trace():
+        self.rtl.enable_trace()
+
+    me disable_trace():
+        self.rtl.disable_trace()
+
+    fn read_signal(name: text) -> i64?:
+        self.rtl.read_signal(name)
+
+    fn waveform_text() -> text:
+        self.rtl.trace_text()
+
+    fn stats_text() -> text:
+        "RV32 RTL: {self.emulator.cycle_count} cycles, signals={self.rtl.signal_count()}, trace={self.rtl.trace_count()}, halted={self.emulator.halted}"
+
+    me _sync_signals():
+        self.rtl.set_signal("cycle", self.emulator.cycle_count)
+        self.rtl.set_signal("pc", self.emulator.state.pc)
+        self.rtl.set_signal("inst_word", self.last_inst_word)
+        self.rtl.set_signal("mem_reads", self.emulator.memory.read_count)
+        self.rtl.set_signal("mem_writes", self.emulator.memory.write_count)
+        self.rtl.set_signal("halted", if self.emulator.halted: 1 else: 0)
+        if val Some(a0) = self.emulator.get_reg("a0"):
+            self.rtl.set_signal("a0", a0)
+        if val Some(sp) = self.emulator.get_reg("sp"):
+            self.rtl.set_signal("sp", sp)

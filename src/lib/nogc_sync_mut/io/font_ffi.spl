@@ -1,15 +1,26 @@
 #![allow(primitive_api)]
-# Font Loading FFI — TrueType font wrapper
+# Font Loading FFI — stb_truetype wrapper
 #
-# Loads TrueType fonts and renders glyph bitmaps.
+# Loads TrueType fonts and renders glyph bitmaps via C runtime (runtime_font.c).
+# All handles are i64 (opaque pointers cast in C).
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
 
 extern fn rt_font_load(path: text) -> i64
 extern fn rt_font_free(handle: i64)
-extern fn rt_font_glyph_bitmap(handle: i64, codepoint: i64, size_px: i64) -> [i64]
-extern fn rt_font_glyph_width(handle: i64, codepoint: i64, size_px: i64) -> i64
-extern fn rt_font_glyph_height(handle: i64, codepoint: i64, size_px: i64) -> i64
-extern fn rt_font_glyph_advance(handle: i64, codepoint: i64, size_px: i64) -> i64
-extern fn rt_font_line_height(handle: i64, size_px: i64) -> i64
+extern fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_bitmap_width(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_height(bitmap_handle: i64) -> i64
+extern fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64
+extern fn rt_font_bitmap_free(bitmap_handle: i64)
+extern fn rt_font_glyph_advance(font_handle: i64, codepoint: i64, size: f64) -> i64
+extern fn rt_font_line_height(font_handle: i64, size: f64) -> i64
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper
+# ============================================================================
 
 class FontHandle:
     handle: i64
@@ -17,7 +28,7 @@ class FontHandle:
 
 impl FontHandle:
     fn is_valid() -> bool:
-        self.handle > 0
+        self.handle != 0
 
 class GlyphMetrics:
     width: i64
@@ -26,18 +37,23 @@ class GlyphMetrics:
     codepoint: i64
 
 class GlyphBitmap:
+    bitmap_handle: i64
     width: i64
     height: i64
-    pixels: [i64]    # Alpha values packed as i64 (0-255)
     metrics: GlyphMetrics
 
 impl GlyphBitmap:
     fn is_valid() -> bool:
-        self.width > 0 and self.height > 0
+        self.bitmap_handle != 0
+
+    fn get_pixel(x: i64, y: i64) -> i64:
+        if not self.is_valid():
+            return 0
+        rt_font_bitmap_get_pixel(self.bitmap_handle, x, y)
 
 fn load_font(path: text) -> FontHandle?:
     val h = rt_font_load(path)
-    if h <= 0:
+    if h == 0:
         return nil
     FontHandle(handle: h, path: path)
 
@@ -45,17 +61,23 @@ fn free_font(font: FontHandle):
     if font.is_valid():
         rt_font_free(font.handle)
 
-fn get_glyph(font: FontHandle, codepoint: i64, size_px: i64) -> GlyphBitmap?:
+fn get_glyph(font: FontHandle, codepoint: i64, size_px: f64) -> GlyphBitmap?:
     if not font.is_valid():
         return nil
-    val w = rt_font_glyph_width(font.handle, codepoint, size_px)
-    val h = rt_font_glyph_height(font.handle, codepoint, size_px)
+    val bmp_handle = rt_font_glyph_bitmap(font.handle, codepoint, size_px)
+    if bmp_handle == 0:
+        return nil
+    val w = rt_font_bitmap_width(bmp_handle)
+    val h = rt_font_bitmap_height(bmp_handle)
     val adv = rt_font_glyph_advance(font.handle, codepoint, size_px)
-    val bitmap = rt_font_glyph_bitmap(font.handle, codepoint, size_px)
     val metrics = GlyphMetrics(width: w, height: h, advance: adv, codepoint: codepoint)
-    GlyphBitmap(width: w, height: h, pixels: bitmap, metrics: metrics)
+    GlyphBitmap(bitmap_handle: bmp_handle, width: w, height: h, metrics: metrics)
 
-fn get_line_height(font: FontHandle, size_px: i64) -> i64:
+fn free_glyph_bitmap(bmp: GlyphBitmap):
+    if bmp.is_valid():
+        rt_font_bitmap_free(bmp.bitmap_handle)
+
+fn get_line_height(font: FontHandle, size_px: f64) -> i64:
     if not font.is_valid():
         return 0
     rt_font_line_height(font.handle, size_px)

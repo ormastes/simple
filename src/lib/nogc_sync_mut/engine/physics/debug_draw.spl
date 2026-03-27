@@ -1,6 +1,7 @@
 # Physics System — Debug Drawing
 #
 # Generates wireframe geometry for all physics colliders in the world.
+# Reads body positions directly from internal bodies (no FFI).
 # The caller can render these lines as an overlay for visual debugging.
 #
 # Usage:
@@ -8,10 +9,8 @@
 #   for line in debug.lines:
 #       draw_line(line.start, line.end_point, color_green)
 
-use std.common.engine.math2d.{Vec2}
+use std.common.engine.math2d.{Vec2, _sin, _cos}
 use std.common.math.{MATH_PI}
-use std.nogc_sync_mut.io.rapier2d_ffi.{physics_body_get_position}
-use std.nogc_sync_mut.engine.physics.types.{PhysicsBody2D}
 use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
 
 # ============================================================================
@@ -48,21 +47,33 @@ fn physics_debug_draw(world: PhysicsWorld2D) -> PhysicsDebugData:
     var lines: [DebugLine] = []
 
     for pb in world.bodies:
-        val rb = world._make_rigid_body(pb)
-        val xform = physics_body_get_position(rb)
-        val bx = xform.position.x
-        val by = xform.position.y
-        val angle = xform.rotation.angle
+        val ib = world.internal_bodies[pb.body_index]
+        val bx = ib.position.x
+        val by = ib.position.y
+        val angle = ib.rotation
 
         # Find colliders for this body
         for col in world.colliders:
             if col.node_id.eq(pb.node_id):
-                # We do not know the collider shape from the handle alone,
-                # so we draw a default unit box. For circle colliders the
-                # user should set a tag or we add shape tracking later.
-                val box_lines = _draw_box(bx, by, angle, 0.5, 0.5)
-                for ln in box_lines:
-                    lines.push(ln)
+                val shape = world.shapes[col.collider_index]
+
+                if shape.is_circle():
+                    val circle_lines = _draw_circle(bx, by, shape.circle.radius)
+                    for ln in circle_lines:
+                        lines.push(ln)
+                    # Draw a radius line to show rotation
+                    val rx = bx + shape.circle.radius * _cos(angle)
+                    val ry = by + shape.circle.radius * _sin(angle)
+                    val radius_line = DebugLine(
+                        start: Vec2(x: bx, y: by),
+                        end_point: Vec2(x: rx, y: ry)
+                    )
+                    lines.push(radius_line)
+
+                if shape.is_box():
+                    val box_lines = _draw_box(bx, by, angle, shape.box_shape.half_width, shape.box_shape.half_height)
+                    for ln in box_lines:
+                        lines.push(ln)
 
     PhysicsDebugData(lines: lines)
 
@@ -79,8 +90,8 @@ fn _draw_box(cx: f64, cy: f64, angle: f64, hx: f64, hy: f64) -> [DebugLine]:
     val corners_y = [-hy, -hy, hy, hy]
 
     # Precompute sin/cos
-    val cos_a = _debug_cos(angle)
-    val sin_a = _debug_sin(angle)
+    val cos_a = _cos(angle)
+    val sin_a = _sin(angle)
 
     # Transform corners to world space
     var wx: [f64] = []
@@ -118,8 +129,8 @@ fn _draw_circle(cx: f64, cy: f64, radius: f64) -> [DebugLine]:
     var i = 1
     while i <= _CIRCLE_SEGMENTS:
         val angle = step * i.to_f64()
-        val cur_x = cx + radius * _debug_cos(angle)
-        val cur_y = cy + radius * _debug_sin(angle)
+        val cur_x = cx + radius * _cos(angle)
+        val cur_y = cy + radius * _sin(angle)
         val ln = DebugLine(
             start: Vec2(x: prev_x, y: prev_y),
             end_point: Vec2(x: cur_x, y: cur_y)
@@ -130,24 +141,3 @@ fn _draw_circle(cx: f64, cy: f64, radius: f64) -> [DebugLine]:
         i = i + 1
 
     lines
-
-# ============================================================================
-# Minimal trig for debug drawing (avoids importing heavy math)
-# ============================================================================
-
-fn _debug_sin(x: f64) -> f64:
-    """Taylor series sine — sufficient for debug wireframes."""
-    var a = x
-    val two_pi = MATH_PI * 2.0
-    while a > MATH_PI:
-        a = a - two_pi
-    while a < -MATH_PI:
-        a = a + two_pi
-    val x2 = a * a
-    val x3 = a * x2
-    val x5 = x3 * x2
-    val x7 = x5 * x2
-    a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0
-
-fn _debug_cos(x: f64) -> f64:
-    _debug_sin(x + MATH_PI / 2.0)

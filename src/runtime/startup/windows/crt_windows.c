@@ -24,7 +24,7 @@ extern void   ExitProcess(unsigned int uExitCode);
  * Minimal command-line parser for freestanding Windows.
  * Splits on spaces, handles simple double-quote grouping.
  * Not fully compatible with Windows quoting rules, but sufficient
- * for seed compiler usage.
+ * for bootstrap compiler usage.
  */
 #define MAX_ARGS 256
 

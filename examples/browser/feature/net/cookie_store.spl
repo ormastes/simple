@@ -194,8 +194,14 @@ fn parse_set_cookie(header: text, request_url: Url) -> BrowserResult<Cookie>:
                 nil:
                     pass_dn  # Ignore malformed max-age
         else if attr_lower.starts_with("expires="):
-            # HTTP date parsing is complex; simplified to epoch or skip
-            pass_todo
+            # Parse RFC 7231 HTTP-date: "Thu, 01 Dec 2024 16:00:00 GMT"
+            val date_str = attr.slice(8, attr.len()).trim()
+            val parsed_epoch = parse_http_date(date_str)
+            match parsed_epoch:
+                Some(epoch):
+                    expires = epoch
+                nil:
+                    pass_dn  # Malformed Expires= — treat as session cookie
         else if attr_lower == "secure":
             secure = true
         else if attr_lower == "httponly":
@@ -370,3 +376,108 @@ fn parse_i64_simple(s: text) -> Option<i64>:
         Some(-result)
     else:
         Some(result)
+
+fn month_name_to_number(month: text) -> i64:
+    # Convert abbreviated month name (case-insensitive) to 1-based month number.
+    # Returns 0 if unrecognized.
+    val m = month.to_lower()
+    if m == "jan": return 1
+    if m == "feb": return 2
+    if m == "mar": return 3
+    if m == "apr": return 4
+    if m == "may": return 5
+    if m == "jun": return 6
+    if m == "jul": return 7
+    if m == "aug": return 8
+    if m == "sep": return 9
+    if m == "oct": return 10
+    if m == "nov": return 11
+    if m == "dec": return 12
+    0
+
+fn parse_http_date(date_str: text) -> Option<i64>:
+    # Parse RFC 7231 HTTP-date to epoch seconds (seconds since 1970-01-01).
+    # Expected format: "Thu, 01 Dec 2024 16:00:00 GMT"
+    # We ignore the day-of-week prefix and the trailing timezone token.
+    # Steps:
+    #   1. Strip optional "DDD, " prefix (up to and including first ", ").
+    #   2. Expect: DD Mon YYYY HH:MM:SS GMT
+    # No leap-second precision needed; leap years handled simply.
+
+    # Strip weekday prefix if present (e.g. "Thu, ")
+    val comma_idx = index_of(date_str, ", ")
+    val s = if comma_idx >= 0:
+        date_str.slice(comma_idx + 2, date_str.len()).trim()
+    else:
+        date_str.trim()
+
+    # Tokenize by spaces: [DD, Mon, YYYY, HH:MM:SS, GMT]
+    val tokens = s.split(" ")
+    if tokens.len() < 4:
+        return nil
+
+    val day_token  = tokens.get(0).trim()
+    val mon_token  = tokens.get(1).trim()
+    val year_token = tokens.get(2).trim()
+    val time_token = tokens.get(3).trim()
+
+    val day_opt  = parse_i64_simple(day_token)
+    val year_opt = parse_i64_simple(year_token)
+
+    val day  = match day_opt:  Some(v): v  nil: return nil
+    val year = match year_opt: Some(v): v  nil: return nil
+
+    val month = month_name_to_number(mon_token)
+    if month == 0:
+        return nil
+
+    # Parse HH:MM:SS
+    val time_parts = time_token.split(":")
+    if time_parts.len() < 3:
+        return nil
+
+    val hour_opt = parse_i64_simple(time_parts.get(0).trim())
+    val min_opt  = parse_i64_simple(time_parts.get(1).trim())
+    val sec_opt  = parse_i64_simple(time_parts.get(2).trim())
+
+    val hour = match hour_opt: Some(v): v  nil: return nil
+    val min  = match min_opt:  Some(v): v  nil: return nil
+    val sec  = match sec_opt:  Some(v): v  nil: return nil
+
+    # Validate ranges
+    if month < 1 or month > 12: return nil
+    if day < 1 or day > 31: return nil
+    if hour < 0 or hour > 23: return nil
+    if min < 0 or min > 59: return nil
+    if sec < 0 or sec > 60: return nil  # 60 allows leap second input gracefully
+
+    # Days elapsed from 1970-01-01 to start of the given year.
+    # Each 400-year cycle has 97 leap years.
+    val y = year - 1970
+    val leap_days = (y / 4) - (y / 100) + (y / 400)
+    var days_since_epoch = y * 365 + leap_days
+
+    # Add days for each completed month in the current year.
+    val is_leap = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+    var m_idx = 1
+    while m_idx < month:
+        if m_idx == 1: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 2:
+            val feb_days = if is_leap: 29 else: 28
+            days_since_epoch = days_since_epoch + feb_days
+        else if m_idx == 3: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 4: days_since_epoch = days_since_epoch + 30
+        else if m_idx == 5: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 6: days_since_epoch = days_since_epoch + 30
+        else if m_idx == 7: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 8: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 9: days_since_epoch = days_since_epoch + 30
+        else if m_idx == 10: days_since_epoch = days_since_epoch + 31
+        else if m_idx == 11: days_since_epoch = days_since_epoch + 30
+        m_idx = m_idx + 1
+
+    # Add remaining days in the month (day is 1-based, so subtract 1)
+    days_since_epoch = days_since_epoch + (day - 1)
+
+    val epoch = days_since_epoch * 86400 + hour * 3600 + min * 60 + sec
+    Some(epoch)

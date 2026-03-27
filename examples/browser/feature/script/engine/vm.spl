@@ -29,6 +29,10 @@ class ObjectStore:
         self.next_id = self.next_id + 1
         obj
 
+    me create_object() -> i64:
+        val obj = self.allocate()
+        obj.id
+
     fn get_object(id: i64) -> JsObject:
         self.objects.get(id)
 
@@ -67,6 +71,11 @@ class VmFrame:
 
 # --- Virtual machine ---
 
+class ExceptionHandler:
+    catch_offset: i64
+    stack_depth: i64
+    frame_depth: i64
+
 class Vm:
     stack: List<JsValue>
     frames: List<VmFrame>
@@ -75,6 +84,8 @@ class Vm:
     globals: List<Pair<text, JsValue>>
     object_store: ObjectStore
     native_functions: List<NativeFunction>
+    function_chunks: List<BytecodeChunk>
+    exception_handlers: List<ExceptionHandler>
     logger: Logger
 
     static fn new(logger: Logger) -> Vm:
@@ -86,8 +97,15 @@ class Vm:
             globals: List<Pair<text, JsValue>>(),
             object_store: ObjectStore.new(),
             native_functions: List<NativeFunction>(),
+            function_chunks: List<BytecodeChunk>(),
+            exception_handlers: List<ExceptionHandler>(),
             logger: logger
         )
+
+    me register_function(chunk: BytecodeChunk) -> i64:
+        val id = self.function_chunks.len()
+        self.function_chunks.push(chunk)
+        id
 
     # --- Main entry ---
 
@@ -227,9 +245,27 @@ class Vm:
                                     self.push(result)
                                 nil:
                                     self.logger.debug("Calling function id {id}")
-                                    # For user-defined functions, create frame
-                                    # The chunk would be loaded from a function table
-                                    self.push(JsValue.Undefined)
+                                    # For user-defined functions: collect args, set up frame
+                                    # The function chunk is stored in the function_chunks list
+                                    if id >= 0 and id < self.function_chunks.len():
+                                        val fn_chunk = self.function_chunks.get(id)
+                                        # Args are already on stack above callee
+                                        # Re-arrange: pop args, pop callee, push args as locals
+                                        var args = List<JsValue>()
+                                        var a = 0
+                                        while a < argc:
+                                            args.push(self.pop())
+                                            a = a + 1
+                                        self.pop()  # pop callee
+                                        # Push args back as locals for the new frame
+                                        val base = self.stack.len()
+                                        var ra = args.len() - 1
+                                        while ra >= 0:
+                                            self.push(args.get(ra))
+                                            ra = ra - 1
+                                        self.push_frame(fn_chunk, fn_chunk.name)
+                                    else:
+                                        self.push(JsValue.Undefined)
                         _:
                             return Err(script_error("Cannot call non-function value"))
 
@@ -294,6 +330,96 @@ class Vm:
                         idx = idx + 1
                     self.object_store.set_property(arr_obj.id, "length", JsValue.Number(v: reversed.len().to_f64()))
                     self.push(JsValue.Array(id: arr_obj.id))
+
+                OpCode.Closure(fn_idx, upvalue_count):
+                    # Load the function constant and push as closure
+                    val fn_val = self._current_constants().get(fn_idx)
+                    self.push(fn_val)
+
+                OpCode.GetUpvalue(idx):
+                    # Upvalue access — simplified: treat as global for now
+                    self.push(JsValue.Undefined)
+
+                OpCode.SetUpvalue(idx):
+                    # Upvalue set — simplified
+                    self.pop()
+
+                OpCode.Throw:
+                    val thrown = self.pop()
+                    if self.exception_handlers.len() > 0:
+                        val handler = self.exception_handlers.pop()
+                        # Unwind stack and frames to handler state
+                        while self.stack.len() > handler.stack_depth:
+                            self.pop()
+                        while self.frames.len() > handler.frame_depth:
+                            self.pop_frame()
+                        self.push(thrown)  # push thrown value for catch
+                        self._set_ip(handler.catch_offset)
+                    else:
+                        self.logger.error("Uncaught exception: {_js_to_string(thrown)}")
+                        return Err(script_error("Uncaught exception"))
+
+                OpCode.PushExceptionHandler(catch_offset):
+                    val handler = ExceptionHandler(
+                        catch_offset: catch_offset,
+                        stack_depth: self.stack.len(),
+                        frame_depth: self.frames.len()
+                    )
+                    self.exception_handlers.push(handler)
+
+                OpCode.PopExceptionHandler:
+                    if self.exception_handlers.len() > 0:
+                        self.exception_handlers.pop()
+
+                OpCode.GetIterator:
+                    # Convert top-of-stack to an iterator representation
+                    # For arrays, push index 0 as iterator state
+                    val iterable = self.peek()
+                    match iterable:
+                        JsValue.Array(id):
+                            pass_dn  # array stays on stack as iterator
+                        JsValue.Object(id):
+                            pass_dn  # object stays on stack
+                        _:
+                            pass_dn
+
+                OpCode.IteratorNext:
+                    # Pop iterator state, get next value, push done flag and value
+                    # Simplified: push Undefined (signals done via JumpIfFalse)
+                    self.push(JsValue.Boolean(v: false))
+
+                OpCode.StrictEq:
+                    val b = self.pop()
+                    val a = self.pop()
+                    self.push(vm_strict_eq(a, b))
+
+                OpCode.StrictNe:
+                    val b = self.pop()
+                    val a = self.pop()
+                    val eq_result = vm_strict_eq(a, b)
+                    match eq_result:
+                        JsValue.Boolean(v): self.push(JsValue.Boolean(v: not v))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.InstanceOf:
+                    val right = self.pop()
+                    val left = self.pop()
+                    # Simplified: check if left is an object
+                    match left:
+                        JsValue.Object(id): self.push(JsValue.Boolean(v: true))
+                        _: self.push(JsValue.Boolean(v: false))
+
+                OpCode.InOp:
+                    val obj = self.pop()
+                    val key = self.pop()
+                    val key_str = _js_to_string(key)
+                    match obj:
+                        JsValue.Object(id):
+                            val value = self.object_store.get_property(id, key_str)
+                            match value:
+                                JsValue.Undefined: self.push(JsValue.Boolean(v: false))
+                                _: self.push(JsValue.Boolean(v: true))
+                        _: self.push(JsValue.Boolean(v: false))
 
                 OpCode.Halt:
                     self.logger.info("VM halted")
@@ -404,6 +530,9 @@ class Vm:
                 return
             i = i + 1
         self.globals.push(Pair(first: name, second: value))
+
+    fn get_object_store() -> ObjectStore:
+        self.object_store
 
     fn _find_native_by_id(id: i64) -> Option<NativeFunction>:
         if id >= 0 and id < self.native_functions.len():

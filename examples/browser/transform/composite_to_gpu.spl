@@ -6,7 +6,7 @@
 # back-to-front with appropriate transforms and opacity.
 
 use sbp.shared.logging.{Logger, LogLevel}
-use sbp.entity.dom.paint_types.{PaintOp, DisplayItem, Color}
+use sbp.entity.dom.paint_types.{PaintOp, DisplayItem, Color, white}
 use sbp.feature.composite.layer_tree.{CompositeLayer}
 use sbp.feature.gpu.command_buffer.{GpuCommand}
 
@@ -29,7 +29,7 @@ class CompositeToGpuBridge:
         # 1. Clear the back buffer
         cmds.push(GpuCommand.Clear(
             surface_id: 0,
-            color: Color.white(),
+            color: white(),
         ))
 
         # 2. Rasterize each layer
@@ -122,13 +122,65 @@ fn composite_layers(layers: List<CompositeLayer>) -> List<GpuCommand>:
     cmds
 
 # Apply the layer's CSS transform (stored as a flattened 4x4 matrix).
-# Currently a placeholder — real implementation would decompose the
-# matrix and issue GPU transform state changes.
+# Decomposes the transform into translation and scale components and
+# emits DrawQuad commands that represent the transformation.
+# A 4x4 identity matrix has 1.0 on the diagonal and 0.0 elsewhere.
 fn apply_layer_transform(layer: CompositeLayer) -> List<GpuCommand>:
     var cmds = List<GpuCommand>()
-    # TODO: decompose layer.transform into GPU transform commands
-    pass_todo
+    val t = layer.transform
+
+    # Only process if we have a full 4x4 matrix (16 elements)
+    if t.len() < 16:
+        return cmds
+
+    # Check if this is the identity matrix — skip if so
+    val is_identity = _is_identity_matrix(t)
+    if is_identity:
+        return cmds
+
+    # Extract translation from matrix elements [12], [13] (tx, ty)
+    val tx = t.get(12)
+    val ty = t.get(13)
+
+    # Extract scale from diagonal elements [0] (sx) and [5] (sy)
+    val sx = t.get(0)
+    val sy = t.get(5)
+
+    # Compute transformed bounds
+    val new_x = layer.bounds_x * sx + tx
+    val new_y = layer.bounds_y * sy + ty
+    val new_w = layer.bounds_w * sx
+    val new_h = layer.bounds_h * sy
+
+    # Emit a DrawQuad with the transformed coordinates on the layer surface
+    cmds.push(GpuCommand.DrawQuad(
+        surface_id: layer.id,
+        x: new_x,
+        y: new_y,
+        w: new_w,
+        h: new_h,
+        texture_id: -1,
+        opacity: layer.opacity
+    ))
+
     cmds
+
+# Check if a flattened 4x4 matrix is the identity matrix.
+fn _is_identity_matrix(m: List<f64>) -> bool:
+    if m.len() < 16:
+        return false
+    # Diagonal must be 1.0, all others 0.0
+    var i = 0
+    while i < 16:
+        val row = i / 4
+        val col = i % 4
+        val expected = if row == col: 1.0 else: 0.0
+        val diff = m.get(i) - expected
+        val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+        if abs_diff > 0.0001:
+            return false
+        i = i + 1
+    true
 
 # Issue a present/swap command for the given swapchain.
 fn present_frame(swapchain_id: i64) -> GpuCommand:

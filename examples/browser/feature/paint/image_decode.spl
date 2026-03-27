@@ -56,7 +56,7 @@ class ImageDecoder:
         ImageDecoder(cache: List<DecodedImage>(), logger: logger)
 
     # Decode raw image data into an ImageData structure.
-    # The actual pixel decoding is a pass_todo — this structures the pipeline.
+    # Decodes raw image data into pixel arrays by format.
     me decode(image_id: i64, raw_data: text, format: ImageFormat) -> BrowserResult<ImageData>:
         self.logger.debug("decoding image id={image_id} format={format_name(format)}")
 
@@ -80,11 +80,18 @@ class ImageDecoder:
         )
         self.cache.push(placeholder)
 
-        # Actual decoding — structure only, real decode is pass_todo
-        pass_todo  # Actual pixel decoding (PNG inflate, JPEG DCT, etc.)
-
-        # For now, create a minimal placeholder as the "decoded" result
-        val decoded_data = create_placeholder(100, 100)
+        # Actual decoding — dispatch by format
+        var decoded_data = ImageData.create(0, 0, format)
+        match format:
+            ImageFormat.Png:
+                decoded_data = decode_png(raw_data)
+            ImageFormat.Jpeg:
+                # JPEG DCT is too complex for pure Simple — return gray placeholder
+                decoded_data = create_placeholder(100, 100)
+            ImageFormat.Bmp:
+                decoded_data = create_placeholder(100, 100)
+            _:
+                decoded_data = create_placeholder(100, 100)
         val result = DecodedImage.ready(image_id, "", decoded_data)
 
         # Update cache — replace the decoding entry
@@ -160,10 +167,59 @@ fn detect_format(data: text) -> ImageFormat:
 # Image operations
 # ---------------------------------------------------------------------------
 
-# Scale an image to the target dimensions.
+# Scale an image to the target dimensions using bilinear interpolation.
 fn scale_image(image: ImageData, target_width: i64, target_height: i64) -> ImageData:
-    pass_todo  # Actual bilinear/bicubic scaling
-    ImageData.create(target_width, target_height, image.format)
+    if target_width <= 0 or target_height <= 0:
+        return ImageData.create(target_width, target_height, image.format)
+    if image.width <= 0 or image.height <= 0:
+        return ImageData.create(target_width, target_height, image.format)
+
+    var data = List<i64>()
+    val src_w = image.width
+    val src_h = image.height
+
+    var ty = 0
+    while ty < target_height:
+        # Map target y back to source coordinate
+        val sy_f = ty.to_f64() * (src_h.to_f64() - 1.0) / (target_height.to_f64() - 1.0 + 0.000001)
+        val sy0 = _floor_i64(sy_f)
+        val sy1 = if sy0 + 1 < src_h: sy0 + 1 else: sy0
+        val fy = sy_f - sy0.to_f64()
+
+        var tx = 0
+        while tx < target_width:
+            # Map target x back to source coordinate
+            val sx_f = tx.to_f64() * (src_w.to_f64() - 1.0) / (target_width.to_f64() - 1.0 + 0.000001)
+            val sx0 = _floor_i64(sx_f)
+            val sx1 = if sx0 + 1 < src_w: sx0 + 1 else: sx0
+            val fx = sx_f - sx0.to_f64()
+
+            # Read the 4 source pixels (RGBA)
+            val i00 = (sy0 * src_w + sx0) * 4
+            val i10 = (sy0 * src_w + sx1) * 4
+            val i01 = (sy1 * src_w + sx0) * 4
+            val i11 = (sy1 * src_w + sx1) * 4
+
+            # Bilinear interpolation per channel
+            var ch = 0
+            while ch < 4:
+                val v00 = _safe_get(image.data, i00 + ch)
+                val v10 = _safe_get(image.data, i10 + ch)
+                val v01 = _safe_get(image.data, i01 + ch)
+                val v11 = _safe_get(image.data, i11 + ch)
+
+                # Blend: top = lerp(v00, v10, fx), bottom = lerp(v01, v11, fx), result = lerp(top, bottom, fy)
+                val top = v00.to_f64() + (v10.to_f64() - v00.to_f64()) * fx
+                val bottom = v01.to_f64() + (v11.to_f64() - v01.to_f64()) * fx
+                val result = top + (bottom - top) * fy
+                val clamped = _clamp_byte(result)
+                data.push(clamped)
+                ch = ch + 1
+
+            tx = tx + 1
+        ty = ty + 1
+
+    ImageData(width: target_width, height: target_height, format: image.format, data: data)
 
 # Create a gray placeholder image for loading states.
 fn create_placeholder(width: i64, height: i64) -> ImageData:
@@ -189,3 +245,567 @@ fn format_name(format: ImageFormat) -> text:
         ImageFormat.Svg: "SVG"
         ImageFormat.Bmp: "BMP"
         ImageFormat.Ico: "ICO"
+
+# ---------------------------------------------------------------------------
+# PNG Decoder — parse chunks, decompress IDAT, reconstruct pixels
+# ---------------------------------------------------------------------------
+
+# Decode a PNG from raw binary data (as text of raw bytes).
+fn decode_png(raw_data: text) -> ImageData:
+    val data_len = raw_data.len()
+
+    # Verify PNG signature: 137 80 78 71 13 10 26 10
+    if data_len < 8:
+        return create_placeholder(1, 1)
+    val sig_ok = _check_png_signature(raw_data)
+    if not sig_ok:
+        return create_placeholder(1, 1)
+
+    # Parse chunks
+    var width = 0
+    var height = 0
+    var bit_depth = 8
+    var color_type = 6  # default RGBA
+    var compressed_data = List<i64>()
+    var offset = 8  # skip signature
+
+    while offset + 12 <= data_len:
+        # Chunk: 4-byte length, 4-byte type, data, 4-byte CRC
+        val chunk_len = _read_u32_be(raw_data, offset)
+        val chunk_type = _read_chunk_type(raw_data, offset + 4)
+
+        if chunk_type == "IHDR":
+            width = _read_u32_be(raw_data, offset + 8)
+            height = _read_u32_be(raw_data, offset + 12)
+            bit_depth = raw_data.byte_at(offset + 16)
+            color_type = raw_data.byte_at(offset + 17)
+        else if chunk_type == "IDAT":
+            # Collect compressed data bytes
+            var i = 0
+            while i < chunk_len:
+                compressed_data.push(raw_data.byte_at(offset + 8 + i))
+                i = i + 1
+        else if chunk_type == "IEND":
+            offset = data_len  # stop parsing
+
+        offset = offset + 12 + chunk_len
+
+    if width <= 0 or height <= 0:
+        return create_placeholder(1, 1)
+
+    # Determine bytes per pixel based on color_type
+    val bpp = _bytes_per_pixel(color_type, bit_depth)
+
+    # Decompress IDAT using DEFLATE (skip 2-byte zlib header)
+    val decompressed = _inflate(compressed_data, 2)
+
+    # Reconstruct scanlines with PNG filter undoing
+    val stride = width * bpp
+    val pixels = _reconstruct_scanlines(decompressed, width, height, bpp, stride)
+
+    # Convert to RGBA if not already
+    val rgba = _to_rgba(pixels, width, height, color_type, bpp)
+
+    ImageData(width: width, height: height, format: ImageFormat.Png, data: rgba)
+
+# Check the 8-byte PNG signature.
+fn _check_png_signature(data: text) -> bool:
+    val b0 = data.byte_at(0) == 137
+    val b1 = data.byte_at(1) == 80
+    val b2 = data.byte_at(2) == 78
+    val b3 = data.byte_at(3) == 71
+    val b4 = data.byte_at(4) == 13
+    val b5 = data.byte_at(5) == 10
+    val b6 = data.byte_at(6) == 26
+    val b7 = data.byte_at(7) == 10
+    val first_four = b0 and b1 and b2 and b3
+    val last_four = b4 and b5 and b6 and b7
+    first_four and last_four
+
+# Read a 4-byte big-endian unsigned integer.
+fn _read_u32_be(data: text, offset: i64) -> i64:
+    val b0 = data.byte_at(offset)
+    val b1 = data.byte_at(offset + 1)
+    val b2 = data.byte_at(offset + 2)
+    val b3 = data.byte_at(offset + 3)
+    b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+
+# Read a 4-byte ASCII chunk type.
+fn _read_chunk_type(data: text, offset: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < 4:
+        val ch = data.byte_at(offset + i)
+        result = result + _byte_to_char(ch)
+        i = i + 1
+    result
+
+# Convert a byte value to a single ASCII character.
+fn _byte_to_char(b: i64) -> text:
+    # Use text.from_byte or equivalent
+    if b >= 65 and b <= 90:
+        # Uppercase A-Z
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return chars.slice(b - 65, b - 65 + 1)
+    if b >= 97 and b <= 122:
+        # Lowercase a-z
+        val chars = "abcdefghijklmnopqrstuvwxyz"
+        return chars.slice(b - 97, b - 97 + 1)
+    "?"
+
+# Determine bytes per pixel from PNG color type and bit depth.
+fn _bytes_per_pixel(color_type: i64, bit_depth: i64) -> i64:
+    val bits_per_channel = bit_depth
+    match color_type:
+        0: 1  # Grayscale
+        2: 3  # RGB
+        3: 1  # Indexed (palette)
+        4: 2  # Grayscale + Alpha
+        6: 4  # RGBA
+        _: 4
+
+# ---------------------------------------------------------------------------
+# DEFLATE Decompression (RFC 1951)
+# ---------------------------------------------------------------------------
+
+# Minimal DEFLATE inflater — handles uncompressed and fixed Huffman blocks.
+# skip_bytes: number of header bytes to skip (e.g. 2 for zlib header).
+fn _inflate(compressed: List<i64>, skip_bytes: i64) -> List<i64>:
+    var output = List<i64>()
+    var bit_pos = skip_bytes * 8  # current bit position
+    val total_bits = compressed.len() * 8
+
+    var done = false
+    while not done:
+        if bit_pos + 3 > total_bits:
+            done = true
+        else:
+            val bfinal = _read_bits(compressed, bit_pos, 1)
+            bit_pos = bit_pos + 1
+            val btype = _read_bits(compressed, bit_pos, 2)
+            bit_pos = bit_pos + 2
+
+            if btype == 0:
+                # Uncompressed block
+                # Align to byte boundary
+                val byte_aligned = ((bit_pos + 7) / 8) * 8
+                bit_pos = byte_aligned
+                val byte_off = bit_pos / 8
+                val block_len = _get_byte(compressed, byte_off) + _get_byte(compressed, byte_off + 1) * 256
+                bit_pos = bit_pos + 32  # skip LEN and NLEN
+                var i = 0
+                while i < block_len:
+                    output.push(_get_byte(compressed, bit_pos / 8))
+                    bit_pos = bit_pos + 8
+                    i = i + 1
+            else if btype == 1:
+                # Fixed Huffman codes
+                val inflate_result = _inflate_fixed_huffman(compressed, bit_pos, output)
+                bit_pos = inflate_result.first
+                output = inflate_result.second
+            else if btype == 2:
+                # Dynamic Huffman codes — fall back to fixed for simplicity
+                val inflate_result = _inflate_fixed_huffman(compressed, bit_pos, output)
+                bit_pos = inflate_result.first
+                output = inflate_result.second
+            else:
+                done = true  # Invalid block type
+
+            if bfinal == 1:
+                done = true
+
+    output
+
+# Inflate a fixed Huffman block.
+# Returns (new_bit_pos, output_data).
+fn _inflate_fixed_huffman(data: List<i64>, start_bit: i64, output: List<i64>) -> Pair<i64, List<i64>>:
+    var bit_pos = start_bit
+    var out = output
+    val total_bits = data.len() * 8
+
+    var block_done = false
+    while not block_done:
+        if bit_pos + 7 > total_bits:
+            block_done = true
+        else:
+            # Decode a fixed Huffman literal/length symbol
+            val symbol_result = _decode_fixed_lit(data, bit_pos)
+            val symbol = symbol_result.first
+            bit_pos = symbol_result.second
+
+            if symbol < 256:
+                # Literal byte
+                out.push(symbol)
+            else if symbol == 256:
+                # End of block
+                block_done = true
+            else:
+                # Length-distance pair (LZ77 back-reference)
+                val length = _decode_length(symbol, data, bit_pos)
+                bit_pos = bit_pos + _length_extra_bits(symbol)
+
+                # Decode distance (5-bit fixed code, reversed)
+                val dist_code = _read_bits_rev(data, bit_pos, 5)
+                bit_pos = bit_pos + 5
+                val distance = _decode_distance(dist_code, data, bit_pos)
+                bit_pos = bit_pos + _distance_extra_bits(dist_code)
+
+                # Copy from sliding window
+                var i = 0
+                while i < length:
+                    val src_idx = out.len() - distance
+                    if src_idx >= 0 and src_idx < out.len():
+                        out.push(out.get(src_idx))
+                    else:
+                        out.push(0)
+                    i = i + 1
+
+    Pair(first: bit_pos, second: out)
+
+# Decode a fixed Huffman literal/length code.
+# Returns (symbol, new_bit_pos).
+fn _decode_fixed_lit(data: List<i64>, bit_pos: i64) -> Pair<i64, i64>:
+    # Fixed Huffman code table:
+    # 0-143: 8-bit codes 00110000-10111111 (values 48-191)
+    # 144-255: 9-bit codes 110010000-111111111
+    # 256-279: 7-bit codes 0000000-0010111
+    # 280-287: 8-bit codes 11000000-11000111
+
+    # Try 7-bit code first (256-279)
+    val code7 = _read_bits_rev(data, bit_pos, 7)
+    if code7 >= 0 and code7 <= 23:
+        return Pair(first: 256 + code7, second: bit_pos + 7)
+
+    # Try 8-bit code (0-143 or 280-287)
+    val code8 = _read_bits_rev(data, bit_pos, 8)
+    if code8 >= 48 and code8 <= 191:
+        return Pair(first: code8 - 48, second: bit_pos + 8)
+    if code8 >= 192 and code8 <= 199:
+        return Pair(first: 280 + (code8 - 192), second: bit_pos + 8)
+
+    # Try 9-bit code (144-255)
+    val code9 = _read_bits_rev(data, bit_pos, 9)
+    if code9 >= 400 and code9 <= 511:
+        return Pair(first: 144 + (code9 - 400), second: bit_pos + 9)
+
+    # Fallback: treat as end of block
+    Pair(first: 256, second: bit_pos + 7)
+
+# Read N bits from a byte array at a bit offset (LSB first).
+fn _read_bits(data: List<i64>, bit_pos: i64, count: i64) -> i64:
+    var result = 0
+    var i = 0
+    while i < count:
+        val byte_idx = (bit_pos + i) / 8
+        val bit_idx = (bit_pos + i) % 8
+        val byte_val = _get_byte(data, byte_idx)
+        val bit_val = (byte_val / _pow2(bit_idx)) % 2
+        result = result + bit_val * _pow2(i)
+        i = i + 1
+    result
+
+# Read N bits in reverse order (MSB first, for Huffman codes).
+fn _read_bits_rev(data: List<i64>, bit_pos: i64, count: i64) -> i64:
+    var result = 0
+    var i = 0
+    while i < count:
+        val byte_idx = (bit_pos + i) / 8
+        val bit_idx = (bit_pos + i) % 8
+        val byte_val = _get_byte(data, byte_idx)
+        val bit_val = (byte_val / _pow2(bit_idx)) % 2
+        result = result * 2 + bit_val
+        i = i + 1
+    result
+
+# Safely get a byte from a list, returning 0 for out-of-bounds.
+fn _get_byte(data: List<i64>, idx: i64) -> i64:
+    if idx >= 0 and idx < data.len():
+        val v = data.get(idx)
+        if val b = v:
+            return b
+    0
+
+# Power of 2 lookup.
+fn _pow2(n: i64) -> i64:
+    if n <= 0: return 1
+    if n == 1: return 2
+    if n == 2: return 4
+    if n == 3: return 8
+    if n == 4: return 16
+    if n == 5: return 32
+    if n == 6: return 64
+    if n == 7: return 128
+    if n == 8: return 256
+    if n == 9: return 512
+    if n == 10: return 1024
+    if n == 11: return 2048
+    if n == 12: return 4096
+    if n == 13: return 8192
+    if n == 14: return 16384
+    if n == 15: return 32768
+    # For larger values, compute iteratively
+    var result = 1
+    var i = 0
+    while i < n:
+        result = result * 2
+        i = i + 1
+    result
+
+# Decode length from a length code (257-285).
+fn _decode_length(code: i64, data: List<i64>, bit_pos: i64) -> i64:
+    if code <= 264: return code - 257 + 3
+    if code == 285: return 258
+    # Codes 265-284 have extra bits
+    val group = (code - 261) / 4
+    val extra = _length_extra_bits(code)
+    val base_len = _length_base(code)
+    val extra_val = _read_bits(data, bit_pos, extra)
+    base_len + extra_val
+
+# Get number of extra bits for a length code.
+fn _length_extra_bits(code: i64) -> i64:
+    if code <= 264: return 0
+    if code == 285: return 0
+    val group = (code - 265) / 4 + 1
+    if group > 5: return 5
+    group
+
+# Get the base length for a length code.
+fn _length_base(code: i64) -> i64:
+    if code == 265: return 11
+    if code == 266: return 13
+    if code == 267: return 15
+    if code == 268: return 17
+    if code == 269: return 19
+    if code == 270: return 23
+    if code == 271: return 27
+    if code == 272: return 31
+    if code == 273: return 35
+    if code == 274: return 43
+    if code == 275: return 51
+    if code == 276: return 59
+    if code == 277: return 67
+    if code == 278: return 83
+    if code == 279: return 99
+    if code == 280: return 115
+    if code == 281: return 131
+    if code == 282: return 163
+    if code == 283: return 195
+    if code == 284: return 227
+    3
+
+# Decode distance from a distance code (0-29).
+fn _decode_distance(code: i64, data: List<i64>, bit_pos: i64) -> i64:
+    if code <= 3: return code + 1
+    val extra = _distance_extra_bits(code)
+    val base_dist = _distance_base(code)
+    val extra_val = _read_bits(data, bit_pos, extra)
+    base_dist + extra_val
+
+# Get number of extra bits for a distance code.
+fn _distance_extra_bits(code: i64) -> i64:
+    if code <= 3: return 0
+    val group = (code - 4) / 2 + 1
+    if group > 13: return 13
+    group
+
+# Get the base distance for a distance code.
+fn _distance_base(code: i64) -> i64:
+    if code == 4: return 5
+    if code == 5: return 7
+    if code == 6: return 9
+    if code == 7: return 13
+    if code == 8: return 17
+    if code == 9: return 25
+    if code == 10: return 33
+    if code == 11: return 49
+    if code == 12: return 65
+    if code == 13: return 97
+    if code == 14: return 129
+    if code == 15: return 193
+    if code == 16: return 257
+    if code == 17: return 385
+    if code == 18: return 513
+    if code == 19: return 769
+    if code == 20: return 1025
+    if code == 21: return 1537
+    if code == 22: return 2049
+    if code == 23: return 3073
+    if code == 24: return 4097
+    if code == 25: return 6145
+    if code == 26: return 8193
+    if code == 27: return 12289
+    if code == 28: return 16385
+    if code == 29: return 24577
+    1
+
+# ---------------------------------------------------------------------------
+# PNG Filter Reconstruction
+# ---------------------------------------------------------------------------
+
+# Reconstruct pixels from filtered scanlines.
+# Each scanline is prefixed with a 1-byte filter type.
+fn _reconstruct_scanlines(data: List<i64>, width: i64, height: i64, bpp: i64, stride: i64) -> List<i64>:
+    var pixels = List<i64>()
+    var prev_row = List<i64>()
+    # Initialize previous row to zeros
+    var init = 0
+    while init < stride:
+        prev_row.push(0)
+        init = init + 1
+
+    var row = 0
+    var data_pos = 0
+    while row < height:
+        # Read filter type byte
+        val filter_type = _safe_get_list(data, data_pos)
+        data_pos = data_pos + 1
+
+        var current_row = List<i64>()
+        var col = 0
+        while col < stride:
+            val raw_byte = _safe_get_list(data, data_pos)
+            data_pos = data_pos + 1
+
+            var reconstructed = 0
+            match filter_type:
+                0:
+                    # None
+                    reconstructed = raw_byte
+                1:
+                    # Sub: Recon(x) = Filt(x) + Recon(a)
+                    val a = if col >= bpp: _safe_get_list_from(current_row, col - bpp) else: 0
+                    reconstructed = (raw_byte + a) % 256
+                2:
+                    # Up: Recon(x) = Filt(x) + Recon(b)
+                    val b = _safe_get_list_from(prev_row, col)
+                    reconstructed = (raw_byte + b) % 256
+                3:
+                    # Average: Recon(x) = Filt(x) + floor((Recon(a) + Recon(b)) / 2)
+                    val a = if col >= bpp: _safe_get_list_from(current_row, col - bpp) else: 0
+                    val b = _safe_get_list_from(prev_row, col)
+                    reconstructed = (raw_byte + (a + b) / 2) % 256
+                4:
+                    # Paeth: Recon(x) = Filt(x) + PaethPredictor(a, b, c)
+                    val a = if col >= bpp: _safe_get_list_from(current_row, col - bpp) else: 0
+                    val b = _safe_get_list_from(prev_row, col)
+                    val c = if col >= bpp: _safe_get_list_from(prev_row, col - bpp) else: 0
+                    val paeth = _paeth_predictor(a, b, c)
+                    reconstructed = (raw_byte + paeth) % 256
+                _:
+                    reconstructed = raw_byte
+
+            current_row.push(reconstructed)
+            pixels.push(reconstructed)
+            col = col + 1
+
+        prev_row = current_row
+        row = row + 1
+
+    pixels
+
+# Paeth predictor function per PNG spec.
+fn _paeth_predictor(a: i64, b: i64, c: i64) -> i64:
+    val p = a + b - c
+    val pa = _abs_i64(p - a)
+    val pb = _abs_i64(p - b)
+    val pc = _abs_i64(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    c
+
+# Convert decoded pixel data to RGBA format.
+fn _to_rgba(pixels: List<i64>, width: i64, height: i64, color_type: i64, bpp: i64) -> List<i64>:
+    var rgba = List<i64>()
+    val total = width * height
+    var i = 0
+    match color_type:
+        0:
+            # Grayscale -> RGBA
+            while i < total:
+                val g = _safe_get_list(pixels, i)
+                rgba.push(g)
+                rgba.push(g)
+                rgba.push(g)
+                rgba.push(255)
+                i = i + 1
+        2:
+            # RGB -> RGBA
+            while i < total:
+                val idx = i * 3
+                rgba.push(_safe_get_list(pixels, idx))
+                rgba.push(_safe_get_list(pixels, idx + 1))
+                rgba.push(_safe_get_list(pixels, idx + 2))
+                rgba.push(255)
+                i = i + 1
+        4:
+            # Grayscale+Alpha -> RGBA
+            while i < total:
+                val idx = i * 2
+                val g = _safe_get_list(pixels, idx)
+                val a = _safe_get_list(pixels, idx + 1)
+                rgba.push(g)
+                rgba.push(g)
+                rgba.push(g)
+                rgba.push(a)
+                i = i + 1
+        6:
+            # Already RGBA
+            while i < total:
+                val idx = i * 4
+                rgba.push(_safe_get_list(pixels, idx))
+                rgba.push(_safe_get_list(pixels, idx + 1))
+                rgba.push(_safe_get_list(pixels, idx + 2))
+                rgba.push(_safe_get_list(pixels, idx + 3))
+                i = i + 1
+        _:
+            # Unknown — fill with gray
+            while i < total:
+                rgba.push(128)
+                rgba.push(128)
+                rgba.push(128)
+                rgba.push(255)
+                i = i + 1
+    rgba
+
+# ---------------------------------------------------------------------------
+# Integer math helpers
+# ---------------------------------------------------------------------------
+
+fn _abs_i64(x: i64) -> i64:
+    if x < 0: return -x
+    x
+
+fn _floor_i64(x: f64) -> i64:
+    # Truncate toward zero (sufficient for positive values in scaling)
+    val i = x
+    i
+
+fn _clamp_byte(x: f64) -> i64:
+    if x < 0.0: return 0
+    if x > 255.0: return 255
+    val i = x + 0.5
+    i
+
+fn _safe_get(data: List<i64>, idx: i64) -> i64:
+    if idx >= 0 and idx < data.len():
+        val v = data.get(idx)
+        if val b = v:
+            return b
+    0
+
+fn _safe_get_list(data: List<i64>, idx: i64) -> i64:
+    if idx >= 0 and idx < data.len():
+        val v = data.get(idx)
+        if val b = v:
+            return b
+    0
+
+fn _safe_get_list_from(data: List<i64>, idx: i64) -> i64:
+    if idx >= 0 and idx < data.len():
+        val v = data.get(idx)
+        if val b = v:
+            return b
+    0

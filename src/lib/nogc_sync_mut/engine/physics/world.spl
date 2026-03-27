@@ -1,10 +1,13 @@
 #![allow(star_import)]
 # Physics System — PhysicsWorld2D
 #
-# Main physics world that wraps Rapier2D FFI with a node-centric API.
+# Main physics world with a pure Simple 2D physics engine.
 # Bodies are identified by NodeId, so the scene graph and physics world
 # stay synchronized. Uses a fixed-timestep accumulator for deterministic
 # simulation, and diffs contact pairs each step to emit start/end signals.
+#
+# No external FFI dependencies — all collision detection, contact resolution,
+# and integration are implemented in pure Simple.
 #
 # Usage:
 #   var world = PhysicsWorld2D.create(default_physics_config())
@@ -13,26 +16,78 @@
 #   world.step(dt)
 #   val transforms = world.get_all_dynamic_transforms()
 
-use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.ids.{NodeId}
 use std.common.engine.math2d.{Vec2}
 use std.common.engine.signal.signal.{Signal}
 use std.common.engine.units.{Seconds, Distance}
-use std.nogc_sync_mut.io.rapier2d_ffi.*
 use std.nogc_sync_mut.engine.physics.types.{CollisionEvent, PhysicsBody2D, PhysicsCollider2D, PhysicsConfig}
+use std.nogc_sync_mut.engine.physics.body2d.{InternalBody2D}
+use std.nogc_sync_mut.engine.physics.shapes2d.{ColliderShape2D}
+use std.nogc_sync_mut.engine.physics.collision2d.{Contact2D, collide_circle_circle, collide_aabb_aabb, collide_circle_aabb, collide_box_box}
+use std.nogc_sync_mut.engine.physics.contact2d.{resolve_contact}
+
+# ============================================================================
+# Joint2D — Internal joint representation
+# ============================================================================
+
+class Joint2D:
+    joint_type: i64        # 0=revolute, 1=fixed, 2=spring
+    node_a: NodeId
+    node_b: NodeId
+    anchor_a: Vec2         # Local anchor on body A
+    anchor_b: Vec2         # Local anchor on body B
+    rest_length: f64       # For spring joints
+    stiffness: f64         # For spring joints
+    damping: f64           # For spring joints
+    offset: Vec2           # Initial offset for fixed joints
+
+# ============================================================================
+# JointStorage — manages all joints in the world
+# ============================================================================
+
+class JointStorage:
+    joints: [Joint2D]
+    next_id: i64
+
+impl JointStorage:
+    static fn create() -> JointStorage:
+        JointStorage(joints: [], next_id: 0)
+
+    me add(joint: Joint2D) -> i64:
+        val id = self.next_id
+        self.joints.push(joint)
+        self.next_id = self.next_id + 1
+        id
+
+    me remove(idx: i64) -> bool:
+        if idx < 0 or idx >= self.joints.len():
+            return false
+        var new_joints: [Joint2D] = []
+        var i = 0
+        while i < self.joints.len():
+            if i != idx:
+                new_joints.push(self.joints[i])
+            i = i + 1
+        self.joints = new_joints
+        true
 
 # ============================================================================
 # PhysicsWorld2D
 # ============================================================================
 
 class PhysicsWorld2D:
-    world: PhysicsWorld
     config: PhysicsConfig
     bodies: [PhysicsBody2D]
     colliders: [PhysicsCollider2D]
+    internal_bodies: [InternalBody2D]
+    shapes: [ColliderShape2D]
     accumulator: f64
     on_contact_start: Signal
     on_contact_end: Signal
     prev_contact_keys: [text]
+    restitution: f64
+    friction: f64
+    joint_storage: JointStorage
 
 impl PhysicsWorld2D:
 
@@ -41,34 +96,39 @@ impl PhysicsWorld2D:
     # ------------------------------------------------------------------
 
     static fn create(config: PhysicsConfig) -> PhysicsWorld2D:
-        val grav = Vector2(x: config.gravity.x, y: config.gravity.y)
-        val pw = physics_create_world(grav)
         PhysicsWorld2D(
-            world: pw,
             config: config,
             bodies: [],
             colliders: [],
+            internal_bodies: [],
+            shapes: [],
             accumulator: 0.0,
             on_contact_start: Signal(name: "on_contact_start", connections: [], next_id: 0, enabled: true),
             on_contact_end: Signal(name: "on_contact_end", connections: [], next_id: 0, enabled: true),
-            prev_contact_keys: []
+            prev_contact_keys: [],
+            restitution: 0.3,
+            friction: 0.4,
+            joint_storage: JointStorage.create()
         )
 
     me destroy():
-        physics_destroy_world(self.world)
+        self.bodies = []
+        self.colliders = []
+        self.internal_bodies = []
+        self.shapes = []
 
     # ------------------------------------------------------------------
     # Body Management
     # ------------------------------------------------------------------
 
     me add_dynamic_body(node_id: NodeId, x: f64, y: f64) -> bool:
-        val pos = Vector2(x: x, y: y)
-        val body = physics_create_dynamic_body(self.world, pos)
-        if not body.is_valid:
-            return false
+        val pos = Vec2(x: x, y: y)
+        val ib = InternalBody2D.create_dynamic(pos, 1.0)
+        val idx = self.internal_bodies.len()
+        self.internal_bodies.push(ib)
         val pb = PhysicsBody2D(
             node_id: node_id,
-            body_handle: body.handle,
+            body_index: idx,
             body_type_code: 2,
             gravity_scale: 1.0
         )
@@ -76,13 +136,13 @@ impl PhysicsWorld2D:
         true
 
     me add_static_body(node_id: NodeId, x: f64, y: f64) -> bool:
-        val pos = Vector2(x: x, y: y)
-        val body = physics_create_static_body(self.world, pos)
-        if not body.is_valid:
-            return false
+        val pos = Vec2(x: x, y: y)
+        val ib = InternalBody2D.create_static(pos)
+        val idx = self.internal_bodies.len()
+        self.internal_bodies.push(ib)
         val pb = PhysicsBody2D(
             node_id: node_id,
-            body_handle: body.handle,
+            body_index: idx,
             body_type_code: 0,
             gravity_scale: 1.0
         )
@@ -90,15 +150,13 @@ impl PhysicsWorld2D:
         true
 
     me add_kinematic_body(node_id: NodeId, x: f64, y: f64) -> bool:
-        val pos = Vector2(x: x, y: y)
-        val rot = Rotation2(angle: 0.0)
-        val xform = Transform2(position: pos, rotation: rot)
-        val body = physics_create_body(self.world, BodyType.Kinematic, xform)
-        if not body.is_valid:
-            return false
+        val pos = Vec2(x: x, y: y)
+        val ib = InternalBody2D.create_kinematic(pos)
+        val idx = self.internal_bodies.len()
+        self.internal_bodies.push(ib)
         val pb = PhysicsBody2D(
             node_id: node_id,
-            body_handle: body.handle,
+            body_index: idx,
             body_type_code: 1,
             gravity_scale: 1.0
         )
@@ -109,14 +167,7 @@ impl PhysicsWorld2D:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
-        val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val ok = physics_destroy_body(rb)
-        var collider_ok = true
-        for c in self.colliders:
-            if c.node_id.eq(node_id):
-                collider_ok = self._destroy_collider(c) and collider_ok
-        # Remove from list
+        # Remove body from lists (rebuild without the target)
         var new_bodies: [PhysicsBody2D] = []
         var i = 0
         while i < self.bodies.len():
@@ -130,7 +181,7 @@ impl PhysicsWorld2D:
             if not c.node_id.eq(node_id):
                 new_colliders.push(c)
         self.colliders = new_colliders
-        ok and collider_ok
+        true
 
     # ------------------------------------------------------------------
     # Collider Management
@@ -140,14 +191,12 @@ impl PhysicsWorld2D:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
-        val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val col = physics_create_box_collider(self.world, rb, hx, hy)
-        if not col.is_valid:
-            return false
+        val shape = ColliderShape2D.box(hx, hy)
+        val shape_idx = self.shapes.len()
+        self.shapes.push(shape)
         val pc = PhysicsCollider2D(
             node_id: node_id,
-            collider_handle: col.handle,
+            collider_index: shape_idx,
             shape_code: 1,
             is_sensor: false
         )
@@ -158,14 +207,12 @@ impl PhysicsWorld2D:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
-        val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val col = physics_create_circle_collider(self.world, rb, radius)
-        if not col.is_valid:
-            return false
+        val shape = ColliderShape2D.circle(radius)
+        val shape_idx = self.shapes.len()
+        self.shapes.push(shape)
         val pc = PhysicsCollider2D(
             node_id: node_id,
-            collider_handle: col.handle,
+            collider_index: shape_idx,
             shape_code: 0,
             is_sensor: false
         )
@@ -178,11 +225,9 @@ impl PhysicsWorld2D:
         for c in self.colliders:
             var next = c
             if c.node_id.eq(node_id):
-                val col = self._make_collider(c)
-                physics_collider_set_sensor(col, is_sensor)
                 next = PhysicsCollider2D(
                     node_id: c.node_id,
-                    collider_handle: c.collider_handle,
+                    collider_index: c.collider_index,
                     shape_code: c.shape_code,
                     is_sensor: is_sensor
                 )
@@ -199,52 +244,147 @@ impl PhysicsWorld2D:
         self.accumulator = self.accumulator + dt.value
 
         while self.accumulator >= self.config.fixed_timestep.value:
-            physics_step(self.world, self.config.fixed_timestep.value)
+            self._fixed_step(self.config.fixed_timestep.value)
             self.accumulator = self.accumulator - self.config.fixed_timestep.value
-            self._process_contacts()
+
+    me _fixed_step(dt: f64):
+        # 1. Apply gravity to dynamic bodies
+        var i = 0
+        while i < self.bodies.len():
+            val pb = self.bodies[i]
+            if pb.body_type_code == 2:
+                val ib = self.internal_bodies[pb.body_index]
+                val gx = self.config.gravity.x * ib.gravity_scale * ib.mass
+                val gy = self.config.gravity.y * ib.gravity_scale * ib.mass
+                val gravity_force = Vec2(x: gx, y: gy)
+                ib.apply_force(gravity_force)
+            i = i + 1
+
+        # 2. Integrate all bodies
+        var j = 0
+        while j < self.internal_bodies.len():
+            self.internal_bodies[j].integrate(dt)
+            j = j + 1
+
+        # 3. Narrow-phase collision detection and resolution
+        self._detect_and_resolve_collisions()
+
+        # 4. Contact diffing for signals
+        self._process_contacts()
+
+    # ------------------------------------------------------------------
+    # Collision Detection and Resolution
+    # ------------------------------------------------------------------
+
+    me _detect_and_resolve_collisions():
+        val n = self.colliders.len()
+        var i = 0
+        while i < n:
+            var j = i + 1
+            while j < n:
+                val col_a = self.colliders[i]
+                val col_b = self.colliders[j]
+
+                # Skip sensor-only pairs (sensors detect but do not resolve)
+                val both_sensors = col_a.is_sensor and col_b.is_sensor
+
+                # Find bodies for each collider
+                val body_idx_a = self._find_body_index(col_a.node_id)
+                val body_idx_b = self._find_body_index(col_b.node_id)
+
+                if body_idx_a >= 0 and body_idx_b >= 0:
+                    val pb_a = self.bodies[body_idx_a]
+                    val pb_b = self.bodies[body_idx_b]
+                    val ib_a = self.internal_bodies[pb_a.body_index]
+                    val ib_b = self.internal_bodies[pb_b.body_index]
+                    val shape_a = self.shapes[col_a.collider_index]
+                    val shape_b = self.shapes[col_b.collider_index]
+
+                    val contact = self._narrow_phase(ib_a, shape_a, ib_b, shape_b)
+                    if val c = contact:
+                        if not col_a.is_sensor and not col_b.is_sensor:
+                            resolve_contact(ib_a, ib_b, c, self.restitution, self.friction)
+                j = j + 1
+            i = i + 1
+
+    fn _narrow_phase(body_a: InternalBody2D, shape_a: ColliderShape2D, body_b: InternalBody2D, shape_b: ColliderShape2D) -> Option<Contact2D>:
+        if shape_a.is_circle() and shape_b.is_circle():
+            return collide_circle_circle(
+                body_a.position, shape_a.circle.radius,
+                body_b.position, shape_b.circle.radius
+            )
+
+        if shape_a.is_box() and shape_b.is_box():
+            # Use OBB if either has rotation, otherwise AABB
+            if body_a.rotation == 0.0 and body_b.rotation == 0.0:
+                return collide_aabb_aabb(
+                    body_a.position, shape_a.box_shape.half_width, shape_a.box_shape.half_height,
+                    body_b.position, shape_b.box_shape.half_width, shape_b.box_shape.half_height
+                )
+            return collide_box_box(
+                body_a.position, shape_a.box_shape.half_width, shape_a.box_shape.half_height, body_a.rotation,
+                body_b.position, shape_b.box_shape.half_width, shape_b.box_shape.half_height, body_b.rotation
+            )
+
+        if shape_a.is_circle() and shape_b.is_box():
+            return collide_circle_aabb(
+                body_a.position, shape_a.circle.radius,
+                body_b.position, shape_b.box_shape.half_width, shape_b.box_shape.half_height
+            )
+
+        if shape_a.is_box() and shape_b.is_circle():
+            # Swap and flip normal
+            val result = collide_circle_aabb(
+                body_b.position, shape_b.circle.radius,
+                body_a.position, shape_a.box_shape.half_width, shape_a.box_shape.half_height
+            )
+            if val c = result:
+                return Contact2D(
+                    point: c.point,
+                    normal: c.normal.mul_scalar(-1.0),
+                    penetration: c.penetration
+                )
+            return nil
+
+        nil
 
     # ------------------------------------------------------------------
     # Contact Diffing — emit start/end signals
     # ------------------------------------------------------------------
 
     me _process_contacts():
-        val contact_list = physics_get_contacts(self.world)
-        val count = physics_contacts_count(contact_list)
-
         var current_keys: [text] = []
-        var current_events: [CollisionEvent] = []
 
+        val n = self.colliders.len()
         var i = 0
-        while i < count:
-            val contact = physics_contacts_get(contact_list, i)
+        while i < n:
+            var j = i + 1
+            while j < n:
+                val col_a = self.colliders[i]
+                val col_b = self.colliders[j]
+                val body_idx_a = self._find_body_index(col_a.node_id)
+                val body_idx_b = self._find_body_index(col_b.node_id)
 
-            # Map collider handles back to node IDs
-            val node_a_opt = self._find_node_by_collider(contact.collider1)
-            val node_b_opt = self._find_node_by_collider(contact.collider2)
+                if body_idx_a >= 0 and body_idx_b >= 0:
+                    val pb_a = self.bodies[body_idx_a]
+                    val pb_b = self.bodies[body_idx_b]
+                    val ib_a = self.internal_bodies[pb_a.body_index]
+                    val ib_b = self.internal_bodies[pb_b.body_index]
+                    val shape_a = self.shapes[col_a.collider_index]
+                    val shape_b = self.shapes[col_b.collider_index]
 
-            if node_a_opt.to_index() >= 0 and node_b_opt.to_index() >= 0:
-                # Build canonical key: smaller index first
-                val a_idx = node_a_opt.to_index()
-                val b_idx = node_b_opt.to_index()
-                var key = ""
-                if a_idx <= b_idx:
-                    key = "{a_idx}_{b_idx}"
-                else:
-                    key = "{b_idx}_{a_idx}"
-
-                current_keys.push(key)
-
-                val evt = CollisionEvent(
-                    node_a: node_a_opt,
-                    node_b: node_b_opt,
-                    normal: Vec2(x: contact.normal.x, y: contact.normal.y),
-                    depth: Distance(value: contact.penetration),
-                    is_sensor: false
-                )
-                current_events.push(evt)
+                    val contact = self._narrow_phase(ib_a, shape_a, ib_b, shape_b)
+                    if val c = contact:
+                        val a_idx = col_a.node_id.to_index()
+                        val b_idx = col_b.node_id.to_index()
+                        var key = ""
+                        if a_idx <= b_idx:
+                            key = "{a_idx}_{b_idx}"
+                        else:
+                            key = "{b_idx}_{a_idx}"
+                        current_keys.push(key)
+                j = j + 1
             i = i + 1
-
-        physics_destroy_contacts(contact_list)
 
         # Emit on_contact_start for new contacts
         for key in current_keys:
@@ -273,66 +413,56 @@ impl PhysicsWorld2D:
         if idx < 0:
             return Vec2.zero()
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val xform = physics_body_get_position(rb)
-        Vec2(x: xform.position.x, y: xform.position.y)
+        val ib = self.internal_bodies[pb.body_index]
+        ib.position
 
     fn get_rotation(node_id: NodeId) -> f64:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return 0.0
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val xform = physics_body_get_position(rb)
-        xform.rotation.angle
+        val ib = self.internal_bodies[pb.body_index]
+        ib.rotation
 
     me set_position(node_id: NodeId, pos: Vec2) -> bool:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val xform = Transform2(
-            position: Vector2(x: pos.x, y: pos.y),
-            rotation: Rotation2(angle: 0.0)
-        )
-        physics_body_set_position(rb, xform)
+        self.internal_bodies[pb.body_index].position = pos
+        true
 
     me apply_force(node_id: NodeId, force: Vec2) -> bool:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val fv = Vector2(x: force.x, y: force.y)
-        physics_body_apply_force(rb, fv)
+        self.internal_bodies[pb.body_index].apply_force(force)
+        true
 
     me apply_impulse(node_id: NodeId, impulse: Vec2) -> bool:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val iv = Vector2(x: impulse.x, y: impulse.y)
-        physics_body_apply_impulse(rb, iv)
+        self.internal_bodies[pb.body_index].apply_impulse(impulse)
+        true
 
     me set_velocity(node_id: NodeId, vel: Vec2) -> bool:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return false
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val lv = Vector2(x: vel.x, y: vel.y)
-        physics_body_set_velocity(rb, lv, 0.0)
+        self.internal_bodies[pb.body_index].velocity = vel
+        true
 
     fn get_velocity(node_id: NodeId) -> Vec2:
         val idx = self._find_body_index(node_id)
         if idx < 0:
             return Vec2.zero()
         val pb = self.bodies[idx]
-        val rb = self._make_rigid_body(pb)
-        val result = physics_body_get_velocity(rb)
-        Vec2(x: result.0.x, y: result.0.y)
+        val ib = self.internal_bodies[pb.body_index]
+        ib.velocity
 
     # ------------------------------------------------------------------
     # Bulk Query — for syncing physics back to scene graph
@@ -342,11 +472,8 @@ impl PhysicsWorld2D:
         var results: [(NodeId, Vec2, f64)] = []
         for pb in self.bodies:
             if pb.body_type_code == 2:
-                val rb = self._make_rigid_body(pb)
-                val xform = physics_body_get_position(rb)
-                val pos = Vec2(x: xform.position.x, y: xform.position.y)
-                val rot = xform.rotation.angle
-                results.push((pb.node_id, pos, rot))
+                val ib = self.internal_bodies[pb.body_index]
+                results.push((pb.node_id, ib.position, ib.rotation))
         results
 
     # ------------------------------------------------------------------
@@ -361,41 +488,8 @@ impl PhysicsWorld2D:
             i = i + 1
         -1
 
-    fn _find_node_by_collider(collider_handle: i64) -> NodeId:
+    fn _find_node_by_collider_index(collider_index: i64) -> NodeId:
         for c in self.colliders:
-            if c.collider_handle == collider_handle:
+            if c.collider_index == collider_index:
                 return c.node_id
         NodeId.invalid()
-
-    fn _make_rigid_body(pb: PhysicsBody2D) -> RigidBody:
-        val bt = if pb.body_type_code == 0:
-            BodyType.Static
-        elif pb.body_type_code == 1:
-            BodyType.Kinematic
-        else:
-            BodyType.Dynamic
-        RigidBody(
-            handle: pb.body_handle,
-            world: self.world,
-            body_type: bt,
-            is_valid: true
-        )
-
-    fn _make_collider(pc: PhysicsCollider2D) -> Collider:
-        val shape = if pc.shape_code == 0:
-            ColliderShape.Circle
-        elif pc.shape_code == 1:
-            ColliderShape.Box
-        elif pc.shape_code == 2:
-            ColliderShape.Capsule
-        else:
-            ColliderShape.Polygon
-        Collider(
-            handle: pc.collider_handle,
-            world: self.world,
-            shape: shape,
-            is_valid: true
-        )
-
-    fn _destroy_collider(pc: PhysicsCollider2D) -> bool:
-        physics_destroy_collider(self._make_collider(pc))

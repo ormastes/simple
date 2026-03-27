@@ -1,15 +1,21 @@
-# AudioManager — Silent backend for the new 2D engine
+# AudioManager — miniaudio backend for the 2D engine
 #
-# The new 2D engine keeps the public audio API shape, but the Rust driver does
-# not currently expose the host `rt_audio_*` extern family. Instead of
-# pretending audio is connected, this module implements an explicit silent
-# backend. Callers can still cache clips, create sound handles, and adjust bus
-# state without pulling in unavailable runtime symbols.
+# Wired to the real runtime audio FFI (rt_audio_*) via audio_ffi.spl.
+# Manages clip loading, playback handles, bus volumes, and listener state.
+# Bus volume tracking remains pure Simple; playback delegates to miniaudio.
 
 use std.common.engine.math2d.{Vec2}
 use std.common.engine.units.{Volume, Distance}
 use std.nogc_sync_mut.engine.audio.types.{
     AudioClip, SoundHandle, AudioBus, AudioConfig
+}
+use std.nogc_sync_mut.io.audio_ffi.{
+    rt_audio_init, rt_audio_shutdown,
+    rt_audio_load_sound, rt_audio_unload_sound,
+    rt_audio_play, rt_audio_play_looped,
+    rt_audio_stop, rt_audio_pause, rt_audio_resume,
+    rt_audio_set_volume, rt_audio_set_master_volume, rt_audio_get_master_volume,
+    rt_audio_is_playing
 }
 
 # ============================================================================
@@ -17,10 +23,10 @@ use std.nogc_sync_mut.engine.audio.types.{
 # ============================================================================
 
 class AudioManager:
-    """Audio API with an explicit silent backend.
+    """Audio API backed by miniaudio via C runtime FFI.
 
-    The manager tracks clip metadata, bus state, and listener position, but
-    performs no host-side playback until a real runtime audio backend is wired.
+    Clip metadata, bus state, and listener position are tracked in Simple.
+    Actual playback is performed by the miniaudio engine through rt_audio_* calls.
     """
     engine_handle: i64
     config: AudioConfig
@@ -32,13 +38,17 @@ class AudioManager:
 
 impl AudioManager:
     static fn create(config: AudioConfig) -> AudioManager:
+        val engine_ok = rt_audio_init()
+
         var buses: Dict<text, AudioBus> = {}
         buses["sfx"] = AudioBus(name: "sfx", mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
         buses["music"] = AudioBus(name: "music", mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
         buses["ui"] = AudioBus(name: "ui", mixer_handle: 0, volume: Volume(value: 1.0), muted: false)
 
+        rt_audio_set_master_volume(config.master_volume.value)
+
         AudioManager(
-            engine_handle: 0,
+            engine_handle: engine_ok,
             config: config,
             buses: buses,
             clip_cache: {},
@@ -48,7 +58,8 @@ impl AudioManager:
         )
 
     me load_clip(path: text) -> AudioClip:
-        val clip = AudioClip(source_handle: 0, path: path, is_loaded: true)
+        val source_handle = rt_audio_load_sound(path)
+        val clip = AudioClip(source_handle: source_handle, path: path, is_loaded: source_handle != 0)
         self.clip_cache[path] = clip
         clip
 
@@ -58,14 +69,19 @@ impl AudioManager:
         self.load_clip(path)
 
     me play(clip: AudioClip, bus_name: text) -> SoundHandle:
-        self._new_sound_handle(clip.path, bus_name, false)
+        val playback_handle = rt_audio_play(clip.source_handle)
+        self._apply_bus_volume(playback_handle, bus_name)
+        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
 
     me play_with_volume(clip: AudioClip, bus_name: text, volume: Volume) -> SoundHandle:
-        # Silent backend: volume parameter ignored until audio FFI runtime exists.
-        self.play(clip, bus_name)
+        val playback_handle = rt_audio_play(clip.source_handle)
+        rt_audio_set_volume(playback_handle, volume.value)
+        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
 
     me play_looped(clip: AudioClip, bus_name: text) -> SoundHandle:
-        self._new_sound_handle(clip.path, bus_name, false)
+        val playback_handle = rt_audio_play_looped(clip.source_handle)
+        self._apply_bus_volume(playback_handle, bus_name)
+        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
 
     me play_one_shot(path: text) -> SoundHandle:
         val clip = self.load_clip_cached(path)
@@ -76,27 +92,37 @@ impl AudioManager:
         self.play_looped(clip, "music")
 
     me play_at(clip: AudioClip, bus_name: text, pos: Vec2) -> SoundHandle:
-        self._new_sound_handle(clip.path, bus_name, true)
+        val playback_handle = rt_audio_play(clip.source_handle)
+        self._apply_bus_volume(playback_handle, bus_name)
+        self._make_sound_handle(playback_handle, clip.path, bus_name, true)
 
     me set_listener_position(pos: Vec2):
         self.listener_x = pos.x
         self.listener_y = pos.y
 
     me stop_sound(handle: SoundHandle) -> bool:
-        # Silent backend: no audio FFI runtime. Returns validity as success.
-        handle.is_valid()
+        if not handle.is_valid():
+            return false
+        rt_audio_stop(handle.playback_handle)
+        true
 
     me pause_sound(handle: SoundHandle) -> bool:
-        # Silent backend: no audio FFI runtime. Returns validity as success.
-        handle.is_valid()
+        if not handle.is_valid():
+            return false
+        rt_audio_pause(handle.playback_handle)
+        true
 
     me resume_sound(handle: SoundHandle) -> bool:
-        # Silent backend: no audio FFI runtime. Returns validity as success.
-        handle.is_valid()
+        if not handle.is_valid():
+            return false
+        rt_audio_resume(handle.playback_handle)
+        true
 
     me set_sound_volume(handle: SoundHandle, volume: Volume) -> bool:
-        # Silent backend: no audio FFI runtime. Returns validity as success.
-        handle.is_valid()
+        if not handle.is_valid():
+            return false
+        rt_audio_set_volume(handle.playback_handle, volume.value)
+        true
 
     me set_bus_volume(bus_name: text, volume: Volume) -> bool:
         if val Some(bus) = self.buses.get(bus_name):
@@ -142,6 +168,7 @@ impl AudioManager:
             spatial_max_distance: self.config.spatial_max_distance,
             spatial_min_distance: self.config.spatial_min_distance
         )
+        rt_audio_set_master_volume(volume.value)
 
     fn get_master_volume() -> Volume:
         self.config.master_volume
@@ -151,12 +178,20 @@ impl AudioManager:
 
     me destroy():
         self.stop_all()
+        rt_audio_shutdown()
 
-    me _new_sound_handle(clip_path: text, bus_name: text, is_spatial: bool) -> SoundHandle:
-        val handle = self.next_playback_handle
-        self.next_playback_handle = self.next_playback_handle + 1
+    # --- Private helpers ---
+
+    me _apply_bus_volume(playback_handle: i64, bus_name: text):
+        if val Some(bus) = self.buses.get(bus_name):
+            if bus.muted:
+                rt_audio_set_volume(playback_handle, 0.0)
+            else:
+                rt_audio_set_volume(playback_handle, bus.volume.value)
+
+    me _make_sound_handle(playback_handle: i64, clip_path: text, bus_name: text, is_spatial: bool) -> SoundHandle:
         SoundHandle(
-            playback_handle: handle,
+            playback_handle: playback_handle,
             clip_path: clip_path,
             bus_name: bus_name,
             is_spatial: is_spatial

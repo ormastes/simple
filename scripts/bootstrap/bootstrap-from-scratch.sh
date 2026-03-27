@@ -184,10 +184,15 @@ else
     -o "${output_dir}/stage2/${PLATFORM}/simple"
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
+  # Note: --source flags are required because the stage2 binary passes all
+  # CLI args (including binary path) through to rt_native_build, causing
+  # "native-build" to be misinterpreted as a source directory. Explicit
+  # --source flags ensure the real source dirs are always included.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf .simple/native_cache/
   "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+    --source src/compiler --source src/app --source src/lib \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage3/${PLATFORM}/simple"
@@ -234,6 +239,7 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
 "${stage_for_build}" native-build \
+  --source src/compiler --source src/app --source src/lib \
   --entry src/app/cli/main.spl \
   --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
   -o "${full_dir}/simple"

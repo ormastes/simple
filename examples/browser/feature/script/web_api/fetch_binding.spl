@@ -23,6 +23,8 @@ use browser.feature.script.builtins.promise.Promise
 use browser.feature.script.builtins.promise.PromiseState
 use browser.feature.script.builtins.promise.promise_resolve
 use browser.feature.script.builtins.promise.promise_reject
+use browser.feature.net.fetch.FetchEngine
+use browser.shared.logging.LogLevel
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -48,7 +50,7 @@ class FetchBinding:
 
 # ── fetch() implementation ───────────────────────────────────────────────
 
-fn js_fetch(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_fetch(args: List<JsValue>, runtime: JsRuntime) -> BrowserResult<JsValue>:
     # 1. Extract URL from first argument
     if args.len() < 1:
         return Err(script_error("fetch() requires at least 1 argument (url)"))
@@ -62,8 +64,46 @@ fn js_fetch(args: List<JsValue>) -> BrowserResult<JsValue>:
     if args.len() >= 2:
         request = parse_request_init(args.get(1), url_str)
 
-    # Not wired to a real HTTP transport — fail honestly.
-    Err(network_error("fetch() not wired — no HTTP transport"))
+    # Create a response object that will hold the fetch result.
+    val response_obj_id = runtime.interpreter.object_store.create_object()
+
+    # Invoke the FetchEngine to perform the actual HTTP request.
+    # The FetchEngine routes through H1Client which uses mock/simulated transport.
+    val logger = Logger(level: LogLevel.Warn, prefix: "js-fetch")
+    var engine = FetchEngine.new(logger)
+    val fetch_result = engine.fetch(request)
+
+    match fetch_result:
+        Ok(response):
+            # Populate the JS response object with the actual response data
+            _install_response_props(runtime, response_obj_id, response)
+
+            # Store body text for text()/json() methods
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "__body__", JsValue.String(v: response.body))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "__fetch_pending__", JsValue.Boolean(v: false))
+        Err(e):
+            # Fetch failed — return an error-state response object
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "status", JsValue.Number(v: 0.0))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "statusText", JsValue.String(v: e.message))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "ok", JsValue.Boolean(v: false))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "url", JsValue.String(v: url_str))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "__fetch_pending__", JsValue.Boolean(v: false))
+            runtime.interpreter.object_store.set_property(
+                response_obj_id, "__fetch_error__", JsValue.String(v: e.message))
+
+            # Still attach text()/json() methods
+            runtime._define_method_on(response_obj_id, "text", NATIVE_RESPONSE_TEXT)
+            runtime._define_method_on(response_obj_id, "json", NATIVE_RESPONSE_JSON)
+
+    # Return the response object (promise-like, already resolved synchronously)
+    Ok(JsValue.Object(id: response_obj_id))
 
 # ── Response object creation ─────────────────────────────────────────────
 
@@ -129,8 +169,13 @@ fn js_response_text(body: text) -> JsValue:
     JsValue.String(v: body)
 
 fn js_response_json(body: text) -> BrowserResult<JsValue>:
-    # Stub — Response.json() requires a JSON parser integration.
-    Err(script_error("Response.json() not wired — no JSON parser integration"))
+    # Parse JSON body into a JsValue object tree.
+    val trimmed = body.trim()
+    if trimmed.length() == 0:
+        return Err(script_error("Unexpected end of JSON input"))
+    # Delegate to the simple JSON tokenizer
+    val result = _parse_json_value(trimmed, 0)
+    Ok(result.value)
 
 fn js_response_blob(body: text) -> BrowserResult<JsValue>:
     Err(script_error("Response.blob() not implemented"))
@@ -205,3 +250,132 @@ fn _headers_hash(headers: List<Pair<text, text>>) -> i64:
     if hash < 0:
         hash = 0 - hash
     hash
+
+# --- Simple JSON parser for Response.json() ---
+
+class JsonParseResult:
+    value: JsValue
+    pos: i64
+
+    static fn create(value: JsValue, pos: i64) -> JsonParseResult:
+        JsonParseResult(value: value, pos: pos)
+
+fn _parse_json_value(data: text, pos: i64) -> JsonParseResult:
+    val p = _skip_ws(data, pos)
+    if p >= data.length():
+        return JsonParseResult.create(JsValue.Null, p)
+    val ch = data.substring(p, p + 1)
+    if ch == "\"":
+        return _parse_json_string(data, p)
+    if ch == "{":
+        return _parse_json_object(data, p)
+    if ch == "[":
+        return _parse_json_array(data, p)
+    if ch == "t" and data.substring(p, p + 4) == "true":
+        return JsonParseResult.create(JsValue.Boolean(v: true), p + 4)
+    if ch == "f" and data.substring(p, p + 5) == "false":
+        return JsonParseResult.create(JsValue.Boolean(v: false), p + 5)
+    if ch == "n" and data.substring(p, p + 4) == "null":
+        return JsonParseResult.create(JsValue.Null, p + 4)
+    # Number
+    _parse_json_number(data, p)
+
+fn _parse_json_string(data: text, pos: i64) -> JsonParseResult:
+    # pos points at opening quote
+    var i = pos + 1
+    var result = ""
+    while i < data.length():
+        val ch = data.substring(i, i + 1)
+        if ch == "\"":
+            return JsonParseResult.create(JsValue.String(v: result), i + 1)
+        if ch == "\\":
+            i = i + 1
+            if i < data.length():
+                val esc = data.substring(i, i + 1)
+                if esc == "n": result = result + "\n"
+                else if esc == "t": result = result + "\t"
+                else if esc == "r": result = result + "\r"
+                else: result = result + esc
+        else:
+            result = result + ch
+        i = i + 1
+    JsonParseResult.create(JsValue.String(v: result), i)
+
+fn _parse_json_number(data: text, pos: i64) -> JsonParseResult:
+    var i = pos
+    if i < data.length() and data.substring(i, i + 1) == "-":
+        i = i + 1
+    while i < data.length():
+        val ch = data.substring(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            i = i + 1
+        else if ch == "." or ch == "e" or ch == "E" or ch == "+" or ch == "-":
+            i = i + 1
+        else:
+            break
+    val num_str = data.substring(pos, i)
+    val num_val = num_str.to_i64() ?? 0
+    JsonParseResult.create(JsValue.Number(v: num_val * 1.0), i)
+
+fn _parse_json_object(data: text, pos: i64) -> JsonParseResult:
+    var i = pos + 1  # skip {
+    var props = List<Pair<text, JsValue>>()
+    i = _skip_ws(data, i)
+    if i < data.length() and data.substring(i, i + 1) == "}":
+        return JsonParseResult.create(JsValue.Object(id: _json_props_hash(props)), i + 1)
+    while i < data.length():
+        i = _skip_ws(data, i)
+        val key_result = _parse_json_string(data, i)
+        val key = match key_result.value:
+            JsValue.String(v): v
+            _: ""
+        i = _skip_ws(data, key_result.pos)
+        if i < data.length() and data.substring(i, i + 1) == ":":
+            i = i + 1
+        val val_result = _parse_json_value(data, i)
+        props.push(Pair(first: key, second: val_result.value))
+        i = _skip_ws(data, val_result.pos)
+        if i < data.length() and data.substring(i, i + 1) == ",":
+            i = i + 1
+        else:
+            break
+    i = _skip_ws(data, i)
+    if i < data.length() and data.substring(i, i + 1) == "}":
+        i = i + 1
+    JsonParseResult.create(JsValue.Object(id: _json_props_hash(props)), i)
+
+fn _parse_json_array(data: text, pos: i64) -> JsonParseResult:
+    var i = pos + 1  # skip [
+    var elements = List<JsValue>()
+    i = _skip_ws(data, i)
+    if i < data.length() and data.substring(i, i + 1) == "]":
+        return JsonParseResult.create(JsValue.Array(elements: elements), i + 1)
+    while i < data.length():
+        val elem = _parse_json_value(data, i)
+        elements.push(elem.value)
+        i = _skip_ws(data, elem.pos)
+        if i < data.length() and data.substring(i, i + 1) == ",":
+            i = i + 1
+        else:
+            break
+    i = _skip_ws(data, i)
+    if i < data.length() and data.substring(i, i + 1) == "]":
+        i = i + 1
+    JsonParseResult.create(JsValue.Array(elements: elements), i)
+
+fn _skip_ws(data: text, pos: i64) -> i64:
+    var i = pos
+    while i < data.length():
+        val ch = data.substring(i, i + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            i = i + 1
+        else:
+            break
+    i
+
+fn _json_props_hash(props: List<Pair<text, JsValue>>) -> i64:
+    # Simple hash for object identity
+    var h: i64 = 7919
+    h = h * 31 + props.length()
+    if h < 0: h = 0 - h
+    h

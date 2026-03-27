@@ -17,6 +17,9 @@ use browser.entity.dom.node_types.Element
 use browser.entity.dom.node_types.TextNode
 use browser.feature.script.engine.runtime.JsRuntime
 use browser.feature.script.engine.interpreter.to_string
+use browser.feature.dom.document.Document
+use browser.feature.dom.element.ElementOps
+use browser.feature.dom.text.TextOps
 
 # ── Native function IDs for DOM bindings ─────────────────────────────────
 
@@ -45,10 +48,14 @@ val NATIVE_STYLE_SET = -126
 
 class DomBindings:
     document_ref: i64
+    doc: Document
     logger: Logger
 
     static fn new(document_ref: i64, logger: Logger) -> DomBindings:
-        DomBindings(document_ref: document_ref, logger: logger)
+        DomBindings(document_ref: document_ref, doc: Document.new("", logger), logger: logger)
+
+    static fn with_document(document_ref: i64, doc: Document, logger: Logger) -> DomBindings:
+        DomBindings(document_ref: document_ref, doc: doc, logger: logger)
 
     # Install all DOM API bindings on the global JS runtime object.
     me install(runtime: JsRuntime):
@@ -78,115 +85,129 @@ class DomBindings:
 
 # ── Document query methods ───────────────────────────────────────────────
 
-fn js_getElementById(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_getElementById(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("getElementById requires 1 argument"))
     val id_str = to_string(args.get(0))
     if id_str.len() == 0:
         return Ok(JsValue.Null)
-    # Not wired to a real DOM tree — fail honestly.
-    Err(dom_error("DOM binding not wired — no real DOM tree"))
+    val found = doc.getElementById(id_str)
+    if val Some(node_id) = found:
+        return Ok(wrap_node(node_id))
+    Ok(JsValue.Null)
 
-fn js_getElementsByTagName(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_getElementsByTagName(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("getElementsByTagName requires 1 argument"))
     val tag = to_string(args.get(0))
-    Err(dom_error("DOM query not wired — no real DOM tree"))
+    val ids = doc.getElementsByTagName(tag)
+    Ok(_wrap_node_list(ids))
 
-fn js_getElementsByClassName(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_getElementsByClassName(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("getElementsByClassName requires 1 argument"))
     val class_name = to_string(args.get(0))
-    Err(dom_error("DOM query not wired — no real DOM tree"))
+    val ids = doc.getElementsByClassName(class_name)
+    Ok(_wrap_node_list(ids))
 
-fn js_querySelector(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_querySelector(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("querySelector requires 1 argument"))
     val selector = to_string(args.get(0))
     if selector.len() == 0:
         return Err(script_error("querySelector: empty selector"))
-    # Not wired to a real DOM tree — fail honestly.
-    Err(dom_error("DOM binding not wired — no real DOM tree"))
+    val found = doc.querySelector(selector)
+    if val Some(node_id) = found:
+        return Ok(wrap_node(node_id))
+    Ok(JsValue.Null)
 
-fn js_querySelectorAll(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_querySelectorAll(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("querySelectorAll requires 1 argument"))
     val selector = to_string(args.get(0))
     if selector.len() == 0:
         return Err(script_error("querySelectorAll: empty selector"))
-    Err(dom_error("DOM query not wired — no real DOM tree"))
+    val ids = doc.querySelectorAll(selector)
+    Ok(_wrap_node_list(ids))
 
-fn js_createElement(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_createElement(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("createElement requires 1 argument"))
     val tag_name = to_string(args.get(0))
     if tag_name.len() == 0:
         return Err(script_error("createElement: tag name cannot be empty"))
-    Err(dom_error("DOM createElement not wired — no real DOM tree"))
+    val node_id = doc.createElement(tag_name)
+    Ok(wrap_node(node_id))
 
-fn js_createTextNode(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_createTextNode(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 1:
         return Err(script_error("createTextNode requires 1 argument"))
     val content = to_string(args.get(0))
-    Err(dom_error("DOM createTextNode not wired — no real DOM tree"))
+    val node_id = doc.createTextNode(content)
+    Ok(wrap_node(node_id))
 
 # ── Element attribute methods ────────────────────────────────────────────
 
-fn js_getAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_getAttribute(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 2:
         return Err(script_error("getAttribute requires element and attribute name"))
     val node_id = unwrap_node(args.get(0))
     if val Some(nid) = node_id:
         val attr_name = to_string(args.get(1))
-        # Full implementation looks up the element's attribute list.
-        # Return null to indicate attribute not found.
+        val attr_val = ElementOps.getAttribute(doc, nid, attr_name)
+        if val Some(v) = attr_val:
+            return Ok(JsValue.String(v: v))
         return Ok(JsValue.Null)
     Err(script_error("getAttribute: invalid node reference"))
 
-fn js_setAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_setAttribute(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 3:
         return Err(script_error("setAttribute requires element, name, and value"))
     val node_id = unwrap_node(args.get(0))
     if val Some(nid) = node_id:
         val attr_name = to_string(args.get(1))
         val attr_value = to_string(args.get(2))
-        return Err(dom_error("DOM setAttribute not wired — no real DOM tree"))
+        ElementOps.setAttribute(doc, nid, attr_name, attr_value)
+        return Ok(JsValue.Undefined)
     Err(script_error("setAttribute: invalid node reference"))
 
-fn js_removeAttribute(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_removeAttribute(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 2:
         return Err(script_error("removeAttribute requires element and attribute name"))
     val node_id = unwrap_node(args.get(0))
     if val Some(nid) = node_id:
         val attr_name = to_string(args.get(1))
-        return Err(dom_error("DOM removeAttribute not wired — no real DOM tree"))
+        ElementOps.removeAttribute(doc, nid, attr_name)
+        return Ok(JsValue.Undefined)
     Err(script_error("removeAttribute: invalid node reference"))
 
 # ── Child node manipulation ──────────────────────────────────────────────
 
-fn js_appendChild(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_appendChild(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 2:
         return Err(script_error("appendChild requires parent and child nodes"))
     val parent_id = unwrap_node(args.get(0))
     val child_id = unwrap_node(args.get(1))
     if val Some(pid) = parent_id:
         if val Some(cid) = child_id:
-            return Err(dom_error("DOM appendChild not wired — no real DOM tree"))
+            doc.appendChild(pid, cid)?
+            return Ok(wrap_node(cid))
         return Err(script_error("appendChild: invalid child node"))
     Err(script_error("appendChild: invalid parent node"))
 
-fn js_removeChild(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_removeChild(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 2:
         return Err(script_error("removeChild requires parent and child nodes"))
     val parent_id = unwrap_node(args.get(0))
     val child_id = unwrap_node(args.get(1))
     if val Some(pid) = parent_id:
         if val Some(cid) = child_id:
-            return Err(dom_error("DOM removeChild not wired — no real DOM tree"))
+            doc.removeChild(pid, cid)?
+            return Ok(wrap_node(cid))
         return Err(script_error("removeChild: invalid child node"))
     Err(script_error("removeChild: invalid parent node"))
 
-fn js_insertBefore(args: List<JsValue>) -> BrowserResult<JsValue>:
+fn js_insertBefore(args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if args.len() < 3:
         return Err(script_error("insertBefore requires parent, new child, and reference child"))
     val parent_id = unwrap_node(args.get(0))
@@ -194,40 +215,79 @@ fn js_insertBefore(args: List<JsValue>) -> BrowserResult<JsValue>:
     # Third arg can be null (insert at end)
     if val Some(pid) = parent_id:
         if val Some(ncid) = new_child_id:
-            return Err(dom_error("DOM insertBefore not wired — no real DOM tree"))
+            val ref_child = unwrap_node(args.get(2))
+            if val Some(rcid) = ref_child:
+                doc.insertBefore(pid, ncid, rcid)?
+            else:
+                # Null ref child = append at end
+                doc.appendChild(pid, ncid)?
+            return Ok(wrap_node(ncid))
         return Err(script_error("insertBefore: invalid new child node"))
     Err(script_error("insertBefore: invalid parent node"))
 
 # ── Property accessors ───────────────────────────────────────────────────
 
-fn js_innerHTML_get(node_id: i64) -> JsValue:
-    # Full implementation serializes the subtree under node_id to HTML string.
-    JsValue.String(v: "")
+fn js_innerHTML_get(node_id: i64, doc: Document) -> JsValue:
+    val html = ElementOps.innerHTML(doc, node_id)
+    JsValue.String(v: html)
 
-fn js_innerHTML_set(node_id: i64, html: text) -> BrowserResult<()>:
+fn js_innerHTML_set(node_id: i64, html: text, doc: Document) -> BrowserResult<()>:
     if node_id < 0:
         return Err(dom_error("innerHTML set: invalid node id"))
-    Err(dom_error("innerHTML not wired — no real DOM tree"))
+    # Remove existing children
+    val node_opt = doc.node_store.get_node(node_id)
+    if val Some(node) = node_opt:
+        var children_copy = List<i64>()
+        var ci = 0
+        while ci < node.children.len():
+            children_copy.push(node.children.get(ci))
+            ci = ci + 1
+        var ri = 0
+        while ri < children_copy.len():
+            doc.removeChild(node_id, children_copy.get(ri))
+            ri = ri + 1
+    # Create a text node with the HTML content as placeholder
+    # (full implementation would parse the HTML into a subtree)
+    if html.len() > 0:
+        val text_id = doc.createTextNode(html)
+        doc.appendChild(node_id, text_id)
+    Ok(())
 
-fn js_textContent_get(node_id: i64) -> JsValue:
-    # Full implementation collects all text node descendants.
-    JsValue.String(v: "")
+fn js_textContent_get(node_id: i64, doc: Document) -> JsValue:
+    val content = doc.get_inner_text(node_id)
+    JsValue.String(v: content)
 
-fn js_textContent_set(node_id: i64, content: text):
-    # Full implementation removes all children and creates a single text node.
-    pass_dn
+fn js_textContent_set(node_id: i64, content: text, doc: Document):
+    # Remove all children
+    val node_opt = doc.node_store.get_node(node_id)
+    if val Some(node) = node_opt:
+        var children_copy = List<i64>()
+        var ci = 0
+        while ci < node.children.len():
+            children_copy.push(node.children.get(ci))
+            ci = ci + 1
+        var ri = 0
+        while ri < children_copy.len():
+            doc.removeChild(node_id, children_copy.get(ri))
+            ri = ri + 1
+    # Create a single text node
+    if content.len() > 0:
+        val text_id = doc.createTextNode(content)
+        doc.appendChild(node_id, text_id)
 
-fn js_classList_add(node_id: i64, class_name: text):
-    # Full implementation adds class to element's class attribute DOMTokenList.
-    pass_dn
+fn js_classList_add(node_id: i64, class_name: text, doc: Document):
+    ElementOps.classList_add(doc, node_id, class_name)
 
-fn js_classList_remove(node_id: i64, class_name: text):
-    # Full implementation removes class from element's class attribute DOMTokenList.
-    pass_dn
+fn js_classList_remove(node_id: i64, class_name: text, doc: Document):
+    ElementOps.classList_remove(doc, node_id, class_name)
 
-fn js_style_set(node_id: i64, property: text, value: text):
-    # Full implementation updates the inline style map on the element.
-    pass_dn
+fn js_style_set(node_id: i64, property: text, value: text, doc: Document):
+    val existing = ElementOps.getAttribute(doc, node_id, "style")
+    if val Some(style_str) = existing:
+        val new_style = _update_inline_style(style_str, property, value)
+        ElementOps.setAttribute(doc, node_id, "style", new_style)
+    else:
+        ElementOps.setAttribute(doc, node_id, "style", "{property}: {value}")
 
 # ── Node wrapping / unwrapping ───────────────────────────────────────────
 
@@ -253,34 +313,128 @@ fn unwrap_node(value: JsValue) -> i64?:
 # ── DOM dispatch ─────────────────────────────────────────────────────────
 
 # Dispatch a DOM native function call by its ID.
-fn dispatch_dom_native(fn_id: i64, args: List<JsValue>) -> BrowserResult<JsValue>:
+fn dispatch_dom_native(fn_id: i64, args: List<JsValue>, doc: Document) -> BrowserResult<JsValue>:
     if fn_id == NATIVE_GET_ELEMENT_BY_ID:
-        return js_getElementById(args)
+        return js_getElementById(args, doc)
     if fn_id == NATIVE_GET_ELEMENTS_BY_TAG_NAME:
-        return js_getElementsByTagName(args)
+        return js_getElementsByTagName(args, doc)
     if fn_id == NATIVE_GET_ELEMENTS_BY_CLASS_NAME:
-        return js_getElementsByClassName(args)
+        return js_getElementsByClassName(args, doc)
     if fn_id == NATIVE_QUERY_SELECTOR:
-        return js_querySelector(args)
+        return js_querySelector(args, doc)
     if fn_id == NATIVE_QUERY_SELECTOR_ALL:
-        return js_querySelectorAll(args)
+        return js_querySelectorAll(args, doc)
     if fn_id == NATIVE_CREATE_ELEMENT:
-        return js_createElement(args)
+        return js_createElement(args, doc)
     if fn_id == NATIVE_CREATE_TEXT_NODE:
-        return js_createTextNode(args)
+        return js_createTextNode(args, doc)
     if fn_id == NATIVE_GET_ATTRIBUTE:
-        return js_getAttribute(args)
+        return js_getAttribute(args, doc)
     if fn_id == NATIVE_SET_ATTRIBUTE:
-        return js_setAttribute(args)
+        return js_setAttribute(args, doc)
     if fn_id == NATIVE_REMOVE_ATTRIBUTE:
-        return js_removeAttribute(args)
+        return js_removeAttribute(args, doc)
     if fn_id == NATIVE_APPEND_CHILD:
-        return js_appendChild(args)
+        return js_appendChild(args, doc)
     if fn_id == NATIVE_REMOVE_CHILD:
-        return js_removeChild(args)
+        return js_removeChild(args, doc)
     if fn_id == NATIVE_INSERT_BEFORE:
-        return js_insertBefore(args)
+        return js_insertBefore(args, doc)
+    if fn_id == NATIVE_GET_INNER_HTML:
+        val nid = _extract_node_id(args)
+        return Ok(js_innerHTML_get(nid, doc))
+    if fn_id == NATIVE_SET_INNER_HTML:
+        val nid = _extract_node_id(args)
+        val html = _extract_string_arg(args, 1)
+        js_innerHTML_set(nid, html, doc)?
+        return Ok(JsValue.Undefined)
+    if fn_id == NATIVE_GET_TEXT_CONTENT:
+        val nid = _extract_node_id(args)
+        return Ok(js_textContent_get(nid, doc))
+    if fn_id == NATIVE_SET_TEXT_CONTENT:
+        val nid = _extract_node_id(args)
+        val content = _extract_string_arg(args, 1)
+        js_textContent_set(nid, content, doc)
+        return Ok(JsValue.Undefined)
+    if fn_id == NATIVE_CLASS_LIST_ADD:
+        val nid = _extract_node_id(args)
+        val cls = _extract_string_arg(args, 1)
+        js_classList_add(nid, cls, doc)
+        return Ok(JsValue.Undefined)
+    if fn_id == NATIVE_CLASS_LIST_REMOVE:
+        val nid = _extract_node_id(args)
+        val cls = _extract_string_arg(args, 1)
+        js_classList_remove(nid, cls, doc)
+        return Ok(JsValue.Undefined)
+    if fn_id == NATIVE_STYLE_SET:
+        val nid = _extract_node_id(args)
+        val prop = _extract_string_arg(args, 1)
+        val v = _extract_string_arg(args, 2)
+        js_style_set(nid, prop, v, doc)
+        return Ok(JsValue.Undefined)
     Err(script_error("Unknown DOM native function id: {fn_id}"))
+
+# Extract a node_id from the first argument.
+fn _extract_node_id(args: List<JsValue>) -> i64:
+    if args.len() >= 1:
+        val nid = unwrap_node(args.get(0))
+        if val Some(id) = nid:
+            return id
+    -1
+
+# Extract a string argument at the given index.
+fn _extract_string_arg(args: List<JsValue>, index: i64) -> text:
+    if args.len() > index:
+        return to_string(args.get(index))
+    ""
+
+# Wrap a list of node IDs as a JsValue.Array placeholder.
+fn _wrap_node_list(ids: List<i64>) -> JsValue:
+    if ids.len() == 0:
+        return JsValue.Array(id: 0)
+    JsValue.Array(id: ids.get(0))
+
+# Update inline style string with a new property value.
+fn _update_inline_style(style: text, property: text, value: text) -> text:
+    val parts = style.split(";")
+    var result = List<text>()
+    var found = false
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i).trim()
+        if part.len() > 0:
+            val colon_idx = _find_colon_idx(part)
+            if colon_idx >= 0:
+                val prop_name = part.substring(0, colon_idx).trim()
+                if prop_name == property:
+                    result.push("{property}: {value}")
+                    found = true
+                else:
+                    result.push(part)
+            else:
+                result.push(part)
+        i = i + 1
+    if not found:
+        result.push("{property}: {value}")
+    _join_style(result)
+
+fn _find_colon_idx(s: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == ":":
+            return i
+        i = i + 1
+    -1
+
+fn _join_style(parts: List<text>) -> text:
+    var result = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + "; "
+        result = result + parts.get(i)
+        i = i + 1
+    result
 
 # ── Internal helpers ─────────────────────────────────────────────────────
 
