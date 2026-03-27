@@ -1,7 +1,7 @@
 # T32 MCP-CLI Improvements — CLI Parity Implementation Plan
 
 **Date:** 2026-03-27
-**Status:** Draft
+**Status:** Complete
 **Requirement:** doc/plan/requirement/t32_mcp_cli_improvements.md
 **Research:** doc/research/t32_mcp_cli_async_and_window_ux.md
 **Design:** doc/design/t32_mcp_cli_improvements.md

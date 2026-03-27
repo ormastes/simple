@@ -928,12 +928,15 @@ int main(int argc, char** argv) {
         // Add runtime/compiler library. Prefer combined native_all library
         // (includes Cranelift FFI for self-hosting) over runtime-only.
         // Check config.runtime_path first (explicit CLI flag — most reliable).
+        // Use --whole-archive to force linking ALL runtime members (not just referenced ones).
         let mut runtime_linked = false;
         if let Some(ref rp) = self.config.runtime_path {
             for name in &["libsimple_native_all.a", "libsimple_runtime.a"] {
                 let lib = rp.join(name);
                 if lib.exists() {
+                    cmd.arg("-Wl,--whole-archive");
                     cmd.arg(&lib);
+                    cmd.arg("-Wl,--no-whole-archive");
                     runtime_linked = true;
                     break;
                 }
@@ -941,7 +944,9 @@ int main(int argc, char** argv) {
         }
         if !runtime_linked {
             if let Some(native_all) = find_native_all_library() {
+                cmd.arg("-Wl,--whole-archive");
                 cmd.arg(&native_all);
+                cmd.arg("-Wl,--no-whole-archive");
             } else if let Some(runtime) = find_runtime_library() {
                 cmd.arg(&runtime);
             }

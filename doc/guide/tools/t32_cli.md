@@ -2,6 +2,8 @@
 
 Command-line interface that converts TRACE32 PowerView GUI operations into CLI commands. Enables scripted and interactive control of TRACE32 debug sessions without the GUI.
 
+Full MCP tool parity: all 36 MCP tools have CLI mappings.
+
 ---
 
 ## Usage
@@ -31,6 +33,14 @@ simple t32 cores                             # List cores in current session
 simple t32 cores select <core_id>            # Switch active core
 ```
 
+### Execution Commands
+
+```bash
+simple t32 cmd run <command> [--force]       # Run raw PRACTICE command
+simple t32 cmm <script> [--wait] [--timeout=<ms>] [--capture-area] [--force]
+simple t32 eval <expression>                 # Evaluate TRACE32 expression
+```
+
 ### Window Operations
 
 ```bash
@@ -38,6 +48,7 @@ simple t32 windows                           # List all windows from catalogs
 simple t32 window show <key>                 # Capture and show window content
 simple t32 window open <key>                 # Open a window
 simple t32 window describe <key>             # Show window actions and fields
+simple t32 screenshot <window> [path]        # Save window screenshot
 ```
 
 ### Fields and Actions
@@ -45,16 +56,52 @@ simple t32 window describe <key>             # Show window actions and fields
 ```bash
 simple t32 field get <key>                   # Get field value
 simple t32 field set <key> <value>           # Set field value
-simple t32 action list                       # List all actions
-simple t32 action do <key>                   # Execute an action
+simple t32 action list [window_key]          # List actions (optionally by window)
+simple t32 action do <key> [args]            # Execute an action
+```
+
+### Observability
+
+```bash
+simple t32 status                            # Show CPU run state
+simple t32 history [count]                   # Show command history (default 20)
+simple t32 resources list                    # List MCP resources
+simple t32 resource read <uri>               # Read resource by URI
+simple t32 error-check                       # Check TRACE32 error state
+```
+
+### Headless / CMM Tools
+
+```bash
+simple t32 headless setup [--area=<name>] [--no-semihost] [--no-error-handler]
+simple t32 area read [name] [--clear]        # Read AREA buffer
+simple t32 cmm-commands [--group=G] [--search=S]  # Query PRACTICE command database
+simple t32 cmm-validate <source> [--mode=<headless|interactive>]
+```
+
+### Job Management (Async)
+
+```bash
+simple t32 jobs list [--session=<id>]        # List async jobs
+simple t32 jobs get <job_id>                 # Get job status
+simple t32 jobs cancel <job_id>              # Cancel a running job
+simple t32 jobs result <job_id>              # Get completed job result
+```
+
+### Dialog Control
+
+```bash
+simple t32 dialog parse <source>             # Parse CMM for dialog elements
+simple t32 dialog get <label> [--type=<bool|string|value>]
+simple t32 dialog set <label> [value] [--action=<set|select|deselect|disable|enable>]
+simple t32 dialog click <label> [--capture-area] [--timeout=<ms>]
 ```
 
 ### Other
 
 ```bash
-simple t32 screenshot <window> [path]        # Save window screenshot
-simple t32 cmm <script_path>                 # Run CMM/PRACTICE script
 simple t32 shell                             # Start interactive REPL
+simple t32 help                              # Show help
 ```
 
 ---
@@ -70,12 +117,15 @@ s1> cores
 s1> windows
 s1> show register_view
 s1:core0> do halt
-s1:core0> do step
+s1:core0> status
+s1:core0> cmd Break.Set main --force
+s1:core0> eval Register.PP(PC)
+s1:core0> jobs list
 s1:core0> history
 s1:core0> quit
 ```
 
-Shell commands: `sessions`, `use`, `cores`, `core`, `windows`, `show`, `open`, `describe`, `set`, `do`, `cmm`, `screenshot`, `history`, `help`, `quit`.
+Shell commands: `sessions`, `use`, `info`, `cores`, `core`, `windows`, `show`, `open`, `describe`, `set`, `do`, `cmd`, `cmm`, `eval`, `screenshot`, `status`, `history`, `resources`, `resource`, `headless`, `area`, `cmm-commands`, `cmm-validate`, `jobs`, `dialog`, `error-check`, `help`, `quit`.
 
 ---
 
@@ -151,15 +201,23 @@ field symbol
 simple t32 <cmd>
     |
     v
-mod.spl (CLI dispatcher)
-    |-> session.spl        — session registry (open/close/use/list)
-    |-> core_context.spl   — core selection (multi-core SoCs)
-    |-> window_model.spl   — window list/open/show/describe
+mod.spl (CLI dispatcher — 22 top-level commands)
+    |-> bridge.spl        — shared execution layer (calls MCP functions directly)
+    |-> render.spl        — output formatting (scalar, table, kv, list, gui_status)
+    |-> commands.spl      — canonical 36-command registry (MCP tool mappings)
+    |-> session.spl       — session registry (open/close/use/list)
+    |-> core_context.spl  — core selection (multi-core SoCs)
+    |-> window_model.spl  — window list/open/show/describe
     |-> catalog_loader.spl — SDN parser for windows/actions/fields
-    |-> text_parser.spl    — output text formatting
-    |-> cli_shell.spl      — interactive REPL
-    |-> types.spl          — shared types (T32Session, T32WindowNode, T32Action, T32Field, T32Catalogs)
+    |-> text_parser.spl   — output text formatting
+    |-> cli_shell.spl     — interactive REPL (all verbs route through bridge)
+    |-> types.spl         — shared types (T32Session, T32BridgeResult, etc.)
+    |-> error_codes.spl   — error messages derived from commands registry
 ```
+
+### MCP Parity
+
+Every MCP tool (`t32_mcp/protocol.spl`) maps to a CLI command via `commands.spl`. The bridge layer (`bridge.spl`) calls MCP execution functions directly without JSON-RPC framing. Parity is enforced by `t32_cli_parity_guard_spec.spl`.
 
 Communication with TRACE32 uses `t32rem` (Remote API CLI) under the hood. See [trace32_linux_setup.md](../backend/trace32_linux_setup.md) for host prerequisites.
 
@@ -167,7 +225,8 @@ Communication with TRACE32 uses `t32rem` (Remote API CLI) under the hood. See [t
 
 ## Source Code
 
-- **CLI module:** `src/app/t32_cli/` (8 files)
+- **CLI module:** `examples/10_tooling/trace32_tools/t32_cli/` (12 files)
+- **MCP server:** `examples/10_tooling/trace32_tools/t32_mcp/` (12 files)
 - **Catalogs:** `config/t32/catalogs/` (3 SDN files)
-- **Protocol layer:** `src/lib/nogc_sync_mut/debug/remote/protocol/trace32.spl`
+- **Tests:** `test/unit/app/t32_cli/` (14 spec files)
 - **Host setup:** [backend/trace32_linux_setup.md](../backend/trace32_linux_setup.md)
