@@ -71,6 +71,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
     let mut backend = "cranelift".to_string();
+    let mut runtime_path: Option<PathBuf> = None;
 
     // Parse arguments (skip "native-build" at index 0)
     let mut i = 1;
@@ -94,6 +95,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --cache-dir <dir>   Cache directory");
                 println!("  --no-mangle         Disable name mangling");
                 println!("  --backend <name>    Codegen backend: cranelift (default) or llvm");
+                println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 return 0;
             }
             "--source" => {
@@ -191,6 +193,15 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            "--runtime-path" => {
+                if i + 1 < args_vec.len() {
+                    runtime_path = Some(PathBuf::from(&args_vec[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("error: --runtime-path requires a directory path");
+                    return 1;
+                }
+            }
             other => {
                 // Handle --key=value forms for flags that take values
                 if let Some(val) = other.strip_prefix("--backend=") {
@@ -217,6 +228,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     }
                 } else if let Some(val) = other.strip_prefix("--cache-dir=") {
                     cache_dir = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--runtime-path=") {
+                    runtime_path = Some(PathBuf::from(val));
                 } else if other.starts_with("--") {
                     eprintln!("warning: unknown option '{}', ignoring", other);
                 } else {
@@ -270,6 +283,17 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         eprintln!("  Incremental: {}", incremental);
         eprintln!("  Mangle: {}", !no_mangle);
         eprintln!("  Backend: {}", backend);
+        if let Some(ref rp) = runtime_path {
+            eprintln!("  Runtime path: {}", rp.display());
+        }
+    }
+
+    // Set runtime path override before building (works in C-compiled binaries)
+    if let Some(ref rp) = runtime_path {
+        simple_compiler::pipeline::native_project::set_runtime_path_override(rp.clone());
+        // Also set env var in-process as fallback (for code that checks env vars directly)
+        unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", rp); }
+        unsafe { std::env::set_var("SIMPLE_NATIVE_ALL_PATH", rp.join("libsimple_native_all.a")); }
     }
 
     let mut config = NativeBuildConfig::default();
@@ -281,6 +305,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.clean = clean;
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
+    config.runtime_path = runtime_path;
 
     // Normalize backend aliases
     if backend == "llvm-lib" {

@@ -1,201 +1,508 @@
-# T32 MCP-CLI Improvements — Task Plan
+# T32 MCP-CLI Improvements — CLI Parity Implementation Plan
 
-**Date:** 2026-03-25
+**Date:** 2026-03-27
 **Status:** Draft
-**Requirement:** doc/requirement/t32_mcp_cli_improvements.md
+**Requirement:** doc/plan/requirement/t32_mcp_cli_improvements.md
 **Research:** doc/research/t32_mcp_cli_async_and_window_ux.md
 **Design:** doc/design/t32_mcp_cli_improvements.md
 
-## Task Breakdown
+## Objective
 
-### F1: Job Manager (REQ-F1-001 through REQ-F1-007)
+Bring the TRACE32 CLI implementation in `examples/10_tooling/trace32_tools/t32_cli/`
+to practical parity with the T32 MCP server in
+`examples/10_tooling/trace32_tools/t32_mcp/`.
 
-| Task | Description | Difficulty | Model | Depends | AC |
-|------|-------------|-----------|-------|---------|-----|
-| **T1** | Define T32Job class with all fields | 2 | sonnet | -- | AC-F1-01 |
-| **T2** | Implement status state machine transitions | 3 | sonnet | T1 | AC-F1-02 |
-| **T2a** | Define valid transition map and `is_terminal()` | 1 | haiku | T1 | AC-F1-02 |
-| **T2b** | Implement `transition(job, new_status)` with guard checks | 2 | sonnet | T2a | AC-F1-02 |
-| **T2c** | Add unit tests for all valid/invalid transitions | 2 | sonnet | T2b | AC-F1-02 |
-| **T3** | Implement T32JobManager core operations | 3 | sonnet | T2 | AC-F1-01, AC-F1-07 |
-| **T3a** | Implement `create_job()` with max-concurrent check | 2 | sonnet | T2 | AC-F1-07 |
-| **T3b** | Implement `get_job()`, `list_jobs()`, `count_active()` | 1 | haiku | T3a | AC-F1-04 |
-| **T3c** | Implement `cancel_job()` with PRACTICE interrupt attempt | 2 | sonnet | T3b | AC-F1-05 |
-| **T3d** | Implement `cleanup()` with retention TTL | 2 | sonnet | T3b | AC-F1-06 |
-| **T4** | Implement `poll_one()` and `poll_all()` | 3 | sonnet | T3 | AC-F1-02 |
-| **T4a** | Implement timeout check in `poll_one()` | 1 | haiku | T3 | AC-F1-02 |
-| **T4b** | Implement PRACTICE.STATE() polling path | 2 | sonnet | T4a | AC-F1-02 |
-| **T4c** | Implement STATE.RUN() polling path | 2 | sonnet | T4a | AC-F1-02 |
-| **T4d** | Wire `poll_all()` into request-driven trigger points | 2 | sonnet | T4b, T4c | AC-F1-02 |
-| **T5** | Add `background=true` parameter to `t32_cmm_run` | 3 | sonnet | T4 | AC-F1-03, AC-F1-08 |
-| **T5a** | Extract `background` param in `handle_t32_cmm_run` | 1 | haiku | T4 | AC-F1-03 |
-| **T5b** | Create job and fire script non-blocking when `background=true` | 2 | sonnet | T5a | AC-F1-03 |
-| **T5c** | Implement foreground timeout escalation to background job | 3 | sonnet | T5b | AC-F1-08 |
-| **T6** | Add `background=true` parameter to `t32_cmd_run` | 2 | sonnet | T5 | AC-F1-03 |
-| **T7** | Implement `t32_job_list` tool handler + schema | 2 | sonnet | T3 | AC-F1-04 |
-| **T8** | Implement `t32_job_get` tool handler + schema | 2 | sonnet | T3 | AC-F1-04 |
-| **T9** | Implement `t32_job_cancel` tool handler + schema | 2 | sonnet | T3 | AC-F1-05 |
-| **T10** | Implement `t32_job_result` tool handler + schema | 2 | sonnet | T3 | AC-F1-04 |
-| **T11** | Add `t32:///jobs/<id>` resource URI support | 2 | sonnet | T8 | AC-F1-05 |
-| **T12** | Register all F1 tools in protocol.spl tool list + dispatcher | 2 | sonnet | T7-T10 | AC-F1-04 |
-| **T13** | Write SSpec tests for F1 job lifecycle | 3 | sonnet | T12 | AC-F1-01 through AC-F1-08 |
+The current gap is not only missing commands. Several exposed CLI commands are
+still presentation-only stubs and do not execute TRACE32 actions. This plan
+makes CLI a real execution surface backed by the same shared T32 logic as MCP.
 
-### F2: Window Snapshots (REQ-F2-001 through REQ-F2-008)
+## Current State
 
-| Task | Description | Difficulty | Model | Depends | AC |
-|------|-------------|-----------|-------|---------|-----|
-| **T14** | Define T32WindowSnapshot class | 2 | sonnet | -- | AC-F2-01 |
-| **T15** | Implement T32SnapshotStore (per-session/core/window) | 3 | sonnet | T14 | AC-F2-01 |
-| **T15a** | Implement `store_snapshot()` with djb2 hash | 2 | sonnet | T14 | AC-F2-01 |
-| **T15b** | Implement `get_snapshot()` and hash comparison | 2 | sonnet | T15a | AC-F2-02 |
-| **T15c** | Implement 200-entry cap and 5-min TTL eviction | 2 | sonnet | T15b | AC-F2-06 |
-| **T16** | Implement structured row diff (label/value windows) | 3 | sonnet | T15 | AC-F2-03 |
-| **T16a** | Implement row parser for label:value formatted windows | 2 | sonnet | T15 | AC-F2-03 |
-| **T16b** | Implement T32DiffEntry generation with old/new values | 2 | sonnet | T16a | AC-F2-03 |
-| **T16c** | Implement text fallback diff for non-structured windows | 2 | sonnet | T16b | AC-F2-03 |
-| **T17** | Add `mode=summary|diff|full` to `t32_window_capture` | 3 | sonnet | T16 | AC-F2-04, AC-F2-05 |
-| **T17a** | Extract `mode` parameter in handler | 1 | haiku | T16 | AC-F2-04 |
-| **T17b** | Implement `mode=summary` (one-line status) | 2 | sonnet | T17a | AC-F2-04 |
-| **T17c** | Implement `mode=diff` (structured diff on change) | 2 | sonnet | T17b | AC-F2-03 |
-| **T17d** | Implement `mode=full` (always full content) | 1 | haiku | T17a | AC-F2-05 |
-| **T18** | Add `t32:///windows/<session>/<window>` resource URI | 2 | sonnet | T15 | AC-F2-01 |
-| **T19** | Add token budget awareness (8K warn at 10K) | 2 | sonnet | T17 | AC-F2-07 |
-| **T20** | Write SSpec tests for F2 snapshot/diff lifecycle | 3 | sonnet | T17 | AC-F2-01 through AC-F2-07 |
+### Confirmed Gaps
 
-### F3: CLI-MCP Gap Closure (REQ-F3-001 through REQ-F3-004)
+- MCP exposes 36 tools in `t32_mcp/protocol.spl`.
+- CLI top-level dispatch only exposes an older subset in `t32_cli/mod.spl`.
+- Interactive shell exposes an even smaller subset in `t32_cli/cli_shell.spl`.
+- Several CLI commands are stubs:
+  - `field set`
+  - `action do`
+  - `screenshot`
+  - `cmm`
+- CLI parity metadata is stale:
+  - `mcp_tool_names()` still lists the older subset only.
 
-| Task | Description | Difficulty | Model | Depends | AC |
-|------|-------------|-----------|-------|---------|-----|
-| **T21** | Implement `t32_session_info` tool handler + schema | 2 | sonnet | -- | AC-F3-01 |
-| **T22** | Implement `t32_action_list` tool handler + schema | 2 | sonnet | -- | AC-F3-02 |
-| **T23** | Implement `t32_status_snapshot` tool handler + schema | 2 | sonnet | -- | AC-F3-04 |
-| **T24** | Register F3 tools in protocol.spl tool list + dispatcher | 1 | haiku | T21-T23 | AC-F3-01 through AC-F3-04 |
-| **T25** | Write SSpec tests for F3 tools | 2 | sonnet | T24 | AC-F3-01 through AC-F3-04 |
+### Impact
 
-### F4: CMM Validator MCP Exposure (REQ-F4-001 through REQ-F4-005)
+- Users cannot rely on CLI for the same workflows supported by MCP.
+- Help text overstates capability relative to actual execution.
+- New MCP tools can land without any CLI parity enforcement.
+- Testing is fragmented: parser/type tests exist, but parity and end-to-end CLI
+  execution coverage are weak.
 
-| Task | Description | Difficulty | Model | Depends | AC |
-|------|-------------|-----------|-------|---------|-----|
-| **T26** | Implement `t32_cmm_validate` tool with `mode=check` | 3 | sonnet | -- | AC-F4-01 |
-| **T26a** | Port blocking-pattern detection from session_tools.spl into reusable module | 2 | sonnet | -- | AC-F4-01 |
-| **T26b** | Implement all 7 BLOCK-level pattern checks | 2 | sonnet | T26a | AC-F4-01 |
-| **T26c** | Wire into `t32_cmm_validate` handler with `mode=check` | 2 | sonnet | T26b | AC-F4-01 |
-| **T27** | Add `mode=report` with severity classification | 2 | sonnet | T26 | AC-F4-02 |
-| **T28** | Add `mode=suggest` with rewrite suggestions | 3 | sonnet | T27 | AC-F4-03 |
-| **T28a** | Define rewrite suggestion map for each BLOCK pattern | 2 | sonnet | T27 | AC-F4-03 |
-| **T28b** | Generate suggested safe replacement text per finding | 2 | sonnet | T28a | AC-F4-03 |
-| **T29** | Handle safe/empty scripts returning `classification=safe` | 1 | haiku | T26 | AC-F4-04 |
-| **T30** | Register F4 tool in protocol.spl + dispatcher | 1 | haiku | T26-T28 | AC-F4-01 |
-| **T31** | Write SSpec tests for F4 validator modes | 2 | sonnet | T30 | AC-F4-01 through AC-F4-04 |
+## Target End State
 
-### F5: Implementation Fixes (REQ-F5-001 through REQ-F5-004)
+### Functional Goals
 
-| Task | Description | Difficulty | Model | Depends | AC |
-|------|-------------|-----------|-------|---------|-----|
-| **T32** | Replace O(N) field state lookup with Dict | 2 | sonnet | -- | AC-F5-01 |
-| **T33** | Add connection retry with exponential backoff to session_open | 3 | sonnet | -- | AC-F5-02 |
-| **T33a** | Implement retry loop (3 attempts, 500ms/1s/2s backoff) | 2 | sonnet | -- | AC-F5-02 |
-| **T33b** | Return structured error with attempt count on final failure | 1 | haiku | T33a | AC-F5-02 |
-| **T34** | Fix SDN catalog error reporting (no silent fallback) | 2 | sonnet | -- | AC-F5-03 |
-| **T35** | Add explicit `timeout_ms` parameters to all blocking tools | 3 | sonnet | -- | AC-F5-04 |
-| **T35a** | Add `timeout_ms` param to `t32_cmm_run`, `t32_cmd_run` | 2 | sonnet | -- | AC-F5-04 |
-| **T35b** | Add `timeout_ms` param to `t32_window_capture`, `t32_session_open` | 2 | sonnet | T35a | AC-F5-04 |
-| **T35c** | Define server-level default timeouts in config constants | 1 | haiku | -- | AC-F5-04 |
-| **T36** | Write SSpec tests for F5 fixes | 2 | sonnet | T32-T35 | AC-F5-01 through AC-F5-04 |
+- Every MCP tool has a CLI mapping or an explicitly documented, tested exclusion.
+- No CLI command that claims to execute TRACE32 is stubbed.
+- Top-level CLI mode and interactive shell mode share the same execution layer.
+- CLI outputs human-readable text while preserving structured response semantics.
+- New MCP tools cannot be added without a parity decision and test update.
 
-## Dependency Graph
+### Non-Goals
 
-```
-                       ┌──────────────────────────────────────────────┐
-                       │            F1: Job Manager                   │
-                       │                                              │
-                       │  T1 ──> T2(a,b,c) ──> T3(a,b,c,d)          │
-                       │                          │                   │
-                       │              ┌───────────┤                   │
-                       │              v           v                   │
-                       │          T4(a,b,c,d)   T7,T8,T9,T10         │
-                       │              │           │                   │
-                       │              v           v                   │
-                       │        T5(a,b,c)──>T6   T11                 │
-                       │              │           │                   │
-                       │              └─────┬─────┘                   │
-                       │                    v                         │
-                       │                  T12 ──> T13                 │
-                       └──────────────────────────────────────────────┘
+- Do not reimplement MCP business logic separately inside CLI.
+- Do not add a second independent tool registry.
+- Do not make shell mode feature-richer than non-interactive CLI mode.
+- Do not rely on live hardware for the full test suite.
 
-                       ┌──────────────────────────────────────────────┐
-                       │          F2: Window Snapshots                │
-                       │                                              │
-                       │  T14 ──> T15(a,b,c) ──> T16(a,b,c)         │
-                       │                           │                  │
-                       │                           v                  │
-                       │                     T17(a,b,c,d) ──> T19    │
-                       │                           │                  │
-                       │            T18 ───────────┘                  │
-                       │                           │                  │
-                       │                           v                  │
-                       │                          T20                 │
-                       └──────────────────────────────────────────────┘
+## Design Direction
 
-                       ┌──────────────────────────────────────────────┐
-                       │        F3: CLI-MCP Gap Closure               │
-                       │                                              │
-                       │  T21, T22, T23  (parallel) ──> T24 ──> T25  │
-                       └──────────────────────────────────────────────┘
+### Principle 1: CLI Is a Thin Adapter
 
-                       ┌──────────────────────────────────────────────┐
-                       │       F4: CMM Validator Exposure             │
-                       │                                              │
-                       │  T26(a,b,c) ──> T27 ──> T28(a,b)           │
-                       │       │                    │                 │
-                       │       v                    v                 │
-                       │      T29              T30 ──> T31           │
-                       └──────────────────────────────────────────────┘
+CLI should own:
+- argument parsing
+- help text
+- human-readable rendering
+- shell prompt and command loop behavior
 
-                       ┌──────────────────────────────────────────────┐
-                       │       F5: Implementation Fixes               │
-                       │                                              │
-                       │  T32, T33(a,b), T34, T35(a,b,c)  (parallel)│
-                       │              │                               │
-                       │              v                               │
-                       │            T36                               │
-                       └──────────────────────────────────────────────┘
-```
+CLI should not own:
+- TRACE32 session semantics
+- MCP/T32 tool business logic
+- duplicate validation rules already implemented in T32 MCP helpers
 
-### Cross-Feature Dependencies
+### Principle 2: Shared Execution Layer
 
-- F5.T35 (timeout params) should land before F1.T5 (background mode) to share the `timeout_ms` parameter pattern.
-- F5.T32 (dict-based field lookup) is independent; can land first as a quick win.
-- F2.T17 (window capture modes) enhances F1 job result reporting but is not a hard dependency.
-- F4.T26a (reusable blocking detection) extracts logic currently in session_tools.spl, which F1.T5/T6 also use; land T26a early.
+Introduce a shared bridge so CLI can call the same logic used by MCP handlers
+without going through JSON-RPC framing.
 
-## Implementation Order (Recommended)
+Recommended split:
+- `app.t32_cli.commands`
+  - command registry
+  - argv parsing
+  - shell command parsing
+  - shared subcommand descriptors
+- `app.t32_cli.bridge`
+  - thin wrappers over `app.mcp_t32.*` functionality
+  - result normalization for CLI consumers
+- `app.t32_cli.render`
+  - table rendering
+  - key/value rendering
+  - error rendering
+  - gui status rendering
 
-**Wave 1 — Foundation (parallel tracks)**
-- F5: T32, T33, T34, T35 (quick fixes, low risk)
-- F1: T1, T2 (class + state machine definition)
-- F4: T26a (extract reusable blocking detection)
+### Principle 3: Single Source of Truth for Parity
 
-**Wave 2 — Core features**
-- F1: T3, T4 (job manager operations)
-- F2: T14, T15 (snapshot classes and store)
-- F3: T21, T22, T23 (new tool handlers — independent)
+CLI command inventory must be derived from or validated against the MCP tool
+inventory defined in `examples/10_tooling/trace32_tools/t32_mcp/protocol.spl`.
 
-**Wave 3 — Integration**
-- F1: T5, T6, T7-T12 (background params, tool handlers, dispatcher)
-- F2: T16, T17, T18, T19 (diff engine, capture modes, resources)
-- F4: T26b-c, T27, T28, T29, T30 (validator modes)
+## Package Plan
 
-**Wave 4 — Testing**
-- F1: T13, F2: T20, F3: T24-T25, F4: T31, F5: T36
+### Existing Packages to Update
 
-## Summary
+- `examples/10_tooling/trace32_tools/t32_cli/mod.spl`
+  - expand top-level dispatch
+  - replace stub handlers with bridge calls
+  - keep help text in sync with real command availability
+- `examples/10_tooling/trace32_tools/t32_cli/cli_shell.spl`
+  - route shell verbs into the same bridge layer as argv mode
+  - add missing shell verbs for parity
+- `examples/10_tooling/trace32_tools/t32_cli/error_codes.spl`
+  - refresh command/subcommand inventories
+  - remove stale MCP tool list duplication or validate it automatically
+- `examples/10_tooling/trace32_tools/t32_cli/session.spl`
+  - keep session/core state ownership here
+  - expose helpers needed by the bridge where practical
+- `examples/10_tooling/trace32_tools/t32_cli/window_model.spl`
+  - keep catalog-driven metadata and view formatting
+  - stop using it as a fake execution layer
 
-| Feature | Tasks | Subtasks | Total Work Items | Est. Effort |
-|---------|-------|----------|-----------------|-------------|
-| F1: Job Manager | 13 | 13 | 26 | L (1-2 weeks) |
-| F2: Window Snapshots | 7 | 10 | 17 | L (1-2 weeks) |
-| F3: CLI-MCP Gap Closure | 5 | 0 | 5 | M (3-5 days) |
-| F4: CMM Validator | 6 | 4 | 10 | M (3-5 days) |
-| F5: Implementation Fixes | 5 | 5 | 10 | M (3-5 days) |
-| **Total** | **36** | **32** | **68** | **~4-6 weeks** |
+### New Packages Recommended
+
+- `examples/10_tooling/trace32_tools/t32_cli/commands.spl`
+  - canonical CLI command table
+  - subcommand parsing and usage text
+  - shell/non-shell shared mapping
+- `examples/10_tooling/trace32_tools/t32_cli/bridge.spl`
+  - shared wrapper layer into T32 MCP/shared logic
+  - typed CLI-facing result normalization
+- `examples/10_tooling/trace32_tools/t32_cli/render.spl`
+  - output formatting separated from execution
+
+## Command Parity Matrix
+
+### Already Present but Must Be Made Real
+
+- `sessions list/open/use/info/close`
+- `cores`
+- `core select`
+- `windows`
+- `window open/show/describe`
+- `field get/set`
+- `action do/list`
+- `screenshot`
+- `cmm`
+
+### Missing and Must Be Added
+
+- `cmd run`
+- `eval`
+- `history`
+- `resources list`
+- `resource read`
+- `headless setup`
+- `area read`
+- `cmm-commands`
+- `status`
+- `cmm-validate`
+- `jobs list`
+- `jobs get`
+- `jobs cancel`
+- `jobs result`
+- `dialog parse`
+- `dialog get`
+- `dialog set`
+- `dialog click`
+- `error-check`
+
+### Mapping Rule
+
+Every MCP tool must map to:
+- one CLI command, or
+- one CLI subcommand, or
+- one tested explicit exclusion entry with rationale
+
+Target: zero exclusions.
+
+## Work Breakdown
+
+### Phase 1: Foundation Refactor
+
+#### F1.1 Create shared CLI execution architecture
+
+- Add `commands.spl`
+- Add `bridge.spl`
+- Add `render.spl`
+- Move common parsing/usage logic out of `mod.spl` and `cli_shell.spl`
+- Define canonical command descriptors with:
+  - name
+  - subcommand
+  - usage
+  - argument schema
+  - MCP tool mapping
+  - renderer selection
+
+#### F1.2 Remove presentation-only execution paths
+
+- Replace `field set` stub with real execution
+- Replace `action do` stub with real execution
+- Replace `screenshot` stub with real execution
+- Replace `cmm` stub with real execution
+- Apply same fix in shell mode
+
+#### Acceptance
+
+- No CLI handler prints fake “Command:” lines in place of execution.
+- CLI and shell both delegate through shared bridge helpers.
+
+### Phase 2: Existing Subset Hardening
+
+#### F2.1 Normalize outputs for already-exposed commands
+
+- sessions
+- cores
+- windows
+- window show/open/describe
+- field get/set
+- action do/list
+
+#### F2.2 Add structured rendering helpers
+
+- simple scalar result renderer
+- key/value object renderer
+- table renderer
+- error renderer
+- `gui_status` footer renderer
+
+#### Acceptance
+
+- Existing commands produce stable output in both success and error cases.
+- `gui_status` is shown consistently where relevant.
+
+### Phase 3: Missing Core Command Coverage
+
+#### F3.1 Raw execution commands
+
+- `cmd run` -> `t32_cmd_run`
+- `cmm run` -> `t32_cmm_run`
+- `eval` -> `t32_eval`
+
+#### F3.2 Observability/data commands
+
+- `history` -> `t32_history_tail`
+- `resources list` -> `t32_resources_list`
+- `resource read` -> `t32_resource_read`
+- `status` -> `t32_status_snapshot`
+- `error-check` -> `t32_error_check`
+
+#### F3.3 Headless and command-database commands
+
+- `headless setup` -> `t32_setup_headless`
+- `area read` -> `t32_area_read`
+- `cmm-commands` -> `t32_cmm_commands`
+- `cmm-validate` -> `t32_cmm_validate`
+
+#### Acceptance
+
+- Each new CLI command has:
+  - top-level dispatch support
+  - shell support when applicable
+  - help text
+  - unit and integration coverage
+
+### Phase 4: Async and Dialog Parity
+
+#### F4.1 Jobs
+
+- `jobs list` -> `t32_job_list`
+- `jobs get` -> `t32_job_get`
+- `jobs cancel` -> `t32_job_cancel`
+- `jobs result` -> `t32_job_result`
+
+#### F4.2 Dialog commands
+
+- `dialog parse` -> `t32_dialog_parse`
+- `dialog get` -> `t32_dialog_get`
+- `dialog set` -> `t32_dialog_set`
+- `dialog click` -> `t32_dialog_click`
+
+#### Acceptance
+
+- Dialog and job workflows are available in both CLI entry and shell mode.
+- Rendering is concise and workflow-friendly, not raw JSON dumps by default.
+
+### Phase 5: Parity Guardrails
+
+#### F5.1 Inventory parity enforcement
+
+- Add parity spec comparing CLI command registry against MCP tool registry
+- Fail if MCP adds a tool without CLI mapping or tested exclusion
+
+#### F5.2 Documentation sync
+
+- Update `doc/guide/tools/t32_cli.md`
+- Update `doc/guide/tools/mcp_t32.md` only if response contracts change
+- Keep command examples aligned with implemented behavior
+
+#### Acceptance
+
+- Parity regressions fail in CI/test runs.
+- Docs no longer advertise commands that are stubbed or absent.
+
+## SSpec Test Plan
+
+### Unit Tests
+
+Target directory:
+- `test/unit/app/t32_cli/`
+
+#### New specs
+
+- `command_registry_spec.spl`
+  - command descriptors exist for all CLI commands
+  - usage/help text is non-empty
+  - each command maps to expected MCP tool
+- `arg_parser_spec.spl`
+  - valid argv parsing
+  - missing argument failures
+  - invalid subcommand failures
+  - shell command parsing parity with argv parser
+- `render_spec.spl`
+  - object rendering
+  - table rendering
+  - error rendering
+  - gui status rendering
+- `bridge_spec.spl`
+  - wrapper calls expected shared helpers
+  - error passthrough
+  - result normalization
+- `parity_spec.spl`
+  - MCP tool list and CLI registry stay aligned
+
+#### Existing specs to expand
+
+- `shell_spec.spl`
+  - add new verbs
+  - add multi-word command parsing
+  - add argument edge cases
+- `error_codes_spec.spl`
+  - new command/subcommand help inventories
+- `session_spec.spl`
+  - session/core transitions used by new commands
+- `window_model_spec.spl`
+  - rendering assumptions for capture/show/describe output
+
+### Integration Tests
+
+Target directory:
+- `test/integration/app/`
+
+#### New specs
+
+- `t32_cli_dispatch_spec.spl`
+  - top-level dispatch routes to every major command family
+- `t32_cli_shell_flow_spec.spl`
+  - shell loop dispatches real commands through shared bridge
+- `t32_cli_mcp_parity_spec.spl`
+  - compares MCP tool surface and CLI command mappings
+- `t32_cli_rendering_spec.spl`
+  - verifies command outputs are human-readable and stable
+
+#### Focus
+
+- test real package interaction, not just isolated parser functions
+- avoid live TRACE32 dependency by using fake or deterministic bridge seams
+
+### Feature-Level Specs
+
+Target directory:
+- `test/feature/app/t32_tools/`
+
+#### Existing spec to expand
+
+- `t32_cli_spec.spl`
+
+Expand beyond parser/types coverage into:
+- top-level command behavior expectations
+- shell command behavior expectations
+- parity statements for command families
+- examples of user-visible workflows
+
+### System Tests
+
+Target directory:
+- `test/system/`
+
+#### New specs
+
+- `t32_cli_system_spec.spl`
+  - end-to-end CLI command families without live hardware dependency
+- `t32_cli_headless_safe_spec.spl`
+  - headless setup, area read, status, cmm validate flow
+- `t32_cli_dialog_workflow_spec.spl`
+  - parse/get/set/click dialog workflow using deterministic fixtures
+- `t32_cli_jobs_workflow_spec.spl`
+  - list/get/cancel/result flow over synthetic job state
+
+#### System test principle
+
+Mirror the style of `test/system/t32_mcp_lifecycle_spec.spl`:
+- focus on pure helpers and end-to-end orchestration
+- avoid requiring an active TRACE32 instance for baseline coverage
+
+## Package Coverage Expectations
+
+Coverage target means decision/branch-oriented practical coverage, not line
+count vanity.
+
+### CLI Packages
+
+- `app.t32_cli.mod`
+  - target: 95%+
+  - must cover all top-level command dispatch branches
+- `app.t32_cli.cli_shell`
+  - target: 90%+
+  - must cover shell verb parsing and prompt-state-sensitive flows
+- `app.t32_cli.error_codes`
+  - target: 95%+
+  - all user-facing command/subcommand guidance paths covered
+- `app.t32_cli.session`
+  - target: 90%+
+  - session selection and no-session errors covered
+- `app.t32_cli.window_model`
+  - target: 85%+
+  - catalog-driven rendering/capture behavior covered
+- `app.t32_cli.commands`
+  - target: 95%+
+  - command table and parser logic must be nearly exhaustive
+- `app.t32_cli.bridge`
+  - target: 90%+
+  - success/error normalization and shared helper dispatch covered
+- `app.t32_cli.render`
+  - target: 90%+
+  - all renderer branches and empty/error cases covered
+
+### Parity Coverage
+
+- 100% of MCP tools must have:
+  - CLI mapping, or
+  - explicit tested exclusion
+
+Target state: 100% mapped, 0 exclusions.
+
+## Detailed Acceptance Criteria
+
+### Command Execution
+
+- CLI no longer contains fake execution stubs for TRACE32-affecting commands.
+- Shell mode and non-shell mode call the same backend helpers.
+- Error paths are structured and consistent across command families.
+
+### Parity
+
+- MCP tool inventory and CLI mapping inventory are checked in tests.
+- Adding a new MCP tool without CLI parity causes test failure.
+
+### Usability
+
+- `simple t32 help` documents all implemented command families.
+- shell `help` documents all implemented shell verbs.
+- outputs are readable without needing raw JSON parsing.
+
+### Testing
+
+- unit, integration, feature, and system test layers all exist for CLI parity
+- no reliance on live hardware for the default parity suite
+- optional live-hardware tests remain separate from default suite
+
+## Implementation Order
+
+### Wave 1
+
+- create `commands.spl`, `bridge.spl`, `render.spl`
+- replace existing stubs with bridge-backed execution
+- update top-level and shell help
+
+### Wave 2
+
+- add raw execution, status, history, resource, headless, and validator commands
+- add rendering and shared parser coverage
+
+### Wave 3
+
+- add jobs and dialog workflows
+- add parity guard specs
+
+### Wave 4
+
+- update docs
+- tighten coverage threshold expectations
+- clean up duplication left in `error_codes.spl`, `mod.spl`, and `cli_shell.spl`
+
+## Risks
+
+- If CLI directly calls MCP handlers that assume JSON-RPC framing, wrapper seams
+  may need extraction before parity work can proceed cleanly.
+- If rendering is mixed into business logic, package split may need a small
+  refactor before large command expansion.
+- If shell and argv parsing diverge further during implementation, parity bugs
+  will reappear unless both are forced through a shared command table.
+
+## Exit Criteria
+
+This plan is complete when:
+- the CLI command surface matches MCP coverage
+- no fake execution stubs remain
+- parity is enforced by SSpec
+- package-level coverage targets are met or explicitly justified
+- docs reflect the implemented command surface accurately

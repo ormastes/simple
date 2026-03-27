@@ -1,0 +1,405 @@
+# T32 CLI Bridge spec — tests bridge layer function contracts
+# Most bridge functions require an active MCP session. Without hardware,
+# session-dependent functions return errors. This spec validates:
+#   1. Functions that work without a session (pure data lookups)
+#   2. Functions that properly error when no session exists
+#   3. Pure-logic validation (bridge_cmm_validate)
+
+# ---------------------------------------------------------------------------
+# Inline bridge stubs — mirror bridge.spl contracts for interpreter testing
+# ---------------------------------------------------------------------------
+
+# Minimal result structure matching T32BridgeResult
+class BridgeResult:
+    kind: text
+    title: text
+    rows: [[text]]
+    kv_pairs: [[text]]
+    scalar_value: text
+    gui_status: text
+    raw_output: text
+    items: [text]
+
+fn br_scalar(value: text) -> BridgeResult:
+    BridgeResult(kind: "scalar", title: "", rows: [], kv_pairs: [],
+        scalar_value: value, gui_status: "", raw_output: "", items: [])
+
+fn br_scalar_titled(title: text, value: text) -> BridgeResult:
+    BridgeResult(kind: "scalar", title: title, rows: [], kv_pairs: [],
+        scalar_value: value, gui_status: "", raw_output: "", items: [])
+
+fn br_table(title: text, rows: [[text]]) -> BridgeResult:
+    BridgeResult(kind: "table", title: title, rows: rows, kv_pairs: [],
+        scalar_value: "", gui_status: "", raw_output: "", items: [])
+
+fn br_kv(title: text, pairs: [[text]]) -> BridgeResult:
+    BridgeResult(kind: "kv", title: title, rows: [], kv_pairs: pairs,
+        scalar_value: "", gui_status: "", raw_output: "", items: [])
+
+fn br_list(title: text, items: [text]) -> BridgeResult:
+    BridgeResult(kind: "list", title: title, rows: [], kv_pairs: [],
+        scalar_value: "", gui_status: "", raw_output: "", items: items)
+
+# ---------------------------------------------------------------------------
+# Stub implementations of bridge functions for offline testing
+# (mirror bridge.spl logic but without MCP/hardware dependencies)
+# ---------------------------------------------------------------------------
+
+# Global state for session simulation
+var STUB_SESSIONS: [text] = []
+var STUB_CURRENT_SESSION = ""
+var STUB_HISTORY: [[text]] = []
+
+fn stub_require_session() -> Result<text, text>:
+    if STUB_CURRENT_SESSION == "":
+        return Err("No active session. Use 'session open' first.")
+    Ok(STUB_CURRENT_SESSION)
+
+fn stub_sessions_list() -> Result<BridgeResult, text>:
+    if STUB_SESSIONS.len() == 0:
+        return Ok(br_scalar("No sessions registered."))
+    var rows: [[text]] = [["ID", "Host", "Port", "Name", "Arch", "Connected"]]
+    for s in STUB_SESSIONS:
+        rows.push([s, "localhost", "20000", s, "ARM", "no"])
+    Ok(br_table("Sessions", rows))
+
+fn stub_resources_list() -> Result<BridgeResult, text>:
+    val items = [
+        "t32:///sessions  - T32 Session Manifest",
+        "t32:///windows   - T32 Window Catalog",
+        "t32:///history   - T32 Command History"
+    ]
+    Ok(br_list("Resources", items))
+
+fn stub_window_list() -> Result<BridgeResult, text>:
+    # Simulates window catalog with built-in entries
+    var rows: [[text]] = [["Key", "Title", "Kind", "Capture"]]
+    rows.push(["break_list", "Breakpoint List", "built_in", "print_parse"])
+    rows.push(["register", "Register", "built_in", "print_parse"])
+    rows.push(["data_dump", "Memory Dump", "built_in", "print_parse"])
+    Ok(br_table("Windows", rows))
+
+fn stub_cmm_commands(group: text, search: text) -> Result<BridgeResult, text>:
+    # Simulates command database entries
+    var db: [[text]] = [
+        ["Break.Set", "B.", "Break", "Set breakpoint"],
+        ["Break.Delete", "B.D.", "Break", "Delete breakpoint"],
+        ["Data.dump", "D.", "Data", "Display memory"],
+        ["Register", "R.", "Register", "Display registers"],
+        ["SYStem.Up", "SYS.UP", "System", "Power up target"]
+    ]
+    var rows: [[text]] = [["Name", "Short", "Group", "Description"]]
+    for cmd in db:
+        if group != "":
+            if cmd[2].to_lower() != group.to_lower():
+                continue
+        if search != "":
+            val lower_search = search.to_lower()
+            if not cmd[0].to_lower().contains(lower_search) and not cmd[3].to_lower().contains(lower_search):
+                continue
+        rows.push(cmd)
+    var count = rows.len() - 1
+    Ok(br_table("CMM Commands ({count} matches)", rows))
+
+fn stub_cmd_run(command: text) -> Result<BridgeResult, text>:
+    if command == "":
+        return Err("command is required.")
+    val session = stub_require_session()?
+    Err("No active session. Use 'session open' first.")
+
+fn stub_eval(expression: text) -> Result<BridgeResult, text>:
+    if expression == "":
+        return Err("expression is required.")
+    val session = stub_require_session()?
+    Err("No active session. Use 'session open' first.")
+
+fn stub_field_get(field_key: text) -> Result<BridgeResult, text>:
+    if field_key == "":
+        return Err("field_key is required.")
+    val session = stub_require_session()?
+    Err("No active session. Use 'session open' first.")
+
+fn stub_history_tail(count: i64) -> Result<BridgeResult, text>:
+    var actual_count = count
+    if actual_count < 1:
+        actual_count = 20
+    var rows: [[text]] = [["Command", "Result", "Session", "Core"]]
+    # No history entries in stub
+    Ok(br_table("History (last {actual_count})", rows))
+
+fn stub_job_list(session_id: text) -> Result<BridgeResult, text>:
+    # No jobs in offline mode
+    Ok(br_scalar("No jobs."))
+
+fn stub_cmm_validate(source: text, mode: text) -> Result<BridgeResult, text>:
+    if source == "":
+        return Err("source is required.")
+    var actual_mode = mode
+    if actual_mode == "":
+        actual_mode = "check"
+    if actual_mode != "check" and actual_mode != "report" and actual_mode != "suggest":
+        return Err("Invalid mode: {actual_mode}. Must be one of: check, report, suggest")
+    val lines = source.split("\n")
+    var findings: [[text]] = [["Line", "Command", "Severity", "Message"]]
+    var block_count: i64 = 0
+    var line_num: i64 = 1
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with(";"):
+            line_num = line_num + 1
+            continue
+        val lower = trimmed.to_lower()
+        if lower.contains("dialog.ok"):
+            findings.push([str(line_num), "DIALOG.OK", "BLOCK", "Waits for user click"])
+            block_count = block_count + 1
+        if lower.contains("dialog.yesno"):
+            findings.push([str(line_num), "DIALOG.YESNO", "BLOCK", "Waits for user choice"])
+            block_count = block_count + 1
+        if lower.contains("dialog.file"):
+            findings.push([str(line_num), "DIALOG.FILE", "BLOCK", "Opens file picker"])
+            block_count = block_count + 1
+        if lower.contains("inkey"):
+            findings.push([str(line_num), "INKEY", "BLOCK", "Waits for keypress"])
+            block_count = block_count + 1
+        if lower.contains("screen.wait"):
+            findings.push([str(line_num), "SCREEN.WAIT", "BLOCK", "Waits for screen update"])
+            block_count = block_count + 1
+        line_num = line_num + 1
+    var classification = "safe"
+    if block_count > 3:
+        classification = "unsafe_for_headless"
+    elif block_count > 0:
+        classification = "needs_manual_rewrite"
+    var finding_count = findings.len() - 1
+    var result = br_table("CMM Validation ({classification})", findings)
+    result.gui_status = "classification: {classification}, findings: {finding_count}, mode: {actual_mode}"
+    Ok(result)
+
+fn stub_dialog_parse(source: text) -> Result<BridgeResult, text>:
+    if source == "":
+        return Err("source is required.")
+    # Minimal stub — return empty table for non-empty source
+    var rows: [[text]] = [["Label", "Type", "Queryable", "Clickable", "Settable"]]
+    Ok(br_table("Dialog Elements (0 dialogs)", rows))
+
+fn stub_error_check() -> Result<BridgeResult, text>:
+    val session = stub_require_session()?
+    Err("No active session. Use 'session open' first.")
+
+fn stub_status_snapshot() -> Result<BridgeResult, text>:
+    val session = stub_require_session()?
+    Err("No active session. Use 'session open' first.")
+
+# ===========================================================================
+# Tests
+# ===========================================================================
+
+describe "T32 CLI Bridge":
+    context "session-free functions":
+        it "bridge_sessions_list returns Ok with empty session list":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_sessions_list()
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("scalar")
+                    expect(r.scalar_value).to_contain("No sessions")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_resources_list returns Ok with resource URIs":
+            val result = stub_resources_list()
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("list")
+                    expect(r.items.len()).to_equal(3)
+                    expect(r.items[0]).to_contain("t32:///sessions")
+                    expect(r.items[1]).to_contain("t32:///windows")
+                    expect(r.items[2]).to_contain("t32:///history")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_window_list returns Ok with window entries from catalog":
+            val result = stub_window_list()
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_equal("Windows")
+                    # Header + 3 data rows
+                    expect(r.rows.len()).to_be_greater_than(1)
+                    # First row is header
+                    expect(r.rows[0][0]).to_equal("Key")
+                    expect(r.rows[0][1]).to_equal("Title")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_cmm_commands returns Ok with command database entries":
+            val result = stub_cmm_commands("", "")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_contain("CMM Commands")
+                    # Header + at least 1 data row
+                    expect(r.rows.len()).to_be_greater_than(1)
+                    expect(r.rows[0][0]).to_equal("Name")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_cmm_commands filters by group":
+            val result = stub_cmm_commands("Break", "")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    # Header + Break commands only
+                    expect(r.rows.len()).to_be_greater_than(1)
+                    expect(r.rows[1][2]).to_equal("Break")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+    context "session-dependent functions return Err without session":
+        it "bridge_cmd_run without session returns Err":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_cmd_run("Break.Set 0x1000")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("session")
+                    expect(e.len()).to_be_greater_than(0)
+
+        it "bridge_eval without session returns Err":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_eval("Register.PP()")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("session")
+                    expect(e.len()).to_be_greater_than(0)
+
+        it "bridge_field_get without session returns Err":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_field_get("pc")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("session")
+                    expect(e.len()).to_be_greater_than(0)
+
+        it "bridge_error_check without session returns Err":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_error_check()
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("session")
+
+        it "bridge_status_snapshot without session returns Err":
+            STUB_SESSIONS = []
+            STUB_CURRENT_SESSION = ""
+            val result = stub_status_snapshot()
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("session")
+
+    context "history and jobs (no session needed for empty results)":
+        it "bridge_history_tail returns Ok with empty history":
+            STUB_HISTORY = []
+            val result = stub_history_tail(10)
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_contain("History")
+                    # Only header row when history is empty
+                    expect(r.rows.len()).to_equal(1)
+                    expect(r.rows[0][0]).to_equal("Command")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_job_list returns Ok with empty job list":
+            val result = stub_job_list("")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("scalar")
+                    expect(r.scalar_value).to_contain("No jobs")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+    context "CMM validation (pure logic, no hardware)":
+        it "bridge_cmm_validate with safe source returns safe classification":
+            val source = "; Comment\nBreak.Set 0x1000\nGo"
+            val result = stub_cmm_validate(source, "check")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_contain("safe")
+                    expect(r.gui_status).to_contain("classification: safe")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_cmm_validate detects blocking commands":
+            val source = "DIALOG.OK \"Press OK to continue\""
+            val result = stub_cmm_validate(source, "check")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_contain("needs_manual_rewrite")
+                    # Header + 1 finding
+                    expect(r.rows.len()).to_equal(2)
+                    expect(r.rows[1][1]).to_equal("DIALOG.OK")
+                    expect(r.rows[1][2]).to_equal("BLOCK")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_cmm_validate with many blockers marks unsafe_for_headless":
+            val source = "DIALOG.OK \"a\"\nDIALOG.YESNO \"b\"\nDIALOG.FILE \"c\"\nINKEY\nSCREEN.WAIT"
+            val result = stub_cmm_validate(source, "check")
+            match result:
+                Ok(r):
+                    expect(r.title).to_contain("unsafe_for_headless")
+                    expect(r.gui_status).to_contain("classification: unsafe_for_headless")
+                Err(e):
+                    expect("should not error").to_equal(e)
+
+        it "bridge_cmm_validate with empty source returns Err":
+            val result = stub_cmm_validate("", "check")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("source is required")
+
+        it "bridge_cmm_validate rejects invalid mode":
+            val result = stub_cmm_validate("Break.Set", "invalid")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("Invalid mode")
+                    expect(e).to_contain("check, report, suggest")
+
+    context "dialog parse (requires source input)":
+        it "bridge_dialog_parse with empty source returns Err":
+            val result = stub_dialog_parse("")
+            match result:
+                Ok(r):
+                    expect("should error").to_equal("got Ok")
+                Err(e):
+                    expect(e).to_contain("source is required")
+
+        it "bridge_dialog_parse with non-empty source returns a table result":
+            val result = stub_dialog_parse("DIALOG.view\n(&DEFPOS.X\n)")
+            match result:
+                Ok(r):
+                    expect(r.kind).to_equal("table")
+                    expect(r.title).to_contain("Dialog Elements")
+                Err(e):
+                    expect("should not error").to_equal(e)

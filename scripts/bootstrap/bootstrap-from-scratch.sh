@@ -178,21 +178,18 @@ else
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
-  SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
   "${seed_bin}" native-build \
     --entry src/app/cli/bootstrap_main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf .simple/native_cache/
-  # Copy runtime next to stage2 binary so its embedded linker finds it
-  cp src/compiler_rust/target/bootstrap/libsimple_runtime.a \
-     "${output_dir}/stage2/${PLATFORM}/libsimple_runtime.a" 2>/dev/null || true
-  SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
   "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --entry src/app/cli/bootstrap_main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage3/${PLATFORM}/simple"
 fi
 
@@ -236,12 +233,9 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
-# Copy runtime next to the build binary so its linker finds it
-cp src/compiler_rust/target/bootstrap/libsimple_runtime.a \
-   "$(dirname "${stage_for_build}")/libsimple_runtime.a" 2>/dev/null || true
-SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
 "${stage_for_build}" native-build \
   --entry src/app/cli/main.spl \
+  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
   -o "${full_dir}/simple"
 
 full_bin="${full_dir}/simple"

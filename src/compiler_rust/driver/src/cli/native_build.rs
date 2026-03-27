@@ -36,6 +36,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
     let mut backend = String::new();
+    let mut runtime_path: Option<PathBuf> = None;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -144,6 +145,19 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 backend = other.strip_prefix("--backend=").unwrap_or("").to_string();
                 i += 1;
             }
+            "--runtime-path" => {
+                if i + 1 < args.len() {
+                    runtime_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("error: --runtime-path requires a directory path");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--runtime-path=") => {
+                runtime_path = Some(PathBuf::from(other.strip_prefix("--runtime-path=").unwrap_or("")));
+                i += 1;
+            }
             other => {
                 // Treat as source directory
                 source_dirs.push(PathBuf::from(other));
@@ -198,6 +212,20 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         if !backend.is_empty() {
             eprintln!("  Backend: {}", backend);
         }
+        if let Some(ref rp) = runtime_path {
+            eprintln!("  Runtime path: {}", rp.display());
+        }
+    }
+
+    // Set runtime path override before building
+    if let Some(ref rp) = runtime_path {
+        simple_compiler::pipeline::native_project::set_runtime_path_override(rp.clone());
+        // Also set env vars in-process as fallback
+        unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", rp); }
+        let native_all = rp.join("libsimple_native_all.a");
+        if native_all.exists() {
+            unsafe { std::env::set_var("SIMPLE_NATIVE_ALL_PATH", &native_all); }
+        }
     }
 
     let mut config = NativeBuildConfig {
@@ -209,6 +237,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         clean,
         cache_dir,
         no_mangle,
+        runtime_path,
         ..Default::default()
     };
     if !backend.is_empty() {

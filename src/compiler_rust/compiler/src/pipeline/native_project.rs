@@ -9,7 +9,17 @@
 //! and auto-detected linker selection via `LinkerBuilder`.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// CLI-provided runtime library directory override.
+/// Set before building; read by `find_native_all_library()` and `find_runtime_library()`.
+static RUNTIME_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the runtime path override (called from CLI arg parsing).
+pub fn set_runtime_path_override(path: PathBuf) {
+    let _ = RUNTIME_PATH_OVERRIDE.set(path);
+}
 
 use rayon::prelude::*;
 
@@ -61,6 +71,8 @@ pub struct NativeBuildConfig {
     pub no_mangle: bool,
     /// Codegen backend: "cranelift" (default) or "llvm".
     pub backend: String,
+    /// Explicit runtime library directory (overrides env var and auto-discovery).
+    pub runtime_path: Option<PathBuf>,
 }
 
 impl Default for NativeBuildConfig {
@@ -77,6 +89,7 @@ impl Default for NativeBuildConfig {
             clean: false,
             no_mangle: false,
             backend: "cranelift".to_string(),
+            runtime_path: None,
         }
     }
 }
@@ -769,7 +782,10 @@ int main(int argc, char** argv) {
         // libc initialization, and library paths automatically.
         // When libsimple_native_all.a is present (always contains LLVM C++ objects),
         // use clang++ to ensure proper C++ runtime initialization ordering.
-        let cc = if find_native_all_library().is_some() {
+        let has_native_all = self.config.runtime_path.as_ref().map_or(false, |rp| {
+            rp.join("libsimple_native_all.a").exists()
+        }) || find_native_all_library().is_some();
+        let cc = if has_native_all {
             find_cxx_compiler()
         } else {
             find_c_compiler()
@@ -911,10 +927,24 @@ int main(int argc, char** argv) {
 
         // Add runtime/compiler library. Prefer combined native_all library
         // (includes Cranelift FFI for self-hosting) over runtime-only.
-        if let Some(native_all) = find_native_all_library() {
-            cmd.arg(&native_all);
-        } else if let Some(runtime) = find_runtime_library() {
-            cmd.arg(&runtime);
+        // Check config.runtime_path first (explicit CLI flag — most reliable).
+        let mut runtime_linked = false;
+        if let Some(ref rp) = self.config.runtime_path {
+            for name in &["libsimple_native_all.a", "libsimple_runtime.a"] {
+                let lib = rp.join(name);
+                if lib.exists() {
+                    cmd.arg(&lib);
+                    runtime_linked = true;
+                    break;
+                }
+            }
+        }
+        if !runtime_linked {
+            if let Some(native_all) = find_native_all_library() {
+                cmd.arg(&native_all);
+            } else if let Some(runtime) = find_runtime_library() {
+                cmd.arg(&runtime);
+            }
         }
 
         // Libraries — via PlatformLinkConfig (single source of truth per OS)
@@ -2893,14 +2923,28 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).
 fn find_native_all_library() -> Option<PathBuf> {
-    // Check env var overrides first
+    // Check CLI override first (works even when env vars don't in C-compiled binaries)
+    if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
+        let p = dir.join("libsimple_native_all.a");
+        if p.exists() {
+            return Some(p);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let p = dir.join("simple_native_all.lib");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+
+    // Check env var overrides
     if let Ok(path) = std::env::var("SIMPLE_NATIVE_ALL_PATH") {
         let p = PathBuf::from(&path);
         if p.exists() {
             return Some(p);
         }
     }
-    // Also check SIMPLE_RUNTIME_PATH for native_all library
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path).join("libsimple_native_all.a");
         if p.exists() {
@@ -2953,7 +2997,24 @@ fn find_native_all_library() -> Option<PathBuf> {
 
 /// Find the Simple runtime library.
 fn find_runtime_library() -> Option<PathBuf> {
-    // Check env var override first
+    // Check CLI override first (works even when env vars don't in C-compiled binaries)
+    if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
+        for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
+            let lib = dir.join(name);
+            if lib.exists() {
+                return Some(lib);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        for name in &["simple_runtime.lib", "simple_native_all.lib"] {
+            let lib = dir.join(name);
+            if lib.exists() {
+                return Some(lib);
+            }
+        }
+    }
+
+    // Check env var override
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path);
         // Check for both runtime and native_all in the given directory
