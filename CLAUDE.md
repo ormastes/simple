@@ -12,8 +12,6 @@ Impl in simple unless it has big performance differences.
 |--------|------|------|--------|
 | **Real binary** | `bin/release/simple` (`.exe` on Windows) | Full interpreter/compiler (production) — **fully self-sufficient** | Compiled from Simple source by Simple compiler |
 | **Platform binaries** | `bin/release/<triple>/simple` | Per-platform release binaries (x86_64-pc-windows-msvc, etc.) | Same as above, organized by target triple |
-| **C++ bootstrap** | `bin/bootstrap/cpp/simple` | Fast CLI dispatcher (~3ms startup) | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
-| **C++ codegen** | `bin/bootstrap/cpp/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
 
 - **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple` (`.exe` on Windows). Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
 - **NEVER copy the Rust bootstrap binary to `bin/release/simple`** — `bin/release/simple` is the **self-hosted** binary compiled by Simple itself. The Rust bootstrap is only a seed for bootstrapping; it goes to `src/compiler_rust/target/bootstrap/simple`, not to `bin/release/`.
@@ -190,11 +188,6 @@ scripts/bootstrap/bootstrap-windows.sh
 # Linux/FreeBSD: use bootstrap-from-scratch.sh
 scripts/bootstrap/bootstrap-from-scratch.sh
 
-# C++ Bootstrap (legacy fallback — CMake + Ninja)
-bin/bootstrap/cpp/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
-cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build -j7
-
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
 CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
 ```
@@ -274,7 +267,7 @@ src/
     nogc_async_mut/ # Async mutable, no GC (actors, async, threads, generators, etc.)
     gc_async_mut/   # GC + async (gpu, cuda, torch, pure ML library)
     nogc_async_mut_noalloc/  # Baremetal, execution, memory, qemu
-  compiler_cpp/     # Generated C from Simple source (temporal bootstrap — CMakeLists.txt + *.c via CMake+Ninja)
+  compiler_cpp/     # Legacy C bootstrap (deprecated — use Rust seed bootstrap)
   runtime/          # C runtime (runtime.c/runtime.h — linked by generated C++)
   compiler/         # Unified compiler — numbered layers (NN.name/ prefix stripped for imports)
     00.common/      # Error types, config, effects, visibility, diagnostics, registry
@@ -298,7 +291,7 @@ src/
 test/               # Test files (lib, app, compiler, benchmarks)
 doc/                # Documentation (report, design, guide, research, feature, tracking, metrics, plan, archive)
 bin/                # Binaries (simple wrapper, release/simple = real binary)
-build/bootstrap/    # Temporal bootstrap binaries (c_simple/simple, cpp/simple)
+build/bootstrap/    # Bootstrap artifacts (stage2/, stage3/, full/)
 tools/              # Development tools (docker containers, windows/ build helpers)
 scripts/            # Bootstrap bash scripts (3 only)
 .claude/            # Agents, skills, templates

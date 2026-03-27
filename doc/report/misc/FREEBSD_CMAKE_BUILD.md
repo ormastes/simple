@@ -1,3 +1,5 @@
+> **DEPRECATED**: C-based bootstrap has been replaced by Rust seed → pure Simple bootstrap. See CLAUDE.md for current bootstrap instructions.
+
 # FreeBSD Build with CMake - Final Report
 
 ## ✅ What We Achieved

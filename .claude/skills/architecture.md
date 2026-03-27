@@ -294,10 +294,9 @@ src/
 │   ├── spec.spl      # SSpec BDD framework
 │   ├── text.spl, array.spl, math.spl, path.spl
 │   └── platform/     # Cross-platform support
-├── compiler_cpp/     # Generated C code + runtime (bootstrap via CMake+Ninja)
-│   ├── CMakeLists.txt
-│   ├── *.cpp, *.c    # Generated C code
-│   └── runtime/      # C runtime (runtime.c/runtime.h)
+├── compiler_rust/    # Rust seed bootstrap (cargo build --profile bootstrap)
+│   └── target/bootstrap/simple  # Rust seed binary (NOT for bin/release/)
+├── runtime/          # C runtime (runtime.c/runtime.h — linked by generated code)
 └── compiler/         # Unified compiler — numbered layers
     ├── 00.common/    # Error types, config, effects, visibility, diagnostics, registry
     ├── 10.frontend/  # Lexer, parser, AST, treesitter, desugar, parser types
@@ -363,7 +362,7 @@ MIR-level weaving at `compiler/90.tools/`:
 
 | Backend | Mode | File(s) |
 |---------|------|---------|
-| **C** | Bootstrap | `c_backend.spl`, `c_ir_builder.spl`, `c_type_mapper.spl` |
+| **C** | Production target | `c_backend.spl`, `c_ir_builder.spl`, `c_type_mapper.spl` |
 | **Cranelift** | Debug/JIT | `compiler.spl`, `cranelift_type_mapper.spl` |
 | **LLVM** | Release | `llvm_backend.spl`, `llvm_ir_builder.spl`, `llvm_target.spl` |
 | **Native** | Bare-metal | `native/isel_x86_64.spl`, `isel_aarch64.spl`, `isel_riscv{32,64}.spl`, `regalloc.spl`, `elf_writer.spl`, `macho_writer.spl` |
@@ -397,21 +396,36 @@ Selection: `select_backend_with_mode(target, mode, nil)` in `backend_selector.sp
 
 Each instruction has an effect tag: `Compute`, `Io`, `Wait`, `GcAlloc`.
 
-## Bootstrap Chain (C Backend)
+## Bootstrap Chain (Rust Seed)
 
 ```
-Phase 0: C/C++ compiler (clang/gcc/MSVC)
-Phase 1: bin/simple compile --backend=c  →  generates C code into src/compiler_cpp/
-Phase 2: cmake + ninja  →  builds C code + runtime.c  →  bootstrap binary
+Stage 1: Rust seed  — cargo build --profile bootstrap in src/compiler_rust/
+         → src/compiler_rust/target/bootstrap/simple (Cranelift backend)
+Stage 2: Stage2 build — Rust seed compiles Simple compiler via native-build
+         → build/bootstrap/simple_stage2
+Stage 3: Self-host verify — Stage2 binary recompiles itself
+         → bin/release/simple (the production self-hosted binary)
 ```
 
 Commands:
 ```bash
-bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build
-mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+# Stage 1: Build Rust seed
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver
+
+# Stage 2: Compile Simple compiler with Rust seed
+src/compiler_rust/target/bootstrap/simple native-build \
+  --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/simple_stage2
+
+# Stage 3: Self-host recompile (produces final binary)
+build/bootstrap/simple_stage2 native-build \
+  --entry src/app/cli/main.spl -o bin/release/simple
+
+# Platform-specific bootstrap scripts:
+# Linux/FreeBSD: scripts/bootstrap/bootstrap-from-scratch.sh
+# Windows:       scripts/bootstrap/bootstrap-windows.sh
 ```
+
+**Important:** Never copy the Rust seed binary to `bin/release/simple`. The release binary must always be the self-hosted binary compiled by Simple itself.
 
 ## Stdlib Variant System
 

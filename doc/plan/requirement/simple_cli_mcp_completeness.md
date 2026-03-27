@@ -124,17 +124,33 @@ required implementation and verification work.
 - AC-TEST-02: Package coverage thresholds are defined and enforced for key CLI/MCP modules.
 - AC-TEST-03: Regressions in command/tool inventory fail tests.
 
-## Current Known Gaps
+## Current Known Gaps (Updated 2026-03-27 per research)
 
 ### CLI
 
-- `migrate`, `diff`, `constr`, and `verify` still route through `cli_not_implemented(...)` in `src/app/io/cli_commands.spl`.
+- **14 placeholder commands** (not 4) route through `cli_not_implemented(...)` in `src/app/io/cli_commands.spl`:
+  - **Implement (infra exists):** `lex`, `diff`, `info`, `brief`, `linkers`, `ffi-gen`, `i18n`
+  - **Hide as experimental:** `verify`, `migrate`, `constr`, `replay`, `gen-lean`
+- 51 total top-level commands with 4 implementation strategies: direct (11), file delegation (24), shell wrapper (1), built-in (5), placeholder (14)
 - command inventory is spread across `src/app/cli/main.spl`, `src/app/cli/cli_helpers.spl`, and multiple delegated entrypoints.
+- help text in `print_cli_help()` advertises all commands including placeholders.
 
 ### MCP
 
+- 69 tools across 8 families + 15 protocol methods = 84 callable operations.
+- **34 native** (debug 25, debug log 6, task 3) and **35 wrapper-based** (diagnostics 9, VCS 8, query 8, CLI 6, test daemon 4).
 - tool families are broad and mostly implemented, but not uniformly categorized as native vs wrapper.
 - some tool families depend on shelling out to the `simple` binary and need explicit maturity labeling and timeout guarantees.
+- schema-dispatch alignment is currently clean (all 69 tools have both schema and handler).
+
+### Testing
+
+- **190 existing test files** (58 CLI, 132 MCP) but critical gaps:
+  - No inventory drift tests (CLI help vs dispatch, MCP tool list vs dispatch)
+  - No placeholder regression tests
+  - No CLI/MCP alignment tests
+  - No wrapper contract tests (timeout, exit code, output normalization)
+  - No protocol handshake integration test (full initialize→shutdown sequence)
 
 ### Alignment
 

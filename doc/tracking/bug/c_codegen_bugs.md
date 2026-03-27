@@ -1,3 +1,5 @@
+> **DEPRECATED**: C-based bootstrap has been replaced by Rust seed → pure Simple bootstrap. See CLAUDE.md for current bootstrap instructions.
+
 # C Codegen Bugs — Bootstrap Compilation (2026-02-22)
 
 Tracked during iterative bootstrap build: `.spl` → `.c` via `build/simple_codegen`.

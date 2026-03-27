@@ -7,11 +7,22 @@ Single source of truth for the Simple compiler implementation.
 - `src/compiler/` is the unified compiler with numbered layers (NN.name/).
 - Layer prefix stripped for imports (e.g., `10.frontend/` → `frontend`).
 
-## Bootstrap (C Backend)
+## Bootstrap (Rust Seed → Native Build → Self-Host)
+
+3-stage pipeline: Rust seed compiler bootstraps the pure Simple self-hosted binary.
 
 ```
-bin/simple compile --backend=c  →  generates C code into src/compiler_cpp/
-cmake + ninja  →  builds C code + runtime  →  bootstrap binary
+# Stage 1: Build Rust seed compiler (Cranelift backend)
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver
+  → src/compiler_rust/target/bootstrap/simple
+
+# Stage 2: Compile Simple compiler with Rust seed
+src/compiler_rust/target/bootstrap/simple native-build \
+  --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/simple_stage2
+
+# Stage 3: Self-host recompile (verification)
+build/bootstrap/simple_stage2 native-build \
+  --entry src/app/cli/main.spl -o bin/release/simple
 ```
 
 ## Layer Structure

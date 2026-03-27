@@ -9,6 +9,9 @@ use compiler.driver.driver_types.{CompileResult}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use std.tooling.easy_fix.{FixConfidence}
+use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
+use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
+use app.io.cli_ops.{_cli_shell, _cli_eprint}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -259,10 +262,12 @@ fn cli_run_fix(args: [text]) -> i64:
     exit_code
 
 fn cli_run_verify(args: [text], gc_log: bool, gc_off: bool) -> i64:
-    cli_not_implemented("Verifier")
+    print "[experimental] Verifier is not yet implemented"
+    1
 
 fn cli_run_migrate(args: [text]) -> i64:
-    cli_not_implemented("Migration tool")
+    print "[experimental] Migration tool is not yet implemented"
+    1
 
 fn cli_run_mcp(args: [text]) -> i64:
     # Single canonical MCP entry via wrapper for fast startup and stable stdio framing.
@@ -284,10 +289,51 @@ fn cli_run_lsp(args: [text]) -> i64:
     cli_run_file("src/app/lsp/main.spl", run_args, false, false)
 
 fn cli_run_diff(args: [text]) -> i64:
-    cli_not_implemented("Diff tool")
+    # Build diff command: prefer jj, fall back to git
+    var revision = ""
+    var paths: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "diff":
+            val _ = 0
+        elif arg == "-r" and i + 1 < args.len():
+            i = i + 1
+            revision = args[i]
+        elif arg.starts_with("-r"):
+            revision = arg[2:]
+        elif not arg.starts_with("-"):
+            paths.push(arg)
+        i = i + 1
+    # Try jj first
+    var cmd = "jj --no-pager --color never diff"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    for p in paths:
+        cmd = cmd + " " + p
+    cmd = cmd + " 2>&1"
+    val result = _cli_shell(cmd)
+    if result.exit_code == 0:
+        if result.stdout.len() > 0:
+            print result.stdout
+        else:
+            print "(no changes)"
+        return 0
+    # Fall back to git diff
+    var git_cmd = "git diff"
+    for p in paths:
+        git_cmd = git_cmd + " " + p
+    git_cmd = git_cmd + " 2>&1"
+    val git_result = _cli_shell(git_cmd)
+    if git_result.stdout.len() > 0:
+        print git_result.stdout
+    else:
+        print "(no changes)"
+    git_result.exit_code
 
 fn cli_constr(args: [text]) -> i64:
-    cli_not_implemented("Constraint checker")
+    print "[experimental] Constraint checker is not yet implemented"
+    1
 
 fn cli_run_query(args: [text]) -> i64:
     val run_args = _cli_strip_command(args, "query")
@@ -298,7 +344,8 @@ fn cli_run_spec_coverage(args: [text]) -> i64:
     cli_run_file("src/app/spec_coverage/main.spl", run_args, false, false)
 
 fn cli_gen_lean(args: [text]) -> i64:
-    cli_not_implemented("Lean generator")
+    print "[experimental] Lean generator is not yet implemented"
+    1
 
 fn cli_run_feature_gen(args: [text]) -> i64:
     val run_args = _cli_strip_command(args, "feature-gen")
@@ -327,16 +374,114 @@ fn cli_todo_scan(args: [text]) -> i64:
     cli_run_file("src/app/todo_scan/main.spl", args, false, false)
 
 fn cli_run_lex(args: [text]) -> i64:
-    cli_not_implemented("Lexer")
+    # Parse args: skip "lex" command name, find file path
+    var file_path = ""
+    for arg in args:
+        if arg == "lex":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            if file_path == "":
+                file_path = arg
+    if file_path == "":
+        print "Usage: simple lex <file.spl>"
+        print ""
+        print "Tokenizes a Simple source file and prints the token stream."
+        return 1
+    if not rt_file_exists(file_path):
+        _cli_eprint("Error: File not found: {file_path}")
+        return 1
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        _cli_eprint("Error: Could not read file: {file_path}")
+        return 1
+    # Tokenize using CoreLexer
+    var lexer = make_core_lexer(source)
+    var token_count = 0
+    print "Tokens for {file_path}:"
+    print "  Line:Col  Kind  Text"
+    print "  ─────────────────────"
+    var done = false
+    while not done:
+        val (next_lexer, kind) = core_lexer_next_token(lexer)
+        lexer = next_lexer
+        val tok_text = core_lexer_token_text(lexer)
+        val tok_line = core_lexer_token_line(lexer)
+        val tok_col = core_lexer_token_col(lexer)
+        if kind == TOK_EOF:
+            done = true
+        else:
+            token_count = token_count + 1
+            print "  {tok_line}:{tok_col}  {kind}  {tok_text}"
+    print ""
+    print "Total: {token_count} tokens"
+    0
 
 fn cli_run_brief(args: [text]) -> i64:
-    cli_not_implemented("Brief tool")
+    # Brief project summary: file count, line count, test count
+    val file_count_result = _cli_shell("find src -name '*.spl' 2>/dev/null | wc -l")
+    val file_count = file_count_result.stdout.trim()
+    val line_count_result = _cli_shell("find src -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}'")
+    val line_count = line_count_result.stdout.trim()
+    val test_count_result = _cli_shell("find test -name '*_spec.spl' 2>/dev/null | wc -l")
+    val test_count = test_count_result.stdout.trim()
+    print "Simple Project Brief"
+    print "  Source files: {file_count}"
+    print "  Total lines:  {line_count}"
+    print "  Test specs:   {test_count}"
+    0
 
 fn cli_run_ffi_gen(args: [text]) -> i64:
-    cli_not_implemented("FFI generator")
+    # Delegate to wrapper_gen module (same infrastructure)
+    val run_args = _cli_strip_command(args, "ffi-gen")
+    cli_run_file("src/app/wrapper_gen/mod.spl", run_args, false, false)
 
 fn cli_run_i18n(args: [text]) -> i64:
-    cli_not_implemented("i18n tool")
+    # List available i18n language files and their status
+    var subcmd = ""
+    for arg in args:
+        if arg == "i18n":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            if subcmd == "":
+                subcmd = arg
+    if subcmd == "" or subcmd == "status":
+        # Show i18n status: count .ko.spl files vs .spl files
+        val en_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.spl' -not -name '*.ko.spl' 2>/dev/null | wc -l")
+        val ko_result = _cli_shell("find src/i18n -maxdepth 1 -name 'strings_*.ko.spl' 2>/dev/null | wc -l")
+        val en_count = en_result.stdout.trim()
+        val ko_count = ko_result.stdout.trim()
+        print "Internationalization (i18n) Status"
+        print "=================================="
+        print ""
+        print "  String modules (English): {en_count}"
+        print "  String modules (Korean):  {ko_count}"
+        print ""
+        print "  Source directory: src/i18n/"
+        print ""
+        print "Categories:"
+        print "  strings_common       Parser errors (E0001-E0016)"
+        print "  strings_semantic     Type checking errors (E1000-E1999)"
+        print "  strings_advanced     Advanced features (generics, traits)"
+        print "  strings_codegen      Code generation (E2000-E2999)"
+        print "  strings_runtime      Runtime errors (E3000+)"
+        print "  strings_verification Static analysis"
+        print "  strings_lint         Code style warnings"
+        print "  strings_explanations Detailed help text"
+        print "  strings_extended     Additional diagnostics"
+        return 0
+    elif subcmd == "list":
+        # List all i18n files
+        val list_result = _cli_shell("find src/i18n -name '*.spl' -maxdepth 1 | sort")
+        print "i18n files:"
+        print list_result.stdout
+        return 0
+    else:
+        print "Usage: simple i18n [status|list]"
+        print ""
+        print "Subcommands:"
+        print "  status   Show i18n coverage (default)"
+        print "  list     List all i18n files"
+        return 1
 
 fn cli_handle_web(args: [text]) -> i64:
     cli_not_implemented("Web handler")
@@ -355,10 +500,37 @@ fn cli_handle_compile(args: [text]) -> i64:
     cli_compile(args)
 
 fn cli_handle_linkers() -> i64:
-    cli_not_implemented("Linker information")
+    # Detect available linkers on the system
+    print "Available native linkers:"
+    print ""
+    # Check mold
+    val mold_result = _cli_shell("which mold 2>/dev/null")
+    if mold_result.exit_code == 0:
+        print "  mold      Modern linker (fastest, recommended)  [installed]"
+    else:
+        print "  mold      Modern linker (fastest, recommended)  [not found]"
+    # Check lld
+    val lld_result = _cli_shell("which lld 2>/dev/null || which ld.lld 2>/dev/null")
+    if lld_result.exit_code == 0:
+        print "  lld       LLVM linker (fast, widely available)  [installed]"
+    else:
+        print "  lld       LLVM linker (fast, widely available)  [not found]"
+    # Check ld
+    val ld_result = _cli_shell("which ld 2>/dev/null")
+    if ld_result.exit_code == 0:
+        print "  ld        GNU linker (default, always available)  [installed]"
+    else:
+        print "  ld        GNU linker (default)  [not found]"
+    print ""
+    print "Auto-detection preference: mold > lld > ld"
+    print ""
+    print "Usage:"
+    print "  simple compile app.spl --linker mold"
+    0
 
 fn cli_replay(args: [text]) -> i64:
-    cli_not_implemented("Replay tool")
+    print "[experimental] Replay tool is not yet implemented"
+    1
 
 fn cli_check(args: [text]) -> i64:
     # Parse flags from args
@@ -402,7 +574,61 @@ fn cli_check(args: [text]) -> i64:
     exit_code
 
 fn cli_info(args: [text]) -> i64:
-    cli_not_implemented("Info tool")
+    # Print project info from simple.sdn manifest
+    var sdn_path = "simple.sdn"
+    if not rt_file_exists(sdn_path):
+        print "No simple.sdn found in current directory."
+        print "Run 'simple init' to create a project."
+        return 1
+    val content = rt_file_read_text(sdn_path) ?? ""
+    if content == "":
+        _cli_eprint("Error: Could not read simple.sdn")
+        return 1
+    # Parse key fields from SDN
+    var name = ""
+    var version = ""
+    var license = ""
+    var main_file = ""
+    var run_config = ""
+    var in_package = false
+    var in_execution = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        # Detect top-level sections (no indent, ends with :)
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            in_package = trimmed == "package:"
+            in_execution = trimmed == "execution:"
+            continue
+        if in_package:
+            if trimmed.starts_with("name:"):
+                name = trimmed[5:].trim()
+            elif trimmed.starts_with("version:"):
+                version = trimmed[8:].trim()
+            elif trimmed.starts_with("license:"):
+                license = trimmed[8:].trim()
+            elif trimmed.starts_with("main:"):
+                main_file = trimmed[5:].trim()
+        elif in_execution:
+            if trimmed.starts_with("run-config:"):
+                run_config = trimmed[11:].trim()
+    print "Project Info"
+    print "============"
+    if name != "":
+        print "  Name:        {name}"
+    if version != "":
+        print "  Version:     {version}"
+    if license != "":
+        print "  License:     {license}"
+    if main_file != "":
+        print "  Entry:       {main_file}"
+    if run_config != "":
+        print "  Run Config:  {run_config}"
+    print ""
+    print "  Manifest:    {sdn_path}"
+    0
 
 # ============================================================================
 # Test Daemon
