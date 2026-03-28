@@ -1,8 +1,3 @@
----
-name: refactor
-description: Code quality refactoring workflow — file size, duplication, coupling, Big-O, test verification
----
-
 # Refactor Skill
 
 ## Phase 1: File Size & Structure

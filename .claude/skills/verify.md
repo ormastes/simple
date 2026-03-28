@@ -1,8 +1,3 @@
----
-name: verify
-description: Production readiness verification — SSpec, stubs, requirements tracing, NFR, docs
----
-
 # Verify Skill — Production Readiness Codex
 
 **Self-sufficient.** Any LLM (Claude, Codex, Gemini) can run verify independently. Does not depend on any other LLM having participated in prior steps.

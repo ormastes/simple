@@ -1,8 +1,3 @@
----
-name: release
-description: Release process and versioning — version bump, CHANGELOG, commit, tag, push
----
-
 # Release Skill
 
 Perform a version bump and release of the Simple Language compiler.
