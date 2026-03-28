@@ -1,0 +1,177 @@
+"""
+# Rate Limiting Middleware
+
+Token bucket rate limiting per peer address. Runs in the PreRead phase
+to reject abusive clients before reading the request body.
+
+## Algorithm
+
+Token bucket with configurable window and burst. Each peer_addr gets
+a bucket that refills at `requests_per_window / window_ms` tokens per
+millisecond. Burst allows short spikes up to `burst_size` above the
+steady-state rate.
+
+## Usage
+
+```simple
+val config = RateLimitConfig(
+    requests_per_window: 100,
+    window_ms: 60000,
+    burst_size: 20,
+    exempt_paths: ["/health", "/ready"]
+)
+val store = RateLimitStore.new()
+pipeline.add(Phase.PreRead, 100, "rate_limit",
+    \req, srv_cfg: rate_limit_handler(req, srv_cfg, config, store))
+```
+"""
+
+use std.http_server.types.{
+    Phase, PhaseResult, HttpRequestData, ServerConfig
+}
+use std.security.types.{SecurityEvent, AuditEntry, AuditConfig}
+use std.security.audit_log.{log_security_event}
+
+# Time FFI
+extern fn rt_time_now_ms() -> i64
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+class RateLimitConfig:
+    """Rate limiter configuration."""
+    requests_per_window: i64
+    window_ms: i64
+    burst_size: i64
+    exempt_paths: [text]
+
+    static fn default() -> RateLimitConfig:
+        """Sensible defaults: 100 req/min, burst of 20."""
+        RateLimitConfig(
+            requests_per_window: 100,
+            window_ms: 60000,
+            burst_size: 20,
+            exempt_paths: []
+        )
+
+# ============================================================================
+# Token Bucket Store
+# ============================================================================
+
+class RateLimitStore:
+    """Per-peer token bucket state using parallel arrays.
+
+    Index i in each array corresponds to the same peer.
+    """
+    peers: [text]
+    tokens: [i64]
+    last_refill_ms: [i64]
+
+    static fn new() -> RateLimitStore:
+        """Create an empty store."""
+        RateLimitStore(peers: [], tokens: [], last_refill_ms: [])
+
+    fn find_peer(peer_addr: text) -> i64:
+        """Find the index for a peer, or -1 if not found."""
+        var i = 0
+        while i < self.peers.len():
+            if self.peers[i] == peer_addr:
+                return i
+            i = i + 1
+        -1
+
+    me add_peer(peer_addr: text, initial_tokens: i64, now_ms: i64):
+        """Register a new peer with initial tokens."""
+        self.peers = self.peers + [peer_addr]
+        self.tokens = self.tokens + [initial_tokens]
+        self.last_refill_ms = self.last_refill_ms + [now_ms]
+
+    me set_tokens(index: i64, value: i64):
+        """Update token count for a peer at the given index."""
+        var new_tokens: [i64] = []
+        var i = 0
+        while i < self.tokens.len():
+            if i == index:
+                new_tokens = new_tokens + [value]
+            else:
+                new_tokens = new_tokens + [self.tokens[i]]
+            i = i + 1
+        self.tokens = new_tokens
+
+    me set_last_refill(index: i64, value: i64):
+        """Update last refill timestamp for a peer at the given index."""
+        var new_times: [i64] = []
+        var i = 0
+        while i < self.last_refill_ms.len():
+            if i == index:
+                new_times = new_times + [value]
+            else:
+                new_times = new_times + [self.last_refill_ms[i]]
+            i = i + 1
+        self.last_refill_ms = new_times
+
+# ============================================================================
+# Handler
+# ============================================================================
+
+fn rate_limit_handler(request: HttpRequestData,
+                      server_config: ServerConfig,
+                      config: RateLimitConfig,
+                      store: RateLimitStore) -> PhaseResult:
+    """PreRead phase handler: enforce per-peer rate limits.
+
+    Args:
+        request: Incoming request
+        server_config: Server configuration
+        config: Rate limit settings
+        store: Mutable token bucket store
+
+    Returns:
+        Continue if allowed, Error(429) if rate limited
+    """
+    # Check exempt paths
+    for exempt in config.exempt_paths:
+        if request.path == exempt:
+            return PhaseResult.Continue
+
+    val peer = request.peer_addr
+    val now_ms = rt_time_now_ms()
+    val max_tokens = config.requests_per_window + config.burst_size
+
+    val idx = store.find_peer(peer)
+
+    if idx == -1:
+        # First request from this peer — initialize bucket
+        store.add_peer(peer, max_tokens - 1, now_ms)
+        return PhaseResult.Continue
+
+    # Refill tokens based on elapsed time
+    val elapsed = now_ms - store.last_refill_ms[idx]
+    val refill_rate = config.requests_per_window
+    val refill_tokens = (elapsed * refill_rate) / config.window_ms
+
+    if refill_tokens > 0:
+        val current = store.tokens[idx]
+        var new_count = current + refill_tokens
+        if new_count > max_tokens:
+            new_count = max_tokens
+        store.set_tokens(idx, new_count)
+        store.set_last_refill(idx, now_ms)
+
+    # Try to consume a token
+    val available = store.tokens[idx]
+    if available <= 0:
+        # Rate limited — log and reject
+        val event = SecurityEvent.RateLimitHit(peer: peer, path: request.path)
+        val entry = AuditEntry.new(
+            event: event,
+            correlation_id: "",
+            module_path: "http_server.rate_limit"
+        )
+        log_security_event(entry, AuditConfig.default())
+
+        return PhaseResult.Error(429, "Rate limit exceeded")
+
+    store.set_tokens(idx, available - 1)
+    PhaseResult.Continue

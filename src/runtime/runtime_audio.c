@@ -156,3 +156,43 @@ int64_t rt_audio_is_playing(int64_t playback_handle) {
     ma_sound* s = (ma_sound*)(uintptr_t)playback_handle;
     return ma_sound_is_playing(s) ? 1 : 0;
 }
+
+/* ================================================================
+ * Spatial audio (3D positioning)
+ * ================================================================ */
+
+void rt_audio_set_sound_position(int64_t playback_handle, double x, double y, double z) {
+    ma_sound* s = (ma_sound*)(uintptr_t)playback_handle;
+    if (!s) return;
+    ma_sound_set_position(s, (float)x, (float)y, (float)z);
+}
+
+void rt_audio_set_spatialization_enabled(int64_t playback_handle, int64_t enabled) {
+    ma_sound* s = (ma_sound*)(uintptr_t)playback_handle;
+    if (!s) return;
+    ma_sound_set_spatialization_enabled(s, enabled ? MA_TRUE : MA_FALSE);
+}
+
+void rt_audio_set_listener_position(double x, double y, double z) {
+    ma_engine_listener_set_position(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+}
+
+void rt_audio_set_listener_direction(double x, double y, double z) {
+    ma_engine_listener_set_direction(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+}
+
+void rt_audio_set_listener_world_up(double x, double y, double z) {
+    ma_engine_listener_set_world_up(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+}
+
+void rt_audio_set_sound_min_distance(int64_t playback_handle, double distance) {
+    ma_sound* s = (ma_sound*)(uintptr_t)playback_handle;
+    if (!s) return;
+    ma_sound_set_min_distance(s, (float)distance);
+}
+
+void rt_audio_set_sound_max_distance(int64_t playback_handle, double distance) {
+    ma_sound* s = (ma_sound*)(uintptr_t)playback_handle;
+    if (!s) return;
+    ma_sound_set_max_distance(s, (float)distance);
+}

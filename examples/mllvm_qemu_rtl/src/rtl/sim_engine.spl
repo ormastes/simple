@@ -2,7 +2,7 @@
 #
 # Feature-dimension signal tracking and backend helpers for the MDSOC RTL tree.
 
-use std.io_runtime.{file_exists, env_get, cwd, process_run}
+use std.io_runtime.{file_exists, file_read, file_write, dir_create_all, env_get, cwd, process_run}
 use rtl.types.{SimBackendKind, Rv32Checkpoint, BackendRunStats, VerilatorBackendConfig}
 
 struct RtlSignalState:
@@ -166,6 +166,11 @@ class VerilatorRtkBackend:
     config: VerilatorBackendConfig?
     status_note: text
     last_host_time_ns: i64
+    last_exit_code: i64
+    last_request_path: text
+    last_checkpoint_path: text
+    last_result_path: text
+    last_result_message: text
 
 impl VerilatorRtkBackend:
     static fn detect_default() -> VerilatorRtkBackend:
@@ -176,27 +181,42 @@ impl VerilatorRtkBackend:
         engine.define_signal("halted", 1, 1, true)
         engine.define_signal("available", 1, 0, true)
         engine.define_signal("host_ns", 64, 0, false)
+        engine.define_signal("sim_cycles", 64, 0, true)
+        engine.define_signal("artifacts_ready", 1, 0, true)
+        engine.define_signal("lint_exit_code", 32, -1, false)
+        val work_dir = Self._default_work_dir()
+        val runner_path = Self._default_runner_path()
+        val top_module = Self._default_top_module()
+        val top_source = Self._default_top_source()
+        val trace_path = "{work_dir}/rtk_trace.vcd"
+        val config = VerilatorBackendConfig.new(selected, runner_path, work_dir, top_module, top_source, trace_path)
         if selected == "":
             return VerilatorRtkBackend(
                 engine: engine,
                 available: false,
-                config: nil,
+                config: Some(config),
                 status_note: "verilator not configured; set VERILATOR_BIN or install verilator in PATH",
-                last_host_time_ns: 0
+                last_host_time_ns: 0,
+                last_exit_code: -1,
+                last_request_path: "",
+                last_checkpoint_path: "",
+                last_result_path: "",
+                last_result_message: ""
             )
 
         val (stdout, stderr, code) = process_run(selected, ["--version"])
-        val work_dir = Self._default_work_dir()
-        val top_module = Self._default_top_module()
-        val trace_path = "{work_dir}/rtk_trace.vcd"
-        val config = VerilatorBackendConfig.new(selected, work_dir, top_module, trace_path)
         if code != 0:
             return VerilatorRtkBackend(
                 engine: engine,
                 available: false,
                 config: Some(config),
                 status_note: "verilator probe failed: {stderr.trim()}",
-                last_host_time_ns: 0
+                last_host_time_ns: 0,
+                last_exit_code: code,
+                last_request_path: "",
+                last_checkpoint_path: "",
+                last_result_path: "",
+                last_result_message: ""
             )
 
         engine.set_signal("available", 1)
@@ -205,7 +225,12 @@ impl VerilatorRtkBackend:
             available: true,
             config: Some(config),
             status_note: stdout.trim(),
-            last_host_time_ns: 0
+            last_host_time_ns: 0,
+            last_exit_code: 0,
+            last_request_path: "",
+            last_checkpoint_path: "",
+            last_result_path: "",
+            last_result_message: ""
         )
 
     me refresh(checkpoint: Rv32Checkpoint):
@@ -214,6 +239,9 @@ impl VerilatorRtkBackend:
         self.engine.set_signal("halted", if checkpoint.halted: 1 else: 0)
         self.engine.set_signal("available", if self.available: 1 else: 0)
         self.engine.set_signal("host_ns", self.last_host_time_ns)
+        self.engine.set_signal("sim_cycles", checkpoint.cycle_count)
+        self.engine.set_signal("artifacts_ready", if self.last_request_path != "" and self.last_checkpoint_path != "": 1 else: 0)
+        self.engine.set_signal("lint_exit_code", self.last_exit_code)
 
     fn read_signal(name: text) -> i64?:
         self.engine.read_signal(name)
@@ -223,9 +251,109 @@ impl VerilatorRtkBackend:
         self.engine.set_signal("host_ns", host_time_ns)
 
     fn status_text() -> text:
+        var artifact_note = ""
+        if self.last_request_path != "":
+            artifact_note = " request={self.last_request_path}"
+        if self.last_checkpoint_path != "":
+            artifact_note = artifact_note + " checkpoint={self.last_checkpoint_path}"
+        if self.last_result_path != "":
+            artifact_note = artifact_note + " result={self.last_result_path}"
+        if self.last_result_message != "":
+            artifact_note = artifact_note + " result_msg={self.last_result_message}"
         if val Some(config) = self.config:
-            return "{self.status_note} {config.to_text()}"
-        self.status_note
+            return "{self.status_note}{artifact_note} {config.to_text()}"
+        "{self.status_note}{artifact_note}"
+
+    me prepare_run(checkpoint: Rv32Checkpoint, max_cycles: i64, inst_word: i64):
+        self.last_request_path = ""
+        self.last_checkpoint_path = ""
+        self.last_result_path = ""
+        self.last_result_message = ""
+        if val Some(config) = self.config:
+            if not dir_create_all(config.work_dir):
+                self.status_note = "failed to create RTK work dir {config.work_dir}"
+                self.last_exit_code = -1
+                self.refresh(checkpoint)
+                return
+
+            val checkpoint_path = "{config.work_dir}/checkpoint.sdn"
+            val request_path = "{config.work_dir}/run_request.sdn"
+            val result_path = "{config.work_dir}/run_result.sdn"
+            val checkpoint_ok = file_write(checkpoint_path, self._checkpoint_text(checkpoint))
+            val request_ok = file_write(request_path, self._request_text(config, checkpoint_path, result_path, max_cycles, inst_word))
+            if checkpoint_ok and request_ok:
+                self.last_checkpoint_path = checkpoint_path
+                self.last_request_path = request_path
+                self.last_result_path = result_path
+                self.status_note = "rtk contract ready"
+                self.last_exit_code = 0
+            else:
+                self.status_note = "failed to write RTK run contract"
+                self.last_exit_code = -1
+
+            if config.runner_path != "":
+                if file_exists(config.runner_path):
+                    self._invoke_runner(config, request_path)
+                else:
+                    self.status_note = "rtk runner missing: {config.runner_path}"
+                    self.last_exit_code = -1
+            if self.available:
+                self._run_lint_probe(config)
+
+            self.refresh(checkpoint)
+            return
+
+        self.status_note = "verilator unavailable; RTK contract not emitted"
+        self.last_exit_code = -1
+        self.refresh(checkpoint)
+
+    fn consume_result(checkpoint: Rv32Checkpoint) -> Rv32Checkpoint:
+        if self.last_result_path == "":
+            return checkpoint
+        if not file_exists(self.last_result_path):
+            return checkpoint
+
+        val content = file_read(self.last_result_path)
+        if content.trim() == "":
+            return checkpoint
+
+        var next = checkpoint
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val parts = trimmed.split("=")
+            if parts.len() < 2:
+                continue
+            val key = parts[0].trim()
+            val value = parts[1].trim()
+            if key == "status":
+                if value != "ok":
+                    self.last_result_message = "runner_status={value}"
+                    return checkpoint
+            else if key == "message":
+                self.last_result_message = value
+            else if key == "pc":
+                next.pc = int(value)
+            else if key == "cycle_count":
+                next.cycle_count = int(value)
+            else if key == "halted":
+                next.halted = value == "true" or value == "1"
+            else if key == "read_count":
+                next.read_count = int(value)
+            else if key == "write_count":
+                next.write_count = int(value)
+            else if key == "reg_values":
+                next.reg_values = self._parse_reg_values(value, next.reg_values)
+            else if key.starts_with("reg[") and key.ends_with("]"):
+                val idx_text = key.slice(4, key.len() - 1)
+                val idx = int(idx_text)
+                if idx >= 0 and idx < next.reg_values.len():
+                    next.reg_values[idx] = int(value)
+        if self.last_result_message == "":
+            self.last_result_message = "ok"
+        next
 
     fn stats(checkpoint: Rv32Checkpoint) -> BackendRunStats:
         BackendRunStats
@@ -251,8 +379,84 @@ impl VerilatorRtkBackend:
             return env_dir
         "{cwd()}/examples/mllvm_qemu_rtl/.rtk"
 
+    fn _default_runner_path() -> text:
+        val env_runner = env_get("MLLVM_QEMU_RTL_RUNNER")
+        if env_runner != "":
+            return env_runner
+        "{cwd()}/examples/mllvm_qemu_rtl/tools/rtk_verilator_runner.sh"
+
     fn _default_top_module() -> text:
         val env_top = env_get("MLLVM_QEMU_RTL_TOP")
         if env_top != "":
             return env_top
         "picorv32"
+
+    fn _default_top_source() -> text:
+        val env_source = env_get("MLLVM_QEMU_RTL_TOP_SOURCE")
+        if env_source != "":
+            return env_source
+        "{cwd()}/examples/mllvm_qemu_rtl/rtl/picorv32_stub.v"
+
+    me _run_lint_probe(config: VerilatorBackendConfig):
+        if config.top_source == "":
+            if self.status_note == "rtk contract ready":
+                self.status_note = "rtk contract ready; no RTL top source configured"
+            self.last_exit_code = 0
+            return
+        if not file_exists(config.top_source):
+            self.status_note = "rtk contract ready; configured RTL top source missing: {config.top_source}"
+            self.last_exit_code = -1
+            return
+
+        val (stdout, stderr, code) = process_run(config.executable, ["--lint-only", "--top-module", config.top_module, config.top_source])
+        self.last_exit_code = code
+        if code == 0:
+            self.status_note = "rtk contract ready; verilator lint ok"
+        else:
+            val trimmed = stderr.trim()
+            if trimmed != "":
+                self.status_note = "rtk contract ready; verilator lint failed: {trimmed}"
+            else:
+                self.status_note = "rtk contract ready; verilator lint failed: {stdout.trim()}"
+
+    me _invoke_runner(config: VerilatorBackendConfig, request_path: text):
+        val (stdout, stderr, code) = process_run(config.runner_path, [request_path])
+        self.last_exit_code = code
+        if code == 0:
+            self.status_note = "rtk runner completed"
+        else:
+            val trimmed = stderr.trim()
+            if trimmed != "":
+                self.status_note = "rtk runner failed: {trimmed}"
+            else:
+                self.status_note = "rtk runner failed: {stdout.trim()}"
+
+    fn _checkpoint_text(checkpoint: Rv32Checkpoint) -> text:
+        "kind=rv32_checkpoint\npc={checkpoint.pc}\ncycle_count={checkpoint.cycle_count}\nhalted={checkpoint.halted}\nread_count={checkpoint.read_count}\nwrite_count={checkpoint.write_count}\nreg_values={self._format_reg_values(checkpoint.reg_values)}\n"
+
+    fn _request_text(config: VerilatorBackendConfig, checkpoint_path: text, result_path: text, max_cycles: i64, inst_word: i64) -> text:
+        "kind=rtk_verilator_run\nbackend=verilator\nmax_cycles={max_cycles}\ninst_word={inst_word}\ncheckpoint_path={checkpoint_path}\nresult_path={result_path}\ntop_module={config.top_module}\ntop_source={config.top_source}\ntrace_path={config.trace_path}\n"
+
+    fn _format_reg_values(reg_values: [i64]) -> text:
+        var out = "["
+        for i in 0..reg_values.len():
+            if i > 0:
+                out = out + ","
+            out = out + reg_values[i]
+        out + "]"
+
+    fn _parse_reg_values(value: text, fallback: [i64]) -> [i64]:
+        var trimmed = value.trim()
+        if trimmed.starts_with("["):
+            trimmed = trimmed.slice(1, trimmed.len())
+        if trimmed.ends_with("]"):
+            trimmed = trimmed.slice(0, trimmed.len() - 1)
+        if trimmed == "":
+            return fallback
+
+        var parsed: [i64] = []
+        for part in trimmed.split(","):
+            parsed.push(int(part.trim()))
+        if parsed.len() == fallback.len():
+            return parsed
+        fallback

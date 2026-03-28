@@ -1,0 +1,70 @@
+# Command registry for web_ui.
+# Registers Simple functions callable from frontend JS via invoke().
+
+use std.nogc_sync_mut.web_ui.types.{CommandResult}
+
+# Native function ID for __web_ui_invoke in JsRuntime.
+# Must not collide with browser engine's IDs (-1 to ~-65).
+val NATIVE_WEB_UI_INVOKE = -100
+
+# A registered command handler.
+class CommandEntry:
+    name: text
+    handler: fn(List<text>) -> Result<text, text>
+
+    static fn create(name: text, handler: fn(List<text>) -> Result<text, text>) -> CommandEntry:
+        CommandEntry(name: name, handler: handler)
+
+# Registry of all command handlers.
+class CommandRegistry:
+    commands: List<CommandEntry>
+
+    static fn create() -> CommandRegistry:
+        CommandRegistry(commands: List<CommandEntry>())
+
+    # Register a command handler.
+    me register(name: text, handler: fn(List<text>) -> Result<text, text>):
+        self.commands.push(CommandEntry.create(name, handler))
+
+    # Check if a command exists.
+    fn has_command(name: text) -> bool:
+        for cmd in self.commands:
+            if cmd.name == name:
+                return true
+        false
+
+    # Dispatch a command by name with text arguments.
+    me dispatch(name: text, args: List<text>) -> CommandResult:
+        for cmd in self.commands:
+            if cmd.name == name:
+                val result = cmd.handler(args)
+                match result:
+                    Ok(value): return CommandResult.Ok(value: value)
+                    Err(msg): return CommandResult.Err(message: msg)
+        CommandResult.Err(message: "Command not found: {name}")
+
+    # Dispatch from a raw invoke string: "cmd_name\targ1\targ2\t..."
+    # Tab-separated format for simplicity (no JSON parsing needed).
+    me dispatch_raw(raw: text) -> text:
+        val parts = raw.split("\t")
+        if parts.len() == 0:
+            return "Error: empty invoke"
+        val cmd_name = parts.get(0)
+        var args = List<text>()
+        var i = 1
+        while i < parts.len():
+            args.push(parts.get(i))
+            i = i + 1
+        val result = self.dispatch(cmd_name, args)
+        match result:
+            CommandResult.Ok(value): value
+            CommandResult.Err(message): "Error: {message}"
+
+    # Get the JS shim that exposes invoke() to frontend code.
+    # This injects a global invoke() function that calls __web_ui_invoke.
+    fn js_invoke_shim() -> text:
+        "function invoke(cmd) { var args = ''; for (var i = 1; i < arguments.length; i++) { if (i > 1) args += '\\t'; args += arguments[i]; } return __web_ui_invoke(cmd + '\\t' + args); }"
+
+    # Get number of registered commands.
+    fn command_count() -> i64:
+        self.commands.len()

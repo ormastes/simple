@@ -4,6 +4,7 @@
 # Messages are sent over stdin/stdout as newline-delimited JSON.
 
 use common.ui.widget.{UIEvent}
+use std.security.sanitize.{sanitize_html, is_path_traversal}
 
 # =========================================================================
 # IPC Message Types
@@ -23,8 +24,37 @@ enum IpcMessageKind:
 # IPC Message Parsing (from Electron → Simple)
 # =========================================================================
 
+## Maximum allowed IPC message length (64KB).
+val IPC_MAX_MESSAGE_LEN = 65536
+
+## Maximum allowed field value length (8KB).
+val IPC_MAX_FIELD_LEN = 8192
+
+fn validate_ipc_message(json_str: text) -> Result<text, text>:
+    """Validate IPC message size and structure before parsing."""
+    if json_str.len() > IPC_MAX_MESSAGE_LEN:
+        return Err("IPC message too long: {json_str.len()} > {IPC_MAX_MESSAGE_LEN}")
+    if json_str.len() == 0:
+        return Err("empty IPC message")
+    # Basic structural check — must look like JSON object
+    val trimmed = json_str.trim()
+    if not trimmed.starts_with("{") or not trimmed.ends_with("}"):
+        return Err("IPC message is not a JSON object")
+    Ok(trimmed)
+
+fn validate_ipc_field(value: text, field_name: text) -> text:
+    """Validate and sanitize an IPC field value."""
+    if value.len() > IPC_MAX_FIELD_LEN:
+        return value.slice(0, IPC_MAX_FIELD_LEN)
+    value
+
 fn parse_ipc_message(json_str: text) -> UIEvent?:
     """Parse a JSON IPC message from the Electron shell."""
+    # Validate message before parsing
+    val validation = validate_ipc_message(json_str)
+    match validation:
+        Err(_): return nil
+        _: pass_dn
     val msg_type = extract_json_field(json_str, "type")
     if msg_type == "keypress":
         val key = extract_json_field(json_str, "key")

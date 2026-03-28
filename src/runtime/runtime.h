@@ -397,6 +397,16 @@ void     rt_audio_set_master_volume(double volume);
 double   rt_audio_get_master_volume(void);
 int64_t  rt_audio_is_playing(int64_t playback_handle);
 
+/* ===== Audio spatial (3D positioning) ===== */
+
+void     rt_audio_set_sound_position(int64_t playback_handle, double x, double y, double z);
+void     rt_audio_set_spatialization_enabled(int64_t playback_handle, int64_t enabled);
+void     rt_audio_set_listener_position(double x, double y, double z);
+void     rt_audio_set_listener_direction(double x, double y, double z);
+void     rt_audio_set_listener_world_up(double x, double y, double z);
+void     rt_audio_set_sound_min_distance(int64_t playback_handle, double distance);
+void     rt_audio_set_sound_max_distance(int64_t playback_handle, double distance);
+
 /* ===== Image Loading (stb_image backend) ===== */
 
 int64_t  rt_image_load(const char* path);

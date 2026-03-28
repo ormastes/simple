@@ -102,11 +102,12 @@ impl ForwardRenderer3D:
         val maybe_cam = components.get_camera(camera_node_id)
         if val Some(cam_data) = maybe_cam:
             val cam_transform = get_world_transform_3d(nodes, camera_node_id)
+            val camera_pos = cam_transform.position
             val proj = cam_data.projection_matrix()
             val view = cam_data.view_matrix(cam_transform)
             val view_proj = proj.mul(view)
 
-            # Collect lights
+            # Collect lights with resolved world transforms (B3)
             var lights: [LightInstance] = []
             val keys = components.entries.keys()
             var k = 0
@@ -118,10 +119,19 @@ impl ForwardRenderer3D:
                     val comp = comps[ci]
                     match comp:
                         Component3D.Light(light_data):
+                            # Resolve the light node's world transform
+                            var light_world_pos = Vec3.zero()
+                            var light_world_dir = light_data.direction
+                            val maybe_node = nodes.nodes[key]
+                            if val Some(node) = maybe_node:
+                                val light_tf = get_world_transform_3d(nodes, node.id)
+                                light_world_pos = light_tf.position
+                                # Transform the local direction to world space
+                                light_world_dir = light_tf.rotation.rotate_vector(light_data.direction)
                             val li = LightInstance(
                                 data: light_data,
-                                world_position: Vec3.zero(),
-                                world_direction: light_data.direction
+                                world_position: light_world_pos,
+                                world_direction: light_world_dir
                             )
                             lights.push(li)
                         _:
@@ -139,9 +149,16 @@ impl ForwardRenderer3D:
                     val comp = comps[ci]
                     match comp:
                         Component3D.Mesh(mesh, material):
-                            val model_mat = Mat4.identity()
+                            # B1: Compute model matrix from node's world transform
+                            var model_mat = Mat4.identity()
+                            val maybe_node = nodes.nodes[key]
+                            if val Some(node) = maybe_node:
+                                val world_tf = get_world_transform_3d(nodes, node.id)
+                                model_mat = world_tf.to_mat4()
                             val mvp = view_proj.mul(model_mat)
-                            self._render_mesh(mesh, material, mvp, lights)
+                            # B4: Frustum culling — skip mesh if outside view frustum
+                            if _is_in_frustum(mvp, mesh.aabb_min, mesh.aabb_max):
+                                self._render_mesh(mesh, material, mvp, model_mat, lights, camera_pos)
                         _:
                             pass_dn
                     ci = ci + 1
@@ -149,7 +166,7 @@ impl ForwardRenderer3D:
 
         self.stats
 
-    me _render_mesh(mesh: MeshData, material: Material3D, mvp: Mat4, lights: [LightInstance]):
+    me _render_mesh(mesh: MeshData, material: Material3D, mvp: Mat4, model_mat: Mat4, lights: [LightInstance], camera_pos: Vec3):
         val tri_count = mesh.indices.len() / 3
         var t = 0
         while t < tri_count:
@@ -160,10 +177,20 @@ impl ForwardRenderer3D:
             val v1 = mesh.vertices[i1]
             val v2 = mesh.vertices[i2]
 
-            # Shade vertices
-            val c0 = _shade_vertex(v0, material, lights)
-            val c1 = _shade_vertex(v1, material, lights)
-            val c2 = _shade_vertex(v2, material, lights)
+            # Transform vertex positions to world space for shading
+            val wp0 = model_mat.transform_point(v0.position)
+            val wp1 = model_mat.transform_point(v1.position)
+            val wp2 = model_mat.transform_point(v2.position)
+
+            # Transform normals to world space (use direction transform, no translation)
+            val wn0 = model_mat.transform_direction(v0.normal).normalize()
+            val wn1 = model_mat.transform_direction(v1.normal).normalize()
+            val wn2 = model_mat.transform_direction(v2.normal).normalize()
+
+            # Shade vertices (B2: now includes specular via camera_pos)
+            val c0 = _shade_vertex_world(wp0, wn0, material, lights, camera_pos)
+            val c1 = _shade_vertex_world(wp1, wn1, material, lights, camera_pos)
+            val c2 = _shade_vertex_world(wp2, wn2, material, lights, camera_pos)
 
             # Project to screen space
             val s0 = self._project_vertex(v0.position, mvp, c0)
@@ -255,7 +282,12 @@ impl ForwardRenderer3D:
                 px = px + 1
             py = py + 1
 
-fn _shade_vertex(v: Vertex3D, material: Material3D, lights: [LightInstance]) -> EngineColor:
+# ============================================================================
+# Shading — Phong with specular, point/spot light support (B2, B3)
+# ============================================================================
+
+fn _shade_vertex_world(world_pos: Vec3, world_normal: Vec3, material: Material3D, lights: [LightInstance], camera_pos: Vec3) -> EngineColor:
+    """Shade a vertex in world space with Phong model including specular."""
     # Unlit materials return albedo directly
     match material.material_type:
         MaterialType3D.Unlit:
@@ -269,19 +301,83 @@ fn _shade_vertex(v: Vertex3D, material: Material3D, lights: [LightInstance]) -> 
     var total_g = material.albedo.g * ambient_strength
     var total_b = material.albedo.b * ambient_strength
 
+    val n = world_normal.normalize()
+    val view_dir = camera_pos.sub(world_pos).normalize()
+    val shininess = 32.0 / (material.roughness + 0.001)
+
     var li = 0
     while li < lights.len():
         val light = lights[li]
+        var light_dir = Vec3.zero()
+        var attenuation = 1.0
+        var spot_factor = 1.0
+
+        if light.data.light_type == 0:
+            # Directional light — use negated world direction
+            light_dir = light.world_direction.negate().normalize()
+        else if light.data.light_type == 1:
+            # Point light — compute direction from vertex to light
+            val to_light = light.world_position.sub(world_pos)
+            val dist = to_light.length()
+            light_dir = to_light.normalize()
+            # Distance attenuation
+            val range = light.data.range
+            if range > 0.0:
+                attenuation = 1.0 / (1.0 + dist * dist / (range * range))
+            else:
+                attenuation = 1.0 / (1.0 + dist * dist)
+        else if light.data.light_type == 2:
+            # Spot light — point light + cone falloff
+            val to_light = light.world_position.sub(world_pos)
+            val dist = to_light.length()
+            light_dir = to_light.normalize()
+            # Distance attenuation
+            val range = light.data.range
+            if range > 0.0:
+                attenuation = 1.0 / (1.0 + dist * dist / (range * range))
+            else:
+                attenuation = 1.0 / (1.0 + dist * dist)
+            # Cone falloff: compare light-to-vertex direction with spot direction
+            val spot_dir = light.world_direction.normalize()
+            val neg_light_dir = light_dir.negate()
+            val spot_cos = neg_light_dir.dot(spot_dir)
+            val cos_outer = light.data.outer_cone
+            val cos_inner = light.data.inner_cone
+            if spot_cos < cos_outer:
+                # Outside cone — no contribution
+                spot_factor = 0.0
+            else if spot_cos < cos_inner:
+                # Between inner and outer — smooth falloff
+                spot_factor = (spot_cos - cos_outer) / (cos_inner - cos_outer + 0.0001)
+            else:
+                spot_factor = 1.0
+        else:
+            # Unknown light type — treat as directional fallback
+            light_dir = light.world_direction.negate().normalize()
+
         # Diffuse: N dot L
-        val n = v.normal.normalize()
-        val light_dir = light.world_direction.negate().normalize()
         val ndotl = n.dot(light_dir)
         var diff = ndotl
         if diff < 0.0:
             diff = 0.0
-        total_r = total_r + material.albedo.r * light.data.color.r * light.data.intensity * diff
-        total_g = total_g + material.albedo.g * light.data.color.g * light.data.intensity * diff
-        total_b = total_b + material.albedo.b * light.data.color.b * light.data.intensity * diff
+
+        val combined_atten = attenuation * spot_factor * light.data.intensity
+
+        total_r = total_r + material.albedo.r * light.data.color.r * combined_atten * diff
+        total_g = total_g + material.albedo.g * light.data.color.g * combined_atten * diff
+        total_b = total_b + material.albedo.b * light.data.color.b * combined_atten * diff
+
+        # B2: Specular component (Phong reflection)
+        if diff > 0.0:
+            # Reflect: R = L - 2(N.L)N   (reflection of light_dir around normal)
+            val reflect_dir = light_dir.sub(n.mul_scalar(2.0 * light_dir.dot(n)))
+            val spec_dot = view_dir.dot(reflect_dir)
+            if spec_dot > 0.0:
+                val spec = _pow_approx(spec_dot, shininess)
+                total_r = total_r + light.data.color.r * combined_atten * spec
+                total_g = total_g + light.data.color.g * combined_atten * spec
+                total_b = total_b + light.data.color.b * combined_atten * spec
+
         li = li + 1
 
     # Clamp
@@ -292,6 +388,169 @@ fn _shade_vertex(v: Vertex3D, material: Material3D, lights: [LightInstance]) -> 
     if total_b > 1.0:
         total_b = 1.0
     EngineColor(r: total_r, g: total_g, b: total_b, a: material.albedo.a)
+
+# ============================================================================
+# B2: Power approximation for specular exponent
+# ============================================================================
+
+fn _pow_approx(base: f64, exp: f64) -> f64:
+    """Approximate pow(base, exp) via repeated squaring of ln/exp approximation.
+    Uses exp(exp * ln(base)) with Taylor-series approximations."""
+    if base <= 0.0:
+        return 0.0
+    if exp == 0.0:
+        return 1.0
+    # ln(base) approximation via Newton's method
+    val ln_base = _ln_approx(base)
+    _exp_approx(exp * ln_base)
+
+fn _ln_approx(x: f64) -> f64:
+    """Natural logarithm approximation for x > 0."""
+    if x <= 0.0:
+        return -100.0
+    # Reduce to range [0.5, 1.5) by pulling out powers of e ~ 2.718281828
+    var val_x = x
+    var adjust = 0.0
+    while val_x > 2.0:
+        val_x = val_x / 2.718281828
+        adjust = adjust + 1.0
+    while val_x < 0.3:
+        val_x = val_x * 2.718281828
+        adjust = adjust - 1.0
+    # Taylor series around 1: ln(1+u) = u - u^2/2 + u^3/3 - u^4/4 + ...
+    val u = val_x - 1.0
+    val u2 = u * u
+    val u3 = u2 * u
+    val u4 = u3 * u
+    val u5 = u4 * u
+    val u6 = u5 * u
+    val u7 = u6 * u
+    val u8 = u7 * u
+    val result = u - u2 / 2.0 + u3 / 3.0 - u4 / 4.0 + u5 / 5.0 - u6 / 6.0 + u7 / 7.0 - u8 / 8.0
+    result + adjust
+
+fn _exp_approx(x: f64) -> f64:
+    """Exponential function approximation."""
+    # Clamp to avoid overflow
+    var val_x = x
+    if val_x > 20.0:
+        val_x = 20.0
+    if val_x < -20.0:
+        return 0.0
+    # Use identity: e^x = e^n * e^f where n=floor(x), f=x-n
+    var n = 0
+    var neg = false
+    if val_x < 0.0:
+        neg = true
+        val_x = -val_x
+    n = val_x
+    val f = val_x - n * 1.0
+    # e^n by repeated multiplication
+    var en = 1.0
+    var i = 0
+    while i < n:
+        en = en * 2.718281828
+        i = i + 1
+    # e^f by Taylor series: 1 + f + f^2/2! + f^3/3! + ...
+    val f2 = f * f
+    val f3 = f2 * f
+    val f4 = f3 * f
+    val f5 = f4 * f
+    val f6 = f5 * f
+    val f7 = f6 * f
+    val f8 = f7 * f
+    val ef = 1.0 + f + f2 / 2.0 + f3 / 6.0 + f4 / 24.0 + f5 / 120.0 + f6 / 720.0 + f7 / 5040.0 + f8 / 40320.0
+    val result = en * ef
+    if neg:
+        return 1.0 / result
+    result
+
+# ============================================================================
+# B4: Frustum culling
+# ============================================================================
+
+fn _is_in_frustum(mvp: Mat4, aabb_min: Vec3, aabb_max: Vec3) -> bool:
+    """Test if an AABB is at least partially inside the view frustum.
+
+    Extracts 6 frustum planes from the MVP matrix and tests all 8 AABB corners.
+    If all 8 corners are on the negative side of any plane, the AABB is outside.
+    """
+    # Extract frustum planes from MVP (Gribb/Hartmann method)
+    # Each plane = (A, B, C, D) where Ax + By + Cz + D >= 0 is inside
+    # Row access: mvp.get(row, col)
+
+    # Left:   row3 + row0
+    val l_a = mvp.get(3, 0) + mvp.get(0, 0)
+    val l_b = mvp.get(3, 1) + mvp.get(0, 1)
+    val l_c = mvp.get(3, 2) + mvp.get(0, 2)
+    val l_d = mvp.get(3, 3) + mvp.get(0, 3)
+
+    # Right:  row3 - row0
+    val r_a = mvp.get(3, 0) - mvp.get(0, 0)
+    val r_b = mvp.get(3, 1) - mvp.get(0, 1)
+    val r_c = mvp.get(3, 2) - mvp.get(0, 2)
+    val r_d = mvp.get(3, 3) - mvp.get(0, 3)
+
+    # Bottom: row3 + row1
+    val b_a = mvp.get(3, 0) + mvp.get(1, 0)
+    val b_b = mvp.get(3, 1) + mvp.get(1, 1)
+    val b_c = mvp.get(3, 2) + mvp.get(1, 2)
+    val b_d = mvp.get(3, 3) + mvp.get(1, 3)
+
+    # Top:    row3 - row1
+    val t_a = mvp.get(3, 0) - mvp.get(1, 0)
+    val t_b = mvp.get(3, 1) - mvp.get(1, 1)
+    val t_c = mvp.get(3, 2) - mvp.get(1, 2)
+    val t_d = mvp.get(3, 3) - mvp.get(1, 3)
+
+    # Near:   row3 + row2
+    val n_a = mvp.get(3, 0) + mvp.get(2, 0)
+    val n_b = mvp.get(3, 1) + mvp.get(2, 1)
+    val n_c = mvp.get(3, 2) + mvp.get(2, 2)
+    val n_d = mvp.get(3, 3) + mvp.get(2, 3)
+
+    # Far:    row3 - row2
+    val f_a = mvp.get(3, 0) - mvp.get(2, 0)
+    val f_b = mvp.get(3, 1) - mvp.get(2, 1)
+    val f_c = mvp.get(3, 2) - mvp.get(2, 2)
+    val f_d = mvp.get(3, 3) - mvp.get(2, 3)
+
+    # Build the 8 AABB corners
+    val c0 = Vec3(x: aabb_min.x, y: aabb_min.y, z: aabb_min.z)
+    val c1 = Vec3(x: aabb_max.x, y: aabb_min.y, z: aabb_min.z)
+    val c2 = Vec3(x: aabb_min.x, y: aabb_max.y, z: aabb_min.z)
+    val c3 = Vec3(x: aabb_max.x, y: aabb_max.y, z: aabb_min.z)
+    val c4 = Vec3(x: aabb_min.x, y: aabb_min.y, z: aabb_max.z)
+    val c5 = Vec3(x: aabb_max.x, y: aabb_min.y, z: aabb_max.z)
+    val c6 = Vec3(x: aabb_min.x, y: aabb_max.y, z: aabb_max.z)
+    val c7 = Vec3(x: aabb_max.x, y: aabb_max.y, z: aabb_max.z)
+    var corners: [Vec3] = [c0, c1, c2, c3, c4, c5, c6, c7]
+
+    # Test each plane: if all 8 corners are outside, mesh is culled
+    if _all_outside_plane(corners, l_a, l_b, l_c, l_d):
+        return false
+    if _all_outside_plane(corners, r_a, r_b, r_c, r_d):
+        return false
+    if _all_outside_plane(corners, b_a, b_b, b_c, b_d):
+        return false
+    if _all_outside_plane(corners, t_a, t_b, t_c, t_d):
+        return false
+    if _all_outside_plane(corners, n_a, n_b, n_c, n_d):
+        return false
+    if _all_outside_plane(corners, f_a, f_b, f_c, f_d):
+        return false
+    true
+
+fn _all_outside_plane(corners: [Vec3], a: f64, b: f64, c: f64, d: f64) -> bool:
+    """Check if all corners are on the negative side of a frustum plane."""
+    var i = 0
+    while i < corners.len():
+        val p = corners[i]
+        val dist = a * p.x + b * p.y + c * p.z + d
+        if dist >= 0.0:
+            return false
+        i = i + 1
+    true
 
 fn _edge_fn_3d(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64:
     (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)

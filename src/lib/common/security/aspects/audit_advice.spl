@@ -1,0 +1,113 @@
+# AOP audit advice — woven at matched join points by the MDSOC weaving engine.
+#
+# These functions are NOT called directly by business code.
+# The capsule.sdn weaving rules inject them at compile time.
+
+use std.security.types.{SecurityEvent, SecurityContext, AuditEntry, AuditConfig}
+use std.security.audit_log.{log_security_event}
+use std.time
+use compiler.mdsoc.weaving.join_point.{JoinPointContext}
+
+## Around advice wrapping HTTP request handling with audit logging.
+##
+## Captures start time, calls proceed(), logs duration and result.
+## Woven at: execution(*.handle_request) & within(std.http.**)
+fn log_request_advice(ctx: JoinPointContext, proceed: fn() -> any) -> any:
+    val start_ms = time.now_ms()
+    val correlation_id = generate_request_id(ctx)
+    val config = AuditConfig.default()
+
+    val result = proceed()
+
+    val duration_ms = time.now_ms() - start_ms
+    val status = extract_status(result)
+
+    val event = SecurityEvent.RequestProcessed(
+        path: ctx.function_name,
+        duration_ms: duration_ms,
+        status: status
+    )
+
+    val entry = AuditEntry.new(
+        event: event,
+        correlation_id: correlation_id,
+        module_path: ctx.module_path
+    )
+
+    log_security_event(entry, config)
+    result
+
+## AfterSuccess advice logging authentication successes.
+##
+## Woven at: execution(*.authenticate) & within(std.security.auth.**)
+fn log_auth_success_advice(ctx: JoinPointContext) -> any:
+    val config = AuditConfig.default()
+    val user_id = extract_user_from_context(ctx)
+    val peer_addr = extract_peer_from_context(ctx)
+
+    val event = SecurityEvent.AuthSuccess(
+        user: user_id,
+        peer: peer_addr
+    )
+
+    val entry = AuditEntry.new(
+        event: event,
+        correlation_id: generate_request_id(ctx),
+        module_path: ctx.module_path
+    )
+
+    log_security_event(entry, config)
+
+## AfterError advice logging authentication failures.
+##
+## Woven at: execution(*.authenticate) & within(std.security.auth.**)
+fn log_auth_failure_advice(ctx: JoinPointContext, error: any):
+    val config = AuditConfig.default()
+    val user_id = extract_user_from_context(ctx)
+    val peer_addr = extract_peer_from_context(ctx)
+    val reason = "{error}"
+
+    val event = SecurityEvent.AuthFailure(
+        user: user_id,
+        peer: peer_addr,
+        reason: reason
+    )
+
+    val entry = AuditEntry.new(
+        event: event,
+        correlation_id: generate_request_id(ctx),
+        module_path: ctx.module_path
+    )
+
+    log_security_event(entry, config)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+## Generate a request-scoped correlation ID from join point context.
+fn generate_request_id(ctx: JoinPointContext) -> text:
+    val ts = time.now_ms()
+    "{ts}-{ctx.module_path}-{ctx.function_name}"
+
+## Extract a numeric status from an advice result.
+## Returns 200 for Ok values, 500 for errors, 0 for unknown.
+fn extract_status(result: any) -> i64:
+    match result:
+        Ok(_): 200
+        Err(_): 500
+        _: 0
+
+## Extract user identifier from join point attributes.
+fn extract_user_from_context(ctx: JoinPointContext) -> text:
+    for attr in ctx.attributes:
+        if attr.starts_with("user="):
+            return attr.slice(5, attr.len())
+    "unknown"
+
+## Extract peer address from join point attributes.
+fn extract_peer_from_context(ctx: JoinPointContext) -> text:
+    for attr in ctx.attributes:
+        if attr.starts_with("peer="):
+            return attr.slice(5, attr.len())
+    "unknown"

@@ -337,7 +337,12 @@ impl Rv32Simulator:
             SimBackendKind.NativeRtl: self.rtl.step()
             SimBackendKind.RtkVerilator:
                 val start_us = time_now_micros()
-                self.verilator.refresh(self.checkpoint())
+                val checkpoint = self.checkpoint()
+                val inst_word = self._current_inst_word()
+                self.verilator.prepare_run(checkpoint, 1, inst_word)
+                val returned = self.verilator.consume_result(checkpoint)
+                self.restore(returned)
+                self.verilator.refresh(returned)
                 val end_us = time_now_micros()
                 self.verilator.record_host_time_ns((end_us - start_us) * 1000)
                 0
@@ -348,7 +353,17 @@ impl Rv32Simulator:
             SimBackendKind.NativeRtl: self.rtl.run(max_cycles)
             SimBackendKind.RtkVerilator:
                 val start_us = time_now_micros()
-                self.verilator.refresh(self.checkpoint())
+                var remaining = max_cycles
+                while remaining > 0:
+                    val checkpoint = self.checkpoint()
+                    if checkpoint.halted:
+                        break
+                    val inst_word = self._current_inst_word()
+                    self.verilator.prepare_run(checkpoint, 1, inst_word)
+                    val returned = self.verilator.consume_result(checkpoint)
+                    self.restore(returned)
+                    self.verilator.refresh(returned)
+                    remaining = remaining - 1
                 val end_us = time_now_micros()
                 self.verilator.record_host_time_ns((end_us - start_us) * 1000)
 
@@ -414,3 +429,7 @@ impl Rv32Simulator:
             SimBackendKind.FastIrTc: self.fast.stats_text()
             SimBackendKind.NativeRtl: self.rtl.stats_text()
             SimBackendKind.RtkVerilator: self.verilator.stats(self.checkpoint()).to_text()
+
+    fn _current_inst_word() -> i64:
+        val checkpoint = self.checkpoint()
+        self.fast.memory.read32(checkpoint.pc)

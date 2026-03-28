@@ -14,6 +14,8 @@ use common.ui.diff.{diff_trees_with}
 use common.ui.state.{update_state}
 use common.ui.surface.{SurfaceHandle, SurfaceManager, new_surface_manager}
 use common.ui.profile.{ProfileResolver, ProfileSet, ProfileSetEntry, Orientation, LayoutProfile, compute_profile}
+use common.ui.capability.{Capability}
+use common.ui.capability_policy.{CapabilityPolicy, check_capability, require_capability}
 
 # =========================================================================
 # UISession
@@ -28,6 +30,7 @@ class UISession:
     surfaces: SurfaceManager
     profile_resolver: ProfileResolver
     profile_sets: [ProfileSetEntry]
+    capability_policy: CapabilityPolicy
 
     static fn new(tree: UITree) -> UISession:
         """Create a session with a main tree and default settings."""
@@ -42,7 +45,8 @@ class UISession:
             lifecycle: new_lifecycle_registry(),
             surfaces: sm,
             profile_resolver: ProfileResolver.new(),
-            profile_sets: []
+            profile_sets: [],
+            capability_policy: CapabilityPolicy.new("main")
         )
 
     static fn new_with_store(tree: UITree, store: WidgetStore) -> UISession:
@@ -57,7 +61,25 @@ class UISession:
             lifecycle: new_lifecycle_registry(),
             surfaces: sm,
             profile_resolver: ProfileResolver.new(),
-            profile_sets: []
+            profile_sets: [],
+            capability_policy: CapabilityPolicy.new("main")
+        )
+
+    static fn new_with_policy(tree: UITree, policy: CapabilityPolicy) -> UISession:
+        """Create a session with a specific capability policy."""
+        val store = WidgetStore.new()
+        var sm = new_surface_manager()
+        sm.open("main", tree)
+        return UISession(
+            state: UIState.new(tree),
+            store: store,
+            viewport: default_viewport(),
+            changelog: default_changelog(),
+            lifecycle: new_lifecycle_registry(),
+            surfaces: sm,
+            profile_resolver: ProfileResolver.new(),
+            profile_sets: [],
+            capability_policy: policy
         )
 
 # =========================================================================
@@ -264,3 +286,20 @@ impl UISession:
     fn current_orientation() -> Orientation:
         """Get the current detected orientation."""
         return self.profile_resolver.orientation()
+
+    # -- Capability enforcement -----------------------------------------------
+
+    fn check_cap(cap: Capability) -> Result<bool, text>:
+        """Check if a capability is allowed by this session's policy."""
+        return check_capability(self.capability_policy, cap)
+
+    me set_capability_policy(policy: CapabilityPolicy):
+        """Replace the session's capability policy."""
+        self.capability_policy = policy
+
+    me open_surface_gated(id: text, tree: UITree, required_cap: Capability) -> Result<SurfaceHandle, text>:
+        """Open a surface only if the required capability is granted."""
+        val cap_check = check_capability(self.capability_policy, required_cap)
+        match cap_check:
+            Ok(_): Ok(self.surfaces.open(id, tree))
+            Err(msg): Err(msg)

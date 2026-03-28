@@ -1,0 +1,192 @@
+# Input sanitization library for XSS, injection, and path traversal prevention.
+
+## Sanitize HTML content — escape dangerous characters to prevent XSS.
+fn sanitize_html(input: text) -> text:
+    """
+    Escapes HTML-special characters to prevent XSS injection.
+
+    sdoctest:
+        expect(sanitize_html("<script>")).to_equal("&lt;script&gt;")
+        expect(sanitize_html("safe text")).to_equal("safe text")
+    """
+    var result = input
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("'", "&#x27;")
+    result = result.replace("/", "&#x2F;")
+    result
+
+## Sanitize a value for use inside an HTML attribute.
+fn sanitize_attribute(input: text) -> text:
+    var result = input
+    result = result.replace("&", "&amp;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("'", "&#x27;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("`", "&#96;")
+    result
+
+## Sanitize a URL — reject dangerous schemes, validate structure.
+fn sanitize_url(input: text) -> Result<text, text>:
+    """
+    Validates URL schemes — rejects javascript:, data:, vbscript:, blob:.
+
+    sdoctest:
+        expect(sanitize_url("https://example.com").is_ok()).to_equal(true)
+        expect(sanitize_url("javascript:alert(1)").is_err()).to_equal(true)
+    """
+    val trimmed = input.trim()
+
+    if trimmed == "":
+        return Err("empty URL")
+
+    val lower = trimmed.to_lower()
+
+    # Reject dangerous schemes
+    if (lower.starts_with("javascript:") or
+        lower.starts_with("data:") or
+        lower.starts_with("vbscript:") or
+        lower.starts_with("blob:")):
+        return Err("dangerous URL scheme: {lower.split(\":\").first()}")
+
+    # Allow safe schemes
+    if (lower.starts_with("http://") or
+        lower.starts_with("https://") or
+        lower.starts_with("/") or
+        lower.starts_with("#") or
+        lower.starts_with("mailto:")):
+        return Ok(trimmed)
+
+    # Relative URLs are allowed
+    if not lower.contains("://"):
+        return Ok(trimmed)
+
+    Err("unsupported URL scheme")
+
+## Sanitize an identifier for use in SQL/SDN — whitelist alphanumeric + underscore.
+fn sanitize_identifier(input: text) -> Result<text, text>:
+    if input == "":
+        return Err("empty identifier")
+
+    if input.len() > 128:
+        return Err("identifier too long: {input.len()} > 128")
+
+    var i = 0
+    while i < input.len():
+        val c = input.char_at(i)
+        val is_valid = (c >= 'a' and c <= 'z') or
+                       (c >= 'A' and c <= 'Z') or
+                       (c >= '0' and c <= '9') or
+                       c == '_'
+        if not is_valid:
+            return Err("invalid character in identifier: '{c}' at position {i}")
+        i = i + 1
+
+    # Must not start with a digit
+    val first = input.char_at(0)
+    if first >= '0' and first <= '9':
+        return Err("identifier must not start with a digit")
+
+    Ok(input)
+
+## Validate content-type header matches expected type.
+fn validate_content_type(header: text, expected: text) -> bool:
+    val lower = header.to_lower().trim()
+    val expected_lower = expected.to_lower()
+
+    # Handle content-type with parameters (e.g., "application/json; charset=utf-8")
+    val media_type = if lower.contains(";"):
+        lower.split(";").first().trim()
+    else:
+        lower
+
+    media_type == expected_lower
+
+## Check for path traversal attempts in a file path.
+fn is_path_traversal(path: text) -> bool:
+    """
+    Detects path traversal patterns including encoded variants.
+
+    sdoctest:
+        expect(is_path_traversal("../etc/passwd")).to_equal(true)
+        expect(is_path_traversal("/home/user/file.txt")).to_equal(false)
+    """
+    # Direct traversal patterns
+    if path.contains(".."):
+        return true
+
+    # URL-encoded traversal
+    if path.contains("%2e%2e") or path.contains("%2E%2E"):
+        return true
+
+    # Double URL-encoded
+    if path.contains("%252e%252e"):
+        return true
+
+    # Null byte injection
+    if path.contains("\0") or path.contains("%00"):
+        return true
+
+    # Backslash traversal (Windows)
+    if path.contains("..\\"):
+        return true
+
+    false
+
+## Sanitize a file path — reject traversal, null bytes, and normalize.
+fn sanitize_path(input: text) -> Result<text, text>:
+    if input == "":
+        return Err("empty path")
+
+    if is_path_traversal(input):
+        return Err("path traversal detected")
+
+    # Reject null bytes
+    if input.contains("\0") or input.contains("%00"):
+        return Err("null byte in path")
+
+    # Reject overly long paths
+    if input.len() > 4096:
+        return Err("path too long: {input.len()} > 4096")
+
+    Ok(input)
+
+## Strip HTML tags from text (for plain-text extraction).
+fn strip_html_tags(input: text) -> text:
+    """
+    Removes all HTML tags, returning only text content.
+
+    sdoctest:
+        expect(strip_html_tags("<p>Hello <b>world</b></p>")).to_equal("Hello world")
+    """
+    var result = ""
+    var in_tag = false
+    var i = 0
+    while i < input.len():
+        val c = input.char_at(i)
+        if c == '<':
+            in_tag = true
+        else if c == '>':
+            in_tag = false
+        else if not in_tag:
+            result = result + c.to_text()
+        i = i + 1
+    result
+
+## Truncate text to a maximum length, adding ellipsis if needed.
+fn truncate(input: text, max_len: i64) -> text:
+    """
+    Truncates text with ellipsis if it exceeds max_len.
+
+    sdoctest:
+        expect(truncate("Hello, world!", 8)).to_equal("Hello...")
+        expect(truncate("Hi", 10)).to_equal("Hi")
+    """
+    if input.len() <= max_len:
+        return input
+    if max_len <= 3:
+        return input.slice(0, max_len)
+    input.slice(0, max_len - 3) + "..."

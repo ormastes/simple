@@ -1,13 +1,15 @@
-# AudioManager — miniaudio backend for the 2D engine
+# AudioManager — miniaudio backend for the 2D/3D engine
 #
 # Wired to the real runtime audio FFI (rt_audio_*) via audio_ffi.spl.
 # Manages clip loading, playback handles, bus volumes, and listener state.
 # Bus volume tracking remains pure Simple; playback delegates to miniaudio.
+# Tracks active sounds for stop_all, set_bus_volume, and spatial updates.
 
 use std.common.engine.math2d.{Vec2}
+use std.common.engine.math3d.{Vec3}
 use std.common.engine.units.{Volume, Distance}
 use std.nogc_sync_mut.engine.audio.types.{
-    AudioClip, SoundHandle, AudioBus, AudioConfig
+    AudioClip, SoundHandle, AudioBus, AudioConfig, Listener3D
 }
 use std.nogc_sync_mut.io.audio_ffi.{
     rt_audio_init, rt_audio_shutdown,
@@ -15,7 +17,11 @@ use std.nogc_sync_mut.io.audio_ffi.{
     rt_audio_play, rt_audio_play_looped,
     rt_audio_stop, rt_audio_pause, rt_audio_resume,
     rt_audio_set_volume, rt_audio_set_master_volume, rt_audio_get_master_volume,
-    rt_audio_is_playing
+    rt_audio_is_playing,
+    rt_audio_set_sound_position, rt_audio_set_spatialization_enabled,
+    rt_audio_set_listener_position, rt_audio_set_listener_direction,
+    rt_audio_set_listener_world_up,
+    rt_audio_set_sound_min_distance, rt_audio_set_sound_max_distance
 }
 
 # ============================================================================
@@ -35,6 +41,7 @@ class AudioManager:
     listener_x: f64
     listener_y: f64
     next_playback_handle: i64
+    active_sounds: [SoundHandle]
 
 impl AudioManager:
     static fn create(config: AudioConfig) -> AudioManager:
@@ -54,7 +61,8 @@ impl AudioManager:
             clip_cache: {},
             listener_x: 0.0,
             listener_y: 0.0,
-            next_playback_handle: 1
+            next_playback_handle: 1,
+            active_sounds: []
         )
 
     me load_clip(path: text) -> AudioClip:
@@ -71,17 +79,23 @@ impl AudioManager:
     me play(clip: AudioClip, bus_name: text) -> SoundHandle:
         val playback_handle = rt_audio_play(clip.source_handle)
         self._apply_bus_volume(playback_handle, bus_name)
-        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        val handle = self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        self.active_sounds.push(handle)
+        handle
 
     me play_with_volume(clip: AudioClip, bus_name: text, volume: Volume) -> SoundHandle:
         val playback_handle = rt_audio_play(clip.source_handle)
         rt_audio_set_volume(playback_handle, volume.value)
-        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        val handle = self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        self.active_sounds.push(handle)
+        handle
 
     me play_looped(clip: AudioClip, bus_name: text) -> SoundHandle:
         val playback_handle = rt_audio_play_looped(clip.source_handle)
         self._apply_bus_volume(playback_handle, bus_name)
-        self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        val handle = self._make_sound_handle(playback_handle, clip.path, bus_name, false)
+        self.active_sounds.push(handle)
+        handle
 
     me play_one_shot(path: text) -> SoundHandle:
         val clip = self.load_clip_cached(path)
@@ -94,16 +108,53 @@ impl AudioManager:
     me play_at(clip: AudioClip, bus_name: text, pos: Vec2) -> SoundHandle:
         val playback_handle = rt_audio_play(clip.source_handle)
         self._apply_bus_volume(playback_handle, bus_name)
-        self._make_sound_handle(playback_handle, clip.path, bus_name, true)
+        # Enable spatialization and set 2D position (z=0)
+        rt_audio_set_spatialization_enabled(playback_handle, 1)
+        rt_audio_set_sound_position(playback_handle, pos.x, pos.y, 0.0)
+        rt_audio_set_sound_min_distance(playback_handle, self.config.spatial_min_distance.value)
+        rt_audio_set_sound_max_distance(playback_handle, self.config.spatial_max_distance.value)
+        val handle = self._make_sound_handle(playback_handle, clip.path, bus_name, true)
+        self.active_sounds.push(handle)
+        handle
+
+    me play_at_3d(clip: AudioClip, bus_name: text, pos: Vec3) -> SoundHandle:
+        """Play a sound at a 3D position with spatialization enabled."""
+        val playback_handle = rt_audio_play(clip.source_handle)
+        self._apply_bus_volume(playback_handle, bus_name)
+        rt_audio_set_spatialization_enabled(playback_handle, 1)
+        rt_audio_set_sound_position(playback_handle, pos.x, pos.y, pos.z)
+        rt_audio_set_sound_min_distance(playback_handle, self.config.spatial_min_distance.value)
+        rt_audio_set_sound_max_distance(playback_handle, self.config.spatial_max_distance.value)
+        val handle = self._make_sound_handle(playback_handle, clip.path, bus_name, true)
+        self.active_sounds.push(handle)
+        handle
+
+    me set_sound_position_3d(handle: SoundHandle, pos: Vec3):
+        """Update the 3D position of a playing sound."""
+        if handle.is_valid():
+            rt_audio_set_sound_position(handle.playback_handle, pos.x, pos.y, pos.z)
 
     me set_listener_position(pos: Vec2):
         self.listener_x = pos.x
         self.listener_y = pos.y
+        rt_audio_set_listener_position(pos.x, pos.y, 0.0)
+
+    me set_listener_position_3d(pos: Vec3):
+        """Set the 3D listener position for spatial audio."""
+        self.listener_x = pos.x
+        self.listener_y = pos.y
+        rt_audio_set_listener_position(pos.x, pos.y, pos.z)
+
+    me set_listener_orientation(forward: Vec3, up: Vec3):
+        """Set the listener's forward direction and up vector."""
+        rt_audio_set_listener_direction(forward.x, forward.y, forward.z)
+        rt_audio_set_listener_world_up(up.x, up.y, up.z)
 
     me stop_sound(handle: SoundHandle) -> bool:
         if not handle.is_valid():
             return false
         rt_audio_stop(handle.playback_handle)
+        self._remove_active_sound(handle)
         true
 
     me pause_sound(handle: SoundHandle) -> bool:
@@ -132,6 +183,16 @@ impl AudioManager:
                 volume: volume,
                 muted: bus.muted
             )
+            # Apply to all active sounds on this bus
+            var i = 0
+            while i < self.active_sounds.len():
+                val snd = self.active_sounds[i]
+                if snd.bus_name == bus_name:
+                    if bus.muted:
+                        rt_audio_set_volume(snd.playback_handle, 0.0)
+                    else:
+                        rt_audio_set_volume(snd.playback_handle, volume.value)
+                i = i + 1
             return true
         false
 
@@ -174,6 +235,14 @@ impl AudioManager:
         self.config.master_volume
 
     me stop_all():
+        # Stop all tracked active sounds
+        var i = 0
+        while i < self.active_sounds.len():
+            val snd = self.active_sounds[i]
+            if snd.is_valid():
+                rt_audio_stop(snd.playback_handle)
+            i = i + 1
+        self.active_sounds = []
         self.clip_cache = {}
 
     me destroy():
@@ -196,3 +265,13 @@ impl AudioManager:
             bus_name: bus_name,
             is_spatial: is_spatial
         )
+
+    me _remove_active_sound(handle: SoundHandle):
+        var new_list: [SoundHandle] = []
+        var i = 0
+        while i < self.active_sounds.len():
+            val snd = self.active_sounds[i]
+            if snd.playback_handle != handle.playback_handle:
+                new_list.push(snd)
+            i = i + 1
+        self.active_sounds = new_list
