@@ -1,3 +1,8 @@
+---
+name: sync
+description: Pull/rebase/push with file-count safety, worktree-aware jj sync
+---
+
 # Sync Skill - Pull/Rebase/Push with Safety Checks
 
 ## Overview

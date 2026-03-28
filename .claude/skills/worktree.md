@@ -1,3 +1,8 @@
+---
+name: worktree
+description: JJ workspace isolation and parallel working-copy workflow
+---
+
 # Worktree Skill -- JJ Workspace Isolation
 
 > Use **jj workspaces** exclusively. DO NOT use `EnterWorktree`/`ExitWorktree` (git worktree tools).
