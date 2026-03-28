@@ -2,6 +2,23 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.3] - 2026-03-28
+
+### Added
+- **Traceability module** — requirement-to-test tracking with SDN config
+- **Verify/Sync/Debug skills** for Claude Code workflow
+- **Release skill** with full GH Actions pipeline docs and `/release` invocation
+
+### Fixed
+- **~200 broken tests** — dict indexing, Slice.len(), interpreter chaining bugs
+- **codegen_parity** Future/Await/Generator/Actor hang in interpreter (skip_it)
+- **bin/simple_mcp_server** updated to use bin/release/simple
+- **bin/simple symlink** fixed via setup.sh for aarch64-apple-darwin-macho
+
+### Changed
+- Cleaned 10 orphan jj commits and 2 stale remote push branches
+- Test database lock cleanup
+
 ## [0.9.2] - 2026-03-22
 
 ### Added
