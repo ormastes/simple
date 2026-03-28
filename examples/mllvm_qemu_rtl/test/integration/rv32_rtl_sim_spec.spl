@@ -10,7 +10,7 @@ use std.spec.{describe, it, expect}
 use std.io_runtime.{file_write, shell, env_set}
 use libwidth.lib32.{Width32Lib, Rv32Simulator}
 use rtl.types.{SimBackendKind}
-use test.helpers.riscv_encode.{encode_addi, encode_add, encode_beq, encode_ebreak, encode_nop, bytes_to_word}
+use test.helpers.riscv_encode.{encode_addi, encode_add, encode_beq, encode_ebreak, encode_jal, encode_jalr, encode_lw, encode_nop, encode_sw, bytes_to_word}
 
 fn create_rv32_rtl(program: [i64]) -> Rv32Simulator:
     val lib = Width32Lib.new()
@@ -194,6 +194,60 @@ describe "RV32 native RTL simulator":
         sim.load_program(program)
         sim.run(5)
         expect(sim.get_reg("a2")).to_equal(Some(2))
+        expect(sim.get_reg("pc")).to_equal(Some(0x80000014))
+
+    it "executes lw/sw roundtrip across multiple RTK stub steps":
+        val runner_path = "examples/mllvm_qemu_rtl/tools/rtk_verilator_runner.sh"
+        shell("chmod +x '{runner_path}'")
+        expect(env_set("MLLVM_QEMU_RTL_RUNNER", runner_path)).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_RTK_DIR", "/tmp/mllvm_qemu_rtl_verilator_stub_mem")).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_TOP_SOURCE", "examples/mllvm_qemu_rtl/rtl/picorv32_stub.v")).to_equal(true)
+
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.RtkVerilator)
+        val program = encode_addi(11, 0, 42) + encode_addi(12, 0, 0x40) + encode_sw(12, 11, 0) + encode_lw(10, 12, 0) + encode_ebreak()
+        sim.load_program(program)
+        sim.reset()
+        sim.load_program(program)
+        sim.run(5)
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        expect(sim.get_reg("pc")).to_equal(Some(0x80000014))
+        expect(sim.stats_text()).to_contain("result_msg=stub_rtl_ebreak")
+
+    it "executes jal across multiple RTK stub steps":
+        val runner_path = "examples/mllvm_qemu_rtl/tools/rtk_verilator_runner.sh"
+        shell("chmod +x '{runner_path}'")
+        expect(env_set("MLLVM_QEMU_RTL_RUNNER", runner_path)).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_RTK_DIR", "/tmp/mllvm_qemu_rtl_verilator_stub_jal")).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_TOP_SOURCE", "examples/mllvm_qemu_rtl/rtl/picorv32_stub.v")).to_equal(true)
+
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.RtkVerilator)
+        val program = encode_jal(1, 8) + encode_addi(10, 0, 1) + encode_addi(10, 0, 2) + encode_ebreak()
+        sim.load_program(program)
+        sim.reset()
+        sim.load_program(program)
+        sim.run(3)
+        expect(sim.get_reg("a0")).to_equal(Some(2))
+        expect(sim.get_reg("ra")).to_equal(Some(0x80000004))
+        expect(sim.get_reg("pc")).to_equal(Some(0x80000010))
+
+    it "executes jalr across multiple RTK stub steps":
+        val runner_path = "examples/mllvm_qemu_rtl/tools/rtk_verilator_runner.sh"
+        shell("chmod +x '{runner_path}'")
+        expect(env_set("MLLVM_QEMU_RTL_RUNNER", runner_path)).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_RTK_DIR", "/tmp/mllvm_qemu_rtl_verilator_stub_jalr")).to_equal(true)
+        expect(env_set("MLLVM_QEMU_RTL_TOP_SOURCE", "examples/mllvm_qemu_rtl/rtl/picorv32_stub.v")).to_equal(true)
+
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.RtkVerilator)
+        val program = encode_addi(5, 0, 0x8000000c) + encode_jalr(1, 5, 0) + encode_addi(10, 0, 1) + encode_addi(10, 0, 3) + encode_ebreak()
+        sim.load_program(program)
+        sim.reset()
+        sim.load_program(program)
+        sim.run(4)
+        expect(sim.get_reg("a0")).to_equal(Some(3))
+        expect(sim.get_reg("ra")).to_equal(Some(0x80000008))
         expect(sim.get_reg("pc")).to_equal(Some(0x80000014))
 
     it "preserves architectural state when switching fast -> native rtl":
