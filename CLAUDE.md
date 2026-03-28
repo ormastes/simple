@@ -34,7 +34,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **debug-analyst** | Interactive debugging with DAP+LSP enrichment | `/debug-lsp`, `/debug` |
 | **explore** | Finding files, understanding structure, researching | `/research`, `/architecture` |
 | **docs** | Writing research/design/guide docs, reports | `/doc`, `/todo` |
-| **vcs** | Committing, pushing, viewing history (jj/git) | `/versioning` |
+| **vcs** | Committing, pushing, syncing, viewing history (jj/git) | `/sync` |
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
@@ -52,7 +52,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
-| `versioning` | JJ (Jujutsu) + Git workflow |
+| `sync` | Pull/rebase/push with file-count safety, worktree-aware |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
@@ -74,7 +74,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
 | `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
-| `vcs` | JJ + Git workflow and sync recovery reference |
+| `vcs` | (renamed to `sync`) Pull/rebase/push with file-count safety |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
 

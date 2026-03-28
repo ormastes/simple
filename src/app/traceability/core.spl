@@ -1,0 +1,872 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Traceability Checker Core
+#
+# Builds a lightweight traceability index over src/, test/, and doc/ and emits
+# warnings for missing source/test links, missing backwards documentation links,
+# and uncovered REQ/NFR identifiers.
+
+use app.io.mod (file_exists, file_read, dir_walk, is_dir)
+
+struct TraceabilityConfig:
+    generated_spec_root: text
+    legacy_requirement_root: text
+    warn_source_roots: [text]
+
+struct TraceabilityWarning:
+    code: text
+    path: text
+    line: i64
+    message: text
+
+struct TraceabilityReport:
+    warnings: [TraceabilityWarning]
+
+struct VirtualFile:
+    path: text
+    content: text
+
+struct ParsedTraceFile:
+    path: text
+    kind: text
+    slug: text
+    normalized_slug: text
+    requirement_value: text
+    plan_value: text
+    design_value: text
+    research_value: text
+    requirement_paths: [text]
+    plan_paths: [text]
+    design_paths: [text]
+    research_paths: [text]
+    generated_spec_paths: [text]
+    raw_test_paths: [text]
+    req_ids: [text]
+    nfr_ids: [text]
+
+fn default_traceability_config() -> TraceabilityConfig:
+    TraceabilityConfig(
+        generated_spec_root: "doc/spec",
+        legacy_requirement_root: "doc/requirement",
+        warn_source_roots: []
+    )
+
+fn load_traceability_config() -> TraceabilityConfig:
+    val path = "config/traceability.sdn"
+    if not file_exists(path):
+        return default_traceability_config()
+
+    val content = file_read(path)
+    if content == "":
+        return default_traceability_config()
+
+    var cfg = default_traceability_config()
+    var in_section = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if has_prefix(trimmed, "#"):
+            continue
+        if trimmed == "traceability:":
+            in_section = true
+            continue
+        if not in_section:
+            continue
+        if has_prefix(line, "  ") == false:
+            in_section = false
+            continue
+
+        if has_prefix(trimmed, "generated_spec_root:"):
+            val start_idx = 20
+            val value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            if value != "":
+                cfg.generated_spec_root = value
+        elif has_prefix(trimmed, "legacy_requirement_root:"):
+            val start_idx = 24
+            val value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            if value != "":
+                cfg.legacy_requirement_root = value
+        elif has_prefix(trimmed, "warn_source_root:"):
+            val start_idx = 17
+            val value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            if value != "":
+                cfg.warn_source_roots.push(value)
+    cfg
+
+fn make_virtual_file(path: text, content: text) -> VirtualFile:
+    VirtualFile(path: path, content: content)
+
+fn analyze_repo_traceability(paths: [text], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> TraceabilityReport:
+    val files = collect_virtual_files(paths)
+    analyze_virtual_files(files, scope, config, enforce_source_roots)
+
+fn run_traceability_build_warnings(verbose: bool) -> i64:
+    if verbose:
+        print "Checking traceability links..."
+    val report = analyze_repo_traceability([], "all", load_traceability_config(), true)
+    for warning in report.warnings:
+        print format_traceability_warning(warning)
+    report.warnings.len()
+
+fn analyze_virtual_files(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> TraceabilityReport:
+    var parsed: [ParsedTraceFile] = []
+    var existing_paths: Dict<text, bool> = {}
+
+    for file in files:
+        existing_paths[file.path] = true
+        parsed.push(parse_trace_file(file))
+
+    var warnings: [TraceabilityWarning] = []
+    warnings = warnings + analyze_specs(parsed, existing_paths, config, scope)
+    warnings = warnings + analyze_requirements(parsed, existing_paths, config, scope)
+    warnings = warnings + analyze_backwards_docs(parsed, existing_paths, config, scope)
+    if enforce_source_roots:
+        warnings = warnings + analyze_source_tests(parsed, existing_paths, config, scope)
+
+    TraceabilityReport(warnings: warnings)
+
+fn collect_virtual_files(paths: [text]) -> [VirtualFile]:
+    var roots = paths
+    if roots.len() == 0:
+        roots = ["src", "test", "doc"]
+
+    var files: [VirtualFile] = []
+    var seen: Dict<text, bool> = {}
+    for root in roots:
+        if not file_exists(root) and not is_dir(root):
+            continue
+        if is_traceable_file_path(root):
+            if seen.contains_key(root) == false:
+                seen[root] = true
+                files.push(VirtualFile(path: root, content: file_read(root)))
+            continue
+        val walked = dir_walk(root)
+        for path in walked:
+            if not is_traceable_file_path(path):
+                continue
+            if seen.contains_key(path):
+                continue
+            seen[path] = true
+            files.push(VirtualFile(path: path, content: file_read(path)))
+    files
+
+fn is_traceable_file_path(path: text) -> bool:
+    if has_prefix(path, "src/"):
+        if has_suffix(path, ".spl"):
+            return true
+    if has_prefix(path, "test/"):
+        if has_suffix(path, ".spl"):
+            return true
+    if has_prefix(path, "doc/"):
+        if has_suffix(path, ".md"):
+            return true
+    false
+
+fn parse_trace_file(file: VirtualFile) -> ParsedTraceFile:
+    val kind = classify_trace_path(file.path)
+    val slug = basename_no_ext(file.path)
+    val normalized = normalize_slug(slug)
+
+    var requirement_value = ""
+    var plan_value = ""
+    var design_value = ""
+    var research_value = ""
+
+    if kind == "spec_feature" or kind == "spec_system":
+        val lines = file.content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if has_prefix(trimmed, "**Requirements:**") and requirement_value == "":
+                val start_idx = 17
+                requirement_value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            elif has_prefix(trimmed, "**Plan:**") and plan_value == "":
+                val start_idx = 9
+                plan_value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            elif has_prefix(trimmed, "**Design:**") and design_value == "":
+                val start_idx = 11
+                design_value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+            elif has_prefix(trimmed, "**Research:**") and research_value == "":
+                val start_idx = 13
+                research_value = strip_quotes(slice_from_text(trimmed, start_idx).trim())
+    ParsedTraceFile(
+        path: file.path,
+        kind: kind,
+        slug: slug,
+        normalized_slug: normalized,
+        requirement_value: requirement_value,
+        plan_value: plan_value,
+        design_value: design_value,
+        research_value: research_value,
+        requirement_paths: extract_paths_for_field(file.content, "requirement"),
+        plan_paths: extract_paths_for_field(file.content, "plan"),
+        design_paths: extract_paths_for_field(file.content, "design"),
+        research_paths: extract_paths_for_field(file.content, "research"),
+        generated_spec_paths: extract_prefixed_paths(file.content, "doc/spec/"),
+        raw_test_paths: extract_raw_test_paths(file.content),
+        req_ids: extract_ids_by_prefix(file.content, "REQ-"),
+        nfr_ids: extract_ids_by_prefix(file.content, "NFR-")
+    )
+
+fn analyze_specs(parsed: [ParsedTraceFile], existing_paths: Dict<text, bool>, config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
+    if scope != "all" and scope != "spec":
+        return []
+
+    var warnings: [TraceabilityWarning] = []
+    for file in parsed:
+        if file.kind != "spec_feature" and file.kind != "spec_system":
+            continue
+
+        warnings = warnings + validate_spec_field(file, existing_paths, config, "requirements")
+        warnings = warnings + validate_spec_field(file, existing_paths, config, "plan")
+        warnings = warnings + validate_spec_field(file, existing_paths, config, "design")
+        warnings = warnings + validate_spec_field(file, existing_paths, config, "research")
+
+        val requirement_slugs = canonical_requirement_slugs(file.requirement_paths, existing_paths, config)
+        if requirement_slugs.len() == 1:
+            val req_slug = requirement_slugs[0]
+            warnings = warnings + validate_companion_slug(file.path, req_slug, file.plan_paths, "TRC221", "Plan link")
+            warnings = warnings + validate_companion_slug(file.path, req_slug, file.design_paths, "TRC222", "Design link")
+            warnings = warnings + validate_companion_slug(file.path, req_slug, file.research_paths, "TRC223", "Research link")
+    warnings
+
+fn validate_spec_field(file: ParsedTraceFile, existing_paths: Dict<text, bool>, config: TraceabilityConfig, field_name: text) -> [TraceabilityWarning]:
+    var warnings: [TraceabilityWarning] = []
+    val raw_value = match field_name:
+        case "requirements": file.requirement_value
+        case "plan": file.plan_value
+        case "design": file.design_value
+        case "research": file.research_value
+        case _: ""
+    val links = match field_name:
+        case "requirements": file.requirement_paths
+        case "plan": file.plan_paths
+        case "design": file.design_paths
+        case "research": file.research_paths
+        case _: []
+    val code_prefix = match field_name:
+        case "requirements": "TRC301"
+        case "plan": "TRC302"
+        case "design": "TRC303"
+        case "research": "TRC304"
+        case _: "TRC399"
+    val human = capitalize(field_name)
+
+    if raw_value == "":
+        warnings.push(make_warning(code_prefix, file.path, 1, "Missing '**{human}:**' link"))
+        return warnings
+    if raw_value == "N/A":
+        return warnings
+    if links.len() == 0:
+        warnings.push(make_warning(code_prefix, file.path, 1, "{human} link must point to a relative file path"))
+        return warnings
+
+    for link in links:
+        if field_name == "requirements":
+            if has_prefix(link, config.legacy_requirement_root + "/"):
+                warnings.push(make_warning("TRC211", file.path, 1, "Requirement link uses legacy root '{link}'"))
+        if existing_paths.contains_key(link) == false:
+            warnings.push(make_warning(code_prefix, file.path, 1, "{human} link not found: '{link}'"))
+    warnings
+
+fn validate_companion_slug(path: text, requirement_slug: text, links: [text], code: text, label: text) -> [TraceabilityWarning]:
+    var warnings: [TraceabilityWarning] = []
+    for link in links:
+        if normalize_slug(basename_no_ext(link)) != requirement_slug:
+            warnings.push(make_warning(code, path, 1, "{label} should use the same slug as the linked requirement"))
+    warnings
+
+fn analyze_requirements(parsed: [ParsedTraceFile], existing_paths: Dict<text, bool>, config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
+    if scope != "all" and scope != "spec" and scope != "doc":
+        return []
+
+    var warnings: [TraceabilityWarning] = []
+    var specs: [ParsedTraceFile] = []
+    for file in parsed:
+        if file.kind == "spec_feature" or file.kind == "spec_system":
+            specs.push(file)
+
+    for file in parsed:
+        if file.kind != "requirement" and file.kind != "nfr":
+            continue
+
+        val ids = merge_unique(file.req_ids, file.nfr_ids)
+        if ids.len() == 0:
+            warnings.push(make_warning("TRC311", file.path, 1, "Requirement document has no REQ-/NFR- identifiers"))
+
+        val linked_specs = specs_for_requirement(file.path, specs, existing_paths, config)
+        if linked_specs.len() == 0:
+            warnings.push(make_warning("TRC312", file.path, 1, "No feature/system spec links to this requirement document"))
+
+        for id in ids:
+            if not any_spec_covers_id(linked_specs, id):
+                warnings.push(make_warning("TRC401", file.path, 1, "Identifier '{id}' is not covered by linked feature/system specs"))
+        warnings = warnings + validate_requirement_companions(file, existing_paths)
+    warnings
+
+fn validate_requirement_companions(file: ParsedTraceFile, existing_paths: Dict<text, bool>) -> [TraceabilityWarning]:
+    var warnings: [TraceabilityWarning] = []
+    val slug = file.normalized_slug
+    val plan_path = "doc/plan/{slug}.md"
+    val design_path = "doc/design/{slug}.md"
+    val architecture_path = "doc/architecture/{slug}.md"
+    val research_path = "doc/research/{slug}.md"
+
+    if existing_paths.contains_key(plan_path):
+        if path_list_contains(file.plan_paths, plan_path) == false:
+            warnings.push(make_warning("TRC321", file.path, 1, "Requirement document should link sibling plan '{plan_path}'"))
+    if existing_paths.contains_key(design_path):
+        if path_list_contains(file.design_paths, design_path) == false:
+            warnings.push(make_warning("TRC322", file.path, 1, "Requirement document should link sibling design '{design_path}'"))
+    if existing_paths.contains_key(architecture_path):
+        if path_list_contains(file.design_paths, architecture_path) == false:
+            warnings.push(make_warning("TRC323", file.path, 1, "Requirement document should link sibling architecture '{architecture_path}'"))
+    if existing_paths.contains_key(research_path):
+        if path_list_contains(file.research_paths, research_path) == false:
+            warnings.push(make_warning("TRC324", file.path, 1, "Requirement document should link sibling research '{research_path}'"))
+    warnings
+
+fn analyze_backwards_docs(parsed: [ParsedTraceFile], existing_paths: Dict<text, bool>, config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
+    if scope != "all" and scope != "doc":
+        return []
+
+    var warnings: [TraceabilityWarning] = []
+    var requirement_slugs: Dict<text, bool> = {}
+    for file in parsed:
+        if file.kind == "requirement" or file.kind == "nfr":
+            requirement_slugs[file.normalized_slug] = true
+
+    for file in parsed:
+        if file.kind != "plan" and file.kind != "design" and file.kind != "architecture" and file.kind != "research":
+            continue
+
+        for raw_test_path in file.raw_test_paths:
+            warnings.push(make_warning("TRC205", file.path, 1, "Document links raw spec '{raw_test_path}'; point to generated markdown under {config.generated_spec_root}/"))
+
+        val has_requirement_backlink = file.requirement_paths.len() > 0
+        val same_slug_requirement_exists = requirement_slugs.contains_key(file.normalized_slug)
+        if same_slug_requirement_exists and not has_requirement_backlink:
+            warnings.push(make_warning("TRC206", file.path, 1, "Document should link back to the matching requirement document"))
+        elif same_slug_requirement_exists and requirement_path_matches_slug(file.requirement_paths, file.normalized_slug) == false:
+            warnings.push(make_warning("TRC207", file.path, 1, "Document requirement backlink does not match its slug"))
+    warnings
+
+fn analyze_source_tests(parsed: [ParsedTraceFile], existing_paths: Dict<text, bool>, config: TraceabilityConfig, scope: text) -> [TraceabilityWarning]:
+    if scope != "all" and scope != "src":
+        return []
+    if config.warn_source_roots.len() == 0:
+        return []
+
+    var warnings: [TraceabilityWarning] = []
+    for file in parsed:
+        if file.kind != "source":
+            continue
+        if is_under_warn_root(file.path, config.warn_source_roots) == false:
+            continue
+        if basename(file.path) != "__init__.spl":
+            val unit_candidates = map_source_to_unit_candidates(file.path)
+            if unit_candidates.len() > 0:
+                if any_path_exists(unit_candidates, existing_paths) == false:
+                    warnings.push(make_warning("TRC101", file.path, 1, "Missing unit spec for source file; expected one of {join_list(unit_candidates)}"))
+    val anchor_dirs = collect_module_anchor_dirs(parsed, config.warn_source_roots)
+    for dir_path in anchor_dirs:
+        val integration_candidates = map_source_dir_to_integration_candidates(dir_path)
+        if integration_candidates.len() > 0:
+            if any_path_exists(integration_candidates, existing_paths) == false:
+                warnings.push(make_warning("TRC111", dir_path + "/__module__", 1, "Missing module/integration spec for source directory; expected one of {join_list(integration_candidates)}"))
+    warnings
+
+fn specs_for_requirement(requirement_path: text, specs: [ParsedTraceFile], existing_paths: Dict<text, bool>, config: TraceabilityConfig) -> [ParsedTraceFile]:
+    var matches: [ParsedTraceFile] = []
+    for spec in specs:
+        val canonical_paths = canonical_requirement_paths(spec.requirement_paths, existing_paths, config)
+        if path_list_contains(canonical_paths, requirement_path):
+            matches.push(spec)
+    matches
+
+fn any_spec_covers_id(specs: [ParsedTraceFile], id: text) -> bool:
+    for spec in specs:
+        if path_list_contains(spec.req_ids, id) or path_list_contains(spec.nfr_ids, id):
+            return true
+    false
+
+fn canonical_requirement_paths(paths: [text], existing_paths: Dict<text, bool>, config: TraceabilityConfig) -> [text]:
+    var result: [text] = []
+    for path in paths:
+        result.push(canonical_requirement_path(path, existing_paths, config))
+    unique_texts(result)
+
+fn canonical_requirement_slugs(paths: [text], existing_paths: Dict<text, bool>, config: TraceabilityConfig) -> [text]:
+    var slugs: [text] = []
+    for path in canonical_requirement_paths(paths, existing_paths, config):
+        if path != "":
+            slugs.push(normalize_slug(basename_no_ext(path)))
+    unique_texts(slugs)
+
+fn canonical_requirement_path(path: text, existing_paths: Dict<text, bool>, config: TraceabilityConfig) -> text:
+    if has_prefix(path, config.legacy_requirement_root + "/"):
+        val start_idx = config.legacy_requirement_root.len()
+        val suffix = slice_from_text(path, start_idx)
+        val canonical = "doc/plan/requirement{suffix}"
+        if existing_paths.contains_key(canonical):
+            return canonical
+    path
+
+fn collect_module_anchor_dirs(parsed: [ParsedTraceFile], warn_source_roots: [text]) -> [text]:
+    var source_dirs: [text] = []
+    var init_dirs: [text] = []
+    for file in parsed:
+        if file.kind != "source":
+            continue
+        if is_under_warn_root(file.path, warn_source_roots) == false:
+            continue
+        val dir_path = dirname(file.path)
+        source_dirs.push(dir_path)
+        if basename(file.path) == "__init__.spl":
+            init_dirs.push(dir_path)
+
+    var anchors = unique_texts(init_dirs)
+    val unique_dirs = unique_texts(source_dirs)
+    for dir_path in unique_dirs:
+        if path_list_contains(anchors, dir_path):
+            continue
+        if not has_child_source_dir(unique_dirs, dir_path):
+            anchors.push(dir_path)
+    unique_texts(anchors)
+
+fn has_child_source_dir(dirs: [text], parent_dir: text) -> bool:
+    for dir_path in dirs:
+        if dir_path != parent_dir:
+            if has_prefix(dir_path, parent_dir + "/"):
+                return true
+    false
+
+fn classify_trace_path(path: text) -> text:
+    if has_prefix(path, "test/feature/") and has_suffix(path, ".spl"):
+        return "spec_feature"
+    if has_prefix(path, "test/system/") and has_suffix(path, ".spl"):
+        return "spec_system"
+    if has_prefix(path, "src/") and has_suffix(path, ".spl"):
+        return "source"
+    if has_prefix(path, "doc/plan/requirement/") and has_suffix(path, ".md"):
+        return "requirement"
+    if has_prefix(path, "doc/plan/nfr/") and has_suffix(path, ".md"):
+        return "nfr"
+    if has_prefix(path, "doc/plan/") and has_suffix(path, ".md"):
+        return "plan"
+    if has_prefix(path, "doc/design/") and has_suffix(path, ".md"):
+        return "design"
+    if has_prefix(path, "doc/architecture/") and has_suffix(path, ".md"):
+        return "architecture"
+    if has_prefix(path, "doc/research/") and has_suffix(path, ".md"):
+        return "research"
+    if has_prefix(path, "doc/spec/") and has_suffix(path, ".md"):
+        return "spec_md"
+    "other"
+
+fn map_source_to_unit_candidates(path: text) -> [text]:
+    val mapping = map_source_path(path)
+    if mapping[0] == "" or mapping[1] == "":
+        return []
+    val unit_root = mapping[0]
+    val rel_no_ext = mapping[1]
+    [
+        "{unit_root}/{rel_no_ext}_spec.spl",
+        "{unit_root}/{rel_no_ext}_test.spl"
+    ]
+
+fn map_source_dir_to_integration_candidates(dir_path: text) -> [text]:
+    val mapping = map_source_dir(dir_path)
+    if mapping[0] == "" or mapping[1] == "":
+        return []
+    val integration_root = mapping[0]
+    val rel = mapping[1]
+    val leaf = basename(rel)
+    [
+        "{integration_root}/{rel}/module_spec.spl",
+        "{integration_root}/{rel}/integration_spec.spl",
+        "{integration_root}/{rel}/{leaf}_spec.spl"
+    ]
+
+fn map_source_path(path: text) -> [text]:
+    if has_prefix(path, "src/") == false:
+        return ["", ""]
+
+    if has_prefix(path, "src/compiler/"):
+        val rel = slice_from_text(path, 13)
+        val logical = normalize_compiler_relative(rel)
+        return ["test/unit/compiler", remove_spl_extension(logical)]
+    if has_prefix(path, "src/app/"):
+        val rel = slice_from_text(path, 8)
+        return ["test/unit/app", remove_spl_extension(rel)]
+    if has_prefix(path, "src/lib/"):
+        val rel = slice_from_text(path, 8)
+        val logical = drop_first_segment(rel)
+        return ["test/unit/lib", remove_spl_extension(logical)]
+    if has_prefix(path, "src/os/"):
+        val rel = slice_from_text(path, 7)
+        return ["test/unit/os", remove_spl_extension(rel)]
+    ["", ""]
+
+fn map_source_dir(dir_path: text) -> [text]:
+    if has_prefix(dir_path, "src/compiler/"):
+        return ["test/integration/compiler", normalize_compiler_relative(slice_from_text(dir_path, 13))]
+    if has_prefix(dir_path, "src/app/"):
+        return ["test/integration/app", slice_from_text(dir_path, 8)]
+    if has_prefix(dir_path, "src/lib/"):
+        return ["test/integration/lib", drop_first_segment(slice_from_text(dir_path, 8))]
+    if has_prefix(dir_path, "src/os/"):
+        return ["test/integration/os", slice_from_text(dir_path, 7)]
+    ["", ""]
+
+fn normalize_compiler_relative(rel: text) -> text:
+    val parts = rel.split("/")
+    if parts.len() == 0:
+        return rel
+    var normalized: [text] = []
+    normalized.push(strip_compiler_layer(parts[0]))
+    var i = 1
+    while i < parts.len():
+        normalized.push(parts[i])
+        i = i + 1
+    normalized.join("/")
+
+fn strip_compiler_layer(segment: text) -> text:
+    val dot_idx = segment.index_of(".") ?? -1
+    if dot_idx <= 0:
+        return segment
+    var numeric = true
+    var i = 0
+    while i < dot_idx:
+        val ch = segment[i:i+1]
+        if ch < "0" or ch > "9":
+            numeric = false
+            break
+        i = i + 1
+    if numeric:
+        val start_idx = dot_idx + 1
+        return slice_from_text(segment, start_idx)
+    segment
+
+fn normalize_slug(name: text) -> text:
+    var value = name
+    if has_suffix(value, "_spec"):
+        value = slice_to_text(value, value.len() - 5)
+    if has_suffix(value, "_test"):
+        value = slice_to_text(value, value.len() - 5)
+    value = strip_date_suffix(value)
+    value
+
+fn strip_date_suffix(value: text) -> text:
+    val underscore_parts = value.split("_")
+    val underscore_len = underscore_parts.len()
+    if underscore_len >= 2:
+        val last_part = underscore_parts[underscore_len - 1]
+        if is_date_suffix(last_part):
+            return join_parts_prefix(underscore_parts, underscore_len - 1, "_")
+
+    val dash_parts = value.split("-")
+    val dash_len = dash_parts.len()
+    if dash_len >= 4:
+        val year = dash_parts[dash_len - 3]
+        val month = dash_parts[dash_len - 2]
+        val day = dash_parts[dash_len - 1]
+        val tail = "{year}-{month}-{day}"
+        if is_date_suffix(tail):
+            return join_parts_prefix(dash_parts, dash_len - 3, "-")
+    value
+
+fn is_date_suffix(value: text) -> bool:
+    if value.len() != 10:
+        return false
+    if char_at_text(value, 4) != "-":
+        return false
+    if char_at_text(value, 7) != "-":
+        return false
+    var indices = [0, 1, 2, 3, 5, 6, 8, 9]
+    for idx in indices:
+        val ch = char_at_text(value, idx)
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+fn extract_relative_paths(content: text) -> [text]:
+    var paths: [text] = []
+    var i = 0
+    while i < content.len():
+        if matches_at(content, i, "doc/") or matches_at(content, i, "test/"):
+            val path = capture_relative_path_from(content, i)
+            if path != "":
+                paths.push(path)
+                i = i + path.len()
+                continue
+        i = i + 1
+    unique_texts(paths)
+
+fn capture_relative_path_from(content: text, start_idx: i64) -> text:
+    var result = ""
+    var i = start_idx
+    while i < content.len():
+        val ch = char_at_text(content, i)
+        if is_path_delimiter(ch):
+            break
+        result = result + ch
+        i = i + 1
+    trim_trailing_path_punct(result)
+
+fn is_path_delimiter(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\t" or ch == ")" or ch == "]" or ch == "\"" or ch == "'" or ch == "," or ch == ";"
+
+fn trim_trailing_path_punct(path: text) -> text:
+    var value = path
+    while has_suffix(value, ".") or has_suffix(value, ":"):
+        value = slice_to_text(value, value.len() - 1)
+    value
+
+fn extract_trace_ids(content: text) -> [text]:
+    merge_unique(extract_ids_by_prefix(content, "REQ-"), extract_ids_by_prefix(content, "NFR-"))
+
+fn extract_ids_by_prefix(content: text, prefix: text) -> [text]:
+    var ids: [text] = []
+    var i = 0
+    while i < content.len():
+        if matches_at(content, i, prefix):
+            val id = capture_id_from(content, i)
+            if id != "":
+                ids.push(id)
+                i = i + id.len()
+                continue
+        i = i + 1
+    unique_texts(ids)
+
+fn capture_id_from(content: text, start_idx: i64) -> text:
+    var result = ""
+    var i = start_idx
+    while i < content.len():
+        val ch = char_at_text(content, i)
+        if is_id_char(ch):
+            result = result + ch
+            i = i + 1
+        else:
+            break
+    result
+
+fn is_id_char(ch: text) -> bool:
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    ch == "-" or ch == "_" or ch == "."
+
+fn extract_raw_test_paths(content: text) -> [text]:
+    var result: [text] = []
+    for path in extract_relative_paths(content):
+        if has_prefix(path, "test/") and has_suffix(path, ".spl"):
+            result.push(path)
+    unique_texts(result)
+
+fn extract_prefixed_paths(content: text, prefix: text) -> [text]:
+    var result: [text] = []
+    for path in extract_relative_paths(content):
+        if has_prefix(path, prefix):
+            result.push(path)
+    unique_texts(result)
+
+fn extract_paths_for_field(content: text, field_name: text) -> [text]:
+    if field_name == "requirement":
+        val direct = merge_unique(extract_prefixed_paths(content, "doc/plan/requirement/"), extract_prefixed_paths(content, "doc/plan/nfr/"))
+        return merge_unique(direct, extract_prefixed_paths(content, "doc/requirement/"))
+    if field_name == "plan":
+        var result: [text] = []
+        for path in extract_prefixed_paths(content, "doc/plan/"):
+            if has_prefix(path, "doc/plan/requirement/") == false and has_prefix(path, "doc/plan/nfr/") == false:
+                result.push(path)
+        return unique_texts(result)
+    if field_name == "design":
+        return merge_unique(extract_prefixed_paths(content, "doc/design/"), extract_prefixed_paths(content, "doc/architecture/"))
+    if field_name == "research":
+        return extract_prefixed_paths(content, "doc/research/")
+    []
+
+fn format_traceability_warning(warning: TraceabilityWarning) -> text:
+    "{warning.path}:{str(warning.line)}: warning[{warning.code}]: {warning.message}"
+
+fn traceability_report_to_json(report: TraceabilityReport) -> text:
+    if report.warnings.len() == 0:
+        return "{\"warnings\":[]}"
+    var parts: [text] = []
+    parts.push("{\"warnings\":[")
+    var i = 0
+    while i < report.warnings.len():
+        val warning = report.warnings[i]
+        parts.push("{\"code\":\"{escape_json(warning.code)}\",\"path\":\"{escape_json(warning.path)}\",\"line\":{str(warning.line)},\"message\":\"{escape_json(warning.message)}\"}")
+        if i < report.warnings.len() - 1:
+            parts.push(",")
+        i = i + 1
+    parts.push("]}")
+    parts.join("")
+
+fn make_warning(code: text, path: text, line: i64, message: text) -> TraceabilityWarning:
+    TraceabilityWarning(code: code, path: path, line: line, message: message)
+
+fn capitalize(value: text) -> text:
+    if value == "":
+        return ""
+    val first = char_at_text(value, 0).upper()
+    val rest = slice_from_text(value, 1)
+    first + rest
+
+fn basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn dirname(path: text) -> text:
+    val idx = path.last_index_of("/") ?? -1
+    if idx < 0:
+        return ""
+    slice_to_text(path, idx)
+
+fn basename_no_ext(path: text) -> text:
+    val base = basename(path)
+    val dot_idx = base.last_index_of(".") ?? -1
+    if dot_idx < 0:
+        return base
+    slice_to_text(base, dot_idx)
+
+fn drop_first_segment(path: text) -> text:
+    val slash = path.index_of("/") ?? -1
+    if slash < 0:
+        return path
+    val start_idx = slash + 1
+    slice_from_text(path, start_idx)
+
+fn strip_quotes(value: text) -> text:
+    var result = value
+    if result.len() >= 2 and has_prefix(result, "\"") and has_suffix(result, "\""):
+        val end_idx = result.len() - 1
+        result = slice_text(result, 1, end_idx)
+    result
+
+fn path_list_contains(paths: [text], target: text) -> bool:
+    for path in paths:
+        if path == target:
+            return true
+    false
+
+fn requirement_path_matches_slug(paths: [text], slug: text) -> bool:
+    for path in paths:
+        if normalize_slug(basename_no_ext(path)) == slug:
+            return true
+    false
+
+fn any_path_exists(paths: [text], existing_paths: Dict<text, bool>) -> bool:
+    for path in paths:
+        if existing_paths.contains_key(path):
+            return true
+    false
+
+fn is_under_warn_root(path: text, warn_source_roots: [text]) -> bool:
+    for root in warn_source_roots:
+        if path == root:
+            return true
+        if has_prefix(path, root + "/"):
+            return true
+    false
+
+fn merge_unique(a: [text], b: [text]) -> [text]:
+    unique_texts(a + b)
+
+fn unique_texts(items: [text]) -> [text]:
+    var seen: Dict<text, bool> = {}
+    var result: [text] = []
+    for item in items:
+        if item == "":
+            continue
+        if seen.contains_key(item) == false:
+            seen[item] = true
+            result.push(item)
+    result
+
+fn join_list(items: [text]) -> text:
+    if items.len() == 0:
+        return ""
+    items.join(", ")
+
+fn escape_json(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+fn char_at_text(s: text, index: i64) -> text:
+    if index < 0 or index >= s.len():
+        return ""
+    s[index:index + 1]
+
+fn slice_text(s: text, start_idx: i64, end_idx: i64) -> text:
+    var start = start_idx
+    var end = end_idx
+    if start < 0:
+        start = 0
+    if end < start:
+        return ""
+    val s_len = s.len()
+    if start > s_len:
+        return ""
+    if end > s_len:
+        end = s_len
+    var result = ""
+    var i = start
+    while i < end:
+        result = result + char_at_text(s, i)
+        i = i + 1
+    result
+
+fn slice_from_text(s: text, start_idx: i64) -> text:
+    slice_text(s, start_idx, s.len())
+
+fn slice_to_text(s: text, end_idx: i64) -> text:
+    slice_text(s, 0, end_idx)
+
+fn matches_at(s: text, start_idx: i64, needle: text) -> bool:
+    if start_idx < 0:
+        return false
+    val s_len = s.len()
+    val needle_len = needle.len()
+    if start_idx + needle_len > s_len:
+        return false
+    var i = 0
+    while i < needle_len:
+        if char_at_text(s, start_idx + i) != char_at_text(needle, i):
+            return false
+        i = i + 1
+    true
+
+fn join_parts_prefix(parts: [text], count: i64, separator: text) -> text:
+    if count <= 0:
+        return ""
+    var result = ""
+    var i = 0
+    while i < count:
+        if i > 0:
+            result = result + separator
+        result = result + parts[i]
+        i = i + 1
+    result
+
+fn remove_spl_extension(path: text) -> text:
+    if has_suffix(path, ".spl"):
+        return slice_to_text(path, path.len() - 4)
+    path
+
+fn has_prefix(value: text, prefix: text) -> bool:
+    matches_at(value, 0, prefix)
+
+fn has_suffix(value: text, suffix: text) -> bool:
+    val suffix_len = suffix.len()
+    val value_len = value.len()
+    if suffix_len > value_len:
+        return false
+    val start_idx = value_len - suffix_len
+    matches_at(value, start_idx, suffix)

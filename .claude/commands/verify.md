@@ -1,0 +1,1 @@
+/Users/ormastes/simple/.claude/skills/verify.md

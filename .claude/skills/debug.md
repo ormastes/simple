@@ -1,75 +1,71 @@
 # Debug Skill
 
-## Logging & Tracing
+## Logging & IR Export
 
 ```bash
-SIMPLE_LOG=debug bin/simple file.spl                # Set log level
+SIMPLE_LOG=debug bin/simple file.spl                # Debug logging
 SIMPLE_LOG=interpreter=trace bin/simple file.spl    # Module-specific
-bin/simple --gc-log file.spl                        # GC debug output
+bin/simple --gc-log file.spl                        # GC output
+bin/simple --emit-ast=ast.json file.spl             # AST dump
+bin/simple --emit-hir=hir.json file.spl             # HIR (type-checked)
+bin/simple --emit-mir=mir.json file.spl             # MIR (lowered)
 ```
 
-## IR Export
-
-```bash
-bin/simple --emit-ast=ast.json file.spl    # AST
-bin/simple --emit-hir=hir.json file.spl    # HIR (type-checked)
-bin/simple --emit-mir=mir.json file.spl    # MIR (lowered)
-CRANELIFT_DEBUG=1 bin/simple --compile file.spl  # Cranelift IR dumps
-```
-
-## Diagnostics via Query Engine
+## Query Engine Diagnostics
 
 ```bash
 bin/simple query check <file> --format json          # Type-check + lint
 bin/simple query workspace-diagnostics <dir>         # Workspace-wide
-bin/simple query hover <file> <line>                 # Type + docs at position
+bin/simple query hover <file> <line>                 # Type + docs
 ```
 
-## Fault Detection Env Vars
+## Fault Detection
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `SIMPLE_STACK_OVERFLOW_DETECTION` | debug=on, release=off | Recursion depth check |
-| `SIMPLE_MAX_RECURSION_DEPTH` | 1000 | Max call depth |
-| `SIMPLE_TIMEOUT_SECONDS` | 0 (off) | Wall-clock timeout |
-| `SIMPLE_EXECUTION_LIMIT` | 10000000 | Instruction count limit |
-| `SIMPLE_LEAK_DETECTION` | false | Heap growth heuristic |
+| Variable | Purpose |
+|----------|---------|
+| `SIMPLE_STACK_OVERFLOW_DETECTION` | Recursion depth (default: on in debug) |
+| `SIMPLE_MAX_RECURSION_DEPTH` | Max call depth (default: 1000) |
+| `SIMPLE_TIMEOUT_SECONDS` | Wall-clock timeout |
+| `SIMPLE_EXECUTION_LIMIT` | Instruction count limit |
+| `SIMPLE_LEAK_DETECTION` | Heap growth heuristic |
 
 ## Common Issues
 
-| Symptom | Debug Step |
-|---------|-----------|
-| "Falling back to interpreter" | `SIMPLE_LOG=debug` for fallback reason |
+| Symptom | Action |
+|---------|--------|
+| Interpreter fallback | `SIMPLE_LOG=debug` |
 | Memory issues | `--gc-log` + `SIMPLE_LEAK_DETECTION=1` |
-| Type errors | `--emit-hir` to see inferred types |
-| Pattern match failures | `--emit-mir` for PatternTest/PatternBind |
+| Type errors | `--emit-hir` for inferred types |
+| Pattern failures | `--emit-mir` for PatternTest/PatternBind |
 
-## RuntimeValue Tags
+## DAP+LSP Chaining
+
+Chain runtime state (DAP) with static analysis (LSP) via **file + line**.
 
 ```
-0b00: Pointer (heap)  |  0b01: Small integer
-0b10: Special (nil/bool)  |  0b11: Symbol
+debug_stack_trace → frames[0].source, line
+  → bin/simple query hover <file> <line>
+  → bin/simple query references <file> <line>
 ```
+
+### Patterns
+- **Variable → Type**: `debug_get_variables` → type name → `query workspace-symbols --query <type>` → `query hover`
+- **Frame → Callers**: `debug_stack_trace` → `query call-hierarchy <file> <line> --direction incoming`
+- **Next-line**: `debug_get_source(count=20)` → `query hover` + `query inlay-hints` on upcoming code
+- **Post-crash**: `stack_trace` → `get_variables` → `query hover` at crash line → `query definition`
+
+### DAP MCP Tools
+Session: `debug_create_session`, `debug_terminate`
+Control: `debug_continue`, `debug_step`, `debug_set_breakpoint`
+Inspect: `debug_stack_trace`, `debug_get_variables`, `debug_evaluate`, `debug_watch`
+Logging: `debug_log_enable(pattern)`, `debug_log_query`, `debug_log_tree`
 
 ## Bootstrap Debugging
 
 ```bash
-scripts/capture_bootstrap_debug.sh     # Capture debug output
-scripts/bootstrap.sh --stage=1         # Run specific stage
+scripts/capture_bootstrap_debug.sh     # Capture output
+scripts/bootstrap.sh --stage=1         # Specific stage
 scripts/bootstrap.sh --verify          # Verify determinism
 ```
 
-Key instrumentation: `[phase3]` (HIR lowering), `[aot]` (compilation)
-
-## Live Debugging Workflow
-
-1. **Capture**: `scripts/capture_bootstrap_debug.sh`
-2. **Analyze**: Check HIR module count at phase 3 exit vs phase 5 entry
-3. **Register bug**: `doc/tracking/bug/bug_db.sdn`
-4. **Fix & verify**: `bin/simple build && scripts/bootstrap.sh --verify`
-
-## See Also
-
-- `/debug-lsp` skill for DAP+LSP chaining
-- `doc/tracking/bug/bug_db.sdn` - Bug database
-- `src/compiler/` - Compiler source
+Workflow: Capture → check HIR count at phase 3 vs phase 5 → register bug → fix & verify.

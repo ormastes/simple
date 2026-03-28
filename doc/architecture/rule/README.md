@@ -84,7 +84,8 @@ These rules apply to all contributors. Overrides require an ADR (see `doc/adr/`)
 ### 4.1 Spec File Requirements
 Every `*_spec.spl` file must have:
 - Module-level `"""..."""` docstring with Feature IDs, Category, Status
-- Recommended: `**Requirements:**`, `**Plan:**`, `**Design:**`, `**Research:**` links
+- For `test/feature/**` and `test/system/**`: `**Requirements:**`, `**Plan:**`, `**Design:**`, `**Research:**` links
+- Use `simple traceability-check` to validate requirement/doc/test links
 
 ### 4.2 ADR Required When
 - Introducing a new major dependency
@@ -136,6 +137,7 @@ Every `*_spec.spl` file must have:
 | Linter (`bin/simple build lint`) | Code style violations |
 | Code review | Architecture violations |
 | `sspec-docgen` warnings | Missing doc links |
+| `traceability-check` | Missing source/test/doc trace links |
 | Release checklist | Pre-release quality gates |
 
 Rules may only be overridden via ADR in `doc/adr/`.

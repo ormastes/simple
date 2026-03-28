@@ -57,6 +57,7 @@ Registered in the dispatch table. Each maps to `src/app/<module>/main.spl`.
 | `query` | `query/` | Query the codebase |
 | `info` | `info/` | Show project/module info |
 | `spec-coverage` | `spec_coverage/` | Spec coverage analysis |
+| `traceability-check` | `traceability/` | Source/test/doc traceability analysis |
 | `replay` | `replay/` | Replay execution traces |
 | `diff` | `diff/` | Diff tool |
 | `context` | `context/` | Context/scope inspection |

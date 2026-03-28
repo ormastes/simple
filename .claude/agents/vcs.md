@@ -1,7 +1,7 @@
 # VCS Agent - Version Control (JJ / Git)
 
-**Use when:** Committing, pushing, viewing history, managing changes.
-**Skills:** `/versioning`
+**Use when:** Committing, pushing, syncing, viewing history, managing changes.
+**Skills:** `/sync`
 
 ## Quick Reference
 
@@ -19,6 +19,7 @@
 | Abandon change | `jj abandon <change_id>` | `git reset` |
 | Squash into parent | `jj squash` | `git rebase -i` (squash) |
 | Edit past change | `jj edit <change_id>` | `git rebase -i` (edit) |
+| File count | `git ls-files \| wc -l` | Check tracked file count |
 
 ## Key Concepts
 
@@ -45,6 +46,42 @@ jj bookmark set main -r @-
 jj git push --bookmark main
 ```
 
+## Sync Workflow (Pull/Rebase/Push with Safety)
+
+See `/sync` skill for full details. Key steps:
+
+```bash
+# 1. Record file count
+FILE_COUNT=$(git ls-files | wc -l | tr -d ' ')
+
+# 2. Commit, fetch, rebase
+jj commit -m "<type>: <msg>"
+jj git fetch
+jj rebase -d main@origin
+
+# 3. Verify file count not reduced
+NEW_COUNT=$(git ls-files | wc -l | tr -d ' ')
+echo "Before: $FILE_COUNT, After: $NEW_COUNT"
+
+# 4. Push
+jj bookmark set main -r @-
+jj git push --bookmark main
+```
+
+## Orphan Prevention
+
+- **NEVER** leave commits detached from main
+- If orphans found: cherrypick onto main with `jj new main` + `jj restore --from <id>`
+- Or rebase: `jj rebase -r <id> -d main`
+
+## Worktree Sync
+
+If on a workspace, switch to main, sync, switch back:
+1. `cd` to main repo
+2. Run sync workflow
+3. `cd` back to worktree
+4. `jj workspace update-stale`
+
 ## Fixing Past Changes
 
 ```bash
@@ -63,26 +100,12 @@ jj squash -r <change_id>
 jj split -r <change_id>
 ```
 
-## Workspace (Parallel Working Copies)
-
-```bash
-# Create workspace for parallel work
-jj workspace add ../simple-ws2 --name ws2
-
-# List workspaces
-jj workspace list
-
-# Remove workspace
-jj workspace forget ws2
-
-# Update stale workspace
-jj workspace update-stale
-```
-
 ## Rules
 
 - NO branches - work directly on main
 - LINEAR history - squash if needed
+- NO orphan commits - everything on main
+- FILE COUNT GUARD - check before/after every rebase
 - Use jj as primary VCS (git commands available for tags, gh CLI)
 
 ## Commit Message Format
@@ -99,4 +122,4 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`
 
 ## See Also
 
-- `/versioning` - Full JJ + git workflow guide
+- `/sync` - Full sync workflow with file-count safety

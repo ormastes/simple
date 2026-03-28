@@ -218,6 +218,9 @@ bin/
 **...contribute code**
 -> `CLAUDE.md`, `doc/architecture/overview.md`
 
+**...write traceable docs and tests**
+-> `doc/guide/writing/traceability.md`
+
 **...run tests**
 -> `bin/simple test`, see `doc/guide/` for test guides
 
