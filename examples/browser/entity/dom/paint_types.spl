@@ -21,8 +21,8 @@ class Gradient:
     static fn create(stops: List<GradientStop>, angle: f64) -> Gradient:
         Gradient(stops: stops, angle: angle)
 
-# TODO: PaintOp.FillRect inlines rect fields (x,y,w,h) — consider using std.common.engine.rect.Rect2 as a parameter type instead.
-# TODO: PaintOp parallels engine RenderCommand (std.nogc_sync_mut.engine.render.command) — evaluate shared display-list abstraction.
+# PaintOp inlines rect fields (x,y,w,h) directly for simplicity rather than wrapping in Rect2.
+# This avoids a dependency on std.common.engine.rect and keeps the enum self-contained.
 enum PaintOp:
     FillRect(x: f64, y: f64, w: f64, h: f64, color: Color)
     DrawText(x: f64, y: f64, text_content: text, font_size: f64, color: Color)
@@ -33,13 +33,27 @@ enum PaintOp:
     PushOpacity(alpha: f64)
     PopOpacity
 
+# Extract the rect (x, y, w, h) from rect-bearing PaintOp variants.
+# Returns nil for non-rect ops (DrawText, PushOpacity, PopOpacity, PopClip).
+fn paint_op_rect(op: PaintOp) -> Option<Pair<Pair<f64, f64>, Pair<f64, f64>>>:
+    match op:
+        PaintOp.FillRect(x, y, w, h, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.DrawBorder(x, y, w, h, _, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.DrawImage(x, y, w, h, _):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        PaintOp.PushClip(x, y, w, h):
+            Some(Pair(first: Pair(first: x, second: y), second: Pair(first: w, second: h)))
+        _: nil
+
 class DisplayList:
     ops: List<PaintOp>
 
     static fn empty() -> DisplayList:
         DisplayList(ops: List<PaintOp>())
 
-# TODO: DisplayItem.z_index parallels std.common.engine.units.ZIndex — consider reusing the strongly-typed wrapper.
+# DisplayItem.z_index uses i64 directly for simplicity — no strongly-typed ZIndex wrapper needed at this layer.
 class DisplayItem:
     z_index: i64
     op: PaintOp

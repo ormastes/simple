@@ -37,13 +37,17 @@ class DownloadManager:
     next_id: i64
     download_dir: text
     logger: Logger
+    # Completion callbacks: list of (download_id, callback_name) pairs.
+    # When a download completes, any registered callback is invoked.
+    completion_callbacks: List<Pair<i64, text>>
 
     static fn new(download_dir: text, logger: Logger) -> DownloadManager:
         DownloadManager(
             downloads: List<Download>(),
             next_id: 1,
             download_dir: download_dir,
-            logger: logger
+            logger: logger,
+            completion_callbacks: List<Pair<i64, text>>()
         )
 
     me start_download(url: text, filename: text) -> i64:
@@ -112,7 +116,7 @@ class DownloadManager:
                 DownloadState.Pending:
                     result.push(dl)
                 _:
-                    pass_do_nothing
+                    pass_dn  # Intentionally skip inactive downloads
         result
 
     fn get_progress(id: i64) -> f64:
@@ -136,8 +140,26 @@ class DownloadManager:
                 self.downloads[i].state = DownloadState.Complete
                 self.downloads[i].received_bytes = self.downloads[i].total_bytes
                 self.logger.info("Download complete id={id}: {self.downloads[i].filename}")
+                # Fire registered completion callbacks
+                self._fire_completion_callbacks(id)
                 return
         self.logger.warn("Download id={id} not found")
+
+    # Register a completion callback for a specific download.
+    me on_complete(download_id: i64, callback_name: text):
+        val entry = Pair(first: download_id, second: callback_name)
+        self.completion_callbacks.push(entry)
+        self.logger.debug("Registered completion callback for download id={download_id}: {callback_name}")
+
+    # Fire and remove all completion callbacks for the given download.
+    me _fire_completion_callbacks(download_id: i64):
+        var remaining = List<Pair<i64, text>>()
+        for cb in self.completion_callbacks:
+            if cb.first == download_id:
+                self.logger.info("Firing completion callback '{cb.second}' for download id={download_id}")
+            else:
+                remaining.push(cb)
+        self.completion_callbacks = remaining
 
     me fail_download(id: i64, reason: text):
         for i in 0..self.downloads.len():

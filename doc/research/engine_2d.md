@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-24
 **Status:** Complete
-**Related:** [Requirements](../plan/requirement/engine_2d.md) | [Plan](../plan/engine_2d.md) | [Design](../design/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
+**Related:** [Requirements](../plan/requirements/engine_2d.md) | [Plan](../plan/engine_2d.md) | [Design](../design/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
 
 ---
 
@@ -137,10 +137,10 @@ A `test/system/engine_2d_spec.spl` should exercise the full engine lifecycle: cr
 
 ## Cross-References
 
-- **Requirements:** `doc/requirement/engine_2d.md`
+- **Requirements:** `doc/plan/requirements/engine_2d.md`
 - **Plan:** `doc/plan/engine_2d.md`
 - **Design:** `doc/design/engine_2d.md`
-- **Limitations:** `doc/bug/engine_2d_limitations.md`
+- **Limitations:** `doc/tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`

@@ -6,12 +6,13 @@ existing RV32 emulator path.
 """
 
 use std.spec.{describe, it, expect}
-use libwidth.lib32.{Width32Lib, Rv32RtlSimulator}
+use libwidth.lib32.{Width32Lib, Rv32Simulator}
+use rtl.types.{SimBackendKind}
 use test.helpers.riscv_encode.{encode_addi, encode_ebreak, encode_nop, bytes_to_word}
 
-fn create_rv32_rtl(program: [i64]) -> Rv32RtlSimulator:
+fn create_rv32_rtl(program: [i64]) -> Rv32Simulator:
     val lib = Width32Lib.new()
-    var sim = lib.create_rv32_rtl_sim()
+    var sim = lib.create_rv32_sim(SimBackendKind.NativeRtl)
     sim.load_program(program)
     sim.reset()
     sim.load_program(program)
@@ -41,5 +42,47 @@ describe "RV32 native RTL simulator":
         var sim = create_rv32_rtl(program)
         sim.step()
         val stats = sim.stats_text()
-        expect(stats).to_contain("RV32 RTL")
+        expect(stats).to_contain("backend=native-rtl")
         expect(stats).to_contain("signals=")
+
+    it "reports unavailable RTK verilator backend explicitly":
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.RtkVerilator)
+        val stats = sim.stats_text()
+        expect(stats).to_contain("backend=rtk-verilator")
+        expect(stats).to_contain("top=")
+
+    it "preserves architectural state when switching fast -> native rtl":
+        val program = encode_addi(10, 0, 42) + encode_nop() + encode_ebreak()
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.FastIrTc)
+        sim.load_program(program)
+        sim.reset()
+        sim.load_program(program)
+        sim.step()
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        sim.select_backend(SimBackendKind.NativeRtl)
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        expect(sim.read_signal("a0")).to_equal(Some(42))
+        expect(sim.read_signal("pc")).to_equal(Some(0x80000004))
+
+    it "restores memory through checkpoint handoff":
+        val program = encode_addi(11, 0, 7) +
+            encode_addi(12, 0, 0x40) +
+            encode_sw(12, 11, 0) +
+            encode_lw(10, 12, 0) +
+            encode_ebreak()
+        val lib = Width32Lib.new()
+        var sim = lib.create_rv32_sim(SimBackendKind.FastIrTc)
+        sim.load_program_at(0x40, [0, 0, 0, 0])
+        sim.load_program(program)
+        sim.reset()
+        sim.load_program(program)
+        sim.load_program_at(0x40, [0, 0, 0, 0])
+        sim.run(4)
+        expect(sim.get_reg("a0")).to_equal(Some(7))
+        val checkpoint = sim.checkpoint()
+        var rtl = lib.create_rv32_sim(SimBackendKind.NativeRtl)
+        rtl.restore(checkpoint)
+        expect(rtl.get_reg("a0")).to_equal(Some(7))
+        expect(rtl.read_signal("mem_writes")).to_equal(Some(checkpoint.write_count))

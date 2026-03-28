@@ -2,7 +2,7 @@
 
 **Status:** Implementing
 **Date:** 2026-03-24
-**Related:** [Requirements](requirement/engine_2d.md) | [Design](../design/engine_2d.md) | [Research](../research/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
+**Related:** [Requirements](requirements/engine_2d.md) | [Design](../design/engine_2d.md) | [Research](../research/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
 
 ---
 
@@ -156,10 +156,10 @@ Phase 8 (GPU Acceleration) [future]
 
 ## Cross-References
 
-- **Requirements:** `doc/requirement/engine_2d.md`
+- **Requirements:** `doc/plan/requirements/engine_2d.md`
 - **Design:** `doc/design/engine_2d.md`
 - **Research:** `doc/research/engine_2d.md`
-- **Limitations:** `doc/bug/engine_2d_limitations.md`
+- **Limitations:** `doc/tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`

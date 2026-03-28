@@ -4,7 +4,7 @@
 # complete 32-bit emulation environment. Provides a factory for creating
 # fully configured Rv32Emulator instances.
 
-use core.types.{GuestArch}
+use core.types.{IrTcTypeKind, GuestArch}
 use core.ops.{IrTcOp}
 use core.block.{IrTcModule, IrTcModuleMode}
 use core.builder.{IrTcBuilder}
@@ -14,7 +14,11 @@ use guest.riscv.decoder32.{Rv32Decoder}
 use runtime.memory.{GuestMemory}
 use runtime.io.{IoController, RiscvUartIO}
 use runtime.interrupt.{InterruptController}
-use runtime.rtl_sim.{RtlSimEngine}
+use rtl.types.{SimBackendKind, Rv32Checkpoint}
+use rtl.sim_engine.{NativeRtlBackend, VerilatorRtkBackend}
+use rtl.bridge.{RtlStateBridge}
+use transform.irtc_to_guest.{IrtcToGuestAdapter}
+use std.io_runtime.{time_now_micros}
 
 # ============================================================================
 # Width32 Library
@@ -59,7 +63,8 @@ impl Width32Lib:
 
         val interrupt = InterruptController.new(GuestArch.Riscv32)
 
-        # Create decoder with a fresh emulation builder
+        # Keep a decoder instance for structural compatibility; execution now
+        # rebuilds an IR_TC TB per step and applies it through the transform path.
         var builder = IrTcBuilder.new("rv32_tb", IrTcModuleMode.Emulation)
         val decoder = Rv32Decoder(builder: builder, cpu_def: cpu_def)
 
@@ -77,17 +82,22 @@ impl Width32Lib:
     fn create_rv32_rtl_sim() -> Rv32RtlSimulator:
         """Factory: create RV32I simulator with native RTL-style observability."""
         val emu = self.create_rv32_emulator()
-        var rtl = RtlSimEngine.new()
-        rtl.define_signal("cycle", 64, 0, true)
-        rtl.define_signal("pc", 32, 0x80000000, true)
-        rtl.define_signal("retired_pc", 32, 0x80000000, true)
-        rtl.define_signal("inst_word", 32, 0, false)
-        rtl.define_signal("a0", 32, 0, true)
-        rtl.define_signal("sp", 32, 0, true)
-        rtl.define_signal("mem_reads", 64, 0, false)
-        rtl.define_signal("mem_writes", 64, 0, false)
-        rtl.define_signal("halted", 1, 0, true)
-        Rv32RtlSimulator(emulator: emu, rtl: rtl, last_inst_word: 0)
+        Rv32RtlSimulator(
+            emulator: emu,
+            rtl: NativeRtlBackend.new(),
+            bridge: RtlStateBridge.new(),
+            last_inst_word: 0
+        )
+
+    fn create_rv32_sim(backend: SimBackendKind) -> Rv32Simulator:
+        """Factory: create a unified RV32 simulator facade."""
+        Rv32Simulator(
+            backend_kind: backend,
+            fast: self.create_rv32_emulator(),
+            rtl: self.create_rv32_rtl_sim(),
+            verilator: VerilatorRtkBackend.detect_default(),
+            bridge: RtlStateBridge.new()
+        )
 
 # ============================================================================
 # RV32 Emulator
@@ -131,13 +141,23 @@ impl Rv32Emulator:
         val b3 = self.memory.read_byte(pc + 3) & 0xFF
         val inst_word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
-        # Decode and execute
-        val result = self.decoder.decode_instruction(inst_word, pc)
+        # Decode into a single-instruction TB and execute it through the IR_TC
+        # guest-state transform path so fast mode shares the same IR boundary.
+        var builder = IrTcBuilder.new("rv32_tb", IrTcModuleMode.Emulation)
+        builder.set_target(GuestArch.Riscv32)
+        builder.begin_function("tb", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val decoder = Rv32Decoder(builder: builder, cpu_def: self.cpu_def)
+        val result = decoder.decode_instruction(inst_word, pc)
         match result:
             Ok(bytes_consumed):
+                val module = builder.finish()
+                var adapter = IrtcToGuestAdapter.new()
+                self.state = adapter.apply_to_state_with_memory(module, self.state, self.memory)
+                if self.state.pc == pc:
+                    self.state.pc = pc + bytes_consumed
                 self.cycle_count = self.cycle_count + 1
-                # Advance PC by 4 (all base ISA instructions are 32-bit)
-                self.state.pc = pc + bytes_consumed
                 1
             Err(_):
                 # Unknown instruction: halt
@@ -196,6 +216,18 @@ impl Rv32Emulator:
         """Return emulation statistics as text."""
         "RV32I: {self.cycle_count} cycles, PC=0x{self.state.pc}, halted={self.halted}"
 
+    fn checkpoint() -> Rv32Checkpoint:
+        Rv32Checkpoint.from_state(self.state, self.memory.memory, self.memory.read_count, self.memory.write_count, self.cycle_count, self.halted)
+
+    me restore(checkpoint: Rv32Checkpoint):
+        self.state.reg_values = checkpoint.reg_values
+        self.state.pc = checkpoint.pc
+        self.memory.memory = checkpoint.memory
+        self.memory.read_count = checkpoint.read_count
+        self.memory.write_count = checkpoint.write_count
+        self.cycle_count = checkpoint.cycle_count
+        self.halted = checkpoint.halted
+
 # ============================================================================
 # RV32 Native RTL Simulator
 # ============================================================================
@@ -203,7 +235,8 @@ impl Rv32Emulator:
 class Rv32RtlSimulator:
     """RV32I emulator wrapped with a native RTL-style signal surface."""
     emulator: Rv32Emulator
-    rtl: RtlSimEngine
+    rtl: NativeRtlBackend
+    bridge: RtlStateBridge
     last_inst_word: i64
 
 impl Rv32RtlSimulator:
@@ -214,11 +247,12 @@ impl Rv32RtlSimulator:
         self.last_inst_word = inst_word
 
         self.rtl.begin_cycle(self.emulator.cycle_count + 1)
-        self.rtl.set_signal("retired_pc", pc_before)
-        self.rtl.set_signal("inst_word", inst_word)
+        val start_us = time_now_micros()
 
         val cycles = self.emulator.step()
+        val end_us = time_now_micros()
         self._sync_signals()
+        self.rtl.record_host_time_ns((end_us - start_us) * 1000)
         self.rtl.sample_all()
         cycles
 
@@ -243,7 +277,6 @@ impl Rv32RtlSimulator:
     me reset():
         self.emulator.reset()
         self.last_inst_word = 0
-        self.rtl.clear_trace()
         self._sync_signals()
 
     fn get_reg(name: text) -> i64?:
@@ -264,19 +297,120 @@ impl Rv32RtlSimulator:
         self.rtl.read_signal(name)
 
     fn waveform_text() -> text:
-        self.rtl.trace_text()
+        self.rtl.waveform_text()
 
     fn stats_text() -> text:
-        "RV32 RTL: {self.emulator.cycle_count} cycles, signals={self.rtl.signal_count()}, trace={self.rtl.trace_count()}, halted={self.emulator.halted}"
+        self.rtl.stats(self.checkpoint()).to_text()
+
+    fn checkpoint() -> Rv32Checkpoint:
+        self.bridge.make_checkpoint(self.emulator.state, self.emulator.memory, self.emulator.cycle_count, self.emulator.halted)
+
+    me restore(checkpoint: Rv32Checkpoint):
+        self.emulator.restore(checkpoint)
+        self._sync_signals()
 
     me _sync_signals():
-        self.rtl.set_signal("cycle", self.emulator.cycle_count)
-        self.rtl.set_signal("pc", self.emulator.state.pc)
-        self.rtl.set_signal("inst_word", self.last_inst_word)
-        self.rtl.set_signal("mem_reads", self.emulator.memory.read_count)
-        self.rtl.set_signal("mem_writes", self.emulator.memory.write_count)
-        self.rtl.set_signal("halted", if self.emulator.halted: 1 else: 0)
+        val checkpoint = self.checkpoint()
+        var a0_value: i64 = 0
+        var sp_value: i64 = 0
         if val Some(a0) = self.emulator.get_reg("a0"):
-            self.rtl.set_signal("a0", a0)
+            a0_value = a0
         if val Some(sp) = self.emulator.get_reg("sp"):
-            self.rtl.set_signal("sp", sp)
+            sp_value = sp
+        self.rtl.refresh(checkpoint, a0_value, sp_value, self.last_inst_word, self.emulator.memory.read_count, self.emulator.memory.write_count)
+
+# ============================================================================
+# Unified RV32 Simulator Facade
+# ============================================================================
+
+class Rv32Simulator:
+    backend_kind: SimBackendKind
+    fast: Rv32Emulator
+    rtl: Rv32RtlSimulator
+    verilator: VerilatorRtkBackend
+    bridge: RtlStateBridge
+
+impl Rv32Simulator:
+    me step() -> i64:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: self.fast.step()
+            SimBackendKind.NativeRtl: self.rtl.step()
+            SimBackendKind.RtkVerilator:
+                val start_us = time_now_micros()
+                self.verilator.refresh(self.checkpoint())
+                val end_us = time_now_micros()
+                self.verilator.record_host_time_ns((end_us - start_us) * 1000)
+                0
+
+    me run(max_cycles: i64):
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: self.fast.run(max_cycles)
+            SimBackendKind.NativeRtl: self.rtl.run(max_cycles)
+            SimBackendKind.RtkVerilator:
+                val start_us = time_now_micros()
+                self.verilator.refresh(self.checkpoint())
+                val end_us = time_now_micros()
+                self.verilator.record_host_time_ns((end_us - start_us) * 1000)
+
+    me load_program(data: [i64]):
+        self.fast.load_program(data)
+        self.rtl.load_program(data)
+        self.verilator.refresh(self.checkpoint())
+
+    me load_program_at(addr: i64, data: [i64]):
+        self.fast.load_program_at(addr, data)
+        self.rtl.load_program_at(addr, data)
+        self.verilator.refresh(self.checkpoint())
+
+    me reset():
+        self.fast.reset()
+        self.rtl.reset()
+        self.verilator.refresh(self.checkpoint())
+
+    fn get_reg(name: text) -> i64?:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: self.fast.get_reg(name)
+            SimBackendKind.NativeRtl: self.rtl.get_reg(name)
+            SimBackendKind.RtkVerilator: self.fast.get_reg(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        val ok_fast = self.fast.set_reg(name, value)
+        self.rtl.set_reg(name, value)
+        self.verilator.refresh(self.checkpoint())
+        ok_fast
+
+    fn read_signal(name: text) -> i64?:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: nil
+            SimBackendKind.NativeRtl: self.rtl.read_signal(name)
+            SimBackendKind.RtkVerilator: self.verilator.read_signal(name)
+
+    fn waveform_text() -> text:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: ""
+            SimBackendKind.NativeRtl: self.rtl.waveform_text()
+            SimBackendKind.RtkVerilator: ""
+
+    fn checkpoint() -> Rv32Checkpoint:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: self.fast.checkpoint()
+            SimBackendKind.NativeRtl: self.rtl.checkpoint()
+            SimBackendKind.RtkVerilator: self.fast.checkpoint()
+
+    me restore(checkpoint: Rv32Checkpoint):
+        self.fast.restore(checkpoint)
+        self.rtl.restore(checkpoint)
+        self.verilator.refresh(checkpoint)
+
+    me select_backend(backend: SimBackendKind):
+        if backend == self.backend_kind:
+            return
+        val checkpoint = self.checkpoint()
+        self.restore(checkpoint)
+        self.backend_kind = backend
+
+    fn stats_text() -> text:
+        match self.backend_kind:
+            SimBackendKind.FastIrTc: self.fast.stats_text()
+            SimBackendKind.NativeRtl: self.rtl.stats_text()
+            SimBackendKind.RtkVerilator: self.verilator.stats(self.checkpoint()).to_text()

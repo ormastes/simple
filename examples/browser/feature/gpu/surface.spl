@@ -42,8 +42,16 @@ class GpuSurface:
     texture_id: i64
     is_valid: bool
     generation: i64
+    pixels: List<i64>
 
     static fn create(id: i64, width: i64, height: i64, format: SurfaceFormat) -> GpuSurface:
+        # Initialize pixel backing store to width * height * 4 zeros (RGBA)
+        val pixel_count = width * height * 4
+        var px = List<i64>()
+        var i = 0
+        while i < pixel_count:
+            px.push(0)
+            i = i + 1
         GpuSurface(
             id: id,
             width: width,
@@ -51,8 +59,34 @@ class GpuSurface:
             format: format,
             texture_id: id,
             is_valid: true,
-            generation: 0
+            generation: 0,
+            pixels: px
         )
+
+    # Get a pixel color at (x, y) as (r, g, b, a) packed into the pixel list.
+    fn get_pixel(x: i64, y: i64) -> List<i64>:
+        val idx = (y * self.width + x) * 4
+        var result = List<i64>()
+        if idx >= 0 and idx + 3 < self.pixels.len():
+            result.push(self.pixels.get(idx))
+            result.push(self.pixels.get(idx + 1))
+            result.push(self.pixels.get(idx + 2))
+            result.push(self.pixels.get(idx + 3))
+        else:
+            result.push(0)
+            result.push(0)
+            result.push(0)
+            result.push(0)
+        result
+
+    # Set a pixel at (x, y) with the given RGBA values.
+    me set_pixel(x: i64, y: i64, r: i64, g: i64, b: i64, a: i64):
+        val idx = (y * self.width + x) * 4
+        if idx >= 0 and idx + 3 < self.pixels.len():
+            self.pixels.set(idx, r)
+            self.pixels.set(idx + 1, g)
+            self.pixels.set(idx + 2, b)
+            self.pixels.set(idx + 3, a)
 
 # Calculate memory usage of a single surface in bytes.
 fn surface_memory_bytes(surface: GpuSurface) -> i64:
@@ -109,6 +143,14 @@ class SurfacePool:
                 surface.width = width
                 surface.height = height
                 surface.generation = surface.generation + 1
+                # Reinitialize pixel backing store for new dimensions
+                val pixel_count = width * height * 4
+                var new_pixels = List<i64>()
+                var pi = 0
+                while pi < pixel_count:
+                    new_pixels.push(0)
+                    pi = pi + 1
+                surface.pixels = new_pixels
                 self.logger.debug("resized surface {surface_id}: {old_w}x{old_h} -> {width}x{height}")
                 return Ok(())
 
@@ -161,14 +203,14 @@ class SurfacePool:
     # Present a swapchain by swapping front and back buffers.
     me present(swapchain: Swapchain) -> BrowserResult<()>:
         val front_surface = self.get_surface(swapchain.front)
-        if front_surface.?:
-            pass_do_nothing
+        if val fs = front_surface:
+            self.logger.trace("present: validated front surface id={fs.id}")
         else:
             return Err(paint_error("swapchain front surface not found: id={swapchain.front}"))
 
         val back_surface = self.get_surface(swapchain.back)
-        if back_surface.?:
-            pass_do_nothing
+        if val bs = back_surface:
+            self.logger.trace("present: validated back surface id={bs.id}")
         else:
             return Err(paint_error("swapchain back surface not found: id={swapchain.back}"))
 

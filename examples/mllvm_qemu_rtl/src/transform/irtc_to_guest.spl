@@ -7,8 +7,15 @@
 
 use core.types.{IrTcTypeKind, IrTcValue, IrTcCond}
 use core.ops.{IrTcOp, IrTcInst}
-use core.block.{IrTcModule, IrTcFunction, IrTcBlock}
+use core.mem_op.{MemOp}
+use core.block.{BlockId, IrTcModule, IrTcFunction, IrTcBlock}
 use guest.cpu_def.{GuestState}
+use runtime.memory.{GuestMemory}
+
+enum BlockControl:
+    Continue
+    Jump(target: BlockId)
+    Stop
 
 # ============================================================================
 # IR_TC -> Guest State Adapter
@@ -38,6 +45,9 @@ impl IrtcToGuestAdapter:
         IrtcToGuestAdapter(_values: {}, errors: [])
 
     me apply_to_state(module: IrTcModule, state: GuestState) -> GuestState:
+        self.apply_to_state_with_memory(module, state, nil)
+
+    me apply_to_state_with_memory(module: IrTcModule, state: GuestState, memory: GuestMemory?) -> GuestState:
         """Apply all guest-state-modifying ops in the module to the state.
 
         Walks every function and block in order, interpreting:
@@ -55,7 +65,7 @@ impl IrtcToGuestAdapter:
         for func in module.functions:
             if func.is_declaration:
                 continue
-            result = _apply_function(func, result)
+            result = _apply_function(func, result, memory)
         result
 
     me apply_function_by_name(module: IrTcModule, name: text, state: GuestState) -> GuestState:
@@ -64,29 +74,48 @@ impl IrtcToGuestAdapter:
         self.errors = []
 
         if val func = module.find_function(name):
-            return _apply_function(func, state)
+            return _apply_function(func, state, nil)
         self.errors.push("function not found: {name}")
         state
 
     # ── Internal: function / block walking ──
 
-    me _apply_function(func: IrTcFunction, state: GuestState) -> GuestState:
-        """Interpret all blocks in a function."""
+    me _apply_function(func: IrTcFunction, state: GuestState, memory: GuestMemory?) -> GuestState:
+        """Interpret a function by following block control flow."""
         var result = state
-        for block in func.blocks:
-            result = _apply_block(block, result)
-        result
+        if func.blocks.len() == 0:
+            return result
 
-    me _apply_block(block: IrTcBlock, state: GuestState) -> GuestState:
+        var current = func.blocks[0].id
+        while true:
+            if val block = func.get_block(current):
+                val next = _apply_block(block, result, memory)
+                result = next.0
+                match next.1:
+                    BlockControl.Continue:
+                        return result
+                    BlockControl.Jump(target):
+                        current = target
+                    BlockControl.Stop:
+                        return result
+            else:
+                self.errors.push("block not found: {current.to_text()}")
+                return result
+
+    me _apply_block(block: IrTcBlock, state: GuestState, memory: GuestMemory?) -> (GuestState, BlockControl):
         """Interpret all instructions in a block."""
         var result = state
         for inst in block.instructions:
-            result = _apply_inst(inst.kind, result)
-        result
+            val next = _apply_inst(inst.kind, result, memory)
+            result = next.0
+            match next.1:
+                BlockControl.Continue: pass_do_nothing
+                _: return next
+        (result, BlockControl.Continue)
 
     # ── Instruction interpretation ──
 
-    me _apply_inst(op: IrTcOp, state: GuestState) -> GuestState:
+    me _apply_inst(op: IrTcOp, state: GuestState, memory: GuestMemory?) -> (GuestState, BlockControl):
         """Interpret a single IR_TC op and update state if applicable."""
         var result = state
         match op:
@@ -189,21 +218,42 @@ impl IrtcToGuestAdapter:
                 self._values[dest.id] = cmp_result
 
             # ── Memory ops (guest load/store would need a GuestMemory handle) ──
-            GuestLoad(dest, _, _, _):
-                # Without memory handle, store zero as placeholder
-                self._values[dest.id] = 0
+            GuestLoad(dest, addr, mem, _):
+                val loaded = if val mem_handle = memory:
+                    _read_memory(mem_handle, _resolve_value(addr), mem)
+                else:
+                    0
+                self._values[dest.id] = loaded
 
-            GuestStore(_, _, _, _):
-                # Without memory handle, silently skip
-                pass_do_nothing
+            GuestStore(value, addr, mem, _):
+                if val mem_handle = memory:
+                    _write_memory(mem_handle, _resolve_value(addr), mem, _resolve_value(value))
 
             # ── Control flow / other ops -- no state effect in linear walk ──
+            Br(target):
+                return (result, BlockControl.Jump(target))
+
+            BrCond(cond, true_, false_):
+                val cond_value = _resolve_value(cond)
+                if cond_value != 0:
+                    return (result, BlockControl.Jump(true_))
+                return (result, BlockControl.Jump(false_))
+
+            LookupGotoTB(_):
+                return (result, BlockControl.Stop)
+
+            ExitTB(_):
+                return (result, BlockControl.Stop)
+
+            Ret(_):
+                return (result, BlockControl.Stop)
+
             _:
                 # Record dest value as 0 if the op has one
                 if val dest = op.dest_value():
                     self._values[dest.id] = 0
 
-        result
+        (result, BlockControl.Continue)
 
     # ── Value resolution ──
 
@@ -213,7 +263,23 @@ impl IrtcToGuestAdapter:
         If the value has been computed, return it.
         Otherwise return 0 as a default.
         """
+        if val imm = value.const_value:
+            return imm
         if val v = self._values.get(value.id):
             v
         else:
             0
+
+    fn _read_memory(memory: GuestMemory, addr: i64, mem: MemOp) -> i64:
+        match mem.width:
+            1: memory.read8(addr)
+            2: memory.read16(addr)
+            4: memory.read32(addr)
+            _: 0
+
+    me _write_memory(memory: GuestMemory, addr: i64, mem: MemOp, value: i64):
+        match mem.width:
+            1: memory.write8(addr, value)
+            2: memory.write16(addr, value)
+            4: memory.write32(addr, value)
+            _: pass_do_nothing

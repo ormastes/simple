@@ -610,24 +610,47 @@ class TreeBuilder:
             "span":
                 self.insert_element(name, attributes)
             "a":
-                # TODO: adoption agency for nested <a>
-                self.insert_element(name, attributes)
+                # Adoption agency: if there is already an <a> in the active
+                # formatting list, run the adoption agency to close it first
+                # (WHATWG 13.2.6.4.7 — handles <a>...<a> misnesting).
+                var existing_a = false
+                var ai = self.active_formatting.len() - 1
+                while ai >= 0:
+                    val af_id = self.active_formatting.get(ai)
+                    val af_tag = self.get_element_tag(af_id)
+                    if af_tag == "a":
+                        existing_a = true
+                        ai = -1  # break
+                    else:
+                        ai = ai - 1
+                if existing_a:
+                    self.run_adoption_agency("a")
+                val a_id = self.insert_element(name, attributes)
+                self.active_formatting.push(a_id)
             "b":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "strong":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "i":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "em":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "u":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "s":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "small":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "code":
-                self.insert_element(name, attributes)
+                val eid = self.insert_element(name, attributes)
+                self.active_formatting.push(eid)
             "abbr":
                 self.insert_element(name, attributes)
             "cite":
@@ -2346,13 +2369,136 @@ class TreeBuilder:
                     return
 
     me close_inline_element(name: text):
-        # Simplified: walk up the stack and close if found
-        # Full spec uses the adoption agency algorithm for formatting elements
-        if self.has_in_scope(name):
-            self.generate_implied_end_tags("")
-            self.pop_until(name)
-        else:
-            self.logger.trace("InBody: </{name}> not in scope, ignoring")
+        # Use the adoption agency algorithm for formatting elements (WHATWG 13.2.6.4.7).
+        # This correctly handles misnested tags like <b>1<i>2</b>3</i>.
+        self.run_adoption_agency(name)
+
+    # Adoption agency algorithm (WHATWG spec section 13.2.6.4.7).
+    # Handles misnested formatting elements by reparenting nodes.
+    me run_adoption_agency(tag: text):
+        # Outer loop: run up to 8 times
+        var outer = 0
+        while outer < 8:
+            outer = outer + 1
+
+            # Step 1: Find the formatting element in the active formatting list
+            var formatting_idx = -1
+            var fi = self.active_formatting.len() - 1
+            while fi >= 0:
+                val node_id = self.active_formatting.get(fi)
+                val node_tag = self.get_element_tag(node_id)
+                if node_tag == tag:
+                    formatting_idx = fi
+                    fi = -1  # break
+                else:
+                    fi = fi - 1
+
+            if formatting_idx < 0:
+                # No formatting element found — fall back to simple close
+                if self.has_in_scope(tag):
+                    self.generate_implied_end_tags("")
+                    self.pop_until(tag)
+                else:
+                    self.logger.trace("adoption_agency: </{tag}> not in scope, ignoring")
+                return
+
+            val formatting_id = self.active_formatting.get(formatting_idx)
+
+            # Check if the formatting element is in the stack of open elements
+            var stack_idx = -1
+            var si = self.open_elements.len() - 1
+            while si >= 0:
+                if self.open_elements.get(si) == formatting_id:
+                    stack_idx = si
+                    si = -1  # break
+                else:
+                    si = si - 1
+
+            if stack_idx < 0:
+                # Not in stack — remove from formatting list and return
+                self._remove_from_active_formatting(formatting_idx)
+                return
+
+            if not self.has_in_scope(tag):
+                self.logger.trace("adoption_agency: <{tag}> not in scope")
+                return
+
+            # Step 2: Find the furthest block — first block-level element
+            # in the stack after the formatting element
+            var furthest_block_idx = -1
+            var bi = stack_idx + 1
+            while bi < self.open_elements.len():
+                val bid = self.open_elements.get(bi)
+                val btag = self.get_element_tag(bid)
+                if _is_special_element(btag):
+                    furthest_block_idx = bi
+                    bi = self.open_elements.len()  # break
+                else:
+                    bi = bi + 1
+
+            # Step 3: If no furthest block, pop until formatting element
+            if furthest_block_idx < 0:
+                # Pop elements from the stack up to and including formatting_id
+                var guard = 0
+                while guard < 1000 and self.open_elements.len() > 0:
+                    guard = guard + 1
+                    val top = self.open_elements.get(self.open_elements.len() - 1)
+                    self.open_elements.pop()
+                    if top == formatting_id:
+                        guard = 1000  # break
+                self._remove_from_active_formatting(formatting_idx)
+                return
+
+            # Step 4: Inner loop — reparent nodes
+            val furthest_block_id = self.open_elements.get(furthest_block_idx)
+            # Common ancestor is the element just before the formatting element
+            val common_ancestor_id = self.open_elements.get(stack_idx - 1)
+
+            # Remove the formatting element from the open elements stack
+            var new_open = List<i64>()
+            var oi = 0
+            while oi < self.open_elements.len():
+                if oi != stack_idx:
+                    new_open.push(self.open_elements.get(oi))
+                oi = oi + 1
+            self.open_elements = new_open
+
+            # Move the furthest block's children into a new formatting element,
+            # then append the new element as a child of the furthest block.
+            val new_elem_id = self.create_element(tag, List<Attr>())
+            # Reparent: move all children of furthest_block into the new element
+            val fb_node = self.get_node(furthest_block_id)
+            var child_idx = 0
+            while child_idx < fb_node.children.len():
+                val child_id = fb_node.children.get(child_idx)
+                self.append_child(new_elem_id, child_id)
+                child_idx = child_idx + 1
+            # Clear the furthest block's children list
+            var ni = 0
+            while ni < self.nodes.len():
+                var node = self.nodes.get(ni)
+                if node.id == furthest_block_id:
+                    node.children = List<i64>()
+                ni = ni + 1
+            # Append new element as the sole child of the furthest block
+            self.append_child(furthest_block_id, new_elem_id)
+
+            # Update the active formatting list: replace the old formatting
+            # element with the new one
+            self._remove_from_active_formatting(formatting_idx)
+            self.active_formatting.push(new_elem_id)
+
+            self.logger.trace("adoption_agency: reparented under <{tag}> id={new_elem_id}")
+            return  # One pass is enough for most cases
+
+    me _remove_from_active_formatting(idx: i64):
+        var new_list = List<i64>()
+        var i = 0
+        while i < self.active_formatting.len():
+            if i != idx:
+                new_list.push(self.active_formatting.get(i))
+            i = i + 1
+        self.active_formatting = new_list
 
     # ===================================================================
     # Table context helpers
@@ -2519,6 +2665,24 @@ class TreeBuilder:
                 node.parent_id = parent_id
             idx = idx + 1
 
+    me remove_child(parent_id: i64, child_id: i64):
+        # Remove child_id from parent's children list and clear child's parent_id
+        var idx = 0
+        while idx < self.nodes.len():
+            var node = self.nodes.get(idx)
+            if node.id == parent_id:
+                var new_children = List<i64>()
+                var ci = 0
+                while ci < node.children.len():
+                    val cid = node.children.get(ci)
+                    if cid != child_id:
+                        new_children.push(cid)
+                    ci = ci + 1
+                node.children = new_children
+            if node.id == child_id:
+                node.parent_id = -1
+            idx = idx + 1
+
     me update_node_data(node_id: i64, new_data: text):
         var idx = 0
         while idx < self.nodes.len():
@@ -2542,3 +2706,79 @@ class TreeBuilder:
                 return false
             idx = idx + 1
         true
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+# Check if a tag is a "special" element per the HTML5 spec.
+# Special elements create scope boundaries for the adoption agency algorithm.
+fn _is_special_element(tag: text) -> bool:
+    match tag:
+        "address": true
+        "applet": true
+        "area": true
+        "article": true
+        "aside": true
+        "base": true
+        "blockquote": true
+        "body": true
+        "br": true
+        "button": true
+        "caption": true
+        "center": true
+        "col": true
+        "colgroup": true
+        "dd": true
+        "details": true
+        "dir": true
+        "div": true
+        "dl": true
+        "dt": true
+        "fieldset": true
+        "figcaption": true
+        "figure": true
+        "footer": true
+        "form": true
+        "h1": true
+        "h2": true
+        "h3": true
+        "h4": true
+        "h5": true
+        "h6": true
+        "head": true
+        "header": true
+        "hr": true
+        "html": true
+        "iframe": true
+        "img": true
+        "input": true
+        "li": true
+        "link": true
+        "listing": true
+        "main": true
+        "marquee": true
+        "meta": true
+        "nav": true
+        "object": true
+        "ol": true
+        "p": true
+        "pre": true
+        "script": true
+        "section": true
+        "select": true
+        "source": true
+        "style": true
+        "summary": true
+        "table": true
+        "tbody": true
+        "td": true
+        "template": true
+        "textarea": true
+        "tfoot": true
+        "th": true
+        "thead": true
+        "title": true
+        "tr": true
+        "ul": true
+        _: false

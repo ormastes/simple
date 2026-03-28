@@ -2,13 +2,15 @@
 
 **Status:** Approved
 **Date:** 2026-03-24
-**Related:** [Requirements](../plan/requirement/engine_2d.md) | [Plan](../plan/engine_2d.md) | [Research](../research/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
+**Related:** [Requirements](../plan/requirements/engine_2d.md) | [Plan](../plan/engine_2d.md) | [Research](../research/engine_2d.md) | [Limitations](../tracking/bug/engine_2d_limitations.md)
 
 ---
 
 ## Overview
 
 The 2D game engine is a layered architecture where pure types (no mutation, no FFI) sit at the bottom, mutable subsystems in the middle, and the game loop at the top. All code is Simple-native with FFI only at leaf modules for hardware access.
+
+**Architecture Note (2026-03-28):** Physics is now implemented in pure Simple (no rapier2d/Rust dependency). Windowing and framebuffer presentation use the SDL2 C runtime (`rt_sdl2_*`) instead of Rust winit. The FFI layer diagram below reflects the original design; see LIM-006 and LIM-007 in the limitations doc for resolution details.
 
 ## Architecture
 
@@ -236,10 +238,10 @@ An `enum Component2D` with variants (Sprite, Camera, TileMap, Physics) is exhaus
 
 ## Cross-References
 
-- **Requirements:** `doc/requirement/engine_2d.md`
+- **Requirements:** `doc/plan/requirements/engine_2d.md`
 - **Plan:** `doc/plan/engine_2d.md`
 - **Research:** `doc/research/engine_2d.md`
-- **Limitations:** `doc/bug/engine_2d_limitations.md`
+- **Limitations:** `doc/tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`

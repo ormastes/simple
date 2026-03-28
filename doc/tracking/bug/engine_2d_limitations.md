@@ -46,16 +46,18 @@
 ## LIM-006: New Engine Window Runtime Not Wired In Rust Driver
 
 **Severity:** High
+**Status:** RESOLVED — Windowing now uses SDL2 via the C runtime (`rt_sdl2_*` family). The winit dependency has been removed.
 **Description:** The Rust driver currently does not expose the `rt_winit_*` extern family used by the new 2D engine window/input layer. The demo therefore fails during semantic/runtime binding before a window can open.
 **Workaround:** None in the Rust driver today. The old self-hosted path still contains these symbols but currently crashes in generic `run` / `check`, so it is not a valid fallback.
-**Future:** Add `rt_winit_*` runtime symbol registration and implementations to the Rust driver/runtime.
+**Future:** None — resolved via SDL2 C runtime.
 
 ## LIM-007: New Engine Physics Runtime Not Wired In Rust Driver
 
 **Severity:** High
+**Status:** RESOLVED — Physics has been rewritten in pure Simple (no rapier2d dependency). The `rt_rapier2d_*` extern family is no longer required.
 **Description:** The Rust driver also lacks the `rt_rapier2d_*` extern family used by `PhysicsWorld2D`, so even after module loading succeeds the demo cannot execute the real physics stack there yet.
 **Workaround:** None.
-**Future:** Add `rt_rapier2d_*` runtime symbol registration and implementations to the Rust driver/runtime.
+**Future:** None — resolved via pure Simple physics implementation.
 
 ## LIM-008: Chained Method Calls Avoided
 
@@ -82,25 +84,26 @@
 
 ## Summary
 
-| ID | Severity | Summary |
-|----|----------|---------|
-| LIM-001 | High | Software renderer has no connected present path |
-| LIM-002 | High | No image file loading |
-| LIM-003 | Medium | No font/text rendering |
-| LIM-004 | Medium | Sprites render as colored rects |
-| LIM-005 | Low | Circle debug draw is approximate |
-| LIM-006 | High | Rust driver lacks new-engine window runtime |
-| LIM-007 | High | Rust driver lacks new-engine physics runtime |
-| LIM-008 | Low | Chained methods avoided |
-| LIM-009 | Low | Signal payloads are text-only |
-| LIM-010 | High | Self-hosted driver still segfaults |
+| ID | Severity | Status | Summary |
+|----|----------|--------|---------|
+| LIM-001 | High | RESOLVED | Software renderer present path (SDL2 `rt_sdl2_present_rgba`) |
+| LIM-002 | High | RESOLVED | Image file loading (stb_image `rt_image_*`) |
+| LIM-003 | Medium | RESOLVED | Font/text rendering (stb_truetype `rt_font_*`) |
+| LIM-004 | Medium | Open | Sprites render as colored rects |
+| LIM-005 | Low | Open | Circle debug draw is approximate |
+| LIM-006 | High | RESOLVED | Window runtime (SDL2 C runtime replaces winit) |
+| LIM-007 | High | RESOLVED | Physics runtime (pure Simple replaces rapier2d) |
+| LIM-008 | Low | Open | Chained methods avoided |
+| LIM-009 | Low | Open | Signal payloads are text-only |
+| LIM-010 | High | Open | Self-hosted driver still segfaults |
 
 ## Cross-References
 
-- **Requirements:** `doc/requirement/engine_2d.md`
+- **Requirements:** `doc/plan/requirements/engine_2d.md`
 - **Plan:** `doc/plan/engine_2d.md`
 - **Design:** `doc/design/engine_2d.md`
 - **Research:** `doc/research/engine_2d.md`
+- **Self:** `doc/tracking/bug/engine_2d_limitations.md`
 - **Source:** `src/lib/nogc_sync_mut/engine/`, `src/lib/common/engine/`
 - **Unit Tests:** `test/unit/lib/engine/`
 - **Demo:** `examples/engine_2d_demo/main.spl`
