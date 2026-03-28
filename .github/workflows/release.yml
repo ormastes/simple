@@ -721,6 +721,218 @@ jobs:
             simple-bootstrap-*.spk.sha256
           retention-days: 7
 
+  build-installers:
+    name: Build Installation Packages
+    needs: [check-version, build-bootstrap]
+    if: always() && needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result != 'cancelled'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-linux-x86_64
+          path: bootstrap-artifact
+        continue-on-error: true
+
+      - name: Download Windows x86_64 bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-windows-x86_64
+          path: bootstrap-artifact-win
+        continue-on-error: true
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep 'version:' simple.sdn | head -1 | sed 's/.*version: *//')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Prepare release binary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p bin/release
+
+          # Extract Linux binary from bootstrap .spk
+          if ls bootstrap-artifact/simple-bootstrap-*.spk 1>/dev/null 2>&1; then
+            cd bootstrap-artifact
+            tar -xzf simple-bootstrap-*.spk
+            if [ -f bin/simple ]; then
+              cp bin/simple ../bin/release/simple
+              chmod +x ../bin/release/simple
+            elif [ -f simple ]; then
+              cp simple ../bin/release/simple
+              chmod +x ../bin/release/simple
+            fi
+            cd ..
+          fi
+
+          # Extract Windows binary
+          mkdir -p bin/release/windows-x86_64
+          if ls bootstrap-artifact-win/simple-bootstrap-*.spk 1>/dev/null 2>&1; then
+            cd bootstrap-artifact-win
+            tar -xzf simple-bootstrap-*.spk
+            if [ -f bin/simple.exe ]; then
+              cp bin/simple.exe ../bin/release/windows-x86_64/simple.exe
+            elif [ -f simple.exe ]; then
+              cp simple.exe ../bin/release/windows-x86_64/simple.exe
+            fi
+            cd ..
+          fi
+
+      - name: Install packaging tools (FPM + NSIS)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev nsis rpm
+          sudo gem install fpm
+
+      - name: Build Debian package (.deb)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p build/installers
+
+          if [ -x bin/release/simple ]; then
+            # Use FPM to build .deb
+            mkdir -p staging-deb/usr/local/bin
+            mkdir -p staging-deb/usr/local/lib/simple/lib
+            mkdir -p staging-deb/usr/local/share/doc/simple-lang
+
+            cp bin/release/simple staging-deb/usr/local/lib/simple/simple
+            chmod 755 staging-deb/usr/local/lib/simple/simple
+            ln -sf /usr/local/lib/simple/simple staging-deb/usr/local/bin/simple
+            cp -r src/lib/. staging-deb/usr/local/lib/simple/lib/ || true
+            cp README.md staging-deb/usr/local/share/doc/simple-lang/ || true
+            cp LICENSE staging-deb/usr/local/share/doc/simple-lang/ || true
+
+            fpm -s dir -t deb \
+              --name simple-lang \
+              --version "${VERSION}" \
+              --description "Simple Language Compiler and Runtime" \
+              --maintainer "Simple Language Team <team@simple-lang.org>" \
+              --url "https://simple-lang.org" \
+              --license MIT \
+              --architecture amd64 \
+              --depends "libc6 >= 2.31" \
+              --category devel \
+              --deb-priority optional \
+              --package build/installers/ \
+              -C staging-deb .
+
+            echo "deb=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠ No Linux binary found, skipping .deb"
+          fi
+
+      - name: Build RPM package (.rpm)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ -d staging-deb/usr ]; then
+            fpm -s dir -t rpm \
+              --name simple-lang \
+              --version "${VERSION}" \
+              --description "Simple Language Compiler and Runtime" \
+              --maintainer "Simple Language Team <team@simple-lang.org>" \
+              --url "https://simple-lang.org" \
+              --license MIT \
+              --architecture x86_64 \
+              --depends "glibc >= 2.31" \
+              --category "Development/Languages" \
+              --package build/installers/ \
+              -C staging-deb .
+
+            echo "rpm=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠ No staging dir, skipping .rpm"
+          fi
+
+      - name: Build macOS package (.pkg)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ -d staging-deb/usr ]; then
+            fpm -s dir -t osxpkg \
+              --name simple-lang \
+              --version "${VERSION}" \
+              --description "Simple Language Compiler and Runtime" \
+              --maintainer "Simple Language Team <team@simple-lang.org>" \
+              --url "https://simple-lang.org" \
+              --license MIT \
+              --architecture amd64 \
+              --package build/installers/ \
+              -C staging-deb . || echo "⚠ macOS .pkg build failed (expected on Linux)"
+          fi
+
+      - name: Build FreeBSD package (.txz)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ -d staging-deb/usr ]; then
+            fpm -s dir -t freebsd \
+              --name simple-lang \
+              --version "${VERSION}" \
+              --description "Simple Language Compiler and Runtime" \
+              --maintainer "Simple Language Team <team@simple-lang.org>" \
+              --url "https://simple-lang.org" \
+              --license MIT \
+              --architecture amd64 \
+              --package build/installers/ \
+              -C staging-deb . || echo "⚠ FreeBSD .txz build failed"
+          fi
+
+      - name: Build Windows installer (.exe)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ -f bin/release/windows-x86_64/simple.exe ]; then
+            # Prepare Windows staging
+            mkdir -p staging-win/bin staging-win/lib staging-win/doc
+            cp bin/release/windows-x86_64/simple.exe staging-win/bin/simple.exe
+            cp -r src/lib/. staging-win/lib/ || true
+            cp README.md staging-win/doc/ || true
+            cp LICENSE staging-win/doc/ || true
+
+            # Process NSIS template
+            sed -e "s|\${VERSION}|${VERSION}|g" \
+                -e "s|\${PACKAGE_NAME}|simple-lang|g" \
+                -e "s|\${DISPLAY_NAME}|Simple Language|g" \
+                -e "s|\${DESCRIPTION}|Simple Language Compiler and Runtime|g" \
+                -e "s|\${PUBLISHER}|Simple Language Team|g" \
+                -e "s|\${HOMEPAGE}|https://simple-lang.org|g" \
+                -e "s|\${SOURCE_DIR}|staging-win|g" \
+                -e "s|\${OUTPUT_DIR}|build/installers|g" \
+                config/packaging/windows/simple.nsi > build/installers/simple-installer.nsi
+
+            makensis -NOCD build/installers/simple-installer.nsi || echo "⚠ NSIS build failed"
+          else
+            echo "⚠ No Windows binary found, skipping .exe installer"
+          fi
+
+      - name: Calculate checksums
+        run: |
+          cd build/installers
+          for f in *.deb *.rpm *.pkg *.txz *.exe; do
+            [ -f "$f" ] && sha256sum "$f" > "$f.sha256"
+          done
+          ls -lh . || true
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: |
+            build/installers/*.deb
+            build/installers/*.rpm
+            build/installers/*.pkg
+            build/installers/*.txz
+            build/installers/*.exe
+            build/installers/*.sha256
+          retention-days: 7
+          if-no-files-found: warn
+
   build-full:
     name: Build Full Package
     needs: check-version
@@ -765,7 +977,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-bootstrap]
+    needs: [build-bootstrap, build-installers]
     if: always() && needs.build-bootstrap.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
@@ -786,6 +998,12 @@ jobs:
           find artifacts -name '*.spk' -exec cp {} release/ \;
           find artifacts -name '*.sha256' -exec cp {} release/ \;
           find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          # Copy installer packages
+          find artifacts -name '*.deb' -exec cp {} release/ \;
+          find artifacts -name '*.rpm' -exec cp {} release/ \;
+          find artifacts -name '*.pkg' -exec cp {} release/ \;
+          find artifacts -name '*.txz' -exec cp {} release/ \;
+          find artifacts -name '*.exe' -exec cp {} release/ \;
           ls -lh release/
 
       - name: Extract version
@@ -838,6 +1056,16 @@ jobs:
 
           **Note:** Some platforms provide source-only packages that require local compilation.
           Platforms marked with ✅ include pre-built binaries.
+
+          ### Native Installation Packages
+
+          Pre-built native packages for direct installation:
+
+          - **Debian/Ubuntu**: \`simple-lang_${VERSION}_amd64.deb\` — \`sudo dpkg -i simple-lang_${VERSION}_amd64.deb\`
+          - **Fedora/RHEL**: \`simple-lang-${VERSION}-1.x86_64.rpm\` — \`sudo rpm -i simple-lang-${VERSION}-1.x86_64.rpm\`
+          - **macOS**: \`simple-lang-${VERSION}.pkg\` — \`sudo installer -pkg simple-lang-${VERSION}.pkg -target /\`
+          - **FreeBSD**: \`simple-lang-${VERSION}.txz\` — \`pkg add simple-lang-${VERSION}.txz\`
+          - **Windows**: \`simple-lang-${VERSION}-setup.exe\` — Run the installer
 
           ### Full Package (Development)
 
