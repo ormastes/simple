@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-03-28 18:19:50
+**Generated:** 2026-03-28 18:26:12
 **Total Tests:** 10
 **Status:** ⚠️ 4 FAILED
 
@@ -41,11 +41,26 @@
 
 ## ❌ Failed Tests (4)
 
+### 🔴 warns when docs point to raw specs
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 2026-03-28T09:26:12.253990+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns when docs point to raw specs' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
+
+---
+
 ### 🔴 warns when a requirement identifier is not covered
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:19:50.223126+00:00
+**Failed:** 2026-03-28T09:26:12.253982+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -56,26 +71,11 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ---
 
-### 🔴 warns on legacy requirement roots in specs
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 2026-03-28T09:19:50.223131+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test 'warns on legacy requirement roots in specs' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
-
----
-
 ### 🔴 warns for opted-in source roots without unit tests
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:19:50.223140+00:00
+**Failed:** 2026-03-28T09:26:12.253993+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -86,16 +86,16 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ---
 
-### 🔴 warns when docs point to raw specs
+### 🔴 warns on legacy requirement roots in specs
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:19:50.223135+00:00
+**Failed:** 2026-03-28T09:26:12.253986+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-Test 'warns when docs point to raw specs' failed
+Test 'warns on legacy requirement roots in specs' failed
 Location: test/unit/app/tooling/traceability_spec.spl
 ```
 
@@ -111,8 +111,8 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ### Priority 1: Fix Failing Tests (4)
 
-1. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
-2. **warns on legacy requirement roots in specs** - Test 'warns on legacy requirement roots in specs' failed
+1. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
+2. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
 3. **warns for opted-in source roots without unit tests** - Test 'warns for opted-in source roots without unit tests' failed
-4. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
+4. **warns on legacy requirement roots in specs** - Test 'warns on legacy requirement roots in specs' failed
 

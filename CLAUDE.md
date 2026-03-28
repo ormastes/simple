@@ -38,6 +38,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
+| **t32** | Installing T32 MCP, CMM LSP plugin setup | `/t32` |
 
 **Usage pattern:** When spawning a Task, include the relevant agent context:
 ```

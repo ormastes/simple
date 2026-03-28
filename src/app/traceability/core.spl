@@ -129,21 +129,35 @@ fn analyze_virtual_files(files: [VirtualFile], scope: text, config: Traceability
     warnings
 
 fn count_virtual_file_warnings_by_code(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool, code: text) -> i64:
-    var parsed: [ParsedTraceFile] = []
+    var file_pairs: [text] = []
+    var file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        file_pairs.push(file.path)
+        file_pairs.push(file.content)
+        file_idx = file_idx + 1
+    count_virtual_file_pair_warnings_by_code(file_pairs, scope, config, enforce_source_roots, code)
+
+fn count_virtual_file_pair_warnings_by_code(file_pairs: [text], scope: text, config: TraceabilityConfig, enforce_source_roots: bool, code: text) -> i64:
     var existing_paths: [text] = []
 
-    for file in files:
-        existing_paths.push(file.path)
-        parsed.push(parse_trace_file(file))
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        existing_paths.push(file_pairs[file_idx])
+        file_idx = file_idx + 2
     existing_paths = unique_texts(existing_paths)
 
     var count = 0
-    count = count + count_warning_code_list(analyze_specs(parsed, existing_paths, config, scope), code)
-    count = count + count_warning_code_list(analyze_requirements(parsed, existing_paths, config, scope), code)
-    count = count + count_warning_code_list(analyze_backwards_docs(parsed, existing_paths, config, scope), code)
+    count = count + count_spec_pair_warnings_by_code(file_pairs, existing_paths, config, scope, code)
+    count = count + count_requirement_pair_warnings_by_code(file_pairs, existing_paths, config, scope, code)
+    count = count + count_backwards_doc_pair_warnings_by_code(file_pairs, existing_paths, config, scope, code)
     if enforce_source_roots:
-        count = count + count_warning_code_list(analyze_source_tests(parsed, existing_paths, config, scope), code)
+        count = count + count_source_test_pair_warnings_by_code(file_pairs, existing_paths, config, scope, code)
     count
+
+fn count_traceability_manifest_warnings_by_code(manifest: text, scope: text, config: TraceabilityConfig, enforce_source_roots: bool, code: text) -> i64:
+    val file_pairs = parse_traceability_manifest(manifest)
+    count_virtual_file_pair_warnings_by_code(file_pairs, scope, config, enforce_source_roots, code)
 
 fn collect_virtual_files(paths: [text]) -> [VirtualFile]:
     var roots = paths
@@ -420,6 +434,431 @@ fn analyze_source_tests(parsed: [ParsedTraceFile], existing_paths: [text], confi
             if any_path_exists(integration_candidates, existing_paths) == false:
                 warnings.push(make_warning("TRC111", dir_path + "/__module__", 1, "Missing module/integration spec for source directory; expected one of {join_list(integration_candidates)}"))
     warnings
+
+fn count_spec_warnings_by_code(files: [VirtualFile], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec":
+        return 0
+
+    var count = 0
+    var file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        val kind = classify_trace_path(file.path)
+        if kind != "spec_feature" and kind != "spec_system":
+            file_idx = file_idx + 1
+            continue
+
+        val requirement_value = find_header_field_value(file.content, "**Requirements:**")
+        val plan_value = find_header_field_value(file.content, "**Plan:**")
+        val design_value = find_header_field_value(file.content, "**Design:**")
+        val research_value = find_header_field_value(file.content, "**Research:**")
+        val requirement_paths = extract_paths_for_field(file.content, "requirement")
+        val plan_paths = extract_paths_for_field(file.content, "plan")
+        val design_paths = extract_paths_for_field(file.content, "design")
+        val research_paths = extract_paths_for_field(file.content, "research")
+
+        count = count + count_spec_field_matches(requirement_value, requirement_paths, existing_paths, config, "requirements", target_code)
+        count = count + count_spec_field_matches(plan_value, plan_paths, existing_paths, config, "plan", target_code)
+        count = count + count_spec_field_matches(design_value, design_paths, existing_paths, config, "design", target_code)
+        count = count + count_spec_field_matches(research_value, research_paths, existing_paths, config, "research", target_code)
+
+        val requirement_slugs = canonical_requirement_slugs(requirement_paths, existing_paths, config)
+        if requirement_slugs.len() == 1:
+            val req_slug = requirement_slugs[0]
+            count = count + count_companion_slug_matches(file.path, req_slug, plan_paths, "TRC221", target_code)
+            count = count + count_companion_slug_matches(file.path, req_slug, design_paths, "TRC222", target_code)
+            count = count + count_companion_slug_matches(file.path, req_slug, research_paths, "TRC223", target_code)
+        file_idx = file_idx + 1
+    count
+
+fn count_spec_field_matches(raw_value: text, links: [text], existing_paths: [text], config: TraceabilityConfig, field_name: text, target_code: text) -> i64:
+    val code_prefix = match field_name:
+        case "requirements": "TRC301"
+        case "plan": "TRC302"
+        case "design": "TRC303"
+        case "research": "TRC304"
+        case _: "TRC399"
+
+    var count = 0
+    if raw_value == "":
+        return count_if_code(target_code, code_prefix)
+    if raw_value == "N/A":
+        return 0
+    if links.len() == 0:
+        return count_if_code(target_code, code_prefix)
+
+    for link in links:
+        if field_name == "requirements":
+            if has_prefix(link, config.legacy_requirement_root + "/"):
+                count = count + count_if_code(target_code, "TRC211")
+        if path_list_contains(existing_paths, link) == false:
+            count = count + count_if_code(target_code, code_prefix)
+    count
+
+fn count_companion_slug_matches(path: text, requirement_slug: text, links: [text], code: text, target_code: text) -> i64:
+    var count = 0
+    for link in links:
+        if normalize_slug(basename_no_ext(link)) != requirement_slug:
+            count = count + count_if_code(target_code, code)
+    count
+
+fn count_requirement_warnings_by_code(files: [VirtualFile], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec" and scope != "doc":
+        return 0
+
+    var count = 0
+    var file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        val kind = classify_trace_path(file.path)
+        if kind != "requirement" and kind != "nfr":
+            file_idx = file_idx + 1
+            continue
+
+        val requirement_paths = extract_paths_for_field(file.content, "requirement")
+        val plan_paths = extract_paths_for_field(file.content, "plan")
+        val design_paths = extract_paths_for_field(file.content, "design")
+        val research_paths = extract_paths_for_field(file.content, "research")
+        val ids = merge_unique(extract_ids_by_prefix(file.content, "REQ-"), extract_ids_by_prefix(file.content, "NFR-"))
+        if ids.len() == 0:
+            count = count + count_if_code(target_code, "TRC311")
+
+        var linked_spec_count = 0
+        var spec_idx = 0
+        while spec_idx < files.len():
+            val maybe_spec = files[spec_idx]
+            val spec_kind = classify_trace_path(maybe_spec.path)
+            if spec_kind != "spec_feature" and spec_kind != "spec_system":
+                spec_idx = spec_idx + 1
+                continue
+            val spec_requirement_paths = extract_paths_for_field(maybe_spec.content, "requirement")
+            val canonical_paths = canonical_requirement_paths(spec_requirement_paths, existing_paths, config)
+            if path_list_contains(canonical_paths, file.path):
+                linked_spec_count = linked_spec_count + 1
+            spec_idx = spec_idx + 1
+
+        if linked_spec_count == 0:
+            count = count + count_if_code(target_code, "TRC312")
+
+        for id in ids:
+            var covered = false
+            spec_idx = 0
+            while spec_idx < files.len():
+                val maybe_spec = files[spec_idx]
+                val spec_kind = classify_trace_path(maybe_spec.path)
+                if spec_kind != "spec_feature" and spec_kind != "spec_system":
+                    spec_idx = spec_idx + 1
+                    continue
+                val spec_requirement_paths = extract_paths_for_field(maybe_spec.content, "requirement")
+                val canonical_paths = canonical_requirement_paths(spec_requirement_paths, existing_paths, config)
+                if path_list_contains(canonical_paths, file.path) == false:
+                    spec_idx = spec_idx + 1
+                    continue
+                val spec_req_ids = extract_ids_by_prefix(maybe_spec.content, "REQ-")
+                val spec_nfr_ids = extract_ids_by_prefix(maybe_spec.content, "NFR-")
+                if path_list_contains(spec_req_ids, id) or path_list_contains(spec_nfr_ids, id):
+                    covered = true
+                    break
+                spec_idx = spec_idx + 1
+            if not covered:
+                count = count + count_if_code(target_code, "TRC401")
+        count = count + count_requirement_companion_matches(file.path, plan_paths, design_paths, research_paths, existing_paths, target_code)
+        file_idx = file_idx + 1
+    count
+
+fn count_requirement_companion_matches(path: text, plan_paths: [text], design_paths: [text], research_paths: [text], existing_paths: [text], target_code: text) -> i64:
+    var count = 0
+    val slug = normalize_slug(basename_no_ext(path))
+    val plan_path = "doc/03_plan/{slug}.md"
+    val design_path = "doc/05_design/{slug}.md"
+    val architecture_path = "doc/04_architecture/{slug}.md"
+    val research_path = "doc/01_research/{slug}.md"
+
+    if path_list_contains(existing_paths, plan_path):
+        if path_list_contains(plan_paths, plan_path) == false:
+            count = count + count_if_code(target_code, "TRC321")
+    if path_list_contains(existing_paths, design_path):
+        if path_list_contains(design_paths, design_path) == false:
+            count = count + count_if_code(target_code, "TRC322")
+    if path_list_contains(existing_paths, architecture_path):
+        if path_list_contains(design_paths, architecture_path) == false:
+            count = count + count_if_code(target_code, "TRC323")
+    if path_list_contains(existing_paths, research_path):
+        if path_list_contains(research_paths, research_path) == false:
+            count = count + count_if_code(target_code, "TRC324")
+    count
+
+fn count_backwards_doc_warnings_by_code(files: [VirtualFile], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "doc":
+        return 0
+
+    var requirement_slugs: [text] = []
+    var file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        val kind = classify_trace_path(file.path)
+        if kind == "requirement" or kind == "nfr":
+            requirement_slugs.push(normalize_slug(basename_no_ext(file.path)))
+        file_idx = file_idx + 1
+    requirement_slugs = unique_texts(requirement_slugs)
+
+    var count = 0
+    file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        val kind = classify_trace_path(file.path)
+        if kind != "plan" and kind != "design" and kind != "architecture" and kind != "research":
+            file_idx = file_idx + 1
+            continue
+
+        val raw_test_paths = extract_raw_test_paths(file.content)
+        for _ in raw_test_paths:
+            count = count + count_if_code(target_code, "TRC205")
+
+        val requirement_paths = extract_paths_for_field(file.content, "requirement")
+        val normalized_slug = normalize_slug(basename_no_ext(file.path))
+        val has_requirement_backlink = requirement_paths.len() > 0
+        val same_slug_requirement_exists = path_list_contains(requirement_slugs, normalized_slug)
+        if same_slug_requirement_exists and not has_requirement_backlink:
+            count = count + count_if_code(target_code, "TRC206")
+        elif same_slug_requirement_exists and requirement_path_matches_slug(requirement_paths, normalized_slug) == false:
+            count = count + count_if_code(target_code, "TRC207")
+        file_idx = file_idx + 1
+    count
+
+fn count_source_test_warnings_by_code(files: [VirtualFile], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "src":
+        return 0
+    if config.warn_source_roots.len() == 0:
+        return 0
+
+    var count = 0
+    var source_dirs: [text] = []
+    var init_dirs: [text] = []
+    var file_idx = 0
+    while file_idx < files.len():
+        val file = files[file_idx]
+        val kind = classify_trace_path(file.path)
+        if kind != "source":
+            file_idx = file_idx + 1
+            continue
+        if is_under_warn_root(file.path, config.warn_source_roots) == false:
+            file_idx = file_idx + 1
+            continue
+        val dir_path = dirname(file.path)
+        source_dirs.push(dir_path)
+        if basename(file.path) == "__init__.spl":
+            init_dirs.push(dir_path)
+        if basename(file.path) != "__init__.spl":
+            val unit_candidates = map_source_to_unit_candidates(file.path)
+            if unit_candidates.len() > 0:
+                if any_path_exists(unit_candidates, existing_paths) == false:
+                    count = count + count_if_code(target_code, "TRC101")
+        file_idx = file_idx + 1
+
+    var anchor_dirs = unique_texts(init_dirs)
+    val unique_dirs = unique_texts(source_dirs)
+    for dir_path in unique_dirs:
+        if path_list_contains(anchor_dirs, dir_path):
+            continue
+        if not has_child_source_dir(unique_dirs, dir_path):
+            anchor_dirs.push(dir_path)
+    anchor_dirs = unique_texts(anchor_dirs)
+
+    for dir_path in anchor_dirs:
+        val integration_candidates = map_source_dir_to_integration_candidates(dir_path)
+        if integration_candidates.len() > 0:
+            if any_path_exists(integration_candidates, existing_paths) == false:
+                count = count + count_if_code(target_code, "TRC111")
+    count
+
+fn count_spec_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec":
+        return 0
+
+    var count = 0
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        val path = file_pairs[file_idx]
+        val content = file_pairs[file_idx + 1]
+        val kind = classify_trace_path(path)
+        if kind != "spec_feature" and kind != "spec_system":
+            file_idx = file_idx + 2
+            continue
+
+        val requirement_value = find_header_field_value(content, "**Requirements:**")
+        val plan_value = find_header_field_value(content, "**Plan:**")
+        val design_value = find_header_field_value(content, "**Design:**")
+        val research_value = find_header_field_value(content, "**Research:**")
+        val requirement_paths = extract_paths_for_field(content, "requirement")
+        val plan_paths = extract_paths_for_field(content, "plan")
+        val design_paths = extract_paths_for_field(content, "design")
+        val research_paths = extract_paths_for_field(content, "research")
+
+        count = count + count_spec_field_matches(requirement_value, requirement_paths, existing_paths, config, "requirements", target_code)
+        count = count + count_spec_field_matches(plan_value, plan_paths, existing_paths, config, "plan", target_code)
+        count = count + count_spec_field_matches(design_value, design_paths, existing_paths, config, "design", target_code)
+        count = count + count_spec_field_matches(research_value, research_paths, existing_paths, config, "research", target_code)
+
+        val requirement_slugs = canonical_requirement_slugs(requirement_paths, existing_paths, config)
+        if requirement_slugs.len() == 1:
+            val req_slug = requirement_slugs[0]
+            count = count + count_companion_slug_matches(path, req_slug, plan_paths, "TRC221", target_code)
+            count = count + count_companion_slug_matches(path, req_slug, design_paths, "TRC222", target_code)
+            count = count + count_companion_slug_matches(path, req_slug, research_paths, "TRC223", target_code)
+        file_idx = file_idx + 2
+    count
+
+fn count_requirement_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "spec" and scope != "doc":
+        return 0
+
+    var count = 0
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        val path = file_pairs[file_idx]
+        val content = file_pairs[file_idx + 1]
+        val kind = classify_trace_path(path)
+        if kind != "requirement" and kind != "nfr":
+            file_idx = file_idx + 2
+            continue
+
+        val plan_paths = extract_paths_for_field(content, "plan")
+        val design_paths = extract_paths_for_field(content, "design")
+        val research_paths = extract_paths_for_field(content, "research")
+        val ids = merge_unique(extract_ids_by_prefix(content, "REQ-"), extract_ids_by_prefix(content, "NFR-"))
+        if ids.len() == 0:
+            count = count + count_if_code(target_code, "TRC311")
+
+        var linked_spec_count = 0
+        var spec_idx = 0
+        while spec_idx + 1 < file_pairs.len():
+            val spec_path = file_pairs[spec_idx]
+            val spec_content = file_pairs[spec_idx + 1]
+            val spec_kind = classify_trace_path(spec_path)
+            if spec_kind != "spec_feature" and spec_kind != "spec_system":
+                spec_idx = spec_idx + 2
+                continue
+            val spec_requirement_paths = extract_paths_for_field(spec_content, "requirement")
+            val canonical_paths = canonical_requirement_paths(spec_requirement_paths, existing_paths, config)
+            if path_list_contains(canonical_paths, path):
+                linked_spec_count = linked_spec_count + 1
+            spec_idx = spec_idx + 2
+
+        if linked_spec_count == 0:
+            count = count + count_if_code(target_code, "TRC312")
+
+        for id in ids:
+            var covered = false
+            spec_idx = 0
+            while spec_idx + 1 < file_pairs.len():
+                val spec_path = file_pairs[spec_idx]
+                val spec_content = file_pairs[spec_idx + 1]
+                val spec_kind = classify_trace_path(spec_path)
+                if spec_kind != "spec_feature" and spec_kind != "spec_system":
+                    spec_idx = spec_idx + 2
+                    continue
+                val spec_requirement_paths = extract_paths_for_field(spec_content, "requirement")
+                val canonical_paths = canonical_requirement_paths(spec_requirement_paths, existing_paths, config)
+                if path_list_contains(canonical_paths, path) == false:
+                    spec_idx = spec_idx + 2
+                    continue
+                val spec_req_ids = extract_ids_by_prefix(spec_content, "REQ-")
+                val spec_nfr_ids = extract_ids_by_prefix(spec_content, "NFR-")
+                if path_list_contains(spec_req_ids, id) or path_list_contains(spec_nfr_ids, id):
+                    covered = true
+                    break
+                spec_idx = spec_idx + 2
+            if not covered:
+                count = count + count_if_code(target_code, "TRC401")
+        count = count + count_requirement_companion_matches(path, plan_paths, design_paths, research_paths, existing_paths, target_code)
+        file_idx = file_idx + 2
+    count
+
+fn count_backwards_doc_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "doc":
+        return 0
+
+    var requirement_slugs: [text] = []
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        val path = file_pairs[file_idx]
+        val kind = classify_trace_path(path)
+        if kind == "requirement" or kind == "nfr":
+            requirement_slugs.push(normalize_slug(basename_no_ext(path)))
+        file_idx = file_idx + 2
+    requirement_slugs = unique_texts(requirement_slugs)
+
+    var count = 0
+    file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        val path = file_pairs[file_idx]
+        val content = file_pairs[file_idx + 1]
+        val kind = classify_trace_path(path)
+        if kind != "plan" and kind != "design" and kind != "architecture" and kind != "research":
+            file_idx = file_idx + 2
+            continue
+
+        val raw_test_paths = extract_raw_test_paths(content)
+        for _ in raw_test_paths:
+            count = count + count_if_code(target_code, "TRC205")
+
+        val requirement_paths = extract_paths_for_field(content, "requirement")
+        val normalized_slug = normalize_slug(basename_no_ext(path))
+        val has_requirement_backlink = requirement_paths.len() > 0
+        val same_slug_requirement_exists = path_list_contains(requirement_slugs, normalized_slug)
+        if same_slug_requirement_exists and not has_requirement_backlink:
+            count = count + count_if_code(target_code, "TRC206")
+        elif same_slug_requirement_exists and requirement_path_matches_slug(requirement_paths, normalized_slug) == false:
+            count = count + count_if_code(target_code, "TRC207")
+        file_idx = file_idx + 2
+    count
+
+fn count_source_test_pair_warnings_by_code(file_pairs: [text], existing_paths: [text], config: TraceabilityConfig, scope: text, target_code: text) -> i64:
+    if scope != "all" and scope != "src":
+        return 0
+    if config.warn_source_roots.len() == 0:
+        return 0
+
+    var count = 0
+    var source_dirs: [text] = []
+    var init_dirs: [text] = []
+    var file_idx = 0
+    while file_idx + 1 < file_pairs.len():
+        val path = file_pairs[file_idx]
+        val kind = classify_trace_path(path)
+        if kind != "source":
+            file_idx = file_idx + 2
+            continue
+        if is_under_warn_root(path, config.warn_source_roots) == false:
+            file_idx = file_idx + 2
+            continue
+        val dir_path = dirname(path)
+        source_dirs.push(dir_path)
+        if basename(path) == "__init__.spl":
+            init_dirs.push(dir_path)
+        if basename(path) != "__init__.spl":
+            val unit_candidates = map_source_to_unit_candidates(path)
+            if unit_candidates.len() > 0:
+                if any_path_exists(unit_candidates, existing_paths) == false:
+                    count = count + count_if_code(target_code, "TRC101")
+        file_idx = file_idx + 2
+
+    var anchor_dirs = unique_texts(init_dirs)
+    val unique_dirs = unique_texts(source_dirs)
+    for dir_path in unique_dirs:
+        if path_list_contains(anchor_dirs, dir_path):
+            continue
+        if not has_child_source_dir(unique_dirs, dir_path):
+            anchor_dirs.push(dir_path)
+    anchor_dirs = unique_texts(anchor_dirs)
+
+    for dir_path in anchor_dirs:
+        val integration_candidates = map_source_dir_to_integration_candidates(dir_path)
+        if integration_candidates.len() > 0:
+            if any_path_exists(integration_candidates, existing_paths) == false:
+                count = count + count_if_code(target_code, "TRC111")
+    count
 
 fn specs_for_requirement(requirement_path: text, specs: [ParsedTraceFile], existing_paths: [text], config: TraceabilityConfig) -> [ParsedTraceFile]:
     var matches: [ParsedTraceFile] = []
@@ -762,6 +1201,41 @@ fn extract_paths_for_field(content: text, field_name: text) -> [text]:
         return extract_prefixed_paths(content, "doc/01_research/")
     []
 
+fn find_header_field_value(content: text, marker: text) -> text:
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if has_prefix(trimmed, marker):
+            val marker_len = text_len(marker)
+            return strip_quotes(trimmed[marker_len:trimmed.len()].trim())
+    ""
+
+fn parse_traceability_manifest(manifest: text) -> [text]:
+    val lines = manifest.split("\n")
+    var file_pairs: [text] = []
+    var current_path = ""
+    var current_content = ""
+    var line_idx = 0
+    while line_idx < lines.len():
+        val line = lines[line_idx]
+        if has_prefix(line, "@@ "):
+            if current_path != "":
+                file_pairs.push(current_path)
+                file_pairs.push(current_content)
+            current_path = line[3:line.len()].trim()
+            current_content = ""
+        else:
+            if current_path != "":
+                if current_content == "":
+                    current_content = line
+                else:
+                    current_content = current_content + "\n" + line
+        line_idx = line_idx + 1
+    if current_path != "":
+        file_pairs.push(current_path)
+        file_pairs.push(current_content)
+    file_pairs
+
 fn format_traceability_warning(warning: TraceabilityWarning) -> text:
     "{warning.path}:{str(warning.line)}: warning[{warning.code}]: {warning.message}"
 
@@ -851,6 +1325,11 @@ fn count_warning_code_list(warnings: [TraceabilityWarning], code: text) -> i64:
             count = count + 1
         i = i + 1
     count
+
+fn count_if_code(target_code: text, actual_code: text) -> i64:
+    if target_code == actual_code:
+        return 1
+    0
 
 fn extend_warnings(base: [TraceabilityWarning], extra: [TraceabilityWarning]) -> [TraceabilityWarning]:
     var result = base
