@@ -1,0 +1,279 @@
+# MCP CLI Passthrough Handler
+#
+# Generic handler that builds a bin/simple command from tool table entry
+# and executes it via shell_cmd(). Works for any tool with handler_kind="cli".
+
+use app.mcp.tool_registry
+
+fn handle_cli_passthrough(id: text, body: text, entry: McpToolEntry) -> text:
+    val _bin = _mcp_find_simple_binary()
+    val timeout_s = entry.timeout_s
+
+    # Build command: timeout <N> bin/simple <cli_command> <args...>
+    var cmd = "timeout " + str(timeout_s) + " " + _bin + " " + entry.cli_command
+
+    # Extract known parameters from body and append as CLI args
+    cmd = _append_cli_args(cmd, body, entry)
+    cmd = cmd + " 2>&1"
+
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = shell_cmd(cmd)
+
+    var output = "-- " + entry.name + " (exit: " + str(exit_code) + ") --\n" + out
+    if exit_code == 124:
+        output = "TIMEOUT: " + entry.name + " timed out after " + str(timeout_s) + "s\n" + out
+    make_tool_result(id, output)
+
+fn _append_cli_args(cmd: text, body: text, entry: McpToolEntry) -> text:
+    var result = cmd
+    val name = entry.name
+
+    # Tool-specific argument mapping
+    # Each tool maps its JSON params to CLI flags/positional args
+
+    # --- simple_check, simple_symbols, simple_run, simple_diagnostics, simple_desugar, simple_lex ---
+    if name == "simple_check" or name == "simple_run" or name == "simple_desugar" or name == "simple_lex":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    if name == "simple_symbols":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    if name == "simple_diagnostics":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_test ---
+    if name == "simple_test":
+        val path = extract_field(body, "path")
+        val filter_str = extract_field(body, "filter")
+        val only_slow = extract_field(body, "only_slow")
+        val list_flag = extract_field(body, "list")
+        if list_flag == "true":
+            result = result + " --list"
+        elif path != "":
+            result = result + " " + path
+        if filter_str != "":
+            result = result + " --filter " + filter_str
+        if only_slow == "true":
+            result = result + " --only-slow"
+        return result
+
+    # --- simple_build ---
+    if name == "simple_build":
+        val release = extract_field(body, "release")
+        val target = extract_field(body, "target")
+        val warn_docs = extract_field(body, "warn_docs")
+        if release == "true":
+            result = result + " --release"
+        if target != "":
+            result = result + " --target " + target
+        if warn_docs == "true":
+            result = result + " --warn-docs"
+        return result
+
+    # --- simple_format ---
+    if name == "simple_format":
+        val path = extract_field(body, "path")
+        val check = extract_field(body, "check")
+        if check == "true":
+            result = result + " --check"
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_lint ---
+    if name == "simple_lint":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_fix ---
+    if name == "simple_fix":
+        val path = extract_field(body, "path")
+        val dry_run = extract_field(body, "dry_run")
+        if path != "":
+            result = result + " " + path
+        if dry_run == "true":
+            result = result + " --dry-run"
+        return result
+
+    # --- simple_doc_coverage ---
+    if name == "simple_doc_coverage":
+        val format_str = extract_field(body, "format")
+        val missing = extract_field(body, "missing")
+        if format_str != "":
+            result = result + " --format=" + format_str
+        if missing == "true":
+            result = result + " --missing"
+        return result
+
+    # --- query tools (ast-query, sem-query, query-schema) ---
+    if name == "simple_ast_query" or name == "simple_sem_query":
+        val query = extract_field(body, "query")
+        val files = extract_field(body, "files")
+        val format_str = extract_field(body, "format")
+        if query != "":
+            result = result + " '" + query + "'"
+        if files != "":
+            result = result + " " + files
+        if format_str != "":
+            result = result + " --format " + format_str
+        return result
+
+    if name == "simple_query_schema":
+        val kind = extract_field(body, "kind")
+        if kind != "":
+            result = result + " " + kind
+        return result
+
+    # --- simple_add ---
+    if name == "simple_add":
+        val package = extract_field(body, "package")
+        val version = extract_field(body, "version")
+        val dev = extract_field(body, "dev")
+        if package != "":
+            result = result + " " + package
+        if version != "":
+            result = result + "@" + version
+        if dev == "true":
+            result = result + " --dev"
+        return result
+
+    # --- simple_remove ---
+    if name == "simple_remove":
+        val package = extract_field(body, "package")
+        if package != "":
+            result = result + " " + package
+        return result
+
+    # --- simple_stats ---
+    if name == "simple_stats":
+        val format_str = extract_field(body, "format")
+        if format_str == "json":
+            result = result + " --json"
+        return result
+
+    # --- simple_duplicate_check ---
+    if name == "simple_duplicate_check":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_check_arch ---
+    if name == "simple_check_arch":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_info ---
+    if name == "simple_info":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- simple_init ---
+    if name == "simple_init":
+        val proj_name = extract_field(body, "name")
+        val path = extract_field(body, "path")
+        if proj_name != "":
+            result = result + " " + proj_name
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- Codegen tools with path param ---
+    if (name == "simple_spec_gen" or name == "simple_ffi_gen" or name == "simple_wrapper_gen" or
+        name == "simple_sspec_docgen" or name == "simple_gen_lean"):
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- Codegen tools with name param ---
+    if name == "simple_feature_gen" or name == "simple_task_gen":
+        val gen_name = extract_field(body, "name")
+        if gen_name != "":
+            result = result + " " + gen_name
+        return result
+
+    # --- simple_cache ---
+    if name == "simple_cache":
+        val action = extract_field(body, "action")
+        if action != "":
+            result = result + " " + action
+        return result
+
+    # --- simple_i18n ---
+    if name == "simple_i18n":
+        val action = extract_field(body, "action")
+        if action != "":
+            result = result + " " + action
+        return result
+
+    # --- task_status / task_cancel ---
+    if name == "task_status" or name == "task_cancel":
+        val task_id = extract_field(body, "task_id")
+        if task_id != "":
+            result = result + " " + task_id
+        return result
+
+    # --- test_daemon_run ---
+    if name == "test_daemon_run":
+        val path = extract_field(body, "path")
+        val filter_str = extract_field(body, "filter")
+        val clean = extract_field(body, "clean")
+        if path != "":
+            result = result + " " + path
+        if filter_str != "":
+            result = result + " --filter " + filter_str
+        return result
+
+    # --- test_daemon_clean ---
+    if name == "test_daemon_clean":
+        val path = extract_field(body, "path")
+        if path != "":
+            result = result + " " + path
+        return result
+
+    # --- debug_log_enable ---
+    if name == "debug_log_enable":
+        val pattern = extract_field(body, "pattern")
+        if pattern != "":
+            result = result + " --pattern " + pattern
+        return result
+
+    # --- debug_log_query ---
+    if name == "debug_log_query":
+        val since_id = extract_field(body, "since_id")
+        val entry_type = extract_field(body, "entry_type")
+        val max_results = extract_field(body, "max_results")
+        if since_id != "":
+            result = result + " --since-id " + since_id
+        if entry_type != "":
+            result = result + " --type " + entry_type
+        if max_results != "":
+            result = result + " --max " + max_results
+        return result
+
+    # --- debug_log_tree ---
+    if name == "debug_log_tree":
+        val format_str = extract_field(body, "format")
+        if format_str != "":
+            result = result + " --format " + format_str
+        return result
+
+    # --- Default: no extra args (brief, todo_scan, todo_gen, env, log disable/clear/status, etc.) ---
+    result

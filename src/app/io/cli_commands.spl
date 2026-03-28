@@ -640,6 +640,8 @@ fn cli_test_daemon(args: [text]) -> i64:
         print "  simple test-daemon start       Start test daemon (foreground)"
         print "  simple test-daemon stop        Stop test daemon"
         print "  simple test-daemon status      Show daemon status"
+        print "  simple test-daemon run <path>  Run test via daemon (auto-starts)"
+        print "  simple test-daemon clean <path> Force-run bypassing cache"
         return 1
 
     val subcmd = args[0]
@@ -649,6 +651,16 @@ fn cli_test_daemon(args: [text]) -> i64:
         return cli_test_daemon_stop()
     elif subcmd == "status":
         return cli_test_daemon_status()
+    elif subcmd == "run":
+        if args.len() < 2:
+            print "Usage: simple test-daemon run <path> [--filter F]"
+            return 1
+        return cli_test_daemon_run(args[1:], false)
+    elif subcmd == "clean":
+        if args.len() < 2:
+            print "Usage: simple test-daemon clean <path>"
+            return 1
+        return cli_test_daemon_run(args[1:], true)
     else:
         print "Unknown test-daemon subcommand: {subcmd}"
         return 1
@@ -702,6 +714,36 @@ fn cli_test_daemon_status() -> i64:
     else:
         print "Test daemon: not running (stale lock, pid: {pid_str})"
     0
+
+fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
+    use app.test_daemon.client.{test_daemon_ensure_running, test_submit_and_wait}
+    use app.test_daemon.types.{test_daemon_config_default, TestResult}
+
+    val config = test_daemon_config_default()
+
+    # Ensure daemon is running (auto-start if needed)
+    if not test_daemon_ensure_running(config):
+        print "Failed to start test daemon"
+        return 1
+
+    val path = args[0]
+    val mode = if clean: "clean" else: "run"
+    print "Submitting test ({mode}): {path}"
+
+    # Submit and wait (10 min timeout)
+    val result = test_submit_and_wait(path, config, clean, 600000)
+
+    # Print result
+    if result.success:
+        print "PASS: {path}"
+        if result.output != "":
+            print result.output
+        return 0
+    else:
+        print "FAIL: {path}"
+        if result.output != "":
+            print result.output
+        return 1
 
 # ============================================================================
 # Watch Daemon Commands

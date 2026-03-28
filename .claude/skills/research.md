@@ -1,126 +1,89 @@
-# Research Skill - Codebase Exploration
+# Research Skill -- Codebase Exploration
 
-## Quick Commands
+## Search Tools
 
-### Find Files
+### 1. Simple CLI `query` (Preferred -- Scope-Aware)
+
 ```bash
-# By pattern
-find . -name "*.spl" -type f
-find . -path "*test*" -name "*_spec.spl"
-
-# Glob patterns in Claude
-Glob: **/*.spl
-Glob: src/**/*.spl
-Glob: test/**/*_spec.spl
+bin/simple query definition <file> <line> [column]       # Go-to-definition
+bin/simple query references <file> <line> [column]       # Find all references
+bin/simple query hover <file> <line> [column]            # Type + docs
+bin/simple query completions <file> <line> [column]      # Code completions
+bin/simple query workspace-symbols [--query X] [--kind fn|class|struct|enum|trait]
+bin/simple query ast-query <file> <pattern>              # Structural pattern matching
+bin/simple query sem-query <file> <query>                # CodeQL-style queries
+bin/simple query check <file> [--format json]            # Type-check + lint
+bin/simple query workspace-diagnostics <dir>             # Workspace diagnostics
+bin/simple query call-hierarchy <file> <line> --direction incoming|outgoing
+bin/simple query type-hierarchy <file> <line> --direction supertypes|subtypes
 ```
 
-### Search Code
-```bash
-# Pattern search
-grep -r "pattern" --include="*.spl"
-grep -rn "fn main" src/
+Source: `src/app/cli/query.spl`
 
-# In Claude, use Grep tool
-Grep: pattern="fn main" path="src/"
-```
+### 2. MCP (Thin Wrapper)
 
-### Understand Structure
-```bash
-# Directory tree
-ls -la src/
-tree -L 2 src/
+MCP server at `src/app/mcp/` wraps CLI for JSON-RPC. Note: `simple_search`, `simple_api`, `simple_dependencies` use raw grep/find, NOT the query engine. Prefer `bin/simple query workspace-symbols` for real code intelligence.
 
-# Module structure
-cat src/app/cli/main.spl
-```
+### 3. LSP (Thin Wrapper over CLI Query)
+
+LSP at `src/lib/nogc_sync_mut/lsp/` delegates to `bin/simple query`.
+
+---
 
 ## Key Documentation
 
-### Specifications
-- `doc/spec/README.md` - Spec index
-- `doc/spec/syntax.md` - Lexical structure
-- `doc/spec/types.md` - Type system
-- `doc/spec/memory.md` - Memory management
-- `doc/spec/concurrency.md` - Actors, async
+| Area | Path |
+|------|------|
+| Spec index | `doc/spec/README.md` |
+| Architecture | `doc/architecture/README.md` |
+| Codebase inventory | `doc/architecture/file_class_structure.md` |
+| Glossary | `doc/architecture/glossary.md` |
+| Feature catalog | `doc/feature/feature.md` (auto-generated) |
+| TODOs | `doc/TODO.md` (`bin/simple todo-scan`) |
+| Bug reports | `doc/tracking/bug/bug_report.md` |
 
-### Architecture
-- `doc/architecture/README.md` - Design principles
-- `doc/codegen_technical.md` - Codegen details
-- `doc/codegen/status.md` - MIR coverage
-
-### Features
-- `doc/feature_index.md` - All features (131+)
-- `doc/features/feature.md` - Feature catalog
-- `doc/status/` - Implementation status (79+ files)
-
-### Research
-- `doc/research/api_design_index.md` - API guidelines
-- `doc/research/improve_api.md` - API overview
+---
 
 ## Research Workflow
 
 ### 1. Understand the Problem
-```
-1. Read relevant spec in doc/spec/
-2. Check feature status in doc/status/
-3. Review existing implementation
-```
+1. Read relevant spec in `doc/spec/`
+2. Check feature status in `doc/feature/feature.md`
+3. `bin/simple query workspace-symbols --query X` for symbol search
 
 ### 2. Explore Implementation
-```
-1. Find entry point (usually in src/driver/)
-2. Trace through compiler pipeline
-3. Check tests for usage examples
-```
+1. Find entry point (usually `src/app/` or `src/compiler/`)
+2. Trace through compiler pipeline (layers 00-99 in `src/compiler/`)
+3. Check tests: `test/**/*_spec.spl`
+4. `bin/simple query references <file> <line>` to trace callers
 
 ### 3. Document Findings
-```
-# For bugs
-→ doc/tracking/bug/bug_report.md
+- Bugs: `doc/tracking/bug/bug_report.md`
+- Improvements: `doc/improve_request.md`
+- Completed work: `doc/report/`
 
-# For improvements
-→ doc/improve_request.md
-
-# For completed work
-→ doc/report/
-```
+---
 
 ## Common Research Patterns
 
-### "Where is X implemented?"
-1. Search for type/function name
-2. Check module structure in `mod.spl` files
-3. Follow imports/exports
-
-### "How does X work?"
-1. Find tests (`*_spec.spl` in `test/`)
-2. Read documentation comments
-3. Trace execution flow
-
-### "What's the status of X?"
-1. Check `doc/status/` files
-2. Check `doc/feature/feature.md`
-3. Search `doc/TODO.md`
+| Question | Approach |
+|----------|----------|
+| Where is X implemented? | `bin/simple query workspace-symbols --query X` |
+| How does X work? | Find tests, `query hover`, trace compiler layers |
+| What's the status of X? | `doc/feature/feature.md`, `doc/TODO.md` |
+| What calls X? | `bin/simple query references <file> <line>` or `query call-hierarchy --direction incoming` |
 
 ## File Patterns
 
 | Pattern | Location |
 |---------|----------|
-| Simple source | `src/**/*.spl` |
-| Simple tests | `test/**/*_spec.spl` |
-| Feature specs | `src/lib/test/features/**/*_spec.spl` |
-| Specs | `doc/spec/*.md` |
-| Status | `doc/status/*.md` |
+| Source | `src/**/*.spl` |
+| Tests | `test/**/*_spec.spl` |
+| Compiler layers | `src/compiler/NN.name/*.spl` |
+| Stdlib | `src/lib/**/*.spl` |
+| MCP server | `src/app/mcp/main*.spl` |
+| LSP/DAP | `src/lib/nogc_sync_mut/{lsp,dap}/*.spl` |
 
 ## Verification Projects
 
-Lean 4 proofs in `verification/`:
-- `manual_pointer_borrow/` - Borrow checker
-- `gc_manual_borrow/` - GC safety
-- `async_compile/` - Effect tracking
-- `memory_model_drf/` - SC-DRF model
-
-## See Also
-
-- `CLAUDE.md` - Full project structure
-- `doc/report/` - Report directory
+Lean 4 proofs in `verification/`: borrow checker, GC safety, effect tracking, SC-DRF model.
