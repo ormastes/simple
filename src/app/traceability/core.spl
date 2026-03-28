@@ -18,9 +18,6 @@ struct TraceabilityWarning:
     line: i64
     message: text
 
-struct TraceabilityReport:
-    warnings: [TraceabilityWarning]
-
 struct VirtualFile:
     path: text
     content: text
@@ -101,19 +98,19 @@ fn load_traceability_config() -> TraceabilityConfig:
 fn make_virtual_file(path: text, content: text) -> VirtualFile:
     VirtualFile(path: path, content: content)
 
-fn analyze_repo_traceability(paths: [text], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> TraceabilityReport:
+fn analyze_repo_traceability(paths: [text], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> [TraceabilityWarning]:
     val files = collect_virtual_files(paths)
     analyze_virtual_files(files, scope, config, enforce_source_roots)
 
 fn run_traceability_build_warnings(verbose: bool) -> i64:
     if verbose:
         print "Checking traceability links..."
-    val report = analyze_repo_traceability([], "all", load_traceability_config(), true)
-    for warning in report.warnings:
+    val warnings = analyze_repo_traceability([], "all", load_traceability_config(), true)
+    for warning in warnings:
         print format_traceability_warning(warning)
-    report.warnings.len()
+    warnings.len()
 
-fn analyze_virtual_files(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> TraceabilityReport:
+fn analyze_virtual_files(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool) -> [TraceabilityWarning]:
     var parsed: [ParsedTraceFile] = []
     var existing_paths: [text] = []
 
@@ -123,17 +120,30 @@ fn analyze_virtual_files(files: [VirtualFile], scope: text, config: Traceability
     existing_paths = unique_texts(existing_paths)
 
     var warnings: [TraceabilityWarning] = []
-    print "TRACE analyze_specs"
-    warnings = warnings + analyze_specs(parsed, existing_paths, config, scope)
-    print "TRACE analyze_requirements"
-    warnings = warnings + analyze_requirements(parsed, existing_paths, config, scope)
-    print "TRACE analyze_backwards_docs"
-    warnings = warnings + analyze_backwards_docs(parsed, existing_paths, config, scope)
+    warnings = extend_warnings(warnings, analyze_specs(parsed, existing_paths, config, scope))
+    warnings = extend_warnings(warnings, analyze_requirements(parsed, existing_paths, config, scope))
+    warnings = extend_warnings(warnings, analyze_backwards_docs(parsed, existing_paths, config, scope))
     if enforce_source_roots:
-        print "TRACE analyze_source_tests"
-        warnings = warnings + analyze_source_tests(parsed, existing_paths, config, scope)
+        warnings = extend_warnings(warnings, analyze_source_tests(parsed, existing_paths, config, scope))
 
-    TraceabilityReport(warnings: warnings)
+    warnings
+
+fn count_virtual_file_warnings_by_code(files: [VirtualFile], scope: text, config: TraceabilityConfig, enforce_source_roots: bool, code: text) -> i64:
+    var parsed: [ParsedTraceFile] = []
+    var existing_paths: [text] = []
+
+    for file in files:
+        existing_paths.push(file.path)
+        parsed.push(parse_trace_file(file))
+    existing_paths = unique_texts(existing_paths)
+
+    var count = 0
+    count = count + count_warning_code_list(analyze_specs(parsed, existing_paths, config, scope), code)
+    count = count + count_warning_code_list(analyze_requirements(parsed, existing_paths, config, scope), code)
+    count = count + count_warning_code_list(analyze_backwards_docs(parsed, existing_paths, config, scope), code)
+    if enforce_source_roots:
+        count = count + count_warning_code_list(analyze_source_tests(parsed, existing_paths, config, scope), code)
+    count
 
 fn collect_virtual_files(paths: [text]) -> [VirtualFile]:
     var roots = paths
@@ -226,17 +236,17 @@ fn analyze_specs(parsed: [ParsedTraceFile], existing_paths: [text], config: Trac
         if file.kind != "spec_feature" and file.kind != "spec_system":
             continue
 
-        warnings = warnings + validate_spec_field(file, existing_paths, config, "requirements")
-        warnings = warnings + validate_spec_field(file, existing_paths, config, "plan")
-        warnings = warnings + validate_spec_field(file, existing_paths, config, "design")
-        warnings = warnings + validate_spec_field(file, existing_paths, config, "research")
+        warnings = extend_warnings(warnings, validate_spec_field(file, existing_paths, config, "requirements"))
+        warnings = extend_warnings(warnings, validate_spec_field(file, existing_paths, config, "plan"))
+        warnings = extend_warnings(warnings, validate_spec_field(file, existing_paths, config, "design"))
+        warnings = extend_warnings(warnings, validate_spec_field(file, existing_paths, config, "research"))
 
         val requirement_slugs = canonical_requirement_slugs(file.requirement_paths, existing_paths, config)
         if requirement_slugs.len() == 1:
             val req_slug = requirement_slugs[0]
-            warnings = warnings + validate_companion_slug(file.path, req_slug, file.plan_paths, "TRC221", "Plan link")
-            warnings = warnings + validate_companion_slug(file.path, req_slug, file.design_paths, "TRC222", "Design link")
-            warnings = warnings + validate_companion_slug(file.path, req_slug, file.research_paths, "TRC223", "Research link")
+            warnings = extend_warnings(warnings, validate_companion_slug(file.path, req_slug, file.plan_paths, "TRC221", "Plan link"))
+            warnings = extend_warnings(warnings, validate_companion_slug(file.path, req_slug, file.design_paths, "TRC222", "Design link"))
+            warnings = extend_warnings(warnings, validate_companion_slug(file.path, req_slug, file.research_paths, "TRC223", "Research link"))
     warnings
 
 fn validate_spec_field(file: ParsedTraceFile, existing_paths: [text], config: TraceabilityConfig, field_name: text) -> [TraceabilityWarning]:
@@ -290,11 +300,6 @@ fn analyze_requirements(parsed: [ParsedTraceFile], existing_paths: [text], confi
         return []
 
     var warnings: [TraceabilityWarning] = []
-    var specs: [ParsedTraceFile] = []
-    for file in parsed:
-        if file.kind == "spec_feature" or file.kind == "spec_system":
-            specs.push(file)
-
     for file in parsed:
         if file.kind != "requirement" and file.kind != "nfr":
             continue
@@ -303,14 +308,31 @@ fn analyze_requirements(parsed: [ParsedTraceFile], existing_paths: [text], confi
         if ids.len() == 0:
             warnings.push(make_warning("TRC311", file.path, 1, "Requirement document has no REQ-/NFR- identifiers"))
 
-        val linked_specs = specs_for_requirement(file.path, specs, existing_paths, config)
-        if linked_specs.len() == 0:
+        var linked_spec_count = 0
+        for spec in parsed:
+            if spec.kind != "spec_feature" and spec.kind != "spec_system":
+                continue
+            val canonical_paths = canonical_requirement_paths(spec.requirement_paths, existing_paths, config)
+            if path_list_contains(canonical_paths, file.path):
+                linked_spec_count = linked_spec_count + 1
+
+        if linked_spec_count == 0:
             warnings.push(make_warning("TRC312", file.path, 1, "No feature/system spec links to this requirement document"))
 
         for id in ids:
-            if not any_spec_covers_id(linked_specs, id):
+            var covered = false
+            for spec in parsed:
+                if spec.kind != "spec_feature" and spec.kind != "spec_system":
+                    continue
+                val canonical_paths = canonical_requirement_paths(spec.requirement_paths, existing_paths, config)
+                if path_list_contains(canonical_paths, file.path) == false:
+                    continue
+                if path_list_contains(spec.req_ids, id) or path_list_contains(spec.nfr_ids, id):
+                    covered = true
+                    break
+            if not covered:
                 warnings.push(make_warning("TRC401", file.path, 1, "Identifier '{id}' is not covered by linked feature/system specs"))
-        warnings = warnings + validate_requirement_companions(file, existing_paths)
+        warnings = extend_warnings(warnings, validate_requirement_companions(file, existing_paths))
     warnings
 
 fn validate_requirement_companions(file: ParsedTraceFile, existing_paths: [text]) -> [TraceabilityWarning]:
@@ -368,17 +390,30 @@ fn analyze_source_tests(parsed: [ParsedTraceFile], existing_paths: [text], confi
         return []
 
     var warnings: [TraceabilityWarning] = []
+    var source_dirs: [text] = []
+    var init_dirs: [text] = []
     for file in parsed:
         if file.kind != "source":
             continue
         if is_under_warn_root(file.path, config.warn_source_roots) == false:
             continue
+        val dir_path = dirname(file.path)
+        source_dirs.push(dir_path)
+        if basename(file.path) == "__init__.spl":
+            init_dirs.push(dir_path)
         if basename(file.path) != "__init__.spl":
             val unit_candidates = map_source_to_unit_candidates(file.path)
             if unit_candidates.len() > 0:
                 if any_path_exists(unit_candidates, existing_paths) == false:
                     warnings.push(make_warning("TRC101", file.path, 1, "Missing unit spec for source file; expected one of {join_list(unit_candidates)}"))
-    val anchor_dirs = collect_module_anchor_dirs(parsed, config.warn_source_roots)
+    var anchor_dirs = unique_texts(init_dirs)
+    val unique_dirs = unique_texts(source_dirs)
+    for dir_path in unique_dirs:
+        if path_list_contains(anchor_dirs, dir_path):
+            continue
+        if not has_child_source_dir(unique_dirs, dir_path):
+            anchor_dirs.push(dir_path)
+    anchor_dirs = unique_texts(anchor_dirs)
     for dir_path in anchor_dirs:
         val integration_candidates = map_source_dir_to_integration_candidates(dir_path)
         if integration_candidates.len() > 0:
@@ -730,16 +765,16 @@ fn extract_paths_for_field(content: text, field_name: text) -> [text]:
 fn format_traceability_warning(warning: TraceabilityWarning) -> text:
     "{warning.path}:{str(warning.line)}: warning[{warning.code}]: {warning.message}"
 
-fn traceability_report_to_json(report: TraceabilityReport) -> text:
-    if report.warnings.len() == 0:
+fn traceability_report_to_json(warnings: [TraceabilityWarning]) -> text:
+    if warnings.len() == 0:
         return "{\"warnings\":[]}"
     var parts: [text] = []
     parts.push("{\"warnings\":[")
     var i = 0
-    while i < report.warnings.len():
-        val warning = report.warnings[i]
+    while i < warnings.len():
+        val warning = warnings[i]
         parts.push("{\"code\":\"{escape_json(warning.code)}\",\"path\":\"{escape_json(warning.path)}\",\"line\":{str(warning.line)},\"message\":\"{escape_json(warning.message)}\"}")
-        if i < report.warnings.len() - 1:
+        if i < warnings.len() - 1:
             parts.push(",")
         i = i + 1
     parts.push("]}")
@@ -806,6 +841,30 @@ fn any_path_exists(paths: [text], existing_paths: [text]) -> bool:
         if path_list_contains(existing_paths, path):
             return true
     false
+
+fn count_warning_code_list(warnings: [TraceabilityWarning], code: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < warnings.len():
+        val warning = warnings[i]
+        if warning.code == code:
+            count = count + 1
+        i = i + 1
+    count
+
+fn extend_warnings(base: [TraceabilityWarning], extra: [TraceabilityWarning]) -> [TraceabilityWarning]:
+    var result = base
+    var i = 0
+    while i < extra.len():
+        result.push(extra[i])
+        i = i + 1
+    result
+
+fn count_parsed_files(items: [ParsedTraceFile]) -> i64:
+    var count = 0
+    for _ in items:
+        count = count + 1
+    count
 
 fn is_under_warn_root(path: text, warn_source_roots: [text]) -> bool:
     for root in warn_source_roots:

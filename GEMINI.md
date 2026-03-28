@@ -24,6 +24,19 @@ Before starting any step, **check if prerequisite artifacts exist**:
 
 ---
 
+## Available Tools
+
+| Tool | Purpose |
+|------|---------|
+| **Simple MCP** | `bin/simple query workspace-symbols`, `references`, `hover` — codebase search |
+| **Simple LSP MCP** | `bin/simple query definition`, `completions` — code navigation |
+| **Context7 MCP** | External library documentation lookup |
+| **Chrome MCP** | Browser control for visual testing and web interaction |
+| **Stitch MCP** | Multi-file code editing and generation |
+| **Playwright CLI** | `npx playwright` — web scraping, browser automation, domain research |
+
+---
+
 ## Step 1: Research
 
 Check: `doc/01_research/local/<feature>.md` and `doc/01_research/domain/<feature>.md` exist?
@@ -31,12 +44,13 @@ Check: `doc/01_research/local/<feature>.md` and `doc/01_research/domain/<feature
 If missing, do both:
 
 ### Local Research
-- Search `src/` for related types, functions, modules, call chains
+- Search `src/` for related types, functions, modules, call chains (use Simple MCP + LSP MCP)
 - Search `doc/` for prior research, design docs, ADRs
 - Output: `doc/01_research/local/<feature>.md`
 
 ### Domain Research
-- Web search for external knowledge, papers, prior art
+- Web search via Playwright CLI for external knowledge, papers, prior art
+- Use Chrome MCP for visual reference gathering
 - Output: `doc/01_research/domain/<feature>.md`
 
 ### Requirement Options

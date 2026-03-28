@@ -27,8 +27,10 @@ The "project brain" file that each tool reads at startup.
 | Tool | Reads CLAUDE.md? | Reads AGENTS.md? | Reads GEMINI.md? | Configurable? |
 |------|-------------------|-------------------|-------------------|---------------|
 | **Claude Code** | Yes (native) | No | No | No fallback config |
-| **Codex CLI** | No (by default) | Yes (native) | No | Yes: `project_doc_fallback_filenames = ["CLAUDE.md"]` in `config.toml` |
-| **Gemini CLI** | No (by default) | No (by default) | Yes (native) | Yes: `context.fileName = ["AGENTS.md", "GEMINI.md"]` in `settings.json` |
+| **Codex CLI** | **Yes** (via fallback) | Yes (native) | No | `project_doc_fallback_filenames = ["CLAUDE.md"]` in `config.toml` |
+| **Gemini CLI** | **Yes** (via fileName) | **Yes** (via fileName) | Yes (native) | `context.fileName = ["GEMINI.md", "AGENTS.md", "CLAUDE.md"]` in `settings.json` |
+
+**Current project status:** All three tools read `CLAUDE.md` as context — configured via settings files, not `@` imports.
 
 ### Override / Local Variants
 
@@ -135,16 +137,33 @@ your-project/
 | **Codex CLI** | `.codex/config.toml` or `~/.codex/config.toml` | TOML | `[mcp_servers.<name>]` |
 | **Gemini CLI** | `.gemini/settings.json` or `~/.gemini/settings.json` | JSON | `mcpServers` |
 
+### MCP Servers Configured per Tool (current project)
+
+| MCP Server | Claude | Codex | Gemini | Purpose |
+|------------|--------|-------|--------|---------|
+| **context7** | Yes | Yes | Yes | External library docs lookup |
+| **simple-mcp** | Yes | Yes | Yes | Codebase query (workspace-symbols, references, hover) |
+| **simple-lsp-mcp** | Yes | Yes | Yes | Code navigation (definition, completions) |
+| **chrome-mcp** | -- | -- | Yes | Browser control, visual testing |
+| **stitch-mcp** | -- | -- | Yes | Multi-file code editing |
+| **jj-git-mcp** | Yes | -- | -- | JJ/Git VCS operations |
+
+### Non-MCP CLI Tools
+
+| Tool | Claude | Codex (AGENTS.md) | Gemini (GEMINI.md) | Purpose |
+|------|--------|--------------------|--------------------|---------|
+| **Playwright CLI** | -- | Yes (`npx playwright`) | Yes (`npx playwright`) | Web scraping, browser automation, domain research |
+
 ### MCP Config Format Comparison
 
 **Claude Code** (`.mcp.json`):
 ```json
 {
   "mcpServers": {
-    "my-server": {
-      "command": "npx",
-      "args": ["-y", "@example/mcp-server"],
-      "env": { "API_KEY": "${API_KEY}" }
+    "simple-mcp": {
+      "command": "bin/simple_mcp_server",
+      "args": [],
+      "env": { "SIMPLE_LIB": "src", "SIMPLE_LOG": "error" }
     }
   }
 }
@@ -152,26 +171,24 @@ your-project/
 
 **Codex CLI** (`.codex/config.toml`):
 ```toml
-[mcp_servers.my-server]
-command = "npx"
-args = ["-y", "@example/mcp-server"]
-startup_timeout_sec = 10
-tool_timeout_sec = 60
+[mcp_servers.simple-mcp]
+command = "bin/simple_mcp_server"
+args = []
 enabled = true
 
-[mcp_servers.my-server.env]
-API_KEY = "value"
+[mcp_servers.simple-mcp.env]
+SIMPLE_LIB = "src"
+SIMPLE_LOG = "error"
 ```
 
 **Gemini CLI** (`.gemini/settings.json`):
 ```json
 {
   "mcpServers": {
-    "my-server": {
-      "command": "npx",
-      "args": ["-y", "@example/mcp-server"],
-      "env": { "API_KEY": "$API_KEY" },
-      "timeout": 600000
+    "simple-mcp": {
+      "command": "bin/simple_mcp_server",
+      "args": [],
+      "env": { "SIMPLE_LIB": "src", "SIMPLE_LOG": "error" }
     }
   }
 }
@@ -181,7 +198,9 @@ API_KEY = "value"
 
 Claude Code and Gemini CLI use **nearly identical JSON format** (`mcpServers` key, same `command`/`args`/`env` structure). Codex CLI uses TOML with slightly different key names but same semantics.
 
-**Sharing strategy:** Maintain a canonical MCP list and generate per-tool configs, or use a shared script.
+**Shared servers (all 3 tools):** context7, simple-mcp, simple-lsp-mcp
+**Gemini-only:** chrome-mcp, stitch-mcp
+**Claude-only:** jj-git-mcp
 
 ### MCP CLI Commands
 
@@ -339,7 +358,7 @@ Claude Code and Gemini CLI both use **Markdown with YAML frontmatter** for agent
 
 | Content | Can Share? | How |
 |---------|-----------|-----|
-| **Project instructions** | Yes | Write once in `AGENTS.md`, import from CLAUDE.md (`@AGENTS.md`), configure Gemini (`context.fileName`) |
+| **Project instructions** | **Yes** | `CLAUDE.md` is the single source; Codex reads via `project_doc_fallback_filenames`, Gemini via `context.fileName` |
 | **MCP servers** | Partially | Claude+Gemini use similar JSON; Codex uses TOML. Use a generation script |
 | **Skills** | Partially | Claude+Codex both use SKILL.md format; Gemini uses TOML. Symlink or generate |
 | **Agents** | Partially | Claude+Gemini both use .md with YAML frontmatter; Codex uses TOML |
@@ -416,8 +435,8 @@ project/
 
 | Content Type | Shared Location | Claude-Specific | Codex-Specific | Gemini-Specific |
 |-------------|-----------------|-----------------|----------------|-----------------|
-| **Project rules** | `AGENTS.md` | `CLAUDE.md` (imports AGENTS.md) | N/A (reads AGENTS.md) | `GEMINI.md` (imports AGENTS.md) |
-| **Coding standards** | `AGENTS.md` | `.claude/rules/` | AGENTS.md sections | `GEMINI.md` sections |
+| **Project rules** | `CLAUDE.md` (single source) | Native | Reads via `project_doc_fallback_filenames` | Reads via `context.fileName` |
+| **Coding standards** | `CLAUDE.md` | `.claude/rules/` | `AGENTS.md` pipeline sections | `GEMINI.md` pipeline sections |
 | **MCP servers** | `config/mcp/servers.json` | `.mcp.json` | `.codex/config.toml [mcp_servers]` | `.gemini/settings.json mcpServers` |
 | **Skills/commands** | `.agents/skills/` (SKILL.md) | `.claude/skills/` | `.codex/skills/` + `.agents/skills/` | `.gemini/commands/` (TOML) |
 | **Agents** | N/A (tool names differ) | `.claude/agents/` | `config.toml [agents]` | `.gemini/agents/` |
@@ -428,35 +447,50 @@ project/
 
 ## 10. Root Instruction File Strategy
 
-### Recommended: Hub-and-Spoke Model
+### Recommended: Settings-Based Cross-Reading (current approach)
+
+Each tool reads `CLAUDE.md` via its config settings — no `@` imports needed, no duplication:
 
 ```
-AGENTS.md          # Hub: all shared project knowledge
-  |
-  +-- CLAUDE.md    # @AGENTS.md + Claude-only (skill refs, memory hints, jj workflow)
-  +-- GEMINI.md    # @./AGENTS.md + Gemini-only (sandbox config, extension refs)
-  +-- (Codex)      # Reads AGENTS.md natively, no wrapper needed
+CLAUDE.md          # Primary: comprehensive project knowledge (300+ lines)
+AGENTS.md          # Codex-specific pipeline + self-sufficiency rules
+GEMINI.md          # Gemini-specific pipeline + self-sufficiency rules
+
+.codex/config.toml:
+  project_doc_fallback_filenames = ["CLAUDE.md"]    # Codex reads CLAUDE.md as fallback
+
+.gemini/settings.json:
+  context.fileName = ["GEMINI.md", "AGENTS.md", "CLAUDE.md"]  # Gemini reads all three
 ```
 
-**AGENTS.md** contains:
+**CLAUDE.md** is the single source of truth containing:
 - Project structure and architecture
 - Coding standards and language rules
 - Test methodology and conventions
 - Build commands and workflows
 - Critical rules (what NOT to do)
-
-**CLAUDE.md** adds:
 - `.claude/skills/` skill references and `/skill-name` syntax
 - `.claude/agents/` agent definitions
-- jj VCS workflow (Claude-specific)
+- jj VCS workflow
 - Memory system hints
-- Claude-specific tool instructions
 
-**GEMINI.md** adds:
+**AGENTS.md** adds Codex-specific:
+- Self-sufficient pipeline steps (research → design → impl → verify → release)
+- Artifact location conventions
+- Codex agent/skill references
+
+**GEMINI.md** adds Gemini-specific:
+- Self-sufficient pipeline steps
+- UI design emphasis (primary Gemini strength)
 - `.gemini/commands/` command references
 - Sandbox configuration hints
-- Gemini-specific tool names
-- Extension references
+
+### Alternative: Hub-and-Spoke Model (not used)
+
+Using `@` imports from a hub file. Less preferred because:
+- Gemini may double-load `CLAUDE.md` if both `@` import and `context.fileName` are set
+- Codex doesn't support `@` imports at all
+- Settings-based approach is cleaner and more maintainable
 
 ---
 
@@ -509,32 +543,59 @@ jq '{mcpServers: .servers}' "$SERVERS" > .gemini/settings.json.tmp
 
 ## 13. Practical Setup for This Project
 
-### Current State
+### Current State (as of 2026-03-28)
 
 ```
 simple/
-  CLAUDE.md              # Exists (comprehensive, 300+ lines)
-  AGENTS.md              # Exists (redirects to CLAUDE.md)
-  .mcp.json              # Exists (Claude MCP servers)
-  .claude/               # Exists (full setup)
-```
+  CLAUDE.md              # Primary instructions (comprehensive, 300+ lines)
+  AGENTS.md              # Codex-specific pipeline + tools table
+  GEMINI.md              # Gemini-specific pipeline + tools table
 
-### Recommended Additions for Coexistence
+  .claude/               # Full setup (skills, agents, memory, commands, templates)
+    settings.json
+    settings.local.json  # MCP: simple-mcp, simple-lsp-mcp, context7, jj-git-mcp
+    skills/              # research, design, impl, verify, release (Markdown)
+    agents/
+    memory/
+    commands/
+    templates/
 
-```
-simple/
-  CLAUDE.md              # Keep as-is (Claude primary)
-  AGENTS.md              # Rewrite: shared content extracted from CLAUDE.md
-  GEMINI.md              # New: @./AGENTS.md + Gemini-specific
-  .mcp.json              # Keep (Claude)
+  .agents/skills/        # Shared skills (Codex native format, SKILL.md)
+    research/SKILL.md
+    design/SKILL.md
+    impl/SKILL.md
+    verify/SKILL.md
+    release/SKILL.md
+
   .codex/
-    config.toml          # New: Codex config + MCP servers (mirrored from .mcp.json)
+    config.toml          # MCP: context7, simple-mcp, simple-lsp-mcp
+    skills/              # + fallback: reads CLAUDE.md
+      mdsoc-architecture-writing/
+
   .gemini/
-    settings.json        # New: Gemini config + MCP servers (mirrored from .mcp.json)
-    commands/            # New: TOML versions of key skills (verify, release)
+    settings.json        # MCP: context7, simple-mcp, simple-lsp-mcp, chrome-mcp, stitch-mcp
+    commands/            # research, design, impl, verify, release (TOML)
 ```
 
-Then update `CLAUDE.md` to: `@AGENTS.md` + Claude-only additions.
+### Cross-Reading Summary
+
+| Tool | Native file | Also reads (via settings) |
+|------|-------------|--------------------------|
+| **Claude Code** | `CLAUDE.md` | — |
+| **Codex CLI** | `AGENTS.md` | `CLAUDE.md` (fallback) |
+| **Gemini CLI** | `GEMINI.md` | `CLAUDE.md` (fileName array) |
+
+### MCP + Tools Summary
+
+| Tool/Server | Claude | Codex | Gemini |
+|-------------|--------|-------|--------|
+| context7 | Yes | Yes | Yes |
+| simple-mcp | Yes | Yes | Yes |
+| simple-lsp-mcp | Yes | Yes | Yes |
+| chrome-mcp | -- | -- | Yes |
+| stitch-mcp | -- | -- | Yes |
+| jj-git-mcp | Yes | -- | -- |
+| Playwright CLI | -- | Yes (AGENTS.md) | Yes (GEMINI.md) |
 
 ---
 
