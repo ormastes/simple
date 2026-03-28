@@ -1,0 +1,321 @@
+"""
+# Header Generator Specification
+
+**Feature IDs:** #SFFI-HEADER-001
+**Category:** Compiler / Tools / Header Generation
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** SFFI bidirectional class interop — C/C++ header generation
+**Plan:** parsed-questing-goose.md
+**Design:** sffi_external_library_pattern.md
+
+## Overview
+
+Tests C header (.h) and C++ wrapper (.hpp) generation for @export("C")
+classes. The C header provides opaque handles and function declarations.
+The C++ header wraps them in RAII classes with move semantics.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| emit_c_header | Generate complete .h file |
+| emit_cpp_header | Generate complete .hpp file |
+| Opaque handle | C typedef struct* pattern |
+| RAII wrapper | C++ class with ctor/dtor delegation |
+"""
+
+use compiler.tools.header_gen.c_header.{emit_c_header}
+use compiler.tools.header_gen.cpp_header.{emit_cpp_header}
+use compiler.mir.mir_data.*
+from hir_types import {SymbolId, HirType}
+from lexer import {Span}
+
+# ============================================================================
+# Helpers: Build MIR test data
+# ============================================================================
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_mir_i32() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn make_mir_i64() -> MirType:
+    MirType(kind: MirTypeKind.I64)
+
+fn make_mir_f64() -> MirType:
+    MirType(kind: MirTypeKind.F64)
+
+fn make_mir_bool() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn make_mir_unit() -> MirType:
+    MirType(kind: MirTypeKind.Unit)
+
+fn make_mir_text() -> MirType:
+    MirType(kind: MirTypeKind.Opaque("text"))
+
+fn make_calc_type_def() -> MirTypeDef:
+    """Create a Calculator MirTypeDef with precision: i32 field."""
+    MirTypeDef(
+        symbol: SymbolId(id: 10),
+        name: "Calculator",
+        kind: MirTypeDefKind.Struct([
+            MirFieldDef(name: "precision", type_: make_mir_i32(), offset: 0)
+        ]),
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_calc_add_func() -> MirFunction:
+    """Create a Calculator.add method (self, f64, f64) -> f64."""
+    MirFunction(
+        symbol: SymbolId(id: 20),
+        name: "__simple_Calculator_add",
+        signature: MirSignature(
+            params: [make_mir_i64(), make_mir_f64(), make_mir_f64()],
+            return_type: make_mir_f64(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_calc_multiply_func() -> MirFunction:
+    """Create a Calculator.multiply method (self, f64, f64) -> f64."""
+    MirFunction(
+        symbol: SymbolId(id: 21),
+        name: "__simple_Calculator_multiply",
+        signature: MirSignature(
+            params: [make_mir_i64(), make_mir_f64(), make_mir_f64()],
+            return_type: make_mir_f64(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_standalone_func() -> MirFunction:
+    """Create a standalone exported function: add_numbers(i32, i32) -> i32."""
+    MirFunction(
+        symbol: SymbolId(id: 30),
+        name: "__simple_add_numbers",
+        signature: MirSignature(
+            params: [make_mir_i32(), make_mir_i32()],
+            return_type: make_mir_i32(),
+            is_variadic: false
+        ),
+        locals: [],
+        blocks: [],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: true,
+        export_name: ""
+    )
+
+fn make_test_module() -> MirModule:
+    """Create a MirModule with Calculator methods."""
+    var funcs: Dict<SymbolId, MirFunction> = {}
+    val add_fn = make_calc_add_func()
+    val mul_fn = make_calc_multiply_func()
+    funcs[add_fn.symbol] = add_fn
+    funcs[mul_fn.symbol] = mul_fn
+
+    MirModule(
+        name: "test_lib",
+        functions: funcs,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+# ============================================================================
+# Test Group 1: C Header Generation
+# ============================================================================
+
+describe "Header Generator":
+    """
+    ## C/C++ Header Generation
+
+    Tests generation of C and C++ headers from exported MIR types.
+    """
+
+    describe "C header":
+        """
+        ## C Header (.h)
+
+        Generates include guards, extern C blocks, opaque handles,
+        function declarations, and _Static_assert layout checks.
+        """
+
+        it "includes include guards":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("#ifndef CALCULATOR_H")
+            expect(header).to_contain("#define CALCULATOR_H")
+            expect(header).to_contain("#endif")
+
+        it "includes standard headers":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("#include <stdint.h>")
+            expect(header).to_contain("#include <stddef.h>")
+            expect(header).to_contain("#include <stdbool.h>")
+
+        it "includes extern C block":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("#ifdef __cplusplus")
+            expect(header).to_contain("extern")
+
+        it "emits opaque handle typedef":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("typedef struct spl_Calculator")
+            expect(header).to_contain("spl_Calculator_t")
+
+        it "emits create/destroy declarations":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("spl_Calculator_create")
+            expect(header).to_contain("spl_Calculator_destroy")
+
+        it "emits method declarations":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("spl_Calculator_add")
+            expect(header).to_contain("spl_Calculator_multiply")
+
+        it "emits library lifecycle functions":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("spl_library_init")
+            expect(header).to_contain("spl_library_shutdown")
+
+        it "emits _Static_assert layout checks":
+            val module = make_test_module()
+            val header = emit_c_header("calculator", [], [make_calc_type_def()], module)
+            expect(header).to_contain("_Static_assert")
+            expect(header).to_contain("sizeof")
+
+        it "emits standalone function declarations":
+            val module = make_test_module()
+            val standalone = make_standalone_func()
+            val header = emit_c_header("mylib", [standalone], [], module)
+            expect(header).to_contain("spl_add_numbers")
+
+        it "converts guard name to uppercase":
+            val module = make_test_module()
+            val header = emit_c_header("my-lib.v2", [], [], module)
+            expect(header).to_contain("#ifndef MY_LIB_V2_H")
+
+    # ============================================================================
+    # Test Group 2: C++ Header Generation
+    # ============================================================================
+
+    describe "C++ header":
+        """
+        ## C++ Header (.hpp)
+
+        Generates namespace, RAII wrapper classes with move semantics,
+        and method delegation to C functions.
+        """
+
+        it "emits pragma once":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("#pragma once")
+
+        it "includes C header":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("#include \"mylib.h\"")
+
+        it "emits namespace spl":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("namespace spl")
+            expect(header).to_contain("} // namespace spl")
+
+        it "emits RAII wrapper class":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("class Calculator")
+            expect(header).to_contain("handle_")
+
+        it "emits constructor":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("explicit Calculator")
+            expect(header).to_contain("spl_Calculator_create")
+
+        it "emits destructor":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("~Calculator")
+            expect(header).to_contain("spl_Calculator_destroy")
+
+        it "emits move constructor":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("Calculator&&")
+            expect(header).to_contain("noexcept")
+            expect(header).to_contain("nullptr")
+
+        it "emits deleted copy":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("= delete")
+
+        it "emits method wrappers":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("add(")
+            expect(header).to_contain("multiply(")
+
+        it "emits Library RAII guard":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("class Library")
+            expect(header).to_contain("spl_library_init")
+            expect(header).to_contain("spl_library_shutdown")
+
+        it "includes standard C++ headers":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("#include <memory>")
+            expect(header).to_contain("#include <string>")
+            expect(header).to_contain("#include <utility>")
+
+        it "emits move assignment operator":
+            val module = make_test_module()
+            val header = emit_cpp_header("mylib", [make_calc_type_def()], [], "mylib.h", module)
+            expect(header).to_contain("operator=")
+            expect(header).to_contain("Calculator&&")

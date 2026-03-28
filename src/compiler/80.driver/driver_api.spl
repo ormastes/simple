@@ -237,6 +237,79 @@ extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
 
 # ============================================================================
+# Header Generation & Shared Library Build
+# ============================================================================
+
+fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
+    """Compile a source file and generate C/C++ headers for @export("C") items.
+
+    Args:
+        path: Source file path
+        output_dir: Directory to write headers into
+        lib_name: Library name for include guards and file naming
+        emit_c: Generate C header (.h)
+        emit_cpp: Generate C++ wrapper header (.hpp)
+
+    Returns:
+        CompileResult.Success on success, error otherwise.
+    """
+    use compiler.tools.header_gen.mod_.{HeaderGenerator}
+
+    # Compile to MIR
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.emit_header = emit_c
+    options.emit_cxx_header = emit_cpp
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(mir_module_any):
+            if mir_module_any.?:
+                val mir_module = mir_module_any as MirModule
+                val gen = HeaderGenerator.create(mir_module)
+
+                if not gen.has_exports():
+                    print "[header-gen] Warning: no @export(\"C\") items found"
+                    return result
+
+                # Ensure output directory exists
+                rt_dir_create(output_dir, true)
+
+                if emit_c:
+                    val c_header = gen.generate_c_header(lib_name)
+                    val c_path = rt_path_join(output_dir, lib_name + ".h")
+                    rt_file_write_text(c_path, c_header)
+                    print "[header-gen] Generated C header: {c_path}"
+
+                if emit_cpp:
+                    val cpp_header = gen.generate_cpp_header(lib_name)
+                    val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
+                    rt_file_write_text(cpp_path, cpp_header)
+                    print "[header-gen] Generated C++ header: {cpp_path}"
+
+            result
+        case _:
+            result
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    """Compile a source file to a shared library (.so/.dylib/.dll).
+
+    Equivalent to: bin/simple build --shared --entry <path> -o <output>
+    """
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Native
+    options.shared = true
+    options.release = true
+    options.optimize = true
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+# ============================================================================
 # SMF Cache Loading for Interpreter
 # ============================================================================
 
@@ -292,6 +365,7 @@ fn try_load_smf_cached(path: text) -> CompileResult?:
 
 export find_runtime_lib_dir
 export compile_file, compile_files, interpret_file, jit_file, aot_file, aot_c_file, aot_llvm_file, aot_llvm_native_file, aot_native_file_with_backend, aot_native_project_with_backend, aot_cuda_file, aot_vhdl_file, check_file, parse_sdn_file, compile_to_smf
+export generate_headers, aot_shared_library
 export try_load_smf_cached
 
 # Re-export types from driver_types for convenience

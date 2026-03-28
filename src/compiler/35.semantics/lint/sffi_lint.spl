@@ -1,0 +1,497 @@
+# SFFI Lint Rules
+#
+# Compile-time lint checks for SFFI bidirectional class interop.
+# Validates that @export("C") classes have C-compatible layouts and types.
+#
+# SFFI001: Non-C-compatible field type in exported class              ERROR
+# SFFI002: text field in exported struct (needs marshalling)          WARNING
+# SFFI003: Struct passed by-value without @repr("C")                  ERROR
+# SFFI004: Bitfield without explicit width                            ERROR
+# SFFI005: Platform-dependent type size in FFI struct                 WARNING
+#
+# These checks run on HirClass definitions at the semantic analysis stage,
+# catching ABI safety issues before code generation.
+#
+# ============================================================================
+
+from hir_definitions import {HirClass, HirStruct, HirField}
+from hir_types import {HirType, HirTypeKind}
+from compiler.types.type_layout import {LayoutKind}
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct SffiLintWarning:
+    code: text          # SFFI001, SFFI002, etc.
+    severity: text      # "ERROR" or "WARNING"
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+
+# ============================================================================
+# C-Compatibility Helpers
+# ============================================================================
+
+fn _is_c_compatible_primitive(kind: HirTypeKind) -> bool:
+    """Check if a HirTypeKind is a C-compatible primitive type.
+
+    C-compatible types: all fixed-size integers, floats, bool.
+    NOT compatible: text (Str), collections, optionals, closures.
+    """
+    match kind:
+        case Int(bits, signed): true
+        case Float(bits): true
+        case Bool: true
+        case Char: true
+        case Unit: true
+        case Ptr(inner, mutable): true
+        case _: false
+
+fn _is_text_type(kind: HirTypeKind) -> bool:
+    """Check if a type is the text/Str type (pointer in C, needs marshalling)."""
+    match kind:
+        case Str: true
+        case _: false
+
+fn _is_collection_type(kind: HirTypeKind) -> bool:
+    """Check if a type is a collection (List, Dict, etc.)."""
+    match kind:
+        case Array(element, size): true
+        case Slice(element): true
+        case Dict(key, value): true
+        case Tuple(elements): true
+        case _: false
+
+fn _is_optional_type(kind: HirTypeKind) -> bool:
+    """Check if a type is Optional<T>."""
+    match kind:
+        case Optional(inner): true
+        case _: false
+
+fn _is_function_type(kind: HirTypeKind) -> bool:
+    """Check if a type is a function/closure type."""
+    match kind:
+        case Function(params, ret, effects): true
+        case _: false
+
+fn _is_platform_dependent_type(kind: HirTypeKind) -> bool:
+    """Check if a type has platform-dependent size.
+
+    Currently isize/usize vary by platform. All other Simple types
+    are fixed-size. This is a guard for future types too.
+    """
+    match kind:
+        case Named(symbol, args):
+            # Named types could be isize/usize aliases
+            # For now, these are caught by the Named check below
+            false
+        case _: false
+
+fn _type_kind_name(kind: HirTypeKind) -> text:
+    """Get a human-readable name for a type kind."""
+    match kind:
+        case Int(bits, signed):
+            if signed:
+                "i{bits}"
+            else:
+                "u{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "text"
+        case Unit: "()"
+        case Tuple(elements): "Tuple"
+        case Array(element, size): "Array"
+        case Slice(element): "Slice"
+        case Dict(key, value): "Dict"
+        case Ref(inner, mutable): "Ref"
+        case Ptr(inner, mutable): "Ptr"
+        case Optional(inner): "Optional"
+        case Result(ok, err): "Result"
+        case Named(symbol, args): "Named"
+        case Function(params, ret, effects): "Function"
+        case DynTrait(trait_): "dyn Trait"
+        case TypeParam(name, bounds): name
+        case Infer(id, level): "infer"
+        case Error: "error"
+        case Never: "!"
+        case Any: "Any"
+        case Projection(base, assoc_name): "Projection"
+
+fn _field_line_num(field: HirField) -> i64:
+    """Extract line number from a field's span."""
+    field.span.line
+
+
+# ============================================================================
+# SFFI001: Non-C-compatible field type in exported class
+# ============================================================================
+
+fn check_sffi001_c_compatible_types(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Check that all fields in an @export("C") class use C-compatible types.
+
+    C-compatible types: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, bool, Ptr.
+    Non-C-compatible: text (separate warning via SFFI002), List, Dict, Option,
+    custom classes without @repr("C"), closures, trait objects.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    var fi = 0
+    while fi < class_def.fields.len():
+        val field = class_def.fields[fi]
+        val kind = field.type_.kind
+
+        # Skip text fields — they get SFFI002 (warning, not error)
+        if _is_text_type(kind):
+            fi = fi + 1
+            continue
+
+        # Skip C-compatible primitives and Ptr
+        if _is_c_compatible_primitive(kind):
+            fi = fi + 1
+            continue
+
+        # Everything else is non-C-compatible
+        val type_name = _type_kind_name(kind)
+        val line = _field_line_num(field)
+
+        if _is_collection_type(kind):
+            warnings.push(SffiLintWarning(
+                code: "SFFI001",
+                severity: "ERROR",
+                message: "field '{field.name}' has non-C-compatible type '{type_name}' in @export(\"C\") class '{class_def.name}'",
+                hint: "use a C-compatible type (i8..i64, u8..u64, f32, f64, bool, Ptr) or pass by handle",
+                line_num: line,
+                file_path: file_path
+            ))
+        elif _is_optional_type(kind):
+            warnings.push(SffiLintWarning(
+                code: "SFFI001",
+                severity: "ERROR",
+                message: "field '{field.name}' has non-C-compatible type 'Optional' in @export(\"C\") class '{class_def.name}'",
+                hint: "Optional<T> has no stable C ABI — use a sentinel value or a separate bool flag",
+                line_num: line,
+                file_path: file_path
+            ))
+        elif _is_function_type(kind):
+            warnings.push(SffiLintWarning(
+                code: "SFFI001",
+                severity: "ERROR",
+                message: "field '{field.name}' has non-C-compatible type 'Function' in @export(\"C\") class '{class_def.name}'",
+                hint: "closures cannot cross the FFI boundary — use a function pointer (Ptr) instead",
+                line_num: line,
+                file_path: file_path
+            ))
+        else:
+            # Named types (custom classes), trait objects, etc.
+            warnings.push(SffiLintWarning(
+                code: "SFFI001",
+                severity: "ERROR",
+                message: "field '{field.name}' has non-C-compatible type '{type_name}' in @export(\"C\") class '{class_def.name}'",
+                hint: "use a C-compatible type or mark the nested struct with @repr(\"C\") and pass by Ptr",
+                line_num: line,
+                file_path: file_path
+            ))
+
+        fi = fi + 1
+
+    warnings
+
+
+# ============================================================================
+# SFFI002: text field in exported struct
+# ============================================================================
+
+fn check_sffi002_text_field(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Warn when an @export("C") class contains a 'text' field.
+
+    The 'text' type maps to char* in C, which requires special marshalling
+    (lifetime, encoding, allocation). Not an error, but the user should be
+    aware of the implications.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    var fi = 0
+    while fi < class_def.fields.len():
+        val field = class_def.fields[fi]
+
+        if _is_text_type(field.type_.kind):
+            val line = _field_line_num(field)
+            warnings.push(SffiLintWarning(
+                code: "SFFI002",
+                severity: "WARNING",
+                message: "field '{field.name}' is 'text' in @export(\"C\") class '{class_def.name}' — maps to char* in C",
+                hint: "text requires marshalling (encoding, lifetime). Consider using a byte buffer or opaque handle for complex strings",
+                line_num: line,
+                file_path: file_path
+            ))
+
+        fi = fi + 1
+
+    warnings
+
+
+# ============================================================================
+# SFFI003: Struct passed by-value without @repr("C")
+# ============================================================================
+
+fn check_sffi003_repr_required(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Check that @export("C") classes also have @repr("C") or compatible layout.
+
+    If a class is exported for C interop, its layout MUST be C-compatible.
+    Without @repr("C"), the Simple compiler may reorder fields for optimization,
+    causing silent data corruption across the FFI boundary.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    # Check if the class has @repr("C") or @repr("packed") layout
+    if class_def.has_layout_attr:
+        val layout_kind = class_def.layout_attr.layout_kind
+        match layout_kind:
+            case LayoutKind.C:
+                # Good — has @repr("C")
+                return warnings
+            case LayoutKind.Packed:
+                # Packed is C-compatible (no reordering)
+                return warnings
+            case LayoutKind.Transparent:
+                # Transparent is C-compatible (single-field)
+                return warnings
+            case LayoutKind.Simple:
+                # Default layout — not guaranteed C-compatible
+                pass_dn
+
+    # Missing @repr("C") on an @export("C") class
+    val line = class_def.span.line
+    warnings.push(SffiLintWarning(
+        code: "SFFI003",
+        severity: "ERROR",
+        message: "@export(\"C\") class '{class_def.name}' does not have @repr(\"C\") layout",
+        hint: "add @repr(\"C\") to guarantee C-compatible field ordering and alignment",
+        line_num: line,
+        file_path: file_path
+    ))
+
+    warnings
+
+
+# ============================================================================
+# SFFI004: Bitfield without explicit width
+# ============================================================================
+
+fn check_sffi004_bitfield_width(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Check that bitfield fields in @export("C") classes have explicit @bits(N) width.
+
+    In C, bitfield packing is implementation-defined (MSVC vs GCC vs Clang differ).
+    Sub-byte fields must have explicit @bits(N) annotations so the compiler can
+    verify the layout matches the C side.
+
+    Currently, HirField does not have a bits attribute — this check is a guard
+    for when bitfield support is added (C5 in the plan). For now, it checks
+    that no field uses a type smaller than a byte without being in a packed struct.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    # Future: when @bits attribute is added to HirField, check that every
+    # sub-byte field has an explicit width. For now, this is a no-op placeholder
+    # that validates the infrastructure is in place.
+
+    # Check for fields that look like they should be bitfields:
+    # u8/i8 fields in a struct that has multiple sub-byte-logical fields
+    # (heuristic: 3+ u8/bool fields in a row may indicate intended bitfield usage)
+    var consecutive_small = 0
+    var first_small_idx = 0
+
+    var fi = 0
+    while fi < class_def.fields.len():
+        val field = class_def.fields[fi]
+        val kind = field.type_.kind
+
+        val is_small = _is_sub_word_type(kind)
+        if is_small:
+            if consecutive_small == 0:
+                first_small_idx = fi
+            consecutive_small = consecutive_small + 1
+        else:
+            consecutive_small = 0
+
+        # If we see 4+ consecutive small fields, it smells like bitfields
+        if consecutive_small >= 4:
+            val first_field = class_def.fields[first_small_idx]
+            val line = _field_line_num(first_field)
+            warnings.push(SffiLintWarning(
+                code: "SFFI004",
+                severity: "ERROR",
+                message: "class '{class_def.name}' has {consecutive_small} consecutive sub-word fields starting at '{first_field.name}' — likely intended as bitfields",
+                hint: "add @bits(N) to specify exact bit widths, or use @repr(\"packed\") for byte-level packing",
+                line_num: line,
+                file_path: file_path
+            ))
+            # Only warn once per consecutive group
+            consecutive_small = 0
+
+        fi = fi + 1
+
+    warnings
+
+fn _is_sub_word_type(kind: HirTypeKind) -> bool:
+    """Check if a type is smaller than a machine word (sub-word)."""
+    match kind:
+        case Int(bits, signed):
+            bits <= 8
+        case Bool: true
+        case Char: false  # char is 4 bytes in Simple
+        case _: false
+
+
+# ============================================================================
+# SFFI005: Platform-dependent type size
+# ============================================================================
+
+fn check_sffi005_platform_dependent(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Warn if an @export("C") class uses types whose size varies by platform.
+
+    Currently all Simple primitive types are fixed-size (i32 is always 32 bits).
+    The main concern is pointer-sized types (isize, usize) and Named types
+    that might wrap platform-dependent values.
+
+    This is primarily a future guard — Simple avoids the C pitfall of
+    platform-dependent int/long sizes.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    var fi = 0
+    while fi < class_def.fields.len():
+        val field = class_def.fields[fi]
+        val kind = field.type_.kind
+
+        # Check for Named types that could be isize/usize
+        # In the future, HirTypeKind may get explicit Isize/Usize variants
+        # For now, Ref types are pointer-sized
+        match kind:
+            case Ref(inner, mutable):
+                val line = _field_line_num(field)
+                warnings.push(SffiLintWarning(
+                    code: "SFFI005",
+                    severity: "WARNING",
+                    message: "field '{field.name}' uses reference type in @export(\"C\") class '{class_def.name}' — reference size is platform-dependent",
+                    hint: "use Ptr<T> for explicit pointer semantics, or use a fixed-size handle (i64)",
+                    line_num: line,
+                    file_path: file_path
+                ))
+            case _:
+                pass_dn
+
+        fi = fi + 1
+
+    warnings
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn lint_sffi_export(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Run all SFFI lint checks on a class definition.
+
+    Only checks classes with @export("C") attribute. Returns an empty list
+    for non-exported classes.
+
+    Checks:
+    - SFFI001: Non-C-compatible field types (ERROR)
+    - SFFI002: text fields needing marshalling (WARNING)
+    - SFFI003: Missing @repr("C") layout (ERROR)
+    - SFFI004: Bitfield without explicit width (ERROR)
+    - SFFI005: Platform-dependent type sizes (WARNING)
+    """
+    var warnings: [SffiLintWarning] = []
+
+    # Only check classes with @export("C")
+    if not class_def.has_export_attr:
+        return warnings
+
+    if not class_def.export_attr.is_export_c:
+        return warnings
+
+    warnings = warnings + check_sffi001_c_compatible_types(class_def, file_path)
+    warnings = warnings + check_sffi002_text_field(class_def, file_path)
+    warnings = warnings + check_sffi003_repr_required(class_def, file_path)
+    warnings = warnings + check_sffi004_bitfield_width(class_def, file_path)
+    warnings = warnings + check_sffi005_platform_dependent(class_def, file_path)
+
+    warnings
+
+
+# ============================================================================
+# Struct Lint (for HirStruct too)
+# ============================================================================
+
+fn lint_sffi_export_struct(struct_def: HirStruct, file_path: text) -> [SffiLintWarning]:
+    """Run SFFI lint checks on a struct definition.
+
+    HirStruct has the same field structure as HirClass but uses layout_attr
+    directly. This provides the same checks for struct definitions.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    # HirStruct does not have export_attr currently — structs are exported
+    # when used as fields in @export("C") classes. Check layout consistency.
+    if struct_def.has_layout_attr:
+        val layout_kind = struct_def.layout_attr.layout_kind
+        match layout_kind:
+            case LayoutKind.C:
+                # Good — has @repr("C"), check field compatibility
+                var fi = 0
+                while fi < struct_def.fields.len():
+                    val field = struct_def.fields[fi]
+                    val kind = field.type_.kind
+
+                    if not _is_c_compatible_primitive(kind) and not _is_text_type(kind):
+                        val type_name = _type_kind_name(kind)
+                        val line = _field_line_num(field)
+                        warnings.push(SffiLintWarning(
+                            code: "SFFI001",
+                            severity: "ERROR",
+                            message: "field '{field.name}' has non-C-compatible type '{type_name}' in @repr(\"C\") struct '{struct_def.name}'",
+                            hint: "use a C-compatible type (i8..i64, u8..u64, f32, f64, bool, Ptr)",
+                            line_num: line,
+                            file_path: file_path
+                        ))
+
+                    if _is_text_type(kind):
+                        val line = _field_line_num(field)
+                        warnings.push(SffiLintWarning(
+                            code: "SFFI002",
+                            severity: "WARNING",
+                            message: "field '{field.name}' is 'text' in @repr(\"C\") struct '{struct_def.name}' — maps to char* in C",
+                            hint: "text requires marshalling (encoding, lifetime)",
+                            line_num: line,
+                            file_path: file_path
+                        ))
+
+                    fi = fi + 1
+            case _:
+                pass_dn
+
+    warnings
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SffiLintWarning
+export lint_sffi_export
+export lint_sffi_export_struct
+export check_sffi001_c_compatible_types
+export check_sffi002_text_field
+export check_sffi003_repr_required
+export check_sffi004_bitfield_width
+export check_sffi005_platform_dependent

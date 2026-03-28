@@ -538,3 +538,225 @@ fn get_type_size_summary(type_name: text) -> TypeSizeSummary:
         align_32bit: primitive_align_for_arch(type_name, TargetArch.X86) ?? 4,
         align_64bit: primitive_align_for_arch(type_name, TargetArch.X86_64) ?? 8
     )
+
+
+# ============================================================================
+# Layout Verification for SFFI Export
+# ============================================================================
+#
+# Computes and verifies struct layouts for C interop. The computed layout
+# is used by the header generator to emit _Static_assert checks in generated
+# C headers, catching ABI mismatches at C compile time.
+
+struct LayoutMismatch:
+    """Describes a layout mismatch between Simple and expected C layout."""
+    field_name: text
+    expected_offset: i64
+    actual_offset: i64
+    expected_size: i64
+    actual_size: i64
+
+struct LayoutVerification:
+    """Result of layout verification for a struct/class.
+
+    Contains the computed layout and any mismatches found. Used by the
+    header generator to emit _Static_assert checks.
+    """
+    class_name: text
+    total_size: i64
+    alignment: i64
+    fields: [FieldLayout]
+    mismatches: [LayoutMismatch]
+    is_valid: bool
+
+fn verify_c_layout(class_name: text, fields: [HirField], attr: LayoutAttr) -> LayoutVerification:
+    """Compute and verify C-compatible layout for an exported class.
+
+    This function:
+    1. Computes field offsets using C alignment rules
+    2. Validates that the layout is self-consistent
+    3. Returns a LayoutVerification with all field offsets for header generation
+
+    The caller (header generator) uses the field offsets to emit:
+        _Static_assert(offsetof(spl_ClassName, field) == N, "offset mismatch");
+        _Static_assert(sizeof(spl_ClassName) == M, "size mismatch");
+    """
+    val layout = compute_struct_layout(fields, attr)
+    var mismatches: [LayoutMismatch] = []
+
+    # Verify each field's alignment is respected
+    var fi = 0
+    while fi < layout.fields.len():
+        val field_layout = layout.fields[fi]
+
+        # Check that offset is properly aligned
+        if not is_aligned(field_layout.offset, field_layout.align):
+            mismatches.push(LayoutMismatch(
+                field_name: field_layout.name,
+                expected_offset: align_up(field_layout.offset, field_layout.align),
+                actual_offset: field_layout.offset,
+                expected_size: field_layout.size,
+                actual_size: field_layout.size
+            ))
+
+        fi = fi + 1
+
+    # Verify total size is aligned to struct alignment
+    val expected_total = align_up(layout.size, layout.align)
+    if layout.size != expected_total:
+        mismatches.push(LayoutMismatch(
+            field_name: "__total_size__",
+            expected_offset: 0,
+            actual_offset: 0,
+            expected_size: expected_total,
+            actual_size: layout.size
+        ))
+
+    LayoutVerification(
+        class_name: class_name,
+        total_size: layout.size,
+        alignment: layout.align,
+        fields: layout.fields,
+        mismatches: mismatches,
+        is_valid: mismatches.len() == 0
+    )
+
+fn verify_c_layout_for_arch(class_name: text, fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> LayoutVerification:
+    """Compute and verify C-compatible layout for a specific target architecture.
+
+    Same as verify_c_layout but uses architecture-specific sizes and alignments.
+    """
+    val layout = compute_struct_layout_for_arch(fields, attr, arch)
+    var mismatches: [LayoutMismatch] = []
+
+    var fi = 0
+    while fi < layout.fields.len():
+        val field_layout = layout.fields[fi]
+
+        if not is_aligned(field_layout.offset, field_layout.align):
+            mismatches.push(LayoutMismatch(
+                field_name: field_layout.name,
+                expected_offset: align_up(field_layout.offset, field_layout.align),
+                actual_offset: field_layout.offset,
+                expected_size: field_layout.size,
+                actual_size: field_layout.size
+            ))
+
+        fi = fi + 1
+
+    val expected_total = align_up(layout.size, layout.align)
+    if layout.size != expected_total:
+        mismatches.push(LayoutMismatch(
+            field_name: "__total_size__",
+            expected_offset: 0,
+            actual_offset: 0,
+            expected_size: expected_total,
+            actual_size: layout.size
+        ))
+
+    LayoutVerification(
+        class_name: class_name,
+        total_size: layout.size,
+        alignment: layout.align,
+        fields: layout.fields,
+        mismatches: mismatches,
+        is_valid: mismatches.len() == 0
+    )
+
+fn generate_c_static_asserts(verification: LayoutVerification) -> text:
+    """Generate C _Static_assert statements for layout verification.
+
+    Produces code like:
+        _Static_assert(sizeof(spl_ClassName) == 16, "size mismatch");
+        _Static_assert(offsetof(spl_ClassName, field) == 0, "offset mismatch");
+
+    This is emitted into the generated C header so the C compiler catches
+    any ABI mismatch at compile time.
+    """
+    val name = verification.class_name
+    var lines: [text] = []
+
+    # Size assertion
+    lines.push("_Static_assert(sizeof(spl_{name}) == {verification.total_size}, \"spl_{name} size mismatch\");")
+
+    # Alignment assertion (using _Alignof in C11)
+    lines.push("_Static_assert(_Alignof(spl_{name}) == {verification.alignment}, \"spl_{name} alignment mismatch\");")
+
+    # Field offset assertions
+    var fi = 0
+    while fi < verification.fields.len():
+        val field = verification.fields[fi]
+        lines.push("_Static_assert(offsetof(spl_{name}, {field.name}) == {field.offset}, \"spl_{name}.{field.name} offset mismatch\");")
+        fi = fi + 1
+
+    lines.join("\n")
+
+fn generate_c_struct_def(verification: LayoutVerification) -> text:
+    """Generate a C struct definition matching the computed layout.
+
+    Produces code like:
+        typedef struct spl_ClassName {
+            int32_t precision;
+            double value;
+        } spl_ClassName;
+
+    Used by the header generator alongside _Static_assert checks.
+    """
+    val name = verification.class_name
+    var lines: [text] = []
+
+    lines.push("typedef struct spl_{name} {")
+
+    var fi = 0
+    while fi < verification.fields.len():
+        val field = verification.fields[fi]
+        val c_type = _field_to_c_type(field)
+        lines.push("    {c_type} {field.name};")
+        fi = fi + 1
+
+    lines.push("} spl_{name};")
+
+    lines.join("\n")
+
+fn _field_to_c_type(field: FieldLayout) -> text:
+    """Map a field's size and alignment to the corresponding C type name.
+
+    Uses size and alignment to determine the correct C type since we don't
+    have the original HirType here — only the computed layout.
+    """
+    # Map by size (assuming standard C types)
+    match field.size:
+        case 1:
+            if field.align == 1:
+                "uint8_t"
+            else:
+                "uint8_t"
+        case 2: "uint16_t"
+        case 4:
+            if field.align == 4:
+                # Could be int32_t or float — default to int32_t
+                "int32_t"
+            else:
+                "int32_t"
+        case 8:
+            if field.align == 8:
+                # Could be int64_t or double — default to int64_t
+                "int64_t"
+            else:
+                "int64_t"
+        case 16: "__int128"
+        case _: "uint8_t /* unknown size {field.size} */"
+
+fn compute_padding_bytes(verification: LayoutVerification) -> i64:
+    """Compute the total number of padding bytes in a struct layout.
+
+    This helps developers understand how much space is wasted on alignment
+    padding, which is useful for optimizing struct layout.
+    """
+    var data_bytes: i64 = 0
+    var fi = 0
+    while fi < verification.fields.len():
+        data_bytes = data_bytes + verification.fields[fi].size
+        fi = fi + 1
+
+    verification.total_size - data_bytes

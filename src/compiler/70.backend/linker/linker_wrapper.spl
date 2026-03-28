@@ -576,6 +576,213 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
         Err("MinGW linking failed: {err_msg}")
 
 # ============================================================================
+# Shared Library Linking
+# ============================================================================
+
+fn link_to_shared(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link object files into a shared library (.so/.dylib/.dll).
+
+    Uses platform-appropriate flags:
+    - Linux: -shared -fPIC -> .so
+    - macOS: -dynamiclib -> .dylib
+    - Windows MSVC: /DLL -> .dll + .lib
+    - Windows MinGW: -shared -> .dll
+    """
+    print "[LINKER] link_to_shared: {object_files.len()} files, output={output}"
+    if object_files.len() == 0:
+        return Err("No object files to link into shared library")
+
+    val os = host_os()
+
+    if os == "windows":
+        return _link_shared_windows(object_files, output, config)
+
+    # Unix-like: Linux, macOS, FreeBSD
+    _link_shared_unix(object_files, output, config)
+
+fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link a shared library on Unix-like systems using cc."""
+    val os = host_os()
+    val sb = StringBuilder(parts: [])
+    sb.push("cc")
+
+    # Position-independent code (required for shared libs)
+    sb.push(" -fPIC")
+
+    # Shared library flag
+    if os == "macos" or os == "darwin":
+        sb.push(" -dynamiclib")
+    else:
+        sb.push(" -shared")
+
+    # Define SPL_SHARED_LIBRARY macro
+    sb.push(" -DSPL_SHARED_LIBRARY")
+
+    # Object files
+    for obj in object_files:
+        sb.push(" ")
+        sb.push(obj)
+
+    # Library paths from config
+    for lp in config.library_paths:
+        sb.push(" -L")
+        sb.push(lp)
+
+    # Auto-detect runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        sb.push(" -L{runtime_dir} -lsimple_compiler")
+        sb.push(" -Wl,-rpath,{runtime_dir}")
+
+    # Standard libraries
+    if os == "linux":
+        sb.push(" -lc -lpthread -ldl -lm")
+    elif os == "macos" or os == "darwin":
+        sb.push(" -lc -lpthread -lm -lSystem")
+    elif os == "freebsd":
+        sb.push(" -lc -lpthread -lm")
+
+    # Libraries from config
+    for lib in config.libraries:
+        sb.push(" -l")
+        sb.push(lib)
+
+    # Extra flags
+    for flag in config.extra_flags:
+        sb.push(" ")
+        sb.push(flag)
+
+    sb.push(" -o ")
+    sb.push(output)
+    val cmd = sb.to_text()
+
+    if config.verbose:
+        print "[linker-wrapper] shared library command: {cmd}"
+
+    val (link_out, link_err, link_code) = shell(cmd)
+    if link_code == 0:
+        if config.verbose:
+            val size = linker_file_size(output)
+            print "[linker-wrapper] Shared library: {output} ({size} bytes)"
+        Ok(output)
+    else:
+        val err_msg = link_err ?? "Unknown linking error"
+        Err("Shared library linking failed: {err_msg}")
+
+fn _link_shared_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link a shared library on Windows."""
+    if _is_mingw_env():
+        return _link_shared_mingw(object_files, output, config)
+    _link_shared_msvc(object_files, output, config)
+
+fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link a DLL using MSVC toolchain."""
+    use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_msvc_crt_paths}
+
+    var msvc_config = MsvcConfig.default()
+    msvc_config.debug = config.debug
+
+    # Add /DLL flag
+    msvc_config.extra_args.push("/DLL")
+    msvc_config.extra_args.push("/DSPL_SHARED_LIBRARY")
+
+    # CRT library paths
+    val crt_paths = _find_msvc_lib_paths()
+    for p in crt_paths:
+        msvc_config.lib_paths.push(p)
+
+    # User library paths
+    for lp in config.library_paths:
+        msvc_config.lib_paths.push(lp)
+
+    # User libraries
+    for lib in config.libraries:
+        if lib.ends_with(".lib"):
+            msvc_config.libs.push(lib)
+        else:
+            msvc_config.libs.push("{lib}.lib")
+
+    # Windows system libraries
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib"]
+    for wlib in win_libs:
+        if not msvc_config.libs.contains(wlib):
+            msvc_config.libs.push(wlib)
+
+    # Runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        msvc_config.lib_paths.push(runtime_dir)
+        msvc_config.libs.push("simple_compiler.lib")
+
+    # Extra flags
+    for flag in config.extra_flags:
+        msvc_config.extra_args.push(flag)
+
+    if config.verbose:
+        print "[linker-wrapper] MSVC DLL linking: {object_files.len()} objects -> {output}"
+
+    val linker = MsvcLinker.new(msvc_config)
+    val result = linker.link(output, object_files)
+    match result:
+        case Ok(_):
+            Ok(output)
+        case Err(e):
+            Err("Windows MSVC DLL linking failed: {e}")
+
+fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    """Link a DLL using MinGW gcc."""
+    val sb = StringBuilder(parts: [])
+    sb.push("gcc -shared -DSPL_SHARED_LIBRARY")
+
+    for obj in object_files:
+        sb.push(" ")
+        sb.push(obj)
+
+    # Library paths
+    for lp in config.library_paths:
+        sb.push(" -L")
+        sb.push(lp)
+
+    # Runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "" and runtime_dir != "none":
+        sb.push(" -L{runtime_dir} -lsimple_compiler")
+
+    # Windows system libraries
+    val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll"]
+    for lib in mingw_libs:
+        sb.push(" -l{lib}")
+
+    # User libraries
+    for lib in config.libraries:
+        sb.push(" -l{lib}")
+
+    # Extra flags
+    for flag in config.extra_flags:
+        sb.push(" ")
+        sb.push(flag)
+
+    sb.push(" -o ")
+    sb.push(output)
+    val cmd = sb.to_text()
+
+    if config.verbose:
+        print "[linker-wrapper] MinGW DLL command: {cmd}"
+
+    val (link_out, link_err, link_code) = shell(cmd)
+    if link_code == 0:
+        Ok(output)
+    else:
+        val err_msg = link_err ?? "Unknown linking error"
+        Err("MinGW DLL linking failed: {err_msg}")
+
+# ============================================================================
 # Exports
 # ============================================================================
 

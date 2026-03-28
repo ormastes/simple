@@ -1,0 +1,90 @@
+# Header Generator — Entry Point Module
+#
+# Orchestrates generation of C (.h) and C++ (.hpp) header files
+# for Simple classes and functions annotated with @export("C").
+#
+# Scans the MIR module for exported types and functions, then
+# delegates to c_header.spl and cpp_header.spl for output.
+#
+# Usage:
+#   val gen = HeaderGenerator.create(mir_module)
+#   val c_header_text = gen.generate_c_header("mylib")
+#   val cpp_header_text = gen.generate_cpp_header("mylib")
+
+use compiler.mir.mir_data.*
+use compiler.tools.header_gen.c_header.{emit_c_header}
+use compiler.tools.header_gen.cpp_header.{emit_cpp_header}
+
+# ============================================================================
+# Header Generator
+# ============================================================================
+
+class HeaderGenerator:
+    """Orchestrates C and C++ header generation for @export("C") items.
+
+    Scans the MIR module for exported classes (MirTypeDef with is_export_c)
+    and exported standalone functions (MirFunction with is_export_c), then
+    generates header content via the c_header and cpp_header submodules.
+    """
+    module: MirModule
+
+    static fn create(module: MirModule) -> HeaderGenerator:
+        """Create a HeaderGenerator for the given MIR module."""
+        HeaderGenerator(module: module)
+
+    fn generate_c_header(lib_name: text) -> text:
+        """Generate a C header (.h) file for all exported items.
+
+        Args:
+            lib_name: Library name used for include guard and file naming.
+
+        Returns:
+            Complete C header text ready to write to a .h file.
+        """
+        val exported_fns = self._collect_exported_functions()
+        val exported_types = self._collect_exported_types()
+        emit_c_header(lib_name, exported_fns, exported_types, self.module)
+
+    fn generate_cpp_header(lib_name: text) -> text:
+        """Generate a C++ wrapper header (.hpp) file for all exported items.
+
+        Args:
+            lib_name: Library name used for namespace and file naming.
+
+        Returns:
+            Complete C++ header text ready to write to a .hpp file.
+        """
+        val exported_fns = self._collect_exported_functions()
+        val exported_types = self._collect_exported_types()
+        val c_header_name = lib_name + ".h"
+        emit_cpp_header(lib_name, exported_types, exported_fns, c_header_name, self.module)
+
+    fn has_exports() -> bool:
+        """Check if the module has any @export("C") items."""
+        for _sym, func in self.module.functions:
+            if func.is_export_c:
+                return true
+        for _sym, type_def in self.module.types:
+            if type_def.is_export_c:
+                return true
+        false
+
+    fn _collect_exported_functions() -> [MirFunction]:
+        """Collect all standalone functions marked with @export("C")."""
+        var result: [MirFunction] = []
+        for _sym, func in self.module.functions:
+            if func.is_export_c:
+                result.push(func)
+        result
+
+    fn _collect_exported_types() -> [MirTypeDef]:
+        """Collect all type definitions marked with @export("C")."""
+        var result: [MirTypeDef] = []
+        for _sym, type_def in self.module.types:
+            if type_def.is_export_c:
+                result.push(type_def)
+        result
+
+# ============================================================================
+# Export
+# ============================================================================

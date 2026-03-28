@@ -1,0 +1,369 @@
+# C++ Header Generator
+#
+# Generates C++ wrapper (.hpp) files for @export("C") classes and functions.
+# Wraps the C header with RAII classes, move semantics, and std::string
+# overloads for a natural C++ API.
+#
+# Each exported Simple class becomes a C++ class that:
+# - Holds an opaque handle from the C API
+# - Calls C create/destroy in constructor/destructor (RAII)
+# - Deletes copy, supports move
+# - Delegates method calls to C functions
+# - Provides std::string overloads for text parameters
+
+use compiler.mir.mir_data.*
+use compiler.backend.c_type_mapper.{CTypeMapper}
+
+# ============================================================================
+# C++ Header Emission
+# ============================================================================
+
+fn emit_cpp_header(lib_name: text, exported_types: [MirTypeDef], exported_fns: [MirFunction], c_header_name: text, module: MirModule) -> text:
+    """Generate a complete C++ wrapper (.hpp) file.
+
+    The generated header includes:
+    1. #pragma once
+    2. #include of the C header
+    3. Standard C++ includes (memory, string, utility)
+    4. namespace spl { ... }
+    5. Library RAII guard class
+    6. Wrapper class per exported type (RAII, move-only, method delegation)
+    7. Closing namespace
+    """
+    var lines: [text] = []
+
+    # Pragma once
+    lines.push(r"#pragma once")
+    lines.push(r"")
+
+    # Include C header
+    lines.push(r"#include " + "\"" + c_header_name + "\"")
+    lines.push(r"")
+
+    # Standard C++ includes
+    lines.push(r"#include <memory>")
+    lines.push(r"#include <string>")
+    lines.push(r"#include <utility>")
+    lines.push(r"#include <cstddef>")
+    lines.push(r"")
+
+    # Open namespace
+    lines.push(r"namespace spl {")
+    lines.push(r"")
+
+    # Library RAII guard
+    val guard_lines = _emit_library_guard()
+    var gi = 0
+    while gi < guard_lines.len():
+        lines.push(guard_lines[gi])
+        gi = gi + 1
+
+    # Wrapper classes for each exported type
+    var ti = 0
+    while ti < exported_types.len():
+        val type_def = exported_types[ti]
+        val class_lines = _emit_wrapper_class(type_def, module)
+        var ci = 0
+        while ci < class_lines.len():
+            lines.push(class_lines[ci])
+            ci = ci + 1
+        ti = ti + 1
+
+    # Free function wrappers
+    if exported_fns.len() > 0:
+        lines.push(r"// --- Free functions ---")
+        lines.push(r"")
+        var fi = 0
+        while fi < exported_fns.len():
+            val func = exported_fns[fi]
+            val fn_lines = _emit_function_wrapper(func)
+            var fli = 0
+            while fli < fn_lines.len():
+                lines.push(fn_lines[fli])
+                fli = fli + 1
+            fi = fi + 1
+
+    # Close namespace
+    lines.push(r"} // namespace spl")
+    lines.push(r"")
+
+    lines.join("\n")
+
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _sanitize_c_name(name: text) -> text:
+    """Sanitize a Simple type/function name for use as a C/C++ identifier."""
+    var s = name.replace("<", "_")
+    s = s.replace(">", "")
+    s = s.replace(",", "_")
+    s = s.replace(" ", "")
+    s = s.replace("::", "_")
+    s
+
+fn _mir_type_to_cpp_param(ty: MirType) -> text:
+    """Map a MIR type to C++ parameter type string."""
+    val mapper = CTypeMapper.create()
+    match ty.kind:
+        case Unit: "void"
+        case Opaque(name):
+            if name == "str" or name == "text":
+                "const std::string&"
+            else:
+                mapper.map_type(ty)
+        case _: mapper.map_type(ty)
+
+fn _mir_type_to_cpp_return(ty: MirType) -> text:
+    """Map a MIR type to C++ return type string."""
+    val mapper = CTypeMapper.create()
+    match ty.kind:
+        case Unit: "void"
+        case Opaque(name):
+            if name == "str" or name == "text":
+                "std::string"
+            else:
+                mapper.map_type(ty)
+        case _: mapper.map_type(ty)
+
+fn _mir_type_to_c_param(ty: MirType) -> text:
+    """Map a MIR type to C parameter type for delegation calls."""
+    val mapper = CTypeMapper.create()
+    match ty.kind:
+        case Unit: "void"
+        case Opaque(name):
+            if name == "str" or name == "text":
+                "const char*"
+            else:
+                mapper.map_type(ty)
+        case _: mapper.map_type(ty)
+
+fn _is_text_type(ty: MirType) -> bool:
+    """Check if a MIR type is the Simple text type."""
+    match ty.kind:
+        case Opaque(name):
+            name == "str" or name == "text"
+        case _:
+            false
+
+fn _emit_library_guard() -> [text]:
+    """Emit RAII library guard class that auto-initializes/shuts down the runtime."""
+    var lines: [text] = []
+    lines.push(r"/**")
+    lines.push(r" * RAII guard for Simple library lifecycle.")
+    lines.push(r" * Create one instance before using any Simple objects.")
+    lines.push(r" * The library is initialized on construction and shut down on destruction.")
+    lines.push(r" */")
+    lines.push(r"class Library {")
+    lines.push(r"public:")
+    lines.push(r"    Library() { spl_library_init(); }")
+    lines.push(r"    ~Library() { spl_library_shutdown(); }")
+    lines.push(r"    Library(const Library&) = delete;")
+    lines.push(r"    Library& operator=(const Library&) = delete;")
+    lines.push(r"};")
+    lines.push(r"")
+    lines
+
+fn _emit_wrapper_class(type_def: MirTypeDef, module: MirModule) -> [text]:
+    """Emit a C++ wrapper class for an exported Simple class."""
+    var lines: [text] = []
+    val c_name = _sanitize_c_name(type_def.name)
+    val prefix = if type_def.export_name != "": type_def.export_name else: "spl_" + c_name
+
+    lines.push(r"/**")
+    lines.push(r" * C++ wrapper for Simple class " + c_name + r".")
+    lines.push(r" * Non-copyable, movable. RAII-managed via opaque handle.")
+    lines.push(r" */")
+    lines.push(r"class " + c_name + r" {")
+
+    # Private handle
+    lines.push(r"    " + prefix + r"_t handle_;")
+    lines.push(r"")
+    lines.push(r"public:")
+
+    # Constructor
+    match type_def.kind:
+        case Struct(fields):
+            val ctor_lines = _emit_constructor(c_name, prefix, fields)
+            var ci = 0
+            while ci < ctor_lines.len():
+                lines.push(r"    " + ctor_lines[ci])
+                ci = ci + 1
+        case _:
+            pass_dn
+
+    # Destructor
+    lines.push(r"    ~" + c_name + r"() {")
+    lines.push(r"        if (handle_) " + prefix + r"_destroy(handle_);")
+    lines.push(r"    }")
+    lines.push(r"")
+
+    # Deleted copy
+    lines.push(r"    " + c_name + r"(const " + c_name + r"&) = delete;")
+    lines.push(r"    " + c_name + r"& operator=(const " + c_name + r"&) = delete;")
+    lines.push(r"")
+
+    # Move constructor
+    lines.push(r"    " + c_name + r"(" + c_name + r"&& other) noexcept : handle_(other.handle_) {")
+    lines.push(r"        other.handle_ = nullptr;")
+    lines.push(r"    }")
+    lines.push(r"")
+
+    # Move assignment
+    lines.push(r"    " + c_name + r"& operator=(" + c_name + r"&& other) noexcept {")
+    lines.push(r"        if (this != &other) {")
+    lines.push(r"            if (handle_) " + prefix + r"_destroy(handle_);")
+    lines.push(r"            handle_ = other.handle_;")
+    lines.push(r"            other.handle_ = nullptr;")
+    lines.push(r"        }")
+    lines.push(r"        return *this;")
+    lines.push(r"    }")
+    lines.push(r"")
+
+    # Handle accessor (for advanced use)
+    lines.push(r"    " + prefix + r"_t handle() const { return handle_; }")
+    lines.push(r"")
+
+    # Method wrappers
+    val method_prefix_str = r"__simple_" + c_name + r"_"
+    for _sym, func in module.functions:
+        if func.name.starts_with(method_prefix_str):
+            val method_name = func.name.replace(method_prefix_str, "")
+            if method_name != "" and method_name != "new" and method_name != "drop":
+                val method_lines = _emit_method_wrapper(prefix, method_name, func)
+                var mi = 0
+                while mi < method_lines.len():
+                    lines.push(r"    " + method_lines[mi])
+                    mi = mi + 1
+
+    lines.push(r"};")
+    lines.push(r"")
+    lines
+
+fn _emit_constructor(c_name: text, prefix: text, fields: [MirFieldDef]) -> [text]:
+    """Emit constructor that delegates to C create function."""
+    var lines: [text] = []
+
+    # C++ parameter list (with std::string for text types)
+    var cpp_params: [text] = []
+    var c_args: [text] = []
+    var fi = 0
+    while fi < fields.len():
+        val field = fields[fi]
+        if _is_text_type(field.type_):
+            cpp_params.push("const std::string& " + field.name)
+            c_args.push(field.name + ".c_str()")
+        else:
+            val c_ty = _mir_type_to_c_param(field.type_)
+            cpp_params.push(c_ty + " " + field.name)
+            c_args.push(field.name)
+        fi = fi + 1
+
+    val params_str = if cpp_params.len() == 0: "" else: cpp_params.join(", ")
+    val args_str = if c_args.len() == 0: "" else: c_args.join(", ")
+
+    lines.push("explicit " + c_name + "(" + params_str + ")")
+    lines.push("    : handle_(" + prefix + "_create(" + args_str + ")) {}")
+    lines.push("")
+    lines
+
+fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [text]:
+    """Emit a C++ method that delegates to the C function."""
+    var lines: [text] = []
+
+    val ret_type = _mir_type_to_cpp_return(func.signature.return_type)
+    val is_void = ret_type == "void"
+    val c_fn_name = prefix + "_" + method_name
+
+    # Build C++ params (skip self which is first param)
+    var cpp_params: [text] = []
+    var c_args: [text] = []
+    c_args.push("handle_")
+
+    var pi = 1
+    while pi < func.signature.params.len():
+        val param_ty = func.signature.params[pi]
+        if _is_text_type(param_ty):
+            cpp_params.push("const std::string& arg" + "{pi}")
+            c_args.push("arg" + "{pi}" + ".c_str()")
+        else:
+            val cpp_ty = _mir_type_to_cpp_param(param_ty)
+            cpp_params.push(cpp_ty + " arg" + "{pi}")
+            c_args.push("arg" + "{pi}")
+        pi = pi + 1
+
+    val params_str = cpp_params.join(", ")
+    val args_str = c_args.join(", ")
+
+    # Check if return type needs string conversion
+    val needs_string_return = _is_text_type(func.signature.return_type)
+
+    lines.push(ret_type + " " + method_name + "(" + params_str + ") {")
+    if is_void:
+        lines.push("    " + c_fn_name + "(" + args_str + ");")
+    elif needs_string_return:
+        lines.push("    const char* _result = " + c_fn_name + "(" + args_str + ");")
+        lines.push("    return _result ? std::string(_result) : std::string();")
+    else:
+        lines.push("    return " + c_fn_name + "(" + args_str + ");")
+    lines.push("}")
+    lines.push("")
+    lines
+
+fn _emit_function_wrapper(func: MirFunction) -> [text]:
+    """Emit a C++ free function wrapper for an exported standalone function."""
+    var lines: [text] = []
+
+    val internal_name = func.name
+    val export_name = if func.export_name != "":
+        func.export_name
+    else:
+        if internal_name.starts_with(r"__simple_"):
+            "spl_" + internal_name.replace(r"__simple_", "")
+        else:
+            "spl_" + _sanitize_c_name(internal_name)
+
+    # Strip spl_ prefix for the C++ wrapper name
+    val cpp_name = if export_name.starts_with("spl_"):
+        export_name.replace("spl_", "")
+    else:
+        export_name
+
+    val ret_type = _mir_type_to_cpp_return(func.signature.return_type)
+    val is_void = ret_type == "void"
+
+    var cpp_params: [text] = []
+    var c_args: [text] = []
+    var pi = 0
+    while pi < func.signature.params.len():
+        val param_ty = func.signature.params[pi]
+        if _is_text_type(param_ty):
+            cpp_params.push("const std::string& arg" + "{pi}")
+            c_args.push("arg" + "{pi}" + ".c_str()")
+        else:
+            val cpp_ty = _mir_type_to_cpp_param(param_ty)
+            cpp_params.push(cpp_ty + " arg" + "{pi}")
+            c_args.push("arg" + "{pi}")
+        pi = pi + 1
+
+    val params_str = cpp_params.join(", ")
+    val args_str = c_args.join(", ")
+
+    val needs_string_return = _is_text_type(func.signature.return_type)
+
+    lines.push(r"inline " + ret_type + " " + cpp_name + "(" + params_str + ") {")
+    if is_void:
+        lines.push("    " + export_name + "(" + args_str + ");")
+    elif needs_string_return:
+        lines.push("    const char* _result = " + export_name + "(" + args_str + ");")
+        lines.push("    return _result ? std::string(_result) : std::string();")
+    else:
+        lines.push("    return " + export_name + "(" + args_str + ");")
+    lines.push(r"}")
+    lines.push(r"")
+    lines
+
+# ============================================================================
+# Export
+# ============================================================================

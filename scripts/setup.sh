@@ -98,17 +98,20 @@ detect_triple() {
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
       os="windows"; vendor="pc"
       # Detect MSVC vs MinGW
-      if [ "${MSYSTEM:-}" != "${MSYSTEM#MINGW}" ] 2>/dev/null; then
-        abi="gnu"
-      elif command -v cl.exe >/dev/null 2>&1; then
-        abi="msvc"
-      elif command -v clang-cl >/dev/null 2>&1; then
-        abi="msvc"
-      elif command -v gcc >/dev/null 2>&1; then
-        abi="gnu"
-      else
-        abi="msvc"
-      fi
+      case "${MSYSTEM:-}" in
+        MINGW*) abi="gnu" ;;
+        *)
+          if command -v cl.exe >/dev/null 2>&1; then
+            abi="msvc"
+          elif command -v clang-cl >/dev/null 2>&1; then
+            abi="msvc"
+          elif command -v gcc >/dev/null 2>&1; then
+            abi="gnu"
+          else
+            abi="msvc"
+          fi
+          ;;
+      esac
       ;;
     *)
       os=$(echo "${host_os}" | tr '[:upper:]' '[:lower:]')

@@ -82,6 +82,9 @@ class MirToC:
         # Emit impl preamble
         self.builder.emit_impl_file_header()
 
+        # Emit shared library lifecycle preamble
+        self.emit_shared_library_preamble()
+
         # Emit named type definitions (sanitizes generic names like Box<i64> -> Box_i64)
         self.emit_type_definitions(module)
 
@@ -103,6 +106,9 @@ class MirToC:
             for blk in body.blocks:
                 print "[translate_module]   block id={blk.id.id} insts={blk.instructions.len()} term={blk.terminator}"
             self.translate_function(fn_name, body)
+
+        # Emit extern "C" wrappers for @export("C") functions and classes
+        self.emit_export_wrappers(module)
 
         self.builder.build()
 
@@ -603,6 +609,244 @@ class MirToC:
                 else:
                     self.builder.emit(func_val + r"(" + args_str + r");")
                 self.builder.emit_goto(r"bb" + normal.id)
+
+    # ================================================================
+    # Shared Library Preamble
+    # ================================================================
+
+    me emit_shared_library_preamble():
+        """Emit shared library lifecycle declarations when SPL_SHARED_LIBRARY is defined."""
+        self.builder.emit_raw(r"#ifdef SPL_SHARED_LIBRARY")
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_init(void);")
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_shutdown(void);")
+        self.builder.emit_raw(r"")
+        self.builder.emit_raw(r"// Auto-init for shared libraries")
+        self.builder.emit_raw(r"#if defined(_WIN32)")
+        self.builder.emit_raw(r"#include <windows.h>")
+        self.builder.emit_raw(r"BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {")
+        self.builder.emit_raw(r"    if (reason == DLL_PROCESS_ATTACH) spl_library_init();")
+        self.builder.emit_raw(r"    else if (reason == DLL_PROCESS_DETACH) spl_library_shutdown();")
+        self.builder.emit_raw(r"    return TRUE;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"#else")
+        self.builder.emit_raw(r"__attribute__((constructor)) static void _spl_auto_init(void) { spl_library_init(); }")
+        self.builder.emit_raw(r"__attribute__((destructor))  static void _spl_auto_fini(void) { spl_library_shutdown(); }")
+        self.builder.emit_raw(r"#endif")
+        self.builder.emit_raw(r"#endif // SPL_SHARED_LIBRARY")
+        self.builder.emit_raw(r"")
+
+    # ================================================================
+    # @export("C") Wrapper Generation
+    # ================================================================
+
+    me emit_export_wrappers(module: MirModule):
+        """Emit extern "C" wrappers for all @export("C") functions and classes."""
+        var has_exports = false
+
+        # Check if there are any exports
+        for _sym, func in module.functions:
+            if func.is_export_c:
+                has_exports = true
+        for _sym, type_def in module.types:
+            if type_def.is_export_c:
+                has_exports = true
+
+        if not has_exports:
+            return
+
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_raw(r"// @export(" + "\"C\"" + r") ABI Wrappers")
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_blank()
+
+        # Emit function wrappers
+        for _sym, func in module.functions:
+            if func.is_export_c:
+                self.emit_function_export_wrapper(func)
+
+        # Emit class/struct wrappers
+        for _sym, type_def in module.types:
+            if type_def.is_export_c:
+                self.emit_type_export_wrapper(type_def, module)
+
+    me emit_function_export_wrapper(func: MirFunction):
+        """Emit an extern "C" wrapper for a single @export("C") function.
+
+        Generates a C ABI function that forwards to the internal __simple_ function.
+        The wrapper uses the export_name if set, otherwise derives a clean name
+        by stripping the __simple_ prefix.
+        """
+        val internal_name = func.name
+        val export_name = self.derive_export_name(func.export_name, internal_name)
+        val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
+        val is_void = ret_ty == "void"
+
+        # Build parameter list with clean names (a0, a1, ...) and C types
+        var wrapper_params: [text] = []
+        var forward_args: [text] = []
+        var param_idx = 0
+        for param_ty in func.signature.params:
+            val c_ty = self.type_mapper.map_type(param_ty)
+            val param_name = "a" + param_idx
+            # Handle text type: wrapper accepts const char*, converts to spl_text for internal call
+            val is_text_param = self.is_text_type(param_ty)
+            if is_text_param:
+                wrapper_params = wrapper_params.push(r"const char* " + param_name)
+                forward_args = forward_args.push(r"spl_text_from_cstr(" + param_name + r")")
+            else:
+                wrapper_params = wrapper_params.push(c_ty + " " + param_name)
+                forward_args = forward_args.push(param_name)
+            param_idx = param_idx + 1
+
+        val params_str = if wrapper_params.len() == 0: "void" else: wrapper_params.join(", ")
+        val args_str = forward_args.join(", ")
+
+        # Handle text return type: internal returns spl_text, wrapper returns const char*
+        val is_text_return = self.is_text_type(func.signature.return_type)
+        val wrapper_ret_ty = if is_text_return: r"const char*" else: ret_ty
+
+        # Emit the extern "C" wrapper
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + export_name + r"(" + params_str + r") {")
+        if is_void:
+            self.builder.emit_raw(r"    " + internal_name + r"(" + args_str + r");")
+        elif is_text_return:
+            self.builder.emit_raw(r"    return spl_text_to_cstr(" + internal_name + r"(" + args_str + r"));")
+        else:
+            self.builder.emit_raw(r"    return " + internal_name + r"(" + args_str + r");")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_type_export_wrapper(type_def: MirTypeDef, module: MirModule):
+        """Emit extern "C" factory/method wrappers for an @export("C") class.
+
+        Generates:
+        - spl_ClassName_create(args...) -> void*   (constructor)
+        - spl_ClassName_destroy(void* self)         (destructor)
+        - spl_ClassName_method(void* self, ...) -> ret  (each method)
+        """
+        val class_name = type_def.name
+        val c_name = sanitize_c_name(class_name)
+        val prefix = if type_def.export_name != "": type_def.export_name else: "spl_" + c_name
+
+        self.builder.emit_raw(r"// --- @export(" + "\"C\"" + r") class: " + class_name + r" ---")
+        self.builder.emit_raw(r"")
+
+        # Emit constructor: spl_ClassName_create(field_args...) -> void*
+        match type_def.kind:
+            case Struct(fields):
+                self.emit_class_create_wrapper(prefix, c_name, fields)
+                self.emit_class_destroy_wrapper(prefix, c_name)
+            case _:
+                self.builder.emit_raw(r"// Skipping non-struct type " + class_name + r" for export wrappers")
+                self.builder.emit_raw(r"")
+
+        # Find and emit method wrappers — look for functions that match ClassName pattern
+        for _sym, func in module.functions:
+            # Match methods: internal name pattern is __simple_ClassName_methodName
+            val method_prefix = r"__simple_" + c_name + r"_"
+            if func.name.starts_with(method_prefix):
+                val method_suffix = func.name.split(method_prefix)[1]
+                if method_suffix != "" and method_suffix != "new" and method_suffix != "drop":
+                    self.emit_class_method_wrapper(prefix, c_name, method_suffix, func)
+
+    me emit_class_create_wrapper(prefix: text, c_name: text, fields: [MirFieldDef]):
+        """Emit spl_ClassName_create(args...) -> void* constructor wrapper."""
+        var params: [text] = []
+        var field_assigns: [text] = []
+        var field_idx = 0
+        for field in fields:
+            val c_ty = self.type_mapper.map_type(field.type_)
+            val is_text_field = self.is_text_type(field.type_)
+            if is_text_field:
+                params = params.push(r"const char* " + field.name)
+                field_assigns = field_assigns.push(r"    ((int64_t*)obj)[" + field_idx + r"] = (int64_t)spl_text_from_cstr(" + field.name + r");")
+            else:
+                params = params.push(c_ty + " " + field.name)
+                field_assigns = field_assigns.push(r"    ((int64_t*)obj)[" + field_idx + r"] = (int64_t)" + field.name + r";")
+            field_idx = field_idx + 1
+
+        val params_str = if params.len() == 0: "void" else: params.join(", ")
+
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void* " + prefix + r"_create(" + params_str + r") {")
+        self.builder.emit_raw(r"    void* obj = spl_malloc(" + (field_idx * 8) + r");")
+        for assign in field_assigns:
+            self.builder.emit_raw(assign)
+        self.builder.emit_raw(r"    return obj;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_class_destroy_wrapper(prefix: text, c_name: text):
+        """Emit spl_ClassName_destroy(void* self) destructor wrapper."""
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void " + prefix + r"_destroy(void* self) {")
+        self.builder.emit_raw(r"    if (self) spl_free(self);")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_class_method_wrapper(prefix: text, c_name: text, method_name: text, func: MirFunction):
+        """Emit spl_ClassName_method(void* self, args...) -> ret wrapper for a class method."""
+        val internal_name = func.name
+        val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
+        val is_void = ret_ty == "void"
+        val is_text_return = self.is_text_type(func.signature.return_type)
+        val wrapper_ret_ty = if is_text_return: r"const char*" else: ret_ty
+
+        # First param of internal method is 'self' pointer — map to void*
+        var wrapper_params: [text] = [r"void* self"]
+        var forward_args: [text] = [r"self"]
+        var param_idx = 0
+        for param_ty in func.signature.params:
+            if param_idx == 0:
+                # Skip self — already handled as void*
+                param_idx = param_idx + 1
+                continue
+            val c_ty = self.type_mapper.map_type(param_ty)
+            val arg_name = "a" + (param_idx - 1)
+            val is_text_param = self.is_text_type(param_ty)
+            if is_text_param:
+                wrapper_params = wrapper_params.push(r"const char* " + arg_name)
+                forward_args = forward_args.push(r"spl_text_from_cstr(" + arg_name + r")")
+            else:
+                wrapper_params = wrapper_params.push(c_ty + " " + arg_name)
+                forward_args = forward_args.push(arg_name)
+            param_idx = param_idx + 1
+
+        val params_str = wrapper_params.join(", ")
+        val args_str = forward_args.join(", ")
+
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + prefix + r"_" + method_name + r"(" + params_str + r") {")
+        if is_void:
+            self.builder.emit_raw(r"    " + internal_name + r"(" + args_str + r");")
+        elif is_text_return:
+            self.builder.emit_raw(r"    return spl_text_to_cstr(" + internal_name + r"(" + args_str + r"));")
+        else:
+            self.builder.emit_raw(r"    return " + internal_name + r"(" + args_str + r");")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    # ================================================================
+    # Export Name Derivation Helpers
+    # ================================================================
+
+    fn derive_export_name(custom_name: text, internal_name: text) -> text:
+        """Derive the C export name for a function.
+
+        If custom_name is non-empty, uses it directly.
+        Otherwise strips '__simple_' prefix from the internal name.
+        """
+        if custom_name != "":
+            return custom_name
+        # Strip __simple_ prefix if present
+        if internal_name.starts_with(r"__simple_"):
+            return internal_name.split(r"__simple_")[1]
+        internal_name
+
+    fn is_text_type(ty: MirType) -> bool:
+        """Check if a MIR type represents Simple's text type (maps to const char* in C)."""
+        match ty.kind:
+            case Opaque(name):
+                name == "str" or name == "text" or name == "Text"
+            case _: false
 
 # ============================================================================
 # Export

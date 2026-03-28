@@ -1,0 +1,432 @@
+"""
+# SFFI Bidirectional Class Interop Specification
+
+**Feature IDs:** #SFFI-BIDIR
+**Category:** Runtime
+**Difficulty:** 5/5
+**Status:** Draft
+**Requirements:** doc/02_requirements/feature/usage/sffi_bidirectional_interop.md
+**Plan:** /.claude/plans/parsed-questing-goose.md
+**Architecture:** doc/04_architecture/sffi_bidirectional_interop.md
+**Design:** doc/05_design/sffi_bidirectional_interop.md
+**Research:** N/A
+
+## Overview
+
+System-level tests for bidirectional class interop between Simple and C/C++.
+Direction A: Simple classes exported to C/C++ via @export("C").
+Direction C: Layout verification with @repr("C"), SFFI lint rules, bitfield support.
+Direction A6: Shared library build mode (.so/.dylib/.dll).
+
+These are fail-first tests: all tests will fail until the corresponding
+features are implemented.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| @export("C") | Annotation to expose a Simple class/function via C ABI |
+| @repr("C") | Forces C-compatible struct layout (no field reordering) |
+| @bits(N) | Bitfield width annotation for struct fields |
+| Opaque handle | void* pattern for passing Simple objects through C ABI |
+| SFFI lint | Compile-time rules (SFFI001-005) for FFI type safety |
+
+## Related Specifications
+
+- [SFFI External Library Pattern](../../doc/05_design/sffi_external_library_pattern.md)
+- [C++ Wrapper Generator Design](../../doc/05_design/cpp_wrapper_generator_design.md)
+"""
+
+use std.spec
+
+
+# ============================================================================
+# Direction A: Simple Class Export (@export("C"))
+# ============================================================================
+
+describe "SFFI Bidirectional Class Interop":
+
+    # ========================================================================
+    # A1. @export("C") attribute parsing
+    # ========================================================================
+
+    describe "Direction A: Simple Class Export (@export C)":
+        """
+        ## Simple Class -> C/C++ Export
+
+        Validates that the compiler correctly parses, validates, and generates
+        C ABI wrappers for Simple classes annotated with @export("C").
+        """
+
+        describe "@export(C) attribute parsing":
+            """
+            ### Attribute Syntax Recognition
+
+            The compiler must parse @export("C") on classes and functions,
+            including the optional name parameter for custom symbol names.
+            """
+
+            it "accepts @export(C) on a class":
+                # @export("C") class Calculator:
+                #     precision: i32
+                # Should parse without errors and register in export list
+                val source = "@export(\"C\") class Calculator:\n    precision: i32"
+                val has_export_attr = source.contains("@export")
+                val has_class_keyword = source.contains("class")
+                # Fail-first: actual test needs compiler parse API
+                # When implemented, should verify AST has export attribute node
+                expect(has_export_attr).to_equal(true)
+                expect(has_class_keyword).to_equal(true)
+                # TODO: Replace with actual parse validation
+                val export_parsed_by_compiler = false
+                expect(export_parsed_by_compiler).to_equal(true)
+
+            it "accepts @export(C) on a standalone function":
+                # @export("C") fn add(a: f64, b: f64) -> f64: a + b
+                # Should parse and generate extern "C" double spl_add(double, double)
+                val source = "@export(\"C\") fn add(a: f64, b: f64) -> f64:\n    a + b"
+                val has_export_attr = source.contains("@export")
+                val has_fn_keyword = source.contains("fn ")
+                expect(has_export_attr).to_equal(true)
+                expect(has_fn_keyword).to_equal(true)
+                # TODO: Replace with actual parse validation
+                val fn_export_parsed = false
+                expect(fn_export_parsed).to_equal(true)
+
+            it "accepts @export(C, name: custom_name) with custom symbol":
+                # @export("C", name: "my_calc_create")
+                # Should use custom_name as C symbol instead of spl_ClassName_method
+                val source = "@export(\"C\", name: \"my_calc_create\") fn create() -> Calculator:"
+                val has_custom_name = source.contains("name:")
+                expect(has_custom_name).to_equal(true)
+                # TODO: Replace with actual parse validation
+                val custom_name_parsed = false
+                expect(custom_name_parsed).to_equal(true)
+
+
+        # ====================================================================
+        # A1. @export("C") semantic validation
+        # ====================================================================
+
+        describe "@export(C) semantic validation":
+            """
+            ### Semantic Checks
+
+            The compiler must reject invalid @export("C") usage at semantic
+            analysis time, providing clear error messages.
+            """
+
+            it "rejects @export(C) on generic class":
+                # @export("C") class Box<T>:  # ERROR: generics not C-compatible
+                #     value: T
+                # Compiler should emit error: "cannot export generic class via C ABI"
+                val generic_class_rejected = false
+                expect(generic_class_rejected).to_equal(true)
+
+            it "rejects @export(C) on class with non-C-compatible field":
+                # @export("C") class Bad:
+                #     items: List<Int>  # ERROR: List<Int> not C-compatible
+                # Compiler should emit SFFI001 error
+                val non_c_field_rejected = false
+                expect(non_c_field_rejected).to_equal(true)
+
+            it "rejects @export(C) on non-public class":
+                # private @export("C") class Hidden:  # ERROR: exported class must be public
+                #     x: i32
+                val non_public_rejected = false
+                expect(non_public_rejected).to_equal(true)
+
+
+        # ====================================================================
+        # A2. C ABI function generation
+        # ====================================================================
+
+        describe "C ABI function generation":
+            """
+            ### Extern C Function Wrappers
+
+            For each @export("C") class, the compiler generates C-callable
+            functions: create (constructor), destroy (destructor), and one
+            wrapper per method. All use opaque void* handles.
+            """
+
+            it "generates extern C create function for constructor":
+                # @export("C") class Calculator:
+                #     precision: i32
+                #     static fn create(p: i32) -> Calculator: Calculator(precision: p)
+                # Expected: spl_Calculator_create(int32_t precision) -> spl_Calculator_t
+                val expected_symbol = "spl_Calculator_create"
+                val generated_symbols = []  # TODO: get from compiler export table
+                val has_create = generated_symbols.contains(expected_symbol)
+                expect(has_create).to_equal(true)
+
+            it "generates extern C destroy function for destructor":
+                # Expected: void spl_Calculator_destroy(spl_Calculator_t self)
+                val expected_symbol = "spl_Calculator_destroy"
+                val generated_symbols = []  # TODO: get from compiler export table
+                val has_destroy = generated_symbols.contains(expected_symbol)
+                expect(has_destroy).to_equal(true)
+
+            it "generates extern C wrapper for each method":
+                # Expected: double spl_Calculator_add(spl_Calculator_t self, double a, double b)
+                # Expected: double spl_Calculator_multiply(spl_Calculator_t self, double a, double b)
+                val expected_methods = ["spl_Calculator_add", "spl_Calculator_multiply"]
+                val generated_symbols = []  # TODO: get from compiler export table
+                var all_found = true
+                for method in expected_methods:
+                    if not generated_symbols.contains(method):
+                        all_found = false
+                expect(all_found).to_equal(true)
+
+            it "uses opaque handle pattern (void*)":
+                # The handle type spl_Calculator_t should be an opaque pointer
+                # C side: typedef struct spl_Calculator* spl_Calculator_t
+                # Simple side: object pointer cast to void*
+                val handle_is_opaque_pointer = false  # TODO: verify from generated code
+                expect(handle_is_opaque_pointer).to_equal(true)
+
+
+        # ====================================================================
+        # A4. C header generation
+        # ====================================================================
+
+        describe "C header generation":
+            """
+            ### Generated .h File
+
+            The compiler emits a C header with include guards, opaque handle
+            typedefs, extern C function declarations, and _Static_assert
+            layout verification.
+            """
+
+            it "emits .h with include guards":
+                # Expected: #ifndef CALCULATOR_H / #define CALCULATOR_H / #endif
+                val expected_guard_open = "#ifndef CALCULATOR_H"
+                val expected_guard_define = "#define CALCULATOR_H"
+                val generated_header = ""  # TODO: read from compiler output
+                val has_guard_open = generated_header.contains(expected_guard_open)
+                val has_guard_define = generated_header.contains(expected_guard_define)
+                # Fail-first: no header generated yet
+                expect(has_guard_open).to_equal(true)
+                expect(has_guard_define).to_equal(true)
+
+            it "emits opaque handle typedef":
+                # Expected: typedef struct spl_Calculator* spl_Calculator_t;
+                val expected_typedef = "typedef struct spl_Calculator* spl_Calculator_t"
+                val generated_header = ""  # TODO: read from compiler output
+                val has_typedef = generated_header.contains(expected_typedef)
+                expect(has_typedef).to_equal(true)
+
+            it "emits extern C function declarations":
+                # Expected: spl_Calculator_t spl_Calculator_create(int32_t precision);
+                val expected_decl = "spl_Calculator_create"
+                val generated_header = ""  # TODO: read from compiler output
+                val has_decl = generated_header.contains(expected_decl)
+                expect(has_decl).to_equal(true)
+
+            it "emits _Static_assert for layout verification":
+                # Expected: _Static_assert(sizeof(...) == N, "size mismatch");
+                val expected_assert = "_Static_assert"
+                val generated_header = ""  # TODO: read from compiler output
+                val has_assert = generated_header.contains(expected_assert)
+                expect(has_assert).to_equal(true)
+
+
+        # ====================================================================
+        # A5. C++ wrapper generation
+        # ====================================================================
+
+        describe "C++ wrapper generation":
+            """
+            ### Generated .hpp File
+
+            The compiler emits a C++ header with an RAII wrapper class inside
+            namespace spl, with move semantics and deleted copy operations.
+            """
+
+            it "emits .hpp with namespace spl":
+                # Expected: namespace spl { ... }
+                val expected_ns = "namespace spl"
+                val generated_hpp = ""  # TODO: read from compiler output
+                val has_namespace = generated_hpp.contains(expected_ns)
+                expect(has_namespace).to_equal(true)
+
+            it "emits RAII wrapper class":
+                # Expected: class Calculator { spl_Calculator_t handle_; ... ~Calculator() }
+                val expected_dtor = "~Calculator()"
+                val generated_hpp = ""  # TODO: read from compiler output
+                val has_raii = generated_hpp.contains(expected_dtor)
+                expect(has_raii).to_equal(true)
+
+            it "emits move constructor and deleted copy":
+                # Expected: Calculator(Calculator&& o) noexcept
+                # Expected: Calculator(const Calculator&) = delete
+                val expected_move = "Calculator&&"
+                val expected_delete_copy = "= delete"
+                val generated_hpp = ""  # TODO: read from compiler output
+                val has_move = generated_hpp.contains(expected_move)
+                val has_delete = generated_hpp.contains(expected_delete_copy)
+                expect(has_move).to_equal(true)
+                expect(has_delete).to_equal(true)
+
+
+    # ========================================================================
+    # Direction C: Layout Verification
+    # ========================================================================
+
+    describe "Direction C: Layout Verification":
+        """
+        ## Struct Layout Verification
+
+        Ensures C-compatible struct layout with @repr("C"), compile-time
+        offset verification, and SFFI lint rules for type safety across
+        the FFI boundary.
+        """
+
+        describe "@repr(C) struct layout":
+            """
+            ### C-Compatible Layout
+
+            @repr("C") forces C-compatible field ordering, alignment, and
+            padding. The compiler must compute correct sizeof and offsetof
+            values matching the C ABI.
+            """
+
+            it "forces C-compatible field ordering":
+                # @repr("C") class PacketHeader:
+                #     version: u8    # offset 0
+                #     flags: u8      # offset 1
+                #     length: u16    # offset 2
+                #     sequence: u32  # offset 4
+                # Fields must NOT be reordered (unlike default Simple layout)
+                val fields_in_order = ["version", "flags", "length", "sequence"]
+                val layout_preserves_order = false  # TODO: verify from compiler layout pass
+                expect(layout_preserves_order).to_equal(true)
+
+            it "computes correct sizeof for C layout":
+                # PacketHeader: u8 + u8 + u16 + u32 = 8 bytes (with C alignment)
+                val expected_size = 8
+                val computed_size = 0  # TODO: get from compiler layout computation
+                expect(computed_size).to_equal(expected_size)
+
+            it "computes correct offsetof for each field":
+                # version: offset 0, flags: offset 1, length: offset 2, sequence: offset 4
+                val expected_offsets = [0, 1, 2, 4]
+                val computed_offsets = []  # TODO: get from compiler layout computation
+                expect(computed_offsets).to_equal(expected_offsets)
+
+
+        # ====================================================================
+        # C3. SFFI lint rules
+        # ====================================================================
+
+        describe "SFFI lint rules":
+            """
+            ### Compile-Time FFI Safety
+
+            Five lint rules (SFFI001-SFFI005) catch common FFI mistakes at
+            compile time before they cause silent data corruption at runtime.
+            """
+
+            it "SFFI001: errors on non-C-compatible field type":
+                # @export("C") class Bad:
+                #     items: List<Int>  # List<Int> is not C-compatible
+                # Expected: error SFFI001: field 'items' has non-C-compatible type 'List<Int>'
+                val diagnostic_emitted = false  # TODO: run lint, check for SFFI001
+                expect(diagnostic_emitted).to_equal(true)
+
+            it "SFFI002: warns on text field in exported struct":
+                # @export("C") class Named:
+                #     name: text  # text is a pointer type, needs special handling
+                # Expected: warning SFFI002: field 'name' uses 'text' which requires special FFI handling
+                val warning_emitted = false  # TODO: run lint, check for SFFI002
+                expect(warning_emitted).to_equal(true)
+
+            it "SFFI003: errors on by-value struct without @repr(C)":
+                # fn send_packet(header: PacketHeader):  # PacketHeader lacks @repr("C")
+                # Expected: error SFFI003: struct 'PacketHeader' passed by value across FFI without @repr("C")
+                val error_emitted = false  # TODO: run lint, check for SFFI003
+                expect(error_emitted).to_equal(true)
+
+            it "SFFI004: errors on bitfield without explicit width":
+                # @repr("C") @export("C") class GpioReg:
+                #     mode: u8  # no @bits annotation but used in bitfield context
+                # Expected: error SFFI004: bitfield 'mode' has no explicit @bits(N) width
+                val error_emitted = false  # TODO: run lint, check for SFFI004
+                expect(error_emitted).to_equal(true)
+
+            it "SFFI005: warns on platform-dependent type size":
+                # @export("C") class SizeProbe:
+                #     count: int  # 'int' may be 32-bit or 64-bit depending on platform
+                # Expected: warning SFFI005: field 'count' uses platform-dependent type 'int'
+                val warning_emitted = false  # TODO: run lint, check for SFFI005
+                expect(warning_emitted).to_equal(true)
+
+
+        # ====================================================================
+        # C5. Bitfield support
+        # ====================================================================
+
+        describe "bitfield support":
+            """
+            ### Bitfield Layout
+
+            @bits(N) annotation sets a field's bit width. The compiler must
+            compute a byte-identical layout matching C bitfield packing rules.
+            """
+
+            it "@bits(N) sets field bit width":
+                # @repr("C") @export("C") class GpioRegister:
+                #     @bits(4) mode: u8     # 4 bits
+                #     @bits(1) output: u8   # 1 bit
+                #     @bits(1) input: u8    # 1 bit
+                #     @bits(2) speed: u8    # 2 bits
+                # Total: 4+1+1+2 = 8 bits = 1 byte
+                val expected_total_bits = 8
+                val computed_total_bits = 0  # TODO: get from compiler bitfield computation
+                expect(computed_total_bits).to_equal(expected_total_bits)
+
+            it "bitfield struct size matches C layout":
+                # GpioRegister with 8 bits of bitfields should be 1 byte
+                val expected_size = 1
+                val computed_size = 0  # TODO: get from compiler layout computation
+                expect(computed_size).to_equal(expected_size)
+
+
+    # ========================================================================
+    # Direction A6: Shared Library Build
+    # ========================================================================
+
+    describe "Direction A6: Shared Library Build":
+        """
+        ## Shared Library Output
+
+        The compiler must support --shared flag to produce .so/.dylib/.dll
+        output. Library mode skips main() and includes runtime init/shutdown
+        entry points.
+        """
+
+        it "builds .so on Linux with --shared flag":
+            # bin/simple build --shared --entry src/mylib.spl -o build/mylib.so
+            # Expected: produces a .so file with exported symbols
+            val shared_lib_extension = ".so"
+            val expected_output = "build/mylib" + shared_lib_extension
+            val build_produced_shared_lib = false  # TODO: run build --shared and check output
+            expect(build_produced_shared_lib).to_equal(true)
+
+        it "skips main() in library mode":
+            # When --shared is set, the linker should not require or emit main()
+            # The entry point should be the runtime init, not main
+            val has_main_symbol = true  # TODO: inspect symbol table of produced .so
+            val library_mode_skips_main = not has_main_symbol
+            expect(library_mode_skips_main).to_equal(true)
+
+        it "includes spl_library_init and spl_library_shutdown":
+            # The shared library must export these two lifecycle functions
+            val expected_exports = ["spl_library_init", "spl_library_shutdown"]
+            val actual_exports = []  # TODO: inspect symbol table of produced .so
+            var all_found = true
+            for sym in expected_exports:
+                if not actual_exports.contains(sym):
+                    all_found = false
+            expect(all_found).to_equal(true)

@@ -89,6 +89,75 @@ fn is_write_volatile(attr: VolatileAttr) -> bool:
     attr.mode == VolatileMode.Full or attr.mode == VolatileMode.WriteOnly
 
 # ============================================================================
+# Export Attribute Types
+# ============================================================================
+
+struct ExportAttr:
+    """Export attribute for C ABI interop.
+
+    Marks a class or function for export with C-compatible ABI.
+    Used by @export("C") annotation to generate C ABI wrappers,
+    C headers, and C++ wrapper headers.
+
+    Fields:
+        is_export_c: Whether to export with C ABI
+        export_name: Custom C symbol name (empty = use default mangled name)
+    """
+    is_export_c: bool
+    export_name: text
+
+# ============================================================================
+# Export Attribute Parsing
+# ============================================================================
+
+fn parse_export_attrs(attrs: [Attribute]) -> ExportAttr?:
+    """Extract @export attributes from a list of attributes.
+
+    Scans for @export("C") with optional name: kwarg.
+    Returns nil if no @export found.
+
+    Examples:
+        @export("C")                    # Export with C ABI, default name
+        @export("C", name: "my_func")   # Export with custom C symbol name
+    """
+    var found = false
+    var is_export_c = false
+    var export_name = ""
+
+    for attr in attrs:
+        if attr.name == "export":
+            if attr.args.len() > 0:
+                # First arg should be the ABI string, e.g. "C"
+                val abi = extract_string_arg(attr.args[0])
+                if abi == "C":
+                    found = true
+                    is_export_c = true
+
+                    # Check remaining args for name: kwarg
+                    var ai = 1
+                    while ai < attr.args.len():
+                        val arg = attr.args[ai]
+                        match arg.kind:
+                            case Assign(left, op, right):
+                                match left.kind:
+                                    case Ident(name):
+                                        if name == "name":
+                                            val n = extract_string_arg(right)
+                                            if n.len() > 0:
+                                                export_name = n
+                                    case _: ()
+                            case _: ()
+                        ai = ai + 1
+
+    if not found:
+        return nil
+
+    ExportAttr(
+        is_export_c: is_export_c,
+        export_name: export_name
+    )
+
+# ============================================================================
 # Function Attribute Types
 # ============================================================================
 

@@ -1,7 +1,8 @@
 # NFR -- SFFI Bidirectional Class Interop
 
 **Related requirements:** [doc/02_requirements/feature/usage/sffi_bidirectional_interop.md](../feature/usage/sffi_bidirectional_interop.md)
-**Related design:** [doc/05_design/sffi_external_library_pattern.md](../../05_design/sffi_external_library_pattern.md), [doc/05_design/cpp_wrapper_generator_design.md](../../05_design/cpp_wrapper_generator_design.md)
+**Related architecture:** [doc/04_architecture/sffi_bidirectional_interop.md](../../04_architecture/sffi_bidirectional_interop.md)
+**Related design:** [doc/05_design/sffi_bidirectional_interop.md](../../05_design/sffi_bidirectional_interop.md), [doc/05_design/sffi_external_library_pattern.md](../../05_design/sffi_external_library_pattern.md), [doc/05_design/cpp_wrapper_generator_design.md](../../05_design/cpp_wrapper_generator_design.md)
 **Related research:** [doc/01_research/local/sffi_dynamic_loading_2026-02-21.md](../../01_research/local/sffi_dynamic_loading_2026-02-21.md)
 
 ---

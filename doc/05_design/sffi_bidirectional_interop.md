@@ -1,5 +1,6 @@
 # Design: SFFI Bidirectional Class Interop
 
+**Related plan:** [parsed-questing-goose.md](/.claude/plans/parsed-questing-goose.md)
 **Related architecture:** [doc/04_architecture/sffi_bidirectional_interop.md](../04_architecture/sffi_bidirectional_interop.md)
 
 **Related requirements:**
@@ -255,12 +256,12 @@ For `@export("C") class Calculator` with method `add(a: f64, b: f64) -> f64`:
 
 ```cpp
 // --- Opaque handle typedef ---
-typedef struct spl_Calculator_opaque* spl_Calculator_t;
+typedef struct spl_Calculator* spl_Calculator_t;
 
 // --- Constructor wrapper ---
 extern "C" spl_Calculator_t spl_Calculator_create(int32_t precision) {
     // Allocate Calculator, call Simple constructor
-    spl_Calculator_opaque* obj = (spl_Calculator_opaque*)spl_gc_alloc(sizeof(Calculator));
+    spl_Calculator* obj = (spl_Calculator*)spl_gc_alloc(sizeof(Calculator));
     Calculator_init(obj, precision);  // calls Simple's Calculator(precision: precision)
     return obj;
 }

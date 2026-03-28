@@ -1,16 +1,16 @@
 # Test Results
 
-**Generated:** 2026-03-28 18:27:47
-**Total Tests:** 10
+**Generated:** 2026-03-28 12:27:23
+**Total Tests:** 5561
 **Status:** ⚠️ 4 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 6 | 60.0% |
-| ❌ Failed | 4 | 40.0% |
-| ⏭️ Skipped | 0 | 0.0% |
+| ✅ Passed | 5446 | 97.9% |
+| ❌ Failed | 4 | 0.1% |
+| ⏭️ Skipped | 111 | 2.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
 
@@ -36,38 +36,21 @@
 | maps source directories to integration candidates | fail_to_pass |  |
 | extracts REQ and NFR identifiers | fail_to_pass |  |
 | extracts relative paths from markdown and plain text | fail_to_pass |  |
+| backend_port_feature_spec | new_test |  |
+| bootstrap_spec | new_test |  |
+| code_quality_tools_spec | new_test |  |
+| codegen_parity_completion_spec | new_test |  |
 
 ---
 
 ## ❌ Failed Tests (4)
 
-### 🔴 warns when a requirement identifier is not covered
+### 🔴 warns on legacy requirement roots in specs
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:27:47.172467+00:00
+**Failed:** 
 **Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test 'warns when a requirement identifier is not covered' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
-
----
-
-### 🔴 warns when docs point to raw specs
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 2026-03-28T09:27:47.172476+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test 'warns when docs point to raw specs' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
 
 ---
 
@@ -75,29 +58,26 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:27:47.172480+00:00
+**Failed:** 
 **Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test 'warns for opted-in source roots without unit tests' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
 
 ---
 
-### 🔴 warns on legacy requirement roots in specs
+### 🔴 warns when docs point to raw specs
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:27:47.172471+00:00
+**Failed:** 
 **Flaky:** No (100.0% failure rate)
 
-**Error:**
-```
-Test 'warns on legacy requirement roots in specs' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
+---
+
+### 🔴 warns when a requirement identifier is not covered
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
 
 ---
 
@@ -111,8 +91,17 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ### Priority 1: Fix Failing Tests (4)
 
-1. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
-2. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
-3. **warns for opted-in source roots without unit tests** - Test 'warns for opted-in source roots without unit tests' failed
-4. **warns on legacy requirement roots in specs** - Test 'warns on legacy requirement roots in specs' failed
+1. **warns on legacy requirement roots in specs** - 
+2. **warns for opted-in source roots without unit tests** - 
+3. **warns when docs point to raw specs** - 
+4. **warns when a requirement identifier is not covered** - 
+
+### Priority 3: Stabilize Flaky Tests (6)
+
+Tests with intermittent failures:
+- maps lib sources to unit candidates (24.0% failure rate)
+- extracts relative paths from markdown and plain text (36.0% failure rate)
+- extracts REQ and NFR identifiers (32.0% failure rate)
+- maps source directories to integration candidates (24.0% failure rate)
+- normalizes date suffixed slugs (4.0% failure rate)
 
