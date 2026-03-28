@@ -1,0 +1,170 @@
+# Driver Core Types - lightweight public driver types for external callers.
+#
+# Canonical location: compiler.common.driver_core_types
+# Extracted from compiler.driver.driver_core_types (2026-03-29) to break the
+# backend↔driver import cycle. These types have no compiler-pipeline imports
+# so any layer can import them without pulling in the full driver/backend graph.
+#
+# A backward-compat shim remains at compiler.driver.driver_core_types.
+
+extern fn rt_file_read_text(path: text) -> text
+
+class BootLogger:
+    level: i64
+
+    static fn from_env() -> BootLogger:
+        BootLogger(level: 0)
+
+    fn debug(message: text): ()
+    fn info(message: text): ()
+    fn warn(message: text): ()
+    fn error(message: text): ()
+    fn trace(message: text): ()
+
+enum CompileMode:
+    Interpret
+    Jit
+    Aot
+    Check
+    Sdn
+    SmfExec
+
+impl CompileMode:
+    fn to_text() -> text:
+        match self:
+            case CompileMode.Interpret: "interpret"
+            case CompileMode.Jit: "jit"
+            case CompileMode.Aot: "aot"
+            case CompileMode.Check: "check"
+            case CompileMode.Sdn: "sdn"
+            case CompileMode.SmfExec: "smf_exec"
+            case _: "unknown"
+
+    static fn from_text(s: text) -> CompileMode?:
+        match s:
+            case "interpret" | "i": Some(CompileMode.Interpret)
+            case "jit" | "j": Some(CompileMode.Jit)
+            case "aot" | "a" | "compile" | "c": Some(CompileMode.Aot)
+            case "check" | "k": Some(CompileMode.Check)
+            case "sdn" | "s" | "data": Some(CompileMode.Sdn)
+            case _: nil
+
+enum OutputFormat:
+    Native
+    Smf
+    Both
+    SelfContained
+
+impl OutputFormat:
+    fn to_text() -> text:
+        match self:
+            case OutputFormat.Native: "native"
+            case OutputFormat.Smf: "smf"
+            case OutputFormat.Both: "both"
+            case OutputFormat.SelfContained: "self-contained"
+            case _: "native"
+
+    static fn from_text(s: text) -> OutputFormat:
+        match s:
+            case "smf": OutputFormat.Smf
+            case "both": OutputFormat.Both
+            case "self-contained" | "sc": OutputFormat.SelfContained
+            case _: OutputFormat.Native
+
+struct CompileOptions:
+    mode: CompileMode
+    input_files: [text]
+    output_file: text?
+    output_format: OutputFormat
+    optimize: bool
+    opt_level: i64?
+    release: bool
+    debug_info: bool
+    verbose: bool
+    log_level: i64
+    profile: text
+    no_borrow_check: bool
+    backend: text
+    interpreter_mode: text
+    gc_off: bool
+    smf_output_mode: text
+    low_memory: bool
+
+    static fn default() -> CompileOptions:
+        CompileOptions(
+            mode: CompileMode.Jit,
+            input_files: [],
+            output_file: nil,
+            output_format: OutputFormat.Native,
+            optimize: false,
+            opt_level: nil,
+            release: false,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,
+            profile: "dev",
+            no_borrow_check: false,
+            backend: "auto",
+            interpreter_mode: "optimized",
+            gc_off: false,
+            smf_output_mode: "code_only",
+            low_memory: false
+        )
+
+fn driver_core_compile_options_default() -> CompileOptions:
+    CompileOptions.default()
+
+enum CompileResult:
+    Success(Any?)
+    TypeError([text])
+    ParseError([text])
+    BlockError([text])
+    ResolveError([text])
+    BorrowError([text])
+    CodegenError(text)
+    RuntimeError(text)
+
+    fn is_success(self) -> bool:
+        match self:
+            case CompileResult.Success(_): true
+            case _: false
+
+    fn get_value(self) -> Any?:
+        match self:
+            case CompileResult.Success(v): v
+            case _: nil
+
+    fn get_errors(self) -> [text]:
+        match self:
+            case CompileResult.Success(_): []
+            case CompileResult.TypeError(e): e
+            case CompileResult.ParseError(e): e
+            case CompileResult.BlockError(e): e
+            case CompileResult.ResolveError(e): e
+            case CompileResult.BorrowError(e): e
+            case CompileResult.CodegenError(m): [m]
+            case CompileResult.RuntimeError(m): [m]
+            case _: []
+
+struct SourceFile:
+    path: text
+    content: text
+    module_name: text
+
+    static fn load(path: text) -> Result<SourceFile, text>:
+        val content = rt_file_read_text(path) ?? ""
+        if content == "":
+            return Err("Failed to read file: {path}")
+
+        var mod_path = path
+        if mod_path.starts_with("src/"):
+            mod_path = mod_path.substring(4)
+        mod_path = mod_path.replace(".spl", "")
+        mod_path = mod_path.replace(".sdn", "")
+        val module_name = mod_path.replace("/", ".")
+
+        Ok(SourceFile(
+            path: path,
+            content: content,
+            module_name: module_name
+        ))

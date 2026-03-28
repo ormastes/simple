@@ -2,11 +2,8 @@
 # Manages the full smux event loop, layout, and rendering.
 # Layout: MenuBar | Main Content (scrollable) | QuickTextBar | MobileKeybar | StatusBar
 #
-# Uses Simple UI framework:
-#   - std.ui.builder for declarative widget tree construction
-#   - std.ui.widget for WidgetNode / UIState / UITree
-#   - std.ui.layout for layout computation
-#   - app.ui.tui.screen for terminal Screen buffer rendering
+# Self-contained TUI rendering via direct ANSI output.
+# No dependency on std.ui.* or app.ui.* framework modules.
 
 use quick_text.{QuickTextEntry, QuickTextPanel}
 use mobile_keys.{MobileKeybar, should_show_keybar}
@@ -15,22 +12,9 @@ use notification.{Notification, notify}
 use tmux_hooks.{TmuxHookManager, TmuxHookEvent}
 use tmux.{tmux_is_available}
 use llm_hooks.{LlmDoneHookConfig, HookAction, run_llm_done_hook, make_continue_message}
+use render_buffer.{ansi_move, ansi_clear_line, ansi_clear_screen, ansi_hide_cursor, ansi_show_cursor, ansi_enable_alt_screen, ansi_disable_alt_screen, ansi_reset}
 
-# Simple UI framework (backend-agnostic)
-use std.ui.builder.{column, row, menubar, statusbar, text_widget, label, scroll, button, divider}
-use std.ui.builder.{with_flex, with_visible}
-use std.ui.widget.{WidgetNode, UIState, UITree, UIEvent}
-use std.ui.layout.{compute_layout}
-use std.ui.state.{init_state, update_state}
-
-# Backend implementations (selected at runtime)
-use std.ui.backend.{RenderBackend}
-use app.ui.tui.backend.{TuiBackend}
-use app.ui.tauri.backend.{TauriBackend}
-use app.ui.tui.screen.{Screen, get_terminal_size, ansi_cursor_home}
-use app.ui.render.widgets.{render_tui_tree}
-
-# TUI-only raw mode externs (no-op on GUI backends)
+# Terminal I/O externs
 extern fn native_term_write(data: text) -> i64
 extern fn native_term_flush() -> i32
 extern fn native_term_read_timeout(max_len: i64, timeout_ms: i64) -> text
@@ -46,18 +30,29 @@ extern fn rt_thread_sleep(milliseconds: i64)
 extern fn rt_env_cwd() -> text
 
 # ============================================================================
-# Backend Selection
+# Terminal Size
 # ============================================================================
 
-fn create_backend(backend_name: text) -> any:
-    """Create a RenderBackend by name. Returns TuiBackend or TauriBackend."""
-    match backend_name:
-        case "tauri": TauriBackend.new()
-        case "tui": TuiBackend.new()
-        case _: TuiBackend.new()
-
-fn is_tui_backend(backend_name: text) -> bool:
-    backend_name == "tui" or backend_name == ""
+fn get_terminal_size() -> (i32, i32):
+    """Get (width, height). Tries stty, then env vars, then fallback 80x24."""
+    # Try stty size (returns "rows cols")
+    val (stty_out, stty_err, stty_code) = rt_process_run("/bin/sh", ["-c", "stty size 2>/dev/null"])
+    if stty_code == 0 and stty_out != "" and stty_out != nil:
+        val parts = stty_out.trim().split(" ")
+        if parts.len() >= 2:
+            val h = parts[0].to_int() as i32
+            val w = parts[1].to_int() as i32
+            if w > 0 and h > 0:
+                return (w, h)
+    # Try environment variables
+    val cols = rt_env_get("COLUMNS")
+    val rows = rt_env_get("LINES")
+    if cols != "" and cols != nil and rows != "" and rows != nil:
+        val w = cols.to_int() as i32
+        val h = rows.to_int() as i32
+        if w > 0 and h > 0:
+            return (w, h)
+    return (80, 24)
 
 # ============================================================================
 # App State
@@ -133,8 +128,7 @@ class SmuxApp:
     quick_text_panel: QuickTextPanel
     keybar: MobileKeybar
     tmux_hook_mgr: TmuxHookManager
-    ui_backend: any             # RenderBackend (TuiBackend or TauriBackend)
-    ui_backend_name: text       # "tui" or "tauri"
+    backend_name: text
 
     static fn create(config: SmuxConfig, platform_name: text) -> SmuxApp:
         SmuxApp.create_with_backend(config, platform_name, "tui")
@@ -160,8 +154,6 @@ class SmuxApp:
         # Build tmux hook manager
         var tmux_mgr = TmuxHookManager.create()
 
-        val backend = create_backend(backend_name)
-
         SmuxApp(
             config: config,
             mode: AppMode.Normal,
@@ -181,8 +173,7 @@ class SmuxApp:
             quick_text_panel: qt_panel,
             keybar: kb,
             tmux_hook_mgr: tmux_mgr,
-            ui_backend: backend,
-            ui_backend_name: backend_name
+            backend_name: backend_name
         )
 
     # ===================================================================
@@ -190,33 +181,32 @@ class SmuxApp:
     # ===================================================================
 
     me init() -> Result<(), text>:
-        # Initialize backend
-        val init_result = self.ui_backend.init()
-        if init_result.is_err():
-            return Err("Backend init failed: {init_result.unwrap_err()}")
-
-        self.width = self.ui_backend.viewport_width()
-        self.height = self.ui_backend.viewport_height()
+        val size = get_terminal_size()
+        self.width = size.0
+        self.height = size.1
         if self.width <= 0:
             self.width = 80
         if self.height <= 0:
             self.height = 24
 
-        # TUI-specific: enable raw mode + mouse tracking
-        if is_tui_backend(self.ui_backend_name):
-            val code = native_enable_raw_mode()
-            if code != 0:
-                val (out, err, fc) = rt_process_run("/bin/sh", ["-c", "stty raw -echo 2>/dev/null"])
-                if fc != 0:
-                    return Err("Failed to enable raw mode")
-            self.raw_mode_active = true
+        # Enable raw mode + alt screen
+        val code = native_enable_raw_mode()
+        if code != 0:
+            val (out, err, fc) = rt_process_run("/bin/sh", ["-c", "stty raw -echo 2>/dev/null"])
+            if fc != 0:
+                return Err("Failed to enable raw mode")
+        self.raw_mode_active = true
 
-            # Enable mouse tracking and bracketed paste (TUI extras)
-            var extras = "\u{001b}[?1006h"  # SGR mouse
-            extras = "{extras}\u{001b}[?1003h"  # All mouse events
-            extras = "{extras}\u{001b}[?2004h"  # Bracketed paste
-            native_term_write(extras)
-            native_term_flush()
+        # Alt screen + hide cursor
+        var setup = ansi_enable_alt_screen()
+        setup = "{setup}{ansi_hide_cursor()}"
+
+        # Enable mouse tracking and bracketed paste
+        setup = "{setup}\u{001b}[?1006h"   # SGR mouse
+        setup = "{setup}\u{001b}[?1003h"   # All mouse events
+        setup = "{setup}\u{001b}[?2004h"   # Bracketed paste
+        native_term_write(setup)
+        native_term_flush()
 
         # Register tmux hooks if in tmux session
         if self.config.tmux_hooks_enabled and self.has_tmux_env:
@@ -247,17 +237,20 @@ class SmuxApp:
         return Ok(())
 
     me shutdown():
-        # TUI-specific: disable mouse tracking and raw mode
-        if is_tui_backend(self.ui_backend_name):
-            var cleanup = "\u{001b}[?2004l"    # Disable bracketed paste
-            cleanup = "{cleanup}\u{001b}[?1003l"    # Disable mouse
-            cleanup = "{cleanup}\u{001b}[?1006l"    # Disable SGR mouse
-            native_term_write(cleanup)
-            native_term_flush()
+        # Disable mouse tracking and bracketed paste
+        var cleanup = "\u{001b}[?2004l"    # Disable bracketed paste
+        cleanup = "{cleanup}\u{001b}[?1003l"    # Disable mouse
+        cleanup = "{cleanup}\u{001b}[?1006l"    # Disable SGR mouse
 
         # Unregister tmux hooks
         if self.has_tmux_env:
             self.tmux_hook_mgr.unregister_hooks()
+
+        # Show cursor + leave alt screen
+        cleanup = "{cleanup}{ansi_show_cursor()}"
+        cleanup = "{cleanup}{ansi_disable_alt_screen()}"
+        native_term_write(cleanup)
+        native_term_flush()
 
         if self.raw_mode_active:
             val code = native_disable_raw_mode()
@@ -265,8 +258,6 @@ class SmuxApp:
                 rt_process_run("/bin/sh", ["-c", "stty cooked echo 2>/dev/null"])
             self.raw_mode_active = false
 
-        # Shutdown backend (handles alt screen, cursor restore, etc.)
-        self.ui_backend.shutdown()
         self.running = false
 
     # ===================================================================
@@ -275,8 +266,8 @@ class SmuxApp:
 
     me run():
         val init_result = self.init()
-        if init_result.err.?:
-            print "smux: Failed to initialize: {init_result.err.?}"
+        if init_result.is_err():
+            print "smux: Failed to initialize: {init_result.unwrap_err()}"
             return
 
         while self.running:
@@ -284,31 +275,26 @@ class SmuxApp:
                 self._render_frame()
                 self.render_needed = false
 
-            # Poll input: TUI uses raw mode, GUI uses backend.poll_event()
-            if is_tui_backend(self.ui_backend_name):
-                val has_input = native_term_poll(50)
-                if has_input:
-                    val data = native_term_read_timeout(4096, 50)
-                    if data != "" and data != nil:
-                        self._handle_input(data)
-            else:
-                # GUI backend: poll via RenderBackend trait
-                val event = self.ui_backend.poll_event(50)
-                if event.?:
-                    self._handle_ui_event(event.unwrap())
+            # Poll input (raw terminal)
+            val has_input = native_term_poll(50)
+            if has_input:
+                val raw_data = native_term_read_timeout(4096, 50)
+                # Guard: native_term_read_timeout may return error codes (-1, -2)
+                # instead of text in some PTY environments
+                val data = "{raw_data}"
+                if data.len() > 0 and data != "-1" and data != "-2" and data != "nil":
+                    self._handle_input(data)
 
-            # Poll tmux hooks (TUI only — tmux doesn't apply in GUI)
-            if is_tui_backend(self.ui_backend_name):
-                if self.has_tmux_env and self.config.tmux_hooks_enabled:
-                    self._poll_tmux_hooks()
+            # Poll tmux hooks
+            if self.has_tmux_env and self.config.tmux_hooks_enabled:
+                self._poll_tmux_hooks()
 
             # Check for viewport resize
-            val new_w = self.ui_backend.viewport_width()
-            val new_h = self.ui_backend.viewport_height()
-            if new_w > 0 and new_h > 0:
-                if new_w != self.width or new_h != self.height:
-                    self.width = new_w
-                    self.height = new_h
+            val new_size = get_terminal_size()
+            if new_size.0 > 0 and new_size.1 > 0:
+                if new_size.0 != self.width or new_size.1 != self.height:
+                    self.width = new_size.0
+                    self.height = new_size.1
                     self.render_needed = true
 
         self.shutdown()
@@ -427,40 +413,6 @@ class SmuxApp:
                 self._handle_char(ch)
                 pos = pos + 1
 
-    # ===================================================================
-    # GUI Event Handling (via RenderBackend.poll_event)
-    # ===================================================================
-
-    me _handle_ui_event(event: UIEvent):
-        """Handle events from GUI backends (Tauri, Electron, Web)."""
-        val kind = event.kind()
-        match kind:
-            case "key":
-                val key = event.key()
-                match key:
-                    case "Escape": self._handle_escape()
-                    case "Enter": self._handle_enter()
-                    case "Tab": self._handle_tab()
-                    case "Backspace": self._handle_backspace()
-                    case "ArrowUp": self._scroll_up(1)
-                    case "ArrowDown": self._scroll_down(1)
-                    case _:
-                        if key.len() == 1:
-                            self._handle_char(key)
-            case "click":
-                val x = event.x()
-                val y = event.y()
-                self._handle_mouse_click("{0};{x};{y}")
-            case "scroll":
-                if event.delta_y() < 0:
-                    self._scroll_up(3)
-                else:
-                    self._scroll_down(3)
-            case "close":
-                self.running = false
-            case _:
-                pass_dn
-
     me _handle_csi_event(event_type: text, param: text):
         match event_type:
             "up" =>
@@ -573,76 +525,60 @@ class SmuxApp:
         self.render_needed = true
 
     # ===================================================================
-    # Rendering (via Simple UI framework)
+    # Direct ANSI Rendering (self-contained, no UI framework needed)
     # ===================================================================
 
     me _render_frame():
-        # Build widget tree using UI builder API (shared across all backends)
-        val tree_root = self._build_widget_tree()
-        val ui_tree = UITree.from_root(tree_root)
-        val state = init_state(ui_tree)
+        val esc = "\u{001b}"
+        var output = ansi_hide_cursor()
 
-        if is_tui_backend(self.ui_backend_name):
-            # TUI path: render to Screen buffer, flush via native_term_write
-            val rects = compute_layout(tree_root, 0, 0, self.width, self.height)
-            var screen = Screen.new(self.width, self.height)
-            screen = render_tui_tree(screen, tree_root, rects, state)
-            native_term_write(ansi_cursor_home())
-            native_term_write(screen.render())
-            native_term_flush()
-        else:
-            # GUI path: delegate to backend (Tauri/Electron/Web)
-            self.ui_backend.render(state)
-
-    fn _build_widget_tree() -> WidgetNode:
-        """Build the full smux UI as a declarative widget tree."""
+        # 1. Menu bar (row 1) — reverse video
+        output = "{output}{ansi_move(1, 1)}{ansi_clear_line()}"
+        output = "{output}{esc}[7m"
         val term_icon = icon_or_ascii("terminal", ">", self.use_nerd)
         val file_icon = icon_or_ascii("file", "F", self.use_nerd)
         val gear_icon = icon_or_ascii("gear", "V", self.use_nerd)
         val help_icon = icon_or_ascii("question", "?", self.use_nerd)
+        var menu_text = " {term_icon} {self.config.title}  {file_icon} File  {gear_icon} View  {help_icon} Help"
+        # Pad to full width
+        while menu_text.len() < self.width:
+            menu_text = "{menu_text} "
+        output = "{output}{menu_text}{esc}[0m"
 
-        # Menu bar items
-        val menu_items = [
-            "{term_icon} {self.config.title}",
-            "{file_icon} File",
-            "{gear_icon} View",
-            "{help_icon} Help"
-        ]
-
-        # Content lines (scrolled view)
-        var content_children: [WidgetNode] = []
+        # 2. Content area (rows 2 to height-bottom_bars)
         val content_h = self._content_height()
         var row = 0
         while row < content_h:
             val line_idx = row + self.scroll_offset
-            var line_content = ""
+            val screen_row = row + 2
+            output = "{output}{ansi_move(screen_row, 1)}{ansi_clear_line()}"
             if line_idx >= 0 and line_idx < self.content_lines.len() as i32:
-                line_content = self.content_lines[line_idx]
-            content_children = content_children + [text_widget("line_{row}", line_content)]
+                output = "{output}{self.content_lines[line_idx]}"
             row = row + 1
 
-        # Build optional bars
-        var children: [WidgetNode] = []
-
-        # 1. Menu bar
-        children = children + [menubar("menu", menu_items)]
-
-        # 2. Content area (takes remaining space)
-        children = children + [with_flex(column("content", content_children), 1)]
+        var next_row = content_h + 2
 
         # 3. Input line (when in input mode)
         if self.mode.name() == "INPUT":
-            children = children + [text_widget("input_line", "> {self.input_buffer}")]
+            output = "{output}{ansi_move(next_row, 1)}{ansi_clear_line()}"
+            output = "{output}{esc}[36m>{esc}[0m {self.input_buffer}"
+            next_row = next_row + 1
 
         # 4. Quick text bar (when visible)
         if self.quick_text_panel.is_visible():
-            children = children + [text_widget("quicktext", self.quick_text_panel.render(self.width as i32, self.use_nerd))]
+            output = "{output}{ansi_move(next_row, 1)}{ansi_clear_line()}"
+            output = "{output}{self.quick_text_panel.render(self.width as i32, self.use_nerd)}"
+            next_row = next_row + 1
 
         # 5. Mobile keybar (when visible)
         if self.keybar.is_visible():
-            children = children + [text_widget("keybar", self.keybar.render(self.width as i32))]
+            output = "{output}{ansi_move(next_row, 1)}{ansi_clear_line()}"
+            output = "{output}{self.keybar.render(self.width as i32)}"
+            next_row = next_row + 1
 
-        # 6. Status bar
+        # 6. Status bar (last row) — reverse video
+        output = "{output}{ansi_move(self.height, 1)}{ansi_clear_line()}"
+        output = "{output}{esc}[7m"
         var mode_icon = ""
         if self.mode.name() == "NORMAL":
             mode_icon = icon_or_ascii("check", "N", self.use_nerd)
@@ -654,9 +590,19 @@ class SmuxApp:
             mode_icon = icon_or_ascii("arrow_right", "Q", self.use_nerd)
         val mode_str = "[{mode_icon} {self.mode.name()}]"
         val size_str = "{self.width}x{self.height}"
-        children = children + [statusbar("status", "{mode_str} {self.status_message}", size_str)]
+        var status_text = " {mode_str} {self.status_message}"
+        # Right-align size string
+        val gap = self.width - status_text.len() - size_str.len() - 1
+        if gap > 0:
+            var padding = 0
+            while padding < gap:
+                status_text = "{status_text} "
+                padding = padding + 1
+        status_text = "{status_text}{size_str} "
+        output = "{output}{status_text}{esc}[0m"
 
-        column("root", children)
+        native_term_write(output)
+        native_term_flush()
 
     fn _content_height() -> i32:
         var h = self.height - 2  # menu + status
@@ -669,6 +615,70 @@ class SmuxApp:
         if h < 1:
             h = 1
         return h
+
+# ============================================================================
+# Factory Functions (interpreter-safe — avoids cross-module static method calls)
+# ============================================================================
+
+fn smux_config_defaults() -> SmuxConfig:
+    """Create default SmuxConfig. Use this instead of SmuxConfig.defaults() cross-module."""
+    var qt: [QuickTextEntry] = []
+    qt.push(QuickTextEntry(label: "Continue", snippet: "Please continue.", shortcut: "1"))
+    qt.push(QuickTextEntry(label: "Approve", snippet: "Looks good, proceed.", shortcut: "2"))
+    qt.push(QuickTextEntry(label: "Fix tests", snippet: "Fix the failing tests.", shortcut: "3"))
+    SmuxConfig(
+        title: "smux",
+        theme: "dark",
+        mobile_keybar_mode: "auto",
+        nerd_font: true,
+        quick_texts: qt,
+        hook_script: "hooks/check_done.spl",
+        hook_timeout_ms: 30000,
+        auto_continue: true,
+        notification_mode: "auto",
+        tmux_hooks_enabled: true
+    )
+
+fn smux_app_create(config: SmuxConfig, platform_name: text, backend_name: text) -> SmuxApp:
+    """Create SmuxApp. Use this instead of SmuxApp.create_with_backend() cross-module."""
+    val tmux_env = rt_env_get("TMUX")
+    val has_tmux = tmux_env != "" and tmux_env != nil
+    val use_nerd = config.nerd_font and has_nerd_font()
+    val show_kb = should_show_keybar(platform_name, config.mobile_keybar_mode)
+
+    var qt_panel = QuickTextPanel.create()
+    var qi = 0
+    while qi < config.quick_texts.len():
+        val qt = config.quick_texts[qi]
+        qt_panel.add_entry(qt.label, qt.snippet, qt.shortcut)
+        qi = qi + 1
+
+    var kb = MobileKeybar.create()
+    kb.set_visible(show_kb)
+
+    var tmux_mgr = TmuxHookManager.create()
+
+    SmuxApp(
+        config: config,
+        mode: AppMode.Normal,
+        running: false,
+        width: 80,
+        height: 24,
+        content_lines: [],
+        input_buffer: "",
+        status_message: "Ready",
+        scroll_offset: 0,
+        render_needed: true,
+        raw_mode_active: false,
+        paused: false,
+        platform_name: platform_name,
+        has_tmux_env: has_tmux,
+        use_nerd: use_nerd,
+        quick_text_panel: qt_panel,
+        keybar: kb,
+        tmux_hook_mgr: tmux_mgr,
+        backend_name: backend_name
+    )
 
 # ============================================================================
 # CSI Parser

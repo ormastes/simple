@@ -9,6 +9,8 @@
 # Verify: Stage2 == Stage3 (binary reproducibility)
 
 use app.build.types (BuildProfile)
+use app.build.orchestrator (run_ffi_generator_with_binary, ffi_generation_skip_env_name)
+use app.io.mod (file_exists, file_size_raw, file_copy, file_delete, dir_create, file_hash_sha256, shell, time_now_unix_micros, env_set)
 use std.log.{error}
 
 # Bootstrap stage
@@ -64,12 +66,29 @@ impl BootstrapResult:
 
         parts.join("\n")
 
-use app.io.mod (file_exists, file_size_raw, file_copy, file_delete, dir_create, process_run, file_hash_sha256, shell, time_now_unix_micros)
 use std.platform.{get_host_os}
 
 # Platform-specific executable extension
 fn exe_ext() -> text:
     if get_host_os() == "windows": ".exe" else: ""
+
+fn bootstrap_native_build_command(binary: text, output: text, backend: text) -> text:
+    if backend == "":
+        "{binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl -o {output} --clean"
+    else:
+        "{binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend {backend} -o {output} --clean"
+
+fn bootstrap_prepare_ffi_workspace(config: BootstrapConfig, verbose: bool) -> bool:
+    if not run_ffi_generator_with_binary(config.rust_seed_binary, verbose):
+        return false
+
+    if not env_set(ffi_generation_skip_env_name(), "1"):
+        error("build", "Failed to set {ffi_generation_skip_env_name()}")
+        return false
+
+    if verbose:
+        print "Bootstrap FFI workspace prepared once at build/rust/ffi_gen"
+    true
 
 # Bootstrap class
 class Bootstrap:
@@ -81,6 +100,16 @@ class Bootstrap:
 
         # Create output directory
         dir_create(config.output_dir, false)
+
+        # Generate the FFI workspace once, then tell the nested stage builds to reuse it.
+        if not bootstrap_prepare_ffi_workspace(config, true):
+            return BootstrapResult(
+                stage1: empty_stage_result(BootstrapStage.Stage1),
+                stage2: empty_stage_result(BootstrapStage.Stage2),
+                stage3: empty_stage_result(BootstrapStage.Stage3),
+                verified: false,
+                overall_success: false
+            )
 
         # Stage 1: Rust seed → simple_new1
         print "Stage 1: Building from Rust seed..."
@@ -174,7 +203,7 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
         )
 
     val stage1_path = "{config.output_dir}/simple_new1{exe_ext()}"
-    val compile_cmd = "{rust_seed} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl -o {stage1_path} --clean"
+    val compile_cmd = bootstrap_native_build_command(rust_seed, stage1_path, "")
     val compile_result = shell(compile_cmd)
     if compile_result.exit_code != 0:
         error("build", "Stage 1 compilation failed")
@@ -212,7 +241,7 @@ fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
     val stage2_path = "{config.output_dir}/simple_new2{exe_ext()}"
     val stage1_binary = stage1.binary_path
 
-    val compile_cmd = "{stage1_binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend {config.backend} -o {stage2_path} --clean"
+    val compile_cmd = bootstrap_native_build_command(stage1_binary, stage2_path, config.backend)
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -249,7 +278,7 @@ fn run_stage3(config: BootstrapConfig, stage2: StageResult) -> StageResult:
 
     shell("chmod +x {stage2_binary}")
 
-    val compile_cmd = "{stage2_binary} native-build --source src/compiler --source src/lib --source src/app --entry src/app/cli/main.spl --backend {config.backend} -o {stage3_path} --clean"
+    val compile_cmd = bootstrap_native_build_command(stage2_binary, stage3_path, config.backend)
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:

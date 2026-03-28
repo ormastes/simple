@@ -2,7 +2,7 @@
 
 Date: 2026-03-29
 Area: `compiler.driver.driver_api` / interpreter module loader
-Status: Draft implementation plan
+Status: Implemented (2026-03-29)
 
 ## Problem
 

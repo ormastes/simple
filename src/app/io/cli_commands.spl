@@ -11,6 +11,7 @@ use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
 use std.tooling.easy_fix.{FixConfidence}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
 use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
+use app.io.mod.{env_get, env_set}
 use app.io.cli_ops.{_cli_shell, _cli_eprint}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -50,6 +51,12 @@ fn _cli_strip_command(args: [text], cmd: text) -> [text]:
         args.slice(1, args.len())
     else:
         args
+
+fn ffi_gen_entry_path() -> text:
+    "src/compiler/90.tools/ffi_gen/main.spl"
+
+fn ffi_gen_force_args(args: [text]) -> text:
+    args.join(" ")
 
 fn cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64:
     val result = interpret_file("src/app/test_runner_new/main.spl")
@@ -431,9 +438,23 @@ fn cli_run_brief(args: [text]) -> i64:
     0
 
 fn cli_run_ffi_gen(args: [text]) -> i64:
-    # Delegate to wrapper_gen module (same infrastructure)
+    # Route to the real generator implementation in compiler/90.tools.
     val run_args = _cli_strip_command(args, "ffi-gen")
-    cli_run_file("src/app/wrapper_gen/mod.spl", run_args, false, false)
+    val previous_force_args = env_get("SIMPLE_FORCE_ARGS")
+    env_set("SIMPLE_FORCE_ARGS", ffi_gen_force_args(run_args))
+
+    val result = interpret_file(ffi_gen_entry_path())
+
+    if previous_force_args == nil or previous_force_args == "":
+        env_set("SIMPLE_FORCE_ARGS", "")
+    else:
+        env_set("SIMPLE_FORCE_ARGS", previous_force_args)
+
+    match result:
+        case CompileResult.Success(_): 0
+        case _:
+            _cli_eprint("Error running ffi-gen")
+            1
 
 fn cli_run_i18n(args: [text]) -> i64:
     # List available i18n language files and their status

@@ -6,15 +6,43 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use tracing::trace;
 
 use crate::value::Value;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
+/// Check if loader tracing/summary is enabled via SIMPLE_LOADER_TRACE env var.
+fn loader_stats_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SIMPLE_LOADER_TRACE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Aggregated loader statistics for diagnosing heavy-path imports.
+/// Gated behind SIMPLE_LOADER_TRACE=1.
+#[derive(Default)]
+struct LoaderStats {
+    /// Number of times each module path was visited (including cache hits)
+    visit_counts: HashMap<PathBuf, u32>,
+    /// Cumulative evaluation time per module in microseconds (excludes cache hits)
+    eval_time_us: HashMap<PathBuf, u128>,
+    /// Maximum recursion depth seen during this session
+    max_depth_seen: usize,
+    /// Total unique modules loaded (non-cached)
+    total_loaded: usize,
+    /// Total sibling preload evaluations
+    sibling_preloads: usize,
+}
+
 // Thread-local cache for normalize_path_key to avoid repeated canonicalize() syscalls
 thread_local! {
     static PATH_KEY_CACHE: RefCell<HashMap<PathBuf, PathBuf>> = RefCell::new(HashMap::new());
+    static LOADER_STATS: RefCell<LoaderStats> = RefCell::new(LoaderStats::default());
 }
 
 /// Maximum depth for recursive module loading to prevent infinite loops
@@ -57,6 +85,8 @@ pub fn clear_module_cache() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
+    // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
+    print_loader_summary();
     // Print resolve stats before clearing (if profiling enabled)
     super::interpreter_module::print_resolve_stats();
     // Also clear path resolution cache
@@ -318,6 +348,89 @@ pub fn clear_partial_module_exports(path: &Path) {
     trace!(path = ?key, "Clearing partial module exports");
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| {
         cache.borrow_mut().remove(&key);
+    });
+}
+
+/// Record a module visit (called at entry of load_and_merge_module).
+/// Tracks visit count and max depth.
+pub fn record_module_visit(path: &Path, depth: usize) {
+    if !loader_stats_enabled() {
+        return;
+    }
+    LOADER_STATS.with(|stats| {
+        let mut s = stats.borrow_mut();
+        *s.visit_counts.entry(path.to_path_buf()).or_insert(0) += 1;
+        if depth > s.max_depth_seen {
+            s.max_depth_seen = depth;
+        }
+    });
+}
+
+/// Record eval time for a module (called after successful evaluation, not for cache hits).
+pub fn record_module_eval_time(path: &Path, elapsed_us: u128) {
+    if !loader_stats_enabled() {
+        return;
+    }
+    LOADER_STATS.with(|stats| {
+        let mut s = stats.borrow_mut();
+        *s.eval_time_us.entry(path.to_path_buf()).or_insert(0) += elapsed_us;
+        s.total_loaded += 1;
+    });
+}
+
+/// Record a sibling preload evaluation.
+pub fn record_sibling_preload() {
+    if !loader_stats_enabled() {
+        return;
+    }
+    LOADER_STATS.with(|stats| {
+        stats.borrow_mut().sibling_preloads += 1;
+    });
+}
+
+/// Print aggregated loader summary to stderr, then clear stats.
+/// Called from clear_module_cache() when SIMPLE_LOADER_TRACE=1.
+pub fn print_loader_summary() {
+    if !loader_stats_enabled() {
+        return;
+    }
+    LOADER_STATS.with(|stats| {
+        let s = stats.borrow();
+        if s.visit_counts.is_empty() {
+            return;
+        }
+
+        eprintln!("[loader-summary] === Module Loader Summary ===");
+        eprintln!("[loader-summary] Total unique modules loaded: {}", s.total_loaded);
+        eprintln!("[loader-summary] Total module visits (incl. cache): {}", s.visit_counts.values().sum::<u32>());
+        eprintln!("[loader-summary] Max recursion depth: {}", s.max_depth_seen);
+        eprintln!("[loader-summary] Sibling preload evaluations: {}", s.sibling_preloads);
+
+        // Top 10 most-visited modules
+        let mut by_visits: Vec<_> = s.visit_counts.iter().collect();
+        by_visits.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("[loader-summary] Top visited modules:");
+        for (path, count) in by_visits.iter().take(10) {
+            // Show short path: strip common prefix up to src/
+            let display = path.to_string_lossy();
+            let short = display.find("src/").map(|i| &display[i..]).unwrap_or(&display);
+            eprintln!("[loader-summary]   {:>4}x  {}", count, short);
+        }
+
+        // Top 10 slowest modules
+        let mut by_time: Vec<_> = s.eval_time_us.iter().collect();
+        by_time.sort_by(|a, b| b.1.cmp(a.1));
+        eprintln!("[loader-summary] Slowest modules:");
+        for (path, time_us) in by_time.iter().take(10) {
+            let display = path.to_string_lossy();
+            let short = display.find("src/").map(|i| &display[i..]).unwrap_or(&display);
+            eprintln!("[loader-summary]   {:>6}us  {}", time_us, short);
+        }
+        eprintln!("[loader-summary] ===========================");
+    });
+    // Clear stats after printing
+    LOADER_STATS.with(|stats| {
+        *stats.borrow_mut() = LoaderStats::default();
     });
 }
 

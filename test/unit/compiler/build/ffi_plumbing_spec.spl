@@ -1,0 +1,55 @@
+"""
+# Build/bootstrap FFI plumbing specification
+#
+# Verifies that the build pipeline points at the real ffi_gen generator and
+# that bootstrap uses a one-time preparation hook with a skip flag for later
+# stage reuse.
+"""
+
+use app.build.orchestrator.{
+    ffi_generator_script_path,
+    ffi_generator_output_dir,
+    ffi_workspace_root,
+    ffi_workspace_manifest_path,
+    ffi_workspace_source_path,
+    build_ffi_generator_args,
+    ffi_generation_skip_env_name
+}
+use app.io.mod.{file_read}
+
+describe "build/bootstrap FFI plumbing":
+    it "targets the real ffi_gen workspace":
+        expect(ffi_generator_script_path()).to_equal("src/compiler/90.tools/ffi_gen/main.spl")
+        expect(ffi_generator_output_dir()).to_equal("build/rust/ffi_gen")
+        expect(ffi_workspace_root()).to_equal("build/rust/ffi_gen")
+        expect(ffi_workspace_manifest_path()).to_equal("build/rust/ffi_gen/Cargo.toml")
+        expect(ffi_workspace_source_path()).to_equal("build/rust/ffi_gen/src/lib.rs")
+        expect(ffi_generation_skip_env_name()).to_equal("SIMPLE_SKIP_FFI_GEN")
+
+    it "builds generator args for the canonical workspace":
+        val args = build_ffi_generator_args()
+        expect(args.len()).to_equal(3)
+        expect(args[0]).to_equal("src/compiler/90.tools/ffi_gen/main.spl")
+        expect(args[1]).to_equal("--gen-workspace")
+        expect(args[2]).to_equal("--output=build/rust/ffi_gen")
+
+    it "bootstrap source uses the deterministic ffi helper and skip flag":
+        val bootstrap_source = file_read("src/compiler/80.driver/build/bootstrap.spl")
+        expect(bootstrap_source.contains("bootstrap_prepare_ffi_workspace")).to_equal(true)
+        expect(bootstrap_source.contains("bootstrap_native_build_command")).to_equal(true)
+        expect(bootstrap_source.contains("SIMPLE_SKIP_FFI_GEN")).to_equal(true)
+        expect(bootstrap_source.contains("src/app/ffi_gen")).to_equal(false)
+
+    it "orchestrator source points at the real generator and no stale app path":
+        val orchestrator_source = file_read("src/compiler/80.driver/build/orchestrator.spl")
+        expect(orchestrator_source.contains("src/compiler/90.tools/ffi_gen/main.spl")).to_equal(true)
+        expect(orchestrator_source.contains("src/app/ffi_gen")).to_equal(false)
+        expect(orchestrator_source.contains("SIMPLE_SKIP_FFI_GEN")).to_equal(true)
+
+    it "legacy command tables point ffi-gen at the canonical generator":
+        val dispatch_source = file_read("src/app/cli/dispatch/table.spl")
+        val bootstrap_check_source = file_read("src/app/cli/bootstrap_check.spl")
+        expect(dispatch_source.contains("src/compiler/90.tools/ffi_gen/main.spl")).to_equal(true)
+        expect(dispatch_source.contains("src/app/ffi_gen/main.spl")).to_equal(false)
+        expect(bootstrap_check_source.contains("src/compiler/90.tools/ffi_gen/main.spl")).to_equal(true)
+        expect(bootstrap_check_source.contains("src/app/ffi_gen/main.spl")).to_equal(false)

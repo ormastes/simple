@@ -41,7 +41,7 @@ use compiler.tools.ffi_gen.lib_gen (generate_simple_ffi_lib)
 
 # Spec modules for --gen-all
 use compiler.tools.ffi_gen.specs (runtime_value_module, gc_module, io_module, process_module, time_module, crypto_module, archive_module, system_module, codegen_module, data_module, serde_module, concurrent_module, cli_module, net_module)
-use std.log.{error, warn}
+use std.log.{error}
 
 # Re-export workspace generation (extracted to ffi_gen_workspace.spl)
 use compiler.tools.ffi_gen.ffi_gen_workspace.*
@@ -147,7 +147,7 @@ class CliOptions:
     static fn default() -> CliOptions:
         CliOptions(
             input_file: "",
-            output_dir: "build/rust",
+            output_dir: "build/rust/ffi_gen",
             dry_run: false,
             verbose: false,
             lang_filter: "",
@@ -176,7 +176,7 @@ fn print_help():
     print "  simple ffi-gen <file.spl> [OPTIONS]"
     print ""
     print "Options:"
-    print "  --output=<dir>    Output directory (default: build/rust/)"
+    print "  --output=<dir>    Output directory (default: build/rust/ffi_gen/)"
     print "  --dry-run         Print generated code without writing"
     print "  --verbose         Verbose logging"
     print "  --lang=<lang>     Filter by language: rust, c"
@@ -263,6 +263,12 @@ fn log_info(msg: text, verbose: bool):
 
 fn log_step(msg: text):
     print "  {msg}"
+
+fn ffi_backend_supported(lang: text) -> bool:
+    lang == "rust"
+
+fn ffi_backend_not_implemented_message(spec: LibExternSpec) -> text:
+    "@Lib(lang: \"{spec.lib_lang}\") is parsed but the generator backend is not implemented for {spec.class_name} ({spec.lib_name}). Use @export(\"C\") and the shared-library/header bridge for C/C++ interop."
 
 # ============================================================================
 # Build Environment Setup
@@ -357,17 +363,19 @@ fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvCon
             print "No @Lib annotations match lang={opts.lang_filter}"
             return 0
 
+    val unsupported_specs = specs.filter(\s: not ffi_backend_supported(s.lib_lang))
+    if unsupported_specs.len() > 0:
+        for spec in unsupported_specs:
+            print_error(ffi_backend_not_implemented_message(spec))
+        return 1
+
     # Generate code per language backend
     var rust_specs = specs.filter(\s: s.lib_lang == "rust")
-    var c_specs = specs.filter(\s: s.lib_lang == "c" or s.lib_lang == "cpp")
 
     if rust_specs.len() > 0:
         val result = generate_rust_wrappers(rust_specs, opts, rust_config)
         if result != 0:
             return result
-
-    if c_specs.len() > 0:
-        warn("ffi_gen", "C/C++ codegen not yet implemented, skipping {c_specs.len()} spec(s)")
 
     print "Done."
     return 0
@@ -555,7 +563,6 @@ fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
     print "Generating all FFI modules to {opts.output_dir}"
 
     # List of all full specs to generate
-    val spec_dir = "src/app/ffi_gen/specs"
     val modules: [text] = ["runtime_value", "gc"]
 
     # Create output directories (ignore errors if already exist)
@@ -662,13 +669,21 @@ fn verify_generated_code(out_dir: text, verbose: bool) -> i64:
 
     # Run cargo check
     val result = process_run("cargo", ["check", "--manifest-path", "{out_dir}/Cargo.toml"])
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
 
-    if result == 0:
+    if verbose and stdout.?:
+        print stdout
+    if verbose and stderr.?:
+        print stderr
+
+    if exit_code == 0:
         log_step("Verification successful: cargo check passed")
     else:
-        print_error("Verification failed: cargo check returned {result}")
+        print_error("Verification failed: cargo check returned {exit_code}")
 
-    result
+    exit_code
 
 # ============================================================================
 # Entry Point

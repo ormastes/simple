@@ -71,6 +71,7 @@ pub fn print_help() {
     eprintln!("Documentation Generation:");
     eprintln!("  simple sspec-docgen <files...>           Generate docs from SSpec test files");
     eprintln!("  simple sspec-docgen <files...> -o <dir>  Output to specific directory");
+    eprintln!("  simple ffi-gen <file.spl> [options]      Generate FFI wrappers from @Lib extern declarations");
     eprintln!();
     eprintln!("Build & Audit (#911-915):");
     eprintln!("  simple query --generated           Find all LLM-generated code");

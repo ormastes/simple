@@ -288,6 +288,16 @@ fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProces
 // Binary / entry resolution
 // ---------------------------------------------------------------------------
 
+fn resolve_external_url() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--url" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    env::var("SIMPLE_DASHBOARD_URL").ok()
+}
+
 fn resolve_simple_binary() -> String {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && !args[1].starts_with('-') {
@@ -347,11 +357,15 @@ fn log_entry_file_status(entry_file: &Option<String>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Check for external URL mode (e.g. --url http://localhost:3000)
+    let external_url = resolve_external_url();
+
     let simple_bin = resolve_simple_binary();
     let entry_file = resolve_entry_file();
 
     eprintln!("[tauri-shell] binary: {}", simple_bin);
     eprintln!("[tauri-shell] entry: {:?}", entry_file);
+    eprintln!("[tauri-shell] external_url: {:?}", external_url);
     log_entry_file_status(&entry_file);
 
     let mut startup_error: Option<String> = None;
@@ -360,48 +374,51 @@ pub fn run() {
     let mut child_stdin = None;
     let mut child_slot = None;
 
-    let ui_entry = entry_file
-        .as_ref()
-        .map(|entry| entry.ends_with(".ui.sdn"))
-        .unwrap_or(false);
+    // In URL mode, skip subprocess spawning entirely
+    if external_url.is_none() {
+        let ui_entry = entry_file
+            .as_ref()
+            .map(|entry| entry.ends_with(".ui.sdn"))
+            .unwrap_or(false);
 
-    if ui_entry && !binary_supports_ui_command(&simple_bin) {
-        startup_error = Some(format!(
-            "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
-            simple_bin,
-            entry_file.clone().unwrap_or_default()
-        ));
-        eprintln!(
-            "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
-            simple_bin
-        );
-    } else {
-        let mut cmd = Command::new(&simple_bin);
-        if let Some(ref entry) = entry_file {
-            if entry.ends_with(".ui.sdn") {
-                cmd.arg("tauri-entry").arg(entry);
-            } else {
-                cmd.arg("run").arg(entry);
+        if ui_entry && !binary_supports_ui_command(&simple_bin) {
+            startup_error = Some(format!(
+                "The selected Simple binary does not support `simple ui ...`.\n\nBinary: {}\nEntry: {}\n\nTauri HTML is loading correctly now, but this executable cannot launch the Simple UI subprocess for .ui.sdn files.",
+                simple_bin,
+                entry_file.clone().unwrap_or_default()
+            ));
+            eprintln!(
+                "[tauri-shell] incompatible Simple binary for .ui.sdn launch: {}",
+                simple_bin
+            );
+        } else {
+            let mut cmd = Command::new(&simple_bin);
+            if let Some(ref entry) = entry_file {
+                if entry.ends_with(".ui.sdn") {
+                    cmd.arg("tauri-entry").arg(entry);
+                } else {
+                    cmd.arg("run").arg(entry);
+                }
             }
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        match cmd.spawn() {
-            Ok(mut child) => {
-                eprintln!("[tauri-shell] subprocess pid={}", child.id());
-                child_stdout = child.stdout.take();
-                child_stderr = child.stderr.take();
-                child_stdin = child.stdin.take();
-                child_slot = Some(child);
-            }
-            Err(e) => {
-                startup_error = Some(format!(
-                    "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
-                    simple_bin, entry_file, e
-                ));
-                eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    eprintln!("[tauri-shell] subprocess pid={}", child.id());
+                    child_stdout = child.stdout.take();
+                    child_stderr = child.stderr.take();
+                    child_stdin = child.stdin.take();
+                    child_slot = Some(child);
+                }
+                Err(e) => {
+                    startup_error = Some(format!(
+                        "Failed to spawn Simple subprocess.\n\nBinary: {}\nEntry: {:?}\nError: {}",
+                        simple_bin, entry_file, e
+                    ));
+                    eprintln!("[tauri-shell] spawn failed '{}': {}", simple_bin, e);
+                }
             }
         }
     }
@@ -423,12 +440,18 @@ pub fn run() {
             send_resize,
         ])
         .setup(move |app| {
-            eprintln!("[tauri-shell] creating window from app://index.html");
+            let url = if let Some(ref ext_url) = external_url {
+                eprintln!("[tauri-shell] creating window with external URL: {}", ext_url);
+                WebviewUrl::External(ext_url.parse().expect("invalid --url value"))
+            } else {
+                eprintln!("[tauri-shell] creating window from app://index.html");
+                WebviewUrl::App("index.html".into())
+            };
 
             let builder = WebviewWindowBuilder::new(
                 app,
                 "main",
-                WebviewUrl::App("index.html".into()),
+                url,
             );
             #[cfg(desktop)]
             let builder = builder.title("Simple UI").inner_size(1280.0, 720.0);

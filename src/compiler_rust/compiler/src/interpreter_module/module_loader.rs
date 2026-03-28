@@ -48,8 +48,9 @@ use crate::value::{Env, Value};
 use super::module_cache::{
     cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
     get_cached_module_exports, get_partial_module_exports, increment_load_depth, increment_total_modules,
-    is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading, MAX_MODULE_DEPTH,
-    MAX_TOTAL_MODULES,
+    is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
+    record_module_visit, record_module_eval_time, record_sibling_preload,
+    MAX_MODULE_DEPTH, MAX_TOTAL_MODULES,
 };
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
@@ -399,6 +400,7 @@ pub fn load_and_merge_module(
     }
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
+    record_module_visit(&module_path, depth);
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
@@ -486,15 +488,16 @@ pub fn load_and_merge_module(
     };
 
     let requested_names = requested_group_import_names(use_stmt);
-    // Apply selective import filtering for modules under src/compiler/ when a Group import
-    // is used. This avoids evaluating large compiler modules in full when only a few symbols
-    // are needed. The filter is general-purpose (not hardcoded to specific paths).
-    let is_compiler_module = {
+    // Apply selective import filtering for Group imports. This avoids evaluating large
+    // modules in full when only a few symbols are needed. The filter is safe for all
+    // modules since it always keeps classes/structs/enums (cheap to evaluate).
+    // Skip only for stdlib modules (src/lib/) which are small and heavily cached.
+    let is_project_module = {
         let path_str = module_path.to_string_lossy();
-        path_str.contains("src/compiler/") || path_str.contains("src\\compiler\\")
+        !path_str.contains("src/lib/") && !path_str.contains("src\\lib\\")
     };
     let filtered_items: Vec<Node> =
-        if is_compiler_module {
+        if is_project_module {
             if let Some(names) = requested_names.as_ref() {
                 let total = module.items.len();
                 let filtered: Vec<Node> = module
@@ -576,6 +579,7 @@ pub fn load_and_merge_module(
                                     break;
                                 }
                             }
+                            record_sibling_preload();
                             loader_trace!("sibling-preload", "{} (requested: {:?})", sibling_path.display(), requested_names);
                             debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
                             if let Ok(sib_source) = fs::read_to_string(sibling_path) {
@@ -720,7 +724,9 @@ pub fn load_and_merge_module(
     // Mark module as done loading
     unmark_module_loading(&module_path);
     decrement_load_depth();
-    let elapsed_ms = load_start.elapsed().as_millis();
+    let elapsed_us = load_start.elapsed().as_micros();
+    let elapsed_ms = elapsed_us / 1000;
+    record_module_eval_time(&module_path, elapsed_us);
     loader_trace!("loaded", "{} ({} exports, {}d, {}ms)", module_path.display(), exports.len(), depth, elapsed_ms);
     debug!(path = ?module_path, exports = exports.len(), "Successfully loaded module");
 

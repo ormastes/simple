@@ -9,6 +9,8 @@ use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_opti
 use app.io.mod (file_exists, file_read, file_write, dir_create_all, file_remove, file_modified_time, shell_int, shell_output_trimmed, shell_bool, shell_output, shell)
 use std.text.{to_int_or}
 use std.text.{escape_json}
+use app.web_dashboard.server.{DashboardServer}
+use app.ui.detect.{has_tauri_shell}
 
 fn main() -> i64:
     val args = get_cli_args()
@@ -80,6 +82,9 @@ fn run_dashboard(args: [text]) -> i64:
         case "query":
             run_query(sub_args)
             return 0
+        case "gui":
+            run_gui(sub_args)
+            return 0
         case "help":
             print_help()
             return 0
@@ -108,6 +113,7 @@ fn print_help():
     print "  coverage       Show coverage summary"
     print "  collect        Collect metrics from sources"
     print "  serve          Start web dashboard server"
+    print "  gui            Open dashboard in desktop window (or browser with --browser)"
     print "  export         Export dashboard report (html/json)"
     print "  invalidate-cache  Clear dashboard cache"
     print "  snapshot       Save snapshot to history"
@@ -127,6 +133,8 @@ fn print_help():
     print "  simple dashboard collect --mode=full"
     print "  simple dashboard export --format=html > report.html"
     print "  simple dashboard serve --port 3000"
+    print "  simple dashboard gui --port 3000"
+    print "  simple dashboard gui --browser"
     print "  simple dashboard query 'todos where priority=P0'"
     print "  simple dashboard compare --baseline=2026-01-01"
 
@@ -691,26 +699,32 @@ fn run_serve(args: [text]):
     val parsed = parse_cli_args(spec2, args)
     val port = to_int_or(parsed_option(parsed, "port"), 3000)
 
-    ensure_dirs()
-    file_write("{DASHBOARD_DIR}/index.html", export_html())
-    file_write("{DASHBOARD_DIR}/data.json", export_json())
-
     print "Starting dashboard server on http://localhost:{port}"
-    print "Serving directory: doc/10_metrics/dashboard"
     print "Press Ctrl+C to stop"
 
-    var cmd = ""
-    if shell_bool("command -v python3 >/dev/null 2>&1"):
-        cmd = "python3 -m http.server {port} --directory doc/10_metrics/dashboard"
-    elif shell_bool("command -v python >/dev/null 2>&1"):
-        cmd = "python -m http.server {port} --directory doc/10_metrics/dashboard"
-    else:
-        print "Error: python3 or python is required for serve."
-        return
+    val server = DashboardServer.new(port)
+    server.start()
 
-    val result = shell(cmd)
-    if result.exit_code != 0:
-        print "Server exited with code {result.exit_code}"
+fn run_gui(args: [text]):
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+    val spec3 = cli_spec_flag(spec2, "browser", "b", "Open in browser instead of desktop window")
+    val parsed = parse_cli_args(spec3, args)
+    val port = to_int_or(parsed_option(parsed, "port"), 3000)
+    val use_browser = parsed_flag(parsed, "browser")
+
+    print "Starting Dashboard GUI on http://localhost:{port}"
+
+    if not use_browser and has_tauri_shell():
+        # Launch Tauri desktop window pointing at dashboard URL
+        shell("tools/tauri-shell/src-tauri/target/release/simple-tauri-shell --url http://localhost:{port} &")
+    else:
+        # Fallback: open in system browser
+        shell("(sleep 1 && open http://localhost:{port}) &")
+
+    # Start the DashboardServer (blocking)
+    val server = DashboardServer.new(port)
+    server.start()
 
 
 # Re-export Phase 6 features (extracted to dashboard_phase6.spl)

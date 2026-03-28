@@ -1,7 +1,7 @@
 # smux — Simple Mux Terminal GUI App
 # Entry point: CLI args, SDN config loading, platform detection, runs SmuxApp.
 
-use src.app.{SmuxApp, SmuxConfig}
+use src.app.{SmuxApp, SmuxConfig, smux_config_defaults, smux_app_create}
 use src.quick_text.{QuickTextEntry}
 use src.platform.{detect_platform, Platform}
 
@@ -35,13 +35,13 @@ fn _parse_int_or(s: text, fallback: i64) -> i64:
 
 fn load_config(path: text) -> SmuxConfig:
     if path == "" or not rt_file_exists(path):
-        return SmuxConfig.defaults()
+        return smux_config_defaults()
     val content_raw = rt_file_read_text(path)
     if content_raw == nil:
-        return SmuxConfig.defaults()
+        return smux_config_defaults()
     val content = "{content_raw}"
     if content == "":
-        return SmuxConfig.defaults()
+        return smux_config_defaults()
 
     var title = "smux"
     var theme = "dark"
@@ -174,7 +174,62 @@ fn _get_flag_value(args: [text], flag: text) -> text:
         i = i + 1
     return ""
 
+fn _render_preview():
+    """Render one frame as plain text (no raw mode needed)."""
+    val config = load_config(_find_config_path())
+    val nerd = false
+    val w = 80
+
+    # Menu bar
+    var menu = " > {config.title}  F File  V View  ? Help"
+    while menu.len() < w:
+        menu = "{menu} "
+    print "\u{001b}[7m{menu}\u{001b}[0m"
+
+    # Content
+    print "Welcome to smux - Simple Mux Terminal GUI"
+    print "Platform: preview | Nerd Font: no"
+    print ""
+    print "Keybindings:"
+    print "  i       - Enter input mode"
+    print "  Esc     - Return to normal mode"
+    print "  Tab     - Toggle quick text panel"
+    print "  Alt+1-9 - Send quick text"
+    print "  d       - Check LLM done hook"
+    print "  q       - Quit (in normal mode)"
+    print "  Ctrl+C  - Force quit"
+    print "  Up/Down - Scroll"
+    print ""
+
+    # Quick text bar
+    var qt_bar = ""
+    var qi = 0
+    while qi < config.quick_texts.len():
+        val qt = config.quick_texts[qi]
+        if qi > 0:
+            qt_bar = "{qt_bar} "
+        qt_bar = "{qt_bar}\u{001b}[44m\u{001b}[37m Alt+{qt.shortcut}:{qt.label} \u{001b}[0m"
+        qi = qi + 1
+    print qt_bar
+
+    # Status bar
+    var status = " [N NORMAL] Ready"
+    val size = "80x24"
+    val gap = w - status.len() - size.len() - 1
+    var pad = 0
+    while pad < gap:
+        status = "{status} "
+        pad = pad + 1
+    status = "{status}{size} "
+    print "\u{001b}[7m{status}\u{001b}[0m"
+
+var _main_ran = false
+
 fn main():
+    if _main_ran:
+        return
+    _main_ran = true
+
     val args = sys_get_args()
 
     if _has_flag(args, "--help") or _has_flag(args, "-h"):
@@ -193,6 +248,10 @@ fn main():
         print "smux 0.1.0"
         return
 
+    if _has_flag(args, "--render"):
+        _render_preview()
+        return
+
     # Backend selection: --gui or --backend=tui|tauri
     var backend_name = "tui"
     if _has_flag(args, "--gui"):
@@ -204,7 +263,7 @@ fn main():
     val platform = detect_platform()
     val config_path = _find_config_path()
     val config = load_config(config_path)
-    var app = SmuxApp.create_with_backend(config, platform.name(), backend_name)
+    var app = smux_app_create(config, platform.name(), backend_name)
     app.run()
 
 main()

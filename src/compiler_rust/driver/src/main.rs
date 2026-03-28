@@ -188,6 +188,12 @@ fn handle_ui_wrapper(_ctx: &CommandContext) -> i32 {
     1
 }
 
+fn handle_ffi_gen_wrapper(_ctx: &CommandContext) -> i32 {
+    eprintln!("error: ffi-gen requires Simple app dispatch support");
+    eprintln!("Run from the project root or set SIMPLE_HOME so src/compiler/90.tools/ffi_gen/main.spl can be resolved.");
+    1
+}
+
 fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     handle_run(args, gc_log, gc_off)
 }
@@ -430,6 +436,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "",
         rust_handler: Handler::Args(run_sspec_docgen_rust),
         env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "ffi-gen",
+        app_path: "src/compiler/90.tools/ffi_gen/main.spl",
+        rust_handler: Handler::Custom(handle_ffi_gen_wrapper),
+        env_override: "",
         needs_rust_flags: &[],
     },
     // Brief view
@@ -810,6 +823,8 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
+        && app_relative_path != "src/app/dashboard/main.spl"
+        && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
     {
         return None;
     }
