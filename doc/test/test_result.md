@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-03-28 18:26:12
+**Generated:** 2026-03-28 18:27:47
 **Total Tests:** 10
 **Status:** ⚠️ 4 FAILED
 
@@ -41,26 +41,11 @@
 
 ## ❌ Failed Tests (4)
 
-### 🔴 warns when docs point to raw specs
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 2026-03-28T09:26:12.253990+00:00
-**Flaky:** No (100.0% failure rate)
-
-**Error:**
-```
-Test 'warns when docs point to raw specs' failed
-Location: test/unit/app/tooling/traceability_spec.spl
-```
-
----
-
 ### 🔴 warns when a requirement identifier is not covered
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:26:12.253982+00:00
+**Failed:** 2026-03-28T09:27:47.172467+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -71,11 +56,26 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ---
 
+### 🔴 warns when docs point to raw specs
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 2026-03-28T09:27:47.172476+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns when docs point to raw specs' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
+
+---
+
 ### 🔴 warns for opted-in source roots without unit tests
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:26:12.253993+00:00
+**Failed:** 2026-03-28T09:27:47.172480+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -90,7 +90,7 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 2026-03-28T09:26:12.253986+00:00
+**Failed:** 2026-03-28T09:27:47.172471+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
@@ -111,8 +111,8 @@ Location: test/unit/app/tooling/traceability_spec.spl
 
 ### Priority 1: Fix Failing Tests (4)
 
-1. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
-2. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
+1. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
+2. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
 3. **warns for opted-in source roots without unit tests** - Test 'warns for opted-in source roots without unit tests' failed
 4. **warns on legacy requirement roots in specs** - Test 'warns on legacy requirement roots in specs' failed
 
