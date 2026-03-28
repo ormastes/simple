@@ -41,4 +41,4 @@ Output: `.build/rust/ffi_<lib>/` (Cargo.toml + src/lib.rs)
 - `src/lib/ffi/` — Centralized extern declarations
 - `src/app/io/mod.spl` — I/O wrappers
 - `src/app/wrapper_gen/` — Generator (mod.spl, spec_parser.spl)
-- `doc/guide/ffi/sffi.md` — Guide
+- `doc/07_guide/ffi/sffi.md` — Guide

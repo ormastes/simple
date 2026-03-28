@@ -1,5 +1,7 @@
 # Verify Skill — Production Readiness Codex
 
+**Self-sufficient.** Any LLM (Claude, Codex, Gemini) can run verify independently. Does not depend on any other LLM having participated in prior steps.
+
 Comprehensive verification that implementation is production-level, not dummy/stub code.
 
 ## Usage
@@ -25,7 +27,7 @@ Argument: `$ARGUMENTS`
 Identify:
 - **Spec files** (`*_spec.spl`) in scope
 - **Source files** (`.spl`) changed or referenced
-- **Doc files** in `doc/plan/requirement/`, `doc/feature/`, `doc/design/`, `doc/architecture/`, `doc/plan/nfr/`
+- **Doc files** in `doc/02_requirements/feature/`, `doc/02_requirements/nfr/`, `doc/05_design/`, `doc/04_architecture/`
 
 ### Phase 2 — SSpec System Test Verification
 
@@ -84,13 +86,13 @@ For each source file in scope:
 
 ### Phase 4 — Feature Requirement Verification
 
-1. **Find requirement doc:** `doc/plan/requirement/<feature>.md`
+1. **Find requirement doc:** `doc/02_requirements/feature/<feature>.md`
    - Extract all REQ-NNN statements
    - For each REQ: trace to source code implementing it
    - Verify implementation matches the "shall" statement
    - Flag requirements with no corresponding implementation
 
-2. **Find feature spec:** `doc/feature/<feature>.md`
+2. **Find feature spec:** `doc/02_requirements/feature/<feature>.md`
    - Extract all BDD scenarios (Given/When/Then)
    - Verify each scenario has a corresponding `it` block in `*_spec.spl`
    - Verify acceptance criteria checkboxes
@@ -104,7 +106,7 @@ For each source file in scope:
 
 ### Phase 5 — NFR Verification
 
-1. **Find NFR doc:** `doc/plan/nfr/<feature>.md`
+1. **Find NFR doc:** `doc/02_requirements/nfr/<feature>.md`
 2. For each NFR category present:
    - **Performance:** Check if benchmarks or timing tests exist
    - **Reliability:** Check error handling paths, graceful degradation
@@ -115,22 +117,22 @@ For each source file in scope:
 
 ### Phase 6 — Architecture & Design Doc Verification
 
-1. **Architecture doc** (`doc/architecture/`):
-   - If new modules/layers were added → verify `doc/architecture/overview.md` or relevant arch doc is updated
+1. **Architecture doc** (`doc/04_architecture/`):
+   - If new modules/layers were added → verify `doc/04_architecture/overview.md` or relevant arch doc is updated
    - If compiler pipeline changed → verify pipeline docs reflect the change
-   - If new ADR-worthy decision was made → check `doc/architecture/adr/` has a record
-   - Check `doc/architecture/file_class_structure.md` references new files
+   - If new ADR-worthy decision was made → check `doc/04_architecture/adr/` has a record
+   - Check `doc/04_architecture/file_class_structure.md` references new files
 
-2. **Design doc** (`doc/design/`):
-   - If a new feature was implemented → verify `doc/design/<feature>.md` exists
+2. **Design doc** (`doc/05_design/`):
+   - If a new feature was implemented → verify `doc/05_design/<feature>.md` exists
    - Design doc must describe: data structures, algorithms, module interactions, error handling strategy
    - Design doc must cross-reference: requirements, feature spec, test files
 
 3. **Report:**
 ```
-[PASS] doc/design/batch_processing.md — exists, cross-references REQ doc
-[FAIL] doc/design/new_parser.md — MISSING (new parser module has no design doc)
-[WARN] doc/architecture/overview.md — not updated for new module "optimizer_v2"
+[PASS] doc/05_design/batch_processing.md — exists, cross-references REQ doc
+[FAIL] doc/05_design/new_parser.md — MISSING (new parser module has no design doc)
+[WARN] doc/04_architecture/overview.md — not updated for new module "optimizer_v2"
 ```
 
 ---

@@ -307,7 +307,7 @@ MACRO_INTRODUCED_SYMBOLS.with(|cell| {
 
 ### Phase 3: Documentation (Estimated: 1 hour)
 
-1. Update `doc/spec/macro.md` with examples
+1. Update `doc/06_spec/macro.md` with examples
 2. Add doctest examples in comments
 3. Create user guide for contract-first macros
 4. Document IDE integration benefits
@@ -316,7 +316,7 @@ MACRO_INTRODUCED_SYMBOLS.with(|cell| {
 
 ### New Files
 - `src/compiler/src/macro_contracts.rs` - Core implementation (390 lines)
-- `doc/report/MACRO_CONTRACTS_IMPLEMENTATION.md` - This document
+- `doc/09_report/MACRO_CONTRACTS_IMPLEMENTATION.md` - This document
 
 ### Modified Files
 - `src/compiler/src/lib.rs` - Added module declaration

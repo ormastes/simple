@@ -41,5 +41,5 @@ ALL scripts in Simple (.spl), NOT Python/Bash. Run: `bin/simple scripts/tool.spl
 
 ## See Also
 
-- `doc/guide/language/coding_style.md` — Full style guide
-- `doc/guide/quick_reference/syntax_quick_reference.md` — Syntax reference
+- `doc/07_guide/language/coding_style.md` — Full style guide
+- `doc/07_guide/quick_reference/syntax_quick_reference.md` — Syntax reference

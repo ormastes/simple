@@ -1,16 +1,16 @@
 # Test Results
 
-**Generated:** 2026-03-26 05:25:06
-**Total Tests:** 11058
-**Status:** ⚠️ 1 FAILED
+**Generated:** 2026-03-28 18:13:00
+**Total Tests:** 10
+**Status:** ⚠️ 4 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 10827 | 97.9% |
-| ❌ Failed | 1 | 0.0% |
-| ⏭️ Skipped | 230 | 2.1% |
+| ✅ Passed | 6 | 60.0% |
+| ❌ Failed | 4 | 40.0% |
+| ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
 
@@ -20,37 +20,84 @@
 
 | Test | Change | Run |
 |------|--------|-----|
-| _test_fix2_spec | new_test |  |
-| contract_load_spec | new_test |  |
-| jit_debug_spec | new_test |  |
-| jit_probe_spec | new_test |  |
-| mini_import_spec | new_test |  |
-| mod_state_spec | new_test |  |
-| runtime_case_1_spec | new_test |  |
-| runtime_case_2_spec | new_test |  |
-| runtime_case_3_spec | new_test |  |
-| runtime_case_4_spec | new_test |  |
-| runtime_case_5_spec | new_test |  |
-| runtime_case_6_spec | new_test |  |
-| runtime_case_7_spec | new_test |  |
-| runtime_case_8_spec | new_test |  |
-| persistent_dict_intensive_spec | new_test |  |
-| persistent_vec_intensive_spec | new_test |  |
-| environment_spec | new_test |  |
-| add_1_complete_spec | new_test |  |
-| audit_1_complete_spec | new_test |  |
-| build_1_complete_spec | new_test |  |
+| normalizes date suffixed slugs | new_test |  |
+| extracts relative paths from markdown and plain text | new_test |  |
+| extracts REQ and NFR identifiers | new_test |  |
+| maps compiler sources to unit candidates | new_test |  |
+| maps lib sources to unit candidates | new_test |  |
+| maps source directories to integration candidates | new_test |  |
+| warns when a requirement identifier is not covered | new_test |  |
+| warns on legacy requirement roots in specs | new_test |  |
+| warns when docs point to raw specs | new_test |  |
+| warns for opted-in source roots without unit tests | new_test |  |
+| normalizes date suffixed slugs | fail_to_pass |  |
+| maps compiler sources to unit candidates | fail_to_pass |  |
+| maps lib sources to unit candidates | fail_to_pass |  |
+| maps source directories to integration candidates | fail_to_pass |  |
+| extracts REQ and NFR identifiers | fail_to_pass |  |
+| extracts relative paths from markdown and plain text | fail_to_pass |  |
 
 ---
 
-## ❌ Failed Tests (1)
+## ❌ Failed Tests (4)
 
-### 🔴 test_daemon_qemu_broker_spec
+### 🔴 warns for opted-in source roots without unit tests
 
-**File:** `home/ormastes/dev/pub/simple/test/unit/app/test_daemon/test_daemon_qemu_broker_spec.spl`
+**File:** `test/unit/app/tooling/traceability_spec.spl`
 **Category:** Unit
-**Failed:** 
+**Failed:** 2026-03-28T09:13:00.810742+00:00
 **Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns for opted-in source roots without unit tests' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
+
+---
+
+### 🔴 warns on legacy requirement roots in specs
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 2026-03-28T09:13:00.810732+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns on legacy requirement roots in specs' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
+
+---
+
+### 🔴 warns when docs point to raw specs
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 2026-03-28T09:13:00.810737+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns when docs point to raw specs' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
+
+---
+
+### 🔴 warns when a requirement identifier is not covered
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 2026-03-28T09:13:00.810728+00:00
+**Flaky:** No (100.0% failure rate)
+
+**Error:**
+```
+Test 'warns when a requirement identifier is not covered' failed
+Location: test/unit/app/tooling/traceability_spec.spl
+```
 
 ---
 
@@ -62,7 +109,10 @@
 
 ## 🎯 Action Items
 
-### Priority 1: Fix Failing Tests (1)
+### Priority 1: Fix Failing Tests (4)
 
-1. **test_daemon_qemu_broker_spec** - 
+1. **warns for opted-in source roots without unit tests** - Test 'warns for opted-in source roots without unit tests' failed
+2. **warns on legacy requirement roots in specs** - Test 'warns on legacy requirement roots in specs' failed
+3. **warns when docs point to raw specs** - Test 'warns when docs point to raw specs' failed
+4. **warns when a requirement identifier is not covered** - Test 'warns when a requirement identifier is not covered' failed
 

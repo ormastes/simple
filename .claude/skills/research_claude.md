@@ -1,84 +1,48 @@
-# Research (Claude) Skill — Step 1 of 5
+# Research Skill (Claude) -- Step 1: Local + Domain Research
 
-**Pipeline:** research_claude -> `/research_codex` -> `/design_gemini` -> `/design_codex` -> `/design_claude`
+**Pipeline:** Step 1 of 5 (research_claude -> research_codex -> design_gemini -> design_codex -> design_claude)
 
-Claude performs local + domain research using parallel agent teams, producing research documents and draft requirement options.
-
-## Inputs
-
-- Feature name or description from user
-- Existing docs in `doc/` vault
-
-## Outputs
-
-- `doc/01_research/local/<feature>.md` — local implementation research
-- `doc/01_research/domain/<feature>.md` — domain/external research
-- Draft requirement options in `doc/02_requirements/feature/` and `doc/02_requirements/nfr/`
-
-## Phase 1: Local Implementation Research
+## Local Implementation Research
 
 ### Tools
+- **Simple MCP:** `bin/simple query workspace-symbols`, `bin/simple query references`, `bin/simple query hover`
+- **LSP Plugin:** `bin/simple query definition`, `bin/simple query completions`, `bin/simple query call-hierarchy`
+- **Obsidian CLI:** Search `doc/` vault for existing research/design/requirement docs
 
-| Tool | Usage |
-|------|-------|
-| Simple MCP | `bin/simple query workspace-symbols --query <term>`, `bin/simple query references <file> <line>`, `bin/simple query hover <file> <line>` |
-| LSP Plugin | `bin/simple query definition <file> <line>`, `bin/simple query completions <file> <line>` |
-| Obsidian CLI | Search `doc/` vault for existing documentation |
+### Agent Team
+Spawn parallel agents:
+- **Agent 1:** Source code exploration via MCP + LSP (search `src/`)
+- **Agent 2:** Doc exploration via Obsidian CLI (search `doc/`)
+- Merge results into research summary
 
-### Agent Team (parallel)
+### Output
+- `doc/01_research/local/<feature>.md`
 
-Spawn two parallel agents:
-
-- **Agent 1 (Code Search):** Searches `src/` via Simple MCP + LSP plugin
-  - Find related types, functions, modules
-  - Trace call chains and dependencies
-  - Identify integration points and affected pipeline stages
-  - Collect code examples and existing patterns
-
-- **Agent 2 (Doc Search):** Searches `doc/` via Obsidian CLI
-  - Find prior research, design docs, ADRs
-  - Check feature specs and requirement docs
-  - Locate related guides and rules
-  - Collect references to existing decisions
-
-### Merge
-
-Combine Agent 1 + Agent 2 results into `doc/01_research/local/<feature>.md`.
-
-## Phase 2: Domain Research
+## Domain Research
 
 ### Tools
+- **Playwright CLI:** Web search for external references, API docs, papers
+- **Obsidian CLI:** Search existing `doc/01_research/domain/` for prior work
 
-| Tool | Usage |
-|------|-------|
-| Playwright CLI | Web search for external knowledge, papers, API docs, prior art |
-| Obsidian CLI | Cross-reference existing research in `doc/01_research/domain/` |
+### Workflow
+1. Search existing research docs for prior analysis
+2. Web search via Playwright for external knowledge
+3. Synthesize into research document
 
-### Process
+### Output
+- `doc/01_research/domain/<feature>.md`
 
-1. Search existing `doc/01_research/domain/` for prior work on this topic
-2. Web search for external knowledge: papers, language design references, API docs, comparable implementations
-3. Synthesize findings into `doc/01_research/domain/<feature>.md`
+## Requirement Samples
 
-## Phase 3: Requirement Samples
-
-Generate draft requirement option sets for user review in Step 2:
-
-- **Feature requirements** -> `doc/02_requirements/feature/<feature>_options.md`
-  - Multiple implementation approaches with trade-offs
-  - Scope variants (minimal, standard, full)
-- **NFR requirements** -> `doc/02_requirements/nfr/<feature>_options.md`
-  - Performance targets, reliability, maintainability
-  - Compatibility and migration considerations
-
-These are DRAFT options — the user selects from them in `/research_codex` (Step 2).
+Generate draft requirement options:
+- Feature requirements -> `doc/02_requirements/feature/<feature>_draft.md`
+- NFR requirements -> `doc/02_requirements/nfr/<feature>_draft.md`
 
 ## Research Document Format
 
 ```markdown
-# <Feature> - Research & Implementation Plan
+# Title - Research & Implementation Plan
 **Date:** YYYY-MM-DD  |  **Status:** Research Phase
-
 ## 1. Problem Analysis (current state + requirements)
 ## 2. Proposed Solution (architecture + code examples)
 ## 3. Integration with Existing Infrastructure
@@ -87,19 +51,5 @@ These are DRAFT options — the user selects from them in `/research_codex` (Ste
 ## 6. References
 ```
 
-## Critical Rules
-
-- NEVER skip local research — always check `src/` and `doc/` first
-- Parallel agents must complete before merging
-- Domain research must cross-reference local findings
-- Draft requirements are OPTIONS, not final selections
-- All output files use Markdown format
-- Include code snippets from `src/` when they illustrate integration points
-
 ## Handoff
-
-Pass all research results to `/research_codex` (Step 2):
-- `doc/01_research/local/<feature>.md`
-- `doc/01_research/domain/<feature>.md`
-- `doc/02_requirements/feature/<feature>_options.md`
-- `doc/02_requirements/nfr/<feature>_options.md`
+Pass research results to `/research_codex` (Step 2).

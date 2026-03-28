@@ -40,6 +40,6 @@ type: reference
 4. Export public API
 
 ## Doc Locations
-- Design decisions: `doc/design/`
-- Specs: `doc/spec/`
-- Writing guides: `doc/guide/writing/design_writing.md`, `doc/guide/writing/architecture_writing.md`
+- Design decisions: `doc/05_design/`
+- Specs: `doc/06_spec/`
+- Writing guides: `doc/07_guide/writing/design_writing.md`, `doc/07_guide/writing/architecture_writing.md`

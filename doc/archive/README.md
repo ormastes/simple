@@ -35,7 +35,7 @@ Documents are archived when:
 **Status:** Doctest is 90% complete. See:
 - Current status: `doc/status/sdoctest.md`
 - Implementation plan: `doc/plans/29_doctest.md`
-- Specification: `doc/spec/sdoctest.md`
+- Specification: `doc/06_spec/sdoctest.md`
 
 ### Outdated/Temporary
 - `32bit_support.md` - 32-bit support notes (deferred - needs LLVM)
@@ -51,7 +51,7 @@ If you're looking for archived content, check:
 | LLVM Backend | `doc/llvm_backend.md` |
 | Doctest Status | `doc/status/sdoctest.md` |
 | Doctest Plan | `doc/plans/29_doctest.md` |
-| Doctest Spec | `doc/spec/sdoctest.md` |
+| Doctest Spec | `doc/06_spec/sdoctest.md` |
 | 32-bit Support | `doc/features/feature.md` (#220, deferred) |
 
 ## Archive Policy

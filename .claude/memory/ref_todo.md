@@ -29,7 +29,7 @@ runtime, codegen, compiler, parser, type, stdlib, gpu, ui, test, driver, loader,
 
 ## Commands
 ```bash
-bin/simple todo-scan    # Scan + generate doc/TODO.md + doc/tracking/todo/todo_db.sdn
+bin/simple todo-scan    # Scan + generate doc/TODO.md + doc/08_tracking/todo/todo_db.sdn
 bin/simple todo-gen     # Generate docs only (legacy)
 ```
 

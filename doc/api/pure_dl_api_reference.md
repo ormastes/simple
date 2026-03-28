@@ -857,7 +857,7 @@ use lib.pure.data (normalize, standardize)
 
 ## See Also
 
-- **User Guide:** `doc/guide/acceleration_user_guide.md`
+- **User Guide:** `doc/07_guide/acceleration_user_guide.md`
 - **Examples:** `examples/pure_nn/`
 - **Tests:** `src/lib/pure/test/`
-- **Design:** `doc/design/pure_dl_sffi_acceleration_plan.md`
+- **Design:** `doc/05_design/pure_dl_sffi_acceleration_plan.md`

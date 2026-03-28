@@ -1,20 +1,38 @@
 # Impl Skill -- 15-Phase Implementation Workflow
 
+**Self-sufficient.** If research, requirements, or design are missing, do them first (phases 1-5 handle this). Does not depend on Codex or Gemini having run prior steps.
+
+## Prerequisites Check
+
+Before starting, check what exists — missing artifacts are created in phases 1-5:
+
+| Artifact | Path | Phase |
+|----------|------|-------|
+| Research | `doc/01_research/local/<feature>.md` | 1-2 |
+| Requirements | `doc/02_requirements/feature/<feature>.md` | 1-3 |
+| Architecture | `doc/04_architecture/<feature>.md` | 4 |
+| Design | `doc/05_design/<feature>.md` | 4 |
+| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | 6 |
+
+**If ALL artifacts exist** (from prior `/research_claude` + `/research_codex` + `/design_gemini` + `/design_codex` + `/design_claude`), skip to Phase 6.
+
+**Agent teams:** This workflow uses opus agent teams. See `/agents` skill for team patterns.
+
 ## Phase Overview
 
 | # | Phase | Agent | Output |
 |---|-------|-------|--------|
-| 1 | Requirements | main | `doc/plan/requirement/<feature>.md` |
-| 2 | Research | research-team | `doc/research/<feature>.md` |
+| 1 | Requirements | main | `doc/02_requirements/feature/<feature>.md` |
+| 2 | Research | research-team | `doc/01_research/<feature>.md` |
 | 3 | Req Update | main | Updated requirement doc |
-| 4 | Plan + Design | design-team | `doc/plan/<feature>.md`, `doc/design/<feature>.md` |
+| 4 | Plan + Design | design-team | `doc/03_plan/<feature>.md`, `doc/05_design/<feature>.md` |
 | 5 | Model Selection | main | Task-to-model assignment |
 | 6 | System Test | test-agent | `test/system/<feature>_spec.spl` |
 | 7 | Doc Consistency | review-agent | Cross-ref validation |
 | 8 | Implementation | code-team | `src/**/<feature>.spl` |
 | 9 | Unit + IT Tests | test-agent | 80%+ branch coverage |
 | 10 | Doctest | code-agent | `"""..."""` sdoctest for public fns |
-| 11 | Bug Reports | review-agent | `doc/tracking/bug/<feature>_limitations.md` |
+| 11 | Bug Reports | review-agent | `doc/08_tracking/bug/<feature>_limitations.md` |
 | 12 | Duplication Check | review-agent | jscpd + semantic + stub scan |
 | 13 | Refactoring | code-agent | Files >800 lines split |
 | 14 | Full Test Suite | test-agent | All tests pass |
@@ -32,14 +50,20 @@ review-team:    explore -> docs          (sequential)
 ## Phase Details
 
 ### Phase 1-3: Requirements + Research
-1. Create `doc/plan/requirement/<feature>.md` (motivation, scope, I/O examples, acceptance criteria)
-2. Research: codebase + web -> `doc/research/<feature>.md`
-3. Update requirement doc based on research; get user approval
+**Preferred:** Run `/research_claude` (Step 1) then `/research_codex` (Step 2) before starting impl.
+**Skip if artifacts exist.** Otherwise do them inline:
+1. Local research: search `src/` and `doc/` for related code and prior work
+2. Domain research: web search for external knowledge
+3. Generate requirement options, ask user to select
+4. Write final: `doc/02_requirements/feature/<feature>.md` and `doc/02_requirements/nfr/<feature>.md`
 
 ### Phase 4-5: Plan + Design + Model Selection
-1. `doc/plan/<feature>.md`: task breakdown, deps DAG, difficulty 1-5 (split tasks >= 4)
-2. `doc/design/<feature>.md`: module structure, types, API, integration points
-3. Assign model: difficulty 1=haiku, 2=sonnet, 3-5=opus
+**Preferred:** Run `/design_gemini` (Step 3) -> `/design_codex` (Step 4) -> `/design_claude` (Step 5) before starting impl.
+**Skip if artifacts exist.** Otherwise do them inline:
+1. Architecture: `doc/04_architecture/<feature>.md`
+2. Detail design: `doc/05_design/<feature>.md`
+3. Agent tasks: `doc/03_plan/agent_tasks/<feature>.md`
+4. UI design (if applicable): `doc/05_design/<feature>_tui.md`, `_gui.md`
 
 ### Phase 6-7: System Test + Doc Consistency
 1. Create `test/system/<feature>_spec.spl` (SSpec BDD, fail-first). See `/sspec`
@@ -58,16 +82,20 @@ review-team:    explore -> docs          (sequential)
 2. Add sdoctest to every public fn: `""" sdoctest: expect(...).to_equal(...) """`
 
 ### Phase 11-13: Bug Reports + Duplication + Refactoring
-1. Document workarounds in `doc/tracking/bug/<feature>_limitations.md`
+1. Document workarounds in `doc/08_tracking/bug/<feature>_limitations.md`
 2. Duplication: `bin/simple duplicate-check <dir>` (token + cosine + semantic)
 3. Stub scan: verify pass_todo reasons, detect identity-returns (STUB001 = hard fail -> loop to Phase 8)
 4. Split files >800 lines
+5. Run `/refactor` skill for comprehensive code quality check.
 
 ### Phase 14-15: Full Test Suite + VCS Sync
 ```bash
 bin/simple test && bin/simple build lint && bin/simple build check
 ```
-All pass -> `/git-jj-sync` -> `doc/report/<feature>_complete_<date>.md`
+Run `/verify` (Claude) for production readiness verification.
+
+All pass -> `/git-jj-sync` -> `doc/09_report/<feature>_complete_<date>.md`
+Add/update guide docs in `doc/07_guide/` if needed.
 
 ## Per-Agent Checks
 

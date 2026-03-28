@@ -176,7 +176,7 @@ test/system/
 
 **User-Facing**:
 ```
-doc/guide/
+doc/07_guide/
   └── deep_learning_guide.md (1,381 lines)
 
 doc/tutorial/
@@ -188,7 +188,7 @@ examples/pure_nn/
 
 **Developer-Facing**:
 ```
-doc/report/
+doc/09_report/
   ├── DL_MASTER_SUMMARY_2026-02-16.md (250 lines)
   ├── FINAL_DL_COMPLETE_2026-02-16.md (450 lines)
   ├── RUNTIME_COMPATIBLE_EXAMPLES_2026-02-16.md (450 lines)
@@ -364,7 +364,7 @@ Not applicable (initial release).
 ### For Users
 
 **Documentation**:
-- Main guide: `doc/guide/deep_learning_guide.md`
+- Main guide: `doc/07_guide/deep_learning_guide.md`
 - Tutorial: `doc/tutorial/deep_learning_quickstart.md`
 - Examples: `examples/pure_nn/`
 
@@ -376,8 +376,8 @@ Not applicable (initial release).
 ### For Developers
 
 **Architecture**:
-- Master summary: `doc/report/DL_MASTER_SUMMARY_2026-02-16.md`
-- Implementation reports: `doc/report/`
+- Master summary: `doc/09_report/DL_MASTER_SUMMARY_2026-02-16.md`
+- Implementation reports: `doc/09_report/`
 - Source code: `src/lib/pure/`, `src/lib/torch/`
 
 **Testing**:

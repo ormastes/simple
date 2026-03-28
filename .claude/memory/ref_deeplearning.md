@@ -47,4 +47,4 @@ E0505 BroadcastIncompat, E0506 BatchMismatch, E0507 ChannelMismatch, E0508 Seque
 - Config: `src/lib/src/config/__init__.spl`
 - Engine: `src/lib/src/ml/engine/__init__.spl`
 - Tracking: `src/lib/src/ml/tracking/__init__.spl`
-- Guide: `doc/guide/deep_learning/deep_learning.md`
+- Guide: `doc/07_guide/deep_learning/deep_learning.md`

@@ -162,7 +162,7 @@ class Promise[T]:
 - `simple/std_lib/test/unit/concurrency/promise_spec.spl` - Promise tests
 - `doc/async_by_default.md` - Complete documentation
 - `doc/async_by_default_STATUS.md` - This file
-- `doc/report/ASYNC_DEFAULT_COMPLETE_2026-01-05.md` - Completion report
+- `doc/09_report/ASYNC_DEFAULT_COMPLETE_2026-01-05.md` - Completion report
 - `doc/plans/async_default_implementation.md` - Implementation plan
 - Feature documentation files (5 files)
 

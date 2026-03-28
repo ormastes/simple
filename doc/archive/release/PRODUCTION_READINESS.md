@@ -464,7 +464,7 @@ See: `doc/needed_feature_UPDATED.md`
 See: `doc/test/HANG_ANALYSIS.md`
 
 ### D. Documentation Index
-See: `doc/guide/README.md`
+See: `doc/07_guide/README.md`
 
 ---
 

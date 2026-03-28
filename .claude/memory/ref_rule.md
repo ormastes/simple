@@ -24,7 +24,7 @@ type: reference
 
 ## Doc Rules
 - Specs include Requirements/Plan/Design/Research links
-- ADR required for major architectural decisions (`doc/architecture/adr/`)
+- ADR required for major architectural decisions (`doc/04_architecture/adr/`)
 
 ## Code Style
 - No over-engineering, no unused code, no magic numbers, no global mutable state
@@ -32,13 +32,13 @@ type: reference
 ## Doc Folder Map
 | Folder | Purpose |
 |--------|---------|
-| `doc/plan/` | Plans, scope, milestones |
-| `doc/plan/requirement/` | Functional requirements |
-| `doc/design/` | Design documents |
-| `doc/architecture/` | Architecture overviews |
-| `doc/architecture/adr/` | ADRs |
-| `doc/research/` | Research and options |
-| `doc/guide/` | Developer guides |
-| `doc/architecture/rule/` | Full rules: `README.md` |
+| `doc/03_plan/` | Plans, scope, milestones |
+| `doc/02_requirements/feature/` | Functional requirements |
+| `doc/05_design/` | Design documents |
+| `doc/04_architecture/` | Architecture overviews |
+| `doc/04_architecture/adr/` | ADRs |
+| `doc/01_research/` | Research and options |
+| `doc/07_guide/` | Developer guides |
+| `doc/04_architecture/rule/` | Full rules: `README.md` |
 
-## Override: Only via ADR in `doc/architecture/adr/`
+## Override: Only via ADR in `doc/04_architecture/adr/`

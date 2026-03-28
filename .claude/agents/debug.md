@@ -62,7 +62,7 @@ bin/simple src/app/mcp/main.spl search "pattern"
 
 ```bash
 # View bugs
-cat doc/tracking/bug/bug_db.sdn
+cat doc/08_tracking/bug/bug_db.sdn
 
 # Add bug
 bin/simple bug-add --id=bug_042 --reproducible-by=test_name
@@ -94,4 +94,4 @@ See `/debug-lsp` for full chain patterns.
 - `/debug-lsp` - DAP+LSP chaining patterns for active session analysis
 - `/mcp-failure-analysis` - MCP tools for failure analysis
 - Use `debug-analyst` agent for interactive session debugging with LSP enrichment
-- `doc/tracking/bug/bug_db.sdn` - Bug tracking database
+- `doc/08_tracking/bug/bug_db.sdn` - Bug tracking database

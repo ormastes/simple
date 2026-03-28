@@ -34,7 +34,7 @@ scripts/local-container-test.sh quick path/to/spec.spl    # Single test
 scripts/ci-test.sh                                         # CI-style
 ```
 
-**Troubleshooting:** See `doc/guide/testing/container_testing.md`
+**Troubleshooting:** See `doc/07_guide/testing/container_testing.md`
 
 ## Writing BDD Tests
 
@@ -69,7 +69,7 @@ Use `to_equal(true)` NOT `to_be_true()`.
 
 ## Run Tracking
 
-Results auto-tracked in `doc/tracking/test/test_db.sdn`.
+Results auto-tracked in `doc/08_tracking/test/test_db.sdn`.
 ```bash
 bin/simple test --list-runs              # View history
 bin/simple test --prune-runs=50          # Keep 50 most recent
@@ -94,4 +94,4 @@ Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/hand
 ## See Also
 
 - `/sspec` skill, `.claude/templates/sspec_template.spl`
-- `doc/guide/testing/testing.md`
+- `doc/07_guide/testing/testing.md`

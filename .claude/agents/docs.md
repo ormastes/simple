@@ -1,21 +1,21 @@
 # Docs Agent - Documentation Writing
 
 **Use when:** Writing research docs, design docs, requirement docs, feature specs, guides, reports, updating TODO tracking.
-**Skills:** `/doc`, `/todo`, `/rule`, `/sspec`
+**Skills:** `/doc`, `/todo`, `/rule`, `/sspec`, `/design`, `/research`
 
 ## Documentation Types
 
 | Type | Location | When to Use |
 |------|----------|-------------|
-| Plan | `doc/plan/` | Project plans: why, scope, milestones, risks |
-| Requirement | `doc/plan/requirement/` | User request + interpretation + REQ-NNN statements |
-| Feature Spec | `doc/feature/` | BDD scenarios derived from requirements |
-| NFR / SLO | `doc/plan/nfr/` | Performance, reliability, security targets |
-| Research | `doc/research/` | Investigation, options analysis, benchmarks |
-| Design | `doc/design/` | Architecture decisions, component design |
-| ADR | `doc/architecture/adr/` | Architecture Decision Records (major decisions) |
-| Guide | `doc/guide/` | User-facing tutorials, runbooks, how-to |
-| Report | `doc/report/` | Session summaries, completion reports |
+| Plan | `doc/03_plan/` | Project plans: why, scope, milestones, risks |
+| Requirement | `doc/02_requirements/feature/` | User request + interpretation + REQ-NNN statements |
+| Feature Spec | `doc/02_requirements/feature/` | BDD scenarios derived from requirements |
+| NFR / SLO | `doc/02_requirements/nfr/` | Performance, reliability, security targets |
+| Research | `doc/01_research/` | Investigation, options analysis, benchmarks |
+| Design | `doc/05_design/` | Architecture decisions, component design |
+| ADR | `doc/04_architecture/adr/` | Architecture Decision Records (major decisions) |
+| Guide | `doc/07_guide/` | User-facing tutorials, runbooks, how-to |
+| Report | `doc/09_report/` | Session summaries, completion reports |
 | BDD Tests | `test/*_spec.spl` | Executable feature specs (SSpec) |
 
 ## Document Relationship Model
@@ -30,16 +30,16 @@ RULES → enforced by CI + review
 ## Critical Rules
 
 - Specifications MUST be SSpec test files (`*_spec.spl`), not markdown
-- Research goes in `doc/research/`, NOT mixed with specs
-- Reports use format: `doc/report/<topic>_<date>.md`
+- Research goes in `doc/01_research/`, NOT mixed with specs
+- Reports use format: `doc/09_report/<topic>_<date>.md`
 - DO NOT add reports to git unless requested
 
 ## Auto-Generated Docs (Updated Every Test Run)
 
-- `doc/feature/feature.md` - All features
-- `doc/feature/pending_feature.md` - Incomplete features
-- `doc/tracking/test/test_result.md` - Test results + timing
-- `doc/tracking/build/recent_build.md` - Build errors/warnings
+- `doc/02_requirements/feature/feature.md` - All features
+- `doc/02_requirements/feature/pending_feature.md` - Incomplete features
+- `doc/08_tracking/test/test_result.md` - Test results + timing
+- `doc/08_tracking/build/recent_build.md` - Build errors/warnings
 
 ## TODO Format
 

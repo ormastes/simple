@@ -45,7 +45,7 @@
 
 **Updated Documents:**
 - `doc/status/sdoctest_implementation.md` - Overall status
-- `doc/spec/sdoctest.md` - Phase 2 progress
+- `doc/06_spec/sdoctest.md` - Phase 2 progress
 - `TODO.md` - Sprint 2 task breakdown
 
 ## Technical Highlights
@@ -197,7 +197,7 @@ List[DoctestExample]
 - `src/runtime/src/value/mod.rs` (added module and exports)
 - `lib/std/doctest/discovery.spl` (enhanced with discovery logic)
 - `doc/status/sdoctest_implementation.md` (updated Sprint 2 status)
-- `doc/spec/sdoctest.md` (updated Phase 2 checklist)
+- `doc/06_spec/sdoctest.md` (updated Phase 2 checklist)
 - `TODO.md` (updated Sprint 2 tasks)
 
 ## Conclusion

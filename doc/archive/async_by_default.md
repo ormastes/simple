@@ -352,7 +352,7 @@ fn fetch_and_process(id: Int) -> Promise[Result]:
 - Promise Implementation: `simple/std_lib/src/concurrency/promise.spl`
 - Parser Support: `src/parser/src/`
 - Integration Tests: `src/type/tests/async_default_integration.rs`
-- Specification: `doc/spec/concurrency.md`
+- Specification: `doc/06_spec/concurrency.md`
 
 ## Future Enhancements
 

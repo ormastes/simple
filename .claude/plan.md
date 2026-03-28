@@ -88,7 +88,7 @@ src/app/ffi_gen/main.spl  ← The generator (written in Simple)
 ## Implementation Plan
 
 ### Phase 1: Research Document
-**Create**: `doc/research/ffi_wrapper_generator_design.md`
+**Create**: `doc/01_research/ffi_wrapper_generator_design.md`
 - Full design document with architecture, type mapping, examples
 
 ### Phase 2: Simple App — `src/app/ffi_gen/`
@@ -162,7 +162,7 @@ Use the generator to auto-produce existing `interpreter_extern` modules:
 ## Files to Create/Modify
 
 ### Create
-- `doc/research/ffi_wrapper_generator_design.md`
+- `doc/01_research/ffi_wrapper_generator_design.md`
 - `src/app/ffi_gen/main.spl`
 - `src/app/ffi_gen/parser.spl`
 - `src/app/ffi_gen/rust_codegen.spl`
@@ -231,7 +231,7 @@ case "ffi-gen":
 ```
 
 ## Completed
-- **Phase 1**: Research document (`doc/research/ffi_wrapper_generator_design.md`)
+- **Phase 1**: Research document (`doc/01_research/ffi_wrapper_generator_design.md`)
 - **Phase 2**: Simple app (`src/app/ffi_gen/`) with CLI, parser, codegen, cargo gen, builder
 - **Phase 2.5**: `build/rust/` persistent environment, `simple.sdn` ffi.rust config
 - **Phase 3**: Type mapping (in `type_mapping.spl`)

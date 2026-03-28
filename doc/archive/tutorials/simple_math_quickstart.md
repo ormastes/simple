@@ -400,7 +400,7 @@ X = torch.linalg.solve(A, B)  # Solves m systems
 
 ### Learn More
 
-- **Specification:** `doc/spec/simple_math.md`
+- **Specification:** `doc/06_spec/simple_math.md`
 - **Examples:** `simple/examples/simple_math_demo.spl`
 - **Tests:** `simple/std_lib/test/unit/ml/torch/`
 - **API Reference:** `simple/std_lib/src/ml/torch/`

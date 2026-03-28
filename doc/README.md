@@ -1,78 +1,45 @@
 # Simple Language Documentation
 
 **Version:** 0.5.0
-**Status:** ✅ PRODUCTION READY
-**Last Updated:** 2026-02-14
+**Status:** Production Ready
+**Last Updated:** 2026-03-28
 
 ---
 
-## 🚀 Start Here
+## Start Here
 
-**Quick Links:**
 - **[FILE.md](FILE.md)** - Complete documentation hub
-- **[report/EXECUTIVE_SUMMARY.md](report/EXECUTIVE_SUMMARY.md)** - 10-minute project overview
-- **[../README_DEPLOYMENT.md](../README_DEPLOYMENT.md)** - Quick deployment guide
+- **[09_report/EXECUTIVE_SUMMARY.md](09_report/EXECUTIVE_SUMMARY.md)** - 10-minute project overview
 
 ---
 
-## 📊 Key Discovery (2026-02-14)
+## Documentation Structure (Numbered Folders)
 
-**7-agent comprehensive audit revealed:**
-- ✅ **170+ of 180 "broken" features actually work (95%+)**
-- ✅ **Original 32-week estimate → 1-2 weeks actual**
-- ✅ **Simple Language IS PRODUCTION READY**
-
----
-
-## 📚 Documentation Structure
-
-### Core Reports
-- [report/EXECUTIVE_SUMMARY.md](report/EXECUTIVE_SUMMARY.md) - High-level overview
-- [archive/release/PRODUCTION_READINESS.md](archive/release/PRODUCTION_READINESS.md) - Deployment assessment
-- [feature/needed_feature.md](feature/needed_feature.md) - Feature status (updated)
-- [feature/FEATURES_THAT_WORK.md](feature/FEATURES_THAT_WORK.md) - Working features
-
-### Architecture
-- [architecture/overview.md](architecture/overview.md) - High-level architecture
-- [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive codebase inventory** (2,649 files, 623K lines)
-
-### User Guides (4,700+ lines)
-- [guide/sync_async/async/async_guide.md](guide/sync_async/async/async_guide.md) - Async programming
-- [guide/lsp_integration.md](guide/lsp_integration.md) - Editor setup
-- [guide/backend/capabilities.md](guide/backend/capabilities.md) - Compiler backends
-
-### Technical Analysis
-- [report/IMPLEMENTATION_FIXES.md](report/IMPLEMENTATION_FIXES.md) - Recent fixes
-- [report/TEST_STATUS_AUDIT.md](report/TEST_STATUS_AUDIT.md) - Complete test audit
-- [tracking/test/HANG_ANALYSIS.md](tracking/test/HANG_ANALYSIS.md) - Root cause analysis
-
-### Project Tracking
-- [tracking/README.md](tracking/README.md) - Bug, test, todo, task, build tracking
-- [metrics/README.md](metrics/README.md) - Dashboard and coverage metrics
+| # | Folder | Purpose |
+|---|--------|---------|
+| 01 | [01_research/](01_research/) | Research (local + domain) |
+| 02 | [02_requirements/](02_requirements/) | Requirements (feature, nfr, ui) |
+| 03 | [03_plan/](03_plan/) | Plans (arch, design, sys_test) |
+| 04 | [04_architecture/](04_architecture/) | Architecture, ADRs, rules |
+| 05 | [05_design/](05_design/) | Design documents |
+| 06 | [06_spec/](06_spec/) | Specs (SSpec-generated) |
+| 07 | [07_guide/](07_guide/) | User guides |
+| 08 | [08_tracking/](08_tracking/) | Bug, test, todo tracking |
+| 09 | [09_report/](09_report/) | Reports |
+| 10 | [10_metrics/](10_metrics/) | Metrics, coverage |
 
 ---
 
-## ✅ What Works NOW
+## Key Documents
 
-- Async/await (9/9 tests passing)
-- LSP for 5 editors (8/8 tests passing)
-- 3 compiler backends (9/9 tests passing)
-- ML/Deep learning (8/8 tests passing)
-- Physics engine (7/7 tests passing)
-- Game engine (8/8 tests passing)
-- Package manager (5/6 tests passing)
-- 130+ utility tests passing
-
-**Total: 221+ tests passing (~98%)**
+- [04_architecture/overview.md](04_architecture/overview.md) - Architecture
+- [04_architecture/file_class_structure.md](04_architecture/file_class_structure.md) - Codebase inventory
+- [02_requirements/feature/FEATURES_THAT_WORK.md](02_requirements/feature/FEATURES_THAT_WORK.md) - Working features
+- [07_guide/quick_reference/syntax_quick_reference.md](07_guide/quick_reference/syntax_quick_reference.md) - Syntax reference
+- [08_tracking/README.md](08_tracking/README.md) - Project tracking hub
 
 ---
 
-## 📖 Full Index
+## Full Index
 
-See **[FILE.md](FILE.md)** for complete documentation hub with all categories, relationship model, and navigation.
-
----
-
-**Documentation:** ✅ Complete (10,000+ lines)
-**Status:** ✅ Production Ready
-**Timeline:** 1-2 weeks to release
+See **[FILE.md](FILE.md)** for complete documentation hub.

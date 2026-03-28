@@ -227,7 +227,7 @@ To complete the full mixin implementation:
 
 ## References
 
-- **Type System Research:** `doc/research/mixin_type_system.md`
+- **Type System Research:** `doc/01_research/mixin_type_system.md`
 - **Implementation Plan:** `doc/plans/mixin_implementation.md`
 - **Lean Verification:** `verification/type_inference_compile/src/Mixins.lean`
 - **Test Cases:** `tests/mixin_type_inference.spl`

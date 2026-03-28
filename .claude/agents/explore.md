@@ -48,13 +48,18 @@ test/           # Test files
   compiler/     # Compiler tests
 
 doc/            # Documentation
-  report/       # Session reports
-  design/       # Design documents
-  guide/        # User guides
-  research/     # Research documents
-  feature/      # Auto-generated feature docs
-  test/         # Auto-generated test results
-  bug/          # Bug tracking
+  01_research/  # Research documents
+  02_requirements/ # Requirements and feature specs
+    feature/    # Auto-generated feature docs
+    nfr/        # Non-functional requirements
+  03_plan/      # Project plans
+  04_architecture/ # Architecture docs and ADRs
+    adr/        # Architecture Decision Records
+  05_design/    # Design documents
+  06_spec/      # Specifications
+  07_guide/     # User guides
+  08_tracking/  # Test results, build status, bug tracking
+  09_report/    # Session reports
 ```
 
 ## Compilation Pipeline
@@ -81,19 +86,19 @@ Source (.spl) -> Lexer -> Tokens -> Parser -> AST -> HIR -> MIR -> Codegen/Inter
 
 | Need | Location |
 |------|----------|
-| What needs work? | `doc/feature/pending_feature.md` |
-| Test results? | `doc/tracking/test/test_result.md` |
-| Build status? | `doc/tracking/build/recent_build.md` |
+| What needs work? | `doc/02_requirements/feature/pending_feature.md` |
+| Test results? | `doc/08_tracking/test/test_result.md` |
+| Build status? | `doc/08_tracking/build/recent_build.md` |
 | All TODOs? | `doc/TODO.md` |
-| All features? | `doc/feature/feature.md` |
-| All bugs? | `doc/tracking/bug/bug_report.md` |
-| Syntax reference | `doc/guide/quick_reference/syntax_quick_reference.md` |
+| All features? | `doc/02_requirements/feature/feature.md` |
+| All bugs? | `doc/08_tracking/bug/bug_report.md` |
+| Syntax reference | `doc/07_guide/quick_reference/syntax_quick_reference.md` |
 
 ## Research Patterns
 
 - **"Where is X?"** - Grep for type/function name, check module structure
 - **"How does X work?"** - Find tests first, read docstrings, trace execution
-- **"What's the status of X?"** - Check `doc/feature/`, `doc/tracking/test/`, `doc/tracking/bug/`
+- **"What's the status of X?"** - Check `doc/02_requirements/feature/`, `doc/08_tracking/test/`, `doc/08_tracking/bug/`
 
 ## See Also
 

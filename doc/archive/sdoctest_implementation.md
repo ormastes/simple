@@ -251,7 +251,7 @@ enum Expected:
 
 ## References
 
-- **Spec:** `doc/spec/sdoctest.md` - Full specification
+- **Spec:** `doc/06_spec/sdoctest.md` - Full specification
 - **Integration:** `doc/doctest_integration.md` - BDD integration plan
 - **Tests:** `test/unit/doctest/` - Unit tests
 - **Fixtures:** `test/fixtures/doctest/` - Test data

@@ -44,4 +44,4 @@ Env: `SIMPLE_GPU_BACKEND`, `SIMPLE_GPU_DEVICE`, `SIMPLE_GPU_DEBUG`
 - `src/compiler/70.backend/backend/cuda_backend.spl` — CUDA→PTX compiler
 - `src/compiler/70.backend/backend/vulkan_backend.spl` — Vulkan→SPIR-V
 - `src/lib/nogc_sync_mut/simd.spl` — SIMD vector types
-- `doc/spec/gpu_simd/gpu.md` — GPU/SIMD specification
+- `doc/06_spec/gpu_simd/gpu.md` — GPU/SIMD specification

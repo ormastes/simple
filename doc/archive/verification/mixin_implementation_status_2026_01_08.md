@@ -13,7 +13,7 @@ The mixin feature implementation has progressed through **Phase 0 (Research), Ph
 ### ✅ Phase 0: Research & Specification (100% Complete)
 
 **Artifacts Created:**
-- `doc/research/typed_mixins_research.md` - Comprehensive research document
+- `doc/01_research/typed_mixins_research.md` - Comprehensive research document
 - `specs/features/mixin_basic.feature` - 12 BDD scenarios
 - `specs/features/mixin_generic.feature` - 14 BDD scenarios  
 - `examples/mixin_lean_verification.smp` - Example code with contracts
@@ -164,7 +164,7 @@ error[E0425]: cannot find function `type_id_to_cranelift` in this scope
 
 ### ✅ Completed Documentation
 
-1. **Research** - `doc/research/typed_mixins_research.md`
+1. **Research** - `doc/01_research/typed_mixins_research.md`
    - Type system design
    - Inference algorithm
    - Grammar specification

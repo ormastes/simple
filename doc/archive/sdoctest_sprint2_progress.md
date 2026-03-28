@@ -165,7 +165,7 @@ Implement file discovery and BDD spec framework integration for doctests.
 - **Discovery:** `lib/std/doctest/discovery.spl`
 - **Tests:** `test/integration/doctest/discovery_spec.spl`
 - **Fixtures:** `test/fixtures/doctest/`
-- **Spec:** `doc/spec/sdoctest.md`
+- **Spec:** `doc/06_spec/sdoctest.md`
 - **Status:** `doc/status/sdoctest_implementation.md`
 
 ---

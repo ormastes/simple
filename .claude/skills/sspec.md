@@ -39,7 +39,7 @@ Use `.to_equal(true)` NOT `.to_be_true()`. Use `.to_equal()` NOT `.to(eq())`.
 **Feature IDs:** #100-110
 **Category:** Language | Stdlib | Runtime | Testing | Tooling
 **Status:** Draft | In Progress | Implemented | Complete
-**Requirements:** doc/plan/requirement/feature.md (or N/A)
+**Requirements:** doc/02_requirements/feature/feature.md (or N/A)
 
 ## Overview
 What this feature does and why.
@@ -103,7 +103,7 @@ describe "Dashboard":
 ## Doc Generation
 
 ```bash
-bin/simple doc-gen    # Output: doc/spec/generated/
+bin/simple doc-gen    # Output: doc/06_spec/generated/
 ```
 
 Extracts `"""..."""` docstrings as markdown with metadata, links, and index.

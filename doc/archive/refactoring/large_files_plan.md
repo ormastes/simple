@@ -474,4 +474,4 @@ This refactoring plan addresses technical debt by breaking down large files into
 1. Get approval for this plan
 2. Start with `ffi.rs` extraction (biggest impact)
 3. Create branch protection to prevent new >800 line files
-4. Track progress in `doc/report/refactoring_progress.md`
+4. Track progress in `doc/09_report/refactoring_progress.md`

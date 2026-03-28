@@ -60,7 +60,11 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `agents` | Agent loop iteration patterns and multi-agent team orchestration |
 | `design` | Design patterns, type system |
 | `architecture` | Compiler pipeline, module structure |
-| `research` | Codebase exploration techniques |
+| `research_claude` | Step 1: Local+domain research with agent teams (Claude) |
+| `research_codex` | Step 2: Forked agent research + requirement selection (Codex) |
+| `design_gemini` | Step 3: TUI/GUI design generation (Gemini) |
+| `design_codex` | Step 4: Architecture + system test design (Codex) |
+| `design_claude` | Step 5: SSpec quality + detail design (Claude) |
 | `debug` | Debugging, tracing, fault detection |
 | `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
 | `refactor` | Code quality refactoring workflow and verification checklist |
@@ -74,11 +78,10 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
 | `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
-| `vcs` | (renamed to `sync`) Pull/rebase/push with file-count safety |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
 
-**Full Syntax Reference:** `doc/guide/quick_reference/syntax_quick_reference.md`
+**Full Syntax Reference:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`
 **Doc Model:** `doc/FILE.md` — PLAN → REQ → FEATURE → TESTS relationship
 
@@ -288,7 +291,18 @@ src/
     99.loader/      # Module resolver, loader
   i18n/             # Internationalization
 test/               # Test files (lib, app, compiler, benchmarks)
-doc/                # Documentation (report, design, guide, research, feature, tracking, metrics, plan, archive)
+doc/                # Documentation (numbered folders, see below)
+    01_research/      # Research (local impl analysis, domain/external)
+    02_requirements/   # Requirements (feature, nfr, ui)
+    03_plan/          # Plans (arch, design, sys_test, agent_tasks)
+    04_architecture/  # Architecture (ADRs, rules, formats)
+    05_design/        # Design documents
+    06_spec/          # SSpec-generated specs (mirrors src/ structure)
+    07_guide/         # User guides, tutorials
+    08_tracking/      # Bug, test, todo, task, build tracking
+    09_report/        # Implementation reports
+    10_metrics/       # Dashboards, coverage
+    archive/          # Historical/deprecated docs
 bin/                # Binaries (simple wrapper, release/simple = real binary)
 build/bootstrap/    # Bootstrap artifacts (stage2/, stage3/, full/)
 tools/              # Development tools (docker containers, windows/ build helpers)
@@ -298,9 +312,9 @@ scripts/            # Bootstrap bash scripts (3 only)
 
 **Import namespace:** `use std.X` and `use lib.X` both resolve from `src/lib/`. The module resolver rewrites `std` → `lib` internally. Prefer `use std.X` in new code.
 
-**Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
+**Detailed Structure:** See [`doc/04_architecture/file_class_structure.md`](doc/04_architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
 
-**Glossary:** See [`doc/architecture/glossary.md`](doc/architecture/glossary.md) for key concepts (Crate, Virtual Crate, Linker Wrapper, SMF, Bootstrap, Frontend sharing).
+**Glossary:** See [`doc/04_architecture/glossary.md`](doc/04_architecture/glossary.md) for key concepts (Crate, Virtual Crate, Linker Wrapper, SMF, Bootstrap, Frontend sharing).
 
 ---
 
@@ -310,12 +324,12 @@ Updated automatically:
 
 | What | Where | When |
 |------|-------|------|
-| Features | `doc/feature/feature.md` | Every test run |
-| Pending | `doc/feature/pending_feature.md` | Every test run |
-| Test results | `doc/tracking/test/test_result.md` | Every test run |
-| Build status | `doc/tracking/build/recent_build.md` | Every build |
+| Features | `doc/06_spec/generated/feature.md` | Every test run |
+| Pending | `doc/06_spec/generated/pending_feature.md` | Every test run |
+| Test results | `doc/08_tracking/test/test_result.md` | Every test run |
+| Build status | `doc/08_tracking/build/recent_build.md` | Every build |
 | TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
-| Bugs | `doc/tracking/bug/bug_report.md` | `bin/simple bug-gen` |
+| Bugs | `doc/08_tracking/bug/bug_report.md` | `bin/simple bug-gen` |
 
 ---
 
