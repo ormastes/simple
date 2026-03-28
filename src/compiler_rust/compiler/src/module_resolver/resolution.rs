@@ -187,6 +187,17 @@ impl ModuleResolver {
                     }
                 }
 
+                // Strategy 5: Try project_root for top-level dirs not under source_root
+                // e.g., "use examples.browser.*" → project_root/examples/browser/
+                if segments[0] != "crate" && segments.len() > 1 {
+                    let proj_dir = self.project_root.join(&segments[0]);
+                    if proj_dir.is_dir() {
+                        if let Ok(resolved) = self.resolve_from_base(&proj_dir, &segments[1..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
                 Err(err)
             }
         }

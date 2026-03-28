@@ -1,0 +1,202 @@
+# EngineDomBackend — DomBackend implementation using the browser engine.
+# Wraps the browser engine's Document and ScriptToDomBridge to provide
+# the platform-independent DomBackend trait for desktop web_ui apps.
+
+use std.common.web.dom.{DomBackend, WebElement}
+use std.common.web.event.{EventBackend, WebEvent, WebEventType}
+use examples.browser.feature.dom.document.{Document, NodeStore}
+use examples.browser.feature.dom.element.{ElementOps}
+use examples.browser.transform.script_to_dom.{ScriptToDomBridge, JsMutation}
+use examples.browser.entity.dom.node_types.{DomNode, NodeKind}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# Event listener entry for the engine backend.
+class EngineEventListener:
+    element_id: i64
+    event_type: WebEventType
+    handler: fn(WebEvent)
+
+    static fn create(element_id: i64, event_type: WebEventType, handler: fn(WebEvent)) -> EngineEventListener:
+        EngineEventListener(element_id: element_id, event_type: event_type, handler: handler)
+
+# DOM backend using the browser engine's Document model.
+class EngineDomBackend:
+    doc: Document
+    bridge: ScriptToDomBridge
+    logger: Logger
+    dirty: bool
+    listeners: List<EngineEventListener>
+    body_id: i64
+    root_id: i64
+
+    static fn create(logger: Logger) -> EngineDomBackend:
+        var store = NodeStore.create()
+        # Create minimal document structure: #document > html > body
+        val doc_id = store.allocate_node(NodeKind.Document, "#document")
+        val html_id = store.allocate_node(NodeKind.Element, "html")
+        val body_id = store.allocate_node(NodeKind.Element, "body")
+        var doc = Document.create(store)
+        doc.appendChild(doc_id, html_id)
+        doc.appendChild(html_id, body_id)
+        val s2d = ScriptToDomBridge.new(logger)
+        EngineDomBackend(
+            doc: doc,
+            bridge: s2d,
+            logger: logger,
+            dirty: false,
+            listeners: List<EngineEventListener>(),
+            body_id: body_id,
+            root_id: html_id
+        )
+
+    # Check if mutations occurred since last render.
+    fn is_dirty() -> bool: self.dirty
+
+    # Clear dirty flag after rendering.
+    me clear_dirty(): self.dirty = false
+
+    # Dispatch a click event to matching listeners.
+    me dispatch_click(element_id: i64, x: i64, y: i64):
+        val event = WebEvent.click(element_id, x, y)
+        for listener in self.listeners:
+            if listener.element_id == element_id:
+                match listener.event_type:
+                    WebEventType.Click: listener.handler(event)
+                    _: pass_dn
+
+impl DomBackend for EngineDomBackend:
+    me create_element(tag: text) -> WebElement:
+        val id = self.doc.createElement(tag)
+        self.dirty = true
+        WebElement.from_id(id)
+
+    me create_text_node(content: text) -> WebElement:
+        val id = self.doc.createTextNode(content)
+        self.dirty = true
+        WebElement.from_id(id)
+
+    me append_child(parent: WebElement, child: WebElement):
+        self.doc.appendChild(parent.id, child.id)
+        self.dirty = true
+
+    me insert_before(parent: WebElement, new_child: WebElement, ref_child: WebElement):
+        self.doc.insertBefore(parent.id, new_child.id, ref_child.id)
+        self.dirty = true
+
+    me remove_child(parent: WebElement, child: WebElement):
+        self.doc.removeChild(parent.id, child.id)
+        self.dirty = true
+
+    me replace_child(parent: WebElement, new_child: WebElement, old_child: WebElement):
+        self.doc.replaceChild(parent.id, new_child.id, old_child.id)
+        self.dirty = true
+
+    me set_attribute(element: WebElement, name: text, value: text):
+        ElementOps.setAttribute(self.doc, element.id, name, value)
+        self.dirty = true
+
+    me get_attribute(element: WebElement, name: text) -> Option<text>:
+        ElementOps.getAttribute(self.doc, element.id, name)
+
+    me remove_attribute(element: WebElement, name: text):
+        ElementOps.removeAttribute(self.doc, element.id, name)
+        self.dirty = true
+
+    me set_text_content(element: WebElement, content: text):
+        val mutation = JsMutation.SetTextContent(node_id: element.id, content: content)
+        self.bridge.apply_js_mutation(mutation, self.doc)
+        self.dirty = true
+
+    me get_text_content(element: WebElement) -> text:
+        val node = self.doc.store.get_text(element.id)
+        match node:
+            Some(t): t.data
+            nil: ""
+
+    me set_inner_html(element: WebElement, html: text):
+        val mutation = JsMutation.SetInnerHTML(node_id: element.id, html: html)
+        self.bridge.apply_js_mutation(mutation, self.doc)
+        self.dirty = true
+
+    me get_inner_html(element: WebElement) -> text:
+        ""
+
+    me add_class(element: WebElement, class_name: text):
+        val mutation = JsMutation.AddClass(node_id: element.id, class_name: class_name)
+        self.bridge.apply_js_mutation(mutation, self.doc)
+        self.dirty = true
+
+    me remove_class(element: WebElement, class_name: text):
+        val mutation = JsMutation.RemoveClass(node_id: element.id, class_name: class_name)
+        self.bridge.apply_js_mutation(mutation, self.doc)
+        self.dirty = true
+
+    me has_class(element: WebElement, class_name: text) -> bool:
+        val class_attr = ElementOps.getAttribute(self.doc, element.id, "class")
+        match class_attr:
+            Some(classes): classes.contains(class_name)
+            nil: false
+
+    me set_style(element: WebElement, property: text, value: text):
+        val mutation = JsMutation.SetStyle(node_id: element.id, property: property, value: value)
+        self.bridge.apply_js_mutation(mutation, self.doc)
+        self.dirty = true
+
+    me get_style(element: WebElement, property: text) -> text:
+        ""
+
+    me query_selector(selector: text) -> Option<WebElement>:
+        val result = self.doc.querySelector(selector)
+        match result:
+            Some(id): Some(WebElement.from_id(id))
+            nil: nil
+
+    me query_selector_all(selector: text) -> List<WebElement>:
+        val ids = self.doc.querySelectorAll(selector)
+        var elements = List<WebElement>()
+        for id in ids:
+            elements.push(WebElement.from_id(id))
+        elements
+
+    me get_element_by_id(id: text) -> Option<WebElement>:
+        val result = self.doc.getElementById(id)
+        match result:
+            Some(node_id): Some(WebElement.from_id(node_id))
+            nil: nil
+
+    me body() -> WebElement:
+        WebElement.from_id(self.body_id)
+
+    me document_element() -> WebElement:
+        WebElement.from_id(self.root_id)
+
+impl EventBackend for EngineDomBackend:
+    me on(element: WebElement, event_type: WebEventType, handler: fn(WebEvent)):
+        val listener = EngineEventListener.create(element.id, event_type, handler)
+        self.listeners.push(listener)
+
+    me off(element: WebElement, event_type: WebEventType):
+        var kept = List<EngineEventListener>()
+        for listener in self.listeners:
+            val matches = listener.element_id == element.id
+            if not matches:
+                kept.push(listener)
+        self.listeners = kept
+
+    me on_click(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.Click, handler)
+
+    me on_input(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.Input, handler)
+
+    me on_change(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.Change, handler)
+
+    me on_submit(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.Submit, handler)
+
+    me on_keydown(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.KeyDown, handler)
+
+    me on_keyup(element: WebElement, handler: fn(WebEvent)):
+        self.on(element, WebEventType.KeyUp, handler)
