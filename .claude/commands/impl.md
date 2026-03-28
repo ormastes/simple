@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/impl.md
+../skills/impl.md

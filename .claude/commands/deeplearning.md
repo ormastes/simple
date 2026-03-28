@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/deeplearning.md
+../skills/deeplearning.md

@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/rule.md
+../skills/rule.md

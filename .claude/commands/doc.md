@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/doc.md
+../skills/doc.md

@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/design.md
+../skills/design.md

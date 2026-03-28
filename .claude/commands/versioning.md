@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/versioning.md
+../skills/versioning.md

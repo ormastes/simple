@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/architecture.md
+../skills/architecture.md

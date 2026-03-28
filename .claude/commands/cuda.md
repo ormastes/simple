@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/cuda.md
+../skills/cuda.md

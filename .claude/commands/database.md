@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/database.md
+../skills/database.md

@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/debug.md
+../skills/debug.md

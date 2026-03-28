@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/todo.md
+../skills/todo.md

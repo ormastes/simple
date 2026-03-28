@@ -110,6 +110,41 @@ if defined MINGW_BIN (
     )
 )
 
+REM === Create .claude\commands\ symlinks → .claude\skills\ ===
+echo.
+echo Setting up Claude command symlinks...
+set "SKILLS_DIR=%REPO_ROOT%\.claude\skills"
+set "COMMANDS_DIR=%REPO_ROOT%\.claude\commands"
+
+if not exist "%SKILLS_DIR%" (
+    echo warning: .claude\skills\ not found, skipping command symlinks >&2
+    goto verify
+)
+
+if not exist "%COMMANDS_DIR%" mkdir "%COMMANDS_DIR%"
+
+set "LINK_COUNT=0"
+set "LINK_METHOD="
+for %%F in ("%SKILLS_DIR%\*.md") do (
+    set "FNAME=%%~nxF"
+    if exist "%COMMANDS_DIR%\!FNAME!" del "%COMMANDS_DIR%\!FNAME!"
+    mklink "%COMMANDS_DIR%\!FNAME!" "..\skills\!FNAME!" >nul 2>&1
+    if !errorlevel! neq 0 (
+        copy "%%F" "%COMMANDS_DIR%\!FNAME!" >nul
+        set "LINK_METHOD=copy"
+    ) else (
+        set "LINK_METHOD=symlink"
+    )
+    set /a LINK_COUNT+=1
+)
+
+if "!LINK_METHOD!"=="copy" (
+    echo Created: !LINK_COUNT! command files [copy] in .claude\commands\
+    echo   Note: Enable Developer Mode for symlinks instead of copies.
+) else (
+    echo Created: !LINK_COUNT! command symlinks in .claude\commands\
+)
+
 :verify
 echo.
 echo Verify:

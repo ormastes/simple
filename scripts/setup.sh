@@ -283,6 +283,28 @@ ln -sf "${release_link_target}" "simple${exe}"
 echo "Created: bin/release/simple${exe} → ${release_link_target}"
 
 # ===========================================================================
+# Claude command symlinks (.claude/commands/ → .claude/skills/)
+# ===========================================================================
+
+skills_dir="${repo_root}/.claude/skills"
+commands_dir="${repo_root}/.claude/commands"
+
+if [ -d "${skills_dir}" ]; then
+  mkdir -p "${commands_dir}"
+  link_count=0
+  for f in "${skills_dir}"/*.md; do
+    [ -f "$f" ] || continue
+    fname=$(basename "$f")
+    rm -f "${commands_dir}/${fname}"
+    cd "${commands_dir}"
+    ln -sf "../skills/${fname}" "${fname}"
+    link_count=$((link_count + 1))
+  done
+  echo ""
+  echo "Created: ${link_count} command symlinks in .claude/commands/"
+fi
+
+# ===========================================================================
 # Verify
 # ===========================================================================
 

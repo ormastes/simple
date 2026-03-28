@@ -1,1 +1,1 @@
-/Users/ormastes/simple/.claude/skills/release.md
+../skills/release.md

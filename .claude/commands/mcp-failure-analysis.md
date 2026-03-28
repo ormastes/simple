@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/mcp-failure-analysis.md
+../skills/mcp-failure-analysis.md

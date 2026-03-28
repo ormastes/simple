@@ -1,1 +1,1 @@
-/home/ormastes/dev/pub/simple/.claude/skills/sffi.md
+../skills/sffi.md
