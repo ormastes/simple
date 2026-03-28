@@ -2,6 +2,7 @@
 # Dashboard Web Server
 #
 # HTTP server for dashboard web interface with REST API endpoints.
+# Includes: project status, tmux terminal (read/write), WebSocket terminal, GUI viewer.
 
 use core.net.tcp.{TcpListener, TcpStream}
 use core.time.{now_iso8601}
@@ -10,6 +11,11 @@ use tooling.dashboard.cache.{get_cached_data}
 use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends}
 use tooling.dashboard.alerts.{check_alerts_with_trends}
 use std.json.builder.{escape_json}
+use app.web_dashboard.tmux_api.{handle_tmux_api}
+use app.web_dashboard.terminal_ws.{handle_terminal_ws}
+use app.web_dashboard.dashboard_html.{generate_full_dashboard_html}
+use app.ui.web.ws_handler.{extract_ws_key, is_ws_upgrade_request}
+use std.text.{to_int_or}
 
 # =========================================================================
 # HTTP Server
@@ -52,8 +58,50 @@ class DashboardServer:
         match stream.read_line():
             Err(e) =>
                 print "Error reading request: {e}"
+                return
             Ok(request_line) =>
-                val response = self.route_request(request_line)
+                val parts = request_line.split(" ")
+                if parts.len() < 2:
+                    stream.write_all(http_error(400, "Bad Request"))
+                    stream.close()
+                    return
+
+                val method = parts[0]
+                val path = parts[1]
+
+                # Read remaining headers (needed for WebSocket upgrade)
+                var headers = ""
+                var is_ws = false
+                var content_length = 0
+                loop:
+                    match stream.read_line():
+                        Ok(header_line):
+                            if header_line.trim() == "":
+                                break
+                            headers = "{headers}{header_line}\n"
+                            if header_line.contains("Upgrade: websocket"):
+                                is_ws = true
+                            if header_line.starts_with("Content-Length:"):
+                                val len_str = header_line[15:]
+                                content_length = to_int_or(len_str.trim(), 0)
+                        Err(_):
+                            break
+
+                # Read body for POST/DELETE
+                var body = ""
+                if (method == "POST" or method == "DELETE") and content_length > 0:
+                    match stream.read_bytes(content_length):
+                        Ok(data) => body = data
+                        Err(_) => pass_dn
+
+                # WebSocket upgrade for terminal
+                if is_ws and path.starts_with("/ws/terminal"):
+                    val query = if path.contains("?"): path[path.index_of("?") ?? path.len():] else: ""
+                    handle_terminal_ws(stream, headers, query)
+                    return
+
+                # Route HTTP requests
+                val response = self.route_request(method, path, body)
                 match stream.write_all(response):
                     Err(e) => print "Error writing response: {e}"
                     Ok(_) => pass
@@ -61,15 +109,12 @@ class DashboardServer:
         stream.close()
 
     # Route HTTP request
-    fn route_request(request_line: text) -> text:
-        val parts = request_line.split(" ")
-        if parts.len() < 2:
-            return http_error(400, "Bad Request")
-
-        val method = parts[0]
-        val path = parts[1]
-
+    fn route_request(method: text, path: text, body: text) -> text:
         # API routes
+        if path.starts_with("/api/tmux"):
+            val (status, content_type, resp_body) = handle_tmux_api(method, path, body)
+            return http_response(status, content_type, resp_body)
+
         if path.starts_with("/api/"):
             return self.handle_api(method, path)
 
@@ -85,7 +130,10 @@ class DashboardServer:
         if method != "GET":
             return http_error(405, "Method Not Allowed")
 
-        match path:
+        # Strip query string for matching
+        val clean_path = if path.contains("?"): path[0:path.index_of("?") ?? path.len()] else: path
+
+        match clean_path:
             "/api/status" => self.api_status()
             "/api/features" => self.api_features()
             "/api/todos" => self.api_todos()
@@ -99,7 +147,7 @@ class DashboardServer:
 
     # Serve index page
     fn serve_index() -> text:
-        val html = generate_dashboard_html()
+        val html = generate_full_dashboard_html(self.port)
         return http_response(200, "text/html", html)
 
     # Serve static files
