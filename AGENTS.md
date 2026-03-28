@@ -1,8 +1,31 @@
 # Codex Agent — Self-Sufficient Feature Pipeline
 
-**Full pipeline (ideal):** `/research` -> `/design` -> `/impl` -> `/verify` -> `/release`
+**Full pipeline (ideal):** `$research` -> `$design` -> `$impl` -> `$verify` -> `$release`
 
 Each step is **self-sufficient** — if prior steps were not done (by Claude, Gemini, or anyone), do them yourself before proceeding.
+
+## Cooperative Phase Dev
+
+In multi-LLM cooperative mode, Codex owns **Step 2 (research)** and **Step 4 (architecture+design)**:
+```
+Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
+→  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
+```
+See: `doc/guide/llm_cooperative_dev_phase.md`
+
+## Skills Reference
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `$research` | `.codex/skills/research/SKILL.md` | Research + requirement options |
+| `$design` | `.codex/skills/design/SKILL.md` | Architecture + system tests |
+| `$impl` | `.codex/skills/impl/SKILL.md` | 15-phase implementation |
+| `$verify` | `.codex/skills/verify/SKILL.md` | Production readiness check |
+| `$release` | `.codex/skills/release/SKILL.md` | Version bump + tag |
+| `$architecture` | `.codex/skills/architecture/SKILL.md` | MDSOC, ADR writing |
+| `$mdsoc` | `.codex/skills/mdsoc-architecture-writing/SKILL.md` | MDSOC architecture docs |
+| `$system_test` | `.codex/skills/system_test/SKILL.md` | SSpec test design |
+| `$coding` | `.codex/skills/coding/SKILL.md` | Simple language rules |
 
 ---
 
@@ -114,6 +137,15 @@ Must show `STATUS: PASS` before release.
 ## Step 5: Release
 
 Run `/release` — version bump, CHANGELOG, commit, tag, push.
+
+---
+
+## MCP Registry Distribution
+
+MCP server available via npm: `@simple-lang/mcp-server`
+- Package: `tools/mcp-registry/` (npm wrapper for native binary)
+- Registry: `registry.modelcontextprotocol.io`
+- Guide: `doc/07_guide/tooling/ai_cli_registration.md`
 
 ---
 

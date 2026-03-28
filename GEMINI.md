@@ -4,6 +4,30 @@
 
 Each step is **self-sufficient** — if prior steps were not done (by Claude, Codex, or anyone), do them yourself before proceeding.
 
+## Cooperative Phase Dev
+
+In multi-LLM cooperative mode, Gemini owns **Step 3 (UI/UX design)** — its primary strength:
+```
+Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
+→  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
+```
+See: `doc/guide/llm_cooperative_dev_phase.md`
+
+## Skills Reference
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `/research` | `.gemini/commands/research.toml` | Local + domain research |
+| `/design` | `.gemini/commands/design.toml` | UI/UX design (Step 3 primary) |
+| `/impl` | `.gemini/commands/impl.toml` | 15-phase implementation |
+| `/verify` | `.gemini/commands/verify.toml` | Production readiness check |
+| `/release` | `.gemini/commands/release.toml` | Version bump + tag |
+| `/ui_design` | `.gemini/commands/ui_design.toml` | TUI/GUI mockup creation |
+| `/visual_test` | `.gemini/commands/visual_test.toml` | Visual regression testing |
+| `/browser_research` | `.gemini/commands/browser_research.toml` | Chrome MCP domain research |
+| `/stitch` | `.gemini/commands/stitch.toml` | Multi-file code generation |
+| `/coding` | `.gemini/commands/coding.toml` | Simple language rules |
+
 ---
 
 ## Self-Sufficiency Rule
@@ -117,6 +141,15 @@ Must show `STATUS: PASS` before release.
 ## Step 5: Release
 
 Version bump, CHANGELOG update, commit, tag, push.
+
+---
+
+## Extension Distribution
+
+This repo is a registered Gemini CLI extension via `gemini-extension.json`.
+- Users install: `gemini extensions install nicobailon/simple`
+- Auto-discovered via `gemini-cli-extension` GitHub topic
+- Guide: `doc/07_guide/tooling/ai_cli_registration.md`
 
 ---
 

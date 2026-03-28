@@ -1,5 +1,11 @@
 # Research Skill (Claude) -- Step 1: Local + Domain Research
 
+## Cooperative Phase
+**Step 1 of 5** in multi-LLM cooperative pipeline.
+- Solo mode: Full research (local + domain + requirements)
+- Cooperative mode: Local research + domain research, then hand off to Codex `$research` (Step 2)
+- See: `doc/guide/llm_cooperative_dev_phase.md`
+
 **Pipeline:** Step 1 of 5 (research_claude -> research_codex -> design_gemini -> design_codex -> design_claude)
 
 ## Local Implementation Research

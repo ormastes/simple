@@ -1,5 +1,11 @@
 # Impl Skill -- 15-Phase Implementation Workflow
 
+## Cooperative Phase
+**Implementation phase** — runs after design is complete (Steps 1-5 or solo design).
+- Any model can run implementation (Claude primary, Gemini/Codex secondary)
+- Self-sufficient: if design artifacts missing, does design inline
+- See: `doc/guide/llm_cooperative_dev_phase.md`
+
 **Self-sufficient.** If research, requirements, or design are missing, do them first (phases 1-5 handle this). Does not depend on Codex or Gemini having run prior steps.
 
 ## Prerequisites Check

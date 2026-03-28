@@ -4,15 +4,23 @@ Date: 2026-03-28
 
 ## Summary
 
-Traceability work is partially implemented. Core source-to-test path mapping and trace ID extraction are in place, and the traceability module now includes manifest-based helper entry points intended to reduce interpreter-specific failures during focused tests.
+Traceability implementation in `src/app/traceability/` is now functionally in place for the covered rules. The focused unit spec passes against the current local Simple binaries, and the source tree contains the CLI entrypoint, dispatch branch, and help text for `simple traceability-check`.
 
-The main remaining blocker is the Simple interpreter, not the high-level traceability design. The focused traceability analysis examples still fail during execution with runtime semantic errors, so the feature is not complete and the checker is not yet validated end to end.
+The remaining gap observed in this checkout is not traceability rule logic. It is release artifact drift: the checked-in `bin/release/linux-x86_64/simple` binary is older than the current source tree and does not yet expose `traceability-check`, even though the command is wired in source.
 
 ## Implemented
 
 - Added traceability helper exports in [src/app/traceability/__init__.spl](/Users/ormastes/simple/src/app/traceability/__init__.spl).
 - Added manifest/default-root helper functions in [src/app/traceability/core.spl](/Users/ormastes/simple/src/app/traceability/core.spl).
 - Updated the focused spec in [test/unit/app/tooling/traceability_spec.spl](/Users/ormastes/simple/test/unit/app/tooling/traceability_spec.spl) to use manifest-style inputs instead of direct virtual-file arrays.
+- Verified the focused spec passes with the current local binary:
+  - `src/compiler_rust/target/bootstrap/simple test test/unit/app/tooling/traceability_spec.spl`
+- Verified the source tree wires the CLI command through:
+  - [src/app/traceability/main.spl](/Users/ormastes/simple/src/app/traceability/main.spl)
+  - [src/app/cli/main.spl](/Users/ormastes/simple/src/app/cli/main.spl)
+  - [src/app/cli/dispatch/table.spl](/Users/ormastes/simple/src/app/cli/dispatch/table.spl)
+  - [src/app/cli/cli_helpers.spl](/Users/ormastes/simple/src/app/cli/cli_helpers.spl)
+- Added CLI-facing regression coverage for `traceability-check` in [test/unit/app/cli/traceability_command_spec.spl](/Users/ormastes/simple/test/unit/app/cli/traceability_command_spec.spl) and updated the static CLI inventory/help specs to include the command.
 - Source mapping helpers are present for:
   - source file to unit spec candidates
   - source directory to integration/module spec candidates
@@ -21,39 +29,44 @@ The main remaining blocker is the Simple interpreter, not the high-level traceab
   - `REQ-*` and `NFR-*` identifier extraction
   - date-suffixed slug normalization
 
-## Current Failures
+## Current Verification
 
-The focused command:
+Passing focused command:
 
 ```text
-bin/simple test test/unit/app/tooling/traceability_spec.spl
+src/compiler_rust/target/bootstrap/simple test test/unit/app/tooling/traceability_spec.spl
 ```
 
-still fails in the traceability analysis section.
+Observed result:
 
-Current failure pattern:
+- `Passed: 10`
+- `Failed: 0`
 
-- `semantic: invalid operation: cannot index value of type i64`
+Stale release artifact behavior:
 
-This affects the analysis examples that should verify:
+- `bin/release/linux-x86_64/simple traceability-check ...`
+- Result: `error: file not found: traceability-check`
 
-- uncovered requirement IDs
-- legacy requirement root warnings
-- raw spec links from docs
-- missing unit/module tests for opted-in source roots
+Attempted rebuild status:
+
+- `src/compiler_rust/target/bootstrap/simple native-build --entry src/app/cli/main.spl -o build/traceability_cli_check`
+- Result: no output binary emitted because the native build hit an unrelated parse failure in `src/lib/nogc_sync_mut/web_ui/dom_backend.spl`
+- Reported failure: `parse: Unexpected token: expected identifier, found Assign`
+
+This indicates the release binary in the checkout has not been rebuilt from the current CLI source, and the current blocker is outside the traceability module.
 
 ## What Was Learned
 
-- Arrays of structs and some imported composite arguments appear unstable under the current interpreter path.
-- Rewriting test inputs from `VirtualFile` arrays to manifest text reduced some boundary complexity but did not eliminate the runtime failure.
-- The remaining issue is likely inside interpreter handling of imported helper calls or collection/indexing semantics, not in the intended traceability rules themselves.
+- The earlier report state is outdated relative to the current checkout.
+- The manifest helper path is stable enough for the focused traceability spec to pass.
+- The main user-visible risk is stale binary packaging, not missing analysis/counting logic.
+- CLI regression coverage needs to include new commands explicitly; otherwise source wiring can exist without any guard at the user-facing layer.
 
 ## Next Work
 
-- Reduce the analysis/count path to interpreter-safe primitive operations only.
-- If that still fails, move the fragile counting/test helper boundary behind a different implementation path rather than continuing to layer Simple-side wrappers.
-- Re-run the focused traceability spec until all helper and analysis sections pass.
-- After the focused spec passes, validate CLI/build integration again.
+- Fix the unrelated native-build parse failure in `src/lib/nogc_sync_mut/web_ui/dom_backend.spl`, then rebuild the release binary so `bin/release/linux-x86_64/simple` reflects the current CLI command set.
+- Add or keep CLI-level regression checks for `traceability-check` so command registration/help drift is caught immediately.
+- After rebuilding, validate `simple traceability-check --scope=all` through the release binary, not just through source-level dispatch/tests.
 
 ## Version Control
 

@@ -54,7 +54,7 @@ Every phase is **self-sufficient**. Any LLM can do any phase alone. If a prior p
 | LLM | Invocation |
 |-----|-----------|
 | Claude Code | `/research` (`.claude/skills/research.md`) |
-| Codex CLI | `$research` (`.agents/skills/research/SKILL.md`) |
+| Codex CLI | `$research` (`.codex/skills/research/SKILL.md`) |
 | Gemini CLI | `/research` (`.gemini/commands/research.toml`) |
 
 ### Multi-LLM Pattern (optional)
@@ -127,7 +127,7 @@ If multiple LLMs participate in research:
 | LLM | Invocation |
 |-----|-----------|
 | Claude Code | `/design` (`.claude/skills/design.md`) |
-| Codex CLI | `$design` (`.agents/skills/design/SKILL.md`) |
+| Codex CLI | `$design` (`.codex/skills/design/SKILL.md`) |
 | Gemini CLI | `/design` (`.gemini/commands/design.toml`) |
 
 ### LLM Strengths
@@ -188,7 +188,7 @@ If multiple LLMs participate in research:
 | LLM | Invocation |
 |-----|-----------|
 | Claude Code | `/impl` (`.claude/skills/impl.md`) |
-| Codex CLI | `$impl` (`.agents/skills/impl/SKILL.md`) |
+| Codex CLI | `$impl` (`.codex/skills/impl/SKILL.md`) |
 | Gemini CLI | `/impl` (`.gemini/commands/impl.toml`) |
 
 ### Critical Rules
@@ -233,7 +233,7 @@ If multiple LLMs participate in research:
 | LLM | Invocation |
 |-----|-----------|
 | Claude Code | `/verify` (`.claude/skills/verify.md`) |
-| Codex CLI | `$verify` (`.agents/skills/verify/SKILL.md`) |
+| Codex CLI | `$verify` (`.codex/skills/verify/SKILL.md`) |
 | Gemini CLI | `/verify` (`.gemini/commands/verify.toml`) |
 
 ---
@@ -265,7 +265,7 @@ If multiple LLMs participate in research:
 | LLM | Invocation |
 |-----|-----------|
 | Claude Code | `/release` (`.claude/skills/release.md`) |
-| Codex CLI | `$release` (`.agents/skills/release/SKILL.md`) |
+| Codex CLI | `$release` (`.codex/skills/release/SKILL.md`) |
 | Gemini CLI | `/release` (`.gemini/commands/release.toml`) |
 
 ---
@@ -301,13 +301,57 @@ If multiple LLMs participate in research:
 
 ## Skill / Command File Locations
 
+### Shared Pipeline Skills (all models, self-sufficient)
+
 | Skill | Claude Code | Codex CLI | Gemini CLI |
 |-------|-------------|-----------|------------|
-| **research** | `.claude/skills/research.md` | `.agents/skills/research/SKILL.md` | `.gemini/commands/research.toml` |
-| **design** | `.claude/skills/design.md` | `.agents/skills/design/SKILL.md` | `.gemini/commands/design.toml` |
-| **impl** | `.claude/skills/impl.md` | `.agents/skills/impl/SKILL.md` | `.gemini/commands/impl.toml` |
-| **verify** | `.claude/skills/verify.md` | `.agents/skills/verify/SKILL.md` | `.gemini/commands/verify.toml` |
-| **release** | `.claude/skills/release.md` | `.agents/skills/release/SKILL.md` | `.gemini/commands/release.toml` |
+| **research** | `.claude/skills/research.md` | `.codex/skills/research/SKILL.md` | `.gemini/commands/research.toml` |
+| **design** | `.claude/skills/design.md` | `.codex/skills/design/SKILL.md` | `.gemini/commands/design.toml` |
+| **impl** | `.claude/skills/impl.md` | `.codex/skills/impl/SKILL.md` | `.gemini/commands/impl.toml` |
+| **verify** | `.claude/skills/verify.md` | `.codex/skills/verify/SKILL.md` | `.gemini/commands/verify.toml` |
+| **release** | `.claude/skills/release.md` | `.codex/skills/release/SKILL.md` | `.gemini/commands/release.toml` |
+| **coding** | `.claude/skills/coding.md` | `.codex/skills/coding/SKILL.md` | `.gemini/commands/coding.toml` |
+
+### Model-Specific Skills (unique strengths)
+
+**Claude Code** — Analysis & orchestration:
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `/sspec` | `.claude/skills/sspec.md` | SSpec BDD framework |
+| `/test` | `.claude/skills/test.md` | Test writing, container testing |
+| `/debug` | `.claude/skills/debug.md` | Debugging, tracing |
+| `/architecture` | `.claude/skills/architecture.md` | Compiler pipeline, modules |
+| `/refactor` | `.claude/skills/refactor.md` | Code quality workflow |
+| `/agents` | `.claude/skills/agents.md` | Multi-agent orchestration |
+| `/doc` | `.claude/skills/doc.md` | 10 doc types |
+| `/sync` | `.claude/skills/sync.md` | JJ VCS workflow |
+| `/stdlib` | `.claude/skills/stdlib.md` | Stdlib development |
+| `/sffi` | `.claude/skills/sffi.md` | FFI wrapper patterns |
+| `/database` | `.claude/skills/database.md` | BugDB, TestDB, FeatureDB |
+| `/mcp` | `.claude/skills/mcp.md` | MCP server implementation |
+| `/deeplearning` | `.claude/skills/deeplearning.md` | ML pipeline operators |
+| `/cuda` | `.claude/skills/cuda.md` | GPU/CUDA/SIMD |
+| `/t32` | `.claude/skills/t32.md` | TRACE32 debugger |
+| `/worktree` | `.claude/skills/worktree.md` | JJ workspace isolation |
+| `/rule` | `.claude/skills/rule.md` | Engineering rules |
+
+**Gemini CLI** — Visual & creative:
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `/ui_design` | `.gemini/commands/ui_design.toml` | TUI/GUI mockup creation (primary) |
+| `/visual_test` | `.gemini/commands/visual_test.toml` | Visual regression testing |
+| `/browser_research` | `.gemini/commands/browser_research.toml` | Chrome MCP domain research |
+| `/stitch` | `.gemini/commands/stitch.toml` | Multi-file code generation |
+
+**Codex CLI** — Architecture & verification:
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `$architecture` | `.codex/skills/architecture/SKILL.md` | MDSOC, ADR writing |
+| `$mdsoc` | `.codex/skills/mdsoc-architecture-writing/SKILL.md` | MDSOC architecture docs |
+| `$system_test` | `.codex/skills/system_test/SKILL.md` | SSpec system test design |
 
 ### Invocation Syntax
 

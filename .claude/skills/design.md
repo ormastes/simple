@@ -1,5 +1,11 @@
 # Design Skill — Architecture, UI, System Tests, Detail Design
 
+## Cooperative Phase
+**Step 5 of 5** in multi-LLM cooperative pipeline.
+- Solo mode: Full design (UI + architecture + system tests + detail)
+- Cooperative mode: Receives artifacts from Gemini `/design` (Step 3) and Codex `$design` (Step 4), then refines SSpec quality + detail design
+- See: `doc/guide/llm_cooperative_dev_phase.md`
+
 **Self-sufficient.** If research/requirements are missing, do `/research` first (or do it inline).
 
 ## Prerequisites Check

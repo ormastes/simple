@@ -47,6 +47,18 @@ Read .claude/agents/code.md and use its rules to implement <feature>
 
 ---
 
+## Cooperative Phase Dev
+
+Claude owns **Step 1 (research)** and **Step 5 (design quality)** in multi-LLM cooperative pipeline:
+```
+Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
+→  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
+```
+Solo mode: `/research` → `/design` → `/impl` → `/verify` → `/release` (fully self-sufficient)
+See: `doc/guide/llm_cooperative_dev_phase.md`
+
+---
+
 ## Skills Reference
 
 Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
@@ -124,6 +136,14 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely
 - **DO NOT ADD REPORT TO GIT** unless requested
+
+---
+
+### AI CLI Plugin Distribution
+- Claude plugins: `tools/claude-plugin/` (local marketplace, packaging script)
+- Gemini extension: `gemini-extension.json` (auto-discovered via `gemini-cli-extension` GitHub topic)
+- MCP registry: `tools/mcp-registry/` (npm wrapper for native binary)
+- Guide: `doc/07_guide/tooling/ai_cli_registration.md`
 
 ---
 
