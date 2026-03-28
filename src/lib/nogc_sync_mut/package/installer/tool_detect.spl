@@ -1,0 +1,76 @@
+# Installer Tool Detection
+#
+# Detects availability of packaging tools: FPM, makensis (NSIS), dpkg-deb.
+
+use std.io_runtime (process_run)
+
+use lib.nogc_sync_mut.package.installer.types (ToolAvailability)
+
+
+fn detect_tool(name: text) -> (bool, text):
+    """Check if a tool is available on PATH. Returns (found, path)."""
+    val (stdout, _, code) = process_run("which", [name])
+    if code == 0:
+        (true, stdout.trim())
+    else:
+        (false, "")
+
+
+fn detect_all_tools() -> ToolAvailability:
+    """Detect all packaging tools and return availability report."""
+    val (has_fpm, fpm_path) = detect_tool("fpm")
+    val (has_makensis, makensis_path) = detect_tool("makensis")
+    val (has_dpkg_deb, dpkg_deb_path) = detect_tool("dpkg-deb")
+
+    ToolAvailability(
+        has_fpm: has_fpm,
+        has_makensis: has_makensis,
+        has_dpkg_deb: has_dpkg_deb,
+        fpm_path: fpm_path,
+        makensis_path: makensis_path,
+        dpkg_deb_path: dpkg_deb_path
+    )
+
+
+fn check_tool_for_platform(platform: InstallerPlatform, tools: ToolAvailability) -> Result<text, text>:
+    """Check if required tool is available for a given platform.
+    Returns Ok(tool_name) or Err(install_instructions)."""
+    match platform:
+        case InstallerPlatform.Deb:
+            if tools.has_fpm:
+                Ok("fpm")
+            else if tools.has_dpkg_deb:
+                Ok("dpkg-deb")
+            else:
+                Err("Install FPM: gem install fpm\n  Or use dpkg-deb (apt install dpkg)")
+
+        case InstallerPlatform.Rpm | InstallerPlatform.MacosPkg | InstallerPlatform.FreeBsd:
+            if tools.has_fpm:
+                Ok("fpm")
+            else:
+                Err("Install FPM: gem install fpm")
+
+        case InstallerPlatform.WindowsExe:
+            if tools.has_makensis:
+                Ok("makensis")
+            else:
+                Err("Install NSIS: apt install nsis")
+
+
+fn print_tool_status(tools: ToolAvailability):
+    """Print detected tool status to stdout."""
+    print "Packaging tool status:"
+    if tools.has_fpm:
+        print "  FPM:       found at {tools.fpm_path}"
+    else:
+        print "  FPM:       not found (gem install fpm)"
+
+    if tools.has_makensis:
+        print "  makensis:  found at {tools.makensis_path}"
+    else:
+        print "  makensis:  not found (apt install nsis)"
+
+    if tools.has_dpkg_deb:
+        print "  dpkg-deb:  found at {tools.dpkg_deb_path}"
+    else:
+        print "  dpkg-deb:  not found (apt install dpkg)"

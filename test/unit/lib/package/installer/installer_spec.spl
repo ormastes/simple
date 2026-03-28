@@ -1,0 +1,132 @@
+# Installer Package Generator Tests
+#
+# Tests for cross-platform installer generation:
+# - Type system (InstallerPlatform enum, config, results)
+# - Tool detection
+# - Staging directory layout
+# - Backend command construction
+
+# NOTE: No imports needed - describe/it/expect are built-in
+
+describe "InstallerPlatform":
+    context "enum values":
+        it "has all 5 platforms":
+            val platforms = InstallerPlatform.all()
+            expect(platforms.len()).to_equal(5)
+
+        it "converts to string":
+            expect(InstallerPlatform.Deb.to_string()).to_equal("deb")
+            expect(InstallerPlatform.Rpm.to_string()).to_equal("rpm")
+            expect(InstallerPlatform.MacosPkg.to_string()).to_equal("macos")
+            expect(InstallerPlatform.FreeBsd.to_string()).to_equal("freebsd")
+            expect(InstallerPlatform.WindowsExe.to_string()).to_equal("windows")
+
+        it "parses from string":
+            val deb = InstallerPlatform.from_string("deb")
+            expect(deb.?).to_equal(true)
+
+            val unknown = InstallerPlatform.from_string("invalid")
+            expect(unknown.?).to_equal(false)
+
+    context "file extensions":
+        it "returns correct extensions":
+            expect(InstallerPlatform.Deb.file_extension()).to_equal(".deb")
+            expect(InstallerPlatform.Rpm.file_extension()).to_equal(".rpm")
+            expect(InstallerPlatform.MacosPkg.file_extension()).to_equal(".pkg")
+            expect(InstallerPlatform.FreeBsd.file_extension()).to_equal(".txz")
+            expect(InstallerPlatform.WindowsExe.file_extension()).to_equal(".exe")
+
+    context "FPM type mapping":
+        it "returns FPM types for supported platforms":
+            expect(InstallerPlatform.Deb.fpm_type().?).to_equal(true)
+            expect(InstallerPlatform.Rpm.fpm_type().?).to_equal(true)
+            expect(InstallerPlatform.MacosPkg.fpm_type().?).to_equal(true)
+            expect(InstallerPlatform.FreeBsd.fpm_type().?).to_equal(true)
+
+        it "returns nil for Windows (uses NSIS)":
+            expect(InstallerPlatform.WindowsExe.fpm_type().?).to_equal(false)
+
+    context "descriptions":
+        it "provides human-readable descriptions":
+            expect(InstallerPlatform.Deb.description()).to_contain("Debian")
+            expect(InstallerPlatform.WindowsExe.description()).to_contain("Windows")
+
+
+describe "InstallerConfig":
+    context "default config":
+        it "creates config with sensible defaults":
+            val config = default_config()
+            expect(config.package_name).to_equal("simple-lang")
+            expect(config.output_dir).to_equal("build/installers")
+            expect(config.architecture).to_equal("amd64")
+            expect(config.license).to_equal("MIT")
+
+        it "has valid homepage URL":
+            val config = default_config()
+            expect(config.homepage).to_start_with("https://")
+
+
+describe "ToolAvailability":
+    context "tool detection":
+        it "detects tools without crashing":
+            val tools = detect_all_tools()
+            # Just verify the struct is populated (tools may or may not be installed)
+            expect(tools.has_fpm == true or tools.has_fpm == false).to_equal(true)
+            expect(tools.has_makensis == true or tools.has_makensis == false).to_equal(true)
+            expect(tools.has_dpkg_deb == true or tools.has_dpkg_deb == false).to_equal(true)
+
+    context "tool checking per platform":
+        it "requires FPM or dpkg-deb for Debian":
+            val tools = ToolAvailability(
+                has_fpm: false, has_makensis: false, has_dpkg_deb: true,
+                fpm_path: "", makensis_path: "", dpkg_deb_path: "/usr/bin/dpkg-deb"
+            )
+            val result = check_tool_for_platform(InstallerPlatform.Deb, tools)
+            expect(result.is_ok()).to_equal(true)
+
+        it "requires FPM for RPM":
+            val tools = ToolAvailability(
+                has_fpm: false, has_makensis: false, has_dpkg_deb: false,
+                fpm_path: "", makensis_path: "", dpkg_deb_path: ""
+            )
+            val result = check_tool_for_platform(InstallerPlatform.Rpm, tools)
+            expect(result.is_err()).to_equal(true)
+
+        it "requires makensis for Windows":
+            val tools = ToolAvailability(
+                has_fpm: true, has_makensis: false, has_dpkg_deb: false,
+                fpm_path: "/usr/bin/fpm", makensis_path: "", dpkg_deb_path: ""
+            )
+            val result = check_tool_for_platform(InstallerPlatform.WindowsExe, tools)
+            expect(result.is_err()).to_equal(true)
+
+        it "accepts makensis for Windows":
+            val tools = ToolAvailability(
+                has_fpm: false, has_makensis: true, has_dpkg_deb: false,
+                fpm_path: "", makensis_path: "/usr/bin/makensis", dpkg_deb_path: ""
+            )
+            val result = check_tool_for_platform(InstallerPlatform.WindowsExe, tools)
+            expect(result.is_ok()).to_equal(true)
+
+
+describe "InstallerResult":
+    context "result construction":
+        it "creates success result":
+            val result = InstallerResult(
+                platform: InstallerPlatform.Deb,
+                success: true,
+                output_path: "build/installers/simple-lang_0.9.3_amd64.deb",
+                message: "Built successfully"
+            )
+            expect(result.success).to_equal(true)
+            expect(result.output_path).to_contain(".deb")
+
+        it "creates failure result":
+            val result = InstallerResult(
+                platform: InstallerPlatform.WindowsExe,
+                success: false,
+                output_path: "",
+                message: "makensis not found"
+            )
+            expect(result.success).to_equal(false)
+            expect(result.message).to_contain("makensis")
