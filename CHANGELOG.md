@@ -2,6 +2,14 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.9.5] - 2026-03-29
+
+### Added
+
+### Fixed
+
+### Changed
+
 ## [0.9.4] - 2026-03-28
 
 ### Added
