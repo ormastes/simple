@@ -12,6 +12,8 @@ How to package and register Simple Language skills/plugins/extensions on their r
 | **Gemini CLI** | geminicli.com/extensions gallery | Yes (GitHub topic) | Add topic only |
 | **MCP Server** | registry.modelcontextprotocol.io | No | npm publish + mcp-publisher |
 
+Related: `doc/07_guide/tooling/ai_command_parity.md` documents the shared workflow names used across Claude, Codex, and Gemini.
+
 ---
 
 ## 1. Claude Code Plugin

@@ -308,6 +308,27 @@ if [ -d "${skills_dir}" ]; then
 fi
 
 # ===========================================================================
+# Codex parity symlinks (.codex/commands/ → .codex/skills/*/SKILL.md)
+# ===========================================================================
+
+codex_skills_dir="${repo_root}/.codex/skills"
+codex_commands_dir="${repo_root}/.codex/commands"
+
+if [ -d "${codex_skills_dir}" ]; then
+  mkdir -p "${codex_commands_dir}"
+  link_count=0
+  for f in "${codex_skills_dir}"/*/SKILL.md; do
+    [ -f "$f" ] || continue
+    skill_name=$(basename "$(dirname "$f")")
+    rm -f "${codex_commands_dir}/${skill_name}.md"
+    cd "${codex_commands_dir}"
+    ln -sf "../skills/${skill_name}/SKILL.md" "${skill_name}.md"
+    link_count=$((link_count + 1))
+  done
+  echo "Created: ${link_count} parity links in .codex/commands/"
+fi
+
+# ===========================================================================
 # Verify
 # ===========================================================================
 

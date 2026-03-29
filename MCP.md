@@ -202,6 +202,8 @@ Currently using **ad-hoc skill sharing** via `.codex/skills/` directory. Can be 
 
 Config: `.codex/config.toml` — reads `AGENTS.md` natively + `CLAUDE.md` as fallback.
 
+Command parity guide: `doc/07_guide/tooling/ai_command_parity.md`
+
 ### MCP Servers (in config.toml)
 
 All 4 MCP servers registered: `simple-mcp`, `simple-lsp-mcp`, `t32-mcp`, `t32-lsp-mcp`
@@ -228,6 +230,7 @@ To convert ad-hoc skills to a proper plugin bundle for the [Codex Plugins catalo
 
 1. Bundle `.codex/skills/` + `.codex/config.toml` MCP entries into a plugin manifest
 2. Install via `/plugins` command in Codex CLI
+3. Reuse `.codex/commands/` parity links as the stable command-name mapping layer
 3. Submit to [openai/skills](https://github.com/openai/skills) catalog for public listing
 
 ---
