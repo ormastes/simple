@@ -830,6 +830,26 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
 
     let path = resolve_app_path(app_relative_path)?;
 
+    if app_relative_path == "src/compiler/90.tools/ffi_gen/main.spl" {
+        let previous_force_args = std::env::var("SIMPLE_FORCE_ARGS").ok();
+        let forced_args = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+        std::env::set_var("SIMPLE_FORCE_ARGS", forced_args);
+
+        let exit_code = run_file_with_args(
+            &path,
+            gc_log,
+            gc_off,
+            vec![path.to_string_lossy().to_string()],
+        );
+
+        match previous_force_args {
+            Some(value) => std::env::set_var("SIMPLE_FORCE_ARGS", value),
+            None => std::env::remove_var("SIMPLE_FORCE_ARGS"),
+        }
+
+        return Some(exit_code);
+    }
+
     // Preserve the original command token in argv so src/app/ui/main.spl can
     // detect `ui` in rt_cli_get_args() and parse the remaining subcommand args.
     let mut full_args = vec![path.to_string_lossy().to_string()];
