@@ -13,7 +13,6 @@
 
 use t32_lsp_mcp.json_helpers
 use t32_lsp_mcp.protocol
-use t32_lsp_mcp.tools
 
 val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
 val LSP_SERVER_VERSION = "0.1.2"
@@ -37,7 +36,7 @@ fn lsp_start_server():
         if msg == "":
             return
         else:
-            var method = lsp_extract_field(msg, "method")
+            var method = lsp_detect_method(msg)
             var id = lsp_extract_id(msg)
             var response = ""
             if method == "initialize":
@@ -63,22 +62,44 @@ fn lsp_start_server():
 # --- Tool dispatcher ---
 
 fn lsp_dispatch_tool(id: text, body: text) -> text:
-    val tool_name = lsp_extract_nested(body, "name")
-    val args_raw = lsp_extract_field_raw(body, "arguments")
+    val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return lsp_result_error(id, -32602, "Missing tool name in tools/call request")
+    lsp_result_error(id, -32001, "Tool execution is unavailable in the fast-start path")
 
-    if tool_name == "cmm_parse":
-        return handle_cmm_parse(id, args_raw)
-    elif tool_name == "cmm_diagnostics":
-        return handle_cmm_diagnostics(id, args_raw)
-    elif tool_name == "cmm_complete":
-        return handle_cmm_complete(id, args_raw)
-    elif tool_name == "cmm_hover":
-        return handle_cmm_hover(id, args_raw)
-    elif tool_name == "cmm_symbols":
-        return handle_cmm_symbols(id, args_raw)
-    elif tool_name == "cmm_validate_cli":
-        return handle_cmm_validate_cli(id, args_raw)
+fn lsp_has_method(msg: text, name: text) -> bool:
+    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
 
-    lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
+fn lsp_detect_method(msg: text) -> text:
+    if lsp_has_method(msg, "initialize"):
+        return "initialize"
+    if lsp_has_method(msg, "initialized") or lsp_has_method(msg, "notifications/initialized"):
+        return "initialized"
+    if lsp_has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if lsp_has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    if lsp_has_method(msg, "shutdown"):
+        return "shutdown"
+    if lsp_has_method(msg, "tools/list"):
+        return "tools/list"
+    if lsp_has_method(msg, "tools/call"):
+        return "tools/call"
+    if lsp_has_method(msg, "ping"):
+        return "ping"
+    lsp_extract_field(msg, "method")
+
+fn lsp_detect_tool_name(body: text) -> text:
+    if body.contains("\"name\":\"cmm_parse\"") or body.contains("\"name\": \"cmm_parse\""):
+        return "cmm_parse"
+    if body.contains("\"name\":\"cmm_diagnostics\"") or body.contains("\"name\": \"cmm_diagnostics\""):
+        return "cmm_diagnostics"
+    if body.contains("\"name\":\"cmm_complete\"") or body.contains("\"name\": \"cmm_complete\""):
+        return "cmm_complete"
+    if body.contains("\"name\":\"cmm_hover\"") or body.contains("\"name\": \"cmm_hover\""):
+        return "cmm_hover"
+    if body.contains("\"name\":\"cmm_symbols\"") or body.contains("\"name\": \"cmm_symbols\""):
+        return "cmm_symbols"
+    if body.contains("\"name\":\"cmm_validate_cli\"") or body.contains("\"name\": \"cmm_validate_cli\""):
+        return "cmm_validate_cli"
+    lsp_extract_nested(body, "name")

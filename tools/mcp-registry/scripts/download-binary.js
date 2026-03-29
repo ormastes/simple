@@ -10,7 +10,7 @@ const { execSync } = require('child_process');
 
 const pkg = require('../package.json');
 const VERSION = pkg.version;
-const REPO = 'nicobailon/simple';
+const REPO = 'ormastes/simple';
 
 function getTriple() {
   const platform = os.platform();
@@ -88,7 +88,7 @@ async function main() {
   } catch (err) {
     console.warn(`Warning: Could not download binary: ${err.message}`);
     console.warn('The MCP server will look for the binary in PATH.');
-    console.warn('Build from source: https://github.com/nicobailon/simple');
+    console.warn('Build from source: https://github.com/ormastes/simple');
     // Don't fail the install
   }
 }

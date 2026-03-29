@@ -1042,30 +1042,39 @@ mod tests {
     fn make_function_node(name: &str) -> simple_parser::ast::Node {
         use simple_parser::ast::*;
         Node::Function(FunctionDef {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
             name: name.to_string(),
+            generic_params: vec![],
             params: vec![],
             return_type: None,
-            body: vec![],
+            where_clause: vec![],
+            body: simple_parser::ast::Block::default(),
+            visibility: Visibility::Private,
+            effects: vec![],
             decorators: vec![],
-            is_async: false,
-            is_static: false,
-            is_mutable: false,
-            generics: None,
-            where_clause: None,
-            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            attributes: vec![],
             doc_comment: None,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
+            bounds_block: None,
+            is_static: false,
+            is_me_method: false,
+            is_generator: false,
+            return_constraint: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
         })
     }
 
     fn make_export_use_node(names: &[&str]) -> simple_parser::ast::Node {
         use simple_parser::ast::*;
         let items: Vec<ImportTarget> = names.iter().map(|n| ImportTarget::Single(n.to_string())).collect();
-        Node::ExportUseStmt(UseStmt {
+        Node::ExportUseStmt(ExportUseStmt {
             span: simple_parser::token::Span::new(0, 0, 0, 0),
             path: ModulePath { segments: vec![] },
             target: ImportTarget::Group(items),
-            is_type_only: false,
-            is_lazy: false,
         })
     }
 
@@ -1143,16 +1152,23 @@ mod tests {
         // Class, Struct, Enum nodes should always be kept
         use simple_parser::ast::*;
         let node = Node::Class(ClassDef {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
             name: "SomeClass".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
             fields: vec![],
             methods: vec![],
-            decorators: vec![],
-            generics: None,
-            where_clause: None,
-            mixins: vec![],
-            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            parent: None,
+            visibility: Visibility::Private,
+            effects: vec![],
+            attributes: vec![],
             doc_comment: None,
-            is_abstract: false,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
+            invariant: None,
+            macro_invocations: vec![],
+            mixins: vec![],
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));

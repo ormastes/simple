@@ -118,10 +118,8 @@ fn lsp_extract_field(json: text, key: text) -> text:
     val raw = lsp_extract_field_raw(json, key)
     if raw == "null":
         return ""
-    if raw.len() >= 2:
-        if raw.starts_with(lsp_Q()):
-            if raw.ends_with(lsp_Q()):
-                return lsp_unescape_json_string(raw.substring(1, raw.len() - 1))
+    if raw.len() >= 2 and raw.starts_with(lsp_Q()) and raw.ends_with(lsp_Q()):
+        return lsp_unescape_json_string(raw[1:raw.len() - 1])
     return raw
 
 fn lsp_unescape_json_string(s: text) -> text:
@@ -154,47 +152,40 @@ fn lsp_unescape_json_string(s: text) -> text:
     parts.join("")
 
 fn lsp_extract_field_raw(json: text, key: text) -> text:
-    var i = 0
-    while i < json.len():
-        if lsp_char_at(json, i) != lsp_Q():
-            i = i + 1
-            continue
-
-        val key_end = lsp_read_string_end(json, i)
-        if key_end < 0:
+    val search = lsp_Q() + key + lsp_Q() + ":"
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(lsp_Q()):
+        val end_idx = lsp_read_string_end(rest, 0)
+        if end_idx < 0:
             return "null"
-        val current_key = json.substring(i + 1, key_end)
-        i = lsp_skip_ws(json, key_end + 1)
-        if i >= json.len() or lsp_char_at(json, i) != ":":
-            continue
-        i = lsp_skip_ws(json, i + 1)
-        if current_key != key:
-            continue
-        if i >= json.len():
-            continue
-
-        val ch = lsp_char_at(json, i)
-        if ch == lsp_Q():
-            val value_end = lsp_read_string_end(json, i)
-            if value_end < 0:
-                return "null"
-            return json.substring(i, value_end + 1)
-        if ch == lsp_LB() or ch == lsp_SB_L():
-            val value_end = lsp_read_nested_end(json, i)
-            if value_end < 0:
-                return "null"
-            return json.substring(i, value_end + 1)
-
-        var end = i
-        while end < json.len():
-            val end_ch = lsp_char_at(json, end)
-            if end_ch == "," or end_ch == lsp_RB() or end_ch == lsp_SB_R() or end_ch == " " or end_ch == "\n" or end_ch == "\r" or end_ch == "\t":
-                break
-            end = end + 1
-        if end == i:
+        return rest[0:end_idx + 1]
+    if rest.starts_with(lsp_LB()) or rest.starts_with(lsp_SB_L()):
+        val end_idx = lsp_read_nested_end(rest, 0)
+        if end_idx < 0:
             return "null"
-        return json.substring(i, end)
-    return "null"
+        return rest[0:end_idx + 1]
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == lsp_RB() or ch == lsp_SB_R() or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
 
 fn lsp_extract_id(json: text) -> text:
     lsp_extract_field_raw(json, "id")
