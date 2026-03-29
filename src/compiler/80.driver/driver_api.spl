@@ -232,6 +232,7 @@ extern fn sys_get_args() -> [text]
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
@@ -298,16 +299,95 @@ fn aot_shared_library(path: text, output: text) -> CompileResult:
 
     Equivalent to: bin/simple build --shared --entry <path> -o <output>
     """
+    use compiler.tools.header_gen.shared_lib_flags.{get_shared_lib_flags}
+
     var options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
-    options.output_file = Some(output)
-    options.output_format = OutputFormat.Native
-    options.shared = true
+    val cpp_output = output + ".simple_public.cpp"
+    val source_obj = output + ".simple_public.o"
+    val runtime_obj = output + ".runtime.o"
+    options.output_file = Some(cpp_output)
+    options.backend = "c"
     options.release = true
     options.optimize = true
     val driver = CompilerDriver.create(options)
-    CompilerDriver.run_compile(driver)
+    val compile_result = CompilerDriver.run_compile(driver)
+
+    match compile_result:
+        case CompileResult.Success(_):
+            val flags = get_shared_lib_flags()
+
+            var source_args: [text] = []
+            var i = 0
+            while i < flags.compile_flags.len():
+                source_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                source_args.push("-D" + flags.defines[i])
+                i = i + 1
+            source_args.push("-c")
+            source_args.push(cpp_output)
+            source_args.push("-o")
+            source_args.push(source_obj)
+
+            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
+            if src_code != 0:
+                rt_file_delete(cpp_output)
+                return CompileResult.CodegenError(_combine_driver_api_process_error("C++ object compilation failed", src_out, src_err))
+
+            var runtime_args: [text] = []
+            i = 0
+            while i < flags.compile_flags.len():
+                runtime_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                runtime_args.push("-D" + flags.defines[i])
+                i = i + 1
+            runtime_args.push("-c")
+            runtime_args.push("src/runtime/runtime.c")
+            runtime_args.push("-I")
+            runtime_args.push("src/runtime")
+            runtime_args.push("-o")
+            runtime_args.push(runtime_obj)
+
+            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
+            if rt_code != 0:
+                rt_file_delete(cpp_output)
+                rt_file_delete(source_obj)
+                return CompileResult.CodegenError(_combine_driver_api_process_error("Runtime object compilation failed", rt_out, rt_err))
+
+            var link_args: [text] = []
+            i = 0
+            while i < flags.link_flags.len():
+                link_args.push(flags.link_flags[i])
+                i = i + 1
+            link_args.push(source_obj)
+            link_args.push(runtime_obj)
+            link_args.push("-o")
+            link_args.push(output)
+
+            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
+            rt_file_delete(cpp_output)
+            rt_file_delete(source_obj)
+            rt_file_delete(runtime_obj)
+
+            if link_code != 0:
+                return CompileResult.CodegenError(_combine_driver_api_process_error("Shared library link failed", link_out, link_err))
+
+            CompileResult.Success(output)
+        case _:
+            compile_result
+
+fn _combine_driver_api_process_error(prefix: text, stdout: text, stderr: text) -> text:
+    var detail = stderr.trim()
+    if detail == "":
+        detail = stdout.trim()
+    if detail == "":
+        return prefix
+    prefix + ": " + detail
 
 # ============================================================================
 # SMF Cache Loading for Interpreter

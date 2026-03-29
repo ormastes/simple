@@ -509,3 +509,63 @@ Current diagnosis:
   family in `stage2`
 - the self-hosted compiler path used by `stage3` is still missing the equivalent
   behavior, so those warnings return once the newly built compiler takes over
+
+### Native-Build Routing Fix: `repro11` to `repro14`
+
+The next blocker after `repro10` was not codegen correctness but control flow:
+`stage2` still invoked the Rust seed command `simple native-build ...`, and that
+command was hardwired to the Rust `NativeProjectBuilder` path. Passing
+`--backend llvm-lib` therefore still hit Rust native-project logic and failed
+early with:
+
+- `LLVM backend requested but 'llvm' feature not enabled`
+
+Root causes identified:
+
+- the Rust CLI command table treated `native-build` as Rust-only
+- `dispatch_to_simple_app()` explicitly refused to dispatch `native-build` to a
+  Simple app
+- Linux `stage2` did not pass `--source` directories, which mattered once the
+  command stopped using the Rust native-build defaulting logic
+
+Fixes applied:
+
+- Rust driver command dispatch now routes `native-build` through
+  `src/app/cli/bootstrap_main.spl` when `--backend llvm-lib` or `--backend
+  llvmlib` is requested
+- the Simple-app dispatch allowlist now includes
+  `src/app/cli/bootstrap_main.spl`
+- Linux `stage2` bootstrap now passes:
+  - `--source src/compiler`
+  - `--source src/app`
+  - `--source src/lib`
+
+Validation:
+
+- direct probe:
+
+```bash
+timeout 5s src/compiler_rust/target/bootstrap/simple native-build --backend llvm-lib
+```
+
+no longer emitted the Rust `native_project` LLVM-feature gate. Instead, it
+entered Simple-source loading and produced parser/deprecation warnings from the
+Simple tree.
+
+- `repro13` / `repro14` stage2 logs no longer contain:
+  - `LLVM backend requested but 'llvm' feature not enabled`
+  - `[CODEGEN-WARN] Failed to declare cross-module function ...`
+
+Observed new behavior:
+
+- `stage2` now spends the timeout budget inside the Simple bootstrap path
+- outer `timeout` / session termination stops it with exit `143` / signal `15`
+- the `stage2` log remains small because the current visible output is only the
+  early parser/deprecation warning set
+
+Interpretation:
+
+- the control-plane bug is fixed: `stage2` is no longer taking the Rust native
+  project path for `llvm-lib`
+- the current issue is performance / long-running execution in the pure Simple
+  bootstrap path, not the previous immediate Rust backend gate failure

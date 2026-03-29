@@ -73,6 +73,7 @@ struct CommandEntry {
 /// Execute a command entry: Simple-first with Rust fallback.
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
     if entry.name == "native-build" && native_build_should_use_simple(ctx.args) {
+        eprintln!("[native-build] dispatching to Simple app: src/app/cli/bootstrap_main.spl");
         if let Some(code) = dispatch_to_simple_app("src/app/cli/bootstrap_main.spl", ctx.args, ctx.gc_log, ctx.gc_off) {
             return code;
         }

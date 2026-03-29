@@ -36,11 +36,13 @@ use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use compiler.driver.driver_aot_output.*
 use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -57,6 +59,9 @@ fn log_warn(msg: text):
     print "[WARN] {msg}"
 fn log_error(msg: text):
     print "[ERROR] {msg}"
+
+fn log_phase(msg: text):
+    eprint("[BOOTSTRAP-PHASE] {msg}")
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -249,16 +254,21 @@ class CompilerDriver:
         val log = self.ctx.logger
 
         # Phase 1: Load source files
+        log_phase("compile:start")
+        log_phase("phase1:load_sources:start")
         if not self.load_sources_impl():
             log_error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
+        log_phase("phase1:load_sources:done")
 
         # Phase 2: Parse all sources
+        log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
         if not self.parse_all_impl():
             log_error("phase 2 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
         log_debug("phase 2 done")
+        log_phase("phase2:parse:done")
 
         # Evict raw source text (no longer needed after parsing)
         if self.ctx.options.low_memory:
@@ -266,6 +276,7 @@ class CompilerDriver:
             self.ctx.evict_sources()
 
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
+        log_phase("phase3:hir_typecheck:start")
         log_trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
         val analyze_ok = self.lower_and_check_impl()
         log_trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
@@ -278,6 +289,7 @@ class CompilerDriver:
                     return CompileResult.ResolveError(self.ctx.errors)
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 3 done")
+        log_phase("phase3:hir_typecheck:done")
 
         # Evict AST modules (no longer needed after HIR lowering)
         if self.ctx.options.low_memory:
@@ -285,14 +297,17 @@ class CompilerDriver:
             self.ctx.evict_ast()
 
         # Phase 4: Monomorphization (specialize generic functions)
+        log_phase("phase4:monomorphize:start")
         log_debug("phase 4: monomorphization...")
         val mono_ok = self.monomorphize_impl()
         if not mono_ok:
             log_error("phase 4 FAILED")
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 4 done")
+        log_phase("phase4:monomorphize:done")
 
         # Phase 5: Mode-specific processing
+        log_phase("phase5:mode_dispatch:start")
         log_debug("phase 5: mode-specific processing...")
         match self.ctx.options.mode:
             case CompileMode.Check:
@@ -337,6 +352,7 @@ class CompilerDriver:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
+        var seen_paths: Dict<text, bool> = {}
 
         # Start with user-provided roots
         var i = 0
@@ -345,7 +361,9 @@ class CompilerDriver:
             val input_path = self.ctx.options.input_files[i]
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
-                all_sources = all_sources.push(s)
+                if not seen_paths.contains(s.path):
+                    seen_paths[s.path] = true
+                    all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
             i = i + 1
@@ -356,12 +374,16 @@ class CompilerDriver:
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:
                 for s in bulk_loaded:
-                    all_sources = all_sources.push(s)
+                    if not seen_paths.contains(s.path):
+                        seen_paths[s.path] = true
+                        all_sources = all_sources.push(s)
             else:
                 for p in paths:
                     val loaded = _driver_collect_sources(p)
                     for s in loaded:
-                        all_sources = all_sources.push(s)
+                        if not seen_paths.contains(s.path):
+                            seen_paths[s.path] = true
+                            all_sources = all_sources.push(s)
 
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources
@@ -693,12 +715,14 @@ class CompilerDriver:
         val log = self.ctx.logger
 
         # Lower to MIR
+        log_phase("aot:lower_to_mir:start")
         if not self.lower_to_mir():
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
             val first_err = self.ctx.errors.first()
             val msg = if first_err != nil: first_err else: "MIR lowering failed"
             return CompileResult.CodegenError(msg)
+        log_phase("aot:lower_to_mir:done")
 
         # Evict HIR modules (no longer needed after MIR lowering)
         if self.ctx.options.low_memory:
@@ -706,17 +730,23 @@ class CompilerDriver:
             self.ctx.evict_hir()
 
         # Borrow checking
+        log_phase("aot:borrow_check:start")
         if not self.borrow_check():
             for err in self.ctx.errors:
                 log_error("Borrow error: {err}")
             return CompileResult.BorrowError(self.ctx.errors)
+        log_phase("aot:borrow_check:done")
 
         # Process async functions (generate state machines for await/yield)
+        log_phase("aot:process_async:start")
         val async_state_machines = self.process_async()
+        log_phase("aot:process_async:done")
 
         # Optimize MIR (use optimization level from options)
+        log_phase("aot:optimize_mir:start")
         val opt_config = self.get_optimization_config()
         self.optimize_mir(opt_config)
+        log_phase("aot:optimize_mir:done")
 
         # Determine output file
         val output = self.ctx.options.output_file ?? "a.out"
@@ -887,6 +917,13 @@ class CompilerDriver:
 fn CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult:
     driver.compile()
 
+fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
+    val ctx = CompileContext.create(options)
+    CompilerDriver(ctx: ctx)
+
+fn compiler_driver_run_compile(driver: CompilerDriver) -> CompileResult:
+    driver.compile()
+
 # Stable facade helpers for `use compiler.driver.{...}` callers.
 # These mirror driver_api.spl directly because direct script resolution does
 # not reliably surface new driver_api exports through the package facade.
@@ -929,16 +966,95 @@ fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, 
             result
 
 fn aot_shared_library(path: text, output: text) -> CompileResult:
+    use compiler.tools.header_gen.shared_lib_flags.{get_shared_lib_flags}
+
     var options = CompileOptions.default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
-    options.output_file = Some(output)
-    options.output_format = OutputFormat.Native
-    options.shared = true
+    val cpp_output = output + ".simple_public.cpp"
+    val source_obj = output + ".simple_public.o"
+    val runtime_obj = output + ".runtime.o"
+    options.output_file = Some(cpp_output)
+    options.backend = "c"
     options.release = true
     options.optimize = true
     val driver = CompilerDriver.create(options)
-    CompilerDriver.run_compile(driver)
+    val compile_result = CompilerDriver.run_compile(driver)
+
+    match compile_result:
+        case CompileResult.Success(_):
+            val flags = get_shared_lib_flags()
+
+            var source_args: [text] = []
+            var i = 0
+            while i < flags.compile_flags.len():
+                source_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                source_args.push("-D" + flags.defines[i])
+                i = i + 1
+            source_args.push("-c")
+            source_args.push(cpp_output)
+            source_args.push("-o")
+            source_args.push(source_obj)
+
+            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
+            if src_code != 0:
+                rt_file_delete(cpp_output)
+                return CompileResult.CodegenError(_combine_process_error("C++ object compilation failed", src_out, src_err))
+
+            var runtime_args: [text] = []
+            i = 0
+            while i < flags.compile_flags.len():
+                runtime_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                runtime_args.push("-D" + flags.defines[i])
+                i = i + 1
+            runtime_args.push("-c")
+            runtime_args.push("src/runtime/runtime.c")
+            runtime_args.push("-I")
+            runtime_args.push("src/runtime")
+            runtime_args.push("-o")
+            runtime_args.push(runtime_obj)
+
+            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
+            if rt_code != 0:
+                rt_file_delete(cpp_output)
+                rt_file_delete(source_obj)
+                return CompileResult.CodegenError(_combine_process_error("Runtime object compilation failed", rt_out, rt_err))
+
+            var link_args: [text] = []
+            i = 0
+            while i < flags.link_flags.len():
+                link_args.push(flags.link_flags[i])
+                i = i + 1
+            link_args.push(source_obj)
+            link_args.push(runtime_obj)
+            link_args.push("-o")
+            link_args.push(output)
+
+            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
+            rt_file_delete(cpp_output)
+            rt_file_delete(source_obj)
+            rt_file_delete(runtime_obj)
+
+            if link_code != 0:
+                return CompileResult.CodegenError(_combine_process_error("Shared library link failed", link_out, link_err))
+
+            CompileResult.Success(output)
+        case _:
+            compile_result
+
+fn _combine_process_error(prefix: text, stdout: text, stderr: text) -> text:
+    var detail = stderr.trim()
+    if detail == "":
+        detail = stdout.trim()
+    if detail == "":
+        return prefix
+    prefix + ": " + detail
 
 # ============================================================================
 # Exports
@@ -948,6 +1064,7 @@ fn aot_shared_library(path: text, output: text) -> CompileResult:
 # Re-export API functions for backward compatibility
 # (other files import interpret_file, compile_to_smf etc. from compiler.driver.driver)
 export CompilerDriver_dot_compile
+export compiler_driver_create, compiler_driver_run_compile
 export generate_headers, aot_shared_library
 
 # Re-export types from driver_types for convenience

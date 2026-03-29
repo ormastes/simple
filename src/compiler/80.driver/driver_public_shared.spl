@@ -1,0 +1,75 @@
+use compiler.driver.driver_core_types.{CompileResult}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    val source = rt_file_read_text(path) ?? ""
+    if source.trim() == "":
+        return CompileResult.RuntimeError("failed to read source file: {path}")
+
+    val temp_input = output + ".simple_public_input.spl"
+    val sanitized_source = _sanitize_shared_source(source)
+    if not rt_file_write_text(temp_input, sanitized_source):
+        return CompileResult.RuntimeError("failed to write temporary shared-library source: {temp_input}")
+
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", temp_input, "--native", "--shared", "-o", output])
+    rt_file_delete(temp_input)
+
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(output):
+        return CompileResult.Success(combined)
+    if exit_code == 0:
+        return CompileResult.RuntimeError("shared library build reported success but did not create output: {output}")
+    CompileResult.RuntimeError(combined)
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _clean_child_output(stdout: text, stderr: text) -> text:
+    val combined = if stderr.trim() != "":
+        stdout + "\n" + stderr
+    else:
+        stdout
+
+    val lines = combined.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "":
+            kept = kept.push(line)
+        i = i + 1
+    kept.join("\n")
+
+fn _sanitize_shared_source(source: text) -> text:
+    val lines = source.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        if trimmed == "@export(\"C\")" or trimmed == "@repr(\"C\")":
+            i = i + 1
+            continue
+        var line = raw
+        if line.contains("@bits("):
+            val parts = line.split("@bits(")
+            line = parts[0].trim_end()
+        kept = kept.push(line)
+        i = i + 1
+    kept.join("\n")

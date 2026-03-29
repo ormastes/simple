@@ -211,6 +211,7 @@ else
   rm -rf .simple/native_cache/
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
     --backend "${backend}" \
+    --source src/compiler --source src/app --source src/lib \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
