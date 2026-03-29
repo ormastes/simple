@@ -1,17 +1,31 @@
-*Source: `test/feature/app/remote_baremetal/remote_baremetal_library_spec.spl`*
-*Last Updated: 2026-03-12*
-
----
-
 # Remote Baremetal Library Checks
 
-**Feature IDs:** #RBLB-001
-**Category:** Tooling
-**Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** [doc/03_plan/trace32_x11_container_recovery_2026-03-12.md](doc/03_plan/trace32_x11_container_recovery_2026-03-12.md)
-**Research:** [doc/01_research/remote_interpreter_failures_2026-03-12.md](doc/01_research/remote_interpreter_failures_2026-03-12.md)
+Checks the library surface that should remain usable for the `interpreter(remote(baremetal(riscv32)))` and `interpreter(remote(baremetal(arm)))` lanes even when full baremetal ELF generation is not yet available from Pure Simple.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #RBLB-001 |
+| Category | Tooling |
+| Difficulty | 3/5 |
+| Status | Implemented |
+| Requirements | N/A |
+| Plan | [doc/03_plan/trace32_x11_container_recovery_2026-03-12.md](doc/03_plan/trace32_x11_container_recovery_2026-03-12.md) |
+| Research | [doc/01_research/remote_interpreter_failures_2026-03-12.md](doc/01_research/remote_interpreter_failures_2026-03-12.md) |
+| Source | `/home/ormastes/dev/pub/simple/test/feature/app/remote_baremetal/remote_baremetal_library_spec.spl` |
+| Updated | 2026-03-29 |
+| Generator | `simple sspec-docgen` (Rust) |
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 22 |
+| Active scenarios | 22 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
@@ -35,19 +49,6 @@ This spec is intentionally host-aware for the semihost shortened-print lane.
 It reports `skip:` or `blocked:` when custom QEMU support, fixture ELFs, or the
 Pure Simple baremetal compiler path are still missing.
 
-## Test Results (22 tests)
-
-| Context | Tests | Status |
-|---------|-------|--------|
-| allocator | 1 | pass |
-| collections (FixedArray, FixedMap, FixedSet) | 3 | pass |
-| async (NoallocScheduler, TimerFuture) | 2 | pass |
-| semihost shortened print (RISC-V) | 2 | pass |
-| ARM semihost (opcodes, extensions, formats, QEMU) | 5 | pass |
-| ARM Cortex-M vector table | 3 | pass |
-| ARM NVIC | 3 | pass |
-| semihost transport | 3 | pass |
-
 ## Syntax
 
 ```simple
@@ -66,13 +67,27 @@ expect(future.poll_timer()).to_equal(0)
 expect(future.poll_timer()).to_equal(1)
 ```
 
-## Semihost Output in TRACE32
+## Scenarios
 
-Semihost output from the target routes to the TRACE32 **AREA** window buffer.
-The T32 MCP server's `t32_setup_headless` tool enables semihosting by default:
-
-```
-SCREEN.OFF → AREA.Create MCP_OUT → AREA.Select MCP_OUT → SYStem.Option SemiHost ON
-```
-
-Read captured output with `t32_area_read(area_name: "MCP_OUT", clear: "true")`.
+- supports bump allocation alignment and reset semantics
+- supports fixed array push remove and factory sizing
+- supports fixed map put update remove and probe continuity
+- supports fixed set add duplicate remove and capacity tracking
+- tracks cooperative scheduler task lifecycle
+- advances timer futures to readiness
+- keeps semihost print opcodes stable
+- keeps interpreter stubs callable while qemu support is host aware
+- keeps standard semihosting opcodes stable
+- keeps interned print extension opcodes stable
+- keeps format type IDs and test protocol handles stable
+- keeps file IO mode constants stable
+- keeps ARM QEMU semihost status host aware
+- validates vector table structure and alignment
+- checks Cortex-M exception count and stack alignment
+- validates data and bss section address ranges
+- supports empty vector table construction
+- supports exception vector enumeration
+- supports NVIC register base addresses
+- keeps transport strategy constants stable
+- keeps capability detection constants stable
+- supports default transport configuration

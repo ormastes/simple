@@ -1,18 +1,32 @@
-*Source: `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`*
-*Last Updated: 2026-03-12*
-
----
-
 # Remote Baremetal Runtime Checks
 
-**Feature IDs:** #RBRT-001
-**Category:** Tooling
-**Difficulty:** 3/5
-**Status:** Implemented
-**Requirements:** N/A
-**Plan:** [doc/03_plan/baremetal_remote_remaining_checklist_2026-03-08.md](doc/03_plan/baremetal_remote_remaining_checklist_2026-03-08.md)
-**Design:** [doc/05_design/remote_jit_architecture.md](doc/05_design/remote_jit_architecture.md)
-**Research:** [doc/01_research/trace32_remote_interfaces_2026-03-08.md](doc/01_research/trace32_remote_interfaces_2026-03-08.md)
+Checks the current remote baremetal execution plumbing used by the Simple test runner. The spec covers:
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #RBRT-001 |
+| Category | Tooling |
+| Difficulty | 3/5 |
+| Status | Implemented |
+| Requirements | N/A |
+| Plan | [doc/03_plan/baremetal_remote_remaining_checklist_2026-03-08.md](doc/03_plan/baremetal_remote_remaining_checklist_2026-03-08.md) |
+| Design | [doc/05_design/remote_jit_architecture.md](doc/05_design/remote_jit_architecture.md) |
+| Research | [doc/01_research/trace32_remote_interfaces_2026-03-08.md](doc/01_research/trace32_remote_interfaces_2026-03-08.md) |
+| Source | `/home/ormastes/dev/pub/simple/test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` |
+| Updated | 2026-03-29 |
+| Generator | `simple sspec-docgen` (Rust) |
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 16 |
+| Active scenarios | 16 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
@@ -44,3 +58,22 @@ val qemu_status = qemu_riscv32_remote_memory_status()
 val t32_status = trace32_remote_status()
 expect(status_is_acceptable(t32_status)).to_equal(true)
 ```
+
+## Scenarios
+
+- extracts runtime, platform, and arch from nested remote spec
+- preserves nested jit stm32h7 mode strings
+- maps riscv32 to qemu-system-riscv32 and virt machine
+- finds the checked-in rv32 baremetal elf fixture
+- can build a temporary rv32 elf and read memory through gdb remote
+- resolves to a non-error readiness state
+- reports openocd readiness for stm targets without treating host blockers as hard failures
+- reports st-link tools readiness for stm targets without treating host blockers as hard failures
+- detects CH32V307 through wlink status
+- reads CH32V307 registers through wlink
+- reads CH32V307 flash memory through wlink
+- reads CH32V307 RAM through wlink
+- reads the H7 cpuid through openocd plus gdb
+- reads the WB cpuid through openocd plus gdb
+- reads the H7 cpuid through st-link tools
+- reads the WB cpuid through st-link tools
