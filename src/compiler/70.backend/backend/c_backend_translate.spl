@@ -721,15 +721,19 @@ class MirToC:
         """Emit extern "C" factory/method wrappers for an @export("C") class.
 
         Generates:
-        - spl_ClassName_create(args...) -> void*   (constructor)
-        - spl_ClassName_destroy(void* self)         (destructor)
-        - spl_ClassName_method(void* self, ...) -> ret  (each method)
+        - private handle wrapper struct
+        - spl_ClassName_create(args...) -> spl_ClassName_t   (constructor)
+        - spl_ClassName_destroy(spl_ClassName_t self)        (destructor)
+        - spl_ClassName_method(spl_ClassName_t self, ...) -> ret  (each method)
         """
         val class_name = type_def.name
         val c_name = sanitize_c_name(class_name)
         val prefix = if type_def.export_name != "": type_def.export_name else: "spl_" + c_name
 
         self.builder.emit_raw(r"// --- @export(" + "\"C\"" + r") class: " + class_name + r" ---")
+        self.builder.emit_raw(r"struct " + prefix + r" {")
+        self.builder.emit_raw(r"    " + c_name + r" inner;")
+        self.builder.emit_raw(r"};")
         self.builder.emit_raw(r"")
 
         # Emit constructor: spl_ClassName_create(field_args...) -> void*
@@ -751,25 +755,19 @@ class MirToC:
                     self.emit_class_method_wrapper(prefix, c_name, method_suffix, func)
 
     me emit_class_create_wrapper(prefix: text, c_name: text, fields: [MirFieldDef]):
-        """Emit spl_ClassName_create(args...) -> void* constructor wrapper."""
+        """Emit spl_ClassName_create(args...) -> spl_ClassName_t constructor wrapper."""
         var params: [text] = []
         var field_assigns: [text] = []
-        var field_idx = 0
         for field in fields:
             val c_ty = self.type_mapper.map_type(field.type_)
-            val is_text_field = self.is_text_type(field.type_)
-            if is_text_field:
-                params = params.push(r"const char* " + field.name)
-                field_assigns = field_assigns.push(r"    ((int64_t*)obj)[" + field_idx + r"] = (int64_t)spl_text_from_cstr(" + field.name + r");")
-            else:
-                params = params.push(c_ty + " " + field.name)
-                field_assigns = field_assigns.push(r"    ((int64_t*)obj)[" + field_idx + r"] = (int64_t)" + field.name + r";")
-            field_idx = field_idx + 1
+            params = params.push(c_ty + " " + field.name)
+            field_assigns = field_assigns.push(r"    obj->inner." + field.name + r" = " + field.name + r";")
 
         val params_str = if params.len() == 0: "void" else: params.join(", ")
 
-        self.builder.emit_raw(r"extern " + "\"C\"" + r" void* " + prefix + r"_create(" + params_str + r") {")
-        self.builder.emit_raw(r"    void* obj = spl_malloc(" + (field_idx * 8) + r");")
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + prefix + r"_t " + prefix + r"_create(" + params_str + r") {")
+        self.builder.emit_raw(r"    " + prefix + r"_t obj = (" + prefix + r"_t)spl_malloc(sizeof(struct " + prefix + r"));")
+        self.builder.emit_raw(r"    if (!obj) return nullptr;")
         for assign in field_assigns:
             self.builder.emit_raw(assign)
         self.builder.emit_raw(r"    return obj;")
@@ -777,23 +775,23 @@ class MirToC:
         self.builder.emit_raw(r"")
 
     me emit_class_destroy_wrapper(prefix: text, c_name: text):
-        """Emit spl_ClassName_destroy(void* self) destructor wrapper."""
-        self.builder.emit_raw(r"extern " + "\"C\"" + r" void " + prefix + r"_destroy(void* self) {")
+        """Emit spl_ClassName_destroy(spl_ClassName_t self) destructor wrapper."""
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void " + prefix + r"_destroy(" + prefix + r"_t self) {")
         self.builder.emit_raw(r"    if (self) spl_free(self);")
         self.builder.emit_raw(r"}")
         self.builder.emit_raw(r"")
 
     me emit_class_method_wrapper(prefix: text, c_name: text, method_name: text, func: MirFunction):
-        """Emit spl_ClassName_method(void* self, args...) -> ret wrapper for a class method."""
+        """Emit spl_ClassName_method(spl_ClassName_t self, args...) -> ret wrapper for a class method."""
         val internal_name = func.name
         val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
         val is_void = ret_ty == "void"
         val is_text_return = self.is_text_type(func.signature.return_type)
         val wrapper_ret_ty = if is_text_return: r"const char*" else: ret_ty
 
-        # First param of internal method is 'self' pointer — map to void*
-        var wrapper_params: [text] = [r"void* self"]
-        var forward_args: [text] = [r"self"]
+        # First param of internal method is 'self' pointer — map from opaque handle to inner object pointer
+        var wrapper_params: [text] = [prefix + r"_t self"]
+        var forward_args: [text] = [r"&self->inner"]
         var param_idx = 0
         for param_ty in func.signature.params:
             if param_idx == 0:
@@ -832,14 +830,18 @@ class MirToC:
         """Derive the C export name for a function.
 
         If custom_name is non-empty, uses it directly.
-        Otherwise strips '__simple_' prefix from the internal name.
+        Otherwise strips '__simple_' prefix from the internal name and
+        prefixes the public symbol with 'spl_' so the C backend matches
+        header generation and the documented export ABI.
         """
         if custom_name != "":
             return custom_name
         # Strip __simple_ prefix if present
         if internal_name.starts_with(r"__simple_"):
-            return internal_name.split(r"__simple_")[1]
-        internal_name
+            return r"spl_" + internal_name.split(r"__simple_")[1]
+        if internal_name.starts_with(r"spl_"):
+            return internal_name
+        r"spl_" + internal_name
 
     fn is_text_type(ty: MirType) -> bool:
         """Check if a MIR type represents Simple's text type (maps to const char* in C)."""

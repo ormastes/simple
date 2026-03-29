@@ -1,6 +1,6 @@
 # Test Specification
 
-*Generated: 2026-03-29 00:32:49*
+*Generated: 2026-03-29 00:57:19*
 
 ## test/feature/app/remote_jit
 
@@ -14,4 +14,4 @@
 - **Total:** 1 tests
 - **Passed:** 4 ✅
 - **Failed:** 0 ❌
-- **Duration:** 19ms
+- **Duration:** 20ms

@@ -293,19 +293,49 @@ fn check_sffi004_bitfield_width(class_def: HirClass, file_path: text) -> [SffiLi
     Sub-byte fields must have explicit @bits(N) annotations so the compiler can
     verify the layout matches the C side.
 
-    Currently, HirField does not have a bits attribute — this check is a guard
-    for when bitfield support is added (C5 in the plan). For now, it checks
-    that no field uses a type smaller than a byte without being in a packed struct.
+    Preferred behavior uses explicit field-level @bits(N) metadata when present.
+    For older parse paths that do not yet carry bits metadata into HIR, this
+    falls back to the previous heuristic on consecutive sub-word fields.
     """
     var warnings: [SffiLintWarning] = []
 
-    # Future: when @bits attribute is added to HirField, check that every
-    # sub-byte field has an explicit width. For now, this is a no-op placeholder
-    # that validates the infrastructure is in place.
+    var has_explicit_bits = false
+    for field in class_def.fields:
+        if field.has_bits_attr:
+            has_explicit_bits = true
+            break
 
-    # Check for fields that look like they should be bitfields:
-    # u8/i8 fields in a struct that has multiple sub-byte-logical fields
-    # (heuristic: 3+ u8/bool fields in a row may indicate intended bitfield usage)
+    if has_explicit_bits:
+        for field in class_def.fields:
+            if not field.has_bits_attr:
+                continue
+
+            val capacity = _bit_capacity(field.type_.kind)
+            val line = _field_line_num(field)
+            if capacity == 0:
+                warnings.push(SffiLintWarning(
+                    code: "SFFI004",
+                    severity: "ERROR",
+                    message: "field '{field.name}' in @export(\"C\") class '{class_def.name}' uses @bits({field.bits_width}) on a non-bitfield-capable type",
+                    hint: "@bits(N) is only valid on integer and bool fields in FFI-exposed layouts",
+                    line_num: line,
+                    file_path: file_path
+                ))
+                continue
+
+            if field.bits_width <= 0 or field.bits_width > capacity:
+                warnings.push(SffiLintWarning(
+                    code: "SFFI004",
+                    severity: "ERROR",
+                    message: "field '{field.name}' in @export(\"C\") class '{class_def.name}' uses invalid @bits({field.bits_width}) width for '{_type_kind_name(field.type_.kind)}'",
+                    hint: "use @bits(N) with 1 <= N <= {capacity} for this field type",
+                    line_num: line,
+                    file_path: file_path
+                ))
+
+        return warnings
+
+    # Fallback heuristic for legacy parse paths without field-level bits metadata.
     var consecutive_small = 0
     var first_small_idx = 0
 
@@ -349,6 +379,13 @@ fn _is_sub_word_type(kind: HirTypeKind) -> bool:
         case Bool: true
         case Char: false  # char is 4 bytes in Simple
         case _: false
+
+fn _bit_capacity(kind: HirTypeKind) -> i64:
+    """Return the legal maximum @bits width for a field type, or 0 if unsupported."""
+    match kind:
+        case Int(bits, signed): bits
+        case Bool: 1
+        case _: 0
 
 
 # ============================================================================

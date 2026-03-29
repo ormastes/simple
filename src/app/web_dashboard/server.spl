@@ -16,6 +16,8 @@ use app.web_dashboard.terminal_ws.{handle_terminal_ws}
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html}
 use app.ui.web.ws_handler.{extract_ws_key, is_ws_upgrade_request}
 use std.text.{to_int_or}
+use dashboard.views.status.{render_status_html, render_vcs_state_html}
+use std.tmux.{tmux_available, tmux_server_running, tmux_list_sessions}
 
 # =========================================================================
 # HTTP Server
@@ -145,9 +147,29 @@ class DashboardServer:
             "/api/plans" => self.api_plans()
             _ => http_error(404, "Not Found")
 
-    # Serve index page
+    # Serve index page — server-side rendered via shared dashboard.views
     fn serve_index() -> text:
-        val html = generate_full_dashboard_html(self.port)
+        # Render status from shared view (same logic as CLI dashboard)
+        var status_html = ""
+        var vcs_html = "--"
+        var tmux_card_html = ""
+
+        match get_cached_data():
+            Ok(data) =>
+                status_html = render_status_html(data)
+                vcs_html = render_vcs_state_html(data.vcs_state)
+            Err(_) =>
+                status_html = "<div class=\"empty-state\">No dashboard data. Run: simple dashboard collect</div>"
+
+        # Tmux card (web-specific addition)
+        if tmux_available():
+            val running = tmux_server_running()
+            val sessions = tmux_list_sessions()
+            val count = sessions.len()
+            val sub = if running: "sessions active" else: "server stopped"
+            tmux_card_html = "<div class=\"card-grid\" style=\"margin-top:12px\"><div class=\"card\"><h3>Tmux</h3><div class=\"value\">{count}</div><div class=\"sub\">{sub}</div></div></div>"
+
+        val html = generate_full_dashboard_html(self.port, status_html, vcs_html, tmux_card_html)
         return http_response(200, "text/html", html)
 
     # Serve static files

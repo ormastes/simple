@@ -178,15 +178,22 @@ fn check_file(path: &Path) -> FileCheckResult {
 
 /// Validate import statements in a module
 fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
-    // Create a module resolver for the file's directory
-    let parent = file_path.parent().unwrap_or(Path::new("."));
-    let resolver = ModuleResolver::single_file(file_path);
+    // Create a project-aware module resolver
+    // Use absolute path so project root detection works from any CWD
+    let abs_path = if file_path.is_absolute() {
+        file_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(file_path))
+            .unwrap_or_else(|_| file_path.to_path_buf())
+    };
+    let resolver = ModuleResolver::single_file(&abs_path);
 
     for item in items {
         match item {
             Node::UseStmt(use_stmt) => {
                 // Try to resolve the import path
-                if let Err(e) = resolver.resolve(&use_stmt.path, file_path) {
+                if let Err(e) = resolver.resolve(&use_stmt.path, &abs_path) {
                     // Only report as warning since the module might be in a different project location
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
@@ -200,7 +207,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                 }
             }
             Node::CommonUseStmt(common_use) => {
-                if let Err(e) = resolver.resolve(&common_use.path, file_path) {
+                if let Err(e) = resolver.resolve(&common_use.path, &abs_path) {
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
                         line: common_use.span.line,
@@ -217,7 +224,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                 }
             }
             Node::ExportUseStmt(export_use) => {
-                if let Err(e) = resolver.resolve(&export_use.path, file_path) {
+                if let Err(e) = resolver.resolve(&export_use.path, &abs_path) {
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
                         line: export_use.span.line,
@@ -237,8 +244,6 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
         }
     }
 
-    // Suppress unused variable warning for parent - it's used by resolver internally
-    let _ = parent;
 }
 
 /// Convert ParseError to CheckError
@@ -336,17 +341,17 @@ fn print_error(error: &CheckError) {
     };
     let reset = "\x1b[0m";
 
+    let level = match error.severity {
+        ErrorSeverity::Error => "error",
+        ErrorSeverity::Warning => "warning",
+    };
     println!(
-        "{}{}:{}:{}: {}error{}: {}",
+        "{}{}:{}:{}: {}{}: {}",
         color,
         error.file,
         error.line,
         error.column,
-        if error.severity == ErrorSeverity::Error {
-            ""
-        } else {
-            "warning: "
-        },
+        level,
         reset,
         error.message
     );

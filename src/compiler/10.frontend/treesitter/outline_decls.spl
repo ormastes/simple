@@ -401,6 +401,7 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
         - name: Type
         - name: Type = default
         - @volatile name: Type
+        - name: Type @bits(N)
         - name: Type @ 0x40020000  (memory-mapped)
         """
         val start = self.current.span
@@ -421,6 +422,21 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
 
         self.expect(TokenKind.Colon, "expected ':' after field name")
         val type_ = self.parse_type_outline()
+
+        var bits: i64 = nil
+
+        # Check for trailing @bits(N) attribute after the field type.
+        if self.check(TokenKind.At):
+            self.advance()  # consume '@'
+            if self.check(TokenKind.Ident) and self.current.text == "bits":
+                self.advance()  # consume 'bits'
+                self.expect(TokenKind.LParen, "expected '(' after @bits")
+                if self.check(TokenKind.IntLit):
+                    bits = self.parse_int_literal()
+                self.expect(TokenKind.RParen, "expected ')' after bit count")
+            else:
+                # Not @bits, treat as memory-mapped address marker and rewind handling below.
+                self.pos = self.pos - 1
 
         # Check for @ address syntax: field: Type @ 0x40020000
         var address_span: Span = nil
@@ -443,6 +459,7 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
             type_: type_,
             is_public: is_public,
             is_volatile: is_volatile,
+            bits: bits,
             address_span: address_span,
             default_span: default_span,
             span: merge_spans(start, self.previous.span)
@@ -452,4 +469,3 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
 # ============================================================================
 # Exports
 # ============================================================================
-

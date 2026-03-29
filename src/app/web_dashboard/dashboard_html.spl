@@ -1,12 +1,15 @@
 # Dashboard HTML Generator
 #
 # Generates the unified web dashboard HTML with:
-# - Project status cards (features, coverage, tests, TODOs, VCS, alerts)
+# - Project status (server-side rendered via shared dashboard.views)
 # - Tmux terminal panels with read/write via WebSocket
 # - Web terminal with keyboard input
 # - GUI viewer for TUI apps
+#
+# Status rendering is delegated to dashboard.views/status.spl (shared with CLI).
+# Only tmux/terminal/GUI views are web-specific.
 
-fn generate_full_dashboard_html(port: i32) -> text:
+fn generate_full_dashboard_html(port: i32, status_html: text, vcs_html: text, tmux_card_html: text) -> text:
     var h: [text] = []
     h.push("<!DOCTYPE html>")
     h.push("<html lang=\"en\">")
@@ -19,12 +22,14 @@ fn generate_full_dashboard_html(port: i32) -> text:
     h.push("</style>")
     h.push("</head>")
     h.push("<body>")
-    h.push(_header_html())
+    h.push(_header_html(vcs_html))
     h.push("<div class=\"layout\">")
     h.push(_sidebar_html())
     h.push("<main class=\"main\">")
     h.push("<div id=\"view-status\" class=\"view active\">")
-    h.push(_status_view_html())
+    # Server-side rendered status from shared dashboard.views
+    h.push(status_html)
+    h.push(tmux_card_html)
     h.push("</div>")
     h.push("<div id=\"view-terminal\" class=\"view\">")
     h.push(_terminal_view_html())
@@ -141,17 +146,16 @@ fn _css() -> text:
 # HTML Sections
 # =========================================================================
 
-fn _header_html() -> text:
+fn _header_html(vcs_html: text) -> text:
     var h: [text] = []
     h.push("<header class=\"header\">")
     h.push("  <div style=\"display:flex;align-items:center\">")
-    h.push("    <span class=\"status-dot ok\" id=\"server-dot\"></span>")
+    h.push("    <span class=\"status-dot ok\"></span>")
     h.push("    <h1>Simple Compiler Dashboard</h1>")
     h.push("  </div>")
     h.push("  <div class=\"header-right\">")
-    h.push("    <span id=\"vcs-info\">--</span>")
-    h.push("    <span id=\"last-update\">--</span>")
-    h.push("    <span class=\"refresh-btn\" onclick=\"refreshAll()\">Refresh</span>")
+    h.push("    <span>{vcs_html}</span>")
+    h.push("    <a href=\"/\" class=\"refresh-btn\">Refresh</a>")
     h.push("  </div>")
     h.push("</header>")
     h.join("\n")
@@ -165,35 +169,6 @@ fn _sidebar_html() -> text:
     h.push("  <div class=\"sidebar-item\" onclick=\"switchView('terminal')\"><span class=\"icon\">&#9638;</span> Terminal</div>")
     h.push("  <div class=\"sidebar-item\" onclick=\"switchView('gui')\"><span class=\"icon\">&#9635;</span> GUI Viewer</div>")
     h.push("</nav>")
-    h.join("\n")
-
-fn _status_view_html() -> text:
-    var h: [text] = []
-    # Metric cards
-    h.push("<div class=\"card-grid\">")
-    h.push("  <div class=\"card\"><h3>Features</h3><div class=\"value accent\" id=\"m-features\">--</div><div class=\"sub\" id=\"m-features-sub\">loading...</div><div class=\"progress-bar\"><div class=\"fill\" id=\"m-features-bar\" style=\"width:0%;background:var(--accent)\"></div></div></div>")
-    h.push("  <div class=\"card\"><h3>Coverage</h3><div class=\"value green\" id=\"m-coverage\">--</div><div class=\"sub\" id=\"m-coverage-sub\">loading...</div><div class=\"progress-bar\"><div class=\"fill\" id=\"m-coverage-bar\" style=\"width:0%;background:var(--green)\"></div></div></div>")
-    h.push("  <div class=\"card\"><h3>Tests</h3><div class=\"value green\" id=\"m-tests\">--</div><div class=\"sub\" id=\"m-tests-sub\">loading...</div></div>")
-    h.push("  <div class=\"card\"><h3>TODOs</h3><div class=\"value yellow\" id=\"m-todos\">--</div><div class=\"sub\" id=\"m-todos-sub\">loading...</div></div>")
-    h.push("  <div class=\"card\"><h3>Plans</h3><div class=\"value purple\" id=\"m-plans\">--</div><div class=\"sub\" id=\"m-plans-sub\">loading...</div></div>")
-    h.push("  <div class=\"card\"><h3>Tmux</h3><div class=\"value\" id=\"m-tmux\">--</div><div class=\"sub\" id=\"m-tmux-sub\">loading...</div></div>")
-    h.push("</div>")
-
-    # Alerts
-    h.push("<div class=\"alerts-panel\" id=\"alerts-panel\"></div>")
-
-    # Recent features table
-    h.push("<div class=\"card\" style=\"margin-top:12px\">")
-    h.push("  <div class=\"section-title\">Features <span class=\"count\" id=\"features-count\">0</span></div>")
-    h.push("  <div id=\"features-table\"><div class=\"empty-state\">Loading...</div></div>")
-    h.push("</div>")
-
-    # TODOs table
-    h.push("<div class=\"card\" style=\"margin-top:12px\">")
-    h.push("  <div class=\"section-title\">TODOs <span class=\"count\" id=\"todos-count\">0</span></div>")
-    h.push("  <div id=\"todos-table\"><div class=\"empty-state\">Loading...</div></div>")
-    h.push("</div>")
-
     h.join("\n")
 
 fn _terminal_view_html() -> text:
@@ -252,95 +227,7 @@ fn _javascript(port: i32) -> text:
     j.push("  if (name === 'terminal') loadTmuxSessions();")
     j.push("}")
 
-    # Status data loading
-    j.push("async function loadStatus() {")
-    j.push("  try {")
-    j.push("    const s = await fetch('/api/status').then(r => r.json());")
-    j.push("    const pct = s.features_total > 0 ? Math.round(s.features_complete * 100 / s.features_total) : 0;")
-    j.push("    document.getElementById('m-features').textContent = s.features_complete + '/' + s.features_total;")
-    j.push("    document.getElementById('m-features-sub').textContent = pct + '% complete';")
-    j.push("    document.getElementById('m-features-bar').style.width = pct + '%';")
-    j.push("    document.getElementById('m-coverage').textContent = (s.coverage_percent || 0).toFixed(1) + '%';")
-    j.push("    document.getElementById('m-coverage-sub').textContent = 'line coverage';")
-    j.push("    document.getElementById('m-coverage-bar').style.width = (s.coverage_percent || 0) + '%';")
-    j.push("    document.getElementById('m-tests').textContent = s.sspec_tests || 0;")
-    j.push("    document.getElementById('m-tests-sub').textContent = 'test suites';")
-    j.push("    document.getElementById('m-todos').textContent = s.todos_total || 0;")
-    j.push("    document.getElementById('m-todos-sub').textContent = (s.todos_critical || 0) + ' critical';")
-    j.push("    document.getElementById('m-plans').textContent = s.plans_total || 0;")
-    j.push("    document.getElementById('m-plans-sub').textContent = 'active plans';")
-    j.push("    document.getElementById('last-update').textContent = s.timestamp || '--';")
-    j.push("    document.getElementById('server-dot').className = 'status-dot ok';")
-    j.push("  } catch(e) {")
-    j.push("    document.getElementById('server-dot').className = 'status-dot err';")
-    j.push("  }")
-    j.push("}")
-
-    # VCS info
-    j.push("async function loadVcs() {")
-    j.push("  try {")
-    j.push("    const v = await fetch('/api/vcs').then(r => r.json());")
-    j.push("    document.getElementById('vcs-info').textContent = (v.bookmark || 'main') + ' @ ' + (v.commit_id || '--').substring(0, 8);")
-    j.push("  } catch(e) {}")
-    j.push("}")
-
-    # Alerts
-    j.push("async function loadAlerts() {")
-    j.push("  try {")
-    j.push("    const alerts = await fetch('/api/alerts').then(r => r.json());")
-    j.push("    const panel = document.getElementById('alerts-panel');")
-    j.push("    if (!alerts.length) { panel.innerHTML = ''; return; }")
-    j.push("    panel.innerHTML = alerts.map(a => {")
-    j.push("      const cls = a.level === 'critical' ? 'alert-critical' : a.level === 'warning' ? 'alert-warning' : 'alert-info';")
-    j.push("      const icon = a.level === 'critical' ? '&#9888;' : '&#9432;';")
-    j.push("      return '<div class=\"alert ' + cls + '\"><span class=\"alert-icon\">' + icon + '</span>' + a.message + '</div>';")
-    j.push("    }).join('');")
-    j.push("  } catch(e) {}")
-    j.push("}")
-
-    # Features table
-    j.push("async function loadFeatures() {")
-    j.push("  try {")
-    j.push("    const features = await fetch('/api/features').then(r => r.json());")
-    j.push("    document.getElementById('features-count').textContent = features.length;")
-    j.push("    if (!features.length) { document.getElementById('features-table').innerHTML = '<div class=\"empty-state\">No features data. Run simple dashboard collect</div>'; return; }")
-    j.push("    let html = '<table class=\"data-table\"><tr><th>ID</th><th>Category</th><th>Name</th><th>Status</th></tr>';")
-    j.push("    features.slice(0, 20).forEach(f => {")
-    j.push("      const badge = f.status === 'complete' ? 'badge-green' : f.status === 'in_progress' ? 'badge-yellow' : 'badge-blue';")
-    j.push("      html += '<tr><td>' + f.id + '</td><td>' + f.category + '</td><td>' + f.name + '</td><td><span class=\"badge ' + badge + '\">' + f.status + '</span></td></tr>';")
-    j.push("    });")
-    j.push("    html += '</table>';")
-    j.push("    document.getElementById('features-table').innerHTML = html;")
-    j.push("  } catch(e) {}")
-    j.push("}")
-
-    # TODOs table
-    j.push("async function loadTodos() {")
-    j.push("  try {")
-    j.push("    const todos = await fetch('/api/todos').then(r => r.json());")
-    j.push("    document.getElementById('todos-count').textContent = todos.length;")
-    j.push("    if (!todos.length) { document.getElementById('todos-table').innerHTML = '<div class=\"empty-state\">No TODOs data. Run simple dashboard collect</div>'; return; }")
-    j.push("    let html = '<table class=\"data-table\"><tr><th>ID</th><th>Priority</th><th>Area</th><th>Description</th><th>File</th></tr>';")
-    j.push("    todos.slice(0, 15).forEach(t => {")
-    j.push("      const badge = t.priority === 'P0' ? 'badge-red' : t.priority === 'P1' ? 'badge-yellow' : 'badge-blue';")
-    j.push("      html += '<tr><td>' + t.id + '</td><td><span class=\"badge ' + badge + '\">' + t.priority + '</span></td><td>' + t.area + '</td><td>' + t.description + '</td><td style=\"font-size:11px;color:var(--text-dim)\">' + t.file + '</td></tr>';")
-    j.push("    });")
-    j.push("    html += '</table>';")
-    j.push("    document.getElementById('todos-table').innerHTML = html;")
-    j.push("  } catch(e) {}")
-    j.push("}")
-
-    # Tmux status card
-    j.push("async function loadTmuxStatus() {")
-    j.push("  try {")
-    j.push("    const t = await fetch('/api/tmux').then(r => r.json());")
-    j.push("    if (t.error) { document.getElementById('m-tmux').textContent = 'N/A'; document.getElementById('m-tmux-sub').textContent = 'tmux not installed'; return; }")
-    j.push("    document.getElementById('m-tmux').textContent = t.session_count;")
-    j.push("    document.getElementById('m-tmux-sub').textContent = t.server_running ? 'sessions active' : 'server stopped';")
-    j.push("  } catch(e) { document.getElementById('m-tmux').textContent = '?'; }")
-    j.push("}")
-
-    # Tmux terminal
+    # Tmux terminal (web-specific — no TUI equivalent)
     j.push("let termWs = null;")
     j.push("async function loadTmuxSessions() {")
     j.push("  try {")
@@ -474,11 +361,7 @@ fn _javascript(port: i32) -> text:
     j.push("  if (iframe) iframe.src = iframe.src;")
     j.push("}")
 
-    # Refresh all
-    j.push("function refreshAll() { loadStatus(); loadVcs(); loadAlerts(); loadFeatures(); loadTodos(); loadTmuxStatus(); }")
-
-    # Auto-refresh
-    j.push("refreshAll();")
-    j.push("setInterval(refreshAll, 30000);")
+    # Auto-refresh reloads page to get fresh server-rendered status
+    j.push("setTimeout(() => location.reload(), 30000);")
 
     j.join("\n")
