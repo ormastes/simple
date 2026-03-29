@@ -16,20 +16,20 @@ echo ""
 
 # Configuration
 INSTALL_DIR="${SIMPLE_INSTALL_DIR:-$HOME/.local}"
-BASE_URL="${SIMPLE_BASE_URL:-https://github.com/simple-lang/simple/releases/download}"
+BASE_URL="${SIMPLE_BASE_URL:-https://github.com/ormastes/simple/releases/download}"
 
 # Auto-detect latest version if not specified
 if [ -n "${SIMPLE_VERSION:-}" ]; then
     VERSION="$SIMPLE_VERSION"
 elif command -v curl >/dev/null 2>&1; then
-    LATEST_URL="https://api.github.com/repos/simple-lang/simple/releases/latest"
+    LATEST_URL="https://api.github.com/repos/ormastes/simple/releases/latest"
     VERSION=$(curl -fsSL "$LATEST_URL" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"v\(.*\)".*/\1/')
     if [ -z "$VERSION" ]; then
-        VERSION="0.6.1"
+        VERSION="0.9.5"
         echo -e "${YELLOW}Could not detect latest version, using $VERSION${NC}"
     fi
 else
-    VERSION="0.6.1"
+    VERSION="0.9.5"
 fi
 
 # Detect platform
