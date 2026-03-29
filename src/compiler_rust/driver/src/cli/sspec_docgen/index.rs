@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::generator::output_stem;
 use super::types::{DocStats, SspecDoc, ValidationResult};
@@ -57,6 +57,7 @@ pub fn generate_index_page(
 
     // Group by category
     let categories = group_by_category(parsed_files);
+    let unmanaged_files = find_unmanaged_files(parsed_files, output_dir)?;
 
     // Generate categorized tables
     for category in categories {
@@ -83,6 +84,28 @@ pub fn generate_index_page(
         md.push('\n');
     }
 
+    if !unmanaged_files.is_empty() {
+        md.push_str("## Residual Files\n\n");
+        md.push_str(
+            "These files are present in `doc/06_spec/generated` but were not regenerated in this run.\n\n",
+        );
+        md.push_str("| File | Type |\n");
+        md.push_str("|------|------|\n");
+        for path in unmanaged_files {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unknown");
+            let file_type = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(classify_residual_file)
+                .unwrap_or("Artifact");
+            md.push_str(&format!("| {} | {} |\n", file_name, file_type));
+        }
+        md.push('\n');
+    }
+
     for file_name in ["INDEX.md", "README.md"] {
         let output_path = output_dir.join(file_name);
         let mut file = fs::File::create(output_path)?;
@@ -90,6 +113,52 @@ pub fn generate_index_page(
     }
 
     Ok(())
+}
+
+fn find_unmanaged_files(
+    parsed_files: &[(SspecDoc, ValidationResult)],
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut managed = std::collections::HashSet::new();
+    managed.insert("INDEX.md".to_string());
+    managed.insert("README.md".to_string());
+
+    for (sspec_doc, _) in parsed_files {
+        managed.insert(format!("{}.md", output_stem(sspec_doc)));
+    }
+
+    let mut unmanaged = Vec::new();
+    for entry in fs::read_dir(output_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if file_name == ".gitkeep" || managed.contains(&file_name) {
+            continue;
+        }
+
+        unmanaged.push(path);
+    }
+
+    unmanaged.sort();
+    Ok(unmanaged)
+}
+
+fn classify_residual_file(extension: &str) -> &'static str {
+    match extension {
+        "md" => "Legacy markdown",
+        "sdn" => "Data/config artifact",
+        other if !other.is_empty() => "Residual artifact",
+        _ => "Artifact",
+    }
 }
 
 /// Group specs by category
@@ -401,7 +470,9 @@ fn escape_table_cell(value: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn validation(doc_lines: usize, warnings: &[&str]) -> ValidationResult {
         ValidationResult {
@@ -473,5 +544,44 @@ expect(true).to_equal(true)
         };
 
         assert_eq!(output_stem(&doc), "functions");
+    }
+
+    #[test]
+    fn test_find_unmanaged_files_excludes_regenerated_pages() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("functions.md"), "").expect("functions");
+        fs::write(dir.path().join("shell_api.md"), "").expect("shell_api");
+        fs::write(dir.path().join("feature_db.sdn"), "").expect("feature_db");
+        fs::write(dir.path().join("README.md"), "").expect("readme");
+        fs::write(dir.path().join("INDEX.md"), "").expect("index");
+
+        let parsed = vec![(
+            SspecDoc {
+                file_path: PathBuf::from("test/specs/functions_spec.spl"),
+                raw_content: String::new(),
+                doc_blocks: vec![],
+                feature_title: None,
+                feature_ids: vec![],
+                metadata: super::super::types::FeatureMetadata {
+                    source_doc: Some("functions.md".to_string()),
+                    ..Default::default()
+                },
+            },
+            ValidationResult {
+                file_path: PathBuf::from("test/specs/functions_spec.spl"),
+                has_docs: true,
+                doc_lines: 10,
+                has_sections: HashSet::new(),
+                warnings: vec![],
+            },
+        )];
+
+        let unmanaged = find_unmanaged_files(&parsed, dir.path()).expect("unmanaged");
+        let names: Vec<_> = unmanaged
+            .iter()
+            .map(|path| path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string())
+            .collect();
+
+        assert_eq!(names, vec!["feature_db.sdn".to_string(), "shell_api.md".to_string()]);
     }
 }

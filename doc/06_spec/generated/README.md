@@ -1,170 +1,54 @@
-# Simple Language Specifications - Index
+# Test Specification Index
 
-**Generated:** 2026-01-10 04:47:40
-**Total Specs:** 16
-**Total Tests:** 292
+*Generated: 2026-03-29 23:49:21*
 
-## Quick Navigation
+## Quick Stats
 
-- [Advanced Features](#advanced-features) (3 specs)
-- [Async/Concurrency](#asyncconcurrency) (3 specs)
-- [Core Language](#core-language) (5 specs)
-- [Data Structures](#data-structures) (1 specs)
-- [Miscellaneous](#miscellaneous) (1 specs)
-- [Testing & Quality](#testing-&-quality) (1 specs)
-- [Type System](#type-system) (2 specs)
+- **Total Features:** 13
+- **Complete Documentation:** 13 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 408
+- **Warnings:** 24
 
 ---
 
-## Advanced Features {#advanced-features}
+## Other (11 features)
+
+| Feature | Status | Docs | Difficulty | Tests | Summary |
+|---------|--------|------|------------|-------|---------|
+| [Async-Default Function Model](async_default.md) | Draft | Thin | N/A | 16 | This document specifies Simple's async-default execution model where functions are async by default and sync is explici… |
+| [Capability-Based Effects Specification](capability_effects.md) | Planned | Thin | N/A | 14 | Capability-based effect system that prevents LLMs from silently adding I/O or stateful behavior to pure code. Explicit… |
+| [Macro Specification](macro.md) | SPECIFICATION (Partially Implemented) | Thin | N/A | 1 | This file contains executable test cases extracted from macro.md. The original specification file remains as architectu… |
+| [Module System Specification - Test Specification](modules.md) | Reference | Thin | N/A | 1 | This file contains executable test cases extracted from modules.md. The original specification file remains as architec… |
+| [Simple Language Concurrency - Test Specification](concurrency.md) | Reference | Thin | N/A | 24 | This file contains executable test cases extracted from concurrency.md. The original specification file remains as arch… |
+| [Simple Language Data Structures - Test Specification](data_structures.md) | Reference | Thin | N/A | 32 | This file contains executable test cases extracted from data_structures.md. The original specification file remains as… |
+| [Simple Language Functions and Pattern Matching - Test Specification](functions.md) | Reference | Needs detail | N/A | 22 | This file contains executable test cases extracted from functions.md. The original specification file remains as archit… |
+| [Simple Language Memory and Ownership - Test Specification](memory.md) | Reference | Thin | N/A | 17 | This file contains executable test cases extracted from memory.md. The original specification file remains as architect… |
+| [Simple Language Traits and Implementations - Test Specification](traits.md) | Implemented (uses existing coherence rules) | Thin | N/A | 36 | This file contains executable test cases extracted from traits.md. The original specification file remains as architect… |
+| [Suspension Operator (`~`) Specification](suspension_operator.md) | Draft | Thin | N/A | 24 | The `~` operator marks expressions that may suspend (perform async operations). It appears in three contexts: |
+| [Type Inference Specification - Test Specification](type_inference.md) | Partial Implementation (Hindley-Milner scaffold working) | Thin | N/A | 16 | Simple uses a Hindley-Milner-style type inference system that automatically deduces types for expressions, variables, a… |
+
+## Tooling (2 features)
+
+| Feature | Status | Docs | Difficulty | Tests | Summary |
+|---------|--------|------|------------|-------|---------|
+| [Remote Baremetal Library Checks](remote_baremetal_library_spec.md) | Implemented | Thin | 3/5 | 22 | Checks the library surface that should remain usable for the `interpreter(remote(baremetal(riscv32)))` and `interpreter… |
+| [Remote Baremetal Runtime Checks](remote_baremetal_runtime_spec.md) | Implemented | Thin | 3/5 | 16 | Checks the current remote baremetal execution plumbing used by the Simple test runner. The spec covers: |
+
+## Residual Files
+
+These files are present in `doc/06_spec/generated` but were not regenerated in this run.
+
+| File | Type |
+|------|------|
+| bootstrap_test_gate.sdn | Data/config artifact |
+| feature.md | Legacy markdown |
+| feature_db.sdn | Data/config artifact |
+| metaprogramming.md | Legacy markdown |
+| pending_feature.md | Legacy markdown |
+| sandboxing.md | Legacy markdown |
+| shell_api.md | Legacy markdown |
+| syntax.md | Legacy markdown |
+| tensor_dimensions.md | Legacy markdown |
+| types.md | Legacy markdown |
 
-### [Capability-Based Effects Specification](capability_effects.md)
-**Status:** 📋 Planned | **Tests:** 14 | **Feature IDs:** #880-884
-
-Capability-based effect system that prevents LLMs from silently adding I/O or stateful behavior to pure code. Explicit effect markers (`@pure`, `@io`,...
-
-**Key Symbols:** Effect, Capability, Pure, IO, Net, FS, EffectChecker
-
-
-### [- Test Specification](macro.md)
-**Status:** SPECIFICATION (Partially Implemented) | **Tests:** 0 | **Feature IDs:** **Source:** macro.md
-
-This file contains executable test cases extracted from macro.md.
-
-
-### [Simple Language Metaprogramming - Test Specification](metaprogramming.md)
-**Status:** Reference | **Tests:** 24 | **Feature IDs:** **Source:** metaprogramming.md
-
-This file contains executable test cases extracted from metaprogramming.md.
-
-
----
-
-## Async/Concurrency {#asyncconcurrency}
-
-### [Async-Default Function Model](async_default.md)
-**Status:** Draft | **Tests:** 31 | **Feature IDs:** #276-285
-
-This document specifies Simple's async-default execution model where functions are async by default and sync is explicit.
-
-**Key Symbols:** Promise, Suspension, ExecutionMode, AsyncContext, Future
-
-
-### [Simple Language Concurrency - Test Specification](concurrency.md)
-**Status:** Reference | **Tests:** 24 | **Feature IDs:** **Source:** concurrency.md
-
-This file contains executable test cases extracted from concurrency.md.
-
-
-### [Suspension Operator (`~`) Specification](suspension_operator.md)
-**Status:** Draft | **Tests:** 24 | **Feature IDs:** #270-275
-
-The `~` operator marks expressions that may suspend (perform async operations). It appears in three contexts:
-
-
----
-
-## Core Language {#core-language}
-
-### [Simple Language Functions and Pattern Matching - Test Specification](functions.md)
-**Status:** Reference | **Tests:** 24 | **Feature IDs:** **Source:** functions.md
-
-This file contains executable test cases extracted from functions.md.
-
-
-### [Simple Language Memory and Ownership - Test Specification](memory.md)
-**Status:** Reference | **Tests:** 17 | **Feature IDs:** **Source:** memory.md
-
-This file contains executable test cases extracted from memory.md.
-
-
-### [Module System Specification - Test Specification](modules.md)
-**Status:** Reference | **Tests:** 0 | **Feature IDs:** **Source:** modules.md
-
-This file contains executable test cases extracted from modules.md.
-
-
-### [Simple Language Syntax Specification](syntax.md)
-**Status:** Stable | **Tests:** 21 | **Feature IDs:** #10-19
-
-Comprehensive specification of Simple's syntax, execution modes, and lexical structure.
-
-**Key Symbols:** Token, Operator, ExecutionMode, Parser, Lexer
-
-
-### [Simple Language Traits and Implementations - Test Specification](traits.md)
-**Status:** ✅ Implemented (uses existing coherence rules) | **Tests:** 36 | **Feature IDs:** **Source:** traits.md
-
-This file contains executable test cases extracted from traits.md.
-
-
----
-
-## Data Structures {#data-structures}
-
-### [Simple Language Data Structures - Test Specification](data_structures.md)
-**Status:** Reference | **Tests:** 32 | **Feature IDs:** **Source:** data_structures.md
-
-This file contains executable test cases extracted from data_structures.md.
-
-
----
-
-## Miscellaneous {#miscellaneous}
-
-### [Shell API Specification](shell_api.md)
-**Status:** Implementing | **Tests:** 8 | **Feature IDs:** #900-905
-
-Shell API provides access to system operations commonly used in shell scripts:
-
-
----
-
-## Testing & Quality {#testing-&-quality}
-
-### [Sandboxing & Isolation](sandboxing.md)
-**Status:** ✅ Runtime Complete (#916-919), 📋 Environment Planned (#920-923) | **Tests:** 0 | **Feature IDs:** #916-923
-
-### Two Isolation Models
-
-
----
-
-## Type System {#type-system}
-
-### [Type Inference Specification](type_inference.md)
-**Status:** Partial Implementation (Hindley-Milner scaffold working) | **Tests:** 24 | **Feature IDs:** #13
-
-Simple uses a Hindley-Milner-style type inference system that automatically deduces types for expressions, variables, and functions without requiring ...
-
-
-### [Simple Language Type System](types.md)
-**Status:** Stable | **Tests:** 13 | **Feature IDs:** #20-29
-
-Complete specification of Simple's type system, including primitives, composites, generics, and mutability rules.
-
-**Key Symbols:** Type, TypeVar, Mutability, Generic
-
-
----
-
-## Statistics
-
-**By Status:**
-- Draft: 2 specs
-- Implementing: 1 specs
-- Partial Implementation (Hindley-Milner scaffold working): 1 specs
-- Reference: 6 specs
-- SPECIFICATION (Partially Implemented): 1 specs
-- Stable: 2 specs
-- ✅ Implemented (uses existing coherence rules): 1 specs
-- ✅ Runtime Complete (#916-919), 📋 Environment Planned (#920-923): 1 specs
-- 📋 Planned: 1 specs
-
-**By Test Count:**
-- 30+ tests: 3 specs
-- 20-29 tests: 6 specs
-- 10-19 tests: 3 specs
-- <10 tests: 4 specs
-
-**Total Test Coverage:** 292 test cases
