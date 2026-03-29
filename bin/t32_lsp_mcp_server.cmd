@@ -8,6 +8,8 @@ set "REPO_ROOT=%SCRIPT_DIR%.."
 set "TRACE32_ROOT=%REPO_ROOT%\examples\10_tooling\trace32_tools"
 pushd "%REPO_ROOT%"
 set "SIMPLE_LIB=%TRACE32_ROOT%"
+set "SIMPLE_RUNTIME=%RUNTIME%"
+set "T32_LSP_MCP_TOOL_RUNNER=examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
 set "SIMPLE_LOG=error"
 set "RUST_LOG=error"
 "%RUNTIME%" "%ENTRY%" %* 2>nul

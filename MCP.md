@@ -6,23 +6,38 @@ All MCP servers, AI CLI plugins, and dev skill integrations produced by this pro
 
 | Platform | Marketplace URL | Our Listing |
 |----------|----------------|-------------|
-| **Claude Code** | [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) / [claudemarketplaces.com](https://claudemarketplaces.com/) | Not submitted |
-| **Gemini CLI** | [geminicli.com/extensions](https://geminicli.com/extensions/) | Not discoverable (need GitHub topic) |
-| **Codex** | [developers.openai.com/codex/plugins](https://developers.openai.com/codex/plugins) / [openai/skills](https://github.com/openai/skills) | Not submitted (plugin system launched 2026-03-26) |
-| **MCP Registry** | [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/) | Not registered |
+| **Claude Code** | [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) / [claudemarketplaces.com](https://claudemarketplaces.com/) | Packaged, not submitted to official directory |
+| **Gemini CLI** | [geminicli.com/extensions](https://geminicli.com/extensions/) | Topic set, pending gallery crawl (daily) |
+| **Codex** | [developers.openai.com/codex/plugins](https://developers.openai.com/codex/plugins) / [openai/skills](https://github.com/openai/skills) | Ad-hoc skills; plugin system launched 2026-03-26 |
+| **MCP Registry** | [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/) | Published: `io.github.ormastes/simple-mcp-server` |
+
+## Dev Plugin / Extension Comparison
+
+Each platform has a "dev plugin" that bundles development workflow skills + MCP servers for Simple Language projects.
+
+| Platform | Dev Plugin | Skills | MCP Servers | Instructions | Status |
+|----------|-----------|--------|-------------|-------------|--------|
+| **Gemini CLI** | `gemini-extension.json` | 12 commands (`.gemini/commands/`) | simple-mcp, simple-lsp-mcp | GEMINI.md | Topic set, pending gallery crawl |
+| **Claude Code** | **Not yet created** | 7 skills (`.claude/skills/`), 12 agents (`.claude/agents/`) — local only | simple-mcp, simple-lsp-mcp, t32-mcp, t32-lsp-mcp | CLAUDE.md | Needs: bundle skills+agents into `simple-dev` plugin, submit to marketplace |
+| **Codex** | **Not yet created** | 11 skills (`.codex/skills/`) — ad-hoc only | simple-mcp, simple-lsp-mcp, t32-mcp, t32-lsp-mcp | AGENTS.md | Needs: convert to plugin bundle format, submit to [openai/skills](https://github.com/openai/skills) |
+
+**Gap:** Only Gemini has a distributable dev extension. Claude and Codex skills/agents work locally but are not packaged as installable plugins for external users.
+
+**TODO:**
+- **Claude `simple-dev` plugin:** Bundle `.claude/skills/` + `.claude/agents/` + MCP config into `tools/claude-plugin/marketplace/plugins/simple-dev/`, then submit to [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official)
+- **Codex `simple-dev` plugin:** Bundle `.codex/skills/` + MCP config into Codex plugin format (see [developers.openai.com/codex/plugins](https://developers.openai.com/codex/plugins)), then submit to [openai/skills](https://github.com/openai/skills)
 
 ## Deployment Status
 
-| Market | Status | Blocking Step |
-|--------|--------|---------------|
-| **npm** (`@simple-lang/mcp-server`) | Not published | `npm org create simple-lang` + `npm publish --access public` |
-| **MCP Registry** | Not registered | npm publish first, then `npx @anthropic-ai/mcp-publisher register` |
-| **Gemini CLI Gallery** | Not discoverable | Need public GitHub repo + `gemini-cli-extension` topic |
-| **Claude Marketplace** | Local only | Package exists; submit to [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) or community marketplaces |
-| **Codex Plugins** | Ad-hoc only | Convert `.codex/skills/` to plugin bundle; submit to [openai/skills](https://github.com/openai/skills) catalog |
-| **GitHub Releases** | None | `gh release create` with platform binaries needed for npm postinstall |
-
-All infrastructure, manifests, and packaging scripts are ready. No external publishing has been done yet.
+| Market | Status | Next Step |
+|--------|--------|-----------|
+| **npm** (`@simple-lang/mcp-server`) | Published (v0.9.5) | — |
+| **MCP Registry** (`io.github.ormastes/simple-mcp-server`) | Published (v0.9.5) | — |
+| **Gemini CLI Gallery** | `gemini-cli-extension` topic set | Wait for daily crawl (~24h) |
+| **GitHub Releases** | v0.9.4 exists, plugin archives uploaded | — |
+| **Claude `simple-dev` plugin** | **Not created** | Bundle skills+agents, submit to [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) |
+| **Claude tool plugins** | Packaged (3 archives in `build/release/plugins/`) | Submit to marketplace |
+| **Codex `simple-dev` plugin** | **Not created** | Convert `.codex/skills/` to plugin bundle, submit to [openai/skills](https://github.com/openai/skills) |
 
 ---
 
@@ -62,7 +77,7 @@ Then in any `.mcp.json`:
 { "mcpServers": { "simple-mcp": { "command": "npx", "args": ["@simple-lang/mcp-server"] } } }
 ```
 
-npm package: `tools/mcp-registry/package.json` (`@simple-lang/mcp-server`). Downloads platform binary on `postinstall`.
+npm package: [`@simple-lang/mcp-server`](https://www.npmjs.com/package/@simple-lang/mcp-server) (`tools/mcp-registry/package.json`). Downloads platform binary on `postinstall`.
 
 ---
 
@@ -271,7 +286,7 @@ cd tools/mcp-registry && npm publish --access public
 npx @anthropic-ai/mcp-publisher register --server-json tools/mcp-registry/server.json
 ```
 
-Registry URL: `https://registry.modelcontextprotocol.io/servers/@simple-lang/mcp-server`
+Registry URL: `https://registry.modelcontextprotocol.io/servers/io.github.ormastes/simple-mcp-server`
 
 ### Codex — Plugin Catalog (new, 2026-03-26)
 

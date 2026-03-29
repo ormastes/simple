@@ -14,6 +14,11 @@
 use t32_lsp_mcp.json_helpers
 use t32_lsp_mcp.protocol
 
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+
 val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
 val LSP_SERVER_VERSION = "0.1.2"
 val LSP_NL = "\n"
@@ -65,7 +70,21 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
     val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return lsp_result_error(id, -32602, "Missing tool name in tools/call request")
-    lsp_result_error(id, -32001, "Tool execution is unavailable in the fast-start path")
+    val args_raw = lsp_extract_field_raw(body, "arguments")
+    val args_path = "/tmp/t32_lsp_mcp_args_" + id + ".json"
+    if not rt_file_write_text(args_path, args_raw):
+        return lsp_result_error(id, -32002, "Failed to write tool arguments")
+    val runtime = lsp_tool_runtime_path()
+    val runner = lsp_tool_runner_path()
+    val (stdout, stderr, code) = rt_process_run(runtime, [runner, id, tool_name, args_path])
+    rt_file_delete(args_path)
+    if code != 0:
+        val err_text = lsp_trim_error_text(stderr, stdout)
+        return lsp_result_error(id, -32002, "Tool backend failed: " + err_text)
+    val response = stdout.trim()
+    if response == "":
+        return lsp_result_error(id, -32002, "Tool backend returned no response")
+    response
 
 fn lsp_has_method(msg: text, name: text) -> bool:
     msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
@@ -103,3 +122,25 @@ fn lsp_detect_tool_name(body: text) -> text:
     if body.contains("\"name\":\"cmm_validate_cli\"") or body.contains("\"name\": \"cmm_validate_cli\""):
         return "cmm_validate_cli"
     lsp_extract_nested(body, "name")
+
+fn lsp_tool_runtime_path() -> text:
+    val env_runtime = rt_env_get("SIMPLE_RUNTIME") ?? ""
+    if env_runtime != "":
+        return env_runtime
+    "bin/release/simple"
+
+fn lsp_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_TOOL_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
+
+fn lsp_trim_error_text(stderr: text, stdout: text) -> text:
+    var raw = stderr.trim()
+    if raw == "":
+        raw = stdout.trim()
+    if raw == "":
+        return "unknown error"
+    if raw.len() > 240:
+        return raw[0:240]
+    raw
