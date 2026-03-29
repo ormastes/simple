@@ -428,6 +428,9 @@ fn process_use_stmt(
             // Unpack module exports into current namespace
             if let Value::Dict(module_exports) = &value {
                 for (name, export_value) in module_exports {
+                    if let Value::Function { def, .. } = export_value {
+                        global_functions.insert(name.clone(), (**def).clone());
+                    }
                     env.insert(name.clone(), export_value.clone());
                     exports.insert(name.clone(), export_value.clone());
                 }

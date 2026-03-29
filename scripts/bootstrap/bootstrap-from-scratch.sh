@@ -210,6 +210,7 @@ else
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
+    --backend "${backend}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
@@ -223,6 +224,7 @@ else
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf .simple/native_cache/
   run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+    --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -270,6 +272,7 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage_for_build}" native-build \
+  --backend "${backend}" \
   --source src/compiler --source src/app --source src/lib \
   --entry src/app/cli/main.spl \
   --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \

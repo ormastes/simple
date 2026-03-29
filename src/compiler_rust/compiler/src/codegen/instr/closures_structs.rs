@@ -224,7 +224,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
-        // If not found and func_name contains '.', try additional name variants
+        // If not found and func_name contains '.', try additional name variants.
+        // Prefer qualified/type-specific spellings before the bare method name.
         let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
         if resolved_name.is_none() {
@@ -232,11 +233,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 let type_name = &func_name[..dot_pos];
                 let method = &func_name[dot_pos + 1..];
 
-                // Try: bare method name
+                // Try: Type__method (double underscore variant)
+                dunder_storage = format!("{}__{}", type_name, method);
                 resolved_name = ctx
                     .use_map
-                    .get(method)
-                    .or_else(|| ctx.import_map.get(method))
+                    .get(&dunder_storage)
+                    .or_else(|| ctx.import_map.get(&dunder_storage))
                     .map(|s| s.as_str());
 
                 // Try: lowercase_type_method (Simple convention)
@@ -249,13 +251,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Try: Type__method (double underscore variant)
+                // Last resort: bare method name
                 if resolved_name.is_none() {
-                    dunder_storage = format!("{}__{}", type_name, method);
                     resolved_name = ctx
                         .use_map
-                        .get(&dunder_storage)
-                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .get(method)
+                        .or_else(|| ctx.import_map.get(method))
                         .map(|s| s.as_str());
                 }
             }

@@ -1,0 +1,269 @@
+#![allow(star_import)]
+# T32 SWD Serial Terminal - TRACE32 SWD serial via TERM window
+#
+# Provides terminal access to a target's serial output through the TRACE32
+# SWD (Serial Wire Debug) TERM window. Uses t32rem commands to configure
+# the TERM gate, send data via TERM.Out, and read output via WinPrint capture.
+#
+# Channel is configurable via config.channel (default: "TERM.A").
+# Minimum poll interval is 200ms to avoid overloading the T32 API.
+#
+# Depends on:
+#   - std.debug.remote.protocol.trace32 (Trace32Client, t32rem wrapper)
+#   - std.debug.remote.protocol.t32_window_capture (t32_capture_window_text)
+#   - std.terminal.types (TerminalConfig, TerminalConnection, TerminalExecResult)
+
+use std.io.{shell, ProcessResult}
+use std.nogc_sync_mut.debug.remote.protocol.trace32.{Trace32Client}
+use std.nogc_sync_mut.debug.remote.protocol.t32_window_capture.{t32_capture_window_text}
+use std.nogc_sync_mut.terminal.types.*
+use app.debug.remote.types.{DebugConfig}
+
+# ============================================================================
+# FFI - Timing
+# ============================================================================
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Connection State
+# ============================================================================
+
+# Store Trace32Client handles mapped by terminal connection ID
+var t32_swd_conn_ids: [i64] = []
+var t32_swd_clients: [Trace32Client] = []
+var t32_swd_conn_id_counter: i64 = 0
+
+val T32_SWD_DEFAULT_CHANNEL: text = "TERM.A"
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn t32_swd_store_client(id: i64, client: Trace32Client):
+    """Store a Trace32Client associated with a terminal connection ID."""
+    t32_swd_conn_ids.push(id)
+    t32_swd_clients.push(client)
+
+fn t32_swd_find_client(id: i64) -> Trace32Client:
+    """Find the Trace32Client for a given terminal connection ID.
+
+    Returns the matching client. Caller should check client.connected field.
+    """
+    var i = 0
+    while i < t32_swd_conn_ids.length():
+        if t32_swd_conn_ids[i] == id:
+            return t32_swd_clients[i]
+        i = i + 1
+    # Return a disconnected placeholder
+    Trace32Client(
+        host: "",
+        port: 0,
+        t32rem_path: "",
+        connected: false,
+        program: "",
+        bp_counter: 0
+    )
+
+fn t32_swd_resolve_channel(config: TerminalConfig) -> text:
+    """Resolve the TERM channel name from config, defaulting to TERM.A."""
+    if config.channel.length() > 0:
+        return config.channel
+    T32_SWD_DEFAULT_CHANNEL
+
+# ============================================================================
+# T32 SWD Terminal Operations
+# ============================================================================
+
+fn t32_swd_connect(config: TerminalConfig) -> TerminalConnection:
+    """Connect to a TRACE32 instance and configure SWD serial TERM window.
+
+    Establishes a connection to TRACE32 via t32rem, then sends PRACTICE
+    commands to set up the SWD serial terminal gate:
+    - TERM.GATE SWD (configure SWD as transport)
+    - TERM.Method SWD (set method)
+
+    Args:
+        config: TerminalConfig with kind == TERM_KIND_T32_SWD.
+                Uses config.t32_host, config.t32_port, config.channel.
+
+    Returns:
+        TerminalConnection with connected=true on success
+
+    Example:
+        val cfg = make_t32_swd_config("swd_serial", "localhost", 20000, "TERM.A")
+        val conn = t32_swd_connect(cfg)
+    """
+    t32_swd_conn_id_counter = t32_swd_conn_id_counter + 1
+    val id = t32_swd_conn_id_counter
+
+    # Build a DebugConfig to connect via Trace32Client
+    val debug_config = DebugConfig(
+        host: config.t32_host,
+        port: config.t32_port,
+        program: "",
+        type_name: "trace32"
+    )
+
+    val client_result = Trace32Client.connect(debug_config)
+    match client_result:
+        Err(e):
+            return TerminalConnection(
+                id: id,
+                kind: TERM_KIND_T32_SWD,
+                config: config,
+                connected: false,
+                session_handle: 0,
+                channel_handle: 0
+            )
+        Ok(client):
+            # Configure SWD serial TERM gate
+            val gate_result = client.run_command("TERM.GATE SWD")
+            match gate_result:
+                Err(e):
+                    return TerminalConnection(
+                        id: id,
+                        kind: TERM_KIND_T32_SWD,
+                        config: config,
+                        connected: false,
+                        session_handle: 0,
+                        channel_handle: 0
+                    )
+                Ok(_):
+                    pass_do_nothing
+
+            val method_result = client.run_command("TERM.Method SWD")
+            match method_result:
+                Err(e):
+                    return TerminalConnection(
+                        id: id,
+                        kind: TERM_KIND_T32_SWD,
+                        config: config,
+                        connected: false,
+                        session_handle: 0,
+                        channel_handle: 0
+                    )
+                Ok(_):
+                    pass_do_nothing
+
+            # Store client for later use
+            t32_swd_store_client(id, client)
+
+            TerminalConnection(
+                id: id,
+                kind: TERM_KIND_T32_SWD,
+                config: config,
+                connected: true,
+                session_handle: id,
+                channel_handle: 0
+            )
+
+fn t32_swd_execute(conn: TerminalConnection, command: text) -> TerminalExecResult:
+    """Execute a PRACTICE command via TRACE32.
+
+    This sends a PRACTICE (CMM) command to TRACE32, not a command to the
+    target's serial console. For sending data to the target serial, use
+    t32_swd_send().
+
+    Args:
+        conn: Active T32 SWD TerminalConnection
+        command: PRACTICE command to execute (e.g., "Data.dump 0x0--+0x100")
+
+    Returns:
+        TerminalExecResult with command output
+    """
+    if not conn.connected:
+        return make_exec_result(-1, "", "not connected", 0)
+
+    val client = t32_swd_find_client(conn.id)
+    if not client.connected:
+        return make_exec_result(-1, "", "t32 client not found", 0)
+
+    val start_us = rt_time_now_unix_micros()
+    val result = client.run_command(command)
+    val end_us = rt_time_now_unix_micros()
+    val duration_ms = (end_us - start_us) / 1000
+
+    match result:
+        Ok(output):
+            return make_exec_result(0, output, "", duration_ms)
+        Err(e):
+            return make_exec_result(-1, "", e, duration_ms)
+
+fn t32_swd_send(conn: TerminalConnection, data: text) -> bool:
+    """Send data to the target's serial console via TERM.Out PRACTICE command.
+
+    Args:
+        conn: Active T32 SWD TerminalConnection
+        data: Text to send to the target serial console
+
+    Returns:
+        true if the TERM.Out command succeeded
+    """
+    if not conn.connected:
+        return false
+
+    val client = t32_swd_find_client(conn.id)
+    if not client.connected:
+        return false
+
+    # Use TERM.Out to send data to target serial
+    val cmd = "TERM.Out {data}"
+    val result = client.run_command(cmd)
+    match result:
+        Ok(_):
+            return true
+        Err(e):
+            return false
+
+fn t32_swd_receive(conn: TerminalConnection, timeout_ms: i64) -> text:
+    """Receive data from the target's serial console via TERM window capture.
+
+    Captures the TERM window contents using WinPrint. The channel name
+    comes from config.channel (default: "TERM.A").
+
+    Minimum poll interval of 200ms is recommended to avoid overloading T32 API.
+
+    Args:
+        conn: Active T32 SWD TerminalConnection
+        timeout_ms: Timeout (used for best-effort timing)
+
+    Returns:
+        Captured TERM window text content, or empty on error
+    """
+    if not conn.connected:
+        return ""
+
+    val client = t32_swd_find_client(conn.id)
+    if not client.connected:
+        return ""
+
+    val channel = t32_swd_resolve_channel(conn.config)
+
+    val result = t32_capture_window_text(client, channel)
+    match result:
+        Ok(content):
+            return content
+        Err(e):
+            return ""
+
+fn t32_swd_close(conn: TerminalConnection) -> bool:
+    """Close a T32 SWD serial terminal connection.
+
+    Disconnects from the TRACE32 instance.
+
+    Args:
+        conn: T32 SWD TerminalConnection to close
+
+    Returns:
+        true if disconnection was successful
+    """
+    if not conn.connected:
+        return false
+
+    val client = t32_swd_find_client(conn.id)
+    if not client.connected:
+        return false
+
+    client.disconnect()
+    true

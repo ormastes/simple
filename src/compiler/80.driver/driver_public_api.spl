@@ -1,0 +1,120 @@
+use compiler.driver.driver_core_types.{CompileResult}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+
+# Lightweight bridge for public `compiler.driver.{...}` imports.
+# These helpers intentionally shell out to a child Simple process that imports
+# `compiler.driver.driver` directly, which avoids eager facade loading and the
+# current imported-function binding bug in `compiler.driver.__init__`.
+
+fn interpret_file(path: text) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
+    val combined = _clean_child_output(stdout, stderr)
+    if _looks_like_driver_failure(combined):
+        return CompileResult.RuntimeError(combined)
+    if exit_code == 0 or combined == "":
+        return CompileResult.Success(combined)
+    CompileResult.Success(combined)
+
+fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
+    val emit_c_text = if emit_c: "true" else: "false"
+    val emit_cpp_text = if emit_cpp: "true" else: "false"
+    val body = "use compiler.driver.driver.{{generate_headers}}\n" +
+        "use compiler.driver.driver_types.{{CompileResult}}\n\n" +
+        _driver_runner_prelude() +
+        "fn main() -> int:\n" +
+        "    val result = generate_headers(\"{_escape_simple_text(path)}\", \"{_escape_simple_text(output_dir)}\", \"{_escape_simple_text(lib_name)}\", {emit_c_text}, {emit_cpp_text})\n" +
+        "    _exit_from_compile_result(result)\n"
+    _run_driver_child("/tmp/simple_driver_public_generate_headers.spl", body)
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    val body = "use compiler.driver.driver.{{aot_shared_library}}\n" +
+        "use compiler.driver.driver_types.{{CompileResult}}\n\n" +
+        _driver_runner_prelude() +
+        "fn main() -> int:\n" +
+        "    val result = aot_shared_library(\"{_escape_simple_text(path)}\", \"{_escape_simple_text(output)}\")\n" +
+        "    _exit_from_compile_result(result)\n"
+    _run_driver_child("/tmp/simple_driver_public_aot_shared_library.spl", body)
+
+fn _run_driver_child(script_path: text, body: text) -> CompileResult:
+    if not rt_file_write_text(script_path, body):
+        return CompileResult.RuntimeError("failed to write helper script: {script_path}")
+
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [script_path])
+    rt_file_delete(script_path)
+
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0:
+        return CompileResult.Success(combined)
+    CompileResult.RuntimeError(combined)
+
+fn _driver_runner_prelude() -> text:
+    "fn _exit_from_compile_result(result: CompileResult) -> int:\n" +
+    "    match result:\n" +
+    "        case CompileResult.Success(_):\n" +
+    "            print \"__SIMPLE_DRIVER_OK__\"\n" +
+    "            0\n" +
+    "        case _:\n" +
+    "            val errors = result.get_errors()\n" +
+    "            if errors.len() > 0:\n" +
+    "                var i = 0\n" +
+    "                while i < errors.len():\n" +
+    "                    print errors[i]\n" +
+    "                    i = i + 1\n" +
+    "            1\n\n"
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
+            return "src/compiler_rust/target/release/simple.exe"
+        if rt_file_exists("bin/release/simple.exe"):
+            return "bin/release/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _clean_child_output(stdout: text, stderr: text) -> text:
+    val combined = if stderr.trim() != "":
+        stdout + "\n" + stderr
+    else:
+        stdout
+
+    val lines = combined.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "" and line != "__SIMPLE_DRIVER_OK__":
+            kept.push(line)
+        i = i + 1
+    kept.join("\n")
+
+fn _escape_simple_text(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    escaped_slashes.replace("\"", "\\\"")
+
+fn _looks_like_driver_failure(output: text) -> bool:
+    val trimmed = output.trim()
+    if trimmed == "":
+        return false
+    trimmed.contains("error:") or
+        trimmed.contains("panic") or
+        trimmed.contains("ParseError") or
+        trimmed.contains("TypeError") or
+        trimmed.contains("RuntimeError")

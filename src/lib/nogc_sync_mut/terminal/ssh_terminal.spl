@@ -1,0 +1,243 @@
+#![allow(star_import)]
+# SSH Terminal - Wraps ssh_ffi.spl for the unified terminal abstraction
+#
+# Provides SSH terminal operations (connect, execute, send, receive, upload, close)
+# using the SshSession/SshChannel/SftpSession types from ssh_ffi.spl.
+# Authentication dispatches by config.auth_method: "password", "pubkey", "agent".
+# Encrypted credentials are transparently resolved via credential_resolve().
+#
+# Depends on:
+#   - std.io.ssh_ffi (SSH2 protocol FFI bindings)
+#   - std.terminal.types (TerminalConfig, TerminalConnection, TerminalExecResult)
+#   - std.terminal.credential.store (credential_resolve for encrypted passwords)
+
+use std.nogc_sync_mut.io.ssh_ffi.*
+use std.nogc_sync_mut.terminal.types.*
+use std.nogc_sync_mut.terminal.credential.store.{credential_resolve}
+
+# ============================================================================
+# FFI - Timing
+# ============================================================================
+
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Connection ID Counter
+# ============================================================================
+
+var ssh_conn_id_counter: i64 = 0
+
+# ============================================================================
+# SSH Terminal Operations
+# ============================================================================
+
+fn ssh_terminal_connect(config: TerminalConfig) -> TerminalConnection:
+    """Connect to an SSH server and authenticate.
+
+    Dispatches authentication by config.auth_method:
+    - "password": Uses credential_resolve(config.credential) for transparent decryption
+    - "pubkey": Uses config.key_path as private key path
+    - "agent": Uses SSH agent forwarding
+
+    Args:
+        config: TerminalConfig with kind == TERM_KIND_SSH
+
+    Returns:
+        TerminalConnection with connected=true on success, connected=false on failure
+
+    Example:
+        val cfg = make_ssh_config("host1", "192.168.1.100", 22, "admin", "password", "secret")
+        val conn = ssh_terminal_connect(cfg)
+        if conn.connected:
+            print "SSH connected"
+    """
+    ssh_conn_id_counter = ssh_conn_id_counter + 1
+    val id = ssh_conn_id_counter
+
+    # Establish TCP + SSH handshake
+    val session = ssh_connect(config.host, config.port)
+    if not session.is_valid:
+        return TerminalConnection(
+            id: id,
+            kind: TERM_KIND_SSH,
+            config: config,
+            connected: false,
+            session_handle: 0,
+            channel_handle: 0
+        )
+
+    # Dispatch authentication
+    var auth_ok = false
+
+    if config.auth_method == "password":
+        val password = credential_resolve(config.credential)
+        auth_ok = ssh_auth_password(session, config.username, password)
+
+    if config.auth_method == "pubkey":
+        # Derive public key path from private key path (append .pub)
+        val pub_path = "{config.key_path}.pub"
+        val passphrase = credential_resolve(config.credential)
+        auth_ok = ssh_auth_pubkey(session, config.username, pub_path, config.key_path, passphrase)
+
+    if config.auth_method == "agent":
+        auth_ok = ssh_auth_agent(session, config.username)
+
+    if not auth_ok:
+        ssh_disconnect(session)
+        return TerminalConnection(
+            id: id,
+            kind: TERM_KIND_SSH,
+            config: config,
+            connected: false,
+            session_handle: 0,
+            channel_handle: 0
+        )
+
+    # Open an interactive shell channel for send/receive operations
+    val channel = ssh_shell(session)
+    val ch_handle = if channel.is_valid: channel.handle else: 0
+
+    TerminalConnection(
+        id: id,
+        kind: TERM_KIND_SSH,
+        config: config,
+        connected: true,
+        session_handle: session.handle,
+        channel_handle: ch_handle
+    )
+
+fn ssh_terminal_execute(conn: TerminalConnection, command: text) -> TerminalExecResult:
+    """Execute a command on the remote SSH server.
+
+    Uses ssh_exec (one-shot channel) rather than the interactive shell channel.
+    Measures wall-clock execution time.
+
+    Args:
+        conn: Active SSH TerminalConnection
+        command: Shell command to execute remotely
+
+    Returns:
+        TerminalExecResult with exit_code, stdout, stderr, duration_ms
+    """
+    if not conn.connected:
+        return make_exec_result(-1, "", "not connected", 0)
+
+    val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
+
+    val start_us = rt_time_now_unix_micros()
+    val result = ssh_exec(session, command)
+    val end_us = rt_time_now_unix_micros()
+    val duration_ms = (end_us - start_us) / 1000
+
+    make_exec_result(result.exit_code, result.stdout, result.stderr, duration_ms)
+
+fn ssh_terminal_send(conn: TerminalConnection, data: text) -> bool:
+    """Send data to the interactive SSH shell channel.
+
+    Args:
+        conn: Active SSH TerminalConnection with an open shell channel
+        data: Text data to send
+
+    Returns:
+        true if data was written successfully
+    """
+    if not conn.connected:
+        return false
+    if conn.channel_handle == 0:
+        return false
+
+    val channel = SshChannel(handle: conn.channel_handle, is_valid: true)
+    val bytes_written = ssh_channel_write(channel, data)
+    bytes_written > 0
+
+fn ssh_terminal_receive(conn: TerminalConnection, timeout_ms: i64) -> text:
+    """Receive data from the interactive SSH shell channel.
+
+    Args:
+        conn: Active SSH TerminalConnection with an open shell channel
+        timeout_ms: Read timeout in milliseconds (currently best-effort)
+
+    Returns:
+        Text data received, or empty string on timeout/error
+    """
+    if not conn.connected:
+        return ""
+    if conn.channel_handle == 0:
+        return ""
+
+    # Set session timeout for read operation
+    val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
+    ssh_set_timeout(session, timeout_ms)
+
+    val channel = SshChannel(handle: conn.channel_handle, is_valid: true)
+    ssh_channel_read(channel)
+
+fn ssh_terminal_upload(conn: TerminalConnection, local_path: text, remote_path: text) -> bool:
+    """Upload a file to the remote server via SFTP.
+
+    Initializes an SFTP subsystem, uploads the file, then shuts down SFTP.
+
+    Args:
+        conn: Active SSH TerminalConnection
+        local_path: Local file path to upload
+        remote_path: Destination path on the remote server
+
+    Returns:
+        true if upload was successful
+    """
+    if not conn.connected:
+        return false
+
+    val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
+    val sftp = sftp_init(session)
+    if not sftp.is_valid:
+        return false
+
+    val ok = sftp_upload(sftp, local_path, remote_path)
+    sftp_shutdown(sftp)
+    ok
+
+fn ssh_terminal_download(conn: TerminalConnection, remote_path: text, local_path: text) -> bool:
+    """Download a file from the remote server via SFTP.
+
+    Args:
+        conn: Active SSH TerminalConnection
+        remote_path: Remote file path to download
+        local_path: Local destination path
+
+    Returns:
+        true if download was successful
+    """
+    if not conn.connected:
+        return false
+
+    val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
+    val sftp = sftp_init(session)
+    if not sftp.is_valid:
+        return false
+
+    val ok = sftp_download(sftp, remote_path, local_path)
+    sftp_shutdown(sftp)
+    ok
+
+fn ssh_terminal_close(conn: TerminalConnection) -> bool:
+    """Close an SSH terminal connection.
+
+    Closes the interactive shell channel (if open) and disconnects the session.
+
+    Args:
+        conn: SSH TerminalConnection to close
+
+    Returns:
+        true if disconnection was successful
+    """
+    if not conn.connected:
+        return false
+
+    # Close interactive shell channel if open
+    if conn.channel_handle != 0:
+        val channel = SshChannel(handle: conn.channel_handle, is_valid: true)
+        ssh_channel_close(channel)
+
+    val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
+    ssh_disconnect(session)

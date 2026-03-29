@@ -223,14 +223,14 @@ pub(crate) fn compile_builtin_method<M: Module>(
 
             let resolved_name = ctx
                 .use_map
-                .get(method)
-                .or_else(|| ctx.import_map.get(method))
-                .or_else(|| ctx.use_map.get(&dot_name))
+                .get(&dot_name)
                 .or_else(|| ctx.import_map.get(&dot_name))
-                .or_else(|| ctx.use_map.get(&lower_name))
-                .or_else(|| ctx.import_map.get(&lower_name))
                 .or_else(|| ctx.use_map.get(&dunder_name))
                 .or_else(|| ctx.import_map.get(&dunder_name))
+                .or_else(|| ctx.use_map.get(&lower_name))
+                .or_else(|| ctx.import_map.get(&lower_name))
+                .or_else(|| ctx.use_map.get(method))
+                .or_else(|| ctx.import_map.get(method))
                 .cloned();
 
             if let Some(resolved) = resolved_name {
@@ -239,14 +239,19 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 } else {
                     std::borrow::Cow::Borrowed(resolved.as_str())
                 };
-                let call_conv = platform_call_conv();
-                let mut sig = Signature::new(call_conv);
-                // receiver + args: all i64
-                for _ in 0..args.len() + 1 {
-                    sig.params.push(AbiParam::new(types::I64));
-                }
-                sig.returns.push(AbiParam::new(types::I64));
-                match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
+                let func_id = if let Some(&existing) = ctx.func_ids.get(resolved.as_ref()) {
+                    Ok(existing)
+                } else {
+                    let call_conv = platform_call_conv();
+                    let mut sig = Signature::new(call_conv);
+                    // receiver + args: all i64
+                    for _ in 0..args.len() + 1 {
+                        sig.params.push(AbiParam::new(types::I64));
+                    }
+                    sig.returns.push(AbiParam::new(types::I64));
+                    ctx.module.declare_function(&resolved, Linkage::Import, &sig)
+                };
+                match func_id {
                     Ok(fid) => {
                         let fref = ctx.module.declare_func_in_func(fid, builder.func);
                         let mut call_args = vec![receiver_val];

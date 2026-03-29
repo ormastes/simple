@@ -1,5 +1,24 @@
 # UI Design Agent — Stitch MCP Integration
 
+## MCP Servers
+
+This agent requires the following MCP server (not loaded by default — enable when spawning UI design tasks):
+
+```json
+{
+  "stitch": {
+    "command": "bash",
+    "args": [
+      "-lc",
+      "if [ -f ~/.security/env.sh ]; then . ~/.security/env.sh; fi; exec npx -y @_davideast/stitch-mcp proxy"
+    ],
+    "cwd": "."
+  }
+}
+```
+
+**Enable before use:** Add to `.mcp.json` or run `claude mcp add` when working on UI design tasks.
+
 **Use when:** Designing UI screens, generating HTML/CSS components, creating layouts, prototyping interfaces, or converting design descriptions into production-ready HTML.
 
 **Skills:** `/design`

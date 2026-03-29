@@ -1,15 +1,89 @@
 extern fn rt_get_args() -> [text]
 extern fn rt_native_build(args: [text]) -> i64
-use compiler.driver.driver_api.{aot_native_file_with_backend}
+use compiler.driver.driver_api.{aot_native_file_with_backend, aot_native_project_with_backend}
 use compiler.driver.driver_types.{CompileResult}
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
     "0.9.4"
 
+fn run_pure_simple_native_build(args: [text], backend: text) -> i64:
+    var entry_point = ""
+    var output = "a.out"
+    var strip = false
+    var source_dirs: [text] = []
+
+    var j = 0
+    if args.len() > 1 and args[1] == "native-build":
+        j = 2
+    elif args.len() > 0 and args[0] == "native-build":
+        j = 1
+
+    while j < args.len():
+        val a = args[j]
+        if a.starts_with("--entry="):
+            entry_point = a.substring(8)
+        elif a == "--entry" and j + 1 < args.len():
+            j = j + 1
+            entry_point = args[j]
+        elif a == "--source" and j + 1 < args.len():
+            j = j + 1
+            source_dirs = source_dirs.push(args[j])
+        elif a.starts_with("--source="):
+            source_dirs = source_dirs.push(a.substring(9))
+        elif a == "-o" and j + 1 < args.len():
+            j = j + 1
+            output = args[j]
+        elif a.starts_with("-o") and a != "-o":
+            output = a.substring(2)
+        elif a == "--strip":
+            strip = true
+        elif a == "--backend" and j + 1 < args.len():
+            j = j + 1
+        elif a.starts_with("--backend="):
+            pass
+        elif not a.starts_with("-") and entry_point == "":
+            entry_point = a
+        j = j + 1
+
+    if entry_point == "":
+        print "error: no entry point specified for native-build"
+        return 1
+
+    val result = if source_dirs.len() > 0:
+        aot_native_project_with_backend(source_dirs, entry_point, output, backend, strip)
+    else:
+        aot_native_file_with_backend(entry_point, output, backend)
+
+    match result:
+        case CompileResult.Success(_):
+            return 0
+        case _:
+            val errors = result.get_errors()
+            for err in errors:
+                print "error: {err}"
+            return 1
+
 fn run_native_build_bootstrap(args: [text]) -> i64:
-    print "[bootstrap] calling rt_native_build with {args.len()} args"
+    var backend = ""
+    var backend_explicit = false
     var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        i = i + 1
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
+        return run_pure_simple_native_build(args, "llvm-lib")
+
+    print "[bootstrap] calling rt_native_build with {args.len()} args"
+    i = 0
     while i < args.len():
         print "[bootstrap] arg[{i}] = {args[i]}"
         i = i + 1

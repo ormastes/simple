@@ -220,6 +220,9 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
 fn is_blocked_compiler_resolution(base: &Path, resolved: &Path) -> bool {
     let base_str = base.to_string_lossy();
     let resolved_str = resolved.to_string_lossy();
+    if resolved_str.contains("src/compiler/80.driver/__init__.spl") {
+        return false;
+    }
     // Only block if: caller is NOT in src/compiler, resolved IS in src/compiler,
     // AND the resolved path is a package __init__.spl (which loads entire subtrees).
     // Individual .spl files are safe to load.
@@ -394,6 +397,18 @@ mod tests {
             resolved
         );
     }
+
+    #[test]
+    fn resolves_compiler_driver_for_external_callers() {
+        let parts = vec!["compiler".to_string(), "driver".to_string()];
+        let resolved = resolve_module_path(&parts, Path::new("/tmp")).unwrap();
+        assert!(
+            resolved.ends_with("src/compiler/80.driver/__init__.spl")
+                || resolved.ends_with("src/compiler/driver/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
 }
 
 fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
@@ -474,14 +489,30 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     // Strip stdlib prefix once if applicable
     let stdlib_parts: &[String] = if is_stdlib { &parts[1..] } else { parts };
 
-    // Walk up from project root (or base_dir) to find stdlib/src locations
-    let search_start = project_root.as_deref().unwrap_or(base_dir);
-    let mut current = search_start.to_path_buf();
-    for _ in 0..10 {
+    // External scripts are often executed from /tmp while the user invokes the
+    // CLI from the repository root. In that case the script-relative base_dir is
+    // useless for project imports, so also search from the current working tree.
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+    if let Some(root) = project_root.clone() {
+        search_roots.push(root);
+    } else {
+        search_roots.push(base_dir.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(cwd_root) = find_project_root(&cwd) {
+            if !search_roots.iter().any(|root| root == &cwd_root) {
+                search_roots.push(cwd_root);
+            }
+        }
+    }
+
+    for search_start in &search_roots {
+        let mut current = search_start.to_path_buf();
+        for _ in 0..10 {
         // Only search stdlib paths if this looks like a stdlib import
-        if is_stdlib && !stdlib_parts.is_empty() {
+            if is_stdlib && !stdlib_parts.is_empty() {
             // Canonical paths first (most likely to hit), then legacy
-            for stdlib_subpath in &[
+                for stdlib_subpath in &[
                 "src/std",
                 "src/lib",
                 "src/std/src",
@@ -491,172 +522,164 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                 "simple/std_lib/src",
                 "std_lib/src",
             ] {
-                let stdlib_candidate = current.join(stdlib_subpath);
-                if !stdlib_candidate.exists() {
-                    continue;
-                }
-
-                let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
-
-                if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
-                    let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
-                    if compat_init.exists() && compat_init.is_file() {
-                        return Ok(compat_init);
+                    let stdlib_candidate = current.join(stdlib_subpath);
+                    if !stdlib_candidate.exists() {
+                        continue;
                     }
-                }
 
-                // Try module.spl
-                let mut stdlib_path = stdlib_candidate.join(&stdlib_relative);
-                stdlib_path.set_extension("spl");
-                if stdlib_path.exists() && stdlib_path.is_file() {
-                    return Ok(stdlib_path);
-                }
+                    let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
-                // Try __init__.spl in stdlib
-                let mut stdlib_init_path = stdlib_candidate.join(&stdlib_relative);
-                stdlib_init_path.push("__init__.spl");
-                if stdlib_init_path.exists() && stdlib_init_path.is_file() {
-                    return Ok(stdlib_init_path);
-                }
-
-                // Search lib subdirectories (mirrors module_loader.spl strategy)
-                for subdir in &[
-                    "nogc_async_mut",
-                    "nogc_sync_mut",
-                    "nogc_async_immut",
-                    "common",
-                    "gc_async_mut",
-                    "nogc_async_mut_noalloc",
-                ] {
-                    // Also try __init__.spl in subdirectory
-                    let mut sub_init = stdlib_candidate.join(subdir).join(&stdlib_relative);
-                    sub_init.push("__init__.spl");
-                    if sub_init.exists() && sub_init.is_file() {
-                        return Ok(sub_init);
+                    if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+                        let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
+                        if compat_init.exists() && compat_init.is_file() {
+                            return Ok(compat_init);
+                        }
                     }
-                    let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
-                    sub_path.set_extension("spl");
-                    if sub_path.exists() && sub_path.is_file() {
-                        return Ok(sub_path);
+
+                    // Try module.spl
+                    let mut stdlib_path = stdlib_candidate.join(&stdlib_relative);
+                    stdlib_path.set_extension("spl");
+                    if stdlib_path.exists() && stdlib_path.is_file() {
+                        return Ok(stdlib_path);
                     }
-                }
 
-                // Try with numbered directory support in stdlib
-                if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, stdlib_parts) {
-                    return Ok(found);
-                }
-            }
-        }
+                    // Try __init__.spl in stdlib
+                    let mut stdlib_init_path = stdlib_candidate.join(&stdlib_relative);
+                    stdlib_init_path.push("__init__.spl");
+                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+                        return Ok(stdlib_init_path);
+                    }
 
-        // Try src/ directory (for app modules like app.lsp.server)
-        let src_candidate = current.join("src");
-        if src_candidate.exists() {
-            // Try module.spl in src/
-            let mut src_path = src_candidate.join(&relative);
-            src_path.set_extension("spl");
-            if src_path.exists() && src_path.is_file() {
-                return Ok(src_path);
-            }
+                    // Search lib subdirectories (mirrors module_loader.spl strategy)
+                    for subdir in &[
+                        "nogc_async_mut",
+                        "nogc_sync_mut",
+                        "nogc_async_immut",
+                        "common",
+                        "gc_async_mut",
+                        "nogc_async_mut_noalloc",
+                    ] {
+                        // Also try __init__.spl in subdirectory
+                        let mut sub_init = stdlib_candidate.join(subdir).join(&stdlib_relative);
+                        sub_init.push("__init__.spl");
+                        if sub_init.exists() && sub_init.is_file() {
+                            return Ok(sub_init);
+                        }
+                        let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
+                        sub_path.set_extension("spl");
+                        if sub_path.exists() && sub_path.is_file() {
+                            return Ok(sub_path);
+                        }
+                    }
 
-            // Try __init__.spl in src/
-            let mut src_init_path = src_candidate.join(&relative);
-            src_init_path.push("__init__.spl");
-            if src_init_path.exists() && src_init_path.is_file() {
-                return Ok(src_init_path);
-            }
-
-            // Try with numbered directory support in src/
-            if let Some(found) = resolve_with_numbered_dirs(&src_candidate, parts) {
-                return Ok(found);
-            }
-
-            // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
-            if parts.len() > 1 && parts[0] == "compiler" {
-                let compiler_dir = src_candidate.join("compiler");
-                if compiler_dir.is_dir() {
-                    if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                    // Try with numbered directory support in stdlib
+                    if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, stdlib_parts) {
                         return Ok(found);
                     }
                 }
             }
 
-            // Strategy: bare stdlib subdir prefix (common.*, nogc_sync_mut.*, etc.)
-            // Handles imports like `use common.ui.widget.{...}` without `std.` prefix
-            // by resolving through src/lib/ directly.
-            {
-                const STDLIB_SUBDIRS: &[&str] = &[
-                    "common",
-                    "nogc_sync_mut",
-                    "nogc_async_mut",
-                    "nogc_async_immut",
-                    "gc_async_mut",
-                    "nogc_async_mut_noalloc",
-                ];
-                if parts.len() > 1 && STDLIB_SUBDIRS.contains(&parts[0].as_str()) {
-                    for lib_path in &["src/lib", "src/std"] {
-                        let lib_candidate = src_candidate.join(lib_path.trim_start_matches("src/"));
-                        if lib_candidate.is_dir() {
-                            if let Some(found) = resolve_with_numbered_dirs(&lib_candidate, parts) {
-                                return Ok(found);
+            // Try src/ directory (for app modules like app.lsp.server)
+            let src_candidate = current.join("src");
+            if src_candidate.exists() {
+                // Try module.spl in src/
+                let mut src_path = src_candidate.join(&relative);
+                src_path.set_extension("spl");
+                if src_path.exists() && src_path.is_file() {
+                    return Ok(src_path);
+                }
+
+                // Try __init__.spl in src/
+                let mut src_init_path = src_candidate.join(&relative);
+                src_init_path.push("__init__.spl");
+                if src_init_path.exists() && src_init_path.is_file() {
+                    return Ok(src_init_path);
+                }
+
+                // Try with numbered directory support in src/
+                if let Some(found) = resolve_with_numbered_dirs(&src_candidate, parts) {
+                    return Ok(found);
+                }
+
+                // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
+                if parts.len() > 1 && parts[0] == "compiler" {
+                    let compiler_dir = src_candidate.join("compiler");
+                    if compiler_dir.is_dir() {
+                        if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                            return Ok(found);
+                        }
+                    }
+                }
+
+                // Strategy: bare stdlib subdir prefix (common.*, nogc_sync_mut.*, etc.)
+                // Handles imports like `use common.ui.widget.{...}` without `std.` prefix
+                // by resolving through src/lib/ directly.
+                {
+                    const STDLIB_SUBDIRS: &[&str] = &[
+                        "common",
+                        "nogc_sync_mut",
+                        "nogc_async_mut",
+                        "nogc_async_immut",
+                        "gc_async_mut",
+                        "nogc_async_mut_noalloc",
+                    ];
+                    if parts.len() > 1 && STDLIB_SUBDIRS.contains(&parts[0].as_str()) {
+                        for lib_path in &["src/lib", "src/std"] {
+                            let lib_candidate = src_candidate.join(lib_path.trim_start_matches("src/"));
+                            if lib_candidate.is_dir() {
+                                if let Some(found) = resolve_with_numbered_dirs(&lib_candidate, parts) {
+                                    return Ok(found);
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // Strategy: "app.*" → src/app/ with numbered prefix support
-            if parts.len() > 1 && parts[0] == "app" {
-                let app_dir = src_candidate.join("app");
-                if app_dir.is_dir() {
-                    if let Some(found) = resolve_with_numbered_dirs(&app_dir, &parts[1..]) {
-                        return Ok(found);
-                    }
-                }
+            if let Some(parent) = current.parent() {
+                current = parent.to_path_buf();
+            } else {
+                break;
             }
-        }
-
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            break;
         }
     }
 
-    // Final fallback for non-stdlib imports: search lib subdirectories
-    // This handles imports like `use sdn.parser.{parse}` where the module lives
-    // under src/lib/common/sdn/parser.spl but doesn't have a `std.` prefix.
-    if !is_stdlib {
-        let search_start = project_root.as_deref().unwrap_or(base_dir);
+    for search_start in &search_roots {
         let mut current = search_start.to_path_buf();
         for _ in 0..10 {
-            for stdlib_subpath in &["src/lib", "src/std"] {
-                let stdlib_candidate = current.join(stdlib_subpath);
-                if !stdlib_candidate.exists() {
-                    continue;
-                }
-
-                // Search lib subdirectories for the original parts
-                for subdir in &[
-                    "common",
-                    "nogc_sync_mut",
-                    "nogc_async_mut",
-                    "nogc_async_immut",
-                    "gc_async_mut",
-                    "nogc_async_mut_noalloc",
-                ] {
-                    let non_std_relative: PathBuf = parts.iter().collect();
-                    let mut sub_path = stdlib_candidate.join(subdir).join(&non_std_relative);
-                    sub_path.set_extension("spl");
-                    if sub_path.exists() && sub_path.is_file() {
-                        trace!(path = ?sub_path, "Found non-stdlib import in lib subdirectory");
-                        return Ok(sub_path);
+            // Final fallback for non-stdlib imports: search lib subdirectories
+            // This handles imports like `use sdn.parser.{parse}` where the module lives
+            // under src/lib/common/sdn/parser.spl but doesn't have a `std.` prefix.
+            if !is_stdlib {
+                for stdlib_subpath in &["src/lib", "src/std"] {
+                    let stdlib_candidate = current.join(stdlib_subpath);
+                    if !stdlib_candidate.exists() {
+                        continue;
                     }
-                    // Also try __init__.spl in subdirectory
-                    let mut sub_init = stdlib_candidate.join(subdir).join(&non_std_relative);
-                    sub_init.push("__init__.spl");
-                    if sub_init.exists() && sub_init.is_file() {
-                        trace!(path = ?sub_init, "Found non-stdlib import __init__.spl in lib subdirectory");
-                        return Ok(sub_init);
+
+                    // Search lib subdirectories for the original parts
+                    for subdir in &[
+                        "common",
+                        "nogc_sync_mut",
+                        "nogc_async_mut",
+                        "nogc_async_immut",
+                        "gc_async_mut",
+                        "nogc_async_mut_noalloc",
+                    ] {
+                        let non_std_relative: PathBuf = parts.iter().collect();
+                        let mut sub_path = stdlib_candidate.join(subdir).join(&non_std_relative);
+                        sub_path.set_extension("spl");
+                        if sub_path.exists() && sub_path.is_file() {
+                            trace!(path = ?sub_path, "Found non-stdlib import in lib subdirectory");
+                            return Ok(sub_path);
+                        }
+                        // Also try __init__.spl in subdirectory
+                        let mut sub_init = stdlib_candidate.join(subdir).join(&non_std_relative);
+                        sub_init.push("__init__.spl");
+                        if sub_init.exists() && sub_init.is_file() {
+                            trace!(path = ?sub_init, "Found non-stdlib import __init__.spl in lib subdirectory");
+                            return Ok(sub_init);
+                        }
                     }
                 }
             }

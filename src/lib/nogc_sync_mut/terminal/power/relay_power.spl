@@ -1,0 +1,130 @@
+#![allow(star_import)]
+# Relay Power Control - Hardware relay power via .shs scripts
+#
+# Each power operation maps to a configurable .shs script path from PowerConfig.
+# Scripts follow the contract:
+#   - Exit 0 = success, non-zero = failure
+#   - State script prints "on" or "off" to stdout
+#   - Scripts use set -eu for safety
+#
+# Used by: power/controller.spl dispatch layer
+
+use std.terminal.types.{PowerConfig, PowerState, POWER_STATE_ON, POWER_STATE_OFF, POWER_STATE_UNKNOWN, make_power_state}
+
+extern fn rt_shell_exec(cmd: text) -> (text, text, i64)
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Relay Power Operations
+# ============================================================================
+
+fn relay_power_on(config: PowerConfig) -> PowerState:
+    """Power on via relay by executing the on_script.
+
+    Runs the configured on_script (.shs). Exit code 0 means the relay
+    successfully switched to the ON position.
+
+    Args:
+        config: PowerConfig with kind="relay", on_script path set
+
+    Returns:
+        PowerState with POWER_STATE_ON on success, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.on_script == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val (stdout, stderr, exit_code) = rt_shell_exec(config.on_script)
+    if exit_code == 0:
+        make_power_state(POWER_STATE_ON, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn relay_power_off(config: PowerConfig) -> PowerState:
+    """Power off via relay by executing the off_script.
+
+    Runs the configured off_script (.shs). Exit code 0 means the relay
+    successfully switched to the OFF position.
+
+    Args:
+        config: PowerConfig with kind="relay", off_script path set
+
+    Returns:
+        PowerState with POWER_STATE_OFF on success, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.off_script == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val (stdout, stderr, exit_code) = rt_shell_exec(config.off_script)
+    if exit_code == 0:
+        make_power_state(POWER_STATE_OFF, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn relay_power_toggle(config: PowerConfig) -> PowerState:
+    """Toggle power via relay by executing the toggle_script.
+
+    Runs the configured toggle_script (.shs). After toggle, queries
+    the state script to determine the resulting power state.
+
+    Args:
+        config: PowerConfig with kind="relay", toggle_script path set
+
+    Returns:
+        PowerState with detected state after toggle, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.toggle_script == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val (stdout, stderr, exit_code) = rt_shell_exec(config.toggle_script)
+    if exit_code == 0:
+        # Query resulting state after toggle
+        return relay_power_state(config)
+    make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn relay_power_reset(config: PowerConfig) -> PowerState:
+    """Reset via relay by executing the reset_script.
+
+    Runs the configured reset_script (.shs). Exit code 0 means the
+    relay performed a power cycle (off then on). Target is ON after reset.
+
+    Args:
+        config: PowerConfig with kind="relay", reset_script path set
+
+    Returns:
+        PowerState with POWER_STATE_ON on success, POWER_STATE_UNKNOWN on failure
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.reset_script == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val (stdout, stderr, exit_code) = rt_shell_exec(config.reset_script)
+    if exit_code == 0:
+        make_power_state(POWER_STATE_ON, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)
+
+fn relay_power_state(config: PowerConfig) -> PowerState:
+    """Query power state via relay by executing the state_script.
+
+    Runs the configured state_script (.shs). Parses stdout for "on" or "off"
+    to determine the current relay position.
+
+    Args:
+        config: PowerConfig with kind="relay", state_script path set
+
+    Returns:
+        PowerState with parsed state, POWER_STATE_UNKNOWN if script fails or output unrecognized
+    """
+    val timestamp = rt_time_now_unix_micros()
+    if config.state_script == "":
+        return make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    val (stdout, stderr, exit_code) = rt_shell_exec(config.state_script)
+    if exit_code == 0:
+        val trimmed = stdout.trim()
+        if trimmed == "on":
+            make_power_state(POWER_STATE_ON, timestamp)
+        elif trimmed == "off":
+            make_power_state(POWER_STATE_OFF, timestamp)
+        else:
+            make_power_state(POWER_STATE_UNKNOWN, timestamp)
+    else:
+        make_power_state(POWER_STATE_UNKNOWN, timestamp)

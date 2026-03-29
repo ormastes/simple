@@ -1011,6 +1011,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             ImportTarget::Aliased { name, alias } => {
                                                 // Import with alias: {Item as alias}
                                                 if let Some(export_value) = exports.get(name) {
+                                                    if let Value::Function { def, .. } = export_value {
+                                                        functions.insert(alias.clone(), (**def).clone());
+                                                    }
                                                     env.insert(alias.clone(), export_value.clone());
                                                     MODULE_GLOBALS.with(|cell| {
                                                         cell.borrow_mut().insert(alias.clone(), export_value.clone());
@@ -1021,6 +1024,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             _ => continue, // Nested groups not supported
                                         };
                                         if let Some(export_value) = exports.get(&item_name) {
+                                            if let Value::Function { def, .. } = export_value {
+                                                functions.insert(item_name.clone(), (**def).clone());
+                                            }
                                             env.insert(item_name.clone(), export_value.clone());
                                             MODULE_GLOBALS.with(|cell| {
                                                 cell.borrow_mut().insert(item_name.clone(), export_value.clone());
@@ -1034,6 +1040,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Add all exports to env
                                 if let Value::Dict(exports) = &value {
                                     for (name, export_value) in exports {
+                                        if let Value::Function { def, .. } = export_value {
+                                            functions.insert(name.clone(), (**def).clone());
+                                        }
                                         env.insert(name.clone(), export_value.clone());
                                         MODULE_GLOBALS.with(|cell| {
                                             cell.borrow_mut().insert(name.clone(), export_value.clone());

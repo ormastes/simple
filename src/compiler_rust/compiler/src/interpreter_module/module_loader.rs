@@ -75,6 +75,52 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
     })
 }
 
+fn locally_defined_names(items: &[Node]) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in items {
+        match item {
+            Node::Function(f) => names.push(f.name.clone()),
+            Node::Class(c) => names.push(c.name.clone()),
+            Node::Struct(s) => names.push(s.name.clone()),
+            Node::Enum(e) => names.push(e.name.clone()),
+            Node::Let(stmt) => {
+                if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
+                    names.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn export_target_names(target: &ImportTarget) -> Vec<String> {
+    match target {
+        ImportTarget::Single(name) => vec![name.clone()],
+        ImportTarget::Aliased { name, alias } => vec![name.clone(), alias.clone()],
+        ImportTarget::Group(items) => items.iter().flat_map(export_target_names).collect(),
+        ImportTarget::Glob => Vec::new(),
+    }
+}
+
+fn should_keep_driver_init_export(item: &Node, requested_names: &[String]) -> bool {
+    match item {
+        Node::ExportUseStmt(export_stmt) => {
+            let export_names = export_target_names(&export_stmt.target);
+            !export_names.is_empty() && export_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
+        }
+        Node::UseStmt(use_stmt) => {
+            let import_names = export_target_names(&use_stmt.target);
+            import_names.is_empty() || import_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
+        }
+        Node::Function(f) => {
+            let is_wrapper = matches!(f.name.as_str(), "interpret_file" | "generate_headers" | "aot_shared_library");
+            !is_wrapper || requested_names.iter().any(|wanted| wanted == &f.name)
+        }
+        _ => true,
+    }
+}
+
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
     match &use_stmt.target {
         ImportTarget::Group(_) | ImportTarget::Glob => {
@@ -400,6 +446,25 @@ pub fn load_and_merge_module(
         }
     };
 
+    let requested_names = requested_group_import_names(use_stmt);
+    let filtered_items: Vec<Node> =
+        if module_path.to_string_lossy().contains("src/compiler/driver/__init__.spl")
+            || module_path.to_string_lossy().contains("src/compiler/80.driver/__init__.spl")
+        {
+            if let Some(names) = requested_names.as_ref() {
+                module
+                    .items
+                    .iter()
+                    .filter(|item| should_keep_driver_init_export(item, names))
+                    .cloned()
+                    .collect()
+            } else {
+                module.items.clone()
+            }
+        } else {
+            module.items.clone()
+        };
+
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
 
@@ -409,8 +474,7 @@ pub fn load_and_merge_module(
     // Without preloading these siblings, bare exports resolve to nothing.
     let preloaded_env: Option<HashMap<String, Value>> =
         if module_path.file_name().map_or(false, |f| f == "__init__.spl") {
-            let has_bare_exports = module
-                .items
+            let has_bare_exports = filtered_items
                 .iter()
                 .any(|item| matches!(item, Node::ExportUseStmt(e) if e.path.segments.is_empty()));
             if has_bare_exports {
@@ -418,8 +482,15 @@ pub fn load_and_merge_module(
                 if let Some(dir) = parent_dir {
                     let mut merged_exports: HashMap<String, Value> = HashMap::new();
                     // Collect sibling .spl files (not __init__.spl itself)
-                    let requested_names = requested_group_import_names(use_stmt);
-                    if let Ok(entries) = fs::read_dir(dir) {
+                    let requested_names = requested_names.clone().map(|names| {
+                        let local_names = locally_defined_names(&filtered_items);
+                        names.into_iter()
+                            .filter(|name| !local_names.iter().any(|local| local == name))
+                            .collect::<Vec<_>>()
+                    });
+                    if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
+                        None
+                    } else if let Ok(entries) = fs::read_dir(dir) {
                         let mut sibling_files: Vec<std::path::PathBuf> = entries
                             .filter_map(|e| e.ok())
                             .map(|e| e.path())
@@ -479,8 +550,12 @@ pub fn load_and_merge_module(
                                 }
                             }
                         }
-                    }
-                    if merged_exports.is_empty() {
+                        if merged_exports.is_empty() {
+                            None
+                        } else {
+                            Some(merged_exports)
+                        }
+                    } else if merged_exports.is_empty() {
                         None
                     } else {
                         Some(merged_exports)
@@ -497,7 +572,7 @@ pub fn load_and_merge_module(
 
     let (module_env, module_exports, module_functions, module_classes, module_enums) =
         match evaluate_module_exports_with_preloaded(
-            &module.items,
+            &filtered_items,
             Some(&module_path),
             functions,
             classes,

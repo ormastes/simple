@@ -566,7 +566,10 @@ pub fn compile_call<M: Module>(
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
 
-        // If not found and func_name contains '.', try additional name variants
+        // If not found and func_name contains '.', try additional name variants.
+        // Prefer qualified/type-specific spellings before the bare method name;
+        // otherwise common factory names like `create` can incorrectly bind to an
+        // unrelated imported symbol from another type/module.
         let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
         if resolved_name.is_none() {
@@ -574,11 +577,12 @@ pub fn compile_call<M: Module>(
                 let type_name = &func_name[..dot_pos];
                 let method = &func_name[dot_pos + 1..];
 
-                // Try: bare method name
+                // Try: Type__method (double underscore variant)
+                dunder_storage = format!("{}__{}", type_name, method);
                 resolved_name = ctx
                     .use_map
-                    .get(method)
-                    .or_else(|| ctx.import_map.get(method))
+                    .get(&dunder_storage)
+                    .or_else(|| ctx.import_map.get(&dunder_storage))
                     .map(|s| s.as_str());
 
                 // Try: lowercase_type_method (Simple convention)
@@ -591,13 +595,12 @@ pub fn compile_call<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Try: Type__method (double underscore variant)
+                // Last resort: bare method name
                 if resolved_name.is_none() {
-                    dunder_storage = format!("{}__{}", type_name, method);
                     resolved_name = ctx
                         .use_map
-                        .get(&dunder_storage)
-                        .or_else(|| ctx.import_map.get(&dunder_storage))
+                        .get(method)
+                        .or_else(|| ctx.import_map.get(method))
                         .map(|s| s.as_str());
                 }
             }
@@ -628,19 +631,23 @@ pub fn compile_call<M: Module>(
             std::borrow::Cow::Borrowed(resolved_name)
         };
 
-        // All Simple values are i64-tagged, so use a uniform i64 signature.
-        let call_conv = crate::codegen::shared::platform_call_conv();
-        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-        for _ in 0..arg_vals.len() {
-            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-        }
-        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        let func_id = if let Some(&existing) = ctx.func_ids.get(resolved_name.as_ref()) {
+            Ok(existing)
+        } else {
+            // All Simple values are i64-tagged, so use a uniform i64 signature
+            // for unresolved cross-module imports.
+            let call_conv = crate::codegen::shared::platform_call_conv();
+            let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+            for _ in 0..arg_vals.len() {
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            }
+            sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            ctx.module
+                .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig)
+        };
 
-        match ctx
-            .module
-            .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig)
-        {
+        match func_id {
             Ok(func_id) => {
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                 let adapted = adapt_args_to_signature(builder, func_ref, arg_vals);
@@ -653,12 +660,10 @@ pub fn compile_call<M: Module>(
                 }
             }
             Err(e) => {
-                // Declaration conflict (e.g., incompatible signature already declared).
                 eprintln!(
                     "[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): {}",
                     func_name, resolved_name, e
                 );
-                // Fall back to returning tagged nil for the dest.
                 if let Some(d) = dest {
                     let nil = builder.ins().iconst(types::I64, 3);
                     ctx.vreg_values.insert(*d, nil);
