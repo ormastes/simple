@@ -5,11 +5,13 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(name: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
 
 # Lightweight bridge for public `compiler.driver.{...}` imports.
-# These helpers intentionally shell out to a child Simple process that imports
-# `compiler.driver.driver` directly, which avoids eager facade loading and the
-# current imported-function binding bug in `compiler.driver.__init__`.
+# `interpret_file` shells out to keep external script calls lightweight.
+# The heavy helpers are implemented in-process here so the public facade owns
+# concrete functions instead of re-exporting imported driver symbols.
 
 fn interpret_file(path: text) -> CompileResult:
     val simple_bin = _find_simple_binary()
@@ -22,52 +24,130 @@ fn interpret_file(path: text) -> CompileResult:
     CompileResult.Success(combined)
 
 fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
-    val emit_c_text = if emit_c: "true" else: "false"
-    val emit_cpp_text = if emit_cpp: "true" else: "false"
-    val body = "use compiler.driver.driver.{{generate_headers}}\n" +
-        "use compiler.driver.driver_types.{{CompileResult}}\n\n" +
-        _driver_runner_prelude() +
-        "fn main() -> int:\n" +
-        "    val result = generate_headers(\"{_escape_simple_text(path)}\", \"{_escape_simple_text(output_dir)}\", \"{_escape_simple_text(lib_name)}\", {emit_c_text}, {emit_cpp_text})\n" +
-        "    _exit_from_compile_result(result)\n"
-    _run_driver_child("/tmp/simple_driver_public_generate_headers.spl", body)
+    use compiler.driver.driver.{CompilerDriver}
+    use compiler.driver.driver_types.{CompileOptions, CompileMode}
+    use compiler.mir.mir.{MirModule}
+    use compiler.tools.header_gen.mod_.{HeaderGenerator}
+
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.emit_header = emit_c
+    options.emit_cxx_header = emit_cpp
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(mir_module_any):
+            if mir_module_any.?:
+                val mir_module = mir_module_any as MirModule
+                val gen = HeaderGenerator.create(mir_module)
+
+                if not gen.has_exports():
+                    print "[header-gen] Warning: no @export(\"C\") items found"
+                    return result
+
+                rt_dir_create(output_dir, true)
+
+                if emit_c:
+                    val c_header = gen.generate_c_header(lib_name)
+                    val c_path = rt_path_join(output_dir, lib_name + ".h")
+                    rt_file_write_text(c_path, c_header)
+                    print "[header-gen] Generated C header: {c_path}"
+
+                if emit_cpp:
+                    val cpp_header = gen.generate_cpp_header(lib_name)
+                    val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
+                    rt_file_write_text(cpp_path, cpp_header)
+                    print "[header-gen] Generated C++ header: {cpp_path}"
+            result
+        case _:
+            result
 
 fn aot_shared_library(path: text, output: text) -> CompileResult:
-    val body = "use compiler.driver.driver.{{aot_shared_library}}\n" +
-        "use compiler.driver.driver_types.{{CompileResult}}\n\n" +
-        _driver_runner_prelude() +
-        "fn main() -> int:\n" +
-        "    val result = aot_shared_library(\"{_escape_simple_text(path)}\", \"{_escape_simple_text(output)}\")\n" +
-        "    _exit_from_compile_result(result)\n"
-    _run_driver_child("/tmp/simple_driver_public_aot_shared_library.spl", body)
+    use compiler.driver.driver.{CompilerDriver}
+    use compiler.driver.driver_types.{CompileOptions, CompileMode}
+    use compiler.tools.header_gen.shared_lib_flags.{get_shared_lib_flags}
 
-fn _run_driver_child(script_path: text, body: text) -> CompileResult:
-    if not rt_file_write_text(script_path, body):
-        return CompileResult.RuntimeError("failed to write helper script: {script_path}")
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    val cpp_output = output + ".simple_public.cpp"
+    val source_obj = output + ".simple_public.o"
+    val runtime_obj = output + ".runtime.o"
+    options.output_file = Some(cpp_output)
+    options.backend = "c"
+    options.release = true
+    options.optimize = true
+    val driver = CompilerDriver.create(options)
+    val compile_result = CompilerDriver.run_compile(driver)
 
-    val simple_bin = _find_simple_binary()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [script_path])
-    rt_file_delete(script_path)
+    match compile_result:
+        case CompileResult.Success(_):
+            val flags = get_shared_lib_flags()
 
-    val combined = _clean_child_output(stdout, stderr)
-    if exit_code == 0:
-        return CompileResult.Success(combined)
-    CompileResult.RuntimeError(combined)
+            var source_args: [text] = []
+            var i = 0
+            while i < flags.compile_flags.len():
+                source_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                source_args.push("-D" + flags.defines[i])
+                i = i + 1
+            source_args.push("-c")
+            source_args.push(cpp_output)
+            source_args.push("-o")
+            source_args.push(source_obj)
 
-fn _driver_runner_prelude() -> text:
-    "fn _exit_from_compile_result(result: CompileResult) -> int:\n" +
-    "    match result:\n" +
-    "        case CompileResult.Success(_):\n" +
-    "            print \"__SIMPLE_DRIVER_OK__\"\n" +
-    "            0\n" +
-    "        case _:\n" +
-    "            val errors = result.get_errors()\n" +
-    "            if errors.len() > 0:\n" +
-    "                var i = 0\n" +
-    "                while i < errors.len():\n" +
-    "                    print errors[i]\n" +
-    "                    i = i + 1\n" +
-    "            1\n\n"
+            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
+            if src_code != 0:
+                rt_file_delete(cpp_output)
+                return CompileResult.CodegenError(_combine_process_error("C++ object compilation failed", src_out, src_err))
+
+            var runtime_args: [text] = []
+            i = 0
+            while i < flags.compile_flags.len():
+                runtime_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                runtime_args.push("-D" + flags.defines[i])
+                i = i + 1
+            runtime_args.push("-c")
+            runtime_args.push("src/runtime/runtime.c")
+            runtime_args.push("-I")
+            runtime_args.push("src/runtime")
+            runtime_args.push("-o")
+            runtime_args.push(runtime_obj)
+
+            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
+            if rt_code != 0:
+                rt_file_delete(cpp_output)
+                rt_file_delete(source_obj)
+                return CompileResult.CodegenError(_combine_process_error("Runtime object compilation failed", rt_out, rt_err))
+
+            var link_args: [text] = []
+            i = 0
+            while i < flags.link_flags.len():
+                link_args.push(flags.link_flags[i])
+                i = i + 1
+            link_args.push(source_obj)
+            link_args.push(runtime_obj)
+            link_args.push("-o")
+            link_args.push(output)
+
+            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
+            rt_file_delete(cpp_output)
+            rt_file_delete(source_obj)
+            rt_file_delete(runtime_obj)
+
+            if link_code != 0:
+                return CompileResult.CodegenError(_combine_process_error("Shared library link failed", link_out, link_err))
+
+            CompileResult.Success(output)
+        case _:
+            compile_result
 
 fn _find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -105,16 +185,20 @@ fn _clean_child_output(stdout: text, stderr: text) -> text:
         i = i + 1
     kept.join("\n")
 
-fn _escape_simple_text(value: text) -> text:
-    val escaped_slashes = value.replace("\\", "\\\\")
-    escaped_slashes.replace("\"", "\\\"")
-
 fn _looks_like_driver_failure(output: text) -> bool:
     val trimmed = output.trim()
     if trimmed == "":
         return false
     trimmed.contains("error:") or
-        trimmed.contains("panic") or
+    trimmed.contains("panic") or
         trimmed.contains("ParseError") or
         trimmed.contains("TypeError") or
         trimmed.contains("RuntimeError")
+
+fn _combine_process_error(prefix: text, stdout: text, stderr: text) -> text:
+    var detail = stderr.trim()
+    if detail == "":
+        detail = stdout.trim()
+    if detail == "":
+        return prefix
+    prefix + ": " + detail

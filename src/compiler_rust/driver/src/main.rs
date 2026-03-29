@@ -72,6 +72,12 @@ struct CommandEntry {
 
 /// Execute a command entry: Simple-first with Rust fallback.
 fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
+    if entry.name == "native-build" && native_build_should_use_simple(ctx.args) {
+        if let Some(code) = dispatch_to_simple_app("src/app/cli/bootstrap_main.spl", ctx.args, ctx.gc_log, ctx.gc_off) {
+            return code;
+        }
+    }
+
     // 1. Check env var override → Rust
     if !entry.env_override.is_empty() && std::env::var(entry.env_override).is_ok() {
         return run_rust_handler(&entry.rust_handler, ctx);
@@ -99,6 +105,22 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
 
     // 4. Fallback → Rust
     run_rust_handler(&entry.rust_handler, ctx)
+}
+
+fn native_build_should_use_simple(args: &[String]) -> bool {
+    let mut i = 1; // skip "native-build"
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--backend" && i + 1 < args.len() {
+            let backend = args[i + 1].as_str();
+            return backend == "llvm-lib" || backend == "llvmlib";
+        }
+        if let Some(backend) = arg.strip_prefix("--backend=") {
+            return backend == "llvm-lib" || backend == "llvmlib";
+        }
+        i += 1;
+    }
+    false
 }
 
 fn run_rust_handler(handler: &Handler, ctx: &CommandContext) -> i32 {
@@ -784,6 +806,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     if app_relative_path != "src/app/ui/cli_entry.spl"
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
+        && app_relative_path != "src/app/cli/bootstrap_main.spl"
     {
         return None;
     }

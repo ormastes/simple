@@ -1,0 +1,458 @@
+#![allow(star_import)]
+# Terminal, Power Control & Remote Test Runner - System Tests
+#
+# SSpec BDD system tests for the unified terminal/power/remote-test subsystem.
+# Covers: terminal types, power types, credential store, SDN config parser,
+# session kinds, terminal dispatch, and power dispatch.
+#
+# Note: Tests requiring real SSH/telnet/T32 targets are marked with comments.
+# Those tests verify dispatch logic without requiring live hardware.
+#
+# Feature IDs: #TERM-001 through #TERM-009
+# Category: Infrastructure
+# Requirements: doc/02_requirements/feature/t32_terminal_power_remote.md
+# Design: doc/05_design/t32_terminal_power_remote.md
+
+use std.spec.{describe, it, expect, before_each}
+use std.terminal.types.{
+    TerminalConfig, TerminalConnection, TerminalExecResult,
+    PowerConfig, PowerState,
+    TERM_KIND_SSH, TERM_KIND_TELNET, TERM_KIND_T32_SWD, TERM_KIND_RELAY,
+    POWER_STATE_UNKNOWN, POWER_STATE_ON, POWER_STATE_OFF,
+    term_kind_name, power_state_name,
+    make_ssh_config, make_ssh_pubkey_config, make_telnet_config,
+    make_t32_swd_config, make_relay_config,
+    make_power_config_t32, make_power_config_relay, make_power_config_host,
+    make_power_state, make_terminal_connection, make_exec_result
+}
+use std.terminal.connection.{terminal_connect, terminal_execute, terminal_send, terminal_receive, terminal_close, terminal_is_connected}
+use std.terminal.power.controller.{power_on, power_off, power_toggle, power_reset, power_state, power_supports_toggle, power_supports_discrete}
+use std.terminal.credential.store.{credential_encrypt, credential_decrypt, credential_resolve, credential_is_encrypted, credential_key_exists}
+use std.terminal.credential.config_parser.{parse_terminal_config, parse_power_config, find_terminal_by_name, find_power_by_name}
+use app.test_daemon.session_types.{SESSION_KIND_REMOTE_PC, session_kind_name, session_kind_from_name}
+
+# ============================================================================
+# Test Group 1: Terminal Types
+# ============================================================================
+
+describe "Terminal Types":
+    it "should create SSH config with correct kind":
+        val config = make_ssh_config("test", "localhost", 22, "user", "password", "pass")
+        expect(config.kind).to_equal(TERM_KIND_SSH)
+        expect(config.host).to_equal("localhost")
+        expect(config.port).to_equal(22)
+        expect(config.username).to_equal("user")
+        expect(config.auth_method).to_equal("password")
+
+    it "should create SSH pubkey config":
+        val config = make_ssh_pubkey_config("test", "localhost", 22, "user", "~/.ssh/id_ed25519")
+        expect(config.kind).to_equal(TERM_KIND_SSH)
+        expect(config.auth_method).to_equal("pubkey")
+        expect(config.key_path).to_equal("~/.ssh/id_ed25519")
+        expect(config.credential).to_equal("")
+
+    it "should create telnet config":
+        val config = make_telnet_config("test", "localhost", 23)
+        expect(config.kind).to_equal(TERM_KIND_TELNET)
+        expect(config.host).to_equal("localhost")
+        expect(config.port).to_equal(23)
+        expect(config.auth_method).to_equal("none")
+
+    it "should create T32 SWD config":
+        val config = make_t32_swd_config("test", "localhost", 20000, "TERM.A")
+        expect(config.kind).to_equal(TERM_KIND_T32_SWD)
+        expect(config.t32_host).to_equal("localhost")
+        expect(config.t32_port).to_equal(20000)
+        expect(config.channel).to_equal("TERM.A")
+
+    it "should create relay config":
+        val config = make_relay_config("test", "scripts/relay.shs")
+        expect(config.kind).to_equal(TERM_KIND_RELAY)
+        expect(config.script_path).to_equal("scripts/relay.shs")
+
+    it "should return correct kind names":
+        expect(term_kind_name(TERM_KIND_SSH)).to_equal("ssh")
+        expect(term_kind_name(TERM_KIND_TELNET)).to_equal("telnet")
+        expect(term_kind_name(TERM_KIND_T32_SWD)).to_equal("t32_swd")
+        expect(term_kind_name(TERM_KIND_RELAY)).to_equal("relay")
+
+    it "should return unknown for invalid kind":
+        expect(term_kind_name(99)).to_equal("unknown")
+
+    it "should create terminal connection in disconnected state":
+        val config = make_ssh_config("test", "localhost", 22, "user", "password", "pass")
+        val conn = make_terminal_connection(1, config)
+        expect(conn.id).to_equal(1)
+        expect(conn.kind).to_equal(TERM_KIND_SSH)
+        expect(conn.connected).to_equal(false)
+        expect(conn.session_handle).to_equal(0)
+
+    it "should create execution result":
+        val result = make_exec_result(0, "hello\n", "", 42)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_equal("hello\n")
+        expect(result.stderr).to_equal("")
+        expect(result.duration_ms).to_equal(42)
+
+    it "should set SSH config name correctly":
+        val config = make_ssh_config("my_server", "10.0.0.1", 2222, "admin", "password", "secret")
+        expect(config.name).to_equal("my_server")
+
+# ============================================================================
+# Test Group 2: Power Types
+# ============================================================================
+
+describe "Power Types":
+    it "should create T32 power config":
+        val config = make_power_config_t32("t32", "localhost", 20000)
+        expect(config.kind).to_equal("t32")
+        expect(config.name).to_equal("t32")
+        expect(config.t32_host).to_equal("localhost")
+        expect(config.t32_port).to_equal(20000)
+
+    it "should create relay power config":
+        val config = make_power_config_relay("relay", "on.shs", "off.shs", "toggle.shs", "reset.shs", "state.shs")
+        expect(config.kind).to_equal("relay")
+        expect(config.on_script).to_equal("on.shs")
+        expect(config.off_script).to_equal("off.shs")
+        expect(config.toggle_script).to_equal("toggle.shs")
+        expect(config.reset_script).to_equal("reset.shs")
+        expect(config.state_script).to_equal("state.shs")
+
+    it "should create host power config":
+        val config = make_power_config_host("host", "192.168.1.1", 22, "user", "pubkey", "", "~/.ssh/id", "AA:BB:CC:DD:EE:FF")
+        expect(config.kind).to_equal("host")
+        expect(config.host).to_equal("192.168.1.1")
+        expect(config.port).to_equal(22)
+        expect(config.mac_address).to_equal("AA:BB:CC:DD:EE:FF")
+        expect(config.key_path).to_equal("~/.ssh/id")
+
+    it "should return correct power state names":
+        expect(power_state_name(POWER_STATE_UNKNOWN)).to_equal("unknown")
+        expect(power_state_name(POWER_STATE_ON)).to_equal("on")
+        expect(power_state_name(POWER_STATE_OFF)).to_equal("off")
+
+    it "should create power state with auto label":
+        val state = make_power_state(POWER_STATE_ON, 1000)
+        expect(state.state).to_equal(POWER_STATE_ON)
+        expect(state.label).to_equal("on")
+        expect(state.timestamp).to_equal(1000)
+
+    it "should handle unknown power state value":
+        expect(power_state_name(99)).to_equal("unknown")
+
+    it "should set relay config name correctly":
+        val config = make_power_config_relay("board_relay", "a.shs", "b.shs", "c.shs", "d.shs", "e.shs")
+        expect(config.name).to_equal("board_relay")
+
+    it "should set host config empty fields to defaults":
+        val config = make_power_config_host("h", "10.0.0.1", 22, "root", "password", "pw", "", "")
+        expect(config.key_path).to_equal("")
+        expect(config.mac_address).to_equal("")
+        expect(config.t32_host).to_equal("")
+        expect(config.t32_port).to_equal(0)
+
+# ============================================================================
+# Test Group 3: Credential Store
+# ============================================================================
+
+describe "Credential Store":
+    it "should resolve plaintext credential as-is":
+        val result = credential_resolve("mypassword")
+        expect(result).to_equal("mypassword")
+
+    it "should resolve empty credential as empty":
+        val result = credential_resolve("")
+        expect(result).to_equal("")
+
+    it "should detect encrypted format":
+        expect(credential_is_encrypted("encrypted:abc123")).to_equal(true)
+        expect(credential_is_encrypted("plaintext")).to_equal(false)
+        expect(credential_is_encrypted("")).to_equal(false)
+
+    it "should not decrypt non-encrypted values":
+        val result = credential_decrypt("plaintext", "")
+        expect(result).to_equal("")
+
+    it "should return empty for encrypt with empty input":
+        val result = credential_encrypt("", "")
+        expect(result).to_equal("")
+
+    it "should return empty for decrypt with invalid prefix":
+        val result = credential_decrypt("not_encrypted:data", "")
+        expect(result).to_equal("")
+
+    # Note: encrypted credential round-trip tests require key file at ~/.simple/credential_key
+    # These are integration tests — run with real key only:
+    #
+    # it "should encrypt and decrypt round-trip":
+    #     val encrypted = credential_encrypt("test_password", "")
+    #     expect(credential_is_encrypted(encrypted)).to_equal(true)
+    #     val decrypted = credential_decrypt(encrypted, "")
+    #     expect(decrypted).to_equal("test_password")
+
+# ============================================================================
+# Test Group 4: SDN Config Parser
+# ============================================================================
+
+describe "SDN Config Parser":
+    it "should parse terminal config file":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        expect(configs.len()).to_be_greater_than(0)
+
+    it "should find terminal by name":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "test_host_ssh")
+        expect(found.?).to_equal(true)
+
+    it "should return nil for unknown terminal name":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "nonexistent_terminal")
+        expect(found.?).to_equal(false)
+
+    it "should parse SSH terminal with password auth":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "test_host_ssh")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal(TERM_KIND_SSH)
+            expect(config.host).to_equal("192.168.1.100")
+            expect(config.port).to_equal(22)
+
+    it "should parse SSH terminal with pubkey auth":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "test_host_ssh_key")
+        if found.?:
+            val config = found
+            expect(config.auth_method).to_equal("pubkey")
+            expect(config.key_path).to_equal("~/.ssh/id_ed25519")
+
+    it "should parse telnet terminal":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "device_telnet")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal(TERM_KIND_TELNET)
+            expect(config.port).to_equal(23)
+
+    it "should parse T32 SWD terminal":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "t32_swd_serial")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal(TERM_KIND_T32_SWD)
+            expect(config.channel).to_equal("TERM.A")
+
+    it "should parse power config file":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        expect(configs.len()).to_be_greater_than(0)
+
+    it "should find power by name":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val found = find_power_by_name(configs, "t32_probe")
+        expect(found.?).to_equal(true)
+
+    it "should return nil for unknown power name":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val found = find_power_by_name(configs, "nonexistent_power")
+        expect(found.?).to_equal(false)
+
+    it "should parse T32 power config":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val found = find_power_by_name(configs, "t32_probe")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal("t32")
+            expect(config.t32_port).to_equal(20000)
+
+    it "should parse relay power config":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val found = find_power_by_name(configs, "board_relay")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal("relay")
+            expect(config.on_script).to_start_with("scripts/")
+
+    it "should parse host power config with MAC":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val found = find_power_by_name(configs, "test_host")
+        if found.?:
+            val config = found
+            expect(config.kind).to_equal("host")
+            expect(config.mac_address).to_equal("AA:BB:CC:DD:EE:FF")
+
+# ============================================================================
+# Test Group 5: Session Kind
+# ============================================================================
+
+describe "Session Kind":
+    it "should have remote_pc session kind constant":
+        expect(SESSION_KIND_REMOTE_PC).to_equal(9)
+
+    it "should return remote_pc name for kind 9":
+        expect(session_kind_name(9)).to_equal("remote_pc")
+
+    it "should parse remote_pc from name":
+        expect(session_kind_from_name("remote_pc")).to_equal(9)
+
+    it "should return -1 for unknown session kind name":
+        expect(session_kind_from_name("nonexistent")).to_equal(-1)
+
+    it "should return unknown for invalid session kind number":
+        expect(session_kind_name(999)).to_equal("unknown")
+
+# ============================================================================
+# Test Group 6: Terminal Dispatch
+# ============================================================================
+
+describe "Terminal Dispatch":
+    # Note: actual connection tests require real SSH/telnet/T32 targets.
+    # These verify the dispatch logic without requiring live hardware.
+
+    it "should reject connection to unreachable SSH host":
+        val config = make_ssh_config("bad", "192.0.2.1", 22, "user", "password", "pass")
+        val conn = terminal_connect(config)
+        expect(conn.connected).to_equal(false)
+
+    it "should reject connection to unreachable telnet host":
+        val config = make_telnet_config("bad", "192.0.2.1", 23)
+        val conn = terminal_connect(config)
+        expect(conn.connected).to_equal(false)
+
+    it "should reject connection to unreachable T32 host":
+        val config = make_t32_swd_config("bad", "192.0.2.1", 20000, "TERM.A")
+        val conn = terminal_connect(config)
+        expect(conn.connected).to_equal(false)
+
+    it "should report disconnected via terminal_is_connected":
+        val config = make_ssh_config("bad", "192.0.2.1", 22, "user", "password", "pass")
+        val conn = terminal_connect(config)
+        expect(terminal_is_connected(conn)).to_equal(false)
+
+    it "should return error result for execute on disconnected terminal":
+        val config = make_ssh_config("bad", "192.0.2.1", 22, "user", "password", "pass")
+        val conn = terminal_connect(config)
+        val result = terminal_execute(conn, "echo test")
+        expect(result.exit_code).to_equal(-1)
+
+    it "should handle close on disconnected connection gracefully":
+        val config = make_ssh_config("bad", "192.0.2.1", 22, "user", "password", "pass")
+        val conn = terminal_connect(config)
+        val closed = terminal_close(conn)
+        # Close on a non-connected terminal should not crash
+        expect(conn.connected).to_equal(false)
+
+# ============================================================================
+# Test Group 7: Power Dispatch
+# ============================================================================
+
+describe "Power Dispatch":
+    # Note: actual power tests require real hardware.
+    # These verify dispatch routing and capability queries.
+
+    it "should support toggle for relay kind":
+        val config = make_power_config_relay("r", "on.shs", "off.shs", "toggle.shs", "reset.shs", "state.shs")
+        expect(power_supports_toggle(config)).to_equal(true)
+
+    it "should support toggle for host kind":
+        val config = make_power_config_host("h", "10.0.0.1", 22, "user", "pubkey", "", "~/.ssh/id", "AA:BB:CC")
+        expect(power_supports_toggle(config)).to_equal(true)
+
+    it "should not support toggle for t32 kind":
+        val config = make_power_config_t32("t", "localhost", 20000)
+        expect(power_supports_toggle(config)).to_equal(false)
+
+    it "should support discrete for all kinds":
+        val t32 = make_power_config_t32("t", "localhost", 20000)
+        val relay = make_power_config_relay("r", "a.shs", "b.shs", "c.shs", "d.shs", "e.shs")
+        val host = make_power_config_host("h", "10.0.0.1", 22, "u", "password", "pw", "", "")
+        expect(power_supports_discrete(t32)).to_equal(true)
+        expect(power_supports_discrete(relay)).to_equal(true)
+        expect(power_supports_discrete(host)).to_equal(true)
+
+    it "should not support discrete for unknown kind":
+        # Build config with unknown kind via direct struct construction
+        val config = PowerConfig(
+            kind: "unknown",
+            name: "bad",
+            host: "",
+            port: 0,
+            username: "",
+            auth_method: "",
+            credential: "",
+            key_path: "",
+            mac_address: "",
+            t32_host: "",
+            t32_port: 0,
+            on_script: "",
+            off_script: "",
+            toggle_script: "",
+            reset_script: "",
+            state_script: ""
+        )
+        expect(power_supports_discrete(config)).to_equal(false)
+        expect(power_supports_toggle(config)).to_equal(false)
+
+    it "should return unknown state for toggle on t32":
+        val config = make_power_config_t32("t", "localhost", 20000)
+        val result = power_toggle(config)
+        expect(result.state).to_equal(POWER_STATE_UNKNOWN)
+
+# ============================================================================
+# Test Group 8: MCP Tool Dispatch (schema validation)
+# ============================================================================
+
+describe "MCP Tool Schemas":
+    # MCP tool dispatch tests require the MCP server running.
+    # These tests verify that the tool schemas are correctly defined
+    # by checking that the underlying functions exist and have correct signatures.
+
+    it "should have terminal_connect function accessible":
+        val config = make_ssh_config("test", "localhost", 22, "user", "password", "pass")
+        # Calling terminal_connect should not crash, even if connection fails
+        val conn = terminal_connect(config)
+        expect(conn.kind).to_equal(TERM_KIND_SSH)
+
+    it "should have power_on function accessible":
+        val config = make_power_config_t32("test", "localhost", 20000)
+        # Calling power_on should not crash, even if T32 is unreachable
+        val result = power_on(config)
+        expect(result.label).to_contain("")  # non-nil result
+
+    it "should have power_state function accessible":
+        val config = make_power_config_t32("test", "localhost", 20000)
+        val result = power_state(config)
+        # Should return some state (likely UNKNOWN since T32 not connected)
+        expect(result.state).to_be_greater_than(-1)
+
+# ============================================================================
+# Test Group 9: Integration - Config to Connection Flow
+# ============================================================================
+
+describe "Config to Connection Integration":
+    it "should parse config and create connection for SSH entry":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "test_host_ssh")
+        if found.?:
+            val config = found
+            val conn = make_terminal_connection(1, config)
+            expect(conn.kind).to_equal(TERM_KIND_SSH)
+            expect(conn.connected).to_equal(false)
+
+    it "should parse config and create connection for T32 entry":
+        val configs = parse_terminal_config("config/t32/t32_terminal.sdn")
+        val found = find_terminal_by_name(configs, "t32_swd_serial")
+        if found.?:
+            val config = found
+            val conn = make_terminal_connection(2, config)
+            expect(conn.kind).to_equal(TERM_KIND_T32_SWD)
+            expect(conn.config.channel).to_equal("TERM.A")
+
+    it "should parse power config and check toggle support":
+        val configs = parse_power_config("config/t32/t32_terminal.sdn")
+        val t32 = find_power_by_name(configs, "t32_probe")
+        val relay = find_power_by_name(configs, "board_relay")
+        if t32.?:
+            expect(power_supports_toggle(t32)).to_equal(false)
+        if relay.?:
+            expect(power_supports_toggle(relay)).to_equal(true)

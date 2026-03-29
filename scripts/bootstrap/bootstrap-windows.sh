@@ -219,6 +219,7 @@ run_logged stage1-native-build env RUST_LOG="${RUST_LOG:-error}" \
   "${seed_bin}" native-build \
     --source src/compiler --source src/lib --source src/app \
     --entry src/app/cli/bootstrap_main.spl \
+    "${backend_flag[@]}" \
     -o "${stage1_bin}" \
     --clean
 
@@ -290,9 +291,11 @@ mkdir -p "${full_dir}"
 full_bin="${full_dir}/simple.exe"
 
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage3_bin}" native-build \
+  --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/main.spl \
+  "${backend_flag[@]}" \
   -o "${full_bin}" \
-  ${backend:+--backend="${backend}"}
+  --clean
 
 if [[ ! -f "${full_bin}" ]]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2

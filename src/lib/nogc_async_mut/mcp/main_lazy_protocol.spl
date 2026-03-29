@@ -194,6 +194,29 @@ fn make_tools_list(id: text) -> text:
     tool_parts.push(make_tool_schema("simple_sem_query", "CodeQL-style semantic query with SQL-like syntax"))
     tool_parts.push(make_tool_schema("simple_query_schema", "List available query node types and predicates"))
 
+    # Terminal tools (8)
+    tool_parts.push(make_tool_schema("terminal_connect", "Connect to a remote terminal (SSH, telnet, T32 SWD, or relay)"))
+    tool_parts.push(make_tool_schema("terminal_disconnect", "Disconnect an active terminal connection"))
+    tool_parts.push(make_tool_schema("terminal_send", "Send data to an active terminal"))
+    tool_parts.push(make_tool_schema("terminal_receive", "Receive data from an active terminal"))
+    tool_parts.push(make_tool_schema("terminal_execute", "Execute a command on a remote terminal"))
+    tool_parts.push(make_tool_schema("terminal_list", "List all active terminal connections"))
+    tool_parts.push(make_tool_schema("terminal_status", "Get status of a terminal connection"))
+    tool_parts.push(make_tool_schema("terminal_upload", "Upload a file to a remote terminal via SFTP"))
+
+    # Power tools (6)
+    tool_parts.push(make_tool_schema("power_on", "Power on a target device"))
+    tool_parts.push(make_tool_schema("power_off", "Power off a target device"))
+    tool_parts.push(make_tool_schema("power_toggle", "Toggle power on a target device"))
+    tool_parts.push(make_tool_schema("power_reset", "Reset a target device"))
+    tool_parts.push(make_tool_schema("power_state", "Query power state of a target device"))
+    tool_parts.push(make_tool_schema("relay_execute", "Execute a relay script with custom command"))
+
+    # Remote test tools (3)
+    tool_parts.push(make_tool_schema("remote_test_run", "Run a test on a remote PC via terminal"))
+    tool_parts.push(make_tool_schema("remote_test_status", "Query status of a remote test"))
+    tool_parts.push(make_tool_schema("remote_test_collect", "Collect full result of a completed remote test"))
+
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
     TOOLS_CACHE = result
@@ -515,6 +538,76 @@ fn make_tool_schema(name: text, description: text) -> text:
     elif name == "simple_query_schema":
         props = jo1(jp("kind", jo2(jp("type", js("string")), jp("description", js("Schema kind: ast, sem, or empty for both")))))
 
+    # --- Terminal tools ---
+    elif name == "terminal_connect":
+        var p = LB()
+        p = p + jp("name", jo2(jp("type", js("string")), jp("description", js("Terminal name from config"))))
+        p = p + "," + jp("kind", jo2(jp("type", js("string")), jp("description", js("ssh|telnet|t32_swd|relay"))))
+        p = p + "," + jp("host", jo2(jp("type", js("string")), jp("description", js("Remote host address"))))
+        p = p + "," + jp("port", jo2(jp("type", js("integer")), jp("description", js("Remote port number"))))
+        p = p + "," + jp("username", jo2(jp("type", js("string")), jp("description", js("Username for auth"))))
+        p = p + "," + jp("auth_method", jo2(jp("type", js("string")), jp("description", js("password|pubkey|agent|none"))))
+        p = p + "," + jp("credential", jo2(jp("type", js("string")), jp("description", js("Password or encrypted credential"))))
+        p = p + "," + jp("key_path", jo2(jp("type", js("string")), jp("description", js("SSH private key path"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("name") + "]"
+    elif name == "terminal_disconnect" or name == "terminal_status":
+        props = jo1(jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Terminal connection ID")))))
+        req = "[" + js("connection_id") + "]"
+    elif name == "terminal_send":
+        props = jo2(
+            jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Terminal connection ID")))),
+            jp("data", jo2(jp("type", js("string")), jp("description", js("Data to send"))))
+        )
+        req = "[" + js("connection_id") + "," + js("data") + "]"
+    elif name == "terminal_receive":
+        props = jo2(
+            jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Terminal connection ID")))),
+            jp("timeout_ms", jo2(jp("type", js("integer")), jp("description", js("Receive timeout in milliseconds (default: 5000)"))))
+        )
+        req = "[" + js("connection_id") + "]"
+    elif name == "terminal_execute":
+        props = jo2(
+            jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Terminal connection ID")))),
+            jp("command", jo2(jp("type", js("string")), jp("description", js("Command to execute"))))
+        )
+        req = "[" + js("connection_id") + "," + js("command") + "]"
+    elif name == "terminal_list":
+        props = LB() + RB()
+    elif name == "terminal_upload":
+        var p = LB()
+        p = p + jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Terminal connection ID"))))
+        p = p + "," + jp("local_path", jo2(jp("type", js("string")), jp("description", js("Local file path to upload"))))
+        p = p + "," + jp("remote_path", jo2(jp("type", js("string")), jp("description", js("Remote destination path"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("connection_id") + "," + js("local_path") + "," + js("remote_path") + "]"
+
+    # --- Power tools ---
+    elif name == "power_on" or name == "power_off" or name == "power_toggle" or name == "power_reset" or name == "power_state":
+        props = jo1(jp("config_name", jo2(jp("type", js("string")), jp("description", js("Power config name from SDN config file")))))
+        req = "[" + js("config_name") + "]"
+    elif name == "relay_execute":
+        props = jo2(
+            jp("script_path", jo2(jp("type", js("string")), jp("description", js("Path to relay .shs script")))),
+            jp("command", jo2(jp("type", js("string")), jp("description", js("Command argument to pass to the script"))))
+        )
+        req = "[" + js("script_path") + "]"
+
+    # --- Remote test tools ---
+    elif name == "remote_test_run":
+        var p = LB()
+        p = p + jp("terminal_name", jo2(jp("type", js("string")), jp("description", js("Terminal name from config (auto-connects if needed)"))))
+        p = p + "," + jp("connection_id", jo2(jp("type", js("integer")), jp("description", js("Existing terminal connection ID"))))
+        p = p + "," + jp("test_path", jo2(jp("type", js("string")), jp("description", js("Path to test file (e.g. test/lib/my_spec.spl)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("test_path") + "]"
+    elif name == "remote_test_status" or name == "remote_test_collect":
+        props = jo1(jp("test_id", jo2(jp("type", js("integer")), jp("description", js("Remote test ID returned by remote_test_run")))))
+        req = "[" + js("test_id") + "]"
+
     var schema = LB()
     schema = schema + jp("type", js("object"))
     schema = schema + "," + jp("properties", props)
@@ -531,11 +624,18 @@ fn make_tool_schema(name: text, description: text) -> text:
         name == "simple_signature_help" or name == "simple_code_actions" or name == "simple_workspace_symbols" or name == "simple_call_hierarchy" or name == "simple_type_hierarchy" or name == "simple_semantic_tokens" or name == "simple_inlay_hints" or name == "simple_selection_range" or
         name == "simple_document_highlight" or name == "simple_type_definition" or name == "simple_implementation" or name == "simple_folding_range" or
         name == "debug_list_sessions" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_evaluate" or name == "debug_get_source" or name == "debug_log_query" or name == "debug_log_tree" or name == "debug_log_status" or name == "debug_list_data_breakpoints" or
-        name == "simple_ast_query" or name == "simple_sem_query" or name == "simple_query_schema"):
+        name == "simple_ast_query" or name == "simple_sem_query" or name == "simple_query_schema" or
+        name == "terminal_list" or name == "terminal_status" or name == "terminal_receive" or
+        name == "power_state" or
+        name == "remote_test_status" or name == "remote_test_collect"):
         read_only = "true"
-    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "simple_rename" or name == "simple_document_formatting":
+    if (name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint" or name == "simple_rename" or name == "simple_document_formatting" or
+        name == "terminal_disconnect" or name == "power_off" or name == "power_reset"):
         destructive = "true"
-    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "simple_test" or name == "simple_rename" or name == "simple_document_formatting":
+    if (name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint" or name == "simple_test" or name == "simple_rename" or name == "simple_document_formatting" or
+        name == "terminal_connect" or name == "terminal_send" or name == "terminal_execute" or name == "terminal_upload" or
+        name == "power_on" or name == "power_off" or name == "power_toggle" or name == "power_reset" or name == "relay_execute" or
+        name == "remote_test_run"):
         idempotent = "false"
 
     var annotations = LB()

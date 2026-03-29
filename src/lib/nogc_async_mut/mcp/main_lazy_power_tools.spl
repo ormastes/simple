@@ -1,0 +1,137 @@
+#![allow(unnamed_duplicate_typed_args)]
+# MCP Lazy Server - Power control tool handlers (6 tools)
+# Handles: power_on, power_off, power_toggle, power_reset, power_state, relay_execute
+#
+# Each handler loads PowerConfig from SDN config file by name,
+# then dispatches to the appropriate power controller.
+
+use std.nogc_sync_mut.terminal.types
+use std.nogc_sync_mut.terminal.power.controller
+use std.nogc_sync_mut.terminal.credential.config_parser
+
+# ============================================================================
+# Helper — load PowerConfig by name from SDN config
+# ============================================================================
+
+val _POWER_CONFIG_PATH = "config/t32/t32_terminal.sdn"
+
+fn _power_load_config(body: text) -> PowerConfig?:
+    val config_name = extract_nested(body, "config_name")
+    if config_name == "":
+        return nil
+    find_power_by_name(_POWER_CONFIG_PATH, config_name)
+
+fn _power_state_label(state: i64) -> text:
+    if state == POWER_STATE_ON:
+        return "on"
+    elif state == POWER_STATE_OFF:
+        return "off"
+    "unknown"
+
+# ============================================================================
+# power_on — Power on a target device
+# ============================================================================
+
+fn handle_power_on(id: text, body: text) -> text:
+    val config = _power_load_config(body)
+    match config:
+        Some(cfg):
+            val ok = power_on(cfg)
+            if ok:
+                return make_tool_result(id, LB() + jp("name", js(cfg.name)) + "," + jp("action", js("power_on")) + "," + jp("status", js("ok")) + RB())
+            else:
+                return make_tool_error(id, -1, "Failed to power on: " + cfg.name)
+        nil:
+            return make_tool_error(id, -1, "Power config not found. Provide config_name parameter.")
+
+# ============================================================================
+# power_off — Power off a target device
+# ============================================================================
+
+fn handle_power_off(id: text, body: text) -> text:
+    val config = _power_load_config(body)
+    match config:
+        Some(cfg):
+            val ok = power_off(cfg)
+            if ok:
+                return make_tool_result(id, LB() + jp("name", js(cfg.name)) + "," + jp("action", js("power_off")) + "," + jp("status", js("ok")) + RB())
+            else:
+                return make_tool_error(id, -1, "Failed to power off: " + cfg.name)
+        nil:
+            return make_tool_error(id, -1, "Power config not found. Provide config_name parameter.")
+
+# ============================================================================
+# power_toggle — Toggle power on a target device
+# ============================================================================
+
+fn handle_power_toggle(id: text, body: text) -> text:
+    val config = _power_load_config(body)
+    match config:
+        Some(cfg):
+            val ok = power_toggle(cfg)
+            if ok:
+                return make_tool_result(id, LB() + jp("name", js(cfg.name)) + "," + jp("action", js("power_toggle")) + "," + jp("status", js("ok")) + RB())
+            else:
+                return make_tool_error(id, -1, "Failed to toggle power: " + cfg.name)
+        nil:
+            return make_tool_error(id, -1, "Power config not found. Provide config_name parameter.")
+
+# ============================================================================
+# power_reset — Reset a target device
+# ============================================================================
+
+fn handle_power_reset(id: text, body: text) -> text:
+    val config = _power_load_config(body)
+    match config:
+        Some(cfg):
+            val ok = power_reset(cfg)
+            if ok:
+                return make_tool_result(id, LB() + jp("name", js(cfg.name)) + "," + jp("action", js("power_reset")) + "," + jp("status", js("ok")) + RB())
+            else:
+                return make_tool_error(id, -1, "Failed to reset: " + cfg.name)
+        nil:
+            return make_tool_error(id, -1, "Power config not found. Provide config_name parameter.")
+
+# ============================================================================
+# power_state — Query power state of a target device
+# ============================================================================
+
+fn handle_power_state(id: text, body: text) -> text:
+    val config = _power_load_config(body)
+    match config:
+        Some(cfg):
+            val state = power_state(cfg)
+            var out = LB()
+            out = out + jp("name", js(cfg.name))
+            out = out + "," + jp("kind", js(cfg.kind))
+            out = out + "," + jp("state", js(_power_state_label(state)))
+            out = out + "," + jp("state_code", str(state))
+            out = out + RB()
+            return make_tool_result(id, out)
+        nil:
+            return make_tool_error(id, -1, "Power config not found. Provide config_name parameter.")
+
+# ============================================================================
+# relay_execute — Execute a relay script with custom command
+# ============================================================================
+
+fn handle_relay_execute(id: text, body: text) -> text:
+    val script_path = extract_nested(body, "script_path")
+    val command = extract_nested(body, "command")
+
+    if script_path == "":
+        return make_tool_error(id, -1, "Missing required parameter: script_path")
+
+    var cmd = script_path
+    if command != "":
+        cmd = cmd + " " + command
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    var result = LB()
+    result = result + jp("script_path", js(script_path))
+    result = result + "," + jp("command", js(command))
+    result = result + "," + jp("exit_code", str(exit_code))
+    result = result + "," + jp("output", js(out))
+    result = result + RB()
+    make_tool_result(id, result)

@@ -1,0 +1,179 @@
+#![allow(unnamed_duplicate_typed_args)]
+# MCP Lazy Server - Remote test execution tool handlers (3 tools)
+# Handles: remote_test_run, remote_test_status, remote_test_collect
+#
+# Runs tests on remote PCs via terminal connections.
+# Stores results in parallel arrays for tracking.
+
+use std.nogc_sync_mut.terminal.types
+use std.nogc_sync_mut.terminal.connection
+use std.nogc_sync_mut.terminal.credential.config_parser
+
+# ============================================================================
+# Global State — Remote Test Tracking (parallel arrays)
+# ============================================================================
+
+var g_rtest_ids: [i64] = []
+var g_rtest_terminal_ids: [i64] = []
+var g_rtest_paths: [text] = []
+var g_rtest_statuses: [text] = []
+var g_rtest_results: [text] = []
+var g_rtest_next_id: i64 = 1
+
+# ============================================================================
+# Helper — find test index by id
+# ============================================================================
+
+fn _rtest_find_index(test_id: i64) -> i64:
+    var i = 0
+    for tid in g_rtest_ids:
+        if tid == test_id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# remote_test_run — Run a test on a remote terminal
+# ============================================================================
+
+fn handle_remote_test_run(id: text, body: text) -> text:
+    val terminal_name = extract_nested(body, "terminal_name")
+    val test_path = extract_nested(body, "test_path")
+    val connection_id_str = extract_nested(body, "connection_id")
+
+    if test_path == "":
+        return make_tool_error(id, -1, "Missing required parameter: test_path")
+
+    # Try to find existing terminal connection by connection_id or name
+    var conn_id: i64 = 0
+    if connection_id_str != "":
+        conn_id = int(connection_id_str)
+
+    # If no connection_id, try to find/create by terminal_name
+    if conn_id == 0 and terminal_name != "":
+        # Search existing connections by name
+        for conn in g_terminal_connections:
+            if conn.config.name == terminal_name:
+                conn_id = conn.id
+                break
+        # If still no connection, try auto-connect from config
+        if conn_id == 0:
+            val found_config = find_terminal_by_name("config/t32/t32_terminal.sdn", terminal_name)
+            match found_config:
+                Some(cfg):
+                    val conn_result = terminal_connect(cfg)
+                    match conn_result:
+                        Some(conn):
+                            var connected = conn
+                            connected.id = g_terminal_next_id
+                            g_terminal_next_id = g_terminal_next_id + 1
+                            g_terminal_connections.push(connected)
+                            conn_id = connected.id
+                        nil:
+                            return make_tool_error(id, -1, "Failed to connect to terminal: " + terminal_name)
+                nil:
+                    return make_tool_error(id, -1, "Terminal not found in config: " + terminal_name)
+
+    if conn_id == 0:
+        return make_tool_error(id, -1, "No connection_id or terminal_name provided")
+
+    # Find the connection
+    var found_conn: TerminalConnection? = nil
+    for conn in g_terminal_connections:
+        if conn.id == conn_id:
+            found_conn = conn
+            break
+
+    match found_conn:
+        nil:
+            return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+        Some(conn):
+            pass
+
+    # Allocate test tracking entry
+    val test_id = g_rtest_next_id
+    g_rtest_next_id = g_rtest_next_id + 1
+    g_rtest_ids.push(test_id)
+    g_rtest_terminal_ids.push(conn_id)
+    g_rtest_paths.push(test_path)
+    g_rtest_statuses.push("running")
+    g_rtest_results.push("")
+
+    # Execute the test command on the remote terminal
+    val command = "bin/simple test " + test_path
+    val exec_result = terminal_execute(found_conn.unwrap(), command)
+
+    val test_idx = _rtest_find_index(test_id)
+    match exec_result:
+        Some(result):
+            var result_json = LB()
+            result_json = result_json + jp("exit_code", str(result.exit_code))
+            result_json = result_json + "," + jp("stdout", js(result.stdout))
+            result_json = result_json + "," + jp("stderr", js(result.stderr))
+            result_json = result_json + "," + jp("duration_ms", str(result.duration_ms))
+            result_json = result_json + RB()
+            if test_idx >= 0:
+                g_rtest_statuses[test_idx] = "completed"
+                g_rtest_results[test_idx] = result_json
+            var out = LB()
+            out = out + jp("test_id", str(test_id))
+            out = out + "," + jp("terminal_id", str(conn_id))
+            out = out + "," + jp("test_path", js(test_path))
+            out = out + "," + jp("status", js("completed"))
+            out = out + "," + jp("exit_code", str(result.exit_code))
+            out = out + RB()
+            return make_tool_result(id, out)
+        nil:
+            if test_idx >= 0:
+                g_rtest_statuses[test_idx] = "failed"
+                g_rtest_results[test_idx] = LB() + jp("error", js("Execution failed")) + RB()
+            return make_tool_error(id, -1, "Failed to execute test on remote terminal: " + str(conn_id))
+
+# ============================================================================
+# remote_test_status — Query status of a remote test
+# ============================================================================
+
+fn handle_remote_test_status(id: text, body: text) -> text:
+    val test_id_str = extract_nested(body, "test_id")
+    if test_id_str == "":
+        return make_tool_error(id, -1, "Missing required parameter: test_id")
+
+    val test_id = int(test_id_str)
+    val idx = _rtest_find_index(test_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Test not found: " + str(test_id))
+
+    var out = LB()
+    out = out + jp("test_id", str(test_id))
+    out = out + "," + jp("terminal_id", str(g_rtest_terminal_ids[idx]))
+    out = out + "," + jp("test_path", js(g_rtest_paths[idx]))
+    out = out + "," + jp("status", js(g_rtest_statuses[idx]))
+    out = out + RB()
+    make_tool_result(id, out)
+
+# ============================================================================
+# remote_test_collect — Collect full result of a completed remote test
+# ============================================================================
+
+fn handle_remote_test_collect(id: text, body: text) -> text:
+    val test_id_str = extract_nested(body, "test_id")
+    if test_id_str == "":
+        return make_tool_error(id, -1, "Missing required parameter: test_id")
+
+    val test_id = int(test_id_str)
+    val idx = _rtest_find_index(test_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Test not found: " + str(test_id))
+
+    val status = g_rtest_statuses[idx]
+    val result_data = g_rtest_results[idx]
+
+    var out = LB()
+    out = out + jp("test_id", str(test_id))
+    out = out + "," + jp("terminal_id", str(g_rtest_terminal_ids[idx]))
+    out = out + "," + jp("test_path", js(g_rtest_paths[idx]))
+    out = out + "," + jp("status", js(status))
+    if result_data != "":
+        out = out + "," + jp("result", result_data)
+    out = out + RB()
+    make_tool_result(id, out)

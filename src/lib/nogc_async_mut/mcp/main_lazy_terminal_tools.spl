@@ -1,0 +1,251 @@
+#![allow(unnamed_duplicate_typed_args)]
+# MCP Lazy Server - Terminal tool handlers (8 tools)
+# Handles: terminal_connect, terminal_disconnect, terminal_send, terminal_receive,
+#          terminal_execute, terminal_list, terminal_status, terminal_upload
+#
+# Uses global state for active terminal connections.
+# Each handler takes (id, body) and returns JSON-RPC response text.
+
+use std.nogc_sync_mut.terminal.types
+use std.nogc_sync_mut.terminal.connection
+use std.nogc_sync_mut.terminal.credential.config_parser
+
+# ============================================================================
+# Global State — Active Terminal Connections
+# ============================================================================
+
+var g_terminal_connections: [TerminalConnection] = []
+var g_terminal_next_id: i64 = 1
+
+# ============================================================================
+# Helper — extract string field from JSON params
+# ============================================================================
+
+fn _term_extract_param(body: text, key: text) -> text:
+    extract_nested(body, key)
+
+fn _term_extract_int_param(body: text, key: text) -> i64:
+    val s = extract_nested(body, key)
+    if s == "":
+        return 0
+    int(s)
+
+fn _term_kind_from_str(kind_str: text) -> i64:
+    if kind_str == "ssh":
+        return TERM_KIND_SSH
+    elif kind_str == "telnet":
+        return TERM_KIND_TELNET
+    elif kind_str == "t32_swd":
+        return TERM_KIND_T32_SWD
+    elif kind_str == "relay":
+        return TERM_KIND_RELAY
+    TERM_KIND_SSH
+
+fn _term_kind_to_str(kind: i64) -> text:
+    if kind == TERM_KIND_SSH:
+        return "ssh"
+    elif kind == TERM_KIND_TELNET:
+        return "telnet"
+    elif kind == TERM_KIND_T32_SWD:
+        return "t32_swd"
+    elif kind == TERM_KIND_RELAY:
+        return "relay"
+    "unknown"
+
+fn _term_find_connection(conn_id: i64) -> i64:
+    """Find index of connection by id. Returns -1 if not found."""
+    var i = 0
+    for conn in g_terminal_connections:
+        if conn.id == conn_id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# terminal_connect — Connect to a remote terminal
+# ============================================================================
+
+fn handle_terminal_connect(id: text, body: text) -> text:
+    val name = _term_extract_param(body, "name")
+    val kind_str = _term_extract_param(body, "kind")
+    val host = _term_extract_param(body, "host")
+    val port = _term_extract_int_param(body, "port")
+    val username = _term_extract_param(body, "username")
+    val auth_method = _term_extract_param(body, "auth_method")
+    val credential = _term_extract_param(body, "credential")
+    val key_path = _term_extract_param(body, "key_path")
+    val t32_host = _term_extract_param(body, "t32_host")
+    val t32_port_val = _term_extract_int_param(body, "t32_port")
+    val channel = _term_extract_param(body, "channel")
+    val script_path = _term_extract_param(body, "script_path")
+
+    # Try to load from config file if only name is given
+    var config: TerminalConfig = TerminalConfig(
+        kind: _term_kind_from_str(kind_str),
+        name: name,
+        host: host,
+        port: port,
+        username: username,
+        auth_method: auth_method,
+        credential: credential,
+        key_path: key_path,
+        t32_host: t32_host,
+        t32_port: t32_port_val,
+        channel: channel,
+        script_path: script_path
+    )
+
+    # If only name provided, try loading from SDN config
+    if name != "" and kind_str == "":
+        val found = find_terminal_by_name("config/t32/t32_terminal.sdn", name)
+        match found:
+            Some(c): config = c
+            nil: pass
+
+    val conn_result = terminal_connect(config)
+    match conn_result:
+        Some(conn):
+            var connected = conn
+            connected.id = g_terminal_next_id
+            g_terminal_next_id = g_terminal_next_id + 1
+            g_terminal_connections.push(connected)
+            val out = LB() + jp("connection_id", str(connected.id)) + "," + jp("kind", js(_term_kind_to_str(connected.kind))) + "," + jp("name", js(config.name)) + "," + jp("status", js("connected")) + RB()
+            return make_tool_result(id, out)
+        nil:
+            return make_tool_error(id, -1, "Failed to connect terminal: " + name)
+
+# ============================================================================
+# terminal_disconnect — Close a terminal connection
+# ============================================================================
+
+fn handle_terminal_disconnect(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    terminal_close(conn)
+    g_terminal_connections.remove(idx)
+    make_tool_result(id, LB() + jp("connection_id", str(conn_id)) + "," + jp("status", js("disconnected")) + RB())
+
+# ============================================================================
+# terminal_send — Send data to a terminal
+# ============================================================================
+
+fn handle_terminal_send(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val data = _term_extract_param(body, "data")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    val ok = terminal_send(conn, data)
+    if ok:
+        make_tool_result(id, LB() + jp("connection_id", str(conn_id)) + "," + jp("bytes_sent", str(data.len())) + "," + jp("status", js("ok")) + RB())
+    else:
+        make_tool_error(id, -1, "Failed to send data to connection: " + str(conn_id))
+
+# ============================================================================
+# terminal_receive — Receive data from a terminal
+# ============================================================================
+
+fn handle_terminal_receive(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val timeout_ms = _term_extract_int_param(body, "timeout_ms")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    var actual_timeout = timeout_ms
+    if actual_timeout <= 0:
+        actual_timeout = 5000
+    val data = terminal_receive(conn, actual_timeout)
+    make_tool_result(id, LB() + jp("connection_id", str(conn_id)) + "," + jp("data", js(data)) + "," + jp("bytes_received", str(data.len())) + RB())
+
+# ============================================================================
+# terminal_execute — Execute a command on the terminal
+# ============================================================================
+
+fn handle_terminal_execute(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val command = _term_extract_param(body, "command")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    val result = terminal_execute(conn, command)
+    match result:
+        Some(exec_result):
+            var out = LB()
+            out = out + jp("connection_id", str(conn_id))
+            out = out + "," + jp("exit_code", str(exec_result.exit_code))
+            out = out + "," + jp("stdout", js(exec_result.stdout))
+            out = out + "," + jp("stderr", js(exec_result.stderr))
+            out = out + "," + jp("duration_ms", str(exec_result.duration_ms))
+            out = out + RB()
+            return make_tool_result(id, out)
+        nil:
+            return make_tool_error(id, -1, "Failed to execute command on connection: " + str(conn_id))
+
+# ============================================================================
+# terminal_list — List all active connections
+# ============================================================================
+
+fn handle_terminal_list(id: text, body: text) -> text:
+    var items: [text] = []
+    for conn in g_terminal_connections:
+        var item = LB()
+        item = item + jp("id", str(conn.id))
+        item = item + "," + jp("kind", js(_term_kind_to_str(conn.kind)))
+        item = item + "," + jp("name", js(conn.config.name))
+        item = item + "," + jp("host", js(conn.config.host))
+        item = item + "," + jp("connected", str(conn.connected))
+        item = item + RB()
+        items.push(item)
+    val arr = SB_L() + items.join(",") + SB_R()
+    make_tool_result(id, LB() + jp("connections", arr) + "," + jp("count", str(items.len())) + RB())
+
+# ============================================================================
+# terminal_status — Get status of a specific connection
+# ============================================================================
+
+fn handle_terminal_status(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    val is_connected = terminal_is_connected(conn)
+    var out = LB()
+    out = out + jp("connection_id", str(conn_id))
+    out = out + "," + jp("kind", js(_term_kind_to_str(conn.kind)))
+    out = out + "," + jp("name", js(conn.config.name))
+    out = out + "," + jp("host", js(conn.config.host))
+    out = out + "," + jp("port", str(conn.config.port))
+    out = out + "," + jp("connected", str(is_connected))
+    out = out + RB()
+    make_tool_result(id, out)
+
+# ============================================================================
+# terminal_upload — Upload a file to the remote terminal
+# ============================================================================
+
+fn handle_terminal_upload(id: text, body: text) -> text:
+    val conn_id = _term_extract_int_param(body, "connection_id")
+    val local_path = _term_extract_param(body, "local_path")
+    val remote_path = _term_extract_param(body, "remote_path")
+    val idx = _term_find_connection(conn_id)
+    if idx < 0:
+        return make_tool_error(id, -1, "Connection not found: " + str(conn_id))
+
+    val conn = g_terminal_connections[idx]
+    val ok = terminal_upload(conn, local_path, remote_path)
+    if ok:
+        make_tool_result(id, LB() + jp("connection_id", str(conn_id)) + "," + jp("local_path", js(local_path)) + "," + jp("remote_path", js(remote_path)) + "," + jp("status", js("uploaded")) + RB())
+    else:
+        make_tool_error(id, -1, "Failed to upload file to connection: " + str(conn_id))
