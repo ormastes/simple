@@ -137,111 +137,91 @@ impl AgentTree:
 
     # -- Internal mutation helpers ----------------------------------------
 
-    me _update_agent_activity(id: text, activity: AgentActivity):
+    fn _find_agent_idx(id: text) -> i32:
+        """Find agent index by ID. Returns -1 if not found."""
         var i = 0
         while i < self.agents.len():
             if self.agents[i].id == id:
-                self.agents[i].activity = activity
-                return
+                return i
             i = i + 1
+        return -1
+
+    me _update_agent_activity(id: text, activity: AgentActivity):
+        val idx = self._find_agent_idx(id)
+        if idx >= 0:
+            self.agents[idx].activity = activity
 
     me _update_agent_time(id: text, timestamp: i64):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                self.agents[i].last_active = timestamp
-                if self.agents[i].start_time == 0:
-                    self.agents[i].start_time = timestamp
-                return
-            i = i + 1
+        val idx = self._find_agent_idx(id)
+        if idx >= 0:
+            self.agents[idx].last_active = timestamp
+            if self.agents[idx].start_time == 0:
+                self.agents[idx].start_time = timestamp
 
     me _update_agent_field(id: text, field: text, value: text):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                if field == "model":
-                    self.agents[i].model = value
-                return
-            i = i + 1
+        val idx = self._find_agent_idx(id)
+        if idx >= 0:
+            if field == "model":
+                self.agents[idx].model = value
 
     me _set_parent(child_id: text, parent_id: text):
-        # Update child's parent_id
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == child_id:
-                self.agents[i].parent_id = parent_id
-            if self.agents[i].id == parent_id:
-                # Add child to parent's children list if not already there
-                var found = false
-                for c in self.agents[i].children:
-                    if c == child_id:
-                        found = true
-                if not found:
-                    self.agents[i].children.push(child_id)
-            i = i + 1
-        # Remove from root_ids if it has a parent now
+        val child_idx = self._find_agent_idx(child_id)
+        if child_idx >= 0:
+            self.agents[child_idx].parent_id = parent_id
+        val parent_idx = self._find_agent_idx(parent_id)
+        if parent_idx >= 0:
+            if not _list_contains(self.agents[parent_idx].children, child_id):
+                self.agents[parent_idx].children.push(child_id)
+        # Remove from root_ids if it now has a parent
         var new_roots: [text] = []
         for rid in self.root_ids:
             if rid != child_id:
                 new_roots.push(rid)
         self.root_ids = new_roots
 
+    me _record_to_list(id: text, field: text, value: text):
+        """Push value into a named list field of an agent, deduplicating."""
+        val idx = self._find_agent_idx(id)
+        if idx < 0:
+            return
+        var list_ref = match field:
+            "tools" => self.agents[idx].tools_used
+            "files_read" => self.agents[idx].files_read
+            "files_written" => self.agents[idx].files_written
+            "urls" => self.agents[idx].urls_fetched
+            _ => return
+        if not _list_contains(list_ref, value):
+            match field:
+                "tools" => self.agents[idx].tools_used.push(value)
+                "files_read" => self.agents[idx].files_read.push(value)
+                "files_written" => self.agents[idx].files_written.push(value)
+                "urls" => self.agents[idx].urls_fetched.push(value)
+                _ => pass_dn
+
     me _record_tool(id: text, tool_name: text):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                var found = false
-                for t in self.agents[i].tools_used:
-                    if t == tool_name:
-                        found = true
-                if not found:
-                    self.agents[i].tools_used.push(tool_name)
-                return
-            i = i + 1
+        self._record_to_list(id, "tools", tool_name)
 
     me _record_file_read(id: text, path: text):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                var found = false
-                for f in self.agents[i].files_read:
-                    if f == path:
-                        found = true
-                if not found:
-                    self.agents[i].files_read.push(path)
-                return
-            i = i + 1
+        self._record_to_list(id, "files_read", path)
 
     me _record_file_write(id: text, path: text):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                var found = false
-                for f in self.agents[i].files_written:
-                    if f == path:
-                        found = true
-                if not found:
-                    self.agents[i].files_written.push(path)
-                return
-            i = i + 1
+        self._record_to_list(id, "files_written", path)
 
     me _record_url(id: text, url: text):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                var found = false
-                for u in self.agents[i].urls_fetched:
-                    if u == url:
-                        found = true
-                if not found:
-                    self.agents[i].urls_fetched.push(url)
-                return
-            i = i + 1
+        self._record_to_list(id, "urls", url)
 
     me _add_tokens(id: text, count: i64):
-        var i = 0
-        while i < self.agents.len():
-            if self.agents[i].id == id:
-                self.agents[i].token_count = self.agents[i].token_count + count
-                return
-            i = i + 1
+        val idx = self._find_agent_idx(id)
+        if idx >= 0:
+            self.agents[idx].token_count = self.agents[idx].token_count + count
+
+# =========================================================================
+# Shared Helpers
+# =========================================================================
+
+fn _list_contains(list: [text], value: text) -> bool:
+    """Check if a text list contains a value."""
+    for item in list:
+        if item == value:
+            return true
+    return false

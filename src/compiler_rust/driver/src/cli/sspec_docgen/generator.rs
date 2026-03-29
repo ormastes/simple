@@ -24,31 +24,57 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
     let mut md = String::new();
 
     md.push_str(&format!("# {}\n\n", feature_name));
-    md.push_str(&format!("*Source: `{}`*\n", sspec_doc.file_path.display()));
-    md.push_str(&format!("*Last Updated: {}*\n\n", Local::now().format("%Y-%m-%d")));
+    if let Some(summary) = extract_summary(sspec_doc) {
+        md.push_str(&format!("{}\n\n", summary));
+    }
 
-    let metadata_lines = build_metadata_lines(sspec_doc);
-    if !metadata_lines.is_empty() {
-        for line in metadata_lines {
-            md.push_str(&line);
-            md.push('\n');
+    let metadata_rows = build_metadata_rows(sspec_doc);
+    if !metadata_rows.is_empty() {
+        md.push_str("## At a Glance\n\n");
+        md.push_str("| Field | Value |\n");
+        md.push_str("|-------|-------|\n");
+        for (field, value) in metadata_rows {
+            md.push_str(&format!(
+                "| {} | {} |\n",
+                escape_table_cell(&field),
+                escape_table_cell(&value)
+            ));
         }
         md.push('\n');
     }
 
-    md.push_str("---\n\n");
+    let scenarios = extract_scenarios(&sspec_doc.raw_content);
+    if !scenarios.is_empty() {
+        md.push_str("## Scenario Summary\n\n");
+        md.push_str("| Metric | Count |\n");
+        md.push_str("|--------|------:|\n");
+        md.push_str(&format!("| Total scenarios | {} |\n", scenarios.len()));
+        md.push_str(&format!(
+            "| Active scenarios | {} |\n",
+            scenarios
+                .iter()
+                .filter(|s| matches!(s.kind, ScenarioKind::Normal | ScenarioKind::Slow))
+                .count()
+        ));
+        md.push_str(&format!(
+            "| Slow scenarios | {} |\n",
+            scenarios.iter().filter(|s| s.kind == ScenarioKind::Slow).count()
+        ));
+        md.push_str(&format!(
+            "| Skipped scenarios | {} |\n",
+            scenarios.iter().filter(|s| s.kind == ScenarioKind::Skipped).count()
+        ));
+        md.push_str(&format!(
+            "| Pending scenarios | {} |\n",
+            scenarios.iter().filter(|s| s.kind == ScenarioKind::Pending).count()
+        ));
+        md.push('\n');
+    }
 
-    if let Some(first_block) = sspec_doc.doc_blocks.first() {
-        let first_content = strip_header_metadata(&first_block.content);
-        if !first_content.is_empty() {
-            md.push_str(&first_content);
-            md.push_str("\n\n");
-        }
-
-        for doc_block in sspec_doc.doc_blocks.iter().skip(1) {
-            md.push_str(doc_block.content.trim());
-            md.push_str("\n\n");
-        }
+    let body = render_doc_body(sspec_doc);
+    if !body.is_empty() {
+        md.push_str(&body);
+        md.push_str("\n\n");
     } else {
         md.push_str("## Overview\n\n");
         md.push_str("Documentation was generated from executable SSpec scenarios.\n\n");
@@ -56,22 +82,7 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
 
     append_evidence_section(&mut md, sspec_doc);
 
-    let scenarios = extract_scenarios(&sspec_doc.raw_content);
     if !scenarios.is_empty() {
-        md.push_str("## Test Summary\n\n");
-        md.push_str("| Metric | Count |\n");
-        md.push_str("|--------|-------|\n");
-        md.push_str(&format!("| Scenarios | {} |\n", scenarios.len()));
-        md.push_str(&format!(
-            "| Slow Scenarios | {} |\n",
-            scenarios.iter().filter(|s| s.kind == ScenarioKind::Slow).count()
-        ));
-        md.push_str(&format!(
-            "| Skipped Scenarios | {} |\n",
-            scenarios.iter().filter(|s| s.kind == ScenarioKind::Skipped).count()
-        ));
-        md.push('\n');
-
         md.push_str("## Scenarios\n\n");
         for scenario in scenarios {
             let prefix = match scenario.kind {
@@ -114,8 +125,8 @@ fn humanize_filename(stem: &str) -> String {
     }
 }
 
-fn build_metadata_lines(sspec_doc: &SspecDoc) -> Vec<String> {
-    let mut lines = Vec::new();
+fn build_metadata_rows(sspec_doc: &SspecDoc) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
 
     if let Some(id) = sspec_doc
         .metadata
@@ -123,31 +134,46 @@ fn build_metadata_lines(sspec_doc: &SspecDoc) -> Vec<String> {
         .clone()
         .or_else(|| (!sspec_doc.feature_ids.is_empty()).then(|| sspec_doc.feature_ids.join(", ")))
     {
-        lines.push(format!("**Feature IDs:** {}", id));
+        rows.push(("Feature IDs".to_string(), id));
     }
     if let Some(category) = &sspec_doc.metadata.category {
-        lines.push(format!("**Category:** {}", category));
+        rows.push(("Category".to_string(), category.clone()));
     }
     if let Some(difficulty) = &sspec_doc.metadata.difficulty {
-        lines.push(format!("**Difficulty:** {}", difficulty));
+        rows.push(("Difficulty".to_string(), difficulty.clone()));
     }
     if let Some(status) = &sspec_doc.metadata.status {
-        lines.push(format!("**Status:** {}", status));
+        rows.push(("Status".to_string(), status.clone()));
     }
     if let Some(requirements) = &sspec_doc.metadata.requirements {
-        lines.push(format!("**Requirements:** {}", requirements));
+        rows.push(("Requirements".to_string(), requirements.clone()));
     }
     if let Some(plan) = &sspec_doc.metadata.plan {
-        lines.push(format!("**Plan:** {}", plan));
+        rows.push(("Plan".to_string(), plan.clone()));
     }
     if let Some(design) = &sspec_doc.metadata.design {
-        lines.push(format!("**Design:** {}", design));
+        rows.push(("Design".to_string(), design.clone()));
     }
     if let Some(research) = &sspec_doc.metadata.research {
-        lines.push(format!("**Research:** {}", research));
+        rows.push(("Research".to_string(), research.clone()));
     }
+    if !sspec_doc.metadata.related.is_empty() {
+        rows.push(("Related".to_string(), sspec_doc.metadata.related.join(", ")));
+    }
+    if !sspec_doc.metadata.dependencies.is_empty() {
+        rows.push((
+            "Dependencies".to_string(),
+            sspec_doc.metadata.dependencies.join(", "),
+        ));
+    }
+    rows.push(("Source".to_string(), format!("`{}`", sspec_doc.file_path.display())));
+    rows.push((
+        "Updated".to_string(),
+        Local::now().format("%Y-%m-%d").to_string(),
+    ));
+    rows.push(("Generator".to_string(), "`simple sspec-docgen` (Rust)".to_string()));
 
-    lines
+    rows
 }
 
 fn strip_header_metadata(content: &str) -> String {
@@ -166,6 +192,8 @@ fn strip_header_metadata(content: &str) -> String {
             || trimmed.starts_with("**Plan:**")
             || trimmed.starts_with("**Design:**")
             || trimmed.starts_with("**Research:**")
+            || trimmed.starts_with("**Related:**")
+            || trimmed.starts_with("**Dependencies:**")
             || trimmed.starts_with("**Artifacts:**")
             || trimmed.starts_with("**Screenshots:**")
             || trimmed.starts_with("**TUI Captures:**")
@@ -195,6 +223,78 @@ fn strip_header_metadata(content: &str) -> String {
     }
 
     out.join("\n").trim().to_string()
+}
+
+fn render_doc_body(sspec_doc: &SspecDoc) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(first_block) = sspec_doc.doc_blocks.first() {
+        let first_content = strip_header_metadata(&first_block.content);
+        if !first_content.is_empty() {
+            sections.push(first_content);
+        }
+
+        for doc_block in sspec_doc.doc_blocks.iter().skip(1) {
+            let content = doc_block.content.trim();
+            if !content.is_empty() {
+                sections.push(content.to_string());
+            }
+        }
+    }
+
+    sections.join("\n\n").trim().to_string()
+}
+
+fn extract_summary(sspec_doc: &SspecDoc) -> Option<String> {
+    let body = render_doc_body(sspec_doc);
+    if body.is_empty() {
+        return None;
+    }
+
+    extract_summary_from_markdown(&body)
+}
+
+fn extract_summary_from_markdown(content: &str) -> Option<String> {
+    let mut in_overview = false;
+    let mut paragraph = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("## ") {
+            in_overview = trimmed == "## Overview" || trimmed == "## Description";
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with('#') || trimmed.starts_with("```") {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if in_overview || paragraph.is_empty() {
+            if !trimmed.starts_with("- ") && !trimmed.starts_with("* ") {
+                paragraph.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if paragraph.is_empty() {
+        None
+    } else {
+        Some(paragraph.join(" "))
+    }
 }
 
 fn append_evidence_section(md: &mut String, sspec_doc: &SspecDoc) {
@@ -381,5 +481,64 @@ mod tests {
         assert!(output.contains("Text artifact"));
         assert!(output.contains("ANSI capture"));
         assert!(output.contains("Log file"));
+    }
+
+    #[test]
+    fn test_generate_feature_doc_title_first_and_summary_table() {
+        let tempdir = tempdir().expect("tempdir");
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/feature/app/example_spec.spl"),
+            raw_content: r#"
+it "renders docs":
+    expect(true).to_equal(true)
+skip_it "skips cleanly":
+    expect(true).to_equal(true)
+"#
+            .to_string(),
+            doc_blocks: vec![super::super::types::DocBlock {
+                content: r#"
+# Example Spec
+
+**Feature IDs:** #EX-001
+**Category:** Tooling
+**Status:** Implemented
+
+## Overview
+
+This page should start with the title and a plain-language summary.
+
+## Examples
+
+```simple
+expect(true).to_equal(true)
+```
+"#
+                .trim()
+                .to_string(),
+                line_start: 0,
+                line_end: 16,
+            }],
+            feature_title: Some("Example Spec".to_string()),
+            feature_ids: vec![],
+            metadata: FeatureMetadata {
+                category: Some("Tooling".to_string()),
+                status: Some("Implemented".to_string()),
+                ..Default::default()
+            },
+        };
+
+        generate_feature_doc(&doc, tempdir.path()).expect("generate doc");
+
+        let output = fs::read_to_string(tempdir.path().join("example_spec.md")).expect("read doc");
+        let lines: Vec<_> = output.lines().collect();
+
+        assert_eq!(lines.first().copied(), Some("# Example Spec"));
+        assert!(output.contains("This page should start with the title and a plain-language summary."));
+        assert!(output.contains("## At a Glance"));
+        assert!(output.contains("| Source | `test/feature/app/example_spec.spl` |"));
+        assert!(output.contains("| Generator | `simple sspec-docgen` (Rust) |"));
+        assert!(output.contains("## Scenario Summary"));
+        assert!(output.contains("| Active scenarios | 1 |"));
+        assert!(output.contains("| Skipped scenarios | 1 |"));
     }
 }

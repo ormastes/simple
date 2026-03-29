@@ -3,10 +3,158 @@
 
 set -eu
 
+REPAIR_DEVLINK=0
+KILL_STALE=0
+ALLOW_MCI_FALLBACK=0
+
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --repair-devlink)
+            REPAIR_DEVLINK=1
+            shift
+            ;;
+        --kill-stale)
+            KILL_STALE=1
+            shift
+            ;;
+        --allow-mci-fallback)
+            ALLOW_MCI_FALLBACK=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 T32USBCHECKER="/opt/t32/bin/pc_linux64/t32usbchecker"
 T32REM="/opt/t32/bin/pc_linux64/t32rem"
 HOST="${1:-localhost}"
 PORT="${2:-20000}"
+TRACE32_DEV_DIR="/dev/lauterbach/trace32"
+MCI_PING_SCRIPT="$(CDPATH= cd -- "$(dirname "$0")"/../config/t32 && pwd)/t32_tcp_ping.shs"
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+sudo_prefix() {
+    if [ "$(id -u)" = "0" ]; then
+        return 1
+    fi
+    if has_cmd sudo; then
+        return 0
+    fi
+    return 1
+}
+
+run_privileged() {
+    if [ "$(id -u)" = "0" ]; then
+        "$@"
+        return 0
+    fi
+    if has_cmd sudo; then
+        sudo "$@"
+        return $?
+    fi
+    "$@"
+}
+
+lauterbach_usb_node() {
+    if ! has_cmd lsusb; then
+        return 0
+    fi
+
+    DEVICE_LINE="$(lsusb | grep '0897:0002' | head -n 1 || true)"
+    if [ -z "$DEVICE_LINE" ]; then
+        return 0
+    fi
+
+    BUS="$(printf '%s\n' "$DEVICE_LINE" | awk '{print $2}')"
+    DEV="$(printf '%s\n' "$DEVICE_LINE" | awk '{print $4}' | tr -d ':')"
+    if [ -n "$BUS" ] && [ -n "$DEV" ]; then
+        printf '/dev/bus/usb/%s/%s\n' "$BUS" "$DEV"
+    fi
+}
+
+print_lauterbach_usb_hint() {
+    USB_NODE="$(lauterbach_usb_node)"
+    if [ -z "$USB_NODE" ]; then
+        return 0
+    fi
+
+    echo "Detected Lauterbach USB node: $USB_NODE" >&2
+    echo "If udev did not create $TRACE32_DEV_DIR, retrigger it or create the symlink manually:" >&2
+    echo "  sudo udevadm trigger --verbose --subsystem-match=usb --attr-match=idVendor=0897" >&2
+    echo "  sudo mkdir -p $TRACE32_DEV_DIR" >&2
+    echo "  sudo ln -sfn ../../bus/usb/$(printf '%s' "$USB_NODE" | awk -F/ '{print $(NF-1)"/"$NF}') $TRACE32_DEV_DIR/3-3" >&2
+}
+
+check_port_conflict() {
+    if ! has_cmd ss; then
+        return 0
+    fi
+
+    CONFLICTS="$(ss -ltnup 2>/dev/null | grep -E ':20000|:2331' || true)"
+    if [ -z "$CONFLICTS" ]; then
+        return 0
+    fi
+
+    echo "TRACE32 readiness warning: default TRACE32 ports are already bound." >&2
+    printf '%s\n' "$CONFLICTS" >&2
+    if printf '%s\n' "$CONFLICTS" | grep -q 'docker-proxy'; then
+        echo "Hint: stop the container holding TRACE32 ports before retrying t32rem." >&2
+    fi
+}
+
+check_mci_fallback() {
+    if [ ! -x "$MCI_PING_SCRIPT" ]; then
+        return 1
+    fi
+
+    MCI_LOG="$(mktemp /tmp/t32_check_ready_mci.XXXXXX.log)"
+    if "$MCI_PING_SCRIPT" "$HOST" "$PORT" >"$MCI_LOG" 2>&1; then
+        cat "$MCI_LOG"
+        rm -f "$MCI_LOG"
+        return 0
+    fi
+
+    rm -f "$MCI_LOG"
+    return 1
+}
+
+kill_stale_trace32() {
+    STALE="$(pgrep -af '/opt/t32/bin/pc_linux64/t32marm' || true)"
+    if [ -z "$STALE" ]; then
+        return 0
+    fi
+
+    echo "Stopping stale TRACE32 sessions..." >&2
+    printf '%s\n' "$STALE" >&2
+
+    if [ "$(id -u)" = "0" ]; then
+        pkill -9 -f '/opt/t32/bin/pc_linux64/t32marm' || true
+    elif has_cmd sudo; then
+        sudo pkill -9 -f '/opt/t32/bin/pc_linux64/t32marm' || true
+    else
+        pkill -9 -f '/opt/t32/bin/pc_linux64/t32marm' || true
+    fi
+    rm -f /tmp/.X*-lock /tmp/.t32* 2>/dev/null || true
+    sleep 1
+}
+
+repair_devlink() {
+    USB_NODE="$(lauterbach_usb_node)"
+    if [ -z "$USB_NODE" ]; then
+        echo "TRACE32 devlink repair skipped: Lauterbach USB node not found via lsusb." >&2
+        return 1
+    fi
+
+    USB_REL="$(printf '%s' "$USB_NODE" | awk -F/ '{print $(NF-1)"/"$NF}')"
+    echo "Repairing TRACE32 devlink for $USB_NODE..." >&2
+    run_privileged mkdir -p "$TRACE32_DEV_DIR"
+    run_privileged ln -sfn "../../bus/usb/$USB_REL" "$TRACE32_DEV_DIR/3-3"
+}
 
 if [ ! -x "$T32USBCHECKER" ]; then
     echo "ERROR: t32usbchecker not found at $T32USBCHECKER" >&2
@@ -18,17 +166,48 @@ if [ ! -x "$T32REM" ]; then
     exit 1
 fi
 
+if [ "$KILL_STALE" = "1" ]; then
+    kill_stale_trace32
+fi
+
+if [ "$REPAIR_DEVLINK" = "1" ]; then
+    repair_devlink || true
+fi
+
 echo "[1/2] Checking TRACE32 USB probe access..."
+if [ ! -d "$TRACE32_DEV_DIR" ]; then
+    echo "TRACE32 device path missing: $TRACE32_DEV_DIR" >&2
+    print_lauterbach_usb_hint
+fi
+
 USB_OUTPUT="$("$T32USBCHECKER" 2>&1 || true)"
 printf '%s\n' "$USB_OUTPUT"
 if printf '%s\n' "$USB_OUTPUT" | grep -qi "no useable TRACE32 devices found"; then
+    print_lauterbach_usb_hint
     echo "TRACE32 readiness failed: probe is not usable on this host." >&2
     exit 1
 fi
 
+if printf '%s\n' "$USB_OUTPUT" | grep -qi "Device or resource busy"; then
+    echo "TRACE32 readiness failed: probe is already claimed by another TRACE32 session." >&2
+    pgrep -af '/opt/t32/bin/pc_linux64/t32marm' >&2 || true
+    exit 1
+fi
+
 echo "[2/2] Checking TRACE32 Remote API..."
+check_port_conflict
 if ! timeout 5 "$T32REM" "$HOST" port="$PORT" PING >/tmp/t32_check_ready_ping.log 2>&1; then
     cat /tmp/t32_check_ready_ping.log >&2
+    if has_cmd ss && ! ss -ltnup 2>/dev/null | grep -q ":$PORT"; then
+        echo "TRACE32 readiness failed: no process is listening on port $PORT. This host's GUI TRACE32 build may not expose RCL/NETASSIST reliably." >&2
+    fi
+    if check_mci_fallback; then
+        if [ "$ALLOW_MCI_FALLBACK" = "1" ]; then
+            echo "TRACE32 readiness OK via MCI fallback on ${HOST}:${PORT} (TCP)"
+            exit 0
+        fi
+        echo "TRACE32 readiness note: MCI TCP fallback is available on ${HOST}:${PORT}, but GUI t32rem/RCL is still unavailable." >&2
+    fi
     echo "TRACE32 readiness failed: t32rem PING did not succeed." >&2
     exit 1
 fi

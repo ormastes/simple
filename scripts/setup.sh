@@ -353,17 +353,17 @@ ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 DAEMON_DIR="/tmp/t32_lsp_mcp_shared"
 cd "$REPO_ROOT"
-export SIMPLE_LIB="$TRACE32_ROOT"
-export SIMPLE_RUNTIME="$RUNTIME"
-export T32_LSP_MCP_TOOL_RUNNER="examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
-export T32_LSP_MCP_TOOL_DAEMON="examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl"
-export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
-export SIMPLE_LOG=error
+export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
+export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
+export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
+export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
+export T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-$DAEMON_DIR}"
+export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "tool_daemon.spl $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"
   nohup "$RUNTIME" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
 fi
-RUST_LOG=error exec "$RUNTIME" "$ENTRY" "$@" 2>/dev/null
+RUST_LOG="${RUST_LOG:-error}" exec "$RUNTIME" "$ENTRY" "$@"
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

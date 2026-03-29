@@ -3,7 +3,7 @@
 # Defines room types, tool-to-room routing, and room content rendering.
 # Each room displays contextually relevant agent activity.
 
-use app.llm_dashboard.data.types.{RoomKind, room_name, tool_to_room, ActivityEntry, format_timestamp}
+use app.llm_dashboard.data.types.{RoomKind, room_name, tool_to_room, ActivityEntry, format_timestamp, truncate_text}
 use app.llm_dashboard.tui.colors.{room_color}
 use dashboard.render.colors.{RESET, DIM, BOLD}
 
@@ -47,82 +47,55 @@ fn render_room_header(room: RoomState) -> text:
 # Room Content Builders
 # =========================================================================
 
-fn build_research_content(entries: [ActivityEntry], max_lines: i32) -> [text]:
-    """Build content lines for the Research room."""
+fn build_room_content(kind: RoomKind, entries: [ActivityEntry], max_lines: i32) -> [text]:
+    """Build content lines for any room, filtering entries and formatting per room type."""
+    val target = room_name(kind)
     var lines: [text] = []
     var count = 0
     var i = entries.len() - 1
     while i >= 0 and count < max_lines:
         val e = entries[i]
-        match e.room:
-            RoomKind.Research:
-                val time = format_timestamp(e.timestamp)
-                if e.summary.len() > 40:
-                    lines.push("{DIM}{time}{RESET} {e.summary.slice(0, 37)}...")
-                else:
-                    lines.push("{DIM}{time}{RESET} {e.summary}")
-                count = count + 1
-            _: pass_dn
+        if room_name(e.room) == target:
+            lines.push(format_room_entry(kind, e))
+            count = count + 1
         i = i - 1
     return lines
+
+fn format_room_entry(kind: RoomKind, e: ActivityEntry) -> text:
+    """Format an activity entry for display in its room."""
+    match kind:
+        RoomKind.Research:
+            val time = format_timestamp(e.timestamp)
+            val s = truncate_text(e.summary, 40)
+            return "{DIM}{time}{RESET} {s}"
+        RoomKind.Code:
+            val icon = match e.tool_name:
+                "Read" => "R"
+                "Write" => "W"
+                "Edit" => "E"
+                "Grep" => "?"
+                "Glob" => "G"
+                _ => ">"
+            return " {icon} {truncate_text(e.summary, 38)}"
+        RoomKind.Skills:
+            return " /{e.summary}"
+        _:
+            return " {truncate_text(e.summary, 38)}"
+
+# truncate_text imported from data.types
+
+# Backward-compatible wrappers (used by tui/app.spl)
+fn build_research_content(entries: [ActivityEntry], max_lines: i32) -> [text]:
+    return build_room_content(RoomKind.Research, entries, max_lines)
 
 fn build_code_content(entries: [ActivityEntry], max_lines: i32) -> [text]:
-    """Build content lines for the Code room."""
-    var lines: [text] = []
-    var count = 0
-    var i = entries.len() - 1
-    while i >= 0 and count < max_lines:
-        val e = entries[i]
-        match e.room:
-            RoomKind.Code:
-                val icon = match e.tool_name:
-                    "Read" => "R"
-                    "Write" => "W"
-                    "Edit" => "E"
-                    "Grep" => "?"
-                    "Glob" => "G"
-                    _ => ">"
-                if e.summary.len() > 38:
-                    lines.push(" {icon} {e.summary.slice(0, 35)}...")
-                else:
-                    lines.push(" {icon} {e.summary}")
-                count = count + 1
-            _: pass_dn
-        i = i - 1
-    return lines
+    return build_room_content(RoomKind.Code, entries, max_lines)
 
 fn build_skills_content(entries: [ActivityEntry], max_lines: i32) -> [text]:
-    """Build content lines for the Skills room."""
-    var lines: [text] = []
-    var count = 0
-    var i = entries.len() - 1
-    while i >= 0 and count < max_lines:
-        val e = entries[i]
-        match e.room:
-            RoomKind.Skills:
-                lines.push(" /{e.summary}")
-                count = count + 1
-            _: pass_dn
-        i = i - 1
-    return lines
+    return build_room_content(RoomKind.Skills, entries, max_lines)
 
 fn build_server_content(entries: [ActivityEntry], max_lines: i32) -> [text]:
-    """Build content lines for the Servers room."""
-    var lines: [text] = []
-    var count = 0
-    var i = entries.len() - 1
-    while i >= 0 and count < max_lines:
-        val e = entries[i]
-        match e.room:
-            RoomKind.Server:
-                var display = e.summary
-                if display.len() > 38:
-                    display = "{display.slice(0, 35)}..."
-                lines.push(" {display}")
-                count = count + 1
-            _: pass_dn
-        i = i - 1
-    return lines
+    return build_room_content(RoomKind.Server, entries, max_lines)
 
 # =========================================================================
 # Room Set

@@ -3,16 +3,181 @@
 
 set -eu
 
+KILL_STALE=0
+FALLBACK_MCI=0
+
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --kill-stale)
+            KILL_STALE=1
+            shift
+            ;;
+        --fallback-mci)
+            FALLBACK_MCI=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 BOARD="${1:-}"
 MODE="${2:-}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 T32_BIN="/opt/t32/bin/pc_linux64/t32marm"
 CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
+LOG_PATH=""
 
 usage() {
-    echo "Usage: $0 <stm32wb|stm32h7> <native|gdb>" >&2
+    echo "Usage: $0 [--kill-stale] [--fallback-mci] <stm32wb|stm32h7> <native|gdb>" >&2
     exit 2
+}
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+trace32_processes() {
+    ps -ef | awk '
+        /\/opt\/t32\/bin\/pc_linux64\/t32marm/ && !/awk/ && !/grep/ {
+            print
+        }
+    '
+}
+
+tcp_port_conflict_summary() {
+    if ! has_cmd ss; then
+        return 0
+    fi
+    ss -ltnp 2>/dev/null | grep -E ':20000|:2331' || true
+}
+
+port_conflict_summary() {
+    if ! has_cmd ss; then
+        return 0
+    fi
+    ss -ltnup 2>/dev/null | grep -E ':20000|:2331' || true
+}
+
+ensure_no_port_conflict() {
+    CONFLICTS="$(port_conflict_summary)"
+    if [ -z "$CONFLICTS" ]; then
+        return 0
+    fi
+
+    echo "ERROR: TRACE32 default ports are already in use." >&2
+    printf '%s\n' "$CONFLICTS" >&2
+
+    if printf '%s\n' "$CONFLICTS" | grep -q 'docker-proxy'; then
+        echo "Hint: a container is hijacking TRACE32 ports 20000/2331." >&2
+        if has_cmd docker; then
+            docker ps --format '  {{.Names}}  {{.Ports}}' 2>/dev/null | grep -E '20000->20000/udp|2331->2331/tcp' >&2 || true
+        fi
+    fi
+
+    exit 1
+}
+
+ensure_no_tcp_port_conflict() {
+    CONFLICTS="$(tcp_port_conflict_summary)"
+    if [ -z "$CONFLICTS" ]; then
+        return 0
+    fi
+
+    echo "ERROR: TRACE32 TCP ports are already in use." >&2
+    printf '%s\n' "$CONFLICTS" >&2
+    exit 1
+}
+
+ensure_no_stale_trace32() {
+    STALE="$(trace32_processes)"
+    if [ -n "$STALE" ]; then
+        echo "ERROR: TRACE32 is already running. A second session will fail with 'TRACE32 already in use'." >&2
+        printf '%s\n' "$STALE" >&2
+        echo "Hint: stop the old TRACE32 session before launching a new one." >&2
+        exit 1
+    fi
+}
+
+kill_stale_trace32() {
+    STALE="$(trace32_processes)"
+    if [ -z "$STALE" ]; then
+        return 0
+    fi
+
+    echo "Stopping stale TRACE32 sessions..."
+    printf '%s\n' "$STALE"
+
+    if ! has_cmd pkill; then
+        echo "ERROR: pkill is required for --kill-stale" >&2
+        exit 1
+    fi
+
+    pkill -9 -f '/opt/t32/bin/pc_linux64/t32marm' || true
+    rm -f /tmp/.X*-lock /tmp/.t32* 2>/dev/null || true
+    sleep 1
+}
+
+start_mci_fallback() {
+    MCI_ENTRYPOINT="$REPO_ROOT/config/t32/trace32_entrypoint.shs"
+    MCI_PING="$REPO_ROOT/config/t32/t32_tcp_ping.shs"
+    MCI_LOG="/tmp/t32_mci.log"
+
+    if [ ! -x "$MCI_ENTRYPOINT" ]; then
+        echo "ERROR: MCI fallback entrypoint not found: $MCI_ENTRYPOINT" >&2
+        exit 1
+    fi
+
+    ensure_no_tcp_port_conflict
+
+    echo "Falling back to t32mciserver (TCP MCI) on port 20000..."
+    nohup "$MCI_ENTRYPOINT" >"$MCI_LOG" 2>&1 &
+    MCI_PID=$!
+    sleep 2
+
+    if ! kill -0 "$MCI_PID" 2>/dev/null; then
+        echo "ERROR: t32mciserver exited during startup." >&2
+        if [ -f "$MCI_LOG" ]; then
+            sed -n '1,120p' "$MCI_LOG" >&2
+        fi
+        exit 1
+    fi
+
+    if [ -x "$MCI_PING" ] && "$MCI_PING" localhost 20000 >/dev/null 2>&1; then
+        echo "TRACE32 MCI fallback pid: $MCI_PID"
+        echo "TRACE32 MCI log: $MCI_LOG"
+        echo "TRACE32 GUI RCL is unavailable on this host; MCI TCP is ready on localhost:20000."
+        exit 0
+    fi
+
+    echo "ERROR: t32mciserver did not answer on localhost:20000." >&2
+    if [ -f "$MCI_LOG" ]; then
+        sed -n '1,120p' "$MCI_LOG" >&2
+    fi
+    exit 1
+}
+
+show_launch_failure_hint() {
+    if [ ! -f "$LOG_PATH" ]; then
+        return 0
+    fi
+
+    if grep -q 'TRACE32 already in use' "$LOG_PATH"; then
+        echo "TRACE32 launch failed: stale TRACE32 session still owns the probe." >&2
+        return 0
+    fi
+
+    if grep -q 'communication error' "$LOG_PATH"; then
+        echo "TRACE32 launch failed: PODBUS communication is still unstable on this host." >&2
+        return 0
+    fi
+
+    if grep -q 'not connected or not accessible' "$LOG_PATH"; then
+        echo "TRACE32 launch failed: Lauterbach probe is visible but not fully usable." >&2
+        return 0
+    fi
 }
 
 if [ "$BOARD" = "" ] || [ "$MODE" = "" ]; then
@@ -54,17 +219,44 @@ if ! command -v xvfb-run >/dev/null 2>&1; then
     exit 1
 fi
 
+ensure_no_port_conflict
+if [ "$KILL_STALE" = "1" ]; then
+    kill_stale_trace32
+fi
+ensure_no_stale_trace32
+
 echo "Starting TRACE32 for $BOARD ($MODE)"
 echo "  config: $CFG_PATH"
 echo "  script: $CMM_PATH"
 
+LOG_PATH="/tmp/t32_${BOARD}_${MODE}.log"
+
 cd "$REPO_ROOT"
-nohup xvfb-run -a "$T32_BIN" -c "$CFG_PATH" "$CMM_PATH" >/tmp/t32_"$BOARD"_"$MODE".log 2>&1 &
+nohup xvfb-run -a "$T32_BIN" -c "$CFG_PATH" "$CMM_PATH" >"$LOG_PATH" 2>&1 &
 PID=$!
 sleep 2
+CHILD_PID=""
+
+if has_cmd pgrep; then
+    CHILD_PID="$(pgrep -P "$PID" -f "$T32_BIN" | head -n 1 || true)"
+fi
+
+if ! kill -0 "$PID" 2>/dev/null || [ -z "$CHILD_PID" ]; then
+    echo "ERROR: TRACE32 exited during startup." >&2
+    show_launch_failure_hint
+    if [ -f "$LOG_PATH" ]; then
+        echo "Recent log output:" >&2
+        sed -n '1,120p' "$LOG_PATH" >&2
+    fi
+    if [ "$FALLBACK_MCI" = "1" ]; then
+        start_mci_fallback
+    fi
+    exit 1
+fi
 
 echo "TRACE32 launch pid: $PID"
-echo "TRACE32 log: /tmp/t32_${BOARD}_${MODE}.log"
+echo "TRACE32 process pid: $CHILD_PID"
+echo "TRACE32 log: $LOG_PATH"
 
 if [ "$MODE" = "gdb" ]; then
     echo "Expected GDB bridge port: 2331"

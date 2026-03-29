@@ -1,24 +1,18 @@
-# Claude Collector
+# LLM Status Collector
 #
-# Collects Claude LLM status from JSONL transcripts.
-# Primary data source: ~/.claude/projects/ JSONL file watching.
-# Secondary: Claude CLI session query, API health check.
+# Unified collector for all LLM providers (Claude, Codex, Gemini).
+# Derives status from the agent tree and estimates cost per provider.
 
-use app.llm_dashboard.data.types.{LLMStatus, LLMProvider, AgentNode}
+use app.llm_dashboard.data.types.{LLMStatus, LLMProvider, AgentNode, AgentActivity, provider_name}
 use app.llm_dashboard.data.agent_tree.{AgentTree}
 
 # =========================================================================
-# Claude Collector
+# Unified Status Collection
 # =========================================================================
 
-class ClaudeCollector:
-    last_check: i64
-
-    static fn new() -> ClaudeCollector:
-        return ClaudeCollector(last_check: 0)
-
-fn collect_claude_status(tree: AgentTree) -> LLMStatus:
-    """Derive Claude status from the agent tree state."""
+fn collect_provider_status(tree: AgentTree, provider: LLMProvider) -> LLMStatus:
+    """Derive status for any LLM provider from the agent tree."""
+    val target_name = provider_name(provider)
     var connected = false
     var model = ""
     var total_tokens: i64 = 0
@@ -26,24 +20,22 @@ fn collect_claude_status(tree: AgentTree) -> LLMStatus:
     var last_heartbeat: i64 = 0
 
     for agent in tree.all_agents():
-        match agent.provider:
-            LLMProvider.Claude:
-                connected = true
-                if agent.model != "" and model == "":
-                    model = agent.model
-                total_tokens = total_tokens + agent.token_count
-                match agent.activity:
-                    AgentActivity.Finished: pass_dn
-                    AgentActivity.Idle: pass_dn
-                    _: active_count = active_count + 1
-                if agent.last_active > last_heartbeat:
-                    last_heartbeat = agent.last_active
-            _: pass_dn
+        if provider_name(agent.provider) == target_name:
+            connected = true
+            if agent.model != "" and model == "":
+                model = agent.model
+            total_tokens = total_tokens + agent.token_count
+            match agent.activity:
+                AgentActivity.Finished: pass_dn
+                AgentActivity.Idle: pass_dn
+                _: active_count = active_count + 1
+            if agent.last_active > last_heartbeat:
+                last_heartbeat = agent.last_active
 
-    val cost_cents = estimate_claude_cost(total_tokens, model)
+    val cost_cents = estimate_cost(provider, total_tokens, model)
 
     return LLMStatus(
-        provider: LLMProvider.Claude,
+        provider: provider,
         connected: connected,
         model: model,
         tokens_used: total_tokens,
@@ -52,23 +44,43 @@ fn collect_claude_status(tree: AgentTree) -> LLMStatus:
         last_heartbeat: last_heartbeat
     )
 
+# Convenience wrappers for backward compatibility
+fn collect_claude_status(tree: AgentTree) -> LLMStatus:
+    return collect_provider_status(tree, LLMProvider.Claude)
+
+fn collect_codex_status(tree: AgentTree) -> LLMStatus:
+    return collect_provider_status(tree, LLMProvider.Codex)
+
+fn collect_gemini_status(tree: AgentTree) -> LLMStatus:
+    return collect_provider_status(tree, LLMProvider.Gemini)
+
 # =========================================================================
-# Cost Estimation
+# Cost Estimation (provider-specific rate tables)
 # =========================================================================
 
-fn estimate_claude_cost(tokens: i64, model: text) -> i64:
-    """Estimate cost in cents based on token count and model.
-    Uses approximate blended (input+output) rates."""
-    val lower = model.to_lower()
-    # Approximate cents per 1K tokens (blended input/output)
-    var cents_per_1k: i64 = 0
-    if lower.contains("opus"):
-        cents_per_1k = 5     # ~$15/M input, ~$75/M output blended
-    elif lower.contains("sonnet"):
-        cents_per_1k = 2     # ~$3/M input, ~$15/M output blended
-    elif lower.contains("haiku"):
-        cents_per_1k = 1     # ~$0.25/M input, ~$1.25/M output blended
-    else:
-        cents_per_1k = 2     # default to sonnet-like
-
+fn estimate_cost(provider: LLMProvider, tokens: i64, model: text) -> i64:
+    """Estimate cost in cents based on provider, token count, and model."""
+    val cents_per_1k = model_rate(provider, model)
     return (tokens * cents_per_1k) / 1000
+
+fn model_rate(provider: LLMProvider, model: text) -> i64:
+    """Get blended cents-per-1K-tokens rate for a model."""
+    val lower = model.to_lower()
+    match provider:
+        LLMProvider.Claude:
+            if lower.contains("opus"):      return 5
+            if lower.contains("sonnet"):    return 2
+            if lower.contains("haiku"):     return 1
+            return 2
+        LLMProvider.Codex:
+            if lower.contains("gpt-4"):     return 3
+            if lower.contains("o1") or lower.contains("o3") or lower.contains("o4"):
+                return 4
+            if lower.contains("codex"):     return 1
+            return 2
+        LLMProvider.Gemini:
+            if lower.contains("2.5-pro") or lower.contains("ultra"):  return 3
+            if lower.contains("2.5-flash") or lower.contains("flash"): return 1
+            if lower.contains("pro"):       return 2
+            return 1
+        _: return 2

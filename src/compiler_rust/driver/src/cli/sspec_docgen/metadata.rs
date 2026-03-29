@@ -57,6 +57,10 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
             if let Some(research) = extract_field_value(trimmed, "**Research:**") {
                 metadata.research = Some(research);
             }
+        } else if trimmed.starts_with("**Related:**") {
+            metadata.related = extract_list_field(&lines, &mut i, "**Related:**");
+        } else if trimmed.starts_with("**Dependencies:**") {
+            metadata.dependencies = extract_list_field(&lines, &mut i, "**Dependencies:**");
         } else if trimmed.starts_with("**Artifacts:**") {
             metadata.artifacts = extract_list_field(&lines, &mut i, "**Artifacts:**");
         } else if trimmed.starts_with("**Screenshots:**") {
@@ -170,5 +174,42 @@ mod tests {
             vec!["logs/run.txt".to_string(), "logs/bridge.txt".to_string()]
         );
         assert_eq!(idx, 2);
+    }
+
+    #[test]
+    fn test_extract_metadata_related_and_dependencies() {
+        let mut doc = SspecDoc {
+            file_path: "test/example_spec.spl".into(),
+            raw_content: String::new(),
+            doc_blocks: vec![super::super::types::DocBlock {
+                content: r#"
+**Related:** doc/04_architecture/example.md, doc/05_design/example.md
+**Dependencies:**
+- std.test
+- app.runtime
+"#
+                .trim()
+                .to_string(),
+                line_start: 0,
+                line_end: 4,
+            }],
+            feature_title: None,
+            feature_ids: vec![],
+            metadata: Default::default(),
+        };
+
+        extract_metadata(&mut doc);
+
+        assert_eq!(
+            doc.metadata.related,
+            vec![
+                "doc/04_architecture/example.md".to_string(),
+                "doc/05_design/example.md".to_string()
+            ]
+        );
+        assert_eq!(
+            doc.metadata.dependencies,
+            vec!["std.test".to_string(), "app.runtime".to_string()]
+        );
     }
 }

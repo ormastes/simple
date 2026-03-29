@@ -18,7 +18,11 @@ and JSON encoding/extraction from the LSP JSON helpers module.
 `examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl`
 """
 
+use app.io.mod.{shell}
 use app.t32_lsp_mcp.json_helpers.{lsp_Q, lsp_LB, lsp_RB, lsp_escape_json, lsp_js, lsp_jp, lsp_jo1, lsp_jo2, lsp_extract_field}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 
 # ============================================================================
 # Inlined helpers from tools.spl (cannot import tools.spl due to cmm_lsp deps)
@@ -297,3 +301,54 @@ describe "T32 LSP MCP JSON Helpers":
             val json = "{\"a\":1}"
             val result = lsp_extract_field(json, "missing")
             expect(result).to_equal("")
+
+# ============================================================================
+# Wrapper integration
+# ============================================================================
+
+fn shell_escape_text(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn shutdown_request(id: text) -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"shutdown\",\"params\":{}}")
+
+fn tools_call_request(id: text, name: text, arguments_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + arguments_json + "}}"
+    mcp_msg(body)
+
+describe "T32 LSP MCP Wrapper":
+
+    it "recovers from stale ready marker before tools/call":
+        val mk_input = shell("mktemp /tmp/t32_lsp_mcp_input.XXXXXX")
+        val input_path = (mk_input.stdout ?? "").trim()
+        val daemon_dir = "/tmp/t32_lsp_mcp_spec_stale_ready"
+        val stale_req = daemon_dir + "/stale.req"
+        val messages = init_request("1") + tools_call_request("2", "cmm_complete", "{\"source\":\"BR\",\"line\":0,\"character\":2}") + shutdown_request("3")
+        expect(input_path != "").to_equal(true)
+        expect(rt_file_write_text(input_path, messages)).to_equal(true)
+
+        val setup = shell("rm -rf " + shell_escape_text(daemon_dir) + " && mkdir -p " + shell_escape_text(daemon_dir) + " && printf ready > " + shell_escape_text(daemon_dir + "/ready") + " && printf stale > " + shell_escape_text(stale_req))
+        expect(setup.exit_code).to_equal(0)
+
+        val cmd = "timeout 15s env T32_LSP_MCP_TOOL_DAEMON_DIR=" + shell_escape_text(daemon_dir) + " /home/ormastes/dev/pub/simple/bin/t32_lsp_mcp_server < " + shell_escape_text(input_path)
+        val result = shell(cmd)
+        val stdout = result.stdout ?? ""
+        val stderr = result.stderr ?? ""
+
+        rt_file_delete(input_path)
+        shell("rm -rf " + shell_escape_text(daemon_dir))
+
+        expect(result.exit_code).to_equal(0)
+        expect(stdout.contains("\"id\":\"1\"")).to_equal(true)
+        expect(stdout.contains("\"id\":\"2\"")).to_equal(true)
+        expect(stdout.contains("\"result\"")).to_equal(true)
+        expect(stdout.contains("Tool daemon timed out")).to_equal(false)
+        expect(stdout.contains("failed to become ready")).to_equal(true)
+        expect(stderr.contains("Transport closed")).to_equal(false)

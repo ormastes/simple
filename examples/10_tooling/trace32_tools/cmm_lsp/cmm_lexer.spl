@@ -196,6 +196,25 @@ fn ends_with_continuation(line: text) -> bool:
         return false
     line[len - 1:len] == "\\"
 
+fn prev_non_whitespace_char(line: text, pos: i64) -> text:
+    var i = pos
+    while i > 0:
+        val ch = line[i - 1:i]
+        if ch != " " and ch != "\t" and ch != "\r":
+            return ch
+        i = i - 1
+    ""
+
+fn has_left_operand_before_ampersand(line: text, pos: i64) -> bool:
+    val prev = prev_non_whitespace_char(line, pos)
+    if prev == "":
+        return false
+    if is_ident_char(prev) or is_digit(prev):
+        return true
+    if prev == "\"" or prev == "'" or prev == ")" or prev == "]":
+        return true
+    false
+
 # --- Label detection ---
 
 # Try to lex a label at column 1. Labels are identifiers followed by colon at the start of a line.
@@ -242,28 +261,16 @@ fn lex_macro_ref(line: text, pos: i64, line_num: i64, col: i64) -> LexResult:
         is_recursive = true
         i = i + 1
 
-    # When &&name immediately follows a non-hex-number token, split into & (AND) + &name.
-    # Requires identifier to follow (so &&( stays as LogicalAnd).
-    if is_recursive and pos > 0 and i < length and is_ident_char(line[i:i + 1]):
-        val prev_ch = line[pos - 1:pos]
-        var split_here = false
-        # Split after non-hex identifier chars (g-z, G-Z, _)
-        if is_ident_char(prev_ch) and not is_hex_digit(prev_ch) and not is_digit(prev_ch):
-            split_here = true
-        # Split after closing quote, closing paren, or trailing dot
-        if prev_ch == "\"" or prev_ch == ")" or prev_ch == ".":
-            split_here = true
-        # Split after digits/hex that are part of a macro name (&name ending in digit)
-        # Scan backwards: if we find & before ident chars, it's &macro&&name, so split.
-        if not split_here and (is_digit(prev_ch) or is_hex_digit(prev_ch)):
-            var back = pos - 1
-            while back > 0 and is_ident_char(line[back - 1:back]):
-                back = back - 1
-            # If the character before the identifier is &, this is &macro_name&&
-            if back > 0 and line[back - 1:back] == "&":
-                split_here = true
-        if split_here:
-            return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
+    # When there is already a left operand, &&name is an infix logical operator,
+    # not a recursive macro reference. Recursive macros remain valid at expression
+    # starts, after assignments, and after delimiters such as '('.
+    if is_recursive and i < length and is_ident_char(line[i:i + 1]) and has_left_operand_before_ampersand(line, pos):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.LogicalAnd, line: line_num, column: col, text: "&&"), new_pos: pos + 2)
+
+    # Likewise, &name after an existing left operand is a binary AND followed by
+    # an identifier or dot-command operand, not a macro reference.
+    if not is_recursive and i < length and is_ident_char(line[i:i + 1]) and has_left_operand_before_ampersand(line, pos):
+        return LexResult(token: CmmToken(kind: CmmTokenKind.Ampersand, line: line_num, column: col, text: "&"), new_pos: pos + 1)
 
     # Special case: && as logical AND operator (no identifier follows, or digit follows)
     # Macro names start with letter or _, NOT with digit. &&0xFF = LogicalAnd + hex.
@@ -740,4 +747,3 @@ fn lex_operator_or_delimiter(line: text, pos: i64, line_num: i64, col: i64) -> L
 
     # Unknown character
     LexResult(token: CmmToken(kind: CmmTokenKind.Error("Unknown character: {ch}"), line: line_num, column: col, text: ch), new_pos: pos + 1)
-

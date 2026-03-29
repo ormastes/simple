@@ -18,10 +18,10 @@ struct FeatureEntry {
     title: String,
     filename: String,
     status: String,
+    docs_status: String,
     difficulty: String,
-    coverage: String,
-    doc_lines: usize,
     test_count: usize,
+    summary: String,
 }
 
 /// Generate INDEX.md with categorization and metadata
@@ -64,28 +64,29 @@ pub fn generate_index_page(
             category.name,
             category.features.len()
         ));
-        md.push_str("| Feature | Status | Difficulty | Tests | Coverage | Details |\n");
-        md.push_str("|---------|--------|------------|-------|----------|----------|\n");
+        md.push_str("| Feature | Status | Docs | Difficulty | Tests | Summary |\n");
+        md.push_str("|---------|--------|------|------------|-------|---------|\n");
 
         for feature in category.features {
             md.push_str(&format!(
-                "| [{}]({}) | {} | {} | {} | {} | {} lines |\n",
+                "| [{}]({}) | {} | {} | {} | {} | {} |\n",
                 feature.title,
                 feature.filename,
                 feature.status,
+                feature.docs_status,
                 feature.difficulty,
                 feature.test_count,
-                feature.coverage,
-                feature.doc_lines
+                escape_table_cell(&feature.summary)
             ));
         }
         md.push('\n');
     }
 
-    // Write to file
-    let output_path = output_dir.join("INDEX.md");
-    let mut file = fs::File::create(output_path)?;
-    file.write_all(md.as_bytes())?;
+    for file_name in ["INDEX.md", "README.md"] {
+        let output_path = output_dir.join(file_name);
+        let mut file = fs::File::create(output_path)?;
+        file.write_all(md.as_bytes())?;
+    }
 
     Ok(())
 }
@@ -133,20 +134,14 @@ fn group_by_category(parsed_files: &[(SspecDoc, ValidationResult)]) -> Vec<Categ
             .clone()
             .unwrap_or_else(|| "N/A".to_string());
 
-        let coverage = if validation.has_docs {
-            format!("{}%", calculate_coverage(validation))
-        } else {
-            "0%".to_string()
-        };
-
         let entry = FeatureEntry {
             title,
             filename: format!("{}.md", file_name),
             status,
+            docs_status: docs_status(validation),
             difficulty,
-            coverage,
-            doc_lines: validation.doc_lines,
             test_count: count_test_cases(&sspec_doc.raw_content),
+            summary: extract_summary(sspec_doc),
         };
 
         category_map.entry(category_name).or_default().push(entry);
@@ -242,21 +237,207 @@ fn count_test_cases(content: &str) -> usize {
         .count()
 }
 
-/// Calculate coverage percentage (simple heuristic)
-fn calculate_coverage(validation: &ValidationResult) -> u32 {
-    if validation.doc_lines >= 500 {
-        100
-    } else if validation.doc_lines >= 300 {
-        90
-    } else if validation.doc_lines >= 200 {
-        80
-    } else if validation.doc_lines >= 100 {
-        60
+fn docs_status(validation: &ValidationResult) -> String {
+    if !validation.has_docs {
+        "Stub".to_string()
+    } else if validation.warnings.is_empty() && validation.doc_lines >= 100 {
+        "Healthy".to_string()
     } else if validation.doc_lines >= 50 {
-        40
-    } else if validation.doc_lines > 0 {
-        20
+        "Needs detail".to_string()
     } else {
-        0
+        "Thin".to_string()
+    }
+}
+
+fn extract_summary(sspec_doc: &SspecDoc) -> String {
+    let body = render_doc_body(sspec_doc);
+    let summary = extract_summary_from_markdown(&body)
+        .unwrap_or_else(|| "Summary not provided in the doc blocks.".to_string());
+    truncate_summary(&summary, 120)
+}
+
+fn render_doc_body(sspec_doc: &SspecDoc) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(first_block) = sspec_doc.doc_blocks.first() {
+        let first = strip_header_metadata(&first_block.content);
+        if !first.is_empty() {
+            sections.push(first);
+        }
+        for block in sspec_doc.doc_blocks.iter().skip(1) {
+            let content = block.content.trim();
+            if !content.is_empty() {
+                sections.push(content.to_string());
+            }
+        }
+    }
+
+    sections.join("\n\n")
+}
+
+fn strip_header_metadata(content: &str) -> String {
+    let mut out = Vec::new();
+    let mut skipping_leading_blanks = true;
+    let mut skipping_metadata_list = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let is_metadata = trimmed.starts_with("**Feature ID:**")
+            || trimmed.starts_with("**Feature IDs:**")
+            || trimmed.starts_with("**Category:**")
+            || trimmed.starts_with("**Difficulty:**")
+            || trimmed.starts_with("**Status:**")
+            || trimmed.starts_with("**Requirements:**")
+            || trimmed.starts_with("**Plan:**")
+            || trimmed.starts_with("**Design:**")
+            || trimmed.starts_with("**Research:**")
+            || trimmed.starts_with("**Related:**")
+            || trimmed.starts_with("**Dependencies:**")
+            || trimmed.starts_with("**Artifacts:**")
+            || trimmed.starts_with("**Screenshots:**")
+            || trimmed.starts_with("**TUI Captures:**")
+            || trimmed.starts_with("**Logs:**");
+
+        if trimmed.starts_with("# ") || is_metadata {
+            skipping_metadata_list = is_metadata;
+            continue;
+        }
+
+        if skipping_metadata_list {
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                continue;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            skipping_metadata_list = false;
+        }
+
+        if skipping_leading_blanks && trimmed.is_empty() {
+            continue;
+        }
+
+        skipping_leading_blanks = false;
+        out.push(line);
+    }
+
+    out.join("\n").trim().to_string()
+}
+
+fn extract_summary_from_markdown(content: &str) -> Option<String> {
+    let mut in_overview = false;
+    let mut paragraph = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("## ") {
+            in_overview = trimmed == "## Overview" || trimmed == "## Description";
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if trimmed.starts_with('#') || trimmed.starts_with("```") {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        if in_overview || paragraph.is_empty() {
+            if !trimmed.starts_with("- ") && !trimmed.starts_with("* ") {
+                paragraph.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if paragraph.is_empty() {
+        None
+    } else {
+        Some(paragraph.join(" "))
+    }
+}
+
+fn truncate_summary(summary: &str, max_len: usize) -> String {
+    if summary.chars().count() <= max_len {
+        return summary.to_string();
+    }
+
+    let truncated: String = summary.chars().take(max_len.saturating_sub(1)).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+fn escape_table_cell(value: &str) -> String {
+    value.replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn validation(doc_lines: usize, warnings: &[&str]) -> ValidationResult {
+        ValidationResult {
+            file_path: PathBuf::from("test/example_spec.spl"),
+            has_docs: doc_lines > 0,
+            doc_lines,
+            has_sections: HashSet::new(),
+            warnings: warnings.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_docs_status_prefers_quality_labels() {
+        assert_eq!(docs_status(&validation(0, &[])), "Stub");
+        assert_eq!(docs_status(&validation(40, &["short"])), "Thin");
+        assert_eq!(docs_status(&validation(80, &["short"])), "Needs detail");
+        assert_eq!(docs_status(&validation(120, &[])), "Healthy");
+    }
+
+    #[test]
+    fn test_extract_summary_prefers_overview_paragraph() {
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/example_spec.spl"),
+            raw_content: String::new(),
+            doc_blocks: vec![super::super::types::DocBlock {
+                content: r#"
+# Example
+
+**Status:** Implemented
+
+## Overview
+
+This summary should appear in the generated index before any code examples.
+
+## Examples
+
+```simple
+expect(true).to_equal(true)
+```
+"#
+                .trim()
+                .to_string(),
+                line_start: 0,
+                line_end: 14,
+            }],
+            feature_title: Some("Example".to_string()),
+            feature_ids: vec![],
+            metadata: Default::default(),
+        };
+
+        assert_eq!(
+            extract_summary(&doc),
+            "This summary should appear in the generated index before any code examples."
+        );
     }
 }
