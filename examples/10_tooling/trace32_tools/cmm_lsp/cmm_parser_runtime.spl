@@ -1,0 +1,61 @@
+# CMM (PRACTICE Script) Parser — Runtime Implementation
+#
+# This module holds the concrete parser implementation. The public
+# `cmm_parser.spl` module stays thin so importers keep the stable name
+# without tripping module-loader issues seen with the full implementation.
+
+use cmm_tokens.{CmmTokenKind, CmmToken}
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem, span, span_range}
+use cmm_lexer.{lex_cmm_source}
+use cmm_parser_core
+use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
+use cmm_parser_expr
+use cmm_parser_stmts
+
+extern fn rt_file_read_text(path: text) -> text
+
+impl CmmParser:
+    # Parse the full token stream into a CmmProgram.
+    me parse_program_runtime() -> CmmProgram:
+        var stmts: [CmmStmt] = []
+        while not self.is_at_end():
+            match self.peek().kind:
+                case CmmTokenKind.Newline:
+                    val tok = self.advance()
+                    stmts.push(CmmStmt.EmptyLine(span(tok.line, tok.column)))
+                case CmmTokenKind.Comment(c):
+                    val tok = self.advance()
+                    stmts.push(CmmStmt.CommentLine(c, span(tok.line, tok.column)))
+                case CmmTokenKind.Eof:
+                    break
+                case CmmTokenKind.RParen:
+                    self.advance()
+                case _:
+                    match self.parse_statement_impl():
+                        case Ok(stmt):
+                            stmts.push(stmt)
+                            self.skip_to_next_line()
+                        case Err(e):
+                            self.errors.push("Line {e.line}: {e.message}")
+                            stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
+                            self.skip_to_next_line()
+                    if not self.is_at_end():
+                        match self.peek().kind:
+                            case CmmTokenKind.Newline:
+                                self.advance()
+                            case CmmTokenKind.Comment(c):
+                                val ctok = self.advance()
+                                stmts.push(CmmStmt.CommentLine(c, span(ctok.line, ctok.column)))
+                            case _: ()
+        CmmProgram(statements: stmts, file_path: "", errors: self.errors)
+
+fn parse_cmm_source(source: text) -> CmmProgram:
+    val tokens = lex_cmm_source(source)
+    var parser = CmmParser(tokens: tokens, current: 0, errors: [])
+    parser.parse_program_runtime()
+
+fn parse_cmm_file(path: text) -> CmmProgram:
+    val source = rt_file_read_text(path) ?? ""
+    var program = parse_cmm_source(source)
+    program.file_path = path
+    program

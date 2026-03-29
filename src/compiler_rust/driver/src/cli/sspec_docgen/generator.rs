@@ -73,6 +73,7 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
         md.push_str("Documentation was generated from executable SSpec scenarios.\n\n");
     }
 
+    append_extracted_examples_section(&mut md, sspec_doc);
     append_evidence_section(&mut md, sspec_doc);
 
     if !scenarios.is_empty() {
@@ -370,6 +371,55 @@ fn append_evidence_section(md: &mut String, sspec_doc: &SspecDoc) {
     }
 }
 
+fn append_extracted_examples_section(md: &mut String, sspec_doc: &SspecDoc) {
+    let examples = extract_examples(&sspec_doc.raw_content);
+    if examples.is_empty() {
+        return;
+    }
+
+    md.push_str("## Example Details\n\n");
+    md.push_str("| Example | Kind | Reference |\n");
+    md.push_str("|---------|------|-----------|\n");
+    for (idx, example) in examples.iter().enumerate() {
+        let reference = example
+            .source_hint
+            .clone()
+            .unwrap_or_else(|| "—".to_string());
+        md.push_str(&format!(
+            "| {} | {} | {} |\n",
+            idx + 1,
+            escape_table_cell(&example.kind),
+            escape_table_cell(&reference)
+        ));
+    }
+    md.push('\n');
+
+    for (idx, example) in examples.iter().enumerate() {
+        md.push_str(&format!("### {}. {}\n\n", idx + 1, example.title));
+
+        let mut details = Vec::new();
+        details.push(format!("Kind: {}", example.kind));
+        if let Some(source_hint) = &example.source_hint {
+            details.push(format!("Reference: {}", source_hint));
+        }
+        if let Some(scenario_name) = &example.scenario_name {
+            details.push(format!("Scenario: `{}`", scenario_name));
+        }
+        md.push_str(&format!("*{}*\n\n", details.join(" | ")));
+
+        if !example.description.is_empty() {
+            md.push_str(&example.description);
+            md.push_str("\n\n");
+        }
+
+        if !example.code.is_empty() {
+            md.push_str("```simple\n");
+            md.push_str(example.code.trim_end());
+            md.push_str("\n```\n\n");
+        }
+    }
+}
+
 fn append_evidence_summary(md: &mut String, evidence_groups: &[(&str, &Vec<String>)]) {
     md.push_str("| Category | Count |\n");
     md.push_str("|----------|------:|\n");
@@ -459,6 +509,15 @@ struct Scenario {
     kind: ScenarioKind,
 }
 
+struct ExtractedExample {
+    title: String,
+    source_hint: Option<String>,
+    description: String,
+    code: String,
+    kind: String,
+    scenario_name: Option<String>,
+}
+
 fn extract_scenarios(content: &str) -> Vec<Scenario> {
     let mut scenarios = Vec::new();
 
@@ -489,6 +548,122 @@ fn extract_quoted_name(input: &str) -> Option<String> {
     let rest = &input[start + 1..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+fn extract_examples(content: &str) -> Vec<ExtractedExample> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut examples = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        let Some(header) = trimmed.strip_prefix("## Test:") else {
+            i += 1;
+            continue;
+        };
+
+        let (title, source_hint) = parse_example_heading(header.trim());
+        i += 1;
+
+        while i < lines.len() && lines[i].trim().is_empty() {
+            i += 1;
+        }
+
+        let mut description = String::new();
+        if i < lines.len() && lines[i].trim() == "\"\"\"" {
+            i += 1;
+            let start = i;
+            while i < lines.len() && lines[i].trim() != "\"\"\"" {
+                i += 1;
+            }
+            description = lines[start..i].join("\n").trim().to_string();
+            if i < lines.len() && lines[i].trim() == "\"\"\"" {
+                i += 1;
+            }
+        }
+
+        while i < lines.len() && lines[i].trim().is_empty() {
+            i += 1;
+        }
+
+        let code_start = i;
+        while i < lines.len() && !lines[i].trim().starts_with("## Test:") {
+            i += 1;
+        }
+
+        let code = lines[code_start..i].join("\n").trim().to_string();
+        let (kind, scenario_name) = classify_example_code(&code);
+
+        examples.push(ExtractedExample {
+            title,
+            source_hint,
+            description,
+            code,
+            kind,
+            scenario_name,
+        });
+    }
+
+    examples
+}
+
+fn parse_example_heading(header: &str) -> (String, Option<String>) {
+    if let Some((title, suffix)) = header.rsplit_once(" (") {
+        if suffix.ends_with(')') {
+            return (
+                title.trim().to_string(),
+                Some(suffix.trim_end_matches(')').trim().to_string()),
+            );
+        }
+    }
+
+    (header.trim().to_string(), None)
+}
+
+fn classify_example_code(code: &str) -> (String, Option<String>) {
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if let Some(name) = trimmed.strip_prefix("it ").and_then(extract_quoted_name) {
+            return ("Scenario".to_string(), Some(name));
+        }
+        if let Some(name) = trimmed.strip_prefix("skip_it ").and_then(extract_quoted_name) {
+            return ("Skipped scenario".to_string(), Some(name));
+        }
+        if let Some(name) = trimmed.strip_prefix("slow_it ").and_then(extract_quoted_name) {
+            return ("Slow scenario".to_string(), Some(name));
+        }
+        if let Some(name) = trimmed.strip_prefix("pending ").and_then(extract_quoted_name) {
+            return ("Pending scenario".to_string(), Some(name));
+        }
+        if let Some(rest) = trimmed.strip_prefix("fn ") {
+            let name = rest
+                .split(['(', ' ', ':'])
+                .next()
+                .unwrap_or("example")
+                .trim()
+                .to_string();
+            return ("Function example".to_string(), Some(name));
+        }
+        if let Some(rest) = trimmed.strip_prefix("class ") {
+            let name = rest
+                .split(['(', ' ', ':'])
+                .next()
+                .unwrap_or("example")
+                .trim()
+                .to_string();
+            return ("Class example".to_string(), Some(name));
+        }
+        if trimmed.starts_with("describe ") {
+            return ("Describe block".to_string(), extract_quoted_name(trimmed));
+        }
+        return ("Code example".to_string(), None);
+    }
+
+    ("Code example".to_string(), None)
 }
 
 #[cfg(test)]
@@ -630,5 +805,90 @@ expect(true).to_equal(true)
         };
 
         assert_eq!(preferred_feature_name(&doc, "macro"), "Macro Specification");
+    }
+
+    #[test]
+    fn test_extract_examples_parses_markers_docblocks_and_code() {
+        let content = r#"
+## Test: Functions (Line ~7)
+
+"""
+Functions in Simple are defined with the `fn` keyword.
+"""
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+## Test: Closures (Line ~19)
+
+"""
+Closures capture variables.
+"""
+it "closures_1":
+    expect(true).to_equal(true)
+"#;
+
+        let examples = extract_examples(content);
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0].title, "Functions");
+        assert_eq!(examples[0].source_hint.as_deref(), Some("Line ~7"));
+        assert_eq!(examples[0].kind, "Function example");
+        assert_eq!(examples[0].scenario_name.as_deref(), Some("add"));
+        assert!(examples[0].code.contains("fn add"));
+        assert_eq!(examples[1].kind, "Scenario");
+        assert_eq!(examples[1].scenario_name.as_deref(), Some("closures_1"));
+    }
+
+    #[test]
+    fn test_generate_feature_doc_renders_example_details_for_extracted_specs() {
+        let tempdir = tempdir().expect("tempdir");
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/specs/functions_spec.spl"),
+            raw_content: r#"
+## Test: Functions (Line ~7)
+
+"""
+Functions in Simple are defined with the `fn` keyword.
+"""
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+"#
+            .to_string(),
+            doc_blocks: vec![super::super::types::DocBlock {
+                content: r#"
+# Simple Language Functions and Pattern Matching - Test Specification
+
+**Status:** Reference
+**Source:** functions.md
+**Type:** Extracted Examples (Category B)
+
+## Overview
+
+This file contains executable test cases extracted from functions.md.
+"#
+                .trim()
+                .to_string(),
+                line_start: 0,
+                line_end: 8,
+            }],
+            feature_title: Some("Simple Language Functions and Pattern Matching - Test Specification".to_string()),
+            feature_ids: vec![],
+            metadata: FeatureMetadata {
+                status: Some("Reference".to_string()),
+                source_doc: Some("functions.md".to_string()),
+                doc_type: Some("Extracted Examples (Category B)".to_string()),
+                ..Default::default()
+            },
+        };
+
+        generate_feature_doc(&doc, tempdir.path()).expect("generate doc");
+
+        let output = fs::read_to_string(tempdir.path().join("functions.md")).expect("read doc");
+        assert!(output.contains("## Example Details"));
+        assert!(output.contains("### 1. Functions"));
+        assert!(output.contains("Kind: Function example"));
+        assert!(output.contains("Reference: Line ~7"));
+        assert!(output.contains("Scenario: `add`"));
+        assert!(output.contains("```simple"));
+        assert!(output.contains("fn add(a: i64, b: i64) -> i64:"));
     }
 }

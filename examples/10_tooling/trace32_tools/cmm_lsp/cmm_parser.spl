@@ -1,79 +1,10 @@
-# CMM (PRACTICE Script) Parser — Main Module
-# Recursive-descent parser for TRACE32 PRACTICE scripting language.
-# Converts a flat token stream from the CMM lexer into a CmmProgram AST.
-#
-# Architecture:
-#   cmm_parser.spl      — CmmParser class, core methods, top-level parse loop
-#   cmm_parser_stmts.spl — Statement parsing (impl block on CmmParser)
-#   cmm_parser_expr.spl  — Expression parsing (impl block on CmmParser)
-#
-# CMM is line-oriented: one command per line, blocks delimited by ( ... ),
-# case-insensitive keywords, macro-based variables (&name).
+# CMM (PRACTICE Script) Parser — Public facade
 
-use cmm_tokens.{CmmTokenKind, CmmToken}
-use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan, CmmDialogItem, span, span_range}
-use cmm_lexer.{lex_cmm_source}
-use cmm_parser_core
-use cmm_parser_core.{CmmParser, CmmParseError, to_upper_cmm}
-# Load the impl blocks that extend CmmParser without importing every helper
-# symbol from those modules into this file's namespace.
-use cmm_parser_expr
-use cmm_parser_stmts
+use cmm_ast.{CmmProgram}
+use cmm_parser_runtime.{parse_cmm_source as runtime_parse_cmm_source, parse_cmm_file as runtime_parse_cmm_file}
 
-extern fn rt_file_read_text(path: text) -> text
-
-impl CmmParser:
-    # --- Top-level parsing ---
-
-    # Parse the full token stream into a CmmProgram.
-    me parse_program() -> CmmProgram:
-        var stmts: [CmmStmt] = []
-        while not self.is_at_end():
-            match self.peek().kind:
-                case CmmTokenKind.Newline:
-                    val tok = self.advance()
-                    stmts.push(CmmStmt.EmptyLine(span(tok.line, tok.column)))
-                case CmmTokenKind.Comment(c):
-                    val tok = self.advance()
-                    stmts.push(CmmStmt.CommentLine(c, span(tok.line, tok.column)))
-                case CmmTokenKind.Eof:
-                    break
-                case CmmTokenKind.RParen:
-                    # Stray closing paren at top level — skip silently
-                    self.advance()
-                case _:
-                    match self.parse_statement_impl():
-                        case Ok(stmt):
-                            stmts.push(stmt)
-                            # Skip any remaining tokens on this line (trailing comments, annotations)
-                            self.skip_to_next_line()
-                        case Err(e):
-                            self.errors.push("Line {e.line}: {e.message}")
-                            # Error recovery: emit an ErrorNode and skip to next line
-                            stmts.push(CmmStmt.ErrorNode(e.message, span(e.line, e.column)))
-                            self.skip_to_next_line()
-                    # Consume trailing newline / comment after statement
-                    if not self.is_at_end():
-                        match self.peek().kind:
-                            case CmmTokenKind.Newline:
-                                self.advance()
-                            case CmmTokenKind.Comment(c):
-                                val ctok = self.advance()
-                                stmts.push(CmmStmt.CommentLine(c, span(ctok.line, ctok.column)))
-                            case _: ()
-        CmmProgram(statements: stmts, file_path: "", errors: self.errors)
-
-# --- Public API ---
-
-# Parse CMM source text into a program AST.
 fn parse_cmm_source(source: text) -> CmmProgram:
-    val tokens = lex_cmm_source(source)
-    var parser = CmmParser(tokens: tokens, current: 0, errors: [])
-    parser.parse_program()
+    runtime_parse_cmm_source(source)
 
-# Parse a CMM file from disk into a program AST.
 fn parse_cmm_file(path: text) -> CmmProgram:
-    val source = rt_file_read_text(path) ?? ""
-    var program = parse_cmm_source(source)
-    program.file_path = path
-    program
+    runtime_parse_cmm_file(path)
