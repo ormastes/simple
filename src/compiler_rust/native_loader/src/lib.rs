@@ -1,5 +1,6 @@
 mod loader;
 mod module;
+mod process_provider;
 mod registry;
 
 // Runtime symbol providers
@@ -10,6 +11,7 @@ mod static_provider;
 
 pub use loader::{LoadError, ModuleLoader};
 pub use module::LoadedModule;
+pub use process_provider::ProcessSymbolProvider;
 pub use registry::ModuleRegistry;
 pub use simple_common::{DynLoader, DynModule};
 

@@ -18,6 +18,10 @@ pub struct FeatureMetadata {
     pub category: Option<String>,
     pub difficulty: Option<String>,
     pub status: Option<String>,
+    pub requirements: Option<String>,
+    pub plan: Option<String>,
+    pub design: Option<String>,
+    pub research: Option<String>,
     pub related: Vec<String>,
     pub dependencies: Vec<String>,
 }
@@ -26,6 +30,7 @@ pub struct FeatureMetadata {
 #[derive(Debug)]
 pub struct SspecDoc {
     pub file_path: PathBuf,
+    pub raw_content: String,
     pub doc_blocks: Vec<DocBlock>,
     pub feature_title: Option<String>,
     pub feature_ids: Vec<String>,

@@ -4,6 +4,7 @@
 //! are resolved at compile time via direct references.
 
 use simple_common::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+use simple_runtime::value::ffi::{rt_native_eq, rt_native_neq};
 
 /// Provides runtime symbols via static linking (compiled into binary).
 ///
@@ -237,6 +238,8 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_value_is_bool,
             rt_value_is_heap,
             rt_value_eq,
+            rt_native_eq,
+            rt_native_neq,
             rt_value_compare,
             // Object operations
             rt_object_new,

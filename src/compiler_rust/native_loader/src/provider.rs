@@ -5,6 +5,7 @@
 
 use crate::chained_provider::ChainedProvider;
 use crate::dynamic_provider::{DynLoadError, DynamicSymbolProvider};
+use crate::process_provider::ProcessSymbolProvider;
 use crate::static_provider::StaticSymbolProvider;
 use simple_common::RuntimeSymbolProvider;
 use std::path::Path;
@@ -15,6 +16,12 @@ use std::sync::Arc;
 /// Determines how runtime symbols are resolved at execution time.
 #[derive(Clone, Debug, Default)]
 pub enum RuntimeLoadMode {
+    /// Resolve symbols from the current process image.
+    ///
+    /// This is the safest option for the CLI and SMF loader because it uses
+    /// the exact runtime already linked into the running `simple` process.
+    Process,
+
     /// Static linking (compiled into binary).
     ///
     /// Zero runtime lookup cost - all symbols are resolved at compile time.
@@ -93,6 +100,8 @@ pub fn create_runtime_provider(mode: RuntimeLoadMode) -> Result<Arc<dyn RuntimeS
     match mode {
         RuntimeLoadMode::Static => Ok(Arc::new(StaticSymbolProvider)),
 
+        RuntimeLoadMode::Process => Ok(Arc::new(ProcessSymbolProvider::new().map_err(DynLoadError::LoadError)?)),
+
         RuntimeLoadMode::Dynamic => Ok(Arc::new(DynamicSymbolProvider::load_default()?)),
 
         RuntimeLoadMode::DynamicPath(path) => Ok(Arc::new(DynamicSymbolProvider::load(Path::new(&path))?)),
@@ -128,13 +137,22 @@ pub fn create_runtime_provider(mode: RuntimeLoadMode) -> Result<Arc<dyn RuntimeS
 /// static linking without errors.
 pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
     let mode = RuntimeLoadMode::default_for_profile();
-    create_runtime_provider(mode.clone()).unwrap_or_else(|err| {
+    let mut chained = ChainedProvider::new();
+
+    if let Ok(process_provider) = create_runtime_provider(RuntimeLoadMode::Process) {
+        chained.add(process_provider);
+    }
+
+    let base_provider = create_runtime_provider(mode.clone()).unwrap_or_else(|err| {
         eprintln!(
             "warning: failed to initialize runtime provider {:?}: {}; falling back to static",
             mode, err
         );
         Arc::new(StaticSymbolProvider)
-    })
+    });
+
+    chained.add(base_provider);
+    Arc::new(chained)
 }
 
 /// Create a static-only provider.

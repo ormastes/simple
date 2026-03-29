@@ -1,9 +1,7 @@
+# Tmux REST API Specification
+
 *Source: `test/app/web_dashboard/tmux_rest_api_spec.spl`*
 *Last Updated: 2026-03-29*
-
----
-
-# Tmux REST API Specification
 
 **Feature IDs:** #TMUX-002
 **Category:** Tooling
@@ -13,6 +11,8 @@
 **Plan:** N/A
 **Design:** N/A
 **Research:** N/A
+
+---
 
 ## Overview
 
@@ -84,6 +84,34 @@ val (s, c, b) = handle_tmux_api("GET", "/api/tmux/capture?session=main&window=0&
 val body = r'{"session": "main", "window": "0", "pane": "0", "command": "ls -la"}'
 val (s2, c2, b2) = handle_tmux_api("POST", "/api/tmux/send-command", body)
 ```
+
+## Test Summary
+
+| Metric | Count |
+|--------|-------|
+| Scenarios | 17 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
+
+## Scenarios
+
+- extracts a simple field
+- extracts from multiple fields
+- returns empty string for missing field
+- returns empty string for empty json
+- handles escaped characters
+- converts single key-value pair
+- converts multiple pairs
+- handles empty value
+- returns JSON with available field
+- returns JSON array
+- rejects GET on send endpoint
+- rejects GET on send-command endpoint
+- rejects GET on resize endpoint
+- returns 400 when session missing from panes
+- returns 400 when session missing from windows
+- returns 404 for unknown path
+- handles capture with query params
 
 ## Request Body Parsing
 

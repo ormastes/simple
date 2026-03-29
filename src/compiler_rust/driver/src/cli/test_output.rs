@@ -388,8 +388,17 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
             "✅"
         };
         let file_name = parts.last().unwrap_or(&"");
+        let spec_doc = if file_name.ends_with("_spec.spl") {
+            format!("spec/{}.md", file_name.trim_end_matches(".spl"))
+        } else {
+            String::new()
+        };
 
         md.push_str(&format!("{} **{}** ({}ms)\n", icon, file_name, file.duration_ms));
+        md.push_str(&format!("  - Source: `{}`\n", path_str));
+        if !spec_doc.is_empty() {
+            md.push_str(&format!("  - Generated doc: `{}`\n", spec_doc));
+        }
 
         if let Some(ref err) = file.error {
             md.push_str(&format!("\n```\nError: {}\n```\n", err));

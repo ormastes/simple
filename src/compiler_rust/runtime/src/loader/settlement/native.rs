@@ -75,6 +75,12 @@ pub struct LoadedNativeLib {
 enum NativeLibHandle {
     /// Embedded static library (pointer to data in memory)
     Static(*const u8, usize),
+    /// Current process image
+    #[cfg(unix)]
+    Process(*mut std::ffi::c_void),
+    /// Current process image
+    #[cfg(windows)]
+    Process(*mut std::ffi::c_void),
     /// Dynamically loaded library
     #[cfg(unix)]
     Dynamic(*mut std::ffi::c_void),
@@ -152,6 +158,52 @@ impl LoadedNativeLib {
     #[cfg(not(any(unix, windows)))]
     pub fn load_shared(name: String, _path: &Path) -> Result<Self, String> {
         Err("Shared library loading not supported on this platform".to_string())
+    }
+
+    /// Use the current process image as a symbol provider.
+    #[cfg(unix)]
+    pub fn load_process(name: String) -> Result<Self, String> {
+        let handle = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        if handle.is_null() {
+            let error = unsafe {
+                let err = libc::dlerror();
+                if err.is_null() {
+                    "Unknown error".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned()
+                }
+            };
+            return Err(format!("Failed to load current process: {}", error));
+        }
+
+        Ok(Self {
+            name,
+            lib_type: NATIVE_LIB_SYSTEM,
+            handle: NativeLibHandle::Process(handle),
+            symbols: HashMap::new(),
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn load_process(name: String) -> Result<Self, String> {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+
+        let handle = unsafe { GetModuleHandleW(std::ptr::null()) };
+        if handle.is_null() {
+            return Err("Failed to get current process module handle".to_string());
+        }
+
+        Ok(Self {
+            name,
+            lib_type: NATIVE_LIB_SYSTEM,
+            handle: NativeLibHandle::Process(handle as *mut _),
+            symbols: HashMap::new(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn load_process(_name: String) -> Result<Self, String> {
+        Err("Process symbol loading not supported on this platform".to_string())
     }
 
     /// Load a system library by name.
@@ -250,6 +302,10 @@ impl LoadedNativeLib {
                 // This is a placeholder - real implementation would parse ELF/Mach-O/COFF
                 None
             }
+            NativeLibHandle::Process(handle) => {
+                let c_name = CString::new(name).ok()?;
+                lookup(*handle, &c_name)
+            }
             NativeLibHandle::Dynamic(handle) => {
                 let c_name = CString::new(name).ok()?;
                 lookup(*handle, &c_name)
@@ -291,6 +347,9 @@ impl Drop for LoadedNativeLib {
             NativeLibHandle::Static(_, _) => {
                 // Nothing to do for static libs
             }
+            NativeLibHandle::Process(_) => {
+                // Current process handle is owned by the OS loader.
+            }
             #[cfg(unix)]
             NativeLibHandle::Dynamic(handle) => {
                 if !handle.is_null() {
@@ -322,10 +381,18 @@ pub struct NativeLibManager {
 
 impl NativeLibManager {
     pub fn new() -> Self {
-        Self {
+        let mut manager = Self {
             libraries: Vec::new(),
             by_name: HashMap::new(),
+        };
+
+        if let Ok(lib) = LoadedNativeLib::load_process("__process__".to_string()) {
+            let handle = NativeHandle(manager.libraries.len() as u32);
+            manager.by_name.insert("__process__".to_string(), handle);
+            manager.libraries.push(lib);
         }
+
+        manager
     }
 
     /// Add a static library.

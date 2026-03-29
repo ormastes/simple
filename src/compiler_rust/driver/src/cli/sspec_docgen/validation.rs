@@ -66,6 +66,7 @@ mod tests {
     fn test_validate_empty_spec() {
         let spec = SspecDoc {
             file_path: PathBuf::from("test.spl"),
+            raw_content: String::new(),
             doc_blocks: vec![],
             feature_title: None,
             feature_ids: vec![],

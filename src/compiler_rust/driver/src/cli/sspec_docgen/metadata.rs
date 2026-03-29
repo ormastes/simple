@@ -23,6 +23,10 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
             if let Some(id) = extract_field_value(trimmed, "**Feature ID:**") {
                 metadata.id = Some(id);
             }
+        } else if trimmed.starts_with("**Feature IDs:**") {
+            if let Some(id) = extract_field_value(trimmed, "**Feature IDs:**") {
+                metadata.id = Some(id);
+            }
         } else if trimmed.starts_with("**Category:**") {
             if let Some(category) = extract_field_value(trimmed, "**Category:**") {
                 metadata.category = Some(category);
@@ -34,6 +38,22 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
         } else if trimmed.starts_with("**Status:**") {
             if let Some(status) = extract_field_value(trimmed, "**Status:**") {
                 metadata.status = Some(status);
+            }
+        } else if trimmed.starts_with("**Requirements:**") {
+            if let Some(requirements) = extract_field_value(trimmed, "**Requirements:**") {
+                metadata.requirements = Some(requirements);
+            }
+        } else if trimmed.starts_with("**Plan:**") {
+            if let Some(plan) = extract_field_value(trimmed, "**Plan:**") {
+                metadata.plan = Some(plan);
+            }
+        } else if trimmed.starts_with("**Design:**") {
+            if let Some(design) = extract_field_value(trimmed, "**Design:**") {
+                metadata.design = Some(design);
+            }
+        } else if trimmed.starts_with("**Research:**") {
+            if let Some(research) = extract_field_value(trimmed, "**Research:**") {
+                metadata.research = Some(research);
             }
         }
     }

@@ -34,15 +34,15 @@ SSpec is a BDD (Behavior-Driven Development) testing framework for Simple, inspi
 ### Quick Start
 
 ```simple
-import std.spec
+use std.sspec.*
 
 describe "Calculator":
     context "addition":
         it "adds two numbers":
-            expect 2 + 2 == 4
+            expect(2 + 2).to_equal(4)
 
         it "adds negatives":
-            expect 5 + (-3) == 2
+            expect(5 + (-3)).to_equal(2)
 ```
 
 Run tests:
@@ -126,7 +126,7 @@ Skip a test temporarily:
 ```simple
 describe "Feature":
     skip "pending implementation":
-        pass
+        nil
 ```
 
 ### SSpec Document Format
@@ -153,7 +153,7 @@ describe "Feature":
 
     context "when condition":
         it "does expected behavior":
-            expect true
+            expect(true).to_equal(true)
 ```
 
 Status values: `Stable`, `Implementing`, `Draft`, `Planned`.

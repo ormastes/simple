@@ -1,6 +1,8 @@
 //! Attribute and decorator parsing
 //!
-//! This module handles parsing of attributes (#[...]) and decorators (@...).
+//! This module handles parsing of attributes (@name) and decorators (@...).
+//! The legacy #[...] syntax has been removed from the parsing pipeline.
+//! The `parse_attribute()` method is retained but no longer called.
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -8,8 +10,53 @@ use crate::token::{Span, TokenKind};
 
 use super::core::Parser;
 
+/// Known attribute names that should be parsed as Attribute (not Decorator) when using @ syntax.
+/// These are non-effect, non-decorator tags used for metadata, lint control, test config, etc.
+pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
+    // Lint control
+    "allow", "warn", "deny",
+    // Test/spec metadata
+    "timeout", "tag", "skip", "ignore", "only", "slow", "flaky", "test",
+    "modes", "skip_modes", "only_modes", "mode_failure_strategy",
+    // Module/compiler directives
+    "inline", "bypass", "no_gc", "no_prelude", "no_auto_defer", "no_mangle",
+    "default", "derive", "repr", "packed", "cfg",
+    // Layout/memory
+    "layout", "variant", "id", "no_alloc", "alloc", "immutable",
+    // Misc
+    "retry", "ratelimit", "gpu", "gpu_kernel", "distributed", "cache", "mock",
+    "deprecated", "config", "extern", "async", "unsafe",
+    "concurrency_mode", "no_auto_defer",
+];
+
+/// Check if a name is a known attribute (should produce Attribute, not Decorator)
+pub fn is_known_attribute_name(name: &str) -> bool {
+    KNOWN_ATTRIBUTE_NAMES.contains(&name)
+}
+
 impl<'a> Parser<'a> {
+    /// Check if current token is @ followed by a known attribute name.
+    /// Used to distinguish @allow(lint) (attribute) from @async (effect decorator).
+    pub(crate) fn is_at_known_attribute(&mut self) -> bool {
+        if !self.check(&TokenKind::At) {
+            return false;
+        }
+        let next = self.peek_next();
+        match &next.kind {
+            TokenKind::Identifier { name, .. } => is_known_attribute_name(name),
+            TokenKind::Allow => true,
+            TokenKind::Default => true,
+            TokenKind::Async => true,
+            TokenKind::Extern => true,
+            _ => false,
+        }
+    }
+
     /// Parse a single attribute: #[name] or #[name = value] or #[name(args)]
+    /// DEPRECATED: This method parses the legacy #[...] syntax. All attributes should
+    /// use @name(args) syntax instead. This method is retained for reference but is no
+    /// longer called from the main parsing pipeline.
+    #[allow(dead_code)]
     pub(crate) fn parse_attribute(&mut self) -> Result<Attribute, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Hash)?;
@@ -118,6 +165,48 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             name,
+            args,
+        })
+    }
+
+    /// Parse @name or @name(args) as an Attribute (not Decorator).
+    /// Used when @ is followed by a known attribute name.
+    pub(crate) fn parse_at_as_attribute(&mut self) -> Result<Attribute, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::At)?;
+
+        // Parse the attribute name
+        let name = match &self.current.kind {
+            TokenKind::Identifier { name: s, .. } => {
+                let name = s.clone();
+                self.advance();
+                name
+            }
+            TokenKind::Allow => { self.advance(); "allow".to_string() }
+            TokenKind::Default => { self.advance(); "default".to_string() }
+            TokenKind::Async => { self.advance(); "async".to_string() }
+            TokenKind::Extern => { self.advance(); "extern".to_string() }
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "attribute name",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ));
+            }
+        };
+
+        // Check for arguments: @name(arg1, arg2)
+        let args = self.parse_optional_paren_args()?;
+
+        Ok(Attribute {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            name,
+            value: None,
             args,
         })
     }

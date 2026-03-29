@@ -7,13 +7,12 @@
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 118
+- **Total Lines:** 150
 
 ---
 
 ## Tooling (1 features)
 
-| Feature | Status | Difficulty | Coverage | Details |
-|---------|--------|------------|----------|----------|
-| [Tmux REST API Specification](tmux_rest_api_spec.md) | ⚠️ Partial | 3/5 | 60% | 118 lines |
-
+| Feature | Status | Difficulty | Tests | Coverage | Details |
+|---------|--------|------------|-------|----------|----------|
+| [Tmux REST API Specification](tmux_rest_api_spec.md) | Implemented | 3/5 | 17 | 60% | 150 lines |

@@ -506,6 +506,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_sandbox_get_fs_mode",
     "rt_value_to_string",
     "rt_value_eq",
+    "rt_native_eq",
+    "rt_native_neq",
     "rt_value_compare",
     "rt_value_truthy",
 ];

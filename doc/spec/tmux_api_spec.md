@@ -1,9 +1,7 @@
+# Tmux API Library Specification
+
 *Source: `test/lib/std/unit/tmux/tmux_api_spec.spl`*
 *Last Updated: 2026-03-29*
-
----
-
-# Tmux API Library Specification
 
 **Feature IDs:** #TMUX-001
 **Category:** Stdlib
@@ -13,6 +11,8 @@
 **Plan:** N/A
 **Design:** N/A
 **Research:** N/A
+
+---
 
 ## Overview
 
@@ -55,6 +55,29 @@ if tmux_available():
     val capture = tmux_capture_pane("main", 0, 0)
     print capture.content
 ```
+
+## Test Summary
+
+| Metric | Count |
+|--------|-------|
+| Scenarios | 12 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
+
+## Scenarios
+
+- reports whether tmux is installed
+- reports server running status
+- returns a list without crashing
+- returns false for non-existent session
+- returns empty list for non-existent session
+- returns empty list for non-existent target
+- returns empty capture for non-existent target
+- formats pane_id as session:window.pane
+- constructs with all fields for `TmuxSession`
+- constructs with all fields for `TmuxWindow`
+- constructs with all fields for `TmuxPane`
+- constructs with all fields for `TmuxCaptureResult`
 
 ## Availability Detection
 

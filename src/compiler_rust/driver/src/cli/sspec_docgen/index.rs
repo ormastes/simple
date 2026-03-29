@@ -21,6 +21,7 @@ struct FeatureEntry {
     difficulty: String,
     coverage: String,
     doc_lines: usize,
+    test_count: usize,
 }
 
 /// Generate INDEX.md with categorization and metadata
@@ -63,16 +64,17 @@ pub fn generate_index_page(
             category.name,
             category.features.len()
         ));
-        md.push_str("| Feature | Status | Difficulty | Coverage | Details |\n");
-        md.push_str("|---------|--------|------------|----------|----------|\n");
+        md.push_str("| Feature | Status | Difficulty | Tests | Coverage | Details |\n");
+        md.push_str("|---------|--------|------------|-------|----------|----------|\n");
 
         for feature in category.features {
             md.push_str(&format!(
-                "| [{}]({}) | {} | {} | {} | {} lines |\n",
+                "| [{}]({}) | {} | {} | {} | {} | {} lines |\n",
                 feature.title,
                 feature.filename,
                 feature.status,
                 feature.difficulty,
+                feature.test_count,
                 feature.coverage,
                 feature.doc_lines
             ));
@@ -108,9 +110,14 @@ fn group_by_category(parsed_files: &[(SspecDoc, ValidationResult)]) -> Vec<Categ
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let title = sspec_doc.feature_title.as_deref().unwrap_or(file_name);
+        let title = sspec_doc
+            .feature_title
+            .clone()
+            .unwrap_or_else(|| humanize_filename(file_name));
 
-        let status = if validation.has_docs {
+        let status = if let Some(status) = &sspec_doc.metadata.status {
+            status.clone()
+        } else if validation.has_docs {
             if validation.doc_lines >= 200 {
                 "✅ Complete".to_string()
             } else {
@@ -133,12 +140,13 @@ fn group_by_category(parsed_files: &[(SspecDoc, ValidationResult)]) -> Vec<Categ
         };
 
         let entry = FeatureEntry {
-            title: title.to_string(),
+            title,
             filename: format!("{}.md", file_name),
             status,
             difficulty,
             coverage,
             doc_lines: validation.doc_lines,
+            test_count: count_test_cases(&sspec_doc.raw_content),
         };
 
         category_map.entry(category_name).or_default().push(entry);
@@ -198,6 +206,40 @@ fn infer_category_from_path(path: &std::path::Path) -> String {
     } else {
         "Other".to_string()
     }
+}
+
+fn humanize_filename(stem: &str) -> String {
+    let base = stem.strip_suffix("_spec").unwrap_or(stem);
+    let words: Vec<String> = base
+        .split('_')
+        .filter(|w| !w.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect();
+
+    if words.is_empty() {
+        "Specification".to_string()
+    } else {
+        format!("{} Specification", words.join(" "))
+    }
+}
+
+fn count_test_cases(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("it ")
+                || trimmed.starts_with("slow_it ")
+                || trimmed.starts_with("skip_it ")
+                || trimmed.starts_with("pending ")
+        })
+        .count()
 }
 
 /// Calculate coverage percentage (simple heuristic)

@@ -5,6 +5,8 @@
 ## test/feature/app/remote_jit
 
 ✅ **trace32_stm32h7_jit_e2e_spec.spl** (0ms)
+  - Source: `test/feature/app/remote_jit/trace32_stm32h7_jit_e2e_spec.spl`
+  - Generated doc: `spec/trace32_stm32h7_jit_e2e_spec.md`
 
 
 ---

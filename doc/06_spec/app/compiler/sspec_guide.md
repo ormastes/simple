@@ -2,4 +2,4 @@
 
 This document has been merged into the unified guide.
 
-**See:** [doc/07_guide/sspec_guide.md](../guide/sspec_guide.md)
+**See:** [doc/07_guide/testing/testing.md](../../../07_guide/testing/testing.md)

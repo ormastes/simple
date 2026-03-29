@@ -68,6 +68,7 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
 
     Ok(SspecDoc {
         file_path: path.to_path_buf(),
+        raw_content: content,
         doc_blocks,
         feature_title,
         feature_ids,

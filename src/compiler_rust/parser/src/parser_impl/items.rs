@@ -271,13 +271,18 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    /// Parse an attributed item: #[attr] fn/struct/class/etc
+    /// Parse an attributed item: @attr fn/struct/class/etc
+    /// Only @ syntax is supported. The legacy #[] syntax has been removed.
     pub(super) fn parse_attributed_item(&mut self) -> Result<Node, ParseError> {
         let mut attributes = Vec::new();
 
-        // Parse all attributes (can be multiple: #[a] #[b] fn foo)
-        while self.check(&TokenKind::Hash) {
-            attributes.push(self.parse_attribute()?);
+        // Parse all attributes — only @known_attr_name syntax
+        loop {
+            if self.check(&TokenKind::At) && self.is_at_known_attribute() {
+                attributes.push(self.parse_at_as_attribute()?);
+            } else {
+                break;
+            }
             // Skip newlines between attributes
             while self.check(&TokenKind::Newline) {
                 self.advance();

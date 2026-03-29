@@ -432,8 +432,8 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
 
         match &self.current.kind {
-            TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
-            TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
+            // Route @ to attributed_item which handles attribute and decorator @ tags
+            TokenKind::At => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::Async => {
                 // `async fn` — skip async keyword, parse as regular function
                 self.advance();
