@@ -57,56 +57,12 @@ use dashboard.render.colors.{status_css_class, html_badge}
 use dashboard.render.progress.{render_progress_bar_html}
 use dashboard.render.table.{render_html_table}
 
-# Status badge
 val badge = html_badge("complete", "complete")
-# => <span class="badge badge-green">complete</span>
 
-# Progress bar
 val bar = render_progress_bar_html(75.0, "coverage")
-# => <div>...<div style="width:75%;background:var(--yellow,...)">...</div></div>
 
-# HTML table
 val html = render_html_table(["Name", "Score"], [["Alice", "95"], ["Bob", "87"]])
-# => <table class="data-table">...</table>
 ```
-
-## Test Summary
-
-| Metric | Count |
-|--------|-------|
-| Scenarios | 27 |
-| Slow Scenarios | 0 |
-| Skipped Scenarios | 0 |
-
-## Scenarios
-
-- maps complete to badge-green
-- maps in_progress to badge-yellow
-- maps planned to badge-blue
-- maps failed to badge-red
-- maps blocked to badge-red
-- maps passed to badge-green
-- returns empty string for unknown status
-- returns green for high percentage
-- returns yellow for medium percentage
-- returns red for low percentage
-- returns green at exactly 80%
-- returns yellow at exactly 60%
-- wraps label in badge span with correct class
-- uses status-based class for different statuses
-- renders bar with correct percentage
-- caps width at 100% for over-100 values
-- uses green color for high percentage
-- uses yellow color for medium percentage
-- uses red color for low percentage
-- handles zero percentage
-- renders fraction with green for high ratio
-- renders fraction with red for low ratio
-- handles zero total without crashing
-- renders table with headers and rows
-- renders empty table with headers only
-- limits rows to specified maximum
-- renders all rows when under limit
 
 ## Status-to-CSS-Class Mapping
 
@@ -157,3 +113,41 @@ val html = render_html_table(["Name", "Score"], [["Alice", "95"], ["Bob", "87"]]
 
         Truncates output to max_rows, preventing oversized HTML
         in the dashboard status view.
+
+## Test Summary
+
+| Metric | Count |
+|--------|-------|
+| Scenarios | 27 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
+
+## Scenarios
+
+- maps complete to badge-green
+- maps in_progress to badge-yellow
+- maps planned to badge-blue
+- maps failed to badge-red
+- maps blocked to badge-red
+- maps passed to badge-green
+- returns empty string for unknown status
+- returns green for high percentage
+- returns yellow for medium percentage
+- returns red for low percentage
+- returns green at exactly 80%
+- returns yellow at exactly 60%
+- wraps label in badge span with correct class
+- uses status-based class for different statuses
+- renders bar with correct percentage
+- caps width at 100% for over-100 values
+- uses green color for high percentage
+- uses yellow color for medium percentage
+- uses red color for low percentage
+- handles zero percentage
+- renders fraction with green for high ratio
+- renders fraction with red for low ratio
+- handles zero total without crashing
+- renders table with headers and rows
+- renders empty table with headers only
+- limits rows to specified maximum
+- renders all rows when under limit

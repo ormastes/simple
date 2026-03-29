@@ -2,6 +2,7 @@
 //!
 //! Handles running individual test files and parsing their output.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -9,6 +10,9 @@ use std::time::{Duration, Instant};
 use crate::runner::Runner;
 use super::types::{IndividualTestResult, TestFileResult, TestExecutionMode};
 use super::build_cache::BuildCache;
+use super::artifact::{ExecutionArtifacts, write_test_artifacts};
+#[path = "scenario_artifacts.rs"]
+mod scenario_artifacts;
 
 use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
@@ -30,6 +34,7 @@ use simple_compiler::codegen::clear_cranelift_registries;
 use simple_compiler::interpreter_ffi::clear_compiled_functions;
 use simple_compiler::{start_watchdog, stop_watchdog};
 use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection_enabled, reset_recursion_depth};
+use scenario_artifacts::write_scenario_manifest;
 
 /// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
 fn per_test_timeout_secs() -> u64 {
@@ -172,6 +177,49 @@ fn strip_ansi_codes(s: &str) -> String {
     }
 
     result
+}
+
+pub(crate) fn artifact_dir_for_test(path: &Path) -> PathBuf {
+    let relative = path
+        .to_string_lossy()
+        .replace("simple/std_lib/test/", "")
+        .replace("test/", "")
+        .replace("_spec.spl", "")
+        .replace("_test.spl", "")
+        .replace(".spl", "");
+    PathBuf::from("target/test-artifacts").join(relative)
+}
+
+pub(crate) fn write_artifact_bundle(
+    path: &Path,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    ignored: usize,
+    duration_ms: u64,
+    error: Option<&str>,
+    output: Option<&str>,
+) {
+    let dir = artifact_dir_for_test(path);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+
+    let mut summary = String::new();
+    summary.push_str(&format!("spec: {}\n", path.display()));
+    summary.push_str(&format!("passed: {}\n", passed));
+    summary.push_str(&format!("failed: {}\n", failed));
+    summary.push_str(&format!("skipped: {}\n", skipped));
+    summary.push_str(&format!("ignored: {}\n", ignored));
+    summary.push_str(&format!("duration_ms: {}\n", duration_ms));
+    if let Some(err) = error {
+        summary.push_str(&format!("error: {}\n", err));
+    }
+    let _ = fs::write(dir.join("summary.txt"), summary);
+
+    if let Some(output) = output {
+        let _ = fs::write(dir.join("output.log"), output);
+    }
 }
 
 /// Run a single test file with options (wrapper for compatibility)
@@ -478,7 +526,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 }
             };
 
-            TestFileResult {
+            let result = TestFileResult {
                 path: path.to_path_buf(),
                 passed,
                 failed,
@@ -491,18 +539,35 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                     None
                 },
                 individual_results,
-            }
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(
+                path,
+                &result,
+                ExecutionArtifacts {
+                    stdout: Some(&stdout),
+                    stderr: Some(&stderr),
+                    combined: Some(&combined_output),
+                    log_note: None,
+                },
+            );
+            result
         }
-        Err(e) => TestFileResult {
-            path: path.to_path_buf(),
-            passed: 0,
-            failed: 1,
-            skipped: 0,
-            ignored: 0,
-            duration_ms,
-            error: Some(e),
-            individual_results: vec![],
-        },
+        Err(e) => {
+            let result = TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(e),
+                individual_results: vec![],
+            };
+            emit_scenario_artifacts(path, &result);
+            emit_test_artifacts(path, &result, ExecutionArtifacts::none());
+            result
+        }
     }
 }
 
@@ -541,6 +606,30 @@ fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) 
     }
 
     args
+}
+
+fn emit_test_artifacts(
+    path: &Path,
+    result: &TestFileResult,
+    artifacts: ExecutionArtifacts<'_>,
+) {
+    if let Err(e) = write_test_artifacts(path, result, artifacts) {
+        eprintln!("[WARN] Failed to write test artifacts for {}: {}", path.display(), e);
+    }
+}
+
+fn emit_scenario_artifacts(path: &Path, result: &TestFileResult) {
+    if result.individual_results.is_empty() {
+        return;
+    }
+
+    if let Err(e) = write_scenario_manifest(path, &result.individual_results) {
+        eprintln!(
+            "[WARN] Failed to write scenario artifact manifest for {}: {}",
+            path.display(),
+            e
+        );
+    }
 }
 
 /// Find the simple binary path.
@@ -686,6 +775,33 @@ fn create_test_runner(options: &super::types::TestOptions) -> Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    use tempfile::tempdir;
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    fn with_temp_cwd() -> (tempfile::TempDir, CurrentDirGuard) {
+        let tempdir = tempdir().expect("tempdir");
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(tempdir.path()).expect("set current dir");
+        (tempdir, CurrentDirGuard { previous })
+    }
 
     #[test]
     fn test_parse_test_output_basic() {
@@ -748,5 +864,36 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--mode=interpreter(remote(baremetal(riscv32)))"));
+    }
+
+    #[test]
+    fn test_write_artifact_bundle_writes_summary_and_output_log() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let (_tempdir, _cwd_guard) = with_temp_cwd();
+
+        let spec_path = Path::new("test/unit/app/tooling/test_runner_simple_spec.spl");
+        write_artifact_bundle(
+            spec_path,
+            3,
+            1,
+            2,
+            0,
+            42,
+            Some("boom"),
+            Some("combined runner output"),
+        );
+
+        let artifact_dir = artifact_dir_for_test(spec_path);
+        let summary = fs::read_to_string(artifact_dir.join("summary.txt")).expect("summary");
+        let output = fs::read_to_string(artifact_dir.join("output.log")).expect("output");
+
+        assert!(summary.contains("spec: test/unit/app/tooling/test_runner_simple_spec.spl"));
+        assert!(summary.contains("passed: 3"));
+        assert!(summary.contains("failed: 1"));
+        assert!(summary.contains("skipped: 2"));
+        assert!(summary.contains("duration_ms: 42"));
+        assert!(summary.contains("error: boom"));
+        assert!(summary.contains("Individual Results:"));
+        assert_eq!(output, "combined runner output");
     }
 }

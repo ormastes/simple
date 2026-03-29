@@ -22,6 +22,10 @@ pub struct FeatureMetadata {
     pub plan: Option<String>,
     pub design: Option<String>,
     pub research: Option<String>,
+    pub artifacts: Vec<String>,
+    pub screenshots: Vec<String>,
+    pub tui_captures: Vec<String>,
+    pub logs: Vec<String>,
     pub related: Vec<String>,
     pub dependencies: Vec<String>,
 }

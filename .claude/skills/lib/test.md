@@ -36,6 +36,11 @@ scripts/ci-test.sh                                         # CI-style
 
 **Troubleshooting:** See `doc/07_guide/testing/container_testing.md`
 
+## Coverage Target Annotations
+
+System tests (`test/system/`) **MUST** have `# @cover` at the top. See `/sspec` skill for format.
+Bypass temporarily: `--no-cover-check`
+
 ## Writing BDD Tests
 
 Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().

@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
+
 /// Debug logging level for test runner
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DebugLevel {
@@ -304,7 +306,7 @@ impl Default for TestOptions {
 }
 
 /// Individual test case result (one per `it`/`skip`/`slow_it` block)
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IndividualTestResult {
     pub name: String,
     pub group: String,
@@ -313,7 +315,7 @@ pub struct IndividualTestResult {
 }
 
 /// Test result for a single file
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TestFileResult {
     pub path: PathBuf,
     pub passed: usize,

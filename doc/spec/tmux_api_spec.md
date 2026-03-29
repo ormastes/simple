@@ -45,39 +45,14 @@ and send keystrokes.
 ```simple
 use std.tmux.*
 
-# Check if tmux is available
 if tmux_available():
     val sessions = tmux_list_sessions()
     for s in sessions:
         print "Session: {s.name} ({s.windows} windows)"
 
-    # Capture pane content
     val capture = tmux_capture_pane("main", 0, 0)
     print capture.content
 ```
-
-## Test Summary
-
-| Metric | Count |
-|--------|-------|
-| Scenarios | 12 |
-| Slow Scenarios | 0 |
-| Skipped Scenarios | 0 |
-
-## Scenarios
-
-- reports whether tmux is installed
-- reports server running status
-- returns a list without crashing
-- returns false for non-existent session
-- returns empty list for non-existent session
-- returns empty list for non-existent target
-- returns empty capture for non-existent target
-- formats pane_id as session:window.pane
-- constructs with all fields for `TmuxSession`
-- constructs with all fields for `TmuxWindow`
-- constructs with all fields for `TmuxPane`
-- constructs with all fields for `TmuxCaptureResult`
 
 ## Availability Detection
 
@@ -139,3 +114,26 @@ if tmux_available():
 ### Scenario: Captured pane content
 
         TmuxCaptureResult holds the text content, pane identifier, and row count.
+
+## Test Summary
+
+| Metric | Count |
+|--------|-------|
+| Scenarios | 12 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
+
+## Scenarios
+
+- reports whether tmux is installed
+- reports server running status
+- returns a list without crashing
+- returns false for non-existent session
+- returns empty list for non-existent session
+- returns empty list for non-existent target
+- returns empty capture for non-existent target
+- formats pane_id as session:window.pane
+- constructs with all fields
+- constructs with all fields
+- constructs with all fields
+- constructs with all fields

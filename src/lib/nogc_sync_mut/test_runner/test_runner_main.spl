@@ -18,7 +18,7 @@ use std.io_runtime.{get_args}
 use test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult}
 use test_runner_args.parse_test_args
 use test_config.{TestConfig}
-use test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, save_manifest_from_discovery, order_tests_by_duration}
+use test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use test_manifest_scanner.{manifest_full_scan}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, run_test_file_composite}
@@ -121,6 +121,22 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     val use_cache = not updated_options.no_cache
     val all_files = discover_test_files_fast(updated_options.path, updated_options, use_cache)
+
+    # Validate # @cover annotations for system tests
+    if not updated_options.no_cover_check:
+        val missing_covers = validate_system_test_covers(all_files)
+        if missing_covers.len() > 0:
+            print ""
+            print "ERROR: System test(s) missing required # @cover annotation:"
+            for mc in missing_covers:
+                print "  {mc}"
+            print ""
+            print "Add at the top of each file:"
+            print "  # @cover src/path/to/component.spl 80%"
+            print ""
+            print "Bypass: --no-cover-check"
+            print "Found {missing_covers.len()} system test(s) without # @cover."
+            return TestRunResult(files: [], total_passed: 0, total_failed: missing_covers.len(), total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
     # MEMORY DEBUG: checkpoint filtering disabled (GROUP 6)
     var files = all_files

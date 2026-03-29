@@ -57,7 +57,24 @@ describe "MyFeature":
             expect(actual).to_equal(expected)
 ```
 
-### 3. Template: `cp .claude/templates/sspec_template.spl test/my_spec.spl`
+### 3. Coverage Target (REQUIRED for system tests)
+
+System test files (`test/system/**`) MUST include `# @cover` annotations at the top, before the docstring:
+
+```simple
+# @cover src/compiler/70.backend/codegen.spl 80%
+# @cover src/compiler/70.backend/linker.spl 60%
+"""
+# Feature Spec
+...
+"""
+```
+
+Format: `# @cover <src_path> <percentage>%`
+- Point to the **last-layer component** the test exercises
+- The test runner will ERROR if missing. Bypass: `--no-cover-check`
+
+### 4. Template: `cp .claude/templates/sspec_template.spl test/my_spec.spl`
 
 ## BDD Syntax
 

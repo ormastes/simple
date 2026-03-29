@@ -14,6 +14,8 @@ use super::types::{
     TestFileResult, TestExecutionMode, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log,
 };
 use super::build_cache::BuildCache;
+use super::artifact::write_result_json;
+use super::execution::write_artifact_bundle;
 use super::doctest::run_cached_doctests;
 use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
@@ -746,6 +748,19 @@ fn execute_test_files(
                 super::execution::run_test_file_safe_mode(path, options)
             }
         };
+        write_artifact_bundle(
+            path,
+            result.passed,
+            result.failed,
+            result.skipped,
+            result.ignored,
+            result.duration_ms,
+            result.error.as_deref(),
+            None,
+        );
+        if let Err(e) = write_result_json(path, &result) {
+            eprintln!("[WARN] Failed to write result.json for {}: {}", path.display(), e);
+        }
         total_passed += result.passed;
         total_failed += result.failed;
         total_skipped += result.skipped;

@@ -13,10 +13,12 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
         .map(|b| b.content.as_str())
         .collect::<Vec<&str>>()
         .join("\n");
+    let lines: Vec<&str> = full_content.lines().collect();
 
     // Extract metadata fields from markdown
-    for line in full_content.lines() {
-        let trimmed = line.trim();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
 
         // Match patterns like "**Feature ID:** #20"
         if trimmed.starts_with("**Feature ID:**") {
@@ -55,7 +57,16 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
             if let Some(research) = extract_field_value(trimmed, "**Research:**") {
                 metadata.research = Some(research);
             }
+        } else if trimmed.starts_with("**Artifacts:**") {
+            metadata.artifacts = extract_list_field(&lines, &mut i, "**Artifacts:**");
+        } else if trimmed.starts_with("**Screenshots:**") {
+            metadata.screenshots = extract_list_field(&lines, &mut i, "**Screenshots:**");
+        } else if trimmed.starts_with("**TUI Captures:**") {
+            metadata.tui_captures = extract_list_field(&lines, &mut i, "**TUI Captures:**");
+        } else if trimmed.starts_with("**Logs:**") {
+            metadata.logs = extract_list_field(&lines, &mut i, "**Logs:**");
         }
+        i += 1;
     }
 
     // Extract feature ID from feature_ids if metadata.id is not set
@@ -77,6 +88,55 @@ fn extract_field_value(line: &str, prefix: &str) -> Option<String> {
     None
 }
 
+fn extract_list_field(lines: &[&str], index: &mut usize, prefix: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let current = lines[*index].trim();
+
+    if let Some(inline) = extract_field_value(current, prefix) {
+        values.extend(split_inline_list(&inline));
+        return values;
+    }
+
+    let mut j = *index + 1;
+    while j < lines.len() {
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed.starts_with("**") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+            break;
+        }
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            let item = item.trim();
+            if !item.is_empty() {
+                values.push(item.to_string());
+            }
+            j += 1;
+            continue;
+        }
+        break;
+    }
+
+    if j > *index + 1 {
+        *index = j - 1;
+    }
+
+    values
+}
+
+fn split_inline_list(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .flat_map(|part| part.split(','))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +152,23 @@ mod tests {
             Some("Data Structures".to_string())
         );
         assert_eq!(extract_field_value("Invalid line", "**Feature ID:**"), None);
+    }
+
+    #[test]
+    fn test_extract_list_field_inline_and_bullets() {
+        let inline = vec!["**Artifacts:** out/a.png; out/b.ansi"];
+        let mut idx = 0;
+        assert_eq!(
+            extract_list_field(&inline, &mut idx, "**Artifacts:**"),
+            vec!["out/a.png".to_string(), "out/b.ansi".to_string()]
+        );
+
+        let bullets = vec!["**Logs:**", "- logs/run.txt", "- logs/bridge.txt", "", "## Next"];
+        let mut idx = 0;
+        assert_eq!(
+            extract_list_field(&bullets, &mut idx, "**Logs:**"),
+            vec!["logs/run.txt".to_string(), "logs/bridge.txt".to_string()]
+        );
+        assert_eq!(idx, 2);
     }
 }

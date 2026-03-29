@@ -425,7 +425,9 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "sspec-docgen",
-        app_path: "src/app/sspec_docgen/main.spl",
+        // Keep Rust as the canonical entrypoint until direct file execution
+        // supports the file-level attributes used across the stdlib/app tree.
+        app_path: "",
         rust_handler: Handler::Args(run_sspec_docgen_rust),
         env_override: "SIMPLE_SSPEC_DOCGEN_RUST",
         needs_rust_flags: &[],
@@ -952,7 +954,7 @@ fn handle_file_execution(
     }
 }
 
-/// Original Rust sspec-docgen implementation (fallback)
+/// Current Rust sspec-docgen implementation.
 fn run_sspec_docgen_rust(args: &[String]) -> i32 {
     // Parse arguments
     let mut output_dir = PathBuf::from("doc/spec");

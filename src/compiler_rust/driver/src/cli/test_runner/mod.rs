@@ -19,6 +19,7 @@
 //! - `static_registry` - Static test metadata for fast queries
 
 mod types;
+mod artifact;
 mod execution;
 mod doctest;
 mod runner;

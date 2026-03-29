@@ -41,7 +41,7 @@ fn humanize_filename(stem: text) -> text:
     parts.join(" ") + " Specification"
 
 fn count_test_items(content: text) -> (i64, i64, i64):
-    # Returns (total_it, skipped_it, pending_it)
+    # Returns (normal_it + slow_it, skipped_it, pending_it)
     val lines = content.split("\n")
     var total = 0
     var skipped = 0
@@ -50,11 +50,41 @@ fn count_test_items(content: text) -> (i64, i64, i64):
         val trimmed = line.trim()
         if trimmed.starts_with("it ") and trimmed.contains("\""):
             total = total + 1
-        elif trimmed.starts_with("skip it ") and trimmed.contains("\""):
+        elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
+            total = total + 1
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             skipped = skipped + 1
         elif trimmed.starts_with("pending ") and trimmed.contains("\""):
             pending = pending + 1
     (total, skipped, pending)
+
+fn count_slow_items(content: text) -> i64:
+    val lines = content.split("\n")
+    var total = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("slow_it ") and trimmed.contains("\""):
+            total = total + 1
+    total
+
+fn extract_scenario_list(content: text) -> [text]:
+    val lines = content.split("\n")
+    var scenarios = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("slow_it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            scenarios.push("- [slow] {name}")
+        elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            scenarios.push("- [skip] {name}")
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            scenarios.push("- [pending] {name}")
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            scenarios.push("- {name}")
+    scenarios
 
 fn build_auto_overview(content: text) -> text:
     # Auto-generate an overview from describe block names
@@ -78,17 +108,17 @@ fn get_current_date() -> text:
     shell_output_trimmed("date -u +%Y-%m-%d", "2026-01-25")
 
 fn build_metadata_line(metadata: FeatureMetadata) -> text:
-    # Build compact pipe-separated metadata line with optional doc links
+    # Build stable metadata lines with optional doc links
     var parts: [text] = []
     if metadata.id != "":
-        parts.push("**Feature ID:** {metadata.id}")
+        parts.push("**Feature IDs:** {metadata.id}")
     if metadata.category != "":
         parts.push("**Category:** {metadata.category}")
     if metadata.difficulty != "":
         parts.push("**Difficulty:** {metadata.difficulty}")
     if metadata.status != "":
         parts.push("**Status:** {metadata.status}")
-    var result = parts.join(" | ")
+    var result = parts.join("\n")
     # Doc links shown as separate lines when present
     if metadata.requirement != "":
         result = result + "\n**Requirements:** {metadata.requirement}"
@@ -99,6 +129,34 @@ fn build_metadata_line(metadata: FeatureMetadata) -> text:
     if metadata.research != "":
         result = result + "\n**Research:** {metadata.research}"
     result
+
+fn append_evidence_section(md_parts: [text], metadata: FeatureMetadata) -> [text]:
+    if metadata.artifacts.len() == 0 and metadata.screenshots.len() == 0 and metadata.tui_captures.len() == 0 and metadata.logs.len() == 0:
+        return md_parts
+
+    var parts = md_parts
+    parts.push("## Evidence\n\n")
+    if metadata.artifacts.len() > 0:
+        parts.push("### Artifacts\n\n")
+        for item in metadata.artifacts:
+            parts.push("- {item}\n")
+        parts.push("\n")
+    if metadata.screenshots.len() > 0:
+        parts.push("### Screenshots\n\n")
+        for item in metadata.screenshots:
+            parts.push("- {item}\n")
+        parts.push("\n")
+    if metadata.tui_captures.len() > 0:
+        parts.push("### TUI Captures\n\n")
+        for item in metadata.tui_captures:
+            parts.push("- {item}\n")
+        parts.push("\n")
+    if metadata.logs.len() > 0:
+        parts.push("### Logs\n\n")
+        for item in metadata.logs:
+            parts.push("- {item}\n")
+        parts.push("\n")
+    parts
 
 fn extract_content_section(block_content: text) -> text:
     # Extract content from first doc block, skipping title and metadata lines.
@@ -128,6 +186,7 @@ fn extract_content_section(block_content: text) -> text:
     # No ## heading: strip title/metadata lines
     var parts: [text] = []
     var found_content = false
+    var skipping_meta_list = false
     for line in lines:
         val trimmed = line.trim()
         var is_meta = false
@@ -149,6 +208,25 @@ fn extract_content_section(block_content: text) -> text:
             is_meta = true
         elif trimmed.starts_with("**Research"):
             is_meta = true
+        elif trimmed.starts_with("**Artifacts"):
+            is_meta = true
+        elif trimmed.starts_with("**Screenshots"):
+            is_meta = true
+        elif trimmed.starts_with("**TUI Captures"):
+            is_meta = true
+        elif trimmed.starts_with("**Logs"):
+            is_meta = true
+
+        if is_meta:
+            skipping_meta_list = true
+            continue
+
+        if skipping_meta_list:
+            if trimmed.starts_with("- ") or trimmed.starts_with("* "):
+                continue
+            if trimmed == "":
+                continue
+            skipping_meta_list = false
 
         if not is_meta:
             if trimmed != "" or found_content:
@@ -184,7 +262,11 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             requirement: meta.requirement,
             plan: meta.plan,
             design: meta.design,
-            research: meta.research
+            research: meta.research,
+            artifacts: meta.artifacts,
+            screenshots: meta.screenshots,
+            tui_captures: meta.tui_captures,
+            logs: meta.logs
         )
     if meta.status == "":
         # Auto-detect status from test content
@@ -202,15 +284,20 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
             requirement: meta.requirement,
             plan: meta.plan,
             design: meta.design,
-            research: meta.research
+            research: meta.research,
+            artifacts: meta.artifacts,
+            screenshots: meta.screenshots,
+            tui_captures: meta.tui_captures,
+            logs: meta.logs
         )
+
+    # Source reference
+    md_parts.push("*Source: `{doc.file_path}`*\n")
+    md_parts.push("*Last Updated: {get_current_date()}*\n\n")
 
     val meta_line = build_metadata_line(meta)
     if meta_line != "":
         md_parts.push("{meta_line}\n\n")
-
-    # Source reference
-    md_parts.push("_Source: `{doc.file_path}`_\n\n")
 
     md_parts.push("---\n\n")
 
@@ -219,33 +306,41 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: text) -> Result<text, text>:
         val first_block = doc.doc_blocks[0]
         val content = extract_content_section(first_block.content)
         if content != "":
-            md_parts.push(content + "\n")
-            md_parts.push("\n---\n\n")
+            md_parts.push(content + "\n\n")
     else:
         # Auto-generate overview from test structure
         val overview = build_auto_overview(doc.raw_content)
         if overview != "":
             md_parts.push("## Overview\n\n")
-            md_parts.push(overview + "\n")
-            md_parts.push("\n---\n\n")
+            md_parts.push(overview + "\n\n")
+
+    md_parts = append_evidence_section(md_parts, meta)
 
     # Test stats summary
     val counts = count_test_items(doc.raw_content)
     val total_tests = counts[0]
     val skip_tests = counts[1]
     val pending_tests = counts[2]
+    val slow_tests = count_slow_items(doc.raw_content)
     if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
         md_parts.push("## Test Summary\n\n")
         md_parts.push("| Metric | Count |\n")
         md_parts.push("|--------|-------|\n")
-        md_parts.push("| Tests | {total_tests} |\n")
-        if skip_tests > 0:
-            md_parts.push("| Skipped | {skip_tests} |\n")
+        md_parts.push("| Scenarios | {total_tests + skip_tests + pending_tests} |\n")
+        md_parts.push("| Slow Scenarios | {slow_tests} |\n")
+        md_parts.push("| Skipped Scenarios | {skip_tests} |\n")
         if pending_tests > 0:
-            md_parts.push("| Pending | {pending_tests} |\n")
+            md_parts.push("| Pending Scenarios | {pending_tests} |\n")
         md_parts.push("\n")
 
-    # Test structure section
+    val scenarios = extract_scenario_list(doc.raw_content)
+    if scenarios.len() > 0:
+        md_parts.push("## Scenarios\n\n")
+        for scenario in scenarios:
+            md_parts.push("{scenario}\n")
+        md_parts.push("\n")
+
+    # Detailed test structure section
     val structure = extract_test_structure(doc.raw_content)
     if structure != "":
         md_parts.push("## Test Structure\n\n")
@@ -339,11 +434,11 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: text, stats: DocStat
     for cat_name in cat_names:
         val cat_entries = categories[cat_name]
         md_parts.push("## {cat_name} ({cat_entries.len()} features)\n\n")
-        md_parts.push("| Feature | Status | Tests | Coverage | Details |\n")
-        md_parts.push("|---------|--------|-------|----------|----------|\n")
+        md_parts.push("| Feature | Status | Difficulty | Tests | Coverage | Details |\n")
+        md_parts.push("|---------|--------|------------|-------|----------|----------|\n")
 
         for entry in cat_entries:
-            md_parts.push("| [{entry.title}]({entry.filename}) | {entry.status} | {entry.test_count} | {entry.coverage} | {entry.doc_lines} lines |\n")
+            md_parts.push("| [{entry.title}]({entry.filename}) | {entry.status} | {entry.difficulty} | {entry.test_count} | {entry.coverage} | {entry.doc_lines} lines |\n")
 
         md_parts.push("\n")
 
@@ -354,4 +449,3 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: text, stats: DocStat
     if not ok:
         return Err("Failed to write {output_path}")
     return Ok(output_path)
-

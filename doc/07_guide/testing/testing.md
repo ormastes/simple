@@ -131,7 +131,12 @@ describe "Feature":
 
 ### SSpec Document Format
 
-Embed markdown documentation in test files using triple-quoted strings. The `simple sspec-docgen` command extracts these blocks and generates markdown documentation in `doc/06_spec/`.
+Embed markdown documentation in test files using triple-quoted strings. The `simple sspec-docgen` command extracts these blocks and generates markdown documentation in `doc/spec/`.
+
+Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
+If those fields are omitted, `sspec-docgen` will also auto-discover evidence under the standard screenshot tree `doc/spec/image/<spec-relative-path>/` when files already exist there.
+The generated Evidence section now renders a compact category summary plus per-category tables with item name, evidence kind, and path. For non-image evidence, prefer `target/test-artifacts/<spec-relative-path>/` so logs, ANSI captures, JSON summaries, and text artifacts can be discovered automatically too.
+For CI/publication, use `simple sspec-docgen ... --output docs/spec` when you want a publishable static-doc tree under `docs/`. The `simple test --doc` flow writes summary pages to `docs/test-spec.md` and `docs/test-spec.html`, and also regenerates `docs/spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/spec/image/` and non-image evidence under `target/test-artifacts/`.
 
 ```simple
 """
@@ -708,6 +713,9 @@ simple test --format json          # JSON output
 simple test --format doc           # Documentation format
 simple test --list                 # List tests
 simple test --only-slow            # Slow tests only
+simple test --screenshots          # Capture GUI screenshots
+simple test --refresh-screenshots  # Force recapture
+simple test --screenshot-output doc/spec/image/custom
 ```
 
 ### Exit Codes
@@ -724,6 +732,8 @@ simple test --only-slow            # Slow tests only
 ## UI System Testing
 
 Test TUI and Web UI backends programmatically in headless environments (CI, containers, SSH) by serving them on web ports and using the `UITestClient` library.
+
+For screenshot-backed UI verification, the test runner writes captures to `doc/spec/image` by default. Specs can reference those paths through `**Screenshots:**` or `**Artifacts:**` metadata so generated markdown includes links to the captured evidence.
 
 ### Architecture
 

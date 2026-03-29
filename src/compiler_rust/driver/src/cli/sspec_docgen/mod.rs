@@ -10,6 +10,7 @@
 //! - **Validation:** Warns about missing documentation and incomplete specs
 //! - **Statistics:** Tracks documentation coverage and quality metrics
 
+mod evidence;
 mod generator;
 mod index;
 mod metadata;
@@ -44,6 +45,7 @@ pub fn generate_sspec_docs(sspec_files: &[PathBuf], output_dir: &Path) -> Result
             Ok(mut parsed) => {
                 // Extract metadata
                 metadata::extract_metadata(&mut parsed);
+                evidence::enrich_with_discovered_evidence(&mut parsed);
 
                 // Validate
                 let validation = validation::validate_spec(&parsed);

@@ -72,46 +72,13 @@ the underlying `std.tmux` library functions.
 ## Examples
 
 ```simple
-# GET /api/tmux → status
 val (status, ctype, body) = handle_tmux_api("GET", "/api/tmux", "")
-# body: {"available": true, "server_running": true, "session_count": 3}
 
-# GET with query params
 val (s, c, b) = handle_tmux_api("GET", "/api/tmux/capture?session=main&window=0&pane=0", "")
-# body: {"pane_id": "main:0.0", "rows": 24, "content": "..."}
 
-# POST with JSON body
 val body = r'{"session": "main", "window": "0", "pane": "0", "command": "ls -la"}'
 val (s2, c2, b2) = handle_tmux_api("POST", "/api/tmux/send-command", body)
 ```
-
-## Test Summary
-
-| Metric | Count |
-|--------|-------|
-| Scenarios | 17 |
-| Slow Scenarios | 0 |
-| Skipped Scenarios | 0 |
-
-## Scenarios
-
-- extracts a simple field
-- extracts from multiple fields
-- returns empty string for missing field
-- returns empty string for empty json
-- handles escaped characters
-- converts single key-value pair
-- converts multiple pairs
-- handles empty value
-- returns JSON with available field
-- returns JSON array
-- rejects GET on send endpoint
-- rejects GET on send-command endpoint
-- rejects GET on resize endpoint
-- returns 400 when session missing from panes
-- returns 400 when session missing from windows
-- returns 404 for unknown path
-- handles capture with query params
 
 ## Request Body Parsing
 
@@ -159,3 +126,31 @@ val (s2, c2, b2) = handle_tmux_api("POST", "/api/tmux/send-command", body)
 
         Query parameters are converted to JSON and passed to
         endpoint handlers uniformly.
+
+## Test Summary
+
+| Metric | Count |
+|--------|-------|
+| Scenarios | 17 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
+
+## Scenarios
+
+- extracts a simple field
+- extracts from multiple fields
+- returns empty string for missing field
+- returns empty string for empty json
+- handles escaped characters
+- converts single key-value pair
+- converts multiple pairs
+- handles empty value
+- returns JSON with available field
+- returns JSON array
+- rejects GET on send endpoint
+- rejects GET on send-command endpoint
+- rejects GET on resize endpoint
+- returns 400 when session missing from panes
+- returns 400 when session missing from windows
+- returns 404 for unknown path
+- handles capture with query params

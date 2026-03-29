@@ -26,6 +26,70 @@
 # | Test DB | Writes run records to `doc/test/test_db.sdn` |
 # | Skip features | Lists unimplemented features from .skip files |
 
+fn strip_test_suffix(stem: text) -> text:
+    if stem.ends_with("_spec"):
+        return stem[0:stem.len() - 5]
+    if stem.ends_with("_test"):
+        return stem[0:stem.len() - 5]
+    stem
+
+fn artifact_dir_for_test(path: text) -> text:
+    var relative = path
+    if relative.starts_with("simple/std_lib/test/"):
+        relative = relative[20:]
+    elif relative.starts_with("test/"):
+        relative = relative[5:]
+
+    if relative.ends_with(".spl"):
+        relative = relative[0:relative.len() - 4]
+
+    val parts = relative.split("/")
+    var mapped = []
+    var i = 0
+    while i < parts.len():
+        if i == parts.len() - 1:
+            mapped.push(strip_test_suffix(parts[i]))
+        else:
+            mapped.push(parts[i])
+        i = i + 1
+    "target/test-artifacts/{mapped.join(\"/\")}"
+
+fn slugify(value: text) -> text:
+    var result = ""
+    var last_dash = false
+    var i = 0
+    while i < value.len():
+        val ch = value[i]
+        val lower = ch.lower()
+        val is_alpha = lower >= "a" and lower <= "z"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_alpha or is_digit:
+            result = result + lower
+            last_dash = false
+        elif not last_dash:
+            result = result + "-"
+            last_dash = true
+        i = i + 1
+
+    while result.starts_with("-"):
+        result = result[1:]
+    while result.ends_with("-"):
+        result = result[0:result.len() - 1]
+    result
+
+fn scenario_dir_for_test(path: text, index: int, group: text, name: text) -> text:
+    val base = artifact_dir_for_test(path)
+    val joined = if group == "" then name else "{group} {name}"
+    val slug = slugify(joined)
+    val ordinal = if index < 10 then "00{index}" else if index < 100 then "0{index}" else "{index}"
+    "{base}/scenarios/{ordinal}-{slug}"
+
+fn canonical_artifact_files() -> [text]:
+    ["summary.txt", "result.json", "run.log", "stdout.log", "stderr.log", "combined.log"]
+
+fn compatibility_artifact_files() -> [text]:
+    ["output.log"]
+
 
 
 # ============================================================================
@@ -191,7 +255,53 @@ describe "Simple Test Runner Output Parsing":
 
 
 # ============================================================================
-# Test Group 4: Timeout Handling
+# Test Group 4: Artifact Layout
+# ============================================================================
+
+describe "Simple Test Runner Artifact Layout":
+    # ## Artifact Emission
+    #
+    # The runner emits stable per-spec evidence under target/test-artifacts/
+    # so sspec-docgen can auto-discover summaries, logs, and ANSI captures.
+
+    it "writes summaries under target/test-artifacts":
+        val summary_path = "{artifact_dir_for_test(\"test/unit/app/tooling/command_dispatch_spec.spl\")}/summary.txt"
+        expect(summary_path).to_equal("target/test-artifacts/unit/app/tooling/command_dispatch/summary.txt")
+        expect(summary_path).to_end_with("summary.txt")
+
+    it "writes result.json next to the text summary":
+        val json_path = "{artifact_dir_for_test(\"test/unit/app/tooling/command_dispatch_spec.spl\")}/result.json"
+        expect(json_path).to_equal("target/test-artifacts/unit/app/tooling/command_dispatch/result.json")
+        expect(json_path).to_end_with("result.json")
+
+    it "treats combined.log as the canonical merged output stream":
+        val combined_path = "{artifact_dir_for_test(\"test/unit/app/tooling/command_dispatch_spec.spl\")}/combined.log"
+        expect(combined_path).to_equal("target/test-artifacts/unit/app/tooling/command_dispatch/combined.log")
+        expect(combined_path).to_end_with("combined.log")
+
+    it "keeps output.log as a compatibility alias":
+        val output_path = "{artifact_dir_for_test(\"test/unit/app/tooling/command_dispatch_spec.spl\")}/output.log"
+        expect(compatibility_artifact_files().contains("output.log")).to_equal(true)
+        expect(output_path).to_end_with("output.log")
+
+    it "derives scenario directories from index and slugified scenario name":
+        val path = scenario_dir_for_test("test/app/web_dashboard/tmux_rest_api_spec.spl", 1, "rendering", "shows dashboard")
+        expect(path).to_equal("target/test-artifacts/app/web_dashboard/tmux_rest_api/scenarios/001-rendering-shows-dashboard")
+
+    it "reserves canonical transcript filenames for scenario evidence":
+        val dir = scenario_dir_for_test("test/app/web_dashboard/tmux_rest_api_spec.spl", 2, "", "captures tui transcript")
+        expect("{dir}/transcript.ansi").to_end_with("transcript.ansi")
+        expect("{dir}/transcript.txt").to_end_with("transcript.txt")
+
+    it "defines the canonical per-spec artifact set":
+        val files = canonical_artifact_files()
+        expect(files.contains("summary.txt")).to_equal(true)
+        expect(files.contains("result.json")).to_equal(true)
+        expect(files.contains("combined.log")).to_equal(true)
+
+
+# ============================================================================
+# Test Group 5: Timeout Handling
 # ============================================================================
 
 describe "Simple Test Runner Timeout":
@@ -217,7 +327,7 @@ describe "Simple Test Runner Timeout":
 
 
 # ============================================================================
-# Test Group 5: Recursion Guard
+# Test Group 6: Recursion Guard
 # ============================================================================
 
 describe "Simple Test Runner Recursion Guard":

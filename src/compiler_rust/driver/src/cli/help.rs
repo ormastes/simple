@@ -230,6 +230,9 @@ Output:\n\
   --json                  Shorthand for --format json\n\
   --doc                   Shorthand for --format doc\n\
   --watch                 Watch and auto-rerun on changes\n\
+  --screenshots           Capture GUI screenshots for tagged tests\n\
+  --refresh-screenshots   Force recapture of GUI screenshots\n\
+  --screenshot-output <dir>  Screenshot output directory (default: doc/spec/image)\n\
 \n\
 Doctests:\n\
   --doctest, --sdoctest   Run all doctest modes\n\
@@ -275,6 +278,8 @@ mod tests {
         let help = test_help_text();
         assert!(help.contains("--sdoctest"));
         assert!(help.contains("--list-runs"));
+        assert!(help.contains("--screenshots"));
+        assert!(help.contains("doc/spec/image"));
         assert!(help.contains("simple test [path] [options]"));
     }
 }
