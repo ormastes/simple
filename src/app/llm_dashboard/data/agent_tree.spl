@@ -1,0 +1,247 @@
+# Agent Tree
+#
+# Builds and maintains the agent hierarchy from dashboard events.
+# Tracks parent-child relationships, agent states, and resource usage.
+
+use app.llm_dashboard.data.types.{
+    AgentNode, AgentActivity, LLMProvider, FileActivity, URLActivity,
+    provider_from_text
+}
+use app.llm_dashboard.data.jsonl_parser.{
+    DashboardEvent, event_to_activity
+}
+
+# =========================================================================
+# Agent Tree
+# =========================================================================
+
+class AgentTree:
+    agents: [AgentNode]
+    root_ids: [text]
+
+    static fn new() -> AgentTree:
+        return AgentTree(agents: [], root_ids: [])
+
+# =========================================================================
+# Tree Methods
+# =========================================================================
+
+impl AgentTree:
+
+    fn get_agent(id: text) -> AgentNode?:
+        """Find an agent by ID."""
+        for agent in self.agents:
+            if agent.id == id:
+                return agent
+        return nil
+
+    fn agent_count() -> i32:
+        return self.agents.len()
+
+    fn all_agents() -> [AgentNode]:
+        return self.agents
+
+    fn root_agents() -> [AgentNode]:
+        """Get top-level agents (no parent)."""
+        var roots: [AgentNode] = []
+        for id in self.root_ids:
+            val agent = self.get_agent(id)
+            if agent != nil:
+                roots.push(agent)
+        return roots
+
+    fn children_of(parent_id: text) -> [AgentNode]:
+        """Get direct children of an agent."""
+        var children: [AgentNode] = []
+        val parent = self.get_agent(parent_id)
+        if parent == nil:
+            return children
+        for child_id in parent.children:
+            val child = self.get_agent(child_id)
+            if child != nil:
+                children.push(child)
+        return children
+
+    fn depth_of(agent_id: text) -> i32:
+        """Get tree depth of an agent (0 for root)."""
+        var depth = 0
+        var current_id = agent_id
+        while true:
+            val agent = self.get_agent(current_id)
+            if agent == nil:
+                return depth
+            if agent.parent_id == nil:
+                return depth
+            current_id = agent.parent_id
+            depth = depth + 1
+            if depth > 20:  # safety limit
+                return depth
+        return depth
+
+    # -- Mutation ---------------------------------------------------------
+
+    me ensure_agent(id: text, provider: LLMProvider, model: text):
+        """Ensure an agent exists in the tree, creating if needed."""
+        for agent in self.agents:
+            if agent.id == id:
+                return
+        var node = AgentNode.new(id, provider, model)
+        self.agents.push(node)
+        self.root_ids.push(id)
+
+    me update_from_event(event: DashboardEvent):
+        """Update the tree based on a dashboard event."""
+        match event:
+            DashboardEvent.SessionStart(session_id, model, provider_name, timestamp):
+                val provider = provider_from_text(provider_name)
+                self.ensure_agent(session_id, provider, model)
+                self._update_agent_field(session_id, "model", model)
+                self._update_agent_time(session_id, timestamp)
+
+            DashboardEvent.ToolCall(agent_id, tool_name, args, timestamp):
+                self.ensure_agent(agent_id, LLMProvider.Claude, "")
+                val activity = event_to_activity(event)
+                self._update_agent_activity(agent_id, activity)
+                self._update_agent_time(agent_id, timestamp)
+                self._record_tool(agent_id, tool_name)
+                # Track file activity
+                if tool_name == "Read" and args.len() > 0:
+                    self._record_file_read(agent_id, args[0])
+                elif (tool_name == "Write" or tool_name == "Edit") and args.len() > 0:
+                    self._record_file_write(agent_id, args[0])
+                elif (tool_name == "WebFetch" or tool_name == "WebSearch") and args.len() > 0:
+                    self._record_url(agent_id, args[0])
+
+            DashboardEvent.AgentSpawn(parent_id, child_id, description, timestamp):
+                self.ensure_agent(parent_id, LLMProvider.Claude, "")
+                self.ensure_agent(child_id, LLMProvider.Claude, "")
+                self._set_parent(child_id, parent_id)
+                self._update_agent_activity(parent_id, AgentActivity.SubAgentSpawn(child_id: child_id))
+                self._update_agent_time(parent_id, timestamp)
+
+            DashboardEvent.AssistantMessage(agent_id, token_count, timestamp):
+                self.ensure_agent(agent_id, LLMProvider.Claude, "")
+                self._update_agent_activity(agent_id, AgentActivity.Thinking)
+                self._add_tokens(agent_id, token_count)
+                self._update_agent_time(agent_id, timestamp)
+
+            DashboardEvent.SessionEnd(session_id, timestamp):
+                self._update_agent_activity(session_id, AgentActivity.Finished)
+                self._update_agent_time(session_id, timestamp)
+
+            DashboardEvent.Error(agent_id, message, timestamp):
+                self._update_agent_activity(agent_id, AgentActivity.Error(msg: message))
+                self._update_agent_time(agent_id, timestamp)
+
+            _: pass_dn
+
+    # -- Internal mutation helpers ----------------------------------------
+
+    me _update_agent_activity(id: text, activity: AgentActivity):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                self.agents[i].activity = activity
+                return
+            i = i + 1
+
+    me _update_agent_time(id: text, timestamp: i64):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                self.agents[i].last_active = timestamp
+                if self.agents[i].start_time == 0:
+                    self.agents[i].start_time = timestamp
+                return
+            i = i + 1
+
+    me _update_agent_field(id: text, field: text, value: text):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                if field == "model":
+                    self.agents[i].model = value
+                return
+            i = i + 1
+
+    me _set_parent(child_id: text, parent_id: text):
+        # Update child's parent_id
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == child_id:
+                self.agents[i].parent_id = parent_id
+            if self.agents[i].id == parent_id:
+                # Add child to parent's children list if not already there
+                var found = false
+                for c in self.agents[i].children:
+                    if c == child_id:
+                        found = true
+                if not found:
+                    self.agents[i].children.push(child_id)
+            i = i + 1
+        # Remove from root_ids if it has a parent now
+        var new_roots: [text] = []
+        for rid in self.root_ids:
+            if rid != child_id:
+                new_roots.push(rid)
+        self.root_ids = new_roots
+
+    me _record_tool(id: text, tool_name: text):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                var found = false
+                for t in self.agents[i].tools_used:
+                    if t == tool_name:
+                        found = true
+                if not found:
+                    self.agents[i].tools_used.push(tool_name)
+                return
+            i = i + 1
+
+    me _record_file_read(id: text, path: text):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                var found = false
+                for f in self.agents[i].files_read:
+                    if f == path:
+                        found = true
+                if not found:
+                    self.agents[i].files_read.push(path)
+                return
+            i = i + 1
+
+    me _record_file_write(id: text, path: text):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                var found = false
+                for f in self.agents[i].files_written:
+                    if f == path:
+                        found = true
+                if not found:
+                    self.agents[i].files_written.push(path)
+                return
+            i = i + 1
+
+    me _record_url(id: text, url: text):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                var found = false
+                for u in self.agents[i].urls_fetched:
+                    if u == url:
+                        found = true
+                if not found:
+                    self.agents[i].urls_fetched.push(url)
+                return
+            i = i + 1
+
+    me _add_tokens(id: text, count: i64):
+        var i = 0
+        while i < self.agents.len():
+            if self.agents[i].id == id:
+                self.agents[i].token_count = self.agents[i].token_count + count
+                return
+            i = i + 1

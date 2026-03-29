@@ -1,0 +1,66 @@
+# Codex Collector
+#
+# Collects OpenAI Codex/GPT status from agent tree.
+# Detects Codex agents by provider type and model name.
+
+use app.llm_dashboard.data.types.{LLMStatus, LLMProvider, AgentNode}
+use app.llm_dashboard.data.agent_tree.{AgentTree}
+
+# =========================================================================
+# Codex Collector
+# =========================================================================
+
+class CodexCollector:
+    last_check: i64
+
+    static fn new() -> CodexCollector:
+        return CodexCollector(last_check: 0)
+
+fn collect_codex_status(tree: AgentTree) -> LLMStatus:
+    """Derive Codex status from the agent tree state."""
+    var connected = false
+    var model = ""
+    var total_tokens: i64 = 0
+    var active_count: i64 = 0
+    var last_heartbeat: i64 = 0
+
+    for agent in tree.all_agents():
+        match agent.provider:
+            LLMProvider.Codex:
+                connected = true
+                if agent.model != "" and model == "":
+                    model = agent.model
+                total_tokens = total_tokens + agent.token_count
+                match agent.activity:
+                    AgentActivity.Finished: pass_dn
+                    AgentActivity.Idle: pass_dn
+                    _: active_count = active_count + 1
+                if agent.last_active > last_heartbeat:
+                    last_heartbeat = agent.last_active
+            _: pass_dn
+
+    val cost_cents = estimate_codex_cost(total_tokens, model)
+
+    return LLMStatus(
+        provider: LLMProvider.Codex,
+        connected: connected,
+        model: model,
+        tokens_used: total_tokens,
+        estimated_cost_cents: cost_cents,
+        active_agents: active_count,
+        last_heartbeat: last_heartbeat
+    )
+
+fn estimate_codex_cost(tokens: i64, model: text) -> i64:
+    """Estimate cost in cents for OpenAI models."""
+    val lower = model.to_lower()
+    var cents_per_1k: i64 = 0
+    if lower.contains("gpt-4"):
+        cents_per_1k = 3
+    elif lower.contains("o1") or lower.contains("o3") or lower.contains("o4"):
+        cents_per_1k = 4
+    elif lower.contains("codex"):
+        cents_per_1k = 1
+    else:
+        cents_per_1k = 2
+    return (tokens * cents_per_1k) / 1000

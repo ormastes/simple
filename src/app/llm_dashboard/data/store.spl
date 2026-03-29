@@ -1,0 +1,252 @@
+# Agent Dashboard Store
+#
+# Central state container for the LLM Agent Dashboard.
+# Aggregates data from JSONL watcher, agent tree, and collectors.
+
+use app.llm_dashboard.data.types.{
+    AgentNode, LLMStatus, LLMProvider, RoomKind, FileActivity, URLActivity,
+    ActivityEntry, provider_name, room_name, format_tokens
+}
+use app.llm_dashboard.data.jsonl_watcher.{JsonlWatcher}
+use app.llm_dashboard.data.agent_tree.{AgentTree}
+use app.llm_dashboard.data.jsonl_parser.{DashboardEvent, event_to_activity_entry}
+
+# =========================================================================
+# Dashboard Store
+# =========================================================================
+
+class AgentDashboardStore:
+    watcher: JsonlWatcher
+    tree: AgentTree
+    activity_feed: [ActivityEntry]
+    file_activities: [FileActivity]
+    url_activities: [URLActivity]
+    llm_statuses: [LLMStatus]
+    max_feed_size: i32
+    last_update: i64
+    total_events: i64
+
+    static fn new() -> AgentDashboardStore:
+        # Initialize with disconnected statuses for all providers
+        var statuses: [LLMStatus] = []
+        statuses.push(LLMStatus.disconnected(LLMProvider.Claude))
+        statuses.push(LLMStatus.disconnected(LLMProvider.Codex))
+        statuses.push(LLMStatus.disconnected(LLMProvider.Gemini))
+
+        return AgentDashboardStore(
+            watcher: JsonlWatcher.new(),
+            tree: AgentTree.new(),
+            activity_feed: [],
+            file_activities: [],
+            url_activities: [],
+            llm_statuses: statuses,
+            max_feed_size: 200,
+            last_update: 0,
+            total_events: 0
+        )
+
+    static fn with_dir(dir: text) -> AgentDashboardStore:
+        var statuses: [LLMStatus] = []
+        statuses.push(LLMStatus.disconnected(LLMProvider.Claude))
+        statuses.push(LLMStatus.disconnected(LLMProvider.Codex))
+        statuses.push(LLMStatus.disconnected(LLMProvider.Gemini))
+
+        return AgentDashboardStore(
+            watcher: JsonlWatcher.with_dir(dir),
+            tree: AgentTree.new(),
+            activity_feed: [],
+            file_activities: [],
+            url_activities: [],
+            llm_statuses: statuses,
+            max_feed_size: 200,
+            last_update: 0,
+            total_events: 0
+        )
+
+# =========================================================================
+# Store Methods
+# =========================================================================
+
+impl AgentDashboardStore:
+
+    # -- Polling ----------------------------------------------------------
+
+    me poll():
+        """Poll for new events and update all state."""
+        val events = self.watcher.poll()
+        for event in events:
+            self._process_event(event)
+            self.total_events = self.total_events + 1
+
+    me _process_event(event: DashboardEvent):
+        """Process a single event, updating tree, feed, and tracking."""
+        # Update agent tree
+        self.tree.update_from_event(event)
+
+        # Update activity feed
+        val entry = event_to_activity_entry(event)
+        if entry != nil:
+            self.activity_feed.push(entry)
+            # Trim feed if too large
+            if self.activity_feed.len() > self.max_feed_size:
+                self.activity_feed = self.activity_feed.slice(
+                    self.activity_feed.len() - self.max_feed_size
+                )
+
+        # Track file and URL activity
+        match event:
+            DashboardEvent.ToolCall(agent_id, tool_name, args, timestamp):
+                if tool_name == "Read" and args.len() > 0:
+                    self.file_activities.push(
+                        FileActivity.new(agent_id, args[0], "read", timestamp)
+                    )
+                elif tool_name == "Write" and args.len() > 0:
+                    self.file_activities.push(
+                        FileActivity.new(agent_id, args[0], "write", timestamp)
+                    )
+                elif tool_name == "Edit" and args.len() > 0:
+                    self.file_activities.push(
+                        FileActivity.new(agent_id, args[0], "edit", timestamp)
+                    )
+                elif tool_name == "WebFetch" and args.len() > 0:
+                    self.url_activities.push(
+                        URLActivity.new(agent_id, args[0], timestamp)
+                    )
+                elif tool_name == "WebSearch" and args.len() > 0:
+                    self.url_activities.push(
+                        URLActivity.new(agent_id, args[0], timestamp)
+                    )
+                else:
+                    pass_dn
+            _: pass_dn
+
+        # Update LLM status from session events
+        match event:
+            DashboardEvent.SessionStart(session_id, model, provider_str, timestamp):
+                self._update_llm_status_connected(provider_str, model, timestamp)
+            DashboardEvent.AssistantMessage(agent_id, token_count, timestamp):
+                self._add_llm_tokens(agent_id, token_count)
+            _: pass_dn
+
+    # -- LLM Status Updates -----------------------------------------------
+
+    me _update_llm_status_connected(provider_str: text, model: text, timestamp: i64):
+        """Mark an LLM provider as connected."""
+        var i = 0
+        while i < self.llm_statuses.len():
+            val status = self.llm_statuses[i]
+            val pname = provider_name(status.provider).to_lower()
+            if provider_str.to_lower().contains(pname) or pname.contains(provider_str.to_lower()):
+                self.llm_statuses[i].connected = true
+                self.llm_statuses[i].model = model
+                self.llm_statuses[i].last_heartbeat = timestamp
+                self.llm_statuses[i].active_agents = self.llm_statuses[i].active_agents + 1
+                return
+            i = i + 1
+        # Default: update Claude (most likely)
+        if self.llm_statuses.len() > 0:
+            self.llm_statuses[0].connected = true
+            self.llm_statuses[0].model = model
+            self.llm_statuses[0].last_heartbeat = timestamp
+
+    me _add_llm_tokens(agent_id: text, token_count: i64):
+        """Add tokens to the appropriate provider's counter."""
+        # Find which provider this agent belongs to
+        val agent = self.tree.get_agent(agent_id)
+        if agent == nil:
+            # Default to Claude
+            if self.llm_statuses.len() > 0:
+                self.llm_statuses[0].tokens_used = self.llm_statuses[0].tokens_used + token_count
+            return
+        val pname = provider_name(agent.provider).to_lower()
+        var i = 0
+        while i < self.llm_statuses.len():
+            if provider_name(self.llm_statuses[i].provider).to_lower() == pname:
+                self.llm_statuses[i].tokens_used = self.llm_statuses[i].tokens_used + token_count
+                return
+            i = i + 1
+
+    # -- Queries ----------------------------------------------------------
+
+    fn get_agents() -> [AgentNode]:
+        return self.tree.all_agents()
+
+    fn get_root_agents() -> [AgentNode]:
+        return self.tree.root_agents()
+
+    fn get_children(parent_id: text) -> [AgentNode]:
+        return self.tree.children_of(parent_id)
+
+    fn get_status(provider: LLMProvider) -> LLMStatus:
+        val pname = provider_name(provider).to_lower()
+        for status in self.llm_statuses:
+            if provider_name(status.provider).to_lower() == pname:
+                return status
+        return LLMStatus.disconnected(provider)
+
+    fn get_feed(count: i32) -> [ActivityEntry]:
+        """Get the most recent activity feed entries."""
+        if count >= self.activity_feed.len():
+            return self.activity_feed
+        return self.activity_feed.slice(self.activity_feed.len() - count)
+
+    fn get_feed_for_room(room: RoomKind, count: i32) -> [ActivityEntry]:
+        """Get activity feed entries for a specific room."""
+        var filtered: [ActivityEntry] = []
+        val rname = room_name(room)
+        for entry in self.activity_feed:
+            if room_name(entry.room) == rname:
+                filtered.push(entry)
+        if count >= filtered.len():
+            return filtered
+        return filtered.slice(filtered.len() - count)
+
+    fn get_files_for_agent(agent_id: text) -> [FileActivity]:
+        var result: [FileActivity] = []
+        for fa in self.file_activities:
+            if fa.agent_id == agent_id:
+                result.push(fa)
+        return result
+
+    fn get_urls_for_agent(agent_id: text) -> [URLActivity]:
+        var result: [URLActivity] = []
+        for ua in self.url_activities:
+            if ua.agent_id == agent_id:
+                result.push(ua)
+        return result
+
+    fn total_files_read() -> i32:
+        var count = 0
+        for fa in self.file_activities:
+            if fa.operation == "read":
+                count = count + 1
+        return count
+
+    fn total_files_written() -> i32:
+        var count = 0
+        for fa in self.file_activities:
+            if fa.operation == "write" or fa.operation == "edit":
+                count = count + 1
+        return count
+
+    fn total_urls() -> i32:
+        return self.url_activities.len()
+
+    fn total_tools_used() -> i32:
+        var count: i64 = 0
+        for entry in self.activity_feed:
+            count = count + 1
+        return count.to_i32()
+
+    fn is_available() -> bool:
+        """Check if JSONL watching is available."""
+        return self.watcher.is_available()
+
+    fn summary_line() -> text:
+        """One-line summary for status bar."""
+        val agents = self.tree.agent_count()
+        val reads = self.total_files_read()
+        val writes = self.total_files_written()
+        val urls = self.total_urls()
+        val tools = self.total_tools_used()
+        return "Agents: {agents}  Files: {reads}R {writes}W  URLs: {urls}  Tools: {tools}"
