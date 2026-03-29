@@ -1,0 +1,369 @@
+# Driver API Core - Heavy compiler driver convenience functions.
+#
+# This file contains the original implementation-heavy driver helpers.
+# `driver_api.spl` is kept as a thin export facade so selective imports
+# can avoid loading this full compiler graph unless they actually need it.
+
+use lazy compiler.hir.hir.*
+use lazy compiler.mir.mir.*
+use lazy compiler.frontend.frontend.{parse_full_frontend}
+use lazy compiler.backend.backend.backend_types.{BackendResult}
+use lazy compiler.backend.backend.backend_port.{BackendPort}
+use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use lazy compiler.backend.backend.compiler.{CompilerBackendImpl}
+use lazy compiler.backend.backend.sdn.{SdnBackendImpl}
+use lazy compiler.types.type_infer.*
+use lazy compiler.backend.ffi.*
+use lazy compiler.mono.monomorphize_integration.*
+use lazy compiler.mir_opt.mir_opt_integration.{OptimizationConfig, optimize_mir_module}
+use lazy compiler.tools.async_integration.{AsyncIntegration, AsyncStateMachine, process_async_mir}
+use lazy compiler.borrow.borrow_check.*
+use lazy compiler.semantics.visibility_integration.{check_module_visibility}
+use lazy compiler.semantics.const_eval.{eval_static_assert, ConstEvalError}
+use lazy compiler.common.config.*
+use lazy compiler.types.type_system.effect_pass.{run_effect_pass}
+use driver_types.*
+use lazy compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
+use lazy compiler.driver.smf_writer.{generate_smf_with_templates, Target}
+use lazy compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
+use lazy compiler.driver.driver_aot_output.*
+use lazy compiler.driver.driver.{CheckBackendImpl, CompilerDriver}
+
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn compiler__driver__driver__CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult
+
+fn find_runtime_lib_dir() -> text:
+    val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
+    if env_path != nil and env_path != "":
+        return env_path
+    if rt_file_exists("rust/target/debug/libsimple_compiler.so"):
+        return "rust/target/debug"
+    if rt_file_exists("rust/target/release/libsimple_compiler.so"):
+        return "rust/target/release"
+    "rust/target/debug"
+
+fn compile_file(path: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = paths
+    options.mode = mode
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn interpret_file(path: text) -> CompileResult:
+    val cached = try_load_smf_cached(path)
+    if cached.?:
+        return cached.unwrap()
+    compile_files([path], CompileMode.Interpret)
+
+fn jit_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Jit)
+
+fn aot_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn aot_c_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "c"
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn aot_llvm_file(path: text, output: text) -> CompileResult:
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Smf
+    options.backend = "llvm"
+    options.release = true
+    options.optimize = true
+    options.opt_level = 3
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn aot_llvm_native_file(path: text, output: text) -> CompileResult:
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Native
+    options.backend = "llvm"
+    options.release = true
+    options.optimize = true
+    options.opt_level = 3
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn aot_native_file_with_backend(path: text, output: text, backend: text) -> CompileResult:
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Native
+    options.backend = backend
+    options.release = true
+    options.optimize = true
+    options.opt_level = 3
+    val driver = CompilerDriver.create(options)
+    driver.compile()
+
+fn aot_cuda_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "cuda"
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn aot_native_project_with_backend(source_dirs: [text], entry: text, output: text, backend: text, strip: bool) -> CompileResult:
+    print "[API] aot_native_project_with_backend: entry={entry}, output={output}, backend={backend}, sources={source_dirs.len()}"
+    var options = CompileOptions.default()
+    var inputs: [text] = []
+    for dir in source_dirs:
+        inputs = inputs.push(dir)
+    inputs = inputs.push(entry)
+    options.input_files = inputs
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Native
+    options.backend = backend
+    options.release = true
+    options.optimize = true
+    options.opt_level = 3
+    print "[API] creating driver with {inputs.len()} inputs..."
+    val driver = CompilerDriver.create(options)
+    print "[API] driver created, calling compile..."
+    val result = driver.compile()
+    print "[API] compile result: {result}"
+    result
+
+fn aot_vhdl_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "vhdl"
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
+
+fn check_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Check)
+
+fn parse_sdn_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Sdn)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+
+fn compile_to_smf(path: text, output: text) -> Result<text, text>:
+    val options = CompileOptions.default()
+    options.input_files = [path]
+    options.output_file = output
+    options.mode = CompileMode.Aot
+    options.output_format = OutputFormat.Smf
+
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(_):
+            Ok(output)
+        case _:
+            val errors = result.get_errors()
+            val error_msg = if errors.len() > 0:
+                errors.join("\n")
+            else:
+                "Compilation failed"
+            Err(error_msg)
+
+extern fn sys_get_args() -> [text]
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
+extern fn rt_path_parent(path: text) -> text
+
+fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
+    use compiler.tools.header_gen.mod_.{HeaderGenerator}
+
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(mir_module_any):
+            if mir_module_any.?:
+                val mir_module = mir_module_any as MirModule
+                val gen = HeaderGenerator.create(mir_module)
+
+                if not gen.has_exports():
+                    print "[header-gen] Warning: no @export(\"C\") items found"
+                    return result
+
+                rt_dir_create(output_dir, true)
+
+                if emit_c:
+                    val c_header = gen.generate_c_header(lib_name)
+                    val c_path = rt_path_join(output_dir, lib_name + ".h")
+                    rt_file_write_text(c_path, c_header)
+                    print "[header-gen] Generated C header: {c_path}"
+
+                if emit_cpp:
+                    val cpp_header = gen.generate_cpp_header(lib_name)
+                    val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
+                    rt_file_write_text(cpp_path, cpp_header)
+                    print "[header-gen] Generated C++ header: {cpp_path}"
+
+            result
+        case _:
+            result
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    use compiler.tools.header_gen.shared_lib_flags.{get_shared_lib_flags}
+
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    val cpp_output = output + ".simple_public.cpp"
+    val source_obj = output + ".simple_public.o"
+    val runtime_obj = output + ".runtime.o"
+    options.output_file = Some(cpp_output)
+    options.backend = "c"
+    options.release = true
+    options.optimize = true
+    val driver = CompilerDriver.create(options)
+    val compile_result = CompilerDriver.run_compile(driver)
+
+    match compile_result:
+        case CompileResult.Success(_):
+            val flags = get_shared_lib_flags()
+
+            var source_args: [text] = []
+            var i = 0
+            while i < flags.compile_flags.len():
+                source_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                source_args.push("-D" + flags.defines[i])
+                i = i + 1
+            source_args.push("-c")
+            source_args.push(cpp_output)
+            source_args.push("-o")
+            source_args.push(source_obj)
+
+            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
+            if src_code != 0:
+                rt_file_delete(cpp_output)
+                return CompileResult.CodegenError(_combine_driver_api_process_error("C++ object compilation failed", src_out, src_err))
+
+            var runtime_args: [text] = []
+            i = 0
+            while i < flags.compile_flags.len():
+                runtime_args.push(flags.compile_flags[i])
+                i = i + 1
+            i = 0
+            while i < flags.defines.len():
+                runtime_args.push("-D" + flags.defines[i])
+                i = i + 1
+            runtime_args.push("-c")
+            runtime_args.push("src/runtime/runtime.c")
+            runtime_args.push("-I")
+            runtime_args.push("src/runtime")
+            runtime_args.push("-o")
+            runtime_args.push(runtime_obj)
+
+            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
+            if rt_code != 0:
+                rt_file_delete(cpp_output)
+                rt_file_delete(source_obj)
+                return CompileResult.CodegenError(_combine_driver_api_process_error("Runtime object compilation failed", rt_out, rt_err))
+
+            var link_args: [text] = []
+            i = 0
+            while i < flags.link_flags.len():
+                link_args.push(flags.link_flags[i])
+                i = i + 1
+            link_args.push(source_obj)
+            link_args.push(runtime_obj)
+            link_args.push("-o")
+            link_args.push(output)
+
+            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
+            rt_file_delete(cpp_output)
+            rt_file_delete(source_obj)
+            rt_file_delete(runtime_obj)
+
+            if link_code != 0:
+                return CompileResult.CodegenError(_combine_driver_api_process_error("Shared library link failed", link_out, link_err))
+
+            CompileResult.Success(output)
+        case _:
+            compile_result
+
+fn _combine_driver_api_process_error(prefix: text, stdout: text, stderr: text) -> text:
+    var detail = stderr.trim()
+    if detail == "":
+        detail = stdout.trim()
+    if detail == "":
+        return prefix
+    prefix + ": " + detail
+
+fn try_load_smf_cached(path: text) -> CompileResult?:
+    use compiler.driver.watcher.smf_manifest.{
+        load_smf_manifest_default, smf_manifest_find
+    }
+    use compiler.driver.cache.cache_validator.{
+        validate_smf
+    }
+    use compiler.driver.cache.compile_options_hash.{
+        compile_options_hash_zero
+    }
+    use compiler.driver.cache.cache_types.{CACHE_FRESH}
+
+    val manifest = load_smf_manifest_default()
+    val entry = smf_manifest_find(manifest, path)
+    if not entry.?:
+        return nil
+
+    val smf_entry = entry.unwrap()
+    val smf_path = smf_entry.smf_path
+
+    if not rt_file_exists(smf_path):
+        return nil
+
+    val freshness = validate_smf(path, smf_path, compile_options_hash_zero())
+    if freshness.status != CACHE_FRESH:
+        return nil
+
+    print "[interp] Loading pre-compiled SMF: {smf_path}"
+    val options = CompileOptions.default()
+    options.input_files = [smf_path]
+    options.mode = CompileMode.SmfExec
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+    Some(result)
+
+export find_runtime_lib_dir
+export compile_file, compile_files, interpret_file, jit_file, aot_file, aot_c_file, aot_llvm_file, aot_llvm_native_file, aot_native_file_with_backend, aot_native_project_with_backend, aot_cuda_file, aot_vhdl_file, check_file, parse_sdn_file, compile_to_smf
+export generate_headers, aot_shared_library
+export try_load_smf_cached

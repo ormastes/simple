@@ -569,3 +569,74 @@ Interpretation:
   project path for `llvm-lib`
 - the current issue is performance / long-running execution in the pure Simple
   bootstrap path, not the previous immediate Rust backend gate failure
+
+### Bootstrap App Compatibility Fixes
+
+After the routing fix, the next blockers were in the bootstrap app path itself.
+
+1. CLI args FFI mismatch
+
+- `src/app/cli/bootstrap_main.spl` originally used `rt_get_args()`
+- under the seed interpreter, that surfaced as a raw runtime handle (`i64`),
+  so even `args.len()` failed with:
+  - `semantic: method len not found on type i64`
+
+Fix:
+
+- switched bootstrap CLI argument loading to `rt_cli_get_args()`
+
+Result:
+
+- bootstrap app now starts correctly under the seed interpreter
+- direct invocation prints:
+  - `[bootstrap_main] argc = ...`
+  - `[bootstrap_main] first = ...`
+
+2. Bootstrap-only API narrowing
+
+- `bootstrap_main.spl` no longer imports the heavyweight `driver_api.spl`
+- it now uses a dedicated `bootstrap_api.spl` bridge in both:
+  - `src/compiler/driver/bootstrap_api.spl`
+  - `src/compiler/80.driver/bootstrap_api.spl`
+
+That bridge was iterated to avoid several interpreter hazards:
+
+- package/file ambiguity around `compiler.driver.driver`
+- stale `.simple` cache state causing an old `CompileOptions.shared` field error
+- unsupported static path calls like `CompilerDriver.create(...)`
+
+Current bridge shape:
+
+- uses `compiler_driver_create(...)`
+- uses `compiler_driver_run_compile(...)`
+- uses `driver_core_compile_options_default()`
+
+3. Source compatibility cleanup
+
+- removed the `function` field name from `driver_public_api.spl` parsing structs
+  in both driver trees because the seed parser treats `function` as a reserved
+  keyword
+
+Current status after these fixes:
+
+- clean direct probe:
+
+```bash
+rm -rf .simple
+timeout 25s src/compiler_rust/target/bootstrap/simple native-build \
+  --backend llvm-lib \
+  --source src/compiler --source src/app --source src/lib \
+  --entry src/app/cli/bootstrap_main.spl \
+  --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+  -o build/bootstrap-direct-stage2-clean4/simple
+```
+
+- no immediate Rust backend gate failure
+- no immediate `len()` / `CompileOptions.shared` / `CompilerDriver.create(...)`
+  failures
+- no immediate `function` keyword parse failure
+- the run now remains in the pure Simple bootstrap path until the outer timeout
+  terminates it
+
+So the next remaining problem is back to runtime/performance of the pure Simple
+bootstrap stage, not control-flow or parser incompatibility.

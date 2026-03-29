@@ -450,6 +450,8 @@ pub fn load_and_merge_module(
     let filtered_items: Vec<Node> =
         if module_path.to_string_lossy().contains("src/compiler/driver/__init__.spl")
             || module_path.to_string_lossy().contains("src/compiler/80.driver/__init__.spl")
+            || module_path.to_string_lossy().contains("src/compiler/driver/driver_api.spl")
+            || module_path.to_string_lossy().contains("src/compiler/80.driver/driver_api.spl")
         {
             if let Some(names) = requested_names.as_ref() {
                 module
@@ -805,5 +807,59 @@ mod tests {
         };
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_driver_api_generate_headers_for_external_callers() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("/tmp/driver_api_probe.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["compiler", "driver", "driver_api"],
+                ImportTarget::Group(vec![ImportTarget::Single("generate_headers".to_string())]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("generate_headers"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_driver_api_compile_to_smf_for_external_callers() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("/tmp/driver_api_probe.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["compiler", "driver", "driver_api"],
+                ImportTarget::Group(vec![ImportTarget::Single("compile_to_smf".to_string())]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("compile_to_smf"), Some(Value::Function { .. })));
     }
 }
