@@ -18,14 +18,10 @@ Each platform has a "dev plugin" that bundles development workflow skills + MCP 
 | Platform | Dev Plugin | Skills | MCP Servers | Instructions | Status |
 |----------|-----------|--------|-------------|-------------|--------|
 | **Gemini CLI** | `gemini-extension.json` | 12 commands (`.gemini/commands/`) | simple-mcp, simple-lsp-mcp | GEMINI.md | Topic set, pending gallery crawl |
-| **Claude Code** | **Not yet created** | 7 skills (`.claude/skills/`), 12 agents (`.claude/agents/`) — local only | simple-mcp, simple-lsp-mcp, t32-mcp, t32-lsp-mcp | CLAUDE.md | Needs: bundle skills+agents into `simple-dev` plugin, submit to marketplace |
-| **Codex** | **Not yet created** | 11 skills (`.codex/skills/`) — ad-hoc only | simple-mcp, simple-lsp-mcp, t32-mcp, t32-lsp-mcp | AGENTS.md | Needs: convert to plugin bundle format, submit to [openai/skills](https://github.com/openai/skills) |
+| **Claude Code** | PR: [#1149](https://github.com/anthropics/claude-plugins-official/pull/1149) | 7 skills (`.claude/skills/`), 12 agents (`.claude/agents/`) | simple-mcp via npm | CLAUDE.md | PR submitted, awaiting review |
+| **Codex** | PR: [#319](https://github.com/openai/skills/pull/319) | 11 skills (`.codex/skills/`) | simple-mcp via npm | AGENTS.md | PR submitted, awaiting review |
 
-**Gap:** Only Gemini has a distributable dev extension. Claude and Codex skills/agents work locally but are not packaged as installable plugins for external users.
-
-**TODO:**
-- **Claude `simple-dev` plugin:** Bundle `.claude/skills/` + `.claude/agents/` + MCP config into `tools/claude-plugin/marketplace/plugins/simple-dev/`, then submit to [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official)
-- **Codex `simple-dev` plugin:** Bundle `.codex/skills/` + MCP config into Codex plugin format (see [developers.openai.com/codex/plugins](https://developers.openai.com/codex/plugins)), then submit to [openai/skills](https://github.com/openai/skills)
+All three platforms now have submissions pending or live. Local skills/agents continue to work for in-project development.
 
 ## Deployment Status
 
@@ -35,9 +31,9 @@ Each platform has a "dev plugin" that bundles development workflow skills + MCP 
 | **MCP Registry** (`io.github.ormastes/simple-mcp-server`) | Published (v0.9.5) | — |
 | **Gemini CLI Gallery** | `gemini-cli-extension` topic set | Wait for daily crawl (~24h) |
 | **GitHub Releases** | v0.9.4 exists, plugin archives uploaded | — |
-| **Claude `simple-dev` plugin** | **Not created** | Bundle skills+agents, submit to [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official) |
-| **Claude tool plugins** | Packaged (3 archives in `build/release/plugins/`) | Submit to marketplace |
-| **Codex `simple-dev` plugin** | **Not created** | Convert `.codex/skills/` to plugin bundle, submit to [openai/skills](https://github.com/openai/skills) |
+| **Claude plugin** | PR submitted: [anthropics/claude-plugins-official#1149](https://github.com/anthropics/claude-plugins-official/pull/1149) | Awaiting review |
+| **Claude tool plugins** | Packaged (3 archives in `build/release/plugins/`) | Available on GitHub Release v0.9.4 |
+| **Codex skill** | PR submitted: [openai/skills#319](https://github.com/openai/skills/pull/319) | Awaiting review |
 
 ---
 
