@@ -137,6 +137,37 @@ esac
 PLATFORM="${arch}-${vendor}-${os}-${abi}"
 echo "Platform: ${PLATFORM}"
 
+log_dir="${output_dir}/logs/${PLATFORM}"
+mkdir -p "${log_dir}"
+
+run_logged() {
+  label=$1
+  shift
+  log_file="${log_dir}/${label}.log"
+  {
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ${label}"
+    echo "cwd: $(pwd)"
+    echo "command: $*"
+    echo ""
+  } >"${log_file}"
+
+  set +e
+  "$@" >>"${log_file}" 2>&1
+  status=$?
+  set -e
+
+  echo "  ${label} log: ${log_file}"
+  if [ "${status}" -ne 0 ]; then
+    echo "error: ${label} failed with exit ${status}" >&2
+    if [ "${status}" -ge 128 ]; then
+      signal=$((${status} - 128))
+      echo "error: ${label} terminated by signal ${signal}" >&2
+    fi
+    echo "error: see log ${log_file}" >&2
+    exit "${status}"
+  fi
+}
+
 # ===========================================================================
 # Bootstrap pipeline
 # ===========================================================================
@@ -145,7 +176,7 @@ seed_bin="src/compiler_rust/target/bootstrap/simple"
 
 if [ ! -x "${seed_bin}" ]; then
   echo "Building Rust seed compiler..."
-  cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
@@ -178,7 +209,7 @@ else
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
-  "${seed_bin}" native-build \
+  run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
@@ -191,7 +222,7 @@ else
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf .simple/native_cache/
-  "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+  run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --source src/compiler --source src/app --source src/lib \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
@@ -238,7 +269,7 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
-"${stage_for_build}" native-build \
+run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage_for_build}" native-build \
   --source src/compiler --source src/app --source src/lib \
   --entry src/app/cli/main.spl \
   --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \

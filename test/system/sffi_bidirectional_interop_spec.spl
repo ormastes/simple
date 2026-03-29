@@ -30,6 +30,7 @@ use compiler.common.attributes.{ExportAttr, parse_export_attrs}
 use compiler.frontend.parser_types.{Attribute, Expr, ExprKind}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.backend.{MirToC}
+use compiler.driver.{generate_headers, CompileResult}
 use compiler.mir.mir_data.*
 use compiler.tools.header_gen.c_header.{emit_c_header}
 use compiler.tools.header_gen.cpp_header.{emit_cpp_header}
@@ -42,6 +43,14 @@ use compiler.types.type_layout.{LayoutAttr, LayoutKind, layoutattr_c_repr, verif
 from hir_definitions import {HirClass, HirField, HirExpr, HirExprKind}
 from hir_types import {SymbolId, HirType, HirTypeKind}
 from lexer import {Span}
+
+val NL = "\n"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 
 fn empty_span() -> Span:
@@ -257,6 +266,15 @@ fn find_by_code(warnings: [SffiLintWarning], code: text) -> [SffiLintWarning]:
             result.push(warning)
     result
 
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+fn cleanup_path(path: text):
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + path])
+    pass_dn
+
 
 describe "SFFI Bidirectional Class Interop":
     describe "attribute parsing":
@@ -337,6 +355,56 @@ describe "SFFI Bidirectional Class Interop":
             expect(header).to_contain("Calculator(const Calculator&) = delete;")
             expect(header).to_contain("Calculator(Calculator&& other) noexcept")
             expect(header).to_contain("spl_Calculator_destroy(handle_)")
+
+    describe "driver header generation":
+        it "generates real C and C++ header files from source-defined exported types and functions":
+            val source_path = "/tmp/sffi_driver_header_spec.spl"
+            val output_dir = "/tmp/sffi_driver_header_out"
+            val header_path = output_dir + "/gpio_driver.h"
+            val cpp_header_path = output_dir + "/gpio_driver.hpp"
+
+            cleanup_path(output_dir)
+            rt_file_delete(source_path)
+
+            val source =
+                "@repr(\"C\")" + NL +
+                "@export(\"C\")" + NL +
+                "class GpioRegister:" + NL +
+                "    mode: u8 @bits(4)" + NL +
+                "    output: bool @bits(1)" + NL +
+                "    input: bool @bits(1)" + NL +
+                "    speed: u8 @bits(2)" + NL + NL +
+                "@export(\"C\")" + NL +
+                "fn add_numbers(a: i32, b: i32) -> i32:" + NL +
+                "    a + b"
+
+            expect(write_source(source_path, source)).to_equal(true)
+
+            val result = generate_headers(source_path, output_dir, "gpio_driver", true, true)
+            expect(result.is_success()).to_equal(true)
+            expect(rt_file_exists(header_path)).to_equal(true)
+            expect(rt_file_exists(cpp_header_path)).to_equal(true)
+
+            val header = rt_file_read_text(header_path) ?? ""
+            expect(header).to_contain("typedef struct spl_GpioRegister* spl_GpioRegister_t;")
+            expect(header).to_contain("spl_GpioRegister_create")
+            expect(header).to_contain("spl_GpioRegister_destroy")
+            expect(header).to_contain("uint8_t mode : 4;")
+            expect(header).to_contain("uint8_t output : 1;")
+            expect(header).to_contain("uint8_t input : 1;")
+            expect(header).to_contain("uint8_t speed : 2;")
+            expect(header).to_contain("int32_t spl_add_numbers(int32_t arg0, int32_t arg1);")
+
+            val cpp_header = rt_file_read_text(cpp_header_path) ?? ""
+            expect(cpp_header).to_contain("#include \"gpio_driver.h\"")
+            expect(cpp_header).to_contain("namespace spl")
+            expect(cpp_header).to_contain("class Library")
+            expect(cpp_header).to_contain("class GpioRegister")
+            expect(cpp_header).to_contain("~GpioRegister()")
+            expect(cpp_header).to_contain("GpioRegister(const GpioRegister&) = delete;")
+
+            rt_file_delete(source_path)
+            cleanup_path(output_dir)
 
     describe "repr(C) layout verification":
         it "computes stable C layout for a packet header":

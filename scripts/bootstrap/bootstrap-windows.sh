@@ -127,6 +127,36 @@ echo "  os:        windows"
 echo "  abi:       ${abi}"
 echo "  toolchain: ${toolchain}"
 
+log_dir="${output_dir}/logs/${PLATFORM}"
+mkdir -p "${log_dir}"
+
+run_logged() {
+  local label="$1"
+  shift
+  local log_file="${log_dir}/${label}.log"
+  {
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ${label}"
+    echo "cwd: $(pwd)"
+    echo "command: $*"
+    echo ""
+  } >"${log_file}"
+
+  set +e
+  "$@" >>"${log_file}" 2>&1
+  local status=$?
+  set -e
+
+  echo "  ${label} log: ${log_file}"
+  if [[ "${status}" -ne 0 ]]; then
+    echo "error: ${label} failed with exit ${status}" >&2
+    if [[ "${status}" -ge 128 ]]; then
+      echo "error: ${label} terminated by signal $((status - 128))" >&2
+    fi
+    echo "error: see log ${log_file}" >&2
+    exit "${status}"
+  fi
+}
+
 # ===========================================================================
 # Compiler configuration
 # ===========================================================================
@@ -155,7 +185,7 @@ fi
 seed_bin="src/compiler_rust/target/bootstrap/simple.exe"
 if [[ ! -f "${seed_bin}" ]]; then
   echo "Building Rust seed compiler..."
-  cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 fi
 
 backend_flag=()
@@ -185,7 +215,7 @@ stage3_bin="${stage3_dir}/simple.exe"
 
 # Stage 1: Rust seed → stage1
 echo "=== Stage 1: Rust seed → stage1 ==="
-RUST_LOG="${RUST_LOG:-error}" \
+run_logged stage1-native-build env RUST_LOG="${RUST_LOG:-error}" \
   "${seed_bin}" native-build \
     --source src/compiler --source src/lib --source src/app \
     --entry src/app/cli/bootstrap_main.spl \
@@ -202,7 +232,7 @@ echo "Stage 1 complete: ${stage1_bin}"
 # Stage 2: stage1 → stage2
 echo ""
 echo "=== Stage 2: stage1 → stage2 (${backend:-default}) ==="
-"${stage1_bin}" native-build \
+run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage1_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl \
   "${backend_flag[@]}" \
@@ -219,7 +249,7 @@ echo "Stage 2 complete: ${stage2_bin}"
 # Stage 3: stage2 → stage3 (verify)
 echo ""
 echo "=== Stage 3: stage2 → stage3 (${backend:-default}, verify) ==="
-"${stage2_bin}" native-build \
+run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage2_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry src/app/cli/bootstrap_main.spl \
   "${backend_flag[@]}" \
@@ -259,7 +289,7 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 full_bin="${full_dir}/simple.exe"
 
-"${stage3_bin}" native-build \
+run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage3_bin}" native-build \
   --entry src/app/cli/main.spl \
   -o "${full_bin}" \
   ${backend:+--backend="${backend}"}
