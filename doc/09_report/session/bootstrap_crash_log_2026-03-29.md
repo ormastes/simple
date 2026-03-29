@@ -106,3 +106,48 @@ Observed behavior:
   session timeout rather than a deterministic compiler crash, so the next step
   is a longer unattended run or a narrower stage2 repro around the emitted
   `[CODEGEN-WARN]` incompatibility warnings.
+
+## Milestone Reached: Stage3 Verification Passes
+
+Longer repro command:
+
+```bash
+./scripts/bootstrap/bootstrap-from-scratch.sh --output=build/bootstrap-crash-repro4
+```
+
+Observed output:
+
+```text
+stage2 sha256: b46dd1d226059d9dac9fb5e790ee7a424f9cb687eeddc84027a98bda48c6d74c
+stage3 sha256: b46dd1d226059d9dac9fb5e790ee7a424f9cb687eeddc84027a98bda48c6d74c
+Bootstrap verification passed.
+Stage 4: compiling full CLI (main.spl) with bootstrap compiler...
+```
+
+Meaning:
+
+- Stage2 completed successfully.
+- Stage3 completed successfully.
+- Stage2 and Stage3 hashes match exactly.
+- The staged self-hosted bootstrap verifier now passes on this repro.
+- Stage4 began successfully.
+
+The remaining termination in this interactive session was:
+
+- `stage4-native-build` exit `143`
+- caused by session timeout / external `SIGTERM`, not by a compiler-reported
+  internal failure in the captured log.
+
+## Current Status
+
+The original blocker has moved:
+
+- **Resolved in this repro:** stage2 parser incompatibility abort
+- **Resolved in this repro:** stage3 self-host verification barrier
+- **Not yet proven complete:** full stage4 native build to final CLI binary
+
+The most visible remaining technical signal is a large set of
+`[CODEGEN-WARN] Failed to declare cross-module function ...` warnings during
+stage2/stage3/stage4. They are not currently preventing stage3 verification,
+but they may still affect stage4 completion or runtime correctness and should
+be investigated next if a full unattended stage4 run still fails.

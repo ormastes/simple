@@ -40,6 +40,9 @@ use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn compiler__driver__driver__CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult
 
@@ -883,6 +886,59 @@ class CompilerDriver:
 # driver_api.spl a stable direct function symbol to call.
 fn CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult:
     driver.compile()
+
+# Stable facade helpers for `use compiler.driver.{...}` callers.
+# These mirror driver_api.spl directly because direct script resolution does
+# not reliably surface new driver_api exports through the package facade.
+fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
+    use compiler.tools.header_gen.mod_.{HeaderGenerator}
+
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.emit_header = emit_c
+    options.emit_cxx_header = emit_cpp
+    val driver = CompilerDriver.create(options)
+    val result = CompilerDriver.run_compile(driver)
+
+    match result:
+        case CompileResult.Success(mir_module_any):
+            if mir_module_any.?:
+                val mir_module = mir_module_any as MirModule
+                val gen = HeaderGenerator.create(mir_module)
+
+                if not gen.has_exports():
+                    print "[header-gen] Warning: no @export(\"C\") items found"
+                    return result
+
+                rt_dir_create(output_dir, true)
+
+                if emit_c:
+                    val c_header = gen.generate_c_header(lib_name)
+                    val c_path = rt_path_join(output_dir, lib_name + ".h")
+                    rt_file_write_text(c_path, c_header)
+                    print "[header-gen] Generated C header: {c_path}"
+
+                if emit_cpp:
+                    val cpp_header = gen.generate_cpp_header(lib_name)
+                    val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
+                    rt_file_write_text(cpp_path, cpp_header)
+                    print "[header-gen] Generated C++ header: {cpp_path}"
+            result
+        case _:
+            result
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    var options = CompileOptions.default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.output_format = OutputFormat.Native
+    options.shared = true
+    options.release = true
+    options.optimize = true
+    val driver = CompilerDriver.create(options)
+    CompilerDriver.run_compile(driver)
 
 # ============================================================================
 # Exports
