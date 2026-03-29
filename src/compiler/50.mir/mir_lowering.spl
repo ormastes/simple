@@ -18,6 +18,7 @@ use mir_data.*
 use hir.*
 use lexer.Span
 use compiler.blocks.value.BlockValue
+use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_}
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -75,6 +76,21 @@ impl MirLowering:
             self.field_map[sym_id.id] = field_names
             ci = ci + 1
 
+        # Lower type definitions so headers/export wrappers can consume real MIR types.
+        val struct_type_keys = module.structs.keys()
+        var sti = 0
+        while sti < struct_type_keys.len():
+            val sym_id = struct_type_keys[sti]
+            self.lower_struct_type(module.structs[sym_id])
+            sti = sti + 1
+
+        val class_type_keys = module.classes.keys()
+        var cti = 0
+        while cti < class_type_keys.len():
+            val sym_id = class_type_keys[cti]
+            self.lower_class_type(module.classes[sym_id])
+            cti = cti + 1
+
         # Lower functions (skip extern declarations - they have no body)
         val fn_vals = module.functions.values()
         var fni = 0
@@ -102,6 +118,84 @@ impl MirLowering:
             coni = coni + 1
 
         self.builder.module
+
+    me lower_struct_type(struct_def: HirStruct):
+        """Lower a HIR struct definition into MIR type metadata."""
+        val layout_attr = if struct_def.has_layout_attr:
+            struct_def.layout_attr
+        else:
+            layoutattr_default_()
+        val layout = compute_struct_layout(struct_def.fields, layout_attr)
+
+        var fields: [MirFieldDef] = []
+        var fi = 0
+        while fi < struct_def.fields.len():
+            val hir_field = struct_def.fields[fi]
+            val field_layout = layout.fields[fi]
+            fields.push(MirFieldDef(
+                name: hir_field.name,
+                type_: self.lower_type(hir_field.type_),
+                offset: field_layout.offset,
+                has_bits_attr: hir_field.has_bits_attr,
+                bits_width: hir_field.bits_width
+            ))
+            fi = fi + 1
+
+        var bldr = self.builder
+        var module = bldr.module
+        var types = module.types
+        types[struct_def.symbol] = MirTypeDef(
+            symbol: struct_def.symbol,
+            name: struct_def.name,
+            kind: MirTypeDefKind.Struct(fields),
+            is_export_c: false,
+            export_name: ""
+        )
+        module.types = types
+        bldr.module = module
+        self.builder = bldr
+
+    me lower_class_type(class_def: HirClass):
+        """Lower a HIR class definition into MIR type metadata."""
+        val layout_attr = if class_def.has_layout_attr:
+            class_def.layout_attr
+        else:
+            layoutattr_default_()
+        val layout = compute_struct_layout(class_def.fields, layout_attr)
+
+        var fields: [MirFieldDef] = []
+        var fi = 0
+        while fi < class_def.fields.len():
+            val hir_field = class_def.fields[fi]
+            val field_layout = layout.fields[fi]
+            fields.push(MirFieldDef(
+                name: hir_field.name,
+                type_: self.lower_type(hir_field.type_),
+                offset: field_layout.offset,
+                has_bits_attr: hir_field.has_bits_attr,
+                bits_width: hir_field.bits_width
+            ))
+            fi = fi + 1
+
+        var is_export_c = false
+        var export_name = ""
+        if class_def.has_export_attr:
+            is_export_c = class_def.export_attr.is_export_c
+            export_name = class_def.export_attr.export_name
+
+        var bldr = self.builder
+        var module = bldr.module
+        var types = module.types
+        types[class_def.symbol] = MirTypeDef(
+            symbol: class_def.symbol,
+            name: class_def.name,
+            kind: MirTypeDefKind.Struct(fields),
+            is_export_c: is_export_c,
+            export_name: export_name
+        )
+        module.types = types
+        bldr.module = module
+        self.builder = bldr
 
     me lower_function(fn_: HirFunction) -> MirFunction:
         """Lower HIR function to MIR."""
@@ -604,4 +698,3 @@ fn MirLowering_dot_lower_module(self: MirLowering, module: HirModule) -> MirModu
 # ============================================================================
 # Exports
 # ============================================================================
-

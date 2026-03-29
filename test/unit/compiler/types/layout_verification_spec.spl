@@ -92,6 +92,12 @@ fn make_field(name: text, type_: HirType) -> HirField:
         span: empty_span()
     )
 
+fn make_bits_field(name: text, type_: HirType, bits_width: i64) -> HirField:
+    val field = make_field(name, type_)
+    field.has_bits_attr = true
+    field.bits_width = bits_width
+    field
+
 # ============================================================================
 # Test Group 1: Primitive Size and Alignment
 # ============================================================================
@@ -351,6 +357,17 @@ describe "Layout Verification":
             val asserts = generate_c_static_asserts(v)
             expect(asserts).to_contain("_Alignof")
 
+        it "skips offsetof asserts for explicit bitfields":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 4),
+                make_bits_field("speed", make_u8_type(), 2)
+            ]
+            val v = verify_c_layout("Flags", fields, layoutattr_c_repr())
+            val asserts = generate_c_static_asserts(v)
+            expect(asserts).to_contain("sizeof")
+            expect(asserts).to_not_contain("offsetof(spl_Flags, mode)")
+            expect(asserts).to_not_contain("offsetof(spl_Flags, speed)")
+
     # ============================================================================
     # Test Group 7: C Struct Definition Generation
     # ============================================================================
@@ -383,6 +400,21 @@ describe "Layout Verification":
             val def = generate_c_struct_def(v)
             expect(def).to_contain("uint8_t")  # bool maps to uint8_t
             expect(def).to_contain("int32_t")  # i32 maps to int32_t
+
+        it "generates C bitfield syntax for explicit bit widths":
+            val fields = [
+                make_bits_field("mode", make_u8_type(), 4),
+                make_bits_field("output", make_bool_type(), 1),
+                make_bits_field("input", make_bool_type(), 1),
+                make_bits_field("speed", make_u8_type(), 2)
+            ]
+            val v = verify_c_layout("GpioRegister", fields, layoutattr_c_repr())
+            val def = generate_c_struct_def(v)
+            expect(v.total_size).to_equal(1)
+            expect(def).to_contain("uint8_t mode : 4;")
+            expect(def).to_contain("uint8_t output : 1;")
+            expect(def).to_contain("uint8_t input : 1;")
+            expect(def).to_contain("uint8_t speed : 2;")
 
     # ============================================================================
     # Test Group 8: Padding Computation

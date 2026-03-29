@@ -361,78 +361,90 @@ jobs:
           git tag -f "$TAG"
           git push origin "$TAG" --force
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: "T32 Tools ${{ needs.version.outputs.version }}"
-          draft: false
-          prerelease: false
-          files: release/*
-          body: |
-            ## TRACE32 MCP Tools ${{ needs.version.outputs.version }}
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-            Pre-built native binaries for TRACE32 development tools.
+      - name: Build bootstrap Simple runtime
+        run: cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 
-            ### Downloads
+      - name: Write release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## TRACE32 MCP Tools ${{ needs.version.outputs.version }}
 
-            | Tool | Linux x86_64 | Windows x86_64 | Description |
-            |------|:---:|:---:|-------------|
-            | **t32-mcp-server** | ✅ | ✅ | TRACE32 debug session control — 20 MCP tools |
-            | **t32-lsp-mcp-server** | ✅ | ✅ | CMM language intelligence — 6 MCP tools |
-            | **cmm-lsp** | ✅ | ✅ | CMM Language Server (LSP over stdio) |
-            | **t32-cli** | ✅ | ✅ | Interactive TRACE32 CLI shell |
+          Pre-built native binaries for TRACE32 development tools.
 
-            ### Claude Code Plugin
+          ### Downloads
 
-            - **Plugin bundle**: `cmm-lsp-claude-plugin-${{ needs.version.outputs.version }}.tar.gz`
-            - **Marketplace install**:
+          | Tool | Linux x86_64 | Windows x86_64 | Description |
+          |------|:---:|:---:|-------------|
+          | **t32-mcp-server** | ✅ | ✅ | TRACE32 debug session control — 20 MCP tools |
+          | **t32-lsp-mcp-server** | ✅ | ✅ | CMM language intelligence — 6 MCP tools |
+          | **cmm-lsp** | ✅ | ✅ | CMM Language Server (LSP over stdio) |
+          | **t32-cli** | ✅ | ✅ | Interactive TRACE32 CLI shell |
 
-            ```bash
-            claude plugin marketplace add tools/claude-plugin/marketplace
-            claude plugin install cmm-lsp@simple-local
-            ```
+          ### Claude Code Plugin
 
-            ### Quick Install (Linux)
+          - **Plugin bundle**: `cmm-lsp-claude-plugin-${{ needs.version.outputs.version }}.tar.gz`
+          - **Marketplace install**:
 
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_tooling/trace32_tools/install.sh | bash
-            ```
+          ```bash
+          claude plugin marketplace add tools/claude-plugin/marketplace
+          claude plugin install cmm-lsp@simple-local
+          ```
 
-            ### Manual Install
+          ### Quick Install (Linux)
 
-            1. Download the binary for your platform
-            2. Make executable: `chmod +x t32-mcp-server`
-            3. Add to your Claude Code `.mcp.json`:
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/ormastes/simple/main/examples/10_tooling/trace32_tools/install.sh | bash
+          ```
 
-            ```json
-            {
-              "mcpServers": {
-                "t32-mcp": {
-                  "command": "/path/to/t32-mcp-server"
-                },
-                "t32-lsp-mcp": {
-                  "command": "/path/to/t32-lsp-mcp-server"
-                }
+          ### Manual Install
+
+          1. Download the binary for your platform
+          2. Make executable: `chmod +x t32-mcp-server`
+          3. Add to your Claude Code `.mcp.json`:
+
+          ```json
+          {
+            "mcpServers": {
+              "t32-mcp": {
+                "command": "/path/to/t32-mcp-server"
+              },
+              "t32-lsp-mcp": {
+                "command": "/path/to/t32-lsp-mcp-server"
               }
             }
-            ```
+          }
+          ```
 
-            ### Requirements
+          ### Requirements
 
-            - **T32 MCP Server**: Lauterbach TRACE32 installation with `t32rem` accessible in PATH
-            - **T32 LSP MCP Server**: Standalone (no TRACE32 needed — pure CMM analysis)
-            - **CMM LSP**: Standalone (for IDE integration)
-            - **T32 CLI**: Lauterbach TRACE32 installation
+          - **T32 MCP Server**: Lauterbach TRACE32 installation with `t32rem` accessible in PATH
+          - **T32 LSP MCP Server**: Standalone (no TRACE32 needed — pure CMM analysis)
+          - **CMM LSP**: Standalone (for IDE integration)
+          - **T32 CLI**: Lauterbach TRACE32 installation
 
-            ### Verification
+          ### Verification
 
-            ```bash
-            msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
-            printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | ./t32-mcp-server
-            ```
+          ```bash
+          msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
+          printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | ./t32-mcp-server
+          ```
 
-            See [SHA256SUMS.txt](SHA256SUMS.txt) for binary checksums.
+          See [SHA256SUMS.txt](SHA256SUMS.txt) for binary checksums.
 
-            ---
-            Built from [`examples/10_tooling/trace32_tools/`](https://github.com/ormastes/simple/tree/main/examples/10_tooling/trace32_tools/) in the [Simple](https://github.com/ormastes/simple) compiler project.
+          ---
+          Built from [`examples/10_tooling/trace32_tools/`](https://github.com/ormastes/simple/tree/main/examples/10_tooling/trace32_tools/) in the [Simple](https://github.com/ormastes/simple) compiler project.
+          EOF
+
+      - name: Create GitHub Release
+        run: |
+          src/compiler_rust/target/bootstrap/simple src/app/release/main.spl github \
+            --repo="${{ github.repository }}" \
+            --tag="${{ needs.version.outputs.tag }}" \
+            --name="T32 Tools ${{ needs.version.outputs.version }}" \
+            --body-file=release-notes.md \
+            --files-dir=release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

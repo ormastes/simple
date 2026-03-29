@@ -85,6 +85,9 @@ struct FieldLayout:
     offset: i64     # Byte offset from struct start
     size: i64       # Size of field in bytes
     align: i64      # Alignment of field
+    has_bits: bool
+    bits_width: i64
+    bit_offset: i64 # Bit offset within the storage unit when has_bits is true
 
 
 # ============================================================================
@@ -186,7 +189,10 @@ fn compute_packed_layout(fields: [HirField]) -> TypeLayout:
             type_: field.type_,
             offset: offset,
             size: size,
-            align: 1
+            align: 1,
+            has_bits: field.has_bits_attr,
+            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bit_offset: 0
         ))
         offset = offset + size
 
@@ -202,6 +208,12 @@ fn compute_c_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
     var field_layouts: [FieldLayout] = []
     var offset: i64 = 0
     var max_align: i64 = 1
+    var active_bitfield = false
+    var bitfield_unit_offset: i64 = 0
+    var bitfield_unit_size: i64 = 0
+    var bitfield_unit_align: i64 = 1
+    var bitfield_unit_bits: i64 = 0
+    var bitfield_used_bits: i64 = 0
 
     for field in fields:
         val size = size_of_type(field.type_)
@@ -211,6 +223,48 @@ fn compute_c_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
         if align > max_align:
             max_align = align
 
+        if field.has_bits_attr:
+            val bits_width = field.bits_width
+            val storage_bits = size * 8
+            val needs_new_unit = not active_bitfield or
+                size != bitfield_unit_size or
+                align != bitfield_unit_align or
+                bitfield_used_bits + bits_width > bitfield_unit_bits
+
+            if needs_new_unit:
+                if active_bitfield:
+                    offset = bitfield_unit_offset + bitfield_unit_size
+                offset = align_up(offset, align)
+                bitfield_unit_offset = offset
+                bitfield_unit_size = size
+                bitfield_unit_align = align
+                bitfield_unit_bits = storage_bits
+                bitfield_used_bits = 0
+                active_bitfield = true
+
+            field_layouts.push(FieldLayout(
+                name: field.name,
+                type_: field.type_,
+                offset: bitfield_unit_offset,
+                size: size,
+                align: align,
+                has_bits: true,
+                bits_width: bits_width,
+                bit_offset: bitfield_used_bits
+            ))
+
+            bitfield_used_bits = bitfield_used_bits + bits_width
+            if bitfield_used_bits >= bitfield_unit_bits:
+                offset = bitfield_unit_offset + bitfield_unit_size
+                active_bitfield = false
+                bitfield_used_bits = 0
+            continue
+
+        if active_bitfield:
+            offset = bitfield_unit_offset + bitfield_unit_size
+            active_bitfield = false
+            bitfield_used_bits = 0
+
         # Align offset for this field
         offset = align_up(offset, align)
 
@@ -219,10 +273,16 @@ fn compute_c_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
             type_: field.type_,
             offset: offset,
             size: size,
-            align: align
+            align: align,
+            has_bits: false,
+            bits_width: 0,
+            bit_offset: 0
         ))
 
         offset = offset + size
+
+    if active_bitfield:
+        offset = bitfield_unit_offset + bitfield_unit_size
 
     # Apply explicit alignment
     val final_align = attr_effective_align(attr, max_align)
@@ -256,7 +316,10 @@ fn compute_transparent_layout(fields: [HirField]) -> TypeLayout:
             type_: field.type_,
             offset: 0,
             size: size,
-            align: align
+            align: align,
+            has_bits: field.has_bits_attr,
+            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bit_offset: 0
         )],
         stride: size
     )
@@ -446,7 +509,10 @@ fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeL
             type_: field.type_,
             offset: offset,
             size: size,
-            align: 1
+            align: 1,
+            has_bits: field.has_bits_attr,
+            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bit_offset: 0
         ))
         offset = offset + size
 
@@ -461,6 +527,12 @@ fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetA
     var field_layouts: [FieldLayout] = []
     var offset: i64 = 0
     var max_align: i64 = 1
+    var active_bitfield = false
+    var bitfield_unit_offset: i64 = 0
+    var bitfield_unit_size: i64 = 0
+    var bitfield_unit_align: i64 = 1
+    var bitfield_unit_bits: i64 = 0
+    var bitfield_used_bits: i64 = 0
 
     for field in fields:
         val size = size_of_type_for_arch(field.type_, arch)
@@ -469,6 +541,48 @@ fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetA
         if align > max_align:
             max_align = align
 
+        if field.has_bits_attr:
+            val bits_width = field.bits_width
+            val storage_bits = size * 8
+            val needs_new_unit = not active_bitfield or
+                size != bitfield_unit_size or
+                align != bitfield_unit_align or
+                bitfield_used_bits + bits_width > bitfield_unit_bits
+
+            if needs_new_unit:
+                if active_bitfield:
+                    offset = bitfield_unit_offset + bitfield_unit_size
+                offset = align_up(offset, align)
+                bitfield_unit_offset = offset
+                bitfield_unit_size = size
+                bitfield_unit_align = align
+                bitfield_unit_bits = storage_bits
+                bitfield_used_bits = 0
+                active_bitfield = true
+
+            field_layouts.push(FieldLayout(
+                name: field.name,
+                type_: field.type_,
+                offset: bitfield_unit_offset,
+                size: size,
+                align: align,
+                has_bits: true,
+                bits_width: bits_width,
+                bit_offset: bitfield_used_bits
+            ))
+
+            bitfield_used_bits = bitfield_used_bits + bits_width
+            if bitfield_used_bits >= bitfield_unit_bits:
+                offset = bitfield_unit_offset + bitfield_unit_size
+                active_bitfield = false
+                bitfield_used_bits = 0
+            continue
+
+        if active_bitfield:
+            offset = bitfield_unit_offset + bitfield_unit_size
+            active_bitfield = false
+            bitfield_used_bits = 0
+
         offset = align_up(offset, align)
 
         field_layouts.push(FieldLayout(
@@ -476,10 +590,16 @@ fn compute_c_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetA
             type_: field.type_,
             offset: offset,
             size: size,
-            align: align
+            align: align,
+            has_bits: false,
+            bits_width: 0,
+            bit_offset: 0
         ))
 
         offset = offset + size
+
+    if active_bitfield:
+        offset = bitfield_unit_offset + bitfield_unit_size
 
     val final_align = attr_effective_align(attr, max_align)
     val final_size = align_up(offset, final_align)
@@ -507,7 +627,10 @@ fn compute_transparent_layout_for_arch(fields: [HirField], arch: TargetArch) -> 
             type_: field.type_,
             offset: 0,
             size: size,
-            align: align
+            align: align,
+            has_bits: field.has_bits_attr,
+            bits_width: if field.has_bits_attr: field.bits_width else: 0,
+            bit_offset: 0
         )],
         stride: size
     )
@@ -686,7 +809,8 @@ fn generate_c_static_asserts(verification: LayoutVerification) -> text:
     var fi = 0
     while fi < verification.fields.len():
         val field = verification.fields[fi]
-        lines.push("_Static_assert(offsetof(spl_{name}, {field.name}) == {field.offset}, \"spl_{name}.{field.name} offset mismatch\");")
+        if not field.has_bits:
+            lines.push("_Static_assert(offsetof(spl_{name}, {field.name}) == {field.offset}, \"spl_{name}.{field.name} offset mismatch\");")
         fi = fi + 1
 
     lines.join("\n")
@@ -711,7 +835,10 @@ fn generate_c_struct_def(verification: LayoutVerification) -> text:
     while fi < verification.fields.len():
         val field = verification.fields[fi]
         val c_type = _field_to_c_type(field)
-        lines.push("    {c_type} {field.name};")
+        if field.has_bits:
+            lines.push("    {c_type} {field.name} : {field.bits_width};")
+        else:
+            lines.push("    {c_type} {field.name};")
         fi = fi + 1
 
     lines.push("} spl_{name};")

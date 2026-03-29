@@ -87,6 +87,10 @@ fn prefetch_files_unix<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle
     let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
     unsafe {
+        // Ignore SIGPIPE before fork to prevent child/parent crash
+        // when pipe is broken (e.g., terminal closed during bootstrap)
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+
         match libc::fork() {
             -1 => {
                 // Fork failed
@@ -94,6 +98,8 @@ fn prefetch_files_unix<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle
             }
             0 => {
                 // Child process - do prefetching
+                // Reset signal disposition for child safety
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
                 for path in &file_paths {
                     let _ = prefetch_file_mmap(path);
                 }
