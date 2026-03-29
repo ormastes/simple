@@ -10,16 +10,9 @@ use super::types::SspecDoc;
 
 /// Generate documentation for a single feature
 pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let file_name = sspec_doc
-        .file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
+    let file_name = output_stem(sspec_doc);
 
-    let feature_name = sspec_doc
-        .feature_title
-        .clone()
-        .unwrap_or_else(|| humanize_filename(file_name));
+    let feature_name = preferred_feature_name(sspec_doc, &file_name);
 
     let mut md = String::new();
 
@@ -145,6 +138,12 @@ fn build_metadata_rows(sspec_doc: &SspecDoc) -> Vec<(String, String)> {
     if let Some(status) = &sspec_doc.metadata.status {
         rows.push(("Status".to_string(), status.clone()));
     }
+    if let Some(doc_type) = &sspec_doc.metadata.doc_type {
+        rows.push(("Type".to_string(), doc_type.clone()));
+    }
+    if let Some(source_doc) = &sspec_doc.metadata.source_doc {
+        rows.push(("Reference".to_string(), source_doc.clone()));
+    }
     if let Some(requirements) = &sspec_doc.metadata.requirements {
         rows.push(("Requirements".to_string(), requirements.clone()));
     }
@@ -188,6 +187,8 @@ fn strip_header_metadata(content: &str) -> String {
             || trimmed.starts_with("**Category:**")
             || trimmed.starts_with("**Difficulty:**")
             || trimmed.starts_with("**Status:**")
+            || trimmed.starts_with("**Source:**")
+            || trimmed.starts_with("**Type:**")
             || trimmed.starts_with("**Requirements:**")
             || trimmed.starts_with("**Plan:**")
             || trimmed.starts_with("**Design:**")
@@ -245,6 +246,45 @@ fn render_doc_body(sspec_doc: &SspecDoc) -> String {
     sections.join("\n\n").trim().to_string()
 }
 
+pub(crate) fn output_stem(sspec_doc: &SspecDoc) -> String {
+    if let Some(source_doc) = &sspec_doc.metadata.source_doc {
+        if let Some(stem) = Path::new(source_doc).file_stem().and_then(|s| s.to_str()) {
+            if !stem.trim().is_empty() {
+                return stem.to_string();
+            }
+        }
+    }
+
+    let stem = sspec_doc
+        .file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let path_str = sspec_doc.file_path.to_string_lossy();
+    if path_str.contains("/test/specs/") || path_str.contains("\\test\\specs\\") {
+        return stem.strip_suffix("_spec").unwrap_or(&stem).to_string();
+    }
+
+    stem
+}
+
+fn preferred_feature_name(sspec_doc: &SspecDoc, stem: &str) -> String {
+    if let Some(title) = &sspec_doc.feature_title {
+        let trimmed = title.trim();
+        if !trimmed.is_empty()
+            && !trimmed.starts_with('-')
+            && trimmed != "Test Specification"
+            && trimmed != "- Test Specification"
+        {
+            return trimmed.to_string();
+        }
+    }
+
+    humanize_filename(stem)
+}
+
 fn extract_summary(sspec_doc: &SspecDoc) -> Option<String> {
     let body = render_doc_body(sspec_doc);
     if body.is_empty() {
@@ -276,6 +316,13 @@ fn extract_summary_from_markdown(content: &str) -> Option<String> {
             continue;
         }
 
+        if is_metadata_line(trimmed) {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         if trimmed.is_empty() {
             if !paragraph.is_empty() {
                 break;
@@ -295,6 +342,10 @@ fn extract_summary_from_markdown(content: &str) -> Option<String> {
     } else {
         Some(paragraph.join(" "))
     }
+}
+
+fn is_metadata_line(trimmed: &str) -> bool {
+    trimmed.starts_with("**") && trimmed.contains(":**")
 }
 
 fn append_evidence_section(md: &mut String, sspec_doc: &SspecDoc) {
@@ -540,5 +591,44 @@ expect(true).to_equal(true)
         assert!(output.contains("## Scenario Summary"));
         assert!(output.contains("| Active scenarios | 1 |"));
         assert!(output.contains("| Skipped scenarios | 1 |"));
+    }
+
+    #[test]
+    fn test_generate_feature_doc_uses_reference_filename_for_extracted_examples() {
+        let tempdir = tempdir().expect("tempdir");
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/specs/functions_spec.spl"),
+            raw_content: String::new(),
+            doc_blocks: vec![],
+            feature_title: Some("Functions".to_string()),
+            feature_ids: vec![],
+            metadata: FeatureMetadata {
+                source_doc: Some("functions.md".to_string()),
+                doc_type: Some("Extracted Examples".to_string()),
+                ..Default::default()
+            },
+        };
+
+        generate_feature_doc(&doc, tempdir.path()).expect("generate doc");
+
+        assert!(tempdir.path().join("functions.md").exists());
+        assert!(!tempdir.path().join("functions_spec.md").exists());
+    }
+
+    #[test]
+    fn test_preferred_feature_name_falls_back_from_placeholder_heading() {
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/specs/macro_spec.spl"),
+            raw_content: String::new(),
+            doc_blocks: vec![],
+            feature_title: Some("- Test Specification".to_string()),
+            feature_ids: vec![],
+            metadata: FeatureMetadata {
+                source_doc: Some("macro.md".to_string()),
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(preferred_feature_name(&doc, "macro"), "Macro Specification");
     }
 }

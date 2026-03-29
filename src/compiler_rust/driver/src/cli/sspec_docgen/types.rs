@@ -18,6 +18,8 @@ pub struct FeatureMetadata {
     pub category: Option<String>,
     pub difficulty: Option<String>,
     pub status: Option<String>,
+    pub source_doc: Option<String>,
+    pub doc_type: Option<String>,
     pub requirements: Option<String>,
     pub plan: Option<String>,
     pub design: Option<String>,

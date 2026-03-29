@@ -41,6 +41,14 @@ pub fn extract_metadata(sspec_doc: &mut SspecDoc) {
             if let Some(status) = extract_field_value(trimmed, "**Status:**") {
                 metadata.status = Some(status);
             }
+        } else if trimmed.starts_with("**Source:**") {
+            if let Some(source_doc) = extract_field_value(trimmed, "**Source:**") {
+                metadata.source_doc = Some(source_doc);
+            }
+        } else if trimmed.starts_with("**Type:**") {
+            if let Some(doc_type) = extract_field_value(trimmed, "**Type:**") {
+                metadata.doc_type = Some(doc_type);
+            }
         } else if trimmed.starts_with("**Requirements:**") {
             if let Some(requirements) = extract_field_value(trimmed, "**Requirements:**") {
                 metadata.requirements = Some(requirements);
@@ -210,6 +218,36 @@ mod tests {
         assert_eq!(
             doc.metadata.dependencies,
             vec!["std.test".to_string(), "app.runtime".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_extract_metadata_source_and_type() {
+        let mut doc = SspecDoc {
+            file_path: "test/specs/functions_spec.spl".into(),
+            raw_content: String::new(),
+            doc_blocks: vec![super::super::types::DocBlock {
+                content: r#"
+**Status:** Reference
+**Source:** functions.md
+**Type:** Extracted Examples (Category B)
+"#
+                .trim()
+                .to_string(),
+                line_start: 0,
+                line_end: 3,
+            }],
+            feature_title: None,
+            feature_ids: vec![],
+            metadata: Default::default(),
+        };
+
+        extract_metadata(&mut doc);
+
+        assert_eq!(doc.metadata.source_doc.as_deref(), Some("functions.md"));
+        assert_eq!(
+            doc.metadata.doc_type.as_deref(),
+            Some("Extracted Examples (Category B)")
         );
     }
 }

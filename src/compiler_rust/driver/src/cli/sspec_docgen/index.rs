@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use super::generator::output_stem;
 use super::types::{DocStats, SspecDoc, ValidationResult};
 
 /// Category of features
@@ -105,16 +106,19 @@ fn group_by_category(parsed_files: &[(SspecDoc, ValidationResult)]) -> Vec<Categ
         };
 
         // Create feature entry
-        let file_name = sspec_doc
-            .file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+        let file_name = output_stem(sspec_doc);
 
         let title = sspec_doc
             .feature_title
             .clone()
-            .unwrap_or_else(|| humanize_filename(file_name));
+            .filter(|title| {
+                let trimmed = title.trim();
+                !trimmed.is_empty()
+                    && !trimmed.starts_with('-')
+                    && trimmed != "Test Specification"
+                    && trimmed != "- Test Specification"
+            })
+            .unwrap_or_else(|| humanize_filename(&file_name));
 
         let status = if let Some(status) = &sspec_doc.metadata.status {
             status.clone()
@@ -287,6 +291,8 @@ fn strip_header_metadata(content: &str) -> String {
             || trimmed.starts_with("**Category:**")
             || trimmed.starts_with("**Difficulty:**")
             || trimmed.starts_with("**Status:**")
+            || trimmed.starts_with("**Source:**")
+            || trimmed.starts_with("**Type:**")
             || trimmed.starts_with("**Requirements:**")
             || trimmed.starts_with("**Plan:**")
             || trimmed.starts_with("**Design:**")
@@ -346,6 +352,13 @@ fn extract_summary_from_markdown(content: &str) -> Option<String> {
             continue;
         }
 
+        if is_metadata_line(trimmed) {
+            if !paragraph.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         if trimmed.is_empty() {
             if !paragraph.is_empty() {
                 break;
@@ -365,6 +378,10 @@ fn extract_summary_from_markdown(content: &str) -> Option<String> {
     } else {
         Some(paragraph.join(" "))
     }
+}
+
+fn is_metadata_line(trimmed: &str) -> bool {
+    trimmed.starts_with("**") && trimmed.contains(":**")
 }
 
 fn truncate_summary(summary: &str, max_len: usize) -> String {
@@ -439,5 +456,22 @@ expect(true).to_equal(true)
             extract_summary(&doc),
             "This summary should appear in the generated index before any code examples."
         );
+    }
+
+    #[test]
+    fn test_index_uses_reference_filename_for_extracted_examples() {
+        let doc = SspecDoc {
+            file_path: PathBuf::from("test/specs/functions_spec.spl"),
+            raw_content: String::new(),
+            doc_blocks: vec![],
+            feature_title: Some("Functions".to_string()),
+            feature_ids: vec![],
+            metadata: super::super::types::FeatureMetadata {
+                source_doc: Some("functions.md".to_string()),
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(output_stem(&doc), "functions");
     }
 }

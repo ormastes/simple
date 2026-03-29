@@ -1,23 +1,27 @@
-# - Test Specification
+# Macro Specification
 
-> **⚠️ GENERATED FILE** - Do not edit directly!
-> **Source:** `tests/specs/macro_spec.spl`
-> **Generated:** 2026-01-10 04:47:40
->
-> To update this file, edit the source _spec.spl file and run:
-> ```bash
-> python scripts/spec_gen.py --input tests/specs/macro_spec.spl
-> ```
+This file contains executable test cases extracted from macro.md. The original specification file remains as architectural reference documentation.
 
-**Status:** SPECIFICATION (Partially Implemented)
-**Feature IDs:** **Source:** macro.md
-**Note:** This is a test extraction file. For complete specification text,
+## At a Glance
 
-## Quick Navigation
+| Field | Value |
+|-------|-------|
+| Status | SPECIFICATION (Partially Implemented) |
+| Type | Extracted Examples (Category B) |
+| Reference | macro.md |
+| Source | `/home/ormastes/dev/pub/simple/test/specs/macro_spec.spl` |
+| Updated | 2026-03-29 |
+| Generator | `simple sspec-docgen` (Rust) |
 
-- [Overview](#overview)
-- [Test Cases](#test-cases) (0 tests)
-- [Source Code](#source-code)
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
@@ -27,15 +31,15 @@ The original specification file remains as architectural reference documentation
 **Note:** This is a test extraction file. For complete specification text,
 design rationale, and architecture, see doc/06_spec/macro.md
 
----
+## Extracted Test Cases
 
----
+0 test cases extracted covering:
+- Core functionality examples
+- Edge cases and validation
+- Integration patterns
 
-## Source Code
+Placeholder test - add test cases as implementation progresses.
 
-**View full specification:** [macro_spec.spl](../../tests/specs/macro_spec.spl)
+## Scenarios
 
----
-
-*This file was auto-generated from the executable specification.*
-*Source: `tests/specs/macro_spec.spl`*
+- placeholder
