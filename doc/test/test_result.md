@@ -1,16 +1,16 @@
 # Test Results
 
-**Generated:** 2026-03-28 12:27:23
-**Total Tests:** 5561
+**Generated:** 2026-03-29 00:31:03
+**Total Tests:** 11116
 **Status:** ⚠️ 4 FAILED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 5446 | 97.9% |
-| ❌ Failed | 4 | 0.1% |
-| ⏭️ Skipped | 111 | 2.0% |
+| ✅ Passed | 10890 | 98.0% |
+| ❌ Failed | 4 | 0.0% |
+| ⏭️ Skipped | 222 | 2.0% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
 
@@ -45,6 +45,15 @@
 
 ## ❌ Failed Tests (4)
 
+### 🔴 warns when a requirement identifier is not covered
+
+**File:** `test/unit/app/tooling/traceability_spec.spl`
+**Category:** Unit
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
 ### 🔴 warns on legacy requirement roots in specs
 
 **File:** `test/unit/app/tooling/traceability_spec.spl`
@@ -72,15 +81,6 @@
 
 ---
 
-### 🔴 warns when a requirement identifier is not covered
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
 ---
 
 ## 📊 Timing Analysis
@@ -91,17 +91,17 @@
 
 ### Priority 1: Fix Failing Tests (4)
 
-1. **warns on legacy requirement roots in specs** - 
-2. **warns for opted-in source roots without unit tests** - 
-3. **warns when docs point to raw specs** - 
-4. **warns when a requirement identifier is not covered** - 
+1. **warns when a requirement identifier is not covered** - 
+2. **warns on legacy requirement roots in specs** - 
+3. **warns for opted-in source roots without unit tests** - 
+4. **warns when docs point to raw specs** - 
 
 ### Priority 3: Stabilize Flaky Tests (6)
 
 Tests with intermittent failures:
-- maps lib sources to unit candidates (24.0% failure rate)
-- extracts relative paths from markdown and plain text (36.0% failure rate)
-- extracts REQ and NFR identifiers (32.0% failure rate)
-- maps source directories to integration candidates (24.0% failure rate)
 - normalizes date suffixed slugs (4.0% failure rate)
+- extracts REQ and NFR identifiers (32.0% failure rate)
+- extracts relative paths from markdown and plain text (36.0% failure rate)
+- maps source directories to integration candidates (24.0% failure rate)
+- maps lib sources to unit candidates (24.0% failure rate)
 
