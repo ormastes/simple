@@ -934,9 +934,16 @@ int main(int argc, char** argv) {
             for name in &["libsimple_native_all.a", "libsimple_runtime.a"] {
                 let lib = rp.join(name);
                 if lib.exists() {
-                    cmd.arg("-Wl,--whole-archive");
-                    cmd.arg(&lib);
-                    cmd.arg("-Wl,--no-whole-archive");
+                    #[cfg(target_os = "macos")]
+                    {
+                        cmd.arg("-Wl,-force_load").arg(&lib);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        cmd.arg("-Wl,--whole-archive");
+                        cmd.arg(&lib);
+                        cmd.arg("-Wl,--no-whole-archive");
+                    }
                     runtime_linked = true;
                     break;
                 }
@@ -944,9 +951,16 @@ int main(int argc, char** argv) {
         }
         if !runtime_linked {
             if let Some(native_all) = find_native_all_library() {
-                cmd.arg("-Wl,--whole-archive");
-                cmd.arg(&native_all);
-                cmd.arg("-Wl,--no-whole-archive");
+                #[cfg(target_os = "macos")]
+                {
+                    cmd.arg("-Wl,-force_load").arg(&native_all);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    cmd.arg("-Wl,--whole-archive");
+                    cmd.arg(&native_all);
+                    cmd.arg("-Wl,--no-whole-archive");
+                }
             } else if let Some(runtime) = find_runtime_library() {
                 cmd.arg(&runtime);
             }

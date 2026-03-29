@@ -289,6 +289,15 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Skip docstrings between attributes and declaration (e.g., @allow(...) """doc""" fn ...)
+        while matches!(&self.current.kind, TokenKind::String { .. } | TokenKind::DocComment(_)) {
+            // Consume the docstring — it's a module/item docstring, not a declaration
+            self.advance();
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
         // Now parse the item with collected attributes
         // Could be function, struct, class, etc.
         match &self.current.kind {
@@ -343,6 +352,15 @@ impl<'a> Parser<'a> {
                     return self.parse_impl_with_attrs(attributes);
                 }
 
+                // After decorators, could be fn, class, struct, extern, etc.
+                match &self.current.kind {
+                    TokenKind::Class => return self.parse_class_with_attrs(attributes),
+                    TokenKind::Struct => return self.parse_struct_with_attrs(attributes),
+                    TokenKind::Enum => return self.parse_enum_with_attrs(attributes),
+                    TokenKind::Extern => return self.parse_extern_with_attrs(attributes),
+                    TokenKind::Mixin => return self.parse_mixin_with_attrs(attributes),
+                    _ => {}
+                }
                 let mut node = self.parse_function_with_attrs(decorators, attributes)?;
                 if let Node::Function(ref mut f) = node {
                     f.effects = effects;
