@@ -270,7 +270,7 @@ pub(super) fn register_definitions(
                 crate::interpreter::EXTERN_FUNCTIONS.with(|cell| {
                     let mut externs = cell.borrow_mut();
                     externs.insert(ext.name.clone());
-                    if crate::is_debug_mode() {
+                    if crate::is_debug_mode() && std::env::var("SIMPLE_DEBUG_EXTERN_REGISTRATION").is_ok() {
                         eprintln!(
                             "[DEBUG] Registered extern function from module: {} (total: {})",
                             ext.name,

@@ -1,1 +1,0 @@
-../skills/versioning.md

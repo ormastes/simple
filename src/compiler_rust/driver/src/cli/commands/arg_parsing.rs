@@ -94,11 +94,9 @@ impl GlobalFlags {
 
     /// Apply global flags to the runtime environment
     pub fn apply(&self) {
+        simple_compiler::set_debug_mode(self.debug_mode);
         if self.macro_trace {
             simple_compiler::set_macro_trace(true);
-        }
-        if self.debug_mode {
-            simple_compiler::set_debug_mode(true);
         }
     }
 }
@@ -202,5 +200,14 @@ mod tests {
         ];
         let filtered = filter_internal_flags(&args);
         assert_eq!(filtered, vec!["test.spl", "arg1"]);
+    }
+
+    #[test]
+    fn test_apply_resets_debug_mode_when_flag_absent() {
+        simple_compiler::set_debug_mode(true);
+        let args = vec!["simple".to_string(), "script.spl".to_string()];
+        let flags = GlobalFlags::parse(&args);
+        flags.apply();
+        assert!(!simple_compiler::is_debug_mode());
     }
 }

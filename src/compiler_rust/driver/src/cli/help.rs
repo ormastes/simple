@@ -209,6 +209,31 @@ pub fn print_help() {
     eprintln!("  simple script.spl --sandbox --time-limit 60 --memory-limit 256M  # Combined");
 }
 
+pub fn print_ffi_gen_help() {
+    eprintln!("FFI Wrapper Generator");
+    eprintln!("=====================");
+    eprintln!();
+    eprintln!("Generates Rust/C wrapper code from @Lib annotated extern class declarations.");
+    eprintln!("The Rust build environment is set up at build/rust/ from simple.sdn config");
+    eprintln!("and persists across runs to avoid toolchain setup overhead.");
+    eprintln!();
+    eprintln!("Usage:");
+    eprintln!("  simple ffi-gen <file.spl> [OPTIONS]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --output=<dir>    Output directory (default: build/rust/ffi_gen/)");
+    eprintln!("  --dry-run         Print generated code without writing");
+    eprintln!("  --verbose         Verbose logging");
+    eprintln!("  --lang=<lang>     Filter by language: rust, c");
+    eprintln!("  --gen-intern      Generate interpreter_extern Rust module from spec");
+    eprintln!("  --gen-all         Generate entire build/rust/ from all full specs");
+    eprintln!("  --gen-module      Generate a single module from a full spec file");
+    eprintln!("  --gen-workspace   Generate multi-crate workspace (16 FFI crates)");
+    eprintln!("  --verify          Verify generated code compiles (cargo check)");
+    eprintln!("  --clean           Clean build/rust/ and re-setup from scratch");
+    eprintln!("  -h, --help        Show this help");
+}
+
 pub fn test_help_text() -> String {
     format!(
         "Simple Test Runner v{VERSION}\n\

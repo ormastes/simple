@@ -24,27 +24,17 @@
 #   --help            Show this help message
 
 use std.cli.cli_util (get_cli_args)
-use app.io.mod (file_read, file_write, file_exists, dir_create, dir_remove, cwd, process_run)
+use std.nogc_sync_mut.io.file_ops.{file_read as ffi_file_read, file_write as ffi_file_write, file_exists as ffi_file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create as ffi_dir_create, dir_remove as ffi_dir_remove}
+use std.nogc_sync_mut.io.env_ops.{cwd as ffi_cwd}
+use std.nogc_sync_mut.io.process_ops.{process_run as ffi_process_run}
 
 # Local module imports (using fully qualified paths)
 use compiler.tools.ffi_gen.parser*
 use compiler.tools.ffi_gen.rust_codegen*
 use compiler.tools.ffi_gen.cargo_gen*
 use compiler.tools.ffi_gen.builder*
-use compiler.tools.ffi_gen.intern_codegen*
-
-# New full code generation modules
-use compiler.tools.ffi_gen.types*
-use compiler.tools.ffi_gen.module_gen (generate_module_source)
-use compiler.tools.ffi_gen.workspace_gen (generate_cargo_toml, generate_lib_rs)
-use compiler.tools.ffi_gen.lib_gen (generate_simple_ffi_lib)
-
-# Spec modules for --gen-all
-use compiler.tools.ffi_gen.specs (runtime_value_module, gc_module, io_module, process_module, time_module, crypto_module, archive_module, system_module, codegen_module, data_module, serde_module, concurrent_module, cli_module, net_module)
 use std.log.{error}
-
-# Re-export workspace generation (extracted to ffi_gen_workspace.spl)
-use compiler.tools.ffi_gen.ffi_gen_workspace.*
 
 # ============================================================================
 # Rust Build Environment Config (from simple.sdn)
@@ -74,10 +64,10 @@ fn read_rust_config(project_root: text) -> RustEnvConfig:
     var config = RustEnvConfig.default()
 
     val sdn_path = "{project_root}/simple.sdn"
-    if not file_exists(sdn_path):
+    if not ffi_file_exists(sdn_path):
         return config
 
-    val content: text = file_read(sdn_path)
+    val content: text = ffi_file_read(sdn_path)
     if content == "":
         return config
 
@@ -280,9 +270,9 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
     val build_rust = "{project_root}/build/rust"
 
     # Create build/rust/ if missing
-    if not file_exists(build_rust):
+    if not ffi_file_exists(build_rust):
         log_info("Creating build/rust/ environment...", verbose)
-        if not dir_create(build_rust, true):
+        if not ffi_dir_create(build_rust, true):
             print_error("Failed to create {build_rust}")
             return 1
 
@@ -297,23 +287,23 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
 
     # Only write if changed (avoid unnecessary rustup invocations)
     var needs_write = true
-    if file_exists(toolchain_path):
-        val existing = file_read(toolchain_path)
+    if ffi_file_exists(toolchain_path):
+        val existing = ffi_file_read(toolchain_path)
         if existing == toolchain_content:
             needs_write = false
             log_info("Rust environment already up to date", verbose)
 
     if needs_write:
         log_info("Writing {toolchain_path} (channel: {rust_config.channel})", verbose)
-        if not file_write(toolchain_path, toolchain_content):
+        if not ffi_file_write(toolchain_path, toolchain_content):
             print_error("Failed to write {toolchain_path}")
             return 1
         log_step("Rust env configured: channel={rust_config.channel}")
 
     # Ensure ffi_gen/ subdir exists
     val ffi_dir = "{build_rust}/ffi_gen"
-    if not file_exists(ffi_dir):
-        if not dir_create(ffi_dir, true):
+    if not ffi_file_exists(ffi_dir):
+        if not ffi_dir_create(ffi_dir, true):
             print_error("Failed to create {ffi_dir}")
             return 1
 
@@ -322,9 +312,9 @@ fn ensure_rust_env(project_root: text, rust_config: RustEnvConfig, verbose: bool
 # Clean and re-setup build/rust/ from scratch
 fn clean_rust_env(project_root: text, verbose: bool) -> i64:
     val build_rust = "{project_root}/build/rust"
-    if file_exists(build_rust):
+    if ffi_file_exists(build_rust):
         log_info("Removing {build_rust}...", verbose)
-        if not dir_remove(build_rust, true):
+        if not ffi_dir_remove(build_rust, true):
             print_error("Failed to remove {build_rust}")
             return 1
         log_step("Cleaned build/rust/")
@@ -338,7 +328,7 @@ fn generate_for_file(input_path: text, opts: CliOptions, rust_config: RustEnvCon
     log_info("Reading {input_path}", opts.verbose)
 
     # Read source file
-    val source = file_read(input_path)
+    val source = ffi_file_read(input_path)
     if source == "":
         print_error("Failed to read or empty file: {input_path}")
         return 1
@@ -400,19 +390,19 @@ fn generate_rust_wrappers(specs: [LibExternSpec], opts: CliOptions, rust_config:
 
     # Write files to build/rust/ffi_gen/
     val out_dir = opts.output_dir
-    if not dir_create(out_dir, true):
+    if not ffi_dir_create(out_dir, true):
         print_error("Failed to create output directory: {out_dir}")
         return 1
-    if not dir_create("{out_dir}/src", true):
+    if not ffi_dir_create("{out_dir}/src", true):
         print_error("Failed to create src directory: {out_dir}/src")
         return 1
 
-    if not file_write("{out_dir}/Cargo.toml", cargo_toml):
+    if not ffi_file_write("{out_dir}/Cargo.toml", cargo_toml):
         print_error("Failed to write Cargo.toml")
         return 1
     log_step("Wrote {out_dir}/Cargo.toml")
 
-    if not file_write("{out_dir}/src/lib.rs", rust_source):
+    if not ffi_file_write("{out_dir}/src/lib.rs", rust_source):
         print_error("Failed to write src/lib.rs")
         return 1
     log_step("Wrote {out_dir}/src/lib.rs")
@@ -435,9 +425,11 @@ fn generate_rust_wrappers(specs: [LibExternSpec], opts: CliOptions, rust_config:
 # The spec file must export a function returning [InternFnSpec].
 # Output: Rust module source + dispatch entries.
 fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
+    use compiler.tools.ffi_gen.intern_codegen*
+
     log_info("Reading intern spec: {spec_path}", opts.verbose)
 
-    val source: text = file_read(spec_path)
+    val source: text = ffi_file_read(spec_path)
     if source == "":
         print_error("Failed to read or empty file: {spec_path}")
         return 1
@@ -473,18 +465,18 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
 
     # Write to output dir
     val out_dir = opts.output_dir
-    if not dir_create(out_dir, true):
+    if not ffi_dir_create(out_dir, true):
         print_error("Failed to create output directory: {out_dir}")
         return 1
 
     val module_path = "{out_dir}/{category}.rs"
-    if not file_write(module_path, module_source):
+    if not ffi_file_write(module_path, module_source):
         print_error("Failed to write {module_path}")
         return 1
     log_step("Wrote {module_path}")
 
     val dispatch_path = "{out_dir}/{category}_dispatch.rs"
-    if not file_write(dispatch_path, dispatch):
+    if not ffi_file_write(dispatch_path, dispatch):
         print_error("Failed to write {dispatch_path}")
         return 1
     log_step("Wrote {dispatch_path}")
@@ -499,6 +491,10 @@ fn generate_intern(spec_path: text, opts: CliOptions) -> i64:
 # Generate a single module from a full spec file.
 # The spec file should contain a function that returns a ModuleSpec.
 fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
+    use compiler.tools.ffi_gen.types*
+    use compiler.tools.ffi_gen.module_gen (generate_module_source)
+    use compiler.tools.ffi_gen.specs.{runtime_value_module, gc_module}
+
     log_info("Reading full module spec: {spec_path}", opts.verbose)
 
     # For now, we need to handle the spec files specially
@@ -538,15 +534,15 @@ fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
 
     # Write to output directory
     val out_dir = opts.output_dir
-    if not dir_create(out_dir, true):
+    if not ffi_dir_create(out_dir, true):
         print_error("Failed to create output directory: {out_dir}")
         return 1
-    if not dir_create("{out_dir}/src", true):
+    if not ffi_dir_create("{out_dir}/src", true):
         print_error("Failed to create src directory: {out_dir}/src")
         return 1
 
     val module_path = "{out_dir}/src/{mod_name}.rs"
-    if not file_write(module_path, module_source):
+    if not ffi_file_write(module_path, module_source):
         print_error("Failed to write {module_path}")
         return 1
     log_step("Wrote {module_path}")
@@ -560,6 +556,11 @@ fn generate_full_module(spec_path: text, opts: CliOptions) -> i64:
 
 # Generate the entire build/rust/ffi_gen/ directory from all full specs.
 fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
+    use compiler.tools.ffi_gen.types*
+    use compiler.tools.ffi_gen.module_gen (generate_module_source)
+    use compiler.tools.ffi_gen.lib_gen (generate_simple_ffi_lib)
+    use compiler.tools.ffi_gen.specs.{runtime_value_module, gc_module}
+
     print "Generating all FFI modules to {opts.output_dir}"
 
     # List of all full specs to generate
@@ -567,8 +568,8 @@ fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
 
     # Create output directories (ignore errors if already exist)
     val out_dir = opts.output_dir
-    dir_create(out_dir, true)
-    dir_create("{out_dir}/src", true)
+    ffi_dir_create(out_dir, true)
+    ffi_dir_create("{out_dir}/src", true)
     # Continue even if creation "failed" - directory might already exist
 
     # Generate each module (imports are at module level)
@@ -630,13 +631,13 @@ fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
         return 0
 
     # Write Cargo.toml
-    if not file_write("{out_dir}/Cargo.toml", cargo_source):
+    if not ffi_file_write("{out_dir}/Cargo.toml", cargo_source):
         print_error("Failed to write Cargo.toml")
         return 1
     log_step("Wrote {out_dir}/Cargo.toml")
 
     # Write lib.rs
-    if not file_write("{out_dir}/src/lib.rs", lib_source):
+    if not ffi_file_write("{out_dir}/src/lib.rs", lib_source):
         print_error("Failed to write src/lib.rs")
         return 1
     log_step("Wrote {out_dir}/src/lib.rs")
@@ -646,7 +647,7 @@ fn generate_all_modules(opts: CliOptions, rust_config: RustEnvConfig) -> i64:
         for mod_name in entry.keys():
             val source = entry[mod_name]
             val mod_path = "{out_dir}/src/{mod_name}.rs"
-            if not file_write(mod_path, source):
+            if not ffi_file_write(mod_path, source):
                 print_error("Failed to write {mod_path}")
                 return 1
             log_step("Wrote {mod_path}")
@@ -668,7 +669,7 @@ fn verify_generated_code(out_dir: text, verbose: bool) -> i64:
     print "Verifying generated code..."
 
     # Run cargo check
-    val result = process_run("cargo", ["check", "--manifest-path", "{out_dir}/Cargo.toml"])
+    val result = ffi_process_run("cargo", ["check", "--manifest-path", "{out_dir}/Cargo.toml"])
     val stdout = result.0
     val stderr = result.1
     val exit_code = result.2
@@ -697,8 +698,23 @@ fn main() -> i64:
         print_help()
         return 0
 
-    val project_root = cwd()
-    val rust_config = read_rust_config(project_root)
+    val project_root = ffi_cwd()
+    val verify_only = opts.verify and opts.input_file == "" and not opts.gen_all and not opts.gen_workspace
+    val requires_input = not opts.clean and not opts.gen_all and not opts.gen_workspace and not verify_only
+
+    if requires_input and opts.input_file == "":
+        print_error("No input file specified")
+        print ""
+        print_help()
+        return 1
+
+    if opts.input_file != "" and not ffi_file_exists(opts.input_file):
+        print_error("File not found: {opts.input_file}")
+        return 1
+
+    var rust_config = RustEnvConfig.default()
+    if opts.gen_all or opts.gen_workspace or (opts.input_file != "" and not opts.gen_intern and not opts.gen_module):
+        rust_config = read_rust_config(project_root)
 
     # Handle --clean: remove build/rust/ and re-setup
     if opts.clean:
@@ -706,10 +722,14 @@ fn main() -> i64:
         if clean_result != 0:
             return clean_result
 
-    # Ensure build/rust/ environment is set up (persists across runs)
-    val env_result = ensure_rust_env(project_root, rust_config, opts.verbose)
-    if env_result != 0:
-        return env_result
+    val needs_rust_env = opts.clean or opts.gen_all or opts.gen_workspace or verify_only or
+        (opts.input_file != "" and not opts.dry_run and not opts.gen_intern and not opts.gen_module)
+
+    # Ensure build/rust/ environment is set up only for modes that need on-disk Rust output.
+    if needs_rust_env:
+        val env_result = ensure_rust_env(project_root, rust_config, opts.verbose)
+        if env_result != 0:
+            return env_result
 
     # Handle --gen-all: generate all modules (no input file required)
     if opts.gen_all:
@@ -717,6 +737,7 @@ fn main() -> i64:
 
     # Handle --gen-workspace: generate multi-crate workspace
     if opts.gen_workspace:
+        use compiler.tools.ffi_gen.ffi_gen_workspace.{generate_workspace}
         return generate_workspace(opts, rust_config)
 
     # Handle --verify alone: verify existing generated code
@@ -727,14 +748,7 @@ fn main() -> i64:
         if opts.clean:
             print "build/rust/ environment re-initialized."
             return 0
-        print_error("No input file specified")
-        print ""
-        print_help()
-        return 1
-
-    if not file_exists(opts.input_file):
-        print_error("File not found: {opts.input_file}")
-        return 1
+        return 0
 
     # Dispatch to appropriate generator mode
     if opts.gen_module:

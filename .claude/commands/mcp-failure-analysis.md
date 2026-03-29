@@ -1,1 +1,0 @@
-../skills/mcp-failure-analysis.md

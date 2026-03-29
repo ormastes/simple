@@ -16,7 +16,7 @@ use simple_driver::cli::basic::{create_runner, run_code, run_file_with_args, wat
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::gen_lean::run_gen_lean;
-use simple_driver::cli::help::{print_help, print_test_help, print_version, version};
+use simple_driver::cli::help::{print_ffi_gen_help, print_help, print_test_help, print_version, version};
 use simple_driver::cli::llm_tools::{run_constr, run_context, run_diff, run_mcp};
 use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::native_build::handle_native_build;
@@ -189,9 +189,8 @@ fn handle_ui_wrapper(_ctx: &CommandContext) -> i32 {
 }
 
 fn handle_ffi_gen_wrapper(_ctx: &CommandContext) -> i32 {
-    eprintln!("error: ffi-gen requires Simple app dispatch support");
-    eprintln!("Run from the project root or set SIMPLE_HOME so src/compiler/90.tools/ffi_gen/main.spl can be resolved.");
-    1
+    print_ffi_gen_help();
+    0
 }
 
 fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
@@ -443,7 +442,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/compiler/90.tools/ffi_gen/main.spl",
         rust_handler: Handler::Custom(handle_ffi_gen_wrapper),
         env_override: "",
-        needs_rust_flags: &[],
+        needs_rust_flags: &["--help", "-h"],
     },
     // Brief view
     CommandEntry {

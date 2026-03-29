@@ -110,6 +110,91 @@ if defined MINGW_BIN (
     )
 )
 
+REM === Generate MCP launcher .cmd scripts in bin\release\ ===
+echo Generating MCP launcher scripts in bin\release\...
+
+REM simple_mcp_server.cmd
+(
+echo @echo off
+echo setlocal
+echo set "SCRIPT_DIR=%%~dp0"
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
+echo set "ENTRY=%%SCRIPT_DIR%%..\..\src\app\mcp\main.spl"
+echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\src"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+) > "%RELEASE_DIR%\simple_mcp_server.cmd"
+echo   simple_mcp_server.cmd
+
+REM simple_lsp_mcp_server.cmd
+(
+echo @echo off
+echo setlocal
+echo set "SCRIPT_DIR=%%~dp0"
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
+echo set "ENTRY=%%SCRIPT_DIR%%..\..\src\app\simple_lsp_mcp\main.spl"
+echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\src"
+echo set "SIMPLE_BINARY=%%RUNTIME%%"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+) > "%RELEASE_DIR%\simple_lsp_mcp_server.cmd"
+echo   simple_lsp_mcp_server.cmd
+
+REM t32_mcp_server.cmd
+(
+echo @echo off
+echo setlocal
+echo set "SCRIPT_DIR=%%~dp0"
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
+echo set "REPO_ROOT=%%SCRIPT_DIR%%..\.."
+echo set "ENTRY=%%REPO_ROOT%%\examples\10_tooling\trace32_tools\t32_mcp\main.spl"
+echo set "SIMPLE_LIB=%%REPO_ROOT%%\examples\10_tooling\trace32_tools"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo pushd "%%REPO_ROOT%%"
+echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+) > "%RELEASE_DIR%\t32_mcp_server.cmd"
+echo   t32_mcp_server.cmd
+
+REM t32_lsp_mcp_server.cmd
+(
+echo @echo off
+echo setlocal
+echo set "SCRIPT_DIR=%%~dp0"
+echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
+echo set "REPO_ROOT=%%SCRIPT_DIR%%..\.."
+echo set "TRACE32_ROOT=%%REPO_ROOT%%\examples\10_tooling\trace32_tools"
+echo set "ENTRY=%%TRACE32_ROOT%%\t32_lsp_mcp\main.spl"
+echo set "SIMPLE_LIB=%%TRACE32_ROOT%%"
+echo set "SIMPLE_RUNTIME=%%RUNTIME%%"
+echo set "T32_LSP_MCP_TOOL_RUNNER=examples\10_tooling\trace32_tools\t32_lsp_mcp\tool_runner.spl"
+echo set "T32_LSP_MCP_TOOL_DAEMON=examples\10_tooling\trace32_tools\cmm_lsp\mcp_daemon.spl"
+echo set "T32_LSP_MCP_TOOL_DAEMON_DIR=%%TEMP%%\t32_lsp_mcp_shared"
+echo set "SIMPLE_LOG=error"
+echo set "RUST_LOG=error"
+echo pushd "%%REPO_ROOT%%"
+echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+) > "%RELEASE_DIR%\t32_lsp_mcp_server.cmd"
+echo   t32_lsp_mcp_server.cmd
+
+REM Create bin\ symlinks/copies for MCP launchers
+for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_server) do (
+    if exist "%REPO_ROOT%\bin\%%M.cmd" del "%REPO_ROOT%\bin\%%M.cmd"
+    mklink "%REPO_ROOT%\bin\%%M.cmd" "release\%%M.cmd" >nul 2>&1
+    if !errorlevel! neq 0 (
+        copy "%RELEASE_DIR%\%%M.cmd" "%REPO_ROOT%\bin\%%M.cmd" >nul
+    )
+)
+echo   Linked bin\*_mcp_server.cmd
+
+echo.
+
 REM === Create .claude\commands\ symlinks → .claude\skills\ ===
 echo.
 echo Setting up Claude command symlinks...
