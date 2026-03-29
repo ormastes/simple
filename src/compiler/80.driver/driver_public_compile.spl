@@ -1,0 +1,148 @@
+use compiler.driver.driver_core_types.{CompileMode, CompileResult}
+use compiler.driver.driver_public_api.{interpret_file}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+
+fn compile_file(path: text) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    val default_output = _default_smf_output(path)
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path])
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(default_output):
+        return CompileResult.Success(default_output)
+    if exit_code == 0:
+        return CompileResult.RuntimeError("compile reported success but did not create output: {default_output}")
+    CompileResult.RuntimeError(combined)
+
+fn compile_to_smf(path: text, output: text) -> Result<text, text>:
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "-o", output])
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(output):
+        return Ok(output)
+    if exit_code == 0:
+        return Err("compile reported success but did not create output: {output}")
+    Err(combined)
+
+fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
+    if paths.len() == 0:
+        return CompileResult.RuntimeError("compile_files requires at least one input path")
+    if paths.len() > 1:
+        return CompileResult.RuntimeError("lightweight external compile_files only supports a single input path")
+
+    val path = paths[0]
+    match mode:
+        case CompileMode.Interpret:
+            interpret_file(path)
+        case CompileMode.Jit:
+            jit_file(path)
+        case CompileMode.Aot:
+            compile_file(path)
+        case CompileMode.Check:
+            check_file(path)
+        case CompileMode.Sdn:
+            parse_sdn_file(path)
+        case CompileMode.SmfExec:
+            CompileResult.RuntimeError("SmfExec mode is not supported by the lightweight external driver_api facade")
+        case _:
+            CompileResult.RuntimeError("unsupported compile mode for lightweight external facade")
+
+fn jit_file(path: text) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0:
+        return CompileResult.Success(combined)
+    CompileResult.RuntimeError(combined)
+
+fn aot_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--native"])
+
+fn aot_c_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend=c"])
+
+fn aot_llvm_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend=llvm"])
+
+fn aot_llvm_native_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend=llvm", "--native"])
+
+fn aot_native_file_with_backend(path: text, output: text, backend: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend={backend}", "--native"])
+
+fn aot_native_project_with_backend(source_dirs: [text], entry: text, output: text, backend: text, strip: bool) -> CompileResult:
+    CompileResult.RuntimeError("lightweight external aot_native_project_with_backend is not supported; use the CLI directly for multi-source native builds")
+
+fn aot_cuda_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend=cuda"])
+
+fn aot_vhdl_file(path: text, output: text) -> CompileResult:
+    _run_compile_to_path(path, output, ["--backend=vhdl"])
+
+fn check_file(path: text) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["lint", path])
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0:
+        return CompileResult.Success(combined)
+    CompileResult.RuntimeError(combined)
+
+fn parse_sdn_file(path: text) -> CompileResult:
+    val content = rt_file_read_text(path) ?? ""
+    if content.trim() == "":
+        return CompileResult.RuntimeError("failed to read SDN file: {path}")
+    CompileResult.Success(content)
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _clean_child_output(stdout: text, stderr: text) -> text:
+    val combined = if stderr.trim() != "":
+        stdout + "\n" + stderr
+    else:
+        stdout
+
+    val lines = combined.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "":
+            kept = kept.push(line)
+        i = i + 1
+    kept.join("\n")
+
+fn _default_smf_output(path: text) -> text:
+    if path.ends_with(".spl"):
+        return path.substring(0, path.len() - 4) + ".smf"
+    path + ".smf"
+
+fn _run_compile_to_path(path: text, output: text, extra_args: [text]) -> CompileResult:
+    val simple_bin = _find_simple_binary()
+    var args = ["compile", path]
+    var i = 0
+    while i < extra_args.len():
+        args = args.push(extra_args[i])
+        i = i + 1
+    args = args.push("-o")
+    args = args.push(output)
+
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, args)
+    val combined = _clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(output):
+        return CompileResult.Success(output)
+    if exit_code == 0:
+        return CompileResult.RuntimeError("compile reported success but did not create output: {output}")
+    CompileResult.RuntimeError(combined)

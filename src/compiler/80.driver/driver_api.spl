@@ -1,74 +1,14 @@
 # Driver API facade.
-#
 # Keep this module lightweight so selective imports can resolve only the
 # requested helper instead of parsing and evaluating the full compiler graph.
 
-use compiler.driver.driver_core_types.{CompileResult}
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_env_get(name: text) -> text
-
-fn compile_file(path: text) -> CompileResult:
-    val simple_bin = _find_simple_binary()
-    val default_output = _default_smf_output(path)
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path])
-    val combined = _clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(default_output):
-        return CompileResult.Success(default_output)
-    if exit_code == 0:
-        return CompileResult.RuntimeError("compile reported success but did not create output: {default_output}")
-    CompileResult.RuntimeError(combined)
-
-fn compile_to_smf(path: text, output: text) -> Result<text, text>:
-    val simple_bin = _find_simple_binary()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "-o", output])
-    val combined = _clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(output):
-        return Ok(output)
-    if exit_code == 0:
-        return Err("compile reported success but did not create output: {output}")
-    Err(combined)
-
-fn _find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "":
-        return env_bin
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("bin/release/simple"):
-        return "bin/release/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
-    "bin/simple"
-
-fn _clean_child_output(stdout: text, stderr: text) -> text:
-    val combined = if stderr.trim() != "":
-        stdout + "\n" + stderr
-    else:
-        stdout
-
-    val lines = combined.split("\n")
-    var kept: [text] = []
-    var i = 0
-    while i < lines.len():
-        val line = lines[i].trim()
-        if line != "":
-            kept = kept.push(line)
-        i = i + 1
-    kept.join("\n")
-
-fn _default_smf_output(path: text) -> text:
-    if path.ends_with(".spl"):
-        return path.substring(0, path.len() - 4) + ".smf"
-    path + ".smf"
-
-export use compiler.driver.driver_api_core.{
-    find_runtime_lib_dir, compile_files, jit_file, aot_file,
-    aot_c_file, aot_llvm_file, aot_llvm_native_file, aot_native_file_with_backend,
-    aot_native_project_with_backend, aot_cuda_file, aot_vhdl_file, check_file,
-    parse_sdn_file, try_load_smf_cached
-}
+export use compiler.driver.driver_api_types.{find_runtime_lib_dir}
+export use compiler.driver.driver_api_interpret.{try_load_smf_cached}
 export use compiler.driver.driver_public_api.{interpret_file, generate_headers}
 export use compiler.driver.driver_public_shared.{aot_shared_library}
-export compile_file, compile_to_smf
+export use compiler.driver.driver_public_compile.{
+    compile_file, compile_to_smf, compile_files, jit_file, aot_file, aot_c_file,
+    aot_llvm_file, aot_llvm_native_file, aot_native_file_with_backend,
+    aot_native_project_with_backend, aot_cuda_file, aot_vhdl_file, check_file,
+    parse_sdn_file
+}

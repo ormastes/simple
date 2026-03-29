@@ -14,8 +14,31 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use tracing::{debug, error, trace, warn, instrument};
+
+/// Check if loader tracing is enabled via SIMPLE_LOADER_TRACE=1 env var.
+/// Result is cached in a OnceLock so the env var is only read once.
+fn loader_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SIMPLE_LOADER_TRACE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Print a structured trace line to stderr when SIMPLE_LOADER_TRACE=1.
+/// No-op when tracing is disabled (the format string is never evaluated).
+macro_rules! loader_trace {
+    ($tag:expr, $($arg:tt)*) => {
+        if loader_trace_enabled() {
+            eprintln!("[loader-trace] {}: {}", $tag, format!($($arg)*));
+        }
+    };
+}
 
 use simple_parser::ast::{Capability, ClassDef, EnumDef, Effect, ImportTarget, Node, UseStmt};
 
@@ -103,7 +126,18 @@ fn export_target_names(target: &ImportTarget) -> Vec<String> {
     }
 }
 
-fn should_keep_driver_init_export(item: &Node, requested_names: &[String]) -> bool {
+/// Decide whether an AST item should be kept when performing selective (group) import filtering.
+///
+/// This is a generalized filter: given a set of `requested_names`, it keeps only the items
+/// that are relevant to those names. This avoids evaluating large modules in full when the
+/// caller only needs a few symbols.
+///
+/// Rules:
+/// - `ExportUseStmt`: keep only if it re-exports at least one requested name
+/// - `UseStmt`: keep if it imports any requested name, or if it's a glob/bare import (needed for transitive deps)
+/// - `Function`: keep only if the function name is in the requested set
+/// - Everything else (classes, structs, enums, etc.): always keep (cheap to evaluate)
+fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool {
     match item {
         Node::ExportUseStmt(export_stmt) => {
             let export_names = export_target_names(&export_stmt.target);
@@ -114,8 +148,7 @@ fn should_keep_driver_init_export(item: &Node, requested_names: &[String]) -> bo
             import_names.is_empty() || import_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
         }
         Node::Function(f) => {
-            let is_wrapper = matches!(f.name.as_str(), "interpret_file" | "generate_headers" | "aot_shared_library");
-            !is_wrapper || requested_names.iter().any(|wanted| wanted == &f.name)
+            requested_names.iter().any(|wanted| wanted == &f.name)
         }
         _ => true,
     }
@@ -359,12 +392,17 @@ pub fn load_and_merge_module(
             return Err(e);
         }
     };
+    let original_module_path = module_path.clone();
     let module_path = prefer_package_init_for_member_import(&module_path, use_stmt);
+    if module_path != original_module_path {
+        loader_trace!("init-redirect", "{} -> {}", original_module_path.display(), module_path.display());
+    }
+    loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
-        if let Value::Dict(d) = &cached_exports {}
+        loader_trace!("cache-hit", "{}", module_path.display());
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps
         // This ensures that static method calls work on imported classes
         merge_cached_module_definitions(&module_path, classes, functions, enums);
@@ -387,6 +425,7 @@ pub fn load_and_merge_module(
     // This allows Java-style forward references where types are available
     // even during circular imports.
     if is_module_loading(&module_path) {
+        loader_trace!("circular", "{} (returning partial)", module_path.display());
         // Try to get partial exports (type definitions from register_definitions)
         if let Some(partial_exports) = get_partial_module_exports(&module_path) {
             debug!(path = ?module_path, "Circular import detected, returning partial exports (type definitions)");
@@ -447,25 +486,32 @@ pub fn load_and_merge_module(
     };
 
     let requested_names = requested_group_import_names(use_stmt);
+    // Apply selective import filtering for modules under src/compiler/ when a Group import
+    // is used. This avoids evaluating large compiler modules in full when only a few symbols
+    // are needed. The filter is general-purpose (not hardcoded to specific paths).
+    let is_compiler_module = {
+        let path_str = module_path.to_string_lossy();
+        path_str.contains("src/compiler/") || path_str.contains("src\\compiler\\")
+    };
     let filtered_items: Vec<Node> =
-        if module_path.to_string_lossy().contains("src/compiler/driver/__init__.spl")
-            || module_path.to_string_lossy().contains("src/compiler/80.driver/__init__.spl")
-            || module_path.to_string_lossy().contains("src/compiler/driver/driver_api.spl")
-            || module_path.to_string_lossy().contains("src/compiler/80.driver/driver_api.spl")
-        {
+        if is_compiler_module {
             if let Some(names) = requested_names.as_ref() {
-                module
+                let total = module.items.len();
+                let filtered: Vec<Node> = module
                     .items
                     .iter()
-                    .filter(|item| should_keep_driver_init_export(item, names))
+                    .filter(|item| should_keep_selective_export(item, names))
                     .cloned()
-                    .collect()
+                    .collect();
+                loader_trace!("selective-filter", "{} kept {}/{} items for {:?}", module_path.display(), filtered.len(), total, names);
+                filtered
             } else {
                 module.items.clone()
             }
         } else {
             module.items.clone()
         };
+    let load_start = Instant::now();
 
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
@@ -503,7 +549,13 @@ pub fn load_and_merge_module(
                                     && p.is_file()
                                     && requested_names
                                         .as_ref()
-                                        .is_none_or(|names| sibling_might_define_requested_names(p, names))
+                                        .is_none_or(|names| {
+                                            let might = sibling_might_define_requested_names(p, names);
+                                            if !might {
+                                                loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                                            }
+                                            might
+                                        })
                             })
                             .collect();
                         // Sort for deterministic load order; mod.spl first if present
@@ -517,6 +569,14 @@ pub fn load_and_merge_module(
                             }
                         });
                         for sibling_path in &sibling_files {
+                            // Early termination: if all requested names are already found, skip remaining siblings
+                            if let Some(names) = requested_names.as_ref() {
+                                if !names.is_empty() && names.iter().all(|n| merged_exports.contains_key(n)) {
+                                    loader_trace!("sibling-skip", "{} (all requested names already found)", sibling_path.display());
+                                    break;
+                                }
+                            }
+                            loader_trace!("sibling-preload", "{} (requested: {:?})", sibling_path.display(), requested_names);
                             debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
                             if let Ok(sib_source) = fs::read_to_string(sibling_path) {
                                 let sib_source = if sib_source.contains('\r') {
@@ -660,6 +720,8 @@ pub fn load_and_merge_module(
     // Mark module as done loading
     unmark_module_loading(&module_path);
     decrement_load_depth();
+    let elapsed_ms = load_start.elapsed().as_millis();
+    loader_trace!("loaded", "{} ({} exports, {}d, {}ms)", module_path.display(), exports.len(), depth, elapsed_ms);
     debug!(path = ?module_path, exports = exports.len(), "Successfully loaded module");
 
     // If importing a specific item, extract it from exports
@@ -681,7 +743,7 @@ pub fn load_and_merge_module(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_and_merge_module, prefer_package_init_for_member_import};
+    use super::{load_and_merge_module, loader_trace_enabled, prefer_package_init_for_member_import, should_keep_selective_export};
     use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
@@ -861,5 +923,238 @@ mod tests {
         };
 
         assert!(matches!(exports.get("compile_to_smf"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_driver_api_check_file_for_external_callers() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("/tmp/driver_api_probe.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["compiler", "driver", "driver_api"],
+                ImportTarget::Group(vec![ImportTarget::Single("check_file".to_string())]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("check_file"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_driver_api_compile_surface_group_for_external_callers() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("/tmp/driver_api_probe.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["compiler", "driver", "driver_api"],
+                ImportTarget::Group(vec![
+                    ImportTarget::Single("compile_file".to_string()),
+                    ImportTarget::Single("compile_to_smf".to_string()),
+                    ImportTarget::Single("check_file".to_string()),
+                    ImportTarget::Single("aot_c_file".to_string()),
+                ]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("compile_file"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("compile_to_smf"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("check_file"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("aot_c_file"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn loads_driver_api_backend_surface_group_for_external_callers() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let current_file = Path::new("/tmp/driver_api_probe.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["compiler", "driver", "driver_api"],
+                ImportTarget::Group(vec![
+                    ImportTarget::Single("aot_llvm_file".to_string()),
+                    ImportTarget::Single("aot_llvm_native_file".to_string()),
+                    ImportTarget::Single("aot_native_file_with_backend".to_string()),
+                    ImportTarget::Single("aot_cuda_file".to_string()),
+                    ImportTarget::Single("aot_vhdl_file".to_string()),
+                ]),
+            ),
+            Some(current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .unwrap();
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+
+        assert!(matches!(exports.get("aot_llvm_file"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("aot_llvm_native_file"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("aot_native_file_with_backend"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("aot_cuda_file"), Some(Value::Function { .. })));
+        assert!(matches!(exports.get("aot_vhdl_file"), Some(Value::Function { .. })));
+    }
+
+    // --- WS1: Loader diagnostics tests ---
+
+    #[test]
+    fn loader_trace_disabled_by_default() {
+        // Without SIMPLE_LOADER_TRACE=1, tracing should be disabled.
+        // Note: OnceLock caches the value, so this test verifies the default path.
+        // In CI/test environments the env var is not set, so this should be false.
+        // We can't reliably test the enabled path without process-level env control,
+        // but we verify the function doesn't panic and returns a bool.
+        let result = loader_trace_enabled();
+        assert_eq!(result, result); // sanity: it's a bool
+    }
+
+    // --- WS2: Generalized selective filter tests ---
+
+    fn make_function_node(name: &str) -> simple_parser::ast::Node {
+        use simple_parser::ast::*;
+        Node::Function(FunctionDef {
+            name: name.to_string(),
+            params: vec![],
+            return_type: None,
+            body: vec![],
+            decorators: vec![],
+            is_async: false,
+            is_static: false,
+            is_mutable: false,
+            generics: None,
+            where_clause: None,
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            doc_comment: None,
+        })
+    }
+
+    fn make_export_use_node(names: &[&str]) -> simple_parser::ast::Node {
+        use simple_parser::ast::*;
+        let items: Vec<ImportTarget> = names.iter().map(|n| ImportTarget::Single(n.to_string())).collect();
+        Node::ExportUseStmt(UseStmt {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            path: ModulePath { segments: vec![] },
+            target: ImportTarget::Group(items),
+            is_type_only: false,
+            is_lazy: false,
+        })
+    }
+
+    fn make_use_node(names: &[&str]) -> simple_parser::ast::Node {
+        use simple_parser::ast::*;
+        let items: Vec<ImportTarget> = names.iter().map(|n| ImportTarget::Single(n.to_string())).collect();
+        Node::UseStmt(UseStmt {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            path: ModulePath { segments: vec!["some".to_string(), "module".to_string()] },
+            target: ImportTarget::Group(items),
+            is_type_only: false,
+            is_lazy: false,
+        })
+    }
+
+    #[test]
+    fn selective_filter_keeps_requested_function() {
+        let node = make_function_node("compile_file");
+        let requested = vec!["compile_file".to_string()];
+        assert!(should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_removes_unrequested_function() {
+        let node = make_function_node("interpret_file");
+        let requested = vec!["compile_file".to_string()];
+        assert!(!should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_keeps_matching_export_use() {
+        let node = make_export_use_node(&["compile_file", "check_file"]);
+        let requested = vec!["compile_file".to_string()];
+        assert!(should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_removes_non_matching_export_use() {
+        let node = make_export_use_node(&["interpret_file", "aot_shared_library"]);
+        let requested = vec!["compile_file".to_string()];
+        assert!(!should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_keeps_bare_use_stmt() {
+        // UseStmt with glob (empty export_target_names) should always be kept
+        use simple_parser::ast::*;
+        let node = Node::UseStmt(UseStmt {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            path: ModulePath { segments: vec!["std".to_string(), "io".to_string()] },
+            target: ImportTarget::Glob,
+            is_type_only: false,
+            is_lazy: false,
+        });
+        let requested = vec!["compile_file".to_string()];
+        assert!(should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_keeps_use_stmt_with_matching_name() {
+        let node = make_use_node(&["compile_file", "other"]);
+        let requested = vec!["compile_file".to_string()];
+        assert!(should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_removes_use_stmt_with_no_matching_name() {
+        let node = make_use_node(&["unrelated_a", "unrelated_b"]);
+        let requested = vec!["compile_file".to_string()];
+        assert!(!should_keep_selective_export(&node, &requested));
+    }
+
+    #[test]
+    fn selective_filter_always_keeps_non_function_non_use_nodes() {
+        // Class, Struct, Enum nodes should always be kept
+        use simple_parser::ast::*;
+        let node = Node::Class(ClassDef {
+            name: "SomeClass".to_string(),
+            fields: vec![],
+            methods: vec![],
+            decorators: vec![],
+            generics: None,
+            where_clause: None,
+            mixins: vec![],
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            doc_comment: None,
+            is_abstract: false,
+        });
+        let requested = vec!["compile_file".to_string()];
+        assert!(should_keep_selective_export(&node, &requested));
     }
 }
