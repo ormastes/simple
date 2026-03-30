@@ -28,6 +28,11 @@ struct AsyncTestRun:
     stderr_file: text
     timeout_ms: i64
 
+val _WAIT_POLL_INITIAL_MS = 10
+val _WAIT_POLL_MEDIUM_MS = 50
+val _WAIT_POLL_MAX_MS = 100
+val _WAIT_POLL_MAX_ITERATIONS = 6000
+
 # ============================================================================
 # Temp File Management
 # ============================================================================
@@ -52,20 +57,20 @@ fn create_temp_files(file_path: text) -> (text, text):
 
     # Replace path separators (chained replace breaks in runtime)
     var base = file_path
-    var temp = ""
+    var temp_chars: [text] = []
     var i = 0
     while i < base.len():
         val ch = base[i:i + 1]
         if ch == "/" or ch == "\\":
-            temp = temp + "_"
+            temp_chars.push("_")
         elif ch == ".":
-            temp = temp + "_"
+            temp_chars.push("_")
         elif ch == ":":
-            temp = temp + "_"
+            temp_chars.push("_")
         else:
-            temp = temp + ch
+            temp_chars.push(ch)
         i = i + 1
-    base = temp
+    base = temp_chars.join("")
 
     val tmp_dir = _get_temp_dir()
     val os = _detect_os()
@@ -87,6 +92,24 @@ fn cleanup_temp_files(stdout_file: text, stderr_file: text):
         file_delete(stdout_file)
     if file_exists(stderr_file):
         file_delete(stderr_file)
+
+fn _wait_poll_sleep_ms(poll_iteration: i64) -> i64:
+    """Adaptive backoff for process polling."""
+    if poll_iteration >= 50:
+        return _WAIT_POLL_MAX_MS
+    if poll_iteration >= 10:
+        return _WAIT_POLL_MEDIUM_MS
+    _WAIT_POLL_INITIAL_MS
+
+fn _find_completed_run(runs: [AsyncTestRun]) -> i64:
+    """Return the first run whose process has exited, or -1 if none have."""
+    var idx = 0
+    while idx < runs.len():
+        val run = runs[idx]
+        if not process_is_running(run.pid):
+            return idx
+        idx = idx + 1
+    -1
 
 # ============================================================================
 # Async Test Spawning
@@ -198,26 +221,14 @@ fn wait_for_any_process(runs: [AsyncTestRun]) -> i64:
 
     NOTE: Uses polling (100ms interval) since rt_process_wait_any doesn't exist
     """
-    val max_iterations = 6000  # 300 seconds max wait (at 50ms base)
-    var sleep_ms = 10
+    var poll_iteration = 0
+    while poll_iteration < _WAIT_POLL_MAX_ITERATIONS:
+        val completed_idx = _find_completed_run(runs)
+        if completed_idx >= 0:
+            return completed_idx
 
-    for iteration in max_iterations:
-        var idx = 0
-        while idx < runs.len():
-            val run = runs[idx]
-
-            if not process_is_running(run.pid):
-                return idx
-
-            idx = idx + 1
-
-        rt_thread_sleep(sleep_ms)
-
-        # Adaptive polling: 10ms -> 50ms -> 100ms
-        if iteration == 10:
-            sleep_ms = 50
-        elif iteration == 50:
-            sleep_ms = 100
+        rt_thread_sleep(_wait_poll_sleep_ms(poll_iteration))
+        poll_iteration = poll_iteration + 1
 
     -1  # Timeout
 
@@ -345,16 +356,12 @@ fn run_tests_parallel_with_monitoring(
 
         active_runs = new_runs
 
-        # Adaptive polling: 10ms -> 50ms -> 100ms
+        # Only sleep after a full pass with no completion.
         if had_completion:
             poll_iteration = 0
-        var sleep_ms = 10
-        if poll_iteration >= 50:
-            sleep_ms = 100
-        elif poll_iteration >= 10:
-            sleep_ms = 50
-        rt_thread_sleep(sleep_ms)
-        poll_iteration = poll_iteration + 1
+        else:
+            rt_thread_sleep(_wait_poll_sleep_ms(poll_iteration))
+            poll_iteration = poll_iteration + 1
 
     results
 
@@ -406,4 +413,3 @@ fn _detect_os() -> text:
 # ============================================================================
 # Exports
 # ============================================================================
-

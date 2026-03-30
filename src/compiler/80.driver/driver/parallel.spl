@@ -10,6 +10,7 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_thread_sleep(millis: i64)
 
 # ============================================================================
 # Configuration
@@ -65,10 +66,11 @@ class BuildGraph:
     """Dependency graph for build units."""
     units: {i64: BuildUnit}
     next_id: i64
+    ready_queue: [i64]
 
 impl BuildGraph:
     static fn empty() -> BuildGraph:
-        BuildGraph(units: {}, next_id: 0)
+        BuildGraph(units: {}, next_id: 0, ready_queue: [])
 
     me add_unit(path: text, dependencies: [i64]) -> i64:
         """Add a build unit, return its ID."""
@@ -89,25 +91,23 @@ impl BuildGraph:
                     dependents: dep.dependents.push(id),
                     status: dep.status, output: dep.output)
 
+        # Zero-dependency units are immediately ready
+        if dependencies.len() == 0:
+            self.ready_queue = self.ready_queue.push(id)
+
         id
 
-    fn ready_units() -> [BuildUnit]:
-        """Get units whose dependencies are all completed."""
+    me ready_units() -> [BuildUnit]:
+        """Drain the ready queue and return units ready to build."""
         var ready: [BuildUnit] = []
-        for (_, unit) in self.units:
-            match unit.status:
-                case Pending:
-                    val all_deps_done = unit.dependencies.filter(\dep_id:
-                        if self.units.contains_key(dep_id):
-                            match self.units[dep_id].status:
-                                case Completed: false
-                                case _: true
-                        else:
-                            false
-                    ).len() == 0
-                    if all_deps_done:
+        for id in self.ready_queue:
+            if self.units.contains_key(id):
+                val unit = self.units[id]
+                match unit.status:
+                    case Pending:
                         ready = ready.push(unit)
-                case _: ()
+                    case _: ()
+        self.ready_queue = []
         ready
 
     me mark_ready(id: i64):
@@ -130,6 +130,24 @@ impl BuildGraph:
             self.units[id] = BuildUnit(id: u.id, path: u.path,
                 dependencies: u.dependencies, dependents: u.dependents,
                 status: BuildUnitStatus.Completed, output: output)
+
+            # Check reverse-dependencies: enqueue newly ready units
+            for dep_id in u.dependents:
+                if not self.units.contains_key(dep_id):
+                    continue
+                val dep_unit = self.units[dep_id]
+                match dep_unit.status:
+                    case Pending:
+                        var all_done = true
+                        for req_id in dep_unit.dependencies:
+                            if self.units.contains_key(req_id):
+                                match self.units[req_id].status:
+                                    case Completed: ()
+                                    case _: all_done = false
+                            # Missing dep treated as satisfied
+                        if all_done:
+                            self.ready_queue = self.ready_queue.push(dep_id)
+                    case _: ()
 
     me mark_failed(id: i64, error: text):
         if self.units.contains_key(id):
@@ -219,6 +237,31 @@ impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
                         stats: BuildStats.empty())
+
+    fn wait_for_finished_process(in_flight_pid: {i64: i64}) -> (i64, i64):
+        """Wait for any in-flight process to finish using bounded polling.
+
+        Returns: (pid, exit_code), or (-1, -1) if no process is available.
+        """
+        if in_flight_pid.len() == 0:
+            return (-1, -1)
+
+        var poll_iteration = 0
+        while true:
+            for (pid, _) in in_flight_pid:
+                if not rt_process_is_running(pid):
+                    val exit_code = rt_process_wait(pid, 1)
+                    if exit_code != -2:
+                        return (pid, exit_code)
+
+            var sleep_ms = 10
+            if poll_iteration >= 50:
+                sleep_ms = 100
+            elif poll_iteration >= 10:
+                sleep_ms = 25
+
+            rt_thread_sleep(sleep_ms)
+            poll_iteration = poll_iteration + 1
 
     me add_unit(path: text, dependencies: [i64]) -> i64:
         self.graph.add_unit(path, dependencies)
@@ -368,12 +411,11 @@ impl ParallelBuilder:
 
         while not self.graph.is_complete():
             # Fill worker slots with ready units
-            var spawned_any = false
-            while in_flight_pid.len() < max_workers:
-                val ready = self.graph.ready_units()
-                if ready.len() == 0:
-                    break
-                val unit = ready[0]
+            val ready = self.graph.ready_units()
+            var ready_idx = 0
+            while in_flight_pid.len() < max_workers and ready_idx < ready.len():
+                val unit = ready[ready_idx]
+                ready_idx = ready_idx + 1
 
                 # Check dependency failures
                 var dep_failed = false
@@ -405,7 +447,6 @@ impl ParallelBuilder:
 
                 in_flight_pid[pid] = unit.id
                 in_flight_path[pid] = unit.path
-                spawned_any = true
                 if self.config.verbose:
                     print "[PARALLEL] spawned pid={pid} for {unit.path}"
 
@@ -413,16 +454,10 @@ impl ParallelBuilder:
             if in_flight_pid.len() == 0:
                 break
 
-            # Poll in-flight processes: try each with 1ms timeout
-            var finished_pid: i64 = -1
-            var finished_exit_code: i64 = -1
-            while finished_pid < 0:
-                for (pid, _) in in_flight_pid:
-                    val exit_code = rt_process_wait(pid, 1)
-                    if exit_code != -2:
-                        finished_pid = pid
-                        finished_exit_code = exit_code
-                        break
+            # Wait for one process to finish before recomputing ready work.
+            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(in_flight_pid)
+            if finished_pid < 0:
+                break
 
             # Collect result from finished process
             val unit_id = in_flight_pid[finished_pid]
