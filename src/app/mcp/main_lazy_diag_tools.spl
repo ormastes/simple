@@ -9,46 +9,100 @@
 # Structured diagnostics helpers
 # ============================================================================
 
-fn severity_label(sev: i64) -> text:
-    if sev == 1:
-        return "Error"
-    if sev == 2:
-        return "Warning"
-    if sev == 3:
-        return "Information"
-    if sev == 4:
-        return "Hint"
-    "Unknown"
-
-fn format_diag_line(json_line: text) -> text:
-    val sev_str = extract_field(json_line, "severity")
-    val code = extract_field(json_line, "code")
-    val message = extract_field(json_line, "message")
-    val line_str = extract_field(json_line, "line")
-    val col_str = extract_field(json_line, "col")
-    val source = extract_field(json_line, "source")
-
-    val sev = sev_str.to_int()
-    val label = severity_label(sev)
-
+fn strip_ansi(s: text) -> text:
+    # Strip ANSI escape codes: \033[...m patterns
     var parts: [text] = []
-    parts.push("  " + label + " (line " + line_str + ", col " + col_str + "): " + message)
-    if code != "":
-        parts.push(" [" + code + "]")
-    if source != "":
-        parts.push(" (" + source + ")")
+    var in_escape = false
+    for ch in s:
+        if in_escape:
+            if ch == "m":
+                in_escape = false
+            continue
+        if ch == "\033" or ch == "\x1b":
+            in_escape = true
+            continue
+        parts.push(ch)
     parts.join("")
 
-fn format_new_diagnostics_block(path: text, json_output: text) -> text:
-    val lines = json_output.split(NL)
+fn parse_diag_text_line(line: text) -> text:
+    # Parses: path:line:col: error/warning: message
+    # Returns formatted: "  Error (line N, col N): message (simple)"
+    # Or empty string if not a diagnostic line
+    val clean = strip_ansi(line)
+    val trimmed = clean.trim()
+    if trimmed == "":
+        return ""
+
+    # Match pattern: something:N:N: severity_word
+    # Find first colon after path
+    var colon1 = -1
+    var colon2 = -1
+    var colon3 = -1
+    var pos = 0
+    for ch in trimmed:
+        if ch == ":":
+            if colon1 < 0:
+                colon1 = pos
+            elif colon2 < 0:
+                colon2 = pos
+            elif colon3 < 0:
+                colon3 = pos
+                break
+        pos = pos + 1
+
+    if colon3 < 0:
+        return ""
+
+    # Extract line number and column
+    val line_str = trimmed.substring(colon1 + 1, colon2)
+    val col_str = trimmed.substring(colon2 + 1, colon3)
+
+    # Check these are numbers
+    val line_num = line_str.trim().to_int()
+    val col_num = col_str.trim().to_int()
+    if line_num == 0 and line_str.trim() != "0":
+        return ""
+
+    # Extract severity + message after third colon
+    val after = trimmed.substring(colon3 + 1, trimmed.len()).trim()
+
+    var severity = "Error"
+    var message = after
+    if after.starts_with("error"):
+        severity = "Error"
+        message = after.substring(5, after.len()).trim()
+        if message.starts_with(":"):
+            message = message.substring(1, message.len()).trim()
+    elif after.starts_with("warning"):
+        severity = "Warning"
+        message = after.substring(7, after.len()).trim()
+        if message.starts_with(":"):
+            message = message.substring(1, message.len()).trim()
+    elif after.starts_with("info"):
+        severity = "Information"
+        message = after.substring(4, after.len()).trim()
+        if message.starts_with(":"):
+            message = message.substring(1, message.len()).trim()
+    elif after.starts_with("hint"):
+        severity = "Hint"
+        message = after.substring(4, after.len()).trim()
+        if message.starts_with(":"):
+            message = message.substring(1, message.len()).trim()
+    else:
+        # Not a recognized severity — could be a non-diagnostic line
+        return ""
+
+    if message == "":
+        message = after
+
+    "  " + severity + " (line " + line_str.trim() + ", col " + col_str.trim() + "): " + message + " (simple)"
+
+fn format_new_diagnostics_block(path: text, check_output: text) -> text:
+    val lines = check_output.split(NL)
     var diag_lines: [text] = []
     for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "":
-            continue
-        val has_severity = (trimmed.index_of("\"severity\"") ?? -1) >= 0
-        if has_severity:
-            val formatted = format_diag_line(trimmed)
+        val formatted = parse_diag_text_line(line)
+        if formatted != "":
             diag_lines.push(formatted)
     if diag_lines.len() == 0:
         return ""
@@ -62,7 +116,7 @@ fn format_new_diagnostics_block(path: text, json_output: text) -> text:
 
 fn run_structured_diagnostics(path: text) -> (text, i64):
     val _bin = _mcp_find_simple_binary()
-    shell_cmd("timeout 30 " + _bin + " check " + path + " --format json 2>&1")
+    shell_cmd("timeout 30 " + _bin + " check " + path + " 2>&1")
 
 # ============================================================================
 # simple_read — Read source file with line numbers + diagnostics
@@ -166,31 +220,23 @@ fn handle_simple_status(id: text, body: text) -> text:
             out_parts.push("  " + fp + "  clean" + NL)
         else:
             total_errors = total_errors + 1
-            # Count diagnostics by severity from JSON lines
+            # Count diagnostics by severity from text output
             val diag_lines = co.split(NL)
             var err_count = 0
             var warn_count = 0
-            var info_count = 0
             for dl in diag_lines:
-                val dt = dl.trim()
-                if dt == "":
-                    continue
-                val has_sev = (dt.index_of("\"severity\"") ?? -1) >= 0
-                if has_sev:
-                    val sev_val = extract_field(dt, "severity").to_int()
-                    if sev_val == 1:
-                        err_count = err_count + 1
-                    elif sev_val == 2:
-                        warn_count = warn_count + 1
-                    else:
-                        info_count = info_count + 1
+                val clean_dl = strip_ansi(dl).trim()
+                val is_err = (clean_dl.contains(": error") or clean_dl.starts_with("error"))
+                val is_warn = (clean_dl.contains(": warning") or clean_dl.starts_with("warning"))
+                if is_err:
+                    err_count = err_count + 1
+                elif is_warn:
+                    warn_count = warn_count + 1
             var summary_parts: [text] = []
             if err_count > 0:
                 summary_parts.push(str(err_count) + " error(s)")
             if warn_count > 0:
                 summary_parts.push(str(warn_count) + " warning(s)")
-            if info_count > 0:
-                summary_parts.push(str(info_count) + " info")
             if summary_parts.len() == 0:
                 summary_parts.push("has issues")
             out_parts.push("  " + fp + "  " + summary_parts.join(", ") + NL)

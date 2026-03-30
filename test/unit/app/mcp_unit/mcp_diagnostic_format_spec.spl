@@ -10,97 +10,74 @@
 describe "MCP Diagnostic Format":
     """Tests for structured diagnostic formatting in MCP tool results"""
 
-    context "severity_label":
-        """Maps LSP severity integers to human-readable labels"""
+    context "strip_ansi":
+        """Removes ANSI escape codes from text"""
 
-        it "maps 1 to Error":
-            expect(severity_label(1)).to_equal("Error")
+        it "passes through plain text":
+            expect(strip_ansi("hello world")).to_equal("hello world")
 
-        it "maps 2 to Warning":
-            expect(severity_label(2)).to_equal("Warning")
+        it "returns empty for empty input":
+            expect(strip_ansi("")).to_equal("")
 
-        it "maps 3 to Information":
-            expect(severity_label(3)).to_equal("Information")
+    context "parse_diag_text_line":
+        """Parses text diagnostic lines into formatted strings"""
 
-        it "maps 4 to Hint":
-            expect(severity_label(4)).to_equal("Hint")
-
-        it "maps 0 to Unknown":
-            expect(severity_label(0)).to_equal("Unknown")
-
-        it "maps 5 to Unknown":
-            expect(severity_label(5)).to_equal("Unknown")
-
-    context "format_diag_line":
-        """Parses JSON diagnostic line into formatted string"""
-
-        it "formats error diagnostic":
-            val json = "{\"severity\":\"1\",\"code\":\"E0001\",\"message\":\"undeclared variable\",\"line\":\"10\",\"col\":\"5\",\"source\":\"simple\"}"
-            val result = format_diag_line(json)
+        it "parses error line":
+            val line = "src/test.spl:10:5: error: undeclared variable"
+            val result = parse_diag_text_line(line)
             expect(result).to_contain("Error")
             expect(result).to_contain("line 10")
             expect(result).to_contain("col 5")
             expect(result).to_contain("undeclared variable")
-            expect(result).to_contain("[E0001]")
             expect(result).to_contain("(simple)")
 
-        it "formats warning diagnostic":
-            val json = "{\"severity\":\"2\",\"code\":\"W0012\",\"message\":\"unused import\",\"line\":\"20\",\"col\":\"1\",\"source\":\"simple\"}"
-            val result = format_diag_line(json)
+        it "parses warning line":
+            val line = "src/test.spl:20:1: warning: unused import"
+            val result = parse_diag_text_line(line)
             expect(result).to_contain("Warning")
+            expect(result).to_contain("line 20")
             expect(result).to_contain("unused import")
-            expect(result).to_contain("[W0012]")
 
-        it "handles empty code":
-            val json = "{\"severity\":\"1\",\"code\":\"\",\"message\":\"parse error\",\"line\":\"1\",\"col\":\"1\",\"source\":\"simple\"}"
-            val result = format_diag_line(json)
-            expect(result).to_contain("Error")
-            expect(result).to_contain("parse error")
+        it "returns empty for non-diagnostic line":
+            val line = "Checking src/test.spl... OK"
+            val result = parse_diag_text_line(line)
+            expect(result).to_equal("")
 
-        it "handles empty source":
-            val json = "{\"severity\":\"4\",\"code\":\"H001\",\"message\":\"consider val\",\"line\":\"5\",\"col\":\"1\",\"source\":\"\"}"
-            val result = format_diag_line(json)
-            expect(result).to_contain("Hint")
-            expect(result).to_contain("consider val")
+        it "returns empty for empty line":
+            expect(parse_diag_text_line("")).to_equal("")
+
+        it "returns empty for summary line":
+            val line = "1 error(s) found in 1 file(s)"
+            val result = parse_diag_text_line(line)
+            expect(result).to_equal("")
 
     context "format_new_diagnostics_block":
-        """Produces <new-diagnostics> XML block from JSON output"""
+        """Produces <new-diagnostics> block from check output"""
 
         it "returns empty for no diagnostics":
             val result = format_new_diagnostics_block("test.spl", "")
             expect(result).to_equal("")
 
-        it "returns empty for non-diagnostic output":
-            val result = format_new_diagnostics_block("test.spl", "some plain text\nwith no JSON")
+        it "returns empty for clean output":
+            val result = format_new_diagnostics_block("test.spl", "Checking test.spl... OK\nAll checks passed")
             expect(result).to_equal("")
 
-        it "wraps single diagnostic in block":
-            val json = "{\"severity\":\"1\",\"code\":\"E0001\",\"message\":\"error msg\",\"line\":\"10\",\"col\":\"5\",\"source\":\"simple\"}"
-            val result = format_new_diagnostics_block("src/test.spl", json)
+        it "wraps single error in block":
+            val output = "src/test.spl:10:5: error: unexpected token\n  expected: expression\n  found:    Colon"
+            val result = format_new_diagnostics_block("src/test.spl", output)
             expect(result).to_contain("<new-diagnostics>")
             expect(result).to_contain("</new-diagnostics>")
             expect(result).to_contain("src/test.spl:")
-            expect(result).to_contain("Error (line 10, col 5): error msg")
+            expect(result).to_contain("Error (line 10, col 5)")
 
         it "wraps multiple diagnostics in block":
-            val line1 = "{\"severity\":\"1\",\"code\":\"E0001\",\"message\":\"error\",\"line\":\"10\",\"col\":\"1\",\"source\":\"simple\"}"
-            val line2 = "{\"severity\":\"2\",\"code\":\"W0001\",\"message\":\"warning\",\"line\":\"20\",\"col\":\"1\",\"source\":\"simple\"}"
-            val json = line1 + "\n" + line2
-            val result = format_new_diagnostics_block("test.spl", json)
+            val output = "test.spl:10:1: error: parse error\ntest.spl:20:1: warning: unused var"
+            val result = format_new_diagnostics_block("test.spl", output)
             expect(result).to_contain("Error (line 10")
             expect(result).to_contain("Warning (line 20")
 
-        it "skips non-diagnostic lines in mixed output":
-            val json = "Loading file...\n{\"severity\":\"1\",\"code\":\"E0001\",\"message\":\"err\",\"line\":\"5\",\"col\":\"1\",\"source\":\"simple\"}\nDone."
-            val result = format_new_diagnostics_block("test.spl", json)
+        it "skips non-diagnostic lines":
+            val output = "Checking test.spl...\ntest.spl:5:1: error: bad\n1 error(s)"
+            val result = format_new_diagnostics_block("test.spl", output)
             expect(result).to_contain("<new-diagnostics>")
             expect(result).to_contain("Error (line 5")
-
-    context "LSP MCP format":
-        """Simple LSP MCP diagnostics block format"""
-
-        it "lsp_severity_label maps correctly":
-            expect(lsp_severity_label(1)).to_equal("Error")
-            expect(lsp_severity_label(2)).to_equal("Warning")
-            expect(lsp_severity_label(3)).to_equal("Information")
-            expect(lsp_severity_label(4)).to_equal("Hint")
