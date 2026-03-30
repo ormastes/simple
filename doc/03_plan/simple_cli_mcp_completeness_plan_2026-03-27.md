@@ -40,7 +40,7 @@ Examples of known placeholders:
 ### simple-mcp
 
 `src/app/mcp/main.spl` exposes a large tool surface, currently described as
-`68 tools`, with families including:
+`99 tools`, with families including:
 
 - diagnostics and editing
 - VCS

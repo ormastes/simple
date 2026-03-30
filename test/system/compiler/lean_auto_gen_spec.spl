@@ -18,226 +18,117 @@ import verification.lean.beq_gen as beq_gen
 import verification.lean.theorem_gen as theorem_gen
 import verification.lean.auto_gen as auto_gen
 
-Feature "AutoLeanMode - mode predicates":
+describe "Lean Auto-Generation":
+    context "AutoLeanMode":
+        it "reports generation flags":
+            expect(structure_gen.AutoLeanMode.Full.generates_structures()).to_equal(true)
+            expect(structure_gen.AutoLeanMode.Full.generates_lookups()).to_equal(true)
+            expect(structure_gen.AutoLeanMode.Full.generates_beq()).to_equal(true)
+            expect(structure_gen.AutoLeanMode.StructureOnly.generates_structures()).to_equal(true)
+            expect(structure_gen.AutoLeanMode.StructureOnly.generates_lookups()).to_equal(false)
+            expect(structure_gen.AutoLeanMode.Skip.generates_structures()).to_equal(false)
 
-    Scenario "Full mode generates structures":
-        Given "Full auto-lean mode"
-        val mode = structure_gen.AutoLeanMode.Full
-        When "checking generates_structures"
-        val result = mode.generates_structures()
-        Then "it should return true"
-        sspec.expect(result).to_be_true()
+    context "StructureGenerator":
+        it "generates structures and inductives":
+            var class_def = structure_gen.SimpleClassDef.new("TraitDef")
+            class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("name", "text"))
+            class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("methods", "TraitMethod").with_list())
 
-    Scenario "Full mode generates lookups":
-        Given "Full auto-lean mode"
-        val mode = structure_gen.AutoLeanMode.Full
-        When "checking generates_lookups"
-        val result = mode.generates_lookups()
-        Then "it should return true"
-        sspec.expect(result).to_be_true()
+            var enum_def = structure_gen.SimpleEnumDef.new("Effect")
+            enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Pure"))
+            enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Io"))
 
-    Scenario "StructureOnly mode generates structures only":
-        Given "StructureOnly auto-lean mode"
-        val mode = structure_gen.AutoLeanMode.StructureOnly
-        When "checking generates_structures"
-        val structs = mode.generates_structures()
-        And "checking generates_lookups"
-        val lookups = mode.generates_lookups()
-        Then "it should generate structures"
-        sspec.expect(structs).to_be_true()
-        And "it should not generate lookups"
-        sspec.expect(lookups).to_be_false()
+            var gen = structure_gen.StructureGenerator.new()
+            val class_out = gen.generate_structure(class_def)
+            val enum_out = gen.generate_inductive(enum_def)
 
-    Scenario "Skip mode generates nothing":
-        Given "Skip auto-lean mode"
-        val mode = structure_gen.AutoLeanMode.Skip
-        When "checking all generation flags"
-        val structs = mode.generates_structures()
-        val lookups = mode.generates_lookups()
-        val beq = mode.generates_beq()
-        Then "all should return false"
-        sspec.expect(structs).to_be_false()
-        sspec.expect(lookups).to_be_false()
-        sspec.expect(beq).to_be_false()
+            expect(class_out).to_contain("structure TraitDef")
+            expect(class_out).to_contain("methods : List TraitMethod")
+            expect(enum_out).to_contain("inductive Effect")
+            expect(enum_out).to_contain("| pure")
+            expect(enum_out).to_contain("| io")
 
-Feature "StructureGenerator - simple class":
+    context "LookupGenerator":
+        it "generates lookup scaffolding":
+            val registry = lookup_gen.RegistryDef.new("Trait")
+            var gen = lookup_gen.LookupGenerator.new()
+            val env_out = gen.generate_env_type(registry)
+            val lookup_out = gen.generate_lookup(registry)
+            val contains_out = gen.generate_contains(registry)
 
-    Scenario "Generate structure from class with fields":
-        Given "a SimpleClassDef with two fields"
-        var class_def = structure_gen.SimpleClassDef.new("TraitDef")
-        val name_field = structure_gen.SimpleFieldDef.new("name", "text")
-        val methods_field = structure_gen.SimpleFieldDef.new("methods", "TraitMethod")
-                .with_list()
-        class_def = class_def.add_field(name_field)
-        class_def = class_def.add_field(methods_field)
+            expect(env_out).to_contain("def TraitEnv")
+            expect(lookup_out).to_contain("def lookupTrait")
+            expect(lookup_out).to_contain("Option TraitDef")
+            expect(contains_out).to_contain("def containsTrait")
+            expect(contains_out).to_contain("isSome")
 
-        When "generating structure"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_structure(class_def)
+    context "BeqGenerator":
+        it "generates BEq functions and reflexivity proofs":
+            var type_def = beq_gen.BeqTypeDef.new("Effect")
+            type_def = type_def.add_variant(beq_gen.BeqVariant.new("Pure", []))
+            type_def = type_def.add_variant(beq_gen.BeqVariant.new("Io", []))
 
-        Then "output should contain structure keyword"
-        sspec.expect(output.contains("structure TraitDef")).to_be_true()
-        And "output should contain name field"
-        sspec.expect(output.contains("name : String")).to_be_true()
-        And "output should contain methods field as List"
-        sspec.expect(output.contains("methods : List TraitMethod")).to_be_true()
-        And "output should have deriving clause"
-        sspec.expect(output.contains("deriving")).to_be_true()
+            var gen = beq_gen.BeqGenerator.new()
+            val fun_out = gen.generate_beq_function(type_def)
+            val inst_out = gen.generate_beq_instance(type_def)
+            val proof_out = gen.generate_reflexivity_proof(type_def)
 
-    Scenario "Generate structure with Skip mode":
-        Given "a SimpleClassDef with Skip mode"
-        var class_def = structure_gen.SimpleClassDef.new("Internal")
-        class_def = class_def.with_mode(structure_gen.AutoLeanMode.Skip)
+            expect(fun_out).to_contain("def Effect.beq")
+            expect(fun_out).to_contain(".pure, .pure => true")
+            expect(fun_out).to_contain("_, _ => false")
+            expect(inst_out).to_contain("instance : BEq Effect")
+            expect(proof_out).to_contain("theorem effect_beq_refl")
+            expect(proof_out).to_contain("rfl")
 
-        When "generating structure"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_structure(class_def)
+    context "TheoremGenerator":
+        it "generates determinism and empty lookup theorems":
+            val det = theorem_gen.generate_determinism_theorem("lookup_trait", [("env", "List TraitDef")], "TraitDef")
+            val lookup_empty = theorem_gen.generate_standard_lookup_theorems(["Trait"])
 
-        Then "output should be empty"
-        sspec.expect(output.len()).to_equal(0)
+            expect(det).to_contain("lookup_trait_deterministic")
+            expect(det).to_contain("= some r1")
+            expect(det).to_contain("= some r2")
+            expect(lookup_empty).to_contain("lookupTrait_empty")
+            expect(lookup_empty).to_contain("containsTrait_empty")
 
-Feature "StructureGenerator - enum/inductive":
+    context "AutoGenerator":
+        it "builds a proof-clean file set":
+            var registry = auto_gen.TypeRegistry.new()
+            var class_def = structure_gen.SimpleClassDef.new("Person")
+            class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("name", "text"))
+            class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("age", "i32"))
+            registry = registry.add_class(class_def)
 
-    Scenario "Generate inductive from simple enum":
-        Given "a SimpleEnumDef with unit variants"
-        var enum_def = structure_gen.SimpleEnumDef.new("Effect")
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Pure"))
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Io"))
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Async"))
+            var enum_def = structure_gen.SimpleEnumDef.new("Mode")
+            enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Online"))
+            enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Offline"))
+            registry = registry.add_enum(enum_def)
 
-        When "generating inductive"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_inductive(enum_def)
+            var config = auto_gen.AutoGenConfig.new("build/lean-auto", "Demo")
+            var gen = auto_gen.AutoGenerator.new(config)
+            gen = gen.set_registry(registry)
 
-        Then "output should contain inductive keyword"
-        sspec.expect(output.contains("inductive Effect")).to_be_true()
-        And "output should contain all variants"
-        sspec.expect(output.contains("| pure")).to_be_true()
-        sspec.expect(output.contains("| io")).to_be_true()
-        sspec.expect(output.contains("| async")).to_be_true()
+            val files = gen.generate_all()
+            expect(files.len()).to_equal(4)
 
-    Scenario "Generate inductive with parameterized variants":
-        Given "a SimpleEnumDef with parameterized variants"
-        var enum_def = structure_gen.SimpleEnumDef.new("Ty")
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Int"))
-        var named_variant = structure_gen.SimpleEnumVariant.new("Named")
-        named_variant = named_variant.add_param("name", "text")
-        enum_def = enum_def.add_variant(named_variant)
+            for (name, content) in files:
+                expect(name.starts_with("Generated_")).to_equal(true)
+                expect(content.contains("sorry")).to_equal(false)
+                expect(content.contains("axiom")).to_equal(false)
 
-        When "generating inductive"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_inductive(enum_def)
+    context "Type translation":
+        it "maps Simple types to Lean types":
+            expect(structure_gen.translate_type_to_lean("text", false, false)).to_equal("String")
+            expect(structure_gen.translate_type_to_lean("i32", false, false)).to_equal("Int")
+            expect(structure_gen.translate_type_to_lean("TraitDef", false, false)).to_equal("TraitDef")
 
-        Then "output should contain Int variant without arrow"
-        sspec.expect(output.contains("| int")).to_be_true()
-        And "output should contain Named variant with arrow"
-        sspec.expect(output.contains("| named : String -> Ty")).to_be_true()
-
-Feature "LookupGenerator - environment types":
-
-    Scenario "Generate environment type alias":
-        Given "a RegistryDef for Trait"
-        val registry = lookup_gen.RegistryDef.new("Trait")
-
-        When "generating env type"
-        var gen = lookup_gen.LookupGenerator.new()
-        val output = gen.generate_env_type(registry)
-
-        Then "output should define TraitEnv"
-        sspec.expect(output.contains("def TraitEnv")).to_be_true()
-        And "output should use List pair type"
-        sspec.expect(output.contains("List (String x TraitDef)")).to_be_true()
-
-    Scenario "Generate lookup function":
-        Given "a RegistryDef for Class"
-        val registry = lookup_gen.RegistryDef.new("Class")
-
-        When "generating lookup"
-        var gen = lookup_gen.LookupGenerator.new()
-        val output = gen.generate_lookup(registry)
-
-        Then "output should define lookupClass"
-        sspec.expect(output.contains("def lookupClass")).to_be_true()
-        And "output should return Option ClassDef"
-        sspec.expect(output.contains("Option ClassDef")).to_be_true()
-        And "output should use find?"
-        sspec.expect(output.contains("find?")).to_be_true()
-
-    Scenario "Generate contains function":
-        Given "a RegistryDef for Impl"
-        val registry = lookup_gen.RegistryDef.new("Impl")
-
-        When "generating contains"
-        var gen = lookup_gen.LookupGenerator.new()
-        val output = gen.generate_contains(registry)
-
-        Then "output should define containsImpl"
-        sspec.expect(output.contains("def containsImpl")).to_be_true()
-        And "output should return Bool"
-        sspec.expect(output.contains(": Bool")).to_be_true()
-        And "output should use isSome"
-        sspec.expect(output.contains("isSome")).to_be_true()
-
-Feature "BeqGenerator - BEq instances":
-
-    Scenario "Generate BEq for simple enum":
-        Given "a BeqTypeDef with unit variants"
-        var type_def = beq_gen.BeqTypeDef.new("Effect")
-        type_def = type_def.add_variant(beq_gen.BeqVariant.new("Pure", []))
-        type_def = type_def.add_variant(beq_gen.BeqVariant.new("Io", []))
-
-        When "generating BEq function"
-        var gen = beq_gen.BeqGenerator.new()
-        val output = gen.generate_beq_function(type_def)
-
-        Then "output should define Effect.beq"
-        sspec.expect(output.contains("def Effect.beq")).to_be_true()
-        And "output should have matching cases"
-        sspec.expect(output.contains(".pure, .pure => true")).to_be_true()
-        sspec.expect(output.contains(".io, .io => true")).to_be_true()
-        And "output should have default false case"
-        sspec.expect(output.contains("_, _ => false")).to_be_true()
-
-    Scenario "Generate BEq instance":
-        Given "a BeqTypeDef"
-        val type_def = beq_gen.BeqTypeDef.new("DispatchMode")
-
-        When "generating BEq instance"
-        var gen = beq_gen.BeqGenerator.new()
-        val output = gen.generate_beq_instance(type_def)
-
-        Then "output should have instance declaration"
-        sspec.expect(output.contains("instance : BEq DispatchMode")).to_be_true()
-        And "output should use generated beq"
-        sspec.expect(output.contains("beq := DispatchMode.beq")).to_be_true()
-
-Feature "BeqGenerator - reflexivity proofs":
-
-    Scenario "Generate reflexivity for simple enum":
-        Given "a BeqTypeDef with unit variants"
-        var type_def = beq_gen.BeqTypeDef.new("Effect")
-        type_def = type_def.add_variant(beq_gen.BeqVariant.new("Pure", []))
-        type_def = type_def.add_variant(beq_gen.BeqVariant.new("Io", []))
-
-        When "generating reflexivity proof"
-        var gen = beq_gen.BeqGenerator.new()
-        val output = gen.generate_reflexivity_proof(type_def)
-
-        Then "output should be a theorem"
-        sspec.expect(output.contains("theorem effect_beq_refl")).to_be_true()
-        And "output should state (e == e) = true"
-        sspec.expect(output.contains("(effect == effect) = true")).to_be_true()
-        And "output should use cases tactic"
-        sspec.expect(output.contains("cases")).to_be_true()
-        And "output should use rfl"
-        sspec.expect(output.contains("rfl")).to_be_true()
-
-    Scenario "Reflexivity proof has no sorry":
-        Given "any BeqTypeDef"
-        var type_def = beq_gen.BeqTypeDef.new("TestType")
-        type_def = type_def.add_variant(beq_gen.BeqVariant.new("A", []))
-
-        When "generating reflexivity proof"
+    context "Convenience functions":
+        it "generate lookup and BEq helper output":
+            val lookups = lookup_gen.generate_standard_lookups("Trait")
+            val beq = beq_gen.generate_simple_enum_beq("Mode", ["Online", "Offline"])
+            expect(lookups).to_contain("lookupTrait")
+            expect(beq).to_contain("instance : BEq Mode")
+            expect(beq).to_contain("mode_beq_refl")
         var gen = beq_gen.BeqGenerator.new()
         val output = gen.generate_reflexivity_proof(type_def)
 

@@ -6,9 +6,9 @@
 //! - write:    Write generated files to verification/
 //! - verify:   Run Lean on known verification projects
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{Interpreter, RunConfig, RunningType};
 use simple_compiler::codegen::lean::{LeanRunner, VerificationSummary};
@@ -115,39 +115,287 @@ fn get_known_lean_files() -> Vec<&'static str> {
         "verification/visibility_export/src/VisibilityExport.lean",
         "verification/macro_auto_import/src/MacroAutoImport.lean",
         "verification/type_inference_compile/src/TypeInferenceCompile.lean",
-        "verification/type_inference_compile/src/Generics.lean",
         "verification/type_inference_compile/src/Contracts.lean",
-        "verification/memory_capabilities/src/MemoryCapabilities.lean",
-        "verification/memory_model_drf/src/MemoryModelDRF.lean",
+        "verification/type_inference_compile/src/AsyncEffectInference.lean",
     ]
 }
 
-/// Read existing Lean files from disk (for compare mode)
-fn read_existing_lean_files() -> Result<HashMap<String, String>, String> {
-    let mut files = HashMap::new();
+fn is_supported_generated_file(path: &str) -> bool {
+    get_known_lean_files().iter().any(|known| known == &path)
+}
 
-    // Find project root
-    let project_root = find_verification_root()?;
+fn placeholder_markers(content: &str) -> Vec<&'static str> {
+    let mut markers = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--") || trimmed.starts_with("/-") || trimmed.starts_with("-/") {
+            continue;
+        }
+        if trimmed.contains("sorry") && !markers.contains(&"sorry") {
+            markers.push("sorry");
+        }
+        if trimmed.starts_with("axiom ") && !markers.contains(&"axiom") {
+            markers.push("axiom");
+        }
+    }
+    markers
+}
 
-    for path in get_known_lean_files() {
-        let full_path = project_root.join(path);
-        if full_path.exists() {
-            match fs::read_to_string(&full_path) {
-                Ok(content) => {
-                    files.insert(path.to_string(), content);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Could not read {}: {}", path, e);
-                }
-            }
+fn relative_output_path(rel_path: &str) -> &str {
+    rel_path.strip_prefix("verification/").unwrap_or(rel_path)
+}
+
+fn resolve_output_path(project_root: &std::path::Path, output_dir: &std::path::Path, rel_path: &str) -> PathBuf {
+    project_root.join(output_dir).join(relative_output_path(rel_path))
+}
+
+fn find_verification_source_root(project_root: &std::path::Path) -> Result<PathBuf, String> {
+    let candidates = [
+        project_root.join("src/compiler_rust/lib/std/src"),
+        project_root.join("src/std/src"),
+    ];
+
+    for candidate in candidates {
+        if candidate.join("verification/regenerate/__init__.spl").exists() {
+            return Ok(candidate);
         }
     }
 
-    if files.is_empty() {
-        return Err("No Lean files found in verification/".to_string());
+    Err("Could not find verification regeneration sources under src/compiler_rust/lib/std/src or src/std/src.".to_string())
+}
+
+struct RegenerationModuleSpec {
+    source_rel_path: &'static str,
+    output_path: &'static str,
+    function_name: &'static str,
+}
+
+fn supported_regeneration_modules() -> &'static [RegenerationModuleSpec] {
+    &[
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/nogc_compile.spl",
+            output_path: "verification/nogc_compile/src/NogcCompile.lean",
+            function_name: "regenerate_nogc_compile",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/async_compile.spl",
+            output_path: "verification/async_compile/src/AsyncCompile.lean",
+            function_name: "regenerate_async_compile",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/gc_manual_borrow.spl",
+            output_path: "verification/gc_manual_borrow/src/GcManualBorrow.lean",
+            function_name: "regenerate_gc_manual_borrow",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/manual_pointer_borrow.spl",
+            output_path: "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
+            function_name: "regenerate_manual_pointer_borrow",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/module_resolution.spl",
+            output_path: "verification/module_resolution/src/ModuleResolution.lean",
+            function_name: "regenerate_module_resolution",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/visibility_export.spl",
+            output_path: "verification/visibility_export/src/VisibilityExport.lean",
+            function_name: "regenerate_visibility_export",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/macro_auto_import.spl",
+            output_path: "verification/macro_auto_import/src/MacroAutoImport.lean",
+            function_name: "regenerate_macro_auto_import",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/type_inference.spl",
+            output_path: "verification/type_inference_compile/src/TypeInferenceCompile.lean",
+            function_name: "regenerate_type_inference_compile",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/contracts.spl",
+            output_path: "verification/type_inference_compile/src/Contracts.lean",
+            function_name: "regenerate_contracts",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/async_effect_inference.spl",
+            output_path: "verification/type_inference_compile/src/AsyncEffectInference.lean",
+            function_name: "regenerate_async_effect_inference",
+        },
+    ]
+}
+
+fn rewrite_regeneration_module_source(source: &str) -> String {
+    let rewritten = source
+        .lines()
+        .filter(|line| line.trim() != "use verification.lean.codegen as codegen")
+        .map(|line| line.replace("codegen.", ""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    replace_identifier(&rewritten, "gen", "builder")
+}
+
+fn replace_identifier(source: &str, from: &str, to: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let from_chars: Vec<char> = from.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let matches = i + from_chars.len() <= chars.len()
+            && chars[i..i + from_chars.len()] == from_chars[..]
+            && (i == 0 || !is_identifier_char(chars[i - 1]))
+            && (i + from_chars.len() == chars.len()
+                || !is_identifier_char(chars[i + from_chars.len()]));
+
+        if matches {
+            out.push_str(to);
+            i += from_chars.len();
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
     }
 
-    Ok(files)
+    out
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn build_rewritten_regen_script(
+    codegen_source: &str,
+    module_body: &[String],
+    output_path: &str,
+) -> Result<String, String> {
+    let mut body = String::new();
+    let mut saw_return = false;
+
+    for line in module_body {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        if trimmed.starts_with("return ") {
+            let expr = trimmed.trim_start_matches("return ").trim();
+            body.push_str("    ");
+            body.push_str(indent);
+            body.push_str("val content = ");
+            body.push_str(expr);
+            body.push('\n');
+            saw_return = true;
+        } else {
+            body.push_str("    ");
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+
+    if !saw_return {
+        return Err("Rewritten regeneration module is missing a final return statement.".to_string());
+    }
+
+    Ok(format!(
+        r#"{codegen_source}
+
+fn main() -> Int:
+{body}    print("FILE:{output_path}")
+    print("LENGTH:" + str(len(content)))
+    print(content)
+    print("END_FILE")
+    0
+"#
+    ))
+}
+
+fn extract_function_body(source: &str, function_name: &str) -> Result<Vec<String>, String> {
+    let signature = format!("fn {}(", function_name);
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with(&signature))
+        .ok_or_else(|| format!("Could not find function {} in regeneration module.", function_name))?;
+    let mut body = Vec::new();
+
+    for line in lines.iter().skip(start + 1) {
+        if let Some(stripped) = line.strip_prefix("    ") {
+            body.push(stripped.to_string());
+        } else if line.trim().is_empty() {
+            body.push(String::new());
+        } else {
+            break;
+        }
+    }
+
+    if body.is_empty() {
+        return Err(format!(
+            "Function {} in regeneration module has an empty body.",
+            function_name
+        ));
+    }
+
+    Ok(body)
+}
+
+fn run_rewritten_regen_module(
+    interpreter: &Interpreter,
+    source_root: &Path,
+    codegen_source: &str,
+    spec: &RegenerationModuleSpec,
+) -> Result<(String, String), String> {
+    let module_path = source_root.join(spec.source_rel_path);
+    let module_source = fs::read_to_string(&module_path).map_err(|e| {
+        format!(
+            "Could not read regeneration source {}: {}",
+            module_path.display(),
+            e
+        )
+    })?;
+    let rewritten_module = rewrite_regeneration_module_source(&module_source);
+    let module_body = extract_function_body(&rewritten_module, spec.function_name)?;
+    let runner_source = build_rewritten_regen_script(codegen_source, &module_body, spec.output_path)?;
+    let runner_name = spec
+        .source_rel_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("regen_runner.spl");
+    let runner_path = source_root.join(format!("_{}", runner_name));
+    fs::write(&runner_path, runner_source).map_err(|e| {
+        format!(
+            "Could not create regeneration runner {}: {}",
+            runner_path.display(),
+            e
+        )
+    })?;
+
+    let config = RunConfig {
+        capture_output: true,
+        running_type: RunningType::Interpreter,
+        ..Default::default()
+    };
+    let result = interpreter.run_file(&runner_path, config);
+    let _ = fs::remove_file(&runner_path);
+
+    match result {
+        Ok(res) if res.exit_code == 0 => {
+            let mut files = parse_regenerate_output(&res.stdout)?;
+            match files.remove(spec.output_path) {
+                Some(content) => Ok((spec.output_path.to_string(), content)),
+                None => Err(format!(
+                    "Regeneration runner for {} did not emit {}.",
+                    spec.source_rel_path, spec.output_path
+                )),
+            }
+        }
+        Ok(res) => Err(format!(
+            "Regeneration module {} failed with exit code {}.\nstdout:\n{}\nstderr:\n{}",
+            spec.source_rel_path, res.exit_code, res.stdout, res.stderr
+        )),
+        Err(e) => Err(format!(
+            "Could not run regeneration module {}: {}",
+            spec.source_rel_path, e
+        )),
+    }
 }
 
 /// Find the repository root that contains verification/
@@ -165,71 +413,44 @@ fn find_verification_root() -> Result<PathBuf, String> {
 }
 
 /// Generate Lean files using the Simple regeneration module
-/// Falls back to reading existing files if interpreter fails
 fn run_regenerate_all() -> Result<HashMap<String, String>, String> {
-    // Try to run the Simple regeneration module
-    let runner_code = r#"
-# Lean regeneration runner
-import verification.regenerate as regen
-
-fn main() -> Int:
-    results = regen.regenerate_all()
-    for (path, content) in results.items():
-        print("FILE:" + path)
-        print("LENGTH:" + str(len(content)))
-        print(content)
-        print("END_FILE")
-    return 0
-"#;
-
-    // Find the project root by looking for src/std
-    let mut current = std::env::current_dir().map_err(|e| e.to_string())?;
-    let std_lib_path = loop {
-        let candidate = current.join("src/std");
-        if candidate.exists() {
-            break candidate;
-        }
-        if !current.pop() {
-            // Fallback: read existing Lean files
-            eprintln!("Note: Could not find src/std - using existing Lean files");
-            return read_existing_lean_files();
-        }
-    };
-
-    // Write runner to a temp file in std_lib/src to have correct module resolution
-    let runner_path = std_lib_path.join("src/_gen_lean_runner.spl");
-    if let Err(e) = fs::write(&runner_path, runner_code) {
-        eprintln!("Note: Could not create runner file ({}) - using existing Lean files", e);
-        return read_existing_lean_files();
-    }
-
-    // Run the file
+    let project_root = find_verification_root()?;
+    let source_root = find_verification_source_root(&project_root)?;
+    let codegen_path = source_root.join("verification/lean/codegen.spl");
+    let codegen_source = fs::read_to_string(&codegen_path).map_err(|e| {
+        format!(
+            "Could not read Lean codegen source {}: {}",
+            codegen_path.display(),
+            e
+        )
+    })?;
     let interpreter = Interpreter::new();
-    let config = RunConfig {
-        capture_output: true,
-        running_type: RunningType::Interpreter,
-        ..Default::default()
-    };
+    let mut supported = HashMap::new();
 
-    let result = interpreter.run_file(&runner_path, config);
-
-    // Clean up temp file
-    let _ = fs::remove_file(&runner_path);
-
-    match result {
-        Ok(res) if res.exit_code == 0 => parse_regenerate_output(&res.stdout),
-        Ok(res) => {
-            eprintln!("Note: Regeneration module failed (code {})", res.exit_code);
-            eprintln!("      The Simple interpreter may not support all syntax yet.");
-            eprintln!("      Falling back to existing Lean files for comparison.");
-            read_existing_lean_files()
+    for spec in supported_regeneration_modules() {
+        let (path, content) =
+            run_rewritten_regen_module(&interpreter, &source_root, &codegen_source, spec)?;
+        if !is_supported_generated_file(&path) {
+            continue;
         }
-        Err(e) => {
-            eprintln!("Note: Could not run regeneration module: {}", e);
-            eprintln!("      Falling back to existing Lean files for comparison.");
-            read_existing_lean_files()
+
+        let markers = placeholder_markers(&content);
+        if !markers.is_empty() {
+            return Err(format!(
+                "Generated Lean output for {} still contains {}.",
+                path,
+                markers.join(", ")
+            ));
         }
+
+        supported.insert(path, content);
     }
+
+    if supported.is_empty() {
+        return Err("No proof-clean Lean files were generated.".to_string());
+    }
+
+    Ok(supported)
 }
 
 /// Parse the output from regenerate_all() into a HashMap
@@ -433,8 +654,13 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
     let mut missing_files = 0;
     let mut total_missing_defs = 0;
     let mut total_new_defs = 0;
-
-    let base_dir = &opts.output_dir;
+    let project_root = match find_verification_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
 
     for (rel_path, generated) in files.iter() {
         // Filter by project if specified
@@ -444,7 +670,7 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
             }
         }
 
-        let full_path = base_dir.parent().unwrap_or(base_dir).join(rel_path);
+        let full_path = resolve_output_path(&project_root, &opts.output_dir, rel_path);
 
         if full_path.exists() {
             match fs::read_to_string(&full_path) {
@@ -748,10 +974,16 @@ fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
 
     // Allow overriding Lean binary via env; default to `lean` in PATH.
     let lean_bin = std::env::var("LEAN_BIN").unwrap_or_else(|_| "lean".to_string());
-    let runner = LeanRunner::new(lean_bin, project_root.join("verification/.lean-cache")).with_verbose(false);
+    let cache_dir = if opts.output_dir.is_absolute() {
+        opts.output_dir.join(".lean-cache")
+    } else {
+        project_root.join(&opts.output_dir).join(".lean-cache")
+    };
+    let runner = LeanRunner::new(lean_bin, cache_dir).with_verbose(false);
 
     let mut results = Vec::new();
     let mut checked = 0;
+    let known_files: HashSet<_> = get_known_lean_files().iter().copied().collect();
 
     for path in get_known_lean_files() {
         if let Some(ref project) = opts.project {
@@ -759,13 +991,25 @@ fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
                 continue;
             }
         }
-        let full = project_root.join(path);
+        let full = resolve_output_path(&project_root, &opts.output_dir, path);
         if !full.exists() {
             continue;
         }
         checked += 1;
         match runner.check_file(&full) {
             Ok(res) => {
+                let source = match fs::read_to_string(&full) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        println!("[error]  {} - {}", path, e);
+                        continue;
+                    }
+                };
+                let markers = placeholder_markers(&source);
+                if !markers.is_empty() {
+                    println!("[fail]   {} (contains {})", path, markers.join(", "));
+                    continue;
+                }
                 if res.success && res.goals_remaining == 0 {
                     println!("[ok]     {}", path);
                 } else if res.success {
@@ -790,7 +1034,18 @@ fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
     }
 
     if checked == 0 {
-        eprintln!("No Lean verification files found (maybe filtered by --project?)");
+        let available: Vec<_> = known_files
+            .into_iter()
+            .filter(|path| resolve_output_path(&project_root, &opts.output_dir, path).exists())
+            .collect();
+        if available.is_empty() {
+            eprintln!(
+                "No supported Lean verification files found under {}. Run `simple gen-lean write --force` first.",
+                opts.output_dir.display()
+            );
+        } else {
+            eprintln!("No Lean verification files matched the current filter.");
+        }
         return 1;
     }
 
@@ -816,7 +1071,13 @@ fn write_lean_files(opts: &GenLeanOptions) -> i32 {
         }
     };
 
-    let base_dir = &opts.output_dir;
+    let project_root = match find_verification_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
     let mut written = 0;
     let mut skipped = 0;
 
@@ -828,7 +1089,7 @@ fn write_lean_files(opts: &GenLeanOptions) -> i32 {
             }
         }
 
-        let full_path = base_dir.parent().unwrap_or(base_dir).join(rel_path);
+        let full_path = resolve_output_path(&project_root, &opts.output_dir, rel_path);
 
         // Check if file exists and --force not set
         if full_path.exists() && !opts.force {

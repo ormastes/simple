@@ -1,6 +1,6 @@
 ---
 name: Simple MCP Server Reference
-description: MCP server architecture, 68 tools list, tool-to-CLI mapping, configuration
+description: MCP server architecture, 99 tools list, tool-to-CLI mapping, configuration
 type: reference
 ---
 

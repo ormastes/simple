@@ -43,7 +43,7 @@ Four MCP servers, all native binaries (no Node.js runtime needed). Each wraps `b
 
 | MCP Server | Launcher | Source | Description |
 |------------|----------|--------|-------------|
-| **simple-mcp** | `bin/simple_mcp_server` | `src/app/mcp/main.spl` | 68 tools — code intelligence, debugging (DAP), build, test, VCS (jj), search, analysis |
+| **simple-mcp** | `bin/simple_mcp_server` | `src/app/mcp/main.spl` | 99 tools — code intelligence, debugging (DAP), build, test, VCS (jj), search, analysis |
 | **simple-lsp-mcp** | `bin/simple_lsp_mcp_server` | `src/app/simple_lsp_mcp/main.spl` | LSP bridge — diagnostics, completions, hover, go-to-definition for `.spl`/`.shs` files |
 | **t32-mcp** | `bin/t32_mcp_server` | `examples/10_tooling/trace32_tools/t32_mcp/main.spl` | TRACE32 probe control — RCL commands, memory read/write, register access, SWD/JTAG |
 | **t32-lsp-mcp** | `bin/t32_lsp_mcp_server` | `examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl` | CMM/PRACTICE LSP bridge — diagnostics, completions, hover for `.cmm` scripts |

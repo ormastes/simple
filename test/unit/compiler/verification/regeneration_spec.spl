@@ -1,100 +1,39 @@
-# Regeneration Module Tests
-# Tests for verification.regenerate - Lean code generation from Simple models
-# NOTE: Using mock implementations until module is available
-
-# Mock regeneration functions
-fn regenerate_tensor_dimensions() -> text:
-    """namespace TensorDimensions
-inductive Dim
-| Dim.Literal : Nat → Dim
-| Dim.Variable : String → Dim
-
-def shapesCompatible (a b : Shape) : Bool := true
-
-theorem shapesCompatible_refl (s : Shape) : shapesCompatible s s = true := by
-  induction s with
-  | nil => rfl
-  | cons d s ih => simp [shapesCompatible, ih]
-
-theorem unifyDim_success_eq : unifyDim d1 d2 = some d → d1 = d2 := by
-  cases d1 <;> cases d2 <;> simp
-
-end TensorDimensions"""
-
-fn regenerate_tensor_memory() -> text:
-    """namespace TensorMemory
-open TensorDimensions
-
-structure MemoryBound where
-  bytes : Nat
-
-structure DeviceMemory where
-  available : Nat
-
-structure TrainingMemory where
-  peak : Nat
-
-theorem training_fits_if_max_fits (m : TrainingMemory) (d : DeviceMemory) :
-  m.peak ≤ d.available → True := by omega
-
-end TensorMemory"""
+use verification.regenerate as regen
+use verification.regenerate.async_compile as regen_async
+use verification.regenerate.gc_manual_borrow as regen_gc
+use verification.regenerate.memory_capabilities as regen_mem_cap
 
 describe "Lean Regeneration":
-    describe "Tensor Dimensions Regeneration":
-        it "regenerates TensorDimensions.lean with valid structure":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.len() > 0
-            expect lean_code.contains("namespace TensorDimensions")
-            expect lean_code.contains("inductive Dim")
-            expect lean_code.contains("def shapesCompatible")
-            expect lean_code.contains("theorem")
+    context "module generators":
+        it "regenerates async compile output":
+            val lean_code = regen_async.regenerate_async_compile()
+            expect(lean_code).to_contain("inductive Effect")
+            expect(lean_code).to_contain("theorem append_safe")
+            expect(lean_code).to_contain("theorem wait_detected")
+            expect(lean_code.contains("sorry")).to_equal(false)
 
-        it "regenerates TensorMemory.lean with memory bounds":
-            val lean_code = regenerate_tensor_memory()
-            expect lean_code.len() > 0
-            expect lean_code.contains("namespace TensorMemory")
-            expect lean_code.contains("structure MemoryBound")
-            expect lean_code.contains("structure TrainingMemory")
-            expect lean_code.contains("theorem training_fits_if_max_fits")
+        it "regenerates GC borrow output":
+            val lean_code = regen_gc.regenerate_gc_manual_borrow()
+            expect(lean_code).to_contain("structure GcState")
+            expect(lean_code).to_contain("theorem borrow_preserves")
+            expect(lean_code).to_contain("theorem collect_preserves")
+            expect(lean_code.contains("sorry")).to_equal(false)
 
-        it "includes import statements":
-            val lean_code = regenerate_tensor_memory()
-            expect lean_code.contains("open TensorDimensions")
+        it "regenerates memory capability output":
+            val lean_code = regen_mem_cap.regenerate_memory_capabilities()
+            expect(lean_code).to_contain("inductive RefCapability")
+            expect(lean_code).to_contain("def canConvert")
+            expect(lean_code).to_contain("theorem conversion_is_safe")
 
-    describe "Lean Syntax Validation":
-        it "structure definitions have 'where' keyword":
-            val lean_code = regenerate_tensor_memory()
-            expect lean_code.contains("structure MemoryBound where")
-            expect lean_code.contains("structure DeviceMemory where")
+    context "regenerate_all":
+        it "returns all expected file entries":
+            val files = regen.regenerate_all()
+            expect(files.len()).to_equal(15)
+            expect(files.contains_key("verification/async_compile/src/AsyncCompile.lean")).to_equal(true)
+            expect(files.contains_key("verification/gc_manual_borrow/src/GcManualBorrow.lean")).to_equal(true)
 
-        it "inductive definitions have constructors":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.contains("inductive Dim")
-            expect lean_code.contains("| Dim.")
-
-        it "theorems have proof structure":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.contains("theorem")
-            val has_proof = lean_code.contains("induction") or lean_code.contains("rfl")
-            expect has_proof
-
-        it "namespaces are properly opened and closed":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.contains("namespace TensorDimensions")
-            expect lean_code.contains("end TensorDimensions")
-
-    describe "Proof Completeness":
-        it "shapesCompatible_refl has complete proof":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.contains("theorem shapesCompatible_refl")
-            expect lean_code.contains("induction s with")
-
-        it "unifyDim_success_eq has complete proof":
-            val lean_code = regenerate_tensor_dimensions()
-            expect lean_code.contains("theorem unifyDim_success_eq")
-            expect lean_code.contains("cases d1")
-
-        it "training_fits_if_max_fits has complete proof":
-            val lean_code = regenerate_tensor_memory()
-            expect lean_code.contains("theorem training_fits_if_max_fits")
-            expect lean_code.contains("omega")
+            if files.contains_key("verification/async_compile/src/AsyncCompile.lean"):
+                val async_file = files.get("verification/async_compile/src/AsyncCompile.lean")
+                expect(async_file.contains("theorem append_safe")).to_equal(true)
+            else:
+                expect(false).to_equal(true)

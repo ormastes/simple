@@ -319,8 +319,21 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// Check if parts represent a stdlib-prefixed import.
+///
+/// `verification.*` lives under the stdlib source tree even though it does not
+/// use the `std.` prefix, so treat it as stdlib-rooted for resolution.
 fn is_stdlib_import(parts: &[String]) -> bool {
-    !parts.is_empty() && matches!(parts[0].as_str(), "std" | "lib" | "std_lib")
+    !parts.is_empty() && matches!(parts[0].as_str(), "std" | "lib" | "std_lib" | "verification")
+}
+
+fn stdlib_relative_parts<'a>(parts: &'a [String]) -> &'a [String] {
+    if parts.first().map(|p| p.as_str()) == Some("verification") {
+        parts
+    } else if is_stdlib_import(parts) {
+        &parts[1..]
+    } else {
+        parts
+    }
 }
 
 /// Clear the path resolution cache (called between test runs)
@@ -391,7 +404,8 @@ mod tests {
         let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
         let resolved = resolve_module_path(&parts, &base_dir).unwrap();
         assert!(
-            resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
+            resolved.ends_with("src/compiler_rust/lib/std/src/io/__init__.spl")
+                || resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
                 || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
             "resolved path was {:?}",
             resolved
@@ -486,8 +500,9 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     // Skip stdlib search entirely for non-stdlib imports (parts[0] != std/lib/std_lib).
     let is_stdlib = is_stdlib_import(parts);
 
-    // Strip stdlib prefix once if applicable
-    let stdlib_parts: &[String] = if is_stdlib { &parts[1..] } else { parts };
+    // `std.*`/`lib.*` drop their synthetic prefix, but `verification.*` is an
+    // actual stdlib subtree and must keep its leading segment.
+    let stdlib_parts: &[String] = stdlib_relative_parts(parts);
 
     // External scripts are often executed from /tmp while the user invokes the
     // CLI from the repository root. In that case the script-relative base_dir is
@@ -513,6 +528,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             if is_stdlib && !stdlib_parts.is_empty() {
             // Canonical paths first (most likely to hit), then legacy
                 for stdlib_subpath in &[
+                "src/compiler_rust/lib/std/src",
                 "src/std",
                 "src/lib",
                 "src/std/src",
