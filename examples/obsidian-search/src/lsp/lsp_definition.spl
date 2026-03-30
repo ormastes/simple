@@ -1,0 +1,60 @@
+# Obsidian LSP — Go-to-Definition Provider
+# Resolves [[wikilinks]] to the target note's file location.
+#
+# When the cursor is on a [[wikilink]], go-to-definition navigates
+# to the target note file (line 0, character 0).
+
+export handle_definition
+
+use src.util.json_helpers.{js, jp, jo2, ji, jnull}
+use src.lsp.lsp_json.{extract_position_line, extract_position_char, extract_td_uri}
+use src.lsp.lsp_json.{make_location}
+use src.lsp.lsp_document.{doc_store_get_content, get_wikilink_at_position}
+use src.lsp.lsp_document.{vault_note_exists, vault_get_note_path_by_name}
+
+# ---------------------------------------------------------------------------
+# Definition handler
+# ---------------------------------------------------------------------------
+
+fn handle_definition(params: text) -> text:
+    val uri = extract_td_uri(params)
+    val line = extract_position_line(params)
+    val character = extract_position_char(params)
+
+    val content = doc_store_get_content(uri)
+    if content == "":
+        return jnull()
+
+    # Check if cursor is on a wikilink
+    val link_target = get_wikilink_at_position(content, line, character)
+    if link_target == "":
+        return jnull()
+
+    # Look up the target note in the vault
+    if not vault_note_exists(link_target):
+        return jnull()
+
+    val target_path = vault_get_note_path_by_name(link_target)
+    if target_path == "":
+        return jnull()
+
+    # Build file URI for the target
+    val target_uri = path_to_uri(target_path)
+
+    # Return location at the beginning of the target file
+    make_location(target_uri, 0, 0)
+
+# ---------------------------------------------------------------------------
+# URI conversion
+# ---------------------------------------------------------------------------
+
+fn path_to_uri(path: text) -> text:
+    # Convert filesystem path to file:// URI
+    if path.starts_with("/"):
+        return "file://{path}"
+    # Windows paths (C:\...)
+    if path.len() >= 2:
+        val second = path.substring(1, 2)
+        if second == ":":
+            return "file:///{path}"
+    "file://{path}"

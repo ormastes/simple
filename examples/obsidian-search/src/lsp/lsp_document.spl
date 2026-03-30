@@ -1,0 +1,230 @@
+# Obsidian LSP — Document Store
+# Manages open documents and vault-wide metadata for cross-file features.
+#
+# On open/change, re-parses the document using note_parser functions.
+# Maintains vault-wide note names/paths/tags for completion and diagnostics.
+
+export OpenDoc, doc_store_init, doc_store_open, doc_store_change, doc_store_close
+export doc_store_get_content, doc_store_get_uri_list
+export vault_init, vault_get_note_names, vault_get_note_paths, vault_get_tags
+export vault_get_path, vault_note_exists, vault_get_note_path_by_name
+export get_line_content, get_wikilink_at_position
+
+use src.util.json_helpers.{safe_substr}
+use src.core.note_parser.{parse_frontmatter, extract_wikilinks, extract_tags, NoteMeta, WikiLink}
+use src.core.vault_scanner.{scan_vault, relative_path}
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_stderr_write(s: text)
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+struct OpenDoc:
+    uri: text
+    content: text
+    version: i64
+    meta: NoteMeta
+    wikilinks: [WikiLink]
+    tags: [text]
+
+# ---------------------------------------------------------------------------
+# Module-level globals for document store and vault state
+# ---------------------------------------------------------------------------
+
+var OPEN_DOCS: [OpenDoc] = []
+var VAULT_NOTE_NAMES: [text] = []
+var VAULT_NOTE_PATHS: [text] = []
+var VAULT_TAGS: [text] = []
+var VAULT_PATH: text = ""
+
+# ---------------------------------------------------------------------------
+# Vault initialization
+# ---------------------------------------------------------------------------
+
+fn vault_init():
+    VAULT_PATH = rt_env_get("OBSIDIAN_VAULT_PATH")
+    if VAULT_PATH == "":
+        rt_stderr_write("obsidian-lsp: OBSIDIAN_VAULT_PATH not set, vault features disabled\n")
+        return
+    rt_stderr_write("obsidian-lsp: scanning vault at {VAULT_PATH}\n")
+    val md_files = scan_vault(VAULT_PATH)
+    VAULT_NOTE_NAMES = []
+    VAULT_NOTE_PATHS = []
+    var all_tags: [text] = []
+    for file_path in md_files:
+        val rel = relative_path(file_path, VAULT_PATH)
+        VAULT_NOTE_PATHS.push(file_path)
+        # Extract note name from filename (strip .md, strip directory)
+        val name = extract_note_name(rel)
+        VAULT_NOTE_NAMES.push(name)
+        # Read file to extract tags (lazy: only frontmatter tags for now)
+        val content = rt_file_read_text(file_path) ?? ""
+        if content != "":
+            val meta = parse_frontmatter(content)
+            for tag in meta.tags:
+                if not list_contains(all_tags, tag):
+                    all_tags.push(tag)
+            # Also extract inline tags
+            val inline_tags = extract_tags(content)
+            for tag in inline_tags:
+                if not list_contains(all_tags, tag):
+                    all_tags.push(tag)
+    VAULT_TAGS = all_tags
+    rt_stderr_write("obsidian-lsp: found {VAULT_NOTE_NAMES.len()} notes, {VAULT_TAGS.len()} tags\n")
+
+fn extract_note_name(rel_path: text) -> text:
+    # Strip .md extension
+    var name = rel_path
+    if name.ends_with(".md"):
+        name = safe_substr(name, 0, name.len() - 3)
+    # Get filename only (after last /)
+    val slash_idx_result = name.last_index_of("/")
+    match slash_idx_result:
+        Some(i): name = safe_substr(name, i + 1, name.len())
+        nil: pass_dn
+    name
+
+fn list_contains(lst: [text], item: text) -> bool:
+    for v in lst:
+        if v == item:
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Vault accessors
+# ---------------------------------------------------------------------------
+
+fn vault_get_note_names() -> [text]:
+    VAULT_NOTE_NAMES
+
+fn vault_get_note_paths() -> [text]:
+    VAULT_NOTE_PATHS
+
+fn vault_get_tags() -> [text]:
+    VAULT_TAGS
+
+fn vault_get_path() -> text:
+    VAULT_PATH
+
+fn vault_note_exists(name: text) -> bool:
+    val lower_name = ("" + name).lower()
+    for n in VAULT_NOTE_NAMES:
+        val lower_n = ("" + n).lower()
+        if lower_n == lower_name:
+            return true
+    false
+
+fn vault_get_note_path_by_name(name: text) -> text:
+    val lower_name = ("" + name).lower()
+    var i = 0
+    while i < VAULT_NOTE_NAMES.len():
+        val lower_n = ("" + VAULT_NOTE_NAMES[i]).lower()
+        if lower_n == lower_name:
+            return VAULT_NOTE_PATHS[i]
+        i = i + 1
+    ""
+
+# ---------------------------------------------------------------------------
+# Document store operations
+# ---------------------------------------------------------------------------
+
+fn doc_store_init():
+    OPEN_DOCS = []
+
+fn doc_store_open(uri: text, content: text, version: i64):
+    val meta = parse_frontmatter(content)
+    val wikilinks = extract_wikilinks(content)
+    val tags = extract_tags(content)
+    val doc = OpenDoc(
+        uri: uri,
+        content: content,
+        version: version,
+        meta: meta,
+        wikilinks: wikilinks,
+        tags: tags
+    )
+    # Remove existing if any
+    doc_store_close(uri)
+    OPEN_DOCS.push(doc)
+
+fn doc_store_change(uri: text, content: text, version: i64):
+    doc_store_open(uri, content, version)
+
+fn doc_store_close(uri: text):
+    var new_docs: [OpenDoc] = []
+    for doc in OPEN_DOCS:
+        if doc.uri != uri:
+            new_docs.push(doc)
+    OPEN_DOCS = new_docs
+
+fn doc_store_get_content(uri: text) -> text:
+    for doc in OPEN_DOCS:
+        if doc.uri == uri:
+            return doc.content
+    ""
+
+fn doc_store_get_uri_list() -> [text]:
+    var uris: [text] = []
+    for doc in OPEN_DOCS:
+        uris.push(doc.uri)
+    uris
+
+fn doc_store_get_doc(uri: text) -> OpenDoc?:
+    for doc in OPEN_DOCS:
+        if doc.uri == uri:
+            return doc
+    nil
+
+# ---------------------------------------------------------------------------
+# Text position helpers
+# ---------------------------------------------------------------------------
+
+fn get_line_content(content: text, line_number: i64) -> text:
+    val lines = content.split("\n")
+    if line_number >= 0 and line_number < lines.len():
+        return lines[line_number]
+    ""
+
+fn get_wikilink_at_position(content: text, line: i64, character: i64) -> text:
+    val line_text = get_line_content(content, line)
+    if line_text == "":
+        return ""
+    # Scan backward from cursor for [[
+    var start = -1
+    var i = character
+    while i >= 1:
+        val ch = safe_substr(line_text, i - 1, i)
+        val ch2 = safe_substr(line_text, i, i + 1)
+        if ch == "]" and ch2 == "]":
+            return ""  # cursor is after closing ]]
+        if ch == "[" and i >= 2:
+            val prev = safe_substr(line_text, i - 2, i - 1)
+            if prev == "[":
+                start = i
+                break
+        i = i - 1
+    # Also check if cursor is right at [[
+    if start < 0 and character >= 2:
+        val c1 = safe_substr(line_text, character - 2, character - 1)
+        val c2 = safe_substr(line_text, character - 1, character)
+        if c1 == "[" and c2 == "[":
+            start = character
+    if start < 0:
+        return ""
+    # Scan forward for ]]
+    var end_pos = start
+    while end_pos < line_text.len() - 1:
+        val c1 = safe_substr(line_text, end_pos, end_pos + 1)
+        val c2 = safe_substr(line_text, end_pos + 1, end_pos + 2)
+        if c1 == "]" and c2 == "]":
+            val link_text = safe_substr(line_text, start, end_pos)
+            # Handle pipe alias: [[target|alias]]
+            val pipe_idx_result = link_text.index_of("|")
+            match pipe_idx_result:
+                Some(p): return safe_substr(link_text, 0, p)
+                nil: return link_text
+        end_pos = end_pos + 1
+    ""

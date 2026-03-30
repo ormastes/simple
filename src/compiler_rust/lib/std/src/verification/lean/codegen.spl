@@ -185,12 +185,22 @@ class LeanCodegen:
         self.raw_output = self.raw_output + line + "\n"
         self
 
+    me add_raw_indented(indent_level: i32, line: text) -> LeanCodegen:
+        var prefix = ""
+        var i = 0
+        while i < indent_level:
+            prefix = prefix + "  "
+            i = i + 1
+        self.raw_output = self.raw_output + prefix + line + "\n"
+        self
+
     me add_blank() -> LeanCodegen:
         self.raw_output = self.raw_output + "\n"
         self
 
     me add_doc_comment(doc: text) -> LeanCodegen:
-        self.raw_output = self.raw_output + "/-- {doc} -/\n"
+        for line in doc.split("\n"):
+            self.raw_output = self.raw_output + "-- {line}\n"
         self
 
     me add_block_comment(lines: List<text>) -> LeanCodegen:
@@ -221,59 +231,93 @@ class LeanCodegen:
     # Emit all raw output combined with structured content as a single string
     # The structured content is inserted before "end <namespace>" if present
     me emit() -> text:
-        # Build structured content first
-        var structured = ""
+        # Build type declarations separately from functions/theorems so raw
+        # recursive definitions can appear after their referenced types.
+        var structured_types = ""
+        var structured_rest = ""
 
-        # Add inductives (enums)
+        # Emit inductives before structures so structures can refer to them.
         for inductive in self.inductives:
-            structured = structured + "inductive {inductive.name}\n"
+            structured_types = structured_types + "inductive {inductive.name}\n"
             for (ctor_name, params) in inductive.constructors:
                 if params.len() == 0:
-                    structured = structured + "  | {ctor_name}\n"
+                    structured_types = structured_types + "  | {ctor_name}\n"
                 else:
                     val param_str = params.join(" → ")
-                    structured = structured + "  | {ctor_name} : {param_str} → {inductive.name}\n"
+                    structured_types = structured_types + "  | {ctor_name} : {param_str} → {inductive.name}\n"
             if inductive.deriving.len() > 0:
                 val derives = inductive.deriving.join(", ")
-                structured = structured + "deriving {derives}\n"
-            structured = structured + "\n"
+                structured_types = structured_types + "deriving {derives}\n"
+            structured_types = structured_types + "\n"
+
+        for structure in self.structures:
+            structured_types = structured_types + "structure {structure.name} where\n"
+            for (field_name, field_type) in structure.fields:
+                structured_types = structured_types + "  {field_name} : {field_type}\n"
+            if structure.deriving.len() > 0:
+                val derives = structure.deriving.join(", ")
+                structured_types = structured_types + "deriving {derives}\n"
+            structured_types = structured_types + "\n"
 
         # Add functions
         for func in self.functions:
             if func.is_partial:
-                structured = structured + "partial "
-            structured = structured + "def {func.name}"
+                structured_rest = structured_rest + "partial "
+            structured_rest = structured_rest + "def {func.name}"
             for (pname, ptype) in func.params:
-                structured = structured + " ({pname} : {ptype})"
-            structured = structured + " : {func.return_type} :=\n"
-            structured = structured + "  {func.body}\n\n"
+                structured_rest = structured_rest + " ({pname} : {ptype})"
+            structured_rest = structured_rest + " : {func.return_type} :=\n"
+            for line in func.body.split("\n"):
+                structured_rest = structured_rest + "  {line}\n"
+            structured_rest = structured_rest + "\n"
 
         # Add theorems
         for theorem in self.theorems:
-            structured = structured + "theorem {theorem.name}"
+            structured_rest = structured_rest + "theorem {theorem.name}"
             for (pname, ptype) in theorem.params:
-                structured = structured + " ({pname} : {ptype})"
-            structured = structured + " :\n  {theorem.statement} := by\n"
+                structured_rest = structured_rest + " ({pname} : {ptype})"
+            structured_rest = structured_rest + " :\n  {theorem.statement} := by\n"
             match theorem.proof:
                 case Some(proof):
-                    structured = structured + "  {proof}\n\n"
+                    for line in proof.split("\n"):
+                        structured_rest = structured_rest + "  {line}\n"
+                    structured_rest = structured_rest + "\n"
                 case nil:
-                    structured = structured + "  sorry\n\n"
+                    structured_rest = structured_rest + "  sorry\n\n"
 
         # Find "end " in raw_output and insert structured content before it
         val lines = self.raw_output.split("\n")
         var result = ""
         var found_end = false
+        var inserted_types = false
         for line in lines:
+            val trimmed = line.trim()
+            val needs_types_before =
+                trimmed.starts_with("mutual") or
+                trimmed.starts_with("def ") or
+                trimmed.starts_with("partial def") or
+                trimmed.starts_with("abbrev ") or
+                trimmed.starts_with("structure ") or
+                trimmed.starts_with("class ") or
+                trimmed.starts_with("theorem ") or
+                trimmed.starts_with("example") or
+                trimmed.starts_with("#check")
+            if needs_types_before and not inserted_types:
+                result = result + structured_types
+                inserted_types = true
             if line.starts_with("end ") and not found_end:
-                # Insert structured content before end namespace
-                result = result + structured
+                if not inserted_types:
+                    result = result + structured_types
+                    inserted_types = true
+                result = result + structured_rest
                 found_end = true
             result = result + line + "\n"
 
         # If no "end" found, just append structured content at the end
         if not found_end:
-            result = result + structured
+            if not inserted_types:
+                result = result + structured_types
+            result = result + structured_rest
 
         result
 
@@ -367,31 +411,42 @@ fn generate_module(module_name: text, output_dir: text) -> LeanCodegen:
 # =============================================================================
 
 # Create a simple type representation
-fn make_simple_type(name: text) -> text:
-    name
+fn cg_make_simple_type(name: text) -> text:
+    match name:
+        case "bool": "Bool"
+        case "Bool": "Bool"
+        case "text": "String"
+        case "string": "String"
+        case "String": "String"
+        case "i32": "Int"
+        case "int": "Int"
+        case "Int": "Int"
+        case "prop": "Prop"
+        case "Prop": "Prop"
+        case other: other
 
 # Create a list type representation
-fn make_list_type(elem_type: text) -> text:
+fn cg_make_list_type(elem_type: text) -> text:
     "List {elem_type}"
 
 # Create a string type representation
-fn make_string_type() -> text:
-    "text"
+fn cg_make_string_type() -> text:
+    "String"
 
 # Create an i32 type representation
-fn make_int_type() -> text:
-    "i32"
+fn cg_make_int_type() -> text:
+    "Int"
 
 # Create a bool type representation
-fn make_bool_type() -> text:
-    "bool"
+fn cg_make_bool_type() -> text:
+    "Bool"
 
 # Create an option type representation
-fn make_option_type(elem_type: text) -> text:
+fn cg_make_option_type(elem_type: text) -> text:
     "Option {elem_type}"
 
 # Create a nat type representation
-fn make_nat_type() -> text:
+fn cg_make_nat_type() -> text:
     "Nat"
 
 # Build an enum/inductive type for regeneration scripts

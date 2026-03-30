@@ -1,0 +1,137 @@
+# Obsidian LSP — Diagnostics
+# Publishes diagnostics for broken wikilinks and orphan notes.
+#
+# Diagnostic severities:
+#   1 = Error   — broken wikilink (target note does not exist)
+#   3 = Info    — orphan note (no incoming links from other notes)
+
+export build_diagnostics, publish_diagnostics
+
+use src.util.json_helpers.{js, jp, jo, jo2, jo3, jo4, ja, ji, jnull}
+use src.lsp.lsp_json.{make_notification, make_range}
+use src.lsp.lsp_document.{doc_store_get_content, vault_note_exists, vault_get_note_names, vault_get_path}
+use src.lsp.lsp_document.{get_line_content, doc_store_get_doc}
+use src.core.note_parser.{extract_wikilinks, WikiLink}
+use src.util.json_helpers.{safe_substr}
+
+extern fn rt_stderr_write(s: text)
+
+# ---------------------------------------------------------------------------
+# Build diagnostics array for a document
+# ---------------------------------------------------------------------------
+
+fn build_diagnostics(uri: text) -> [text]:
+    var diags: [text] = []
+    val doc = doc_store_get_doc(uri)
+    if not doc.?:
+        return diags
+
+    val document = doc ?? panic("unreachable")
+    val content = document.content
+    val vault_path = vault_get_path()
+
+    # Skip diagnostics if no vault is configured
+    if vault_path == "":
+        return diags
+
+    # Check for broken wikilinks
+    val lines = content.split("\n")
+    var line_num = 0
+    for line in lines:
+        val links = extract_wikilinks(line)
+        for link in links:
+            val target = link.target
+            if target != "" and not vault_note_exists(target):
+                # Find column position of the wikilink in this line
+                val search = "[[" + target
+                val col_result = line.index_of(search)
+                var col = 0
+                match col_result:
+                    Some(c): col = c
+                    nil: col = 0
+                val end_col = col + target.len() + 4  # [[ + target + ]]
+                val range = make_range(line_num, col, line_num, end_col)
+                val diag = jo4(
+                    jp("range", range),
+                    jp("severity", ji(1)),
+                    jp("source", js("obsidian-lsp")),
+                    jp("message", js("Broken wikilink: note '{target}' not found in vault"))
+                )
+                diags.push(diag)
+        line_num = line_num + 1
+
+    # Check if this note is an orphan (informational)
+    val note_names = vault_get_note_names()
+    val note_name = extract_note_name_from_uri(uri)
+    if note_name != "":
+        val is_orphan = check_orphan(note_name)
+        if is_orphan:
+            val range = make_range(0, 0, 0, 1)
+            val diag = jo4(
+                jp("range", range),
+                jp("severity", ji(3)),
+                jp("source", js("obsidian-lsp")),
+                jp("message", js("Orphan note: no incoming wikilinks to '{note_name}'"))
+            )
+            diags.push(diag)
+
+    diags
+
+# ---------------------------------------------------------------------------
+# Orphan detection
+# ---------------------------------------------------------------------------
+
+fn check_orphan(note_name: text) -> bool:
+    # A note is orphan if no other open document links to it
+    # For now, check against open documents only (full vault check would be expensive)
+    val lower_name = ("" + note_name).lower()
+    val doc_uris = doc_store_get_uri_list()
+    for uri in doc_uris:
+        val doc = doc_store_get_doc(uri)
+        if not doc.?:
+            continue
+        val document = doc ?? panic("unreachable")
+        # Skip self
+        val doc_name = extract_note_name_from_uri(uri)
+        if ("" + doc_name).lower() == lower_name:
+            continue
+        for link in document.wikilinks:
+            val lower_target = ("" + link.target).lower()
+            if lower_target == lower_name:
+                return false
+    true
+
+fn doc_store_get_uri_list() -> [text]:
+    # Re-import to avoid circular dep — use the module function
+    use src.lsp.lsp_document.{doc_store_get_uri_list as get_uris}
+    get_uris()
+
+# ---------------------------------------------------------------------------
+# Publish diagnostics notification
+# ---------------------------------------------------------------------------
+
+fn publish_diagnostics(uri: text) -> text:
+    val diags = build_diagnostics(uri)
+    val params = jo2(jp("uri", js(uri)), jp("diagnostics", ja(diags)))
+    make_notification("textDocument/publishDiagnostics", params)
+
+fn publish_empty_diagnostics(uri: text) -> text:
+    val params = jo2(jp("uri", js(uri)), jp("diagnostics", ja([])))
+    make_notification("textDocument/publishDiagnostics", params)
+
+# ---------------------------------------------------------------------------
+# URI helpers
+# ---------------------------------------------------------------------------
+
+fn extract_note_name_from_uri(uri: text) -> text:
+    # URI format: file:///path/to/note.md
+    var name = uri
+    # Strip .md
+    if name.ends_with(".md"):
+        name = safe_substr(name, 0, name.len() - 3)
+    # Get part after last /
+    val slash_result = name.last_index_of("/")
+    match slash_result:
+        Some(i): name = safe_substr(name, i + 1, name.len())
+        nil: pass_dn
+    name

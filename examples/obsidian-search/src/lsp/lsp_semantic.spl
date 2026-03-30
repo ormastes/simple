@@ -1,0 +1,203 @@
+# Obsidian LSP — Semantic Tokens Provider
+# Provides semantic highlighting for Obsidian-flavored markdown.
+#
+# Token types (indices into the legend):
+#   0 = "namespace"    — frontmatter delimiters (---)
+#   1 = "type"         — headings (# ## ###)
+#   2 = "variable"     — wikilinks ([[target]])
+#   3 = "string"       — tags (#tag)
+#   4 = "keyword"      — task markers (- [ ] / - [x])
+#
+# Encoding: relative line, relative start char, length, token type, modifiers
+
+export handle_semantic_tokens_full, semantic_tokens_legend
+
+use src.util.json_helpers.{js, jp, jo, jo1, jo2, ja, ji, jnull, safe_substr}
+use src.lsp.lsp_json.{extract_td_uri}
+use src.lsp.lsp_document.{doc_store_get_content}
+
+# ---------------------------------------------------------------------------
+# Semantic token legend
+# ---------------------------------------------------------------------------
+
+fn semantic_tokens_legend() -> text:
+    val token_types = ja([
+        js("namespace"),
+        js("type"),
+        js("variable"),
+        js("string"),
+        js("keyword")
+    ])
+    val token_modifiers = ja([])
+    jo2(jp("tokenTypes", token_types), jp("tokenModifiers", token_modifiers))
+
+# ---------------------------------------------------------------------------
+# Full semantic tokens handler
+# ---------------------------------------------------------------------------
+
+fn handle_semantic_tokens_full(params: text) -> text:
+    val uri = extract_td_uri(params)
+    val content = doc_store_get_content(uri)
+
+    if content == "":
+        return jo1(jp("data", ja([])))
+
+    val lines = content.split("\n")
+    var data: [text] = []
+
+    # Track previous token position for relative encoding
+    var prev_line = 0
+    var prev_char = 0
+
+    var line_num = 0
+    var in_frontmatter = false
+    var fm_started = false
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Frontmatter delimiters
+        if line_num == 0 and trimmed == "---":
+            in_frontmatter = true
+            fm_started = true
+            add_token(data, line_num, 0, 3, 0, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+
+        if in_frontmatter and trimmed == "---":
+            in_frontmatter = false
+            add_token(data, line_num, 0, 3, 0, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+
+        if in_frontmatter:
+            line_num = line_num + 1
+            continue
+
+        # Headings
+        if trimmed.starts_with("######"):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("#####") and not trimmed.starts_with("######"):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("####") and not trimmed.starts_with("#####"):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("###") and not trimmed.starts_with("####"):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("##") and not trimmed.starts_with("###"):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("# "):
+            add_token(data, line_num, 0, line.len(), 1, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = 0
+            line_num = line_num + 1
+            continue
+
+        # Task markers
+        if trimmed.starts_with("- [ ] ") or trimmed.starts_with("- [x] "):
+            val task_start = find_task_start(line)
+            add_token(data, line_num, task_start, 5, 4, 0, prev_line, prev_char)
+            prev_line = line_num
+            prev_char = task_start
+
+        # Scan for wikilinks and tags within the line
+        var col = 0
+        while col < line.len() - 1:
+            val ch = safe_substr(line, col, col + 1)
+            val next_ch = safe_substr(line, col + 1, col + 2)
+
+            # Wikilink [[ ... ]]
+            if ch == "[" and next_ch == "[":
+                val end_pos = find_closing_brackets(line, col + 2)
+                if end_pos > 0:
+                    val link_len = end_pos + 2 - col
+                    add_token(data, line_num, col, link_len, 2, 0, prev_line, prev_char)
+                    prev_line = line_num
+                    prev_char = col
+                    col = end_pos + 2
+                    continue
+
+            # Tag #tag (not heading)
+            if ch == "#" and col > 0:
+                val before = safe_substr(line, col - 1, col)
+                if before == " " or before == "\t":
+                    if next_ch != " " and next_ch != "#":
+                        val tag_end = find_tag_end(line, col + 1)
+                        val tag_len = tag_end - col
+                        if tag_len > 1:
+                            add_token(data, line_num, col, tag_len, 3, 0, prev_line, prev_char)
+                            prev_line = line_num
+                            prev_char = col
+                            col = tag_end
+                            continue
+
+            col = col + 1
+
+        line_num = line_num + 1
+
+    jo1(jp("data", ja(data)))
+
+# ---------------------------------------------------------------------------
+# Token encoding helper
+# ---------------------------------------------------------------------------
+
+fn add_token(data: [text], line: i64, char_pos: i64, length: i64, token_type: i64, modifiers: i64, prev_line: i64, prev_char: i64):
+    val delta_line = line - prev_line
+    val delta_char = if delta_line == 0: char_pos - prev_char else: char_pos
+    data.push(ji(delta_line))
+    data.push(ji(delta_char))
+    data.push(ji(length))
+    data.push(ji(token_type))
+    data.push(ji(modifiers))
+
+# ---------------------------------------------------------------------------
+# Scan helpers
+# ---------------------------------------------------------------------------
+
+fn find_closing_brackets(line: text, start: i64) -> i64:
+    var i = start
+    while i < line.len() - 1:
+        val c1 = safe_substr(line, i, i + 1)
+        val c2 = safe_substr(line, i + 1, i + 2)
+        if c1 == "]" and c2 == "]":
+            return i
+        i = i + 1
+    -1
+
+fn find_tag_end(line: text, start: i64) -> i64:
+    var i = start
+    while i < line.len():
+        val ch = safe_substr(line, i, i + 1)
+        if ch == " " or ch == "\n" or ch == "\r" or ch == "," or ch == "]" or ch == ")":
+            return i
+        i = i + 1
+    line.len()
+
+fn find_task_start(line: text) -> i64:
+    val idx_result = line.index_of("- [")
+    match idx_result:
+        Some(i): return i
+        nil: return 0

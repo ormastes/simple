@@ -1,0 +1,463 @@
+# LSP-MCP Bridge Handlers — per-tool handler dispatch
+#
+# Routes bridge tool/call requests to core modules (in-process, no daemon).
+# Provides LSP-oriented operations: diagnostics, completions, hover,
+# link resolution, and semantic health status.
+
+use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, jnull, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, escape_json, LB, RB, SB_L, SB_R}
+use src.core.note_parser.{parse_frontmatter, extract_wikilinks, extract_tags}
+use src.core.vault_scanner.{scan_vault, relative_path}
+use src.core.warnings.{make_search_quality_json}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(name: text) -> text
+
+# --- Helper: build full path from vault + relative ---
+
+fn bridge_full_path(vault_path: text, rel_path: text) -> text:
+    var full_path = vault_path
+    if full_path != "" and not full_path.ends_with("/"):
+        full_path = full_path + "/"
+    full_path + rel_path
+
+# --- Helper: extract note name from path (without .md) ---
+
+fn note_name_from_path(rel_path: text) -> text:
+    var name = rel_path
+    val slash_idx = rel_path.last_index_of("/")
+    match slash_idx:
+        Some(i):
+            name = rel_path.substring(i + 1, rel_path.len())
+        nil: pass_dn
+    if name.ends_with(".md"):
+        return safe_substr(name, 0, name.len() - 3)
+    name
+
+# --- Helper: collect all vault note names ---
+
+fn collect_vault_names(vault_path: text) -> [text]:
+    var names: [text] = []
+    if vault_path == "":
+        return names
+    val files = scan_vault(vault_path)
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val name = note_name_from_path(rel)
+        names.push(name)
+    names
+
+# --- Helper: resolve wikilink target to file path ---
+
+fn resolve_target_to_path(vault_path: text, target: text) -> text:
+    if vault_path == "":
+        return ""
+    val lower_target = ("" + target).lower()
+    val files = scan_vault(vault_path)
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val name = note_name_from_path(rel)
+        val lower_name = ("" + name).lower()
+        if lower_name == lower_target:
+            return rel
+    # Try partial match on path
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val lower_rel = ("" + rel).lower()
+        if lower_rel.contains(lower_target):
+            return rel
+    ""
+
+# --- Helper: find close suggestions for unresolved link ---
+
+fn find_suggestions(vault_path: text, target: text, limit: i64) -> [text]:
+    var suggestions: [text] = []
+    if vault_path == "":
+        return suggestions
+    val lower_target = ("" + target).lower()
+    val files = scan_vault(vault_path)
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val name = note_name_from_path(rel)
+        val lower_name = ("" + name).lower()
+        if lower_name.contains(lower_target) or lower_target.contains(lower_name):
+            suggestions.push(name)
+            if suggestions.len() >= limit:
+                break
+    suggestions
+
+# --- 1. obsidian_diagnostics ---
+
+fn handle_diagnostics(id: text, body: text, vault_path: text) -> text:
+    val path = extract_arg(body, "path")
+    if path == "":
+        return make_error(id, -32602, "Missing required parameter: path")
+
+    val full_path = bridge_full_path(vault_path, path)
+    val content = rt_file_read_text(full_path) ?? ""
+    if content == "":
+        return tool_text_result(id, jo2(
+            jp("path", js(path)),
+            jp("error", js("Could not read note at path: " + path))
+        ))
+
+    # Extract wikilinks and check each against vault files
+    val links = extract_wikilinks(content)
+    var broken_links: [text] = []
+    var valid_count = 0
+
+    for link in links:
+        val resolved = resolve_target_to_path(vault_path, link.target)
+        if resolved == "":
+            broken_links.push(link.target)
+        else:
+            valid_count = valid_count + 1
+
+    # Build diagnostics list
+    var diag_items: [text] = []
+    for broken in broken_links:
+        var diag_pairs: [text] = []
+        diag_pairs.push(jp("severity", js("warning")))
+        diag_pairs.push(jp("message", js("Broken wikilink: [[" + broken + "]]")))
+        diag_pairs.push(jp("target", js(broken)))
+        diag_items.push(jo(diag_pairs))
+
+    val meta = parse_frontmatter(content)
+    if meta.title == "":
+        var diag_pairs: [text] = []
+        diag_pairs.push(jp("severity", js("info")))
+        diag_pairs.push(jp("message", js("Note has no title in frontmatter or heading")))
+        diag_items.push(jo(diag_pairs))
+
+    val tags = extract_tags(content)
+    var output_pairs: [text] = []
+    output_pairs.push(jp("path", js(path)))
+    output_pairs.push(jp("title", js(if meta.title != "": meta.title else: path)))
+    output_pairs.push(jp("total_links", ji(links.len())))
+    output_pairs.push(jp("valid_links", ji(valid_count)))
+    output_pairs.push(jp("broken_links", ji(broken_links.len())))
+    output_pairs.push(jp("tag_count", ji(tags.len())))
+    output_pairs.push(jp("diagnostics", ja(diag_items)))
+    tool_text_result(id, jo(output_pairs))
+
+# --- 2. obsidian_vault_diagnostics ---
+
+fn handle_vault_diagnostics(id: text, body: text, vault_path: text) -> text:
+    val limit_str = extract_arg(body, "limit")
+    var limit = if limit_str != "": int(limit_str) ?? 50 else: 50
+    if limit <= 0:
+        limit = 50
+    if limit > 500:
+        limit = 500
+
+    if vault_path == "":
+        return tool_text_result(id, jo1(jp("error", js("OBSIDIAN_VAULT_PATH not set"))))
+
+    val files = scan_vault(vault_path)
+    var total_notes = files.len()
+    var total_broken = 0
+    var orphan_notes: [text] = []
+    var diag_items: [text] = []
+
+    # Collect all note names for link checking
+    var all_names: [text] = []
+    var all_rels: [text] = []
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        all_rels.push(rel)
+        all_names.push(note_name_from_path(rel))
+
+    # Track which notes are linked to
+    var linked_notes: [text] = []
+
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val content = rt_file_read_text(file) ?? ""
+        if content == "":
+            continue
+
+        val links = extract_wikilinks(content)
+        for link in links:
+            val lower_target = ("" + link.target).lower()
+            var found = false
+            for name in all_names:
+                val lower_name = ("" + name).lower()
+                if lower_name == lower_target:
+                    found = true
+                    # Track that this note is linked
+                    var already_tracked = false
+                    for ln in linked_notes:
+                        if ln == name:
+                            already_tracked = true
+                            break
+                    if not already_tracked:
+                        linked_notes.push(name)
+                    break
+            if not found and diag_items.len() < limit:
+                total_broken = total_broken + 1
+                var diag_pairs: [text] = []
+                diag_pairs.push(jp("severity", js("warning")))
+                diag_pairs.push(jp("source", js(rel)))
+                diag_pairs.push(jp("message", js("Broken wikilink: [[" + link.target + "]]")))
+                diag_pairs.push(jp("target", js(link.target)))
+                diag_items.push(jo(diag_pairs))
+
+    # Find orphan notes (not linked to by any other note)
+    for name in all_names:
+        var is_linked = false
+        for ln in linked_notes:
+            if ln == name:
+                is_linked = true
+                break
+        if not is_linked:
+            orphan_notes.push(name)
+
+    var orphan_json: [text] = []
+    var orphan_count = 0
+    for orphan in orphan_notes:
+        if orphan_count < limit:
+            orphan_json.push(js(orphan))
+        orphan_count = orphan_count + 1
+
+    # Embedding health status
+    val embedding_status = jo3(
+        jp("available", jb(false)),
+        jp("reason", js("Semantic search not yet configured")),
+        jp("alternative", js("BM25 keyword search is active"))
+    )
+
+    var output_pairs: [text] = []
+    output_pairs.push(jp("total_notes", ji(total_notes)))
+    output_pairs.push(jp("broken_links", ji(total_broken)))
+    output_pairs.push(jp("orphan_notes_count", ji(orphan_notes.len())))
+    output_pairs.push(jp("orphan_notes", ja(orphan_json)))
+    output_pairs.push(jp("diagnostics", ja(diag_items)))
+    output_pairs.push(jp("embedding_health", embedding_status))
+    tool_text_result(id, jo(output_pairs))
+
+# --- 3. obsidian_complete_wikilink ---
+
+fn handle_complete_wikilink(id: text, body: text, vault_path: text) -> text:
+    val prefix = extract_arg(body, "prefix")
+    if prefix == "":
+        return make_error(id, -32602, "Missing required parameter: prefix")
+
+    val lower_prefix = ("" + prefix).lower()
+    val names = collect_vault_names(vault_path)
+    var completions: [text] = []
+
+    for name in names:
+        val lower_name = ("" + name).lower()
+        if lower_name.starts_with(lower_prefix) or lower_name.contains(lower_prefix):
+            completions.push(js(name))
+            if completions.len() >= 50:
+                break
+
+    val output = jo2(
+        jp("prefix", js(prefix)),
+        jp("completions", ja(completions))
+    )
+    tool_text_result(id, output)
+
+# --- 4. obsidian_complete_tag ---
+
+fn handle_complete_tag(id: text, body: text, vault_path: text) -> text:
+    val prefix = extract_arg(body, "prefix")
+    if prefix == "":
+        return make_error(id, -32602, "Missing required parameter: prefix")
+
+    val lower_prefix = ("" + prefix).lower()
+    var all_tags: [text] = []
+
+    if vault_path != "":
+        val files = scan_vault(vault_path)
+        for file in files:
+            val content = rt_file_read_text(file) ?? ""
+            if content == "":
+                continue
+            val meta = parse_frontmatter(content)
+            for t in meta.tags:
+                if t != "":
+                    var already = false
+                    for existing in all_tags:
+                        if existing == t:
+                            already = true
+                            break
+                    if not already:
+                        all_tags.push(t)
+            val inline_tags = extract_tags(content)
+            for t in inline_tags:
+                if t != "":
+                    var already = false
+                    for existing in all_tags:
+                        if existing == t:
+                            already = true
+                            break
+                    if not already:
+                        all_tags.push(t)
+
+    var completions: [text] = []
+    for tag in all_tags:
+        val lower_tag = ("" + tag).lower()
+        if lower_tag.starts_with(lower_prefix) or lower_tag.contains(lower_prefix):
+            completions.push(js(tag))
+            if completions.len() >= 50:
+                break
+
+    val output = jo2(
+        jp("prefix", js(prefix)),
+        jp("completions", ja(completions))
+    )
+    tool_text_result(id, output)
+
+# --- 5. obsidian_hover ---
+
+fn handle_hover(id: text, body: text, vault_path: text) -> text:
+    val target = extract_arg(body, "target")
+    if target == "":
+        return make_error(id, -32602, "Missing required parameter: target")
+
+    val resolved_path = resolve_target_to_path(vault_path, target)
+    if resolved_path == "":
+        return tool_text_result(id, jo2(
+            jp("target", js(target)),
+            jp("error", js("Could not resolve wikilink target: " + target))
+        ))
+
+    val full_path = bridge_full_path(vault_path, resolved_path)
+    val content = rt_file_read_text(full_path) ?? ""
+    val meta = parse_frontmatter(content)
+    val tags = extract_tags(content)
+
+    # Build markdown preview
+    var preview_parts: [text] = []
+    preview_parts.push("**" + (if meta.title != "": meta.title else: target) + "**")
+    preview_parts.push("")
+    preview_parts.push("Path: `" + resolved_path + "`")
+
+    if meta.tags.len() > 0:
+        var tag_strs: [text] = []
+        for t in meta.tags:
+            if t != "":
+                tag_strs.push("#" + t)
+        if tag_strs.len() > 0:
+            preview_parts.push("Tags: " + tag_strs.join(" "))
+
+    if meta.aliases.len() > 0:
+        val alias_str = meta.aliases.join(", ")
+        if alias_str != "":
+            preview_parts.push("Aliases: " + alias_str)
+
+    # Add first few lines of content as preview
+    if content != "":
+        val lines = content.split("\n")
+        var body_lines: [text] = []
+        var in_frontmatter = false
+        var past_frontmatter = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "---" and not past_frontmatter:
+                if in_frontmatter:
+                    past_frontmatter = true
+                else:
+                    in_frontmatter = true
+                continue
+            if in_frontmatter and not past_frontmatter:
+                continue
+            if trimmed != "" and body_lines.len() < 5:
+                body_lines.push(trimmed)
+
+        if body_lines.len() > 0:
+            preview_parts.push("")
+            preview_parts.push("---")
+            for bl in body_lines:
+                preview_parts.push(bl)
+
+    val markdown_preview = preview_parts.join("\n")
+
+    var output_pairs: [text] = []
+    output_pairs.push(jp("target", js(target)))
+    output_pairs.push(jp("resolved_path", js(resolved_path)))
+    output_pairs.push(jp("title", js(if meta.title != "": meta.title else: target)))
+    output_pairs.push(jp("preview", js(markdown_preview)))
+    tool_text_result(id, jo(output_pairs))
+
+# --- 6. obsidian_resolve_link ---
+
+fn handle_resolve_link(id: text, body: text, vault_path: text) -> text:
+    val target = extract_arg(body, "target")
+    if target == "":
+        return make_error(id, -32602, "Missing required parameter: target")
+
+    val resolved_path = resolve_target_to_path(vault_path, target)
+    if resolved_path != "":
+        val output = jo3(
+            jp("target", js(target)),
+            jp("resolved", jb(true)),
+            jp("path", js(resolved_path))
+        )
+        return tool_text_result(id, output)
+
+    # Not found — provide suggestions
+    val suggestions = find_suggestions(vault_path, target, 10)
+    var sugg_json: [text] = []
+    for s in suggestions:
+        sugg_json.push(js(s))
+
+    val output = jo4(
+        jp("target", js(target)),
+        jp("resolved", jb(false)),
+        jp("path", js("")),
+        jp("suggestions", ja(sugg_json))
+    )
+    tool_text_result(id, output)
+
+# --- 7. obsidian_semantic_health ---
+
+fn handle_semantic_health(id: text, body: text, vault_path: text) -> text:
+    var note_count = 0
+    if vault_path != "":
+        val files = scan_vault(vault_path)
+        note_count = files.len()
+
+    var output_pairs: [text] = []
+    output_pairs.push(jp("semantic_search_available", jb(false)))
+    output_pairs.push(jp("embedding_model", js("none")))
+    output_pairs.push(jp("indexed_notes", ji(0)))
+    output_pairs.push(jp("total_notes", ji(note_count)))
+    output_pairs.push(jp("status", js("Semantic search is not configured. Using BM25 keyword search.")))
+
+    var alt_pairs: [text] = []
+    alt_pairs.push(jp("bm25_search", js("Active - full-text keyword search with ranking")))
+    alt_pairs.push(jp("graph_search", js("Active - link-based relationship traversal")))
+    alt_pairs.push(jp("tag_search", js("Active - tag-based note filtering")))
+    alt_pairs.push(jp("fuzzy_search", js("Active - approximate string matching")))
+    output_pairs.push(jp("alternatives", jo(alt_pairs)))
+
+    var config_pairs: [text] = []
+    config_pairs.push(jp("vault_path", js(vault_path)))
+    config_pairs.push(jp("vault_accessible", jb(vault_path != "")))
+    output_pairs.push(jp("configuration", jo(config_pairs)))
+
+    tool_text_result(id, jo(output_pairs))
+
+# --- Main handler dispatch ---
+
+fn handle_bridge_tool_call(id: text, body: text, vault_path: text) -> text:
+    val tool_name = extract_nested(body, "name")
+
+    if tool_name == "obsidian_diagnostics":
+        return handle_diagnostics(id, body, vault_path)
+    elif tool_name == "obsidian_vault_diagnostics":
+        return handle_vault_diagnostics(id, body, vault_path)
+    elif tool_name == "obsidian_complete_wikilink":
+        return handle_complete_wikilink(id, body, vault_path)
+    elif tool_name == "obsidian_complete_tag":
+        return handle_complete_tag(id, body, vault_path)
+    elif tool_name == "obsidian_hover":
+        return handle_hover(id, body, vault_path)
+    elif tool_name == "obsidian_resolve_link":
+        return handle_resolve_link(id, body, vault_path)
+    elif tool_name == "obsidian_semantic_health":
+        return handle_semantic_health(id, body, vault_path)
+
+    make_error(id, -32602, "Unknown bridge tool: " + tool_name)

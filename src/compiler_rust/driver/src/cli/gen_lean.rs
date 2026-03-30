@@ -232,8 +232,14 @@ fn rewrite_regeneration_module_source(source: &str) -> String {
         .map(|line| line.replace("codegen.", ""))
         .collect::<Vec<_>>()
         .join("\n");
-
-    replace_identifier(&rewritten, "gen", "builder")
+    let rewritten = replace_identifier(&rewritten, "gen", "builder");
+    let rewritten = replace_identifier(&rewritten, "make_simple_type", "cg_make_simple_type");
+    let rewritten = replace_identifier(&rewritten, "make_list_type", "cg_make_list_type");
+    let rewritten = replace_identifier(&rewritten, "make_string_type", "cg_make_string_type");
+    let rewritten = replace_identifier(&rewritten, "make_int_type", "cg_make_int_type");
+    let rewritten = replace_identifier(&rewritten, "make_bool_type", "cg_make_bool_type");
+    let rewritten = replace_identifier(&rewritten, "make_option_type", "cg_make_option_type");
+    replace_identifier(&rewritten, "make_nat_type", "cg_make_nat_type")
 }
 
 fn replace_identifier(source: &str, from: &str, to: &str) -> String {
