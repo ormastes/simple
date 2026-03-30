@@ -26,6 +26,7 @@
 //! Return values are interpreted as `i64` and wrapped back as `Value::Int`.
 
 use crate::error::CompileError;
+use crate::plugin_manifest;
 use crate::value::Value;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -68,6 +69,10 @@ struct SatelliteLibrary {
 
 /// Global map of satellite prefix -> library state.
 static SATELLITE_LIBRARIES: std::sync::LazyLock<Mutex<HashMap<String, SatelliteLibrary>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Global map of manifest library path -> library state.
+static MANIFEST_LIBRARIES: std::sync::LazyLock<Mutex<HashMap<String, SatelliteLibrary>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Attempt to find and load the runtime shared library.
@@ -295,6 +300,65 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
     call_fptr(fptr, name, evaluated_args)
 }
 
+/// Try to call a function from a library explicitly mapped by the plugin manifest.
+fn try_call_manifest_library(
+    library_path: &str,
+    name: &str,
+    evaluated_args: &[Value],
+) -> Option<Result<Value, CompileError>> {
+    let mut libraries = match MANIFEST_LIBRARIES.lock() {
+        Ok(libraries) => libraries,
+        Err(_) => return None,
+    };
+
+    let state = libraries
+        .entry(library_path.to_string())
+        .or_insert_with(|| SatelliteLibrary {
+            handle: 0,
+            attempted: false,
+            symbols: HashMap::new(),
+        });
+
+    if !state.attempted {
+        state.attempted = true;
+        state.handle = try_dlopen(library_path).unwrap_or(0);
+    }
+
+    if state.handle == 0 {
+        return Some(Err(CompileError::runtime(format!(
+            "plugin library could not be loaded for '{}': {}",
+            name, library_path
+        ))));
+    }
+
+    let fptr = if let Some(&cached) = state.symbols.get(name) {
+        if cached == 0 {
+            return Some(Err(CompileError::runtime(format!(
+                "plugin symbol '{}' not found in {}",
+                name, library_path
+            ))));
+        }
+        cached
+    } else {
+        match dlsym_lookup(state.handle, name) {
+            Some(addr) => {
+                state.symbols.insert(name.to_string(), addr);
+                addr
+            }
+            None => {
+                state.symbols.insert(name.to_string(), 0);
+                return Some(Err(CompileError::runtime(format!(
+                    "plugin symbol '{}' not found in {}",
+                    name, library_path
+                ))));
+            }
+        }
+    };
+
+    drop(libraries);
+    call_fptr(fptr, name, evaluated_args)
+}
+
 /// Try to dlopen a library path, returning the handle or None.
 fn try_dlopen(path: &str) -> Option<usize> {
     #[cfg(unix)]
@@ -483,6 +547,16 @@ fn call_fptr(fptr: usize, name: &str, evaluated_args: &[Value]) -> Option<Result
 /// `Some(Err(...))` if found but the call failed, or `None` if the function
 /// was not found in any library.
 pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<Value, CompileError>> {
+    if let Some(error) = plugin_manifest::manifest_error() {
+        return Some(Err(CompileError::runtime(format!("plugin manifest error: {}", error))));
+    }
+
+    if let Some(library_path) = plugin_manifest::library_for_symbol(name) {
+        if let Some(result) = try_call_manifest_library(&library_path, name, evaluated_args) {
+            return Some(result);
+        }
+    }
+
     // --- Step 1: Try the main runtime library ---
     let runtime_result = {
         let mut rt = match DYNAMIC_RUNTIME.lock() {

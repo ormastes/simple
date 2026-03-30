@@ -92,6 +92,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | Guide | Description |
 |-------|-------------|
 | [library/stdlib.md](library/stdlib.md) | SDN, strings, collections, DB, SQP |
+| [library/security.md](library/security.md) | Security library, sanitization, capability policy, security AOP |
 | [library/web_framework.md](library/web_framework.md) | Web framework, HTTP |
 | [library/ui.md](library/ui.md) | UI framework (.sui files) |
 | [library/library_smf.md](library/library_smf.md) | Library SMF creation and usage |

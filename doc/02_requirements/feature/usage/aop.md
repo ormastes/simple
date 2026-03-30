@@ -47,9 +47,9 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 
 ## Limitations (Current Implementation)
 
-- Around advice not yet implemented (skipped tests)
+- Around advice is validated through runtime proceed enforcement and MIR weaving coverage
 - Inline module definitions in test blocks not supported
-- DI integration not yet implemented (skipped tests)
+- Runtime `init(...)` interception with `@inject` is covered in the Rust interpreter path; broader Simple-side DI/AOP authoring remains limited
 
 ## Feature: AOP Basic Syntax
 
@@ -260,5 +260,4 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 
 **Example:** disabled weaving produces no diagnostics
     Then  expect isolated_func() == 100
-
 

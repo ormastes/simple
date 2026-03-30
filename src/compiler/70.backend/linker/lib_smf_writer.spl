@@ -10,8 +10,10 @@
 #   builder.add_module("std/io/file", "path/to/file.smf")
 #   builder.write("libstd_io.lsm")
 
-use app.io.{file_write, file_read, file_exists}
+use std.io_runtime.{file_read_bytes, file_exists}
 use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_MAGIC, LSMF_HEADER_SIZE, LSMF_INDEX_ENTRY_SIZE, fnv1a_hash}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 # ============================================================================
 # Lib SMF Builder
@@ -64,13 +66,7 @@ impl LibSmfBuilder:
         if not file_exists(smf_path):
             return Err("SMF file not found: {smf_path}")
 
-        # Read SMF data
-        val data_result = file_read(smf_path)
-        if data_result.is_err():
-            return Err("Failed to read SMF file: {smf_path}")
-
-        val data_text = data_result.unwrap()
-        val data = text_to_bytes(data_text)
+        val data = file_read_bytes(smf_path)
 
         # Calculate hash
         val hash = fnv1a_hash(data)
@@ -116,21 +112,10 @@ impl LibSmfBuilder:
             return Err("Object file not found: {obj_path}")
 
         # Read SMF data
-        val smf_result = file_read(smf_path)
-        if smf_result.is_err():
-            return Err("Failed to read SMF file: {smf_path}")
-
-        val smf_text = smf_result.unwrap()
-        val smf_data = text_to_bytes(smf_text)
+        val smf_data = file_read_bytes(smf_path)
         val smf_hash = fnv1a_hash(smf_data)
 
-        # Read object data
-        val obj_result = file_read(obj_path)
-        if obj_result.is_err():
-            return Err("Failed to read object file: {obj_path}")
-
-        val obj_text = obj_result.unwrap()
-        val obj_data = text_to_bytes(obj_text)
+        val obj_data = file_read_bytes(obj_path)
         val obj_hash = fnv1a_hash(obj_data)
 
         # Add to modules list
@@ -313,10 +298,8 @@ impl LibSmfBuilder:
             file_data[i] = header_bytes[i]
             i = i + 1
 
-        # Write to file
-        val file_text = bytes_to_text(file_data)
-        val write_result = file_write(output_path, file_text)
-        if write_result.is_err():
+        val write_result = rt_file_write_bytes(output_path, file_data)
+        if not write_result:
             return Err("Failed to write library file: {output_path}")
 
         if self.verbose:
@@ -348,23 +331,6 @@ impl LibSmfBuilder:
 # ============================================================================
 # Helper Functions
 # ============================================================================
-
-"""Convert text to bytes."""
-fn text_to_bytes(text: text) -> [u8]:
-    var bytes: [u8] = []
-    var i = 0
-    while i < text.len():
-        bytes.push(text[i] as u8)
-        i = i + 1
-    bytes
-
-"""Convert bytes to text."""
-fn bytes_to_text(bytes: [u8]) -> text:
-    var chars: [text] = []
-    for b in bytes:
-        val c = b as i64
-        chars.push("{c}")
-    chars.join("")
 
 # ============================================================================
 # Convenience Functions
@@ -402,4 +368,3 @@ fn create_lib_smf(modules: [(text, text)], output_path: text, verbose: bool) -> 
 # ============================================================================
 # Exports
 # ============================================================================
-

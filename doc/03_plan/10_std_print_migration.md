@@ -1,6 +1,10 @@
 # Plan: Migrate Tests to Use std Print Library
 
-## Status: Phase 1-5 Complete ✓
+> **DEPRECATED (2026-03-30):** Phase 1-5 complete but Phase 6 (test migration) was never done.
+> Tests still use raw `extern fn println` instead of prelude auto-import.
+> This plan is kept for historical reference — actual migration diverged from this plan.
+
+## Status: Phase 1-5 Complete ✓ | Phase 6 NOT IMPLEMENTED
 
 The I/O capture infrastructure is now fully implemented. Tests can capture stdout/stderr using `RunConfig { capture_output: true }`.
 

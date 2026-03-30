@@ -1,6 +1,12 @@
 # Pending Features - Future Development
 
-**Status:** Planned / Low Priority  
+> **NOTE (2026-03-30):** Many features listed below are now IMPLEMENTED.
+> LSP: production-ready (`src/lib/nogc_sync_mut/lsp/`, `src/app/lsp/`)
+> DAP: production-ready (`src/lib/nogc_sync_mut/dap/`, `src/app/dap/`)
+> MCP: production-ready (`src/app/mcp/`, 6 MCP servers in `.mcp.json`)
+> See `doc/06_spec/generated/feature.md` for current feature status.
+
+**Status:** Partially Stale — review individual items
 **Timeline:** TBD based on priorities
 
 ## Developer Tooling

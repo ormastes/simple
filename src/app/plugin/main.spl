@@ -1,0 +1,91 @@
+use app.plugin.registry.{
+    plugin_manifest_path, parse_plugin_manifest_text, load_plugin_manifest,
+    save_plugin_manifest, merge_plugin_entries, remove_plugin_entry
+}
+use app.plugin.loader.{plugin_library_exists}
+use std.cli.cli_util.{get_cli_args}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+
+fn actual_args() -> [text]:
+    val all_args = get_cli_args()
+    var args: [text] = []
+    var seen_command = false
+    var i = 0
+    while i < all_args.len():
+        val arg = all_args[i]
+        if arg == "plugin":
+            seen_command = true
+            args.push(arg)
+        elif seen_command:
+            args.push(arg)
+        i = i + 1
+    args
+
+fn print_plugin_help():
+    print "Simple plugin commands"
+    print "  simple plugin list"
+    print "  simple plugin install <manifest.sdn>"
+    print "  simple plugin remove <name>"
+
+fn handle_list(path: text):
+    val entries = load_plugin_manifest(path)
+    if entries.len() == 0:
+        print "no plugins registered"
+        return
+    for entry in entries:
+        val exists_text = if plugin_library_exists(entry): "ready" else: "missing-library"
+        print entry.name + " -> " + entry.library + " (" + exists_text + ")"
+
+fn handle_install(path: text, manifest_path: text) -> i64:
+    if not file_exists(manifest_path):
+        print "plugin manifest not found: " + manifest_path
+        return 1
+    val incoming = parse_plugin_manifest_text(file_read(manifest_path) ?? "")
+    if incoming.len() == 0:
+        print "no plugins found in manifest: " + manifest_path
+        return 1
+    val merged = merge_plugin_entries(load_plugin_manifest(path), incoming)
+    if not save_plugin_manifest(path, merged):
+        print "failed to save plugin manifest: " + path
+        return 1
+    print "installed plugin manifest: " + manifest_path
+    0
+
+fn handle_remove(path: text, name: text) -> i64:
+    val existing = load_plugin_manifest(path)
+    val updated = remove_plugin_entry(existing, name)
+    if updated.len() == existing.len():
+        print "plugin not found: " + name
+        return 1
+    if not save_plugin_manifest(path, updated):
+        print "failed to save plugin manifest: " + path
+        return 1
+    print "removed plugin: " + name
+    0
+
+fn main() -> i64:
+    val args = actual_args()
+    if args.len() < 2 or args[0] != "plugin":
+        print_plugin_help()
+        return 1
+
+    val manifest_path = plugin_manifest_path()
+    val subcommand = args[1]
+    if subcommand == "list":
+        handle_list(manifest_path)
+        return 0
+    if subcommand == "install" and args.len() >= 3:
+        return handle_install(manifest_path, args[2])
+    if subcommand == "remove" and args.len() >= 3:
+        return handle_remove(manifest_path, args[2])
+
+    print_plugin_help()
+    1

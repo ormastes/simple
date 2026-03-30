@@ -9,6 +9,8 @@ use ..monomorphize.note_sdn.*
 use ..compilation_context.{GenericTemplate, ConcreteType}
 use ..instantiation.{TemplateInstantiator, mangle}
 use linker_context.LinkerCompilationContext
+use .smf_reader.SmfReaderImpl
+use .obj_taker.{SmfSymbol, parse_template}
 
 # ============================================================================
 # Result Types
@@ -165,20 +167,59 @@ fn lazyinstantiator_do_instantiate(self: LazyInstantiator, entry: PossibleInstan
         )
         self.output_metadata = self.output_metadata_add_dependency(output_metadata, dep)
 
-        # Build linker compilation context from input metadata
-        # Loading actual templates from input SMF TemplateCode sections not yet implemented.
-        # When SMF section reading is wired (STUB-007), this should:
+        # Build linker compilation context from input metadata.
+        # Load templates from input SMF TemplateCode sections:
         #   1. Open SmfReaderImpl for source_path
-        #   2. Call read_template_section() to get GTPL bytes
-        #   3. Deserialize via parse_template() from obj_taker
-        #   4. Convert Template to GenericTemplate
-        pass_todo("STUB-009: load real templates from SMF TemplateCode section")
+        #   2. Look up the template symbol
+        #   3. Call read_template_section() to get GTPL bytes
+        #   4. Deserialize via parse_template() from obj_taker
+        #   5. Convert Template to GenericTemplate
         var object_templates: Dict<text, GenericTemplate> = {}
-        object_templates[entry.template_name] = GenericTemplate(
-            name: entry.template_name,
-            type_params: entry.type_args.split(",").map(\s: s.trim())
-            ## DESUGARED: ast_data: nil
-        )
+        val reader_result = SmfReaderImpl.open(source_path)
+        if reader_result.is_ok():
+            val reader = reader_result.unwrap()
+            val sym_result = reader.lookup_symbol(entry.template_name)
+            if sym_result.is_ok():
+                val sym = sym_result.unwrap()
+                if sym.is_generic_template:
+                    val tpl_result = reader.read_template_section(sym)
+                    if tpl_result.is_ok():
+                        val tpl_bytes = tpl_result.unwrap()
+                        val tpl = parse_template(tpl_bytes, sym)
+                        object_templates[entry.template_name] = GenericTemplate(
+                            name: tpl.name,
+                            type_params: tpl.type_params,
+                            ast_data: tpl.body
+                        )
+                    else:
+                        # TemplateCode section read failed -- fall back to placeholder
+                        object_templates[entry.template_name] = GenericTemplate(
+                            name: entry.template_name,
+                            type_params: entry.type_args.split(",").map(\s: s.trim()),
+                            ast_data: nil
+                        )
+                else:
+                    # Symbol exists but not a generic template
+                    object_templates[entry.template_name] = GenericTemplate(
+                        name: entry.template_name,
+                        type_params: entry.type_args.split(",").map(\s: s.trim()),
+                        ast_data: nil
+                    )
+            else:
+                # Symbol not found in SMF -- fall back to placeholder
+                object_templates[entry.template_name] = GenericTemplate(
+                    name: entry.template_name,
+                    type_params: entry.type_args.split(",").map(\s: s.trim()),
+                    ast_data: nil
+                )
+            reader.close()
+        else:
+            # Cannot open SMF file -- fall back to placeholder
+            object_templates[entry.template_name] = GenericTemplate(
+                name: entry.template_name,
+                type_params: entry.type_args.split(",").map(\s: s.trim()),
+                ast_data: nil
+            )
 
         val linker_ctx = linkercompilationcontext_from_objects(object_templates, nil, nil)
         var instantiator = TemplateInstantiator(

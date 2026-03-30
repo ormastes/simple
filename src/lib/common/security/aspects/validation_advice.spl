@@ -42,24 +42,26 @@ fn sanitize_html_output(ctx: JoinPointContext, proceed: fn() -> any) -> any:
 ## Inspects join point attributes for input parameters and checks them
 ## against common attack patterns (path traversal, null bytes, oversized input).
 ## Woven at: execution(*.handle_request) & within(std.http.**)
-fn validate_request_input(ctx: JoinPointContext):
+fn validate_request_input(ctx: JoinPointContext) -> Result<(), text>:
     val config = AuditConfig.default()
 
     for attr in ctx.attributes:
         if attr.starts_with("path="):
             val path_value = attr.slice(5, attr.len())
-            validate_path_param(ctx, path_value, config)
+            validate_path_param(ctx, path_value, config)?
 
         else if attr.starts_with("input="):
             val input_value = attr.slice(6, attr.len())
-            validate_input_length(ctx, input_value, config)
+            validate_input_length(ctx, input_value, config)?
+
+    Ok(())
 
 # ---------------------------------------------------------------------------
 # Internal validators
 # ---------------------------------------------------------------------------
 
 ## Validate a path parameter for traversal attacks.
-fn validate_path_param(ctx: JoinPointContext, path_value: text, config: AuditConfig):
+fn validate_path_param(ctx: JoinPointContext, path_value: text, config: AuditConfig) -> Result<(), text>:
     if is_path_traversal(path_value):
         val event = SecurityEvent.InputSanitized(
             field: "path",
@@ -80,11 +82,11 @@ fn validate_path_param(ctx: JoinPointContext, path_value: text, config: AuditCon
         Err(msg):
             return Err("invalid path parameter: {msg}")
         Ok(_):
-            pass_do_nothing
+            Ok(())
 
 ## Validate input length against maximum allowed size.
 ## Rejects inputs exceeding 1 MB to prevent denial-of-service.
-fn validate_input_length(ctx: JoinPointContext, input_value: text, config: AuditConfig):
+fn validate_input_length(ctx: JoinPointContext, input_value: text, config: AuditConfig) -> Result<(), text>:
     val max_input_len = 1048576  # 1 MB
 
     if input_value.len() > max_input_len:
@@ -101,6 +103,8 @@ fn validate_input_length(ctx: JoinPointContext, input_value: text, config: Audit
 
         log_security_event(entry, config)
         return Err("input exceeds maximum allowed length: {input_value.len()} > {max_input_len}")
+
+    Ok(())
 
 # ---------------------------------------------------------------------------
 # Helpers

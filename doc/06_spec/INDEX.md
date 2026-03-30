@@ -1,14 +1,14 @@
 # Test Specification Index
 
-*Generated: 2026-03-30 00:09:40*
+*Generated: 2026-03-31 00:00:00*
 
 ## Quick Stats
 
-- **Total Features:** 13
-- **Complete Documentation:** 13 (100%)
+- **Total Features:** 15
+- **Complete Documentation:** 15 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 408
-- **Warnings:** 24
+- **Total Lines:** 496
+- **Warnings:** 26
 
 ---
 
@@ -28,10 +28,12 @@
 | [Suspension Operator (`~`) Specification](suspension_operator.md) | Draft | Thin | N/A | 24 | The `~` operator marks expressions that may suspend (perform async operations). It appears in three contexts: |
 | [Type Inference Specification - Test Specification](type_inference.md) | Partial Implementation (Hindley-Milner scaffold working) | Thin | N/A | 16 | Simple uses a Hindley-Milner-style type inference system that automatically deduces types for expressions, variables, a… |
 
-## Tooling (2 features)
+## Tooling (4 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
+| [CH32V307 Composite Runner Path Regression](ch32v307_composite_runner_path_spec.md) | Implemented | Thin | 4/5 | 3 | Verifies that the CH32V307 composite runner no longer short-circuits through the old placeholder path and now routes `… |
+| [QEMU RV32 Raw Injected Regression](qemu_rv32_raw_injected_regression_spec.md) | Implemented | Thin | 4/5 | 2 | Separate recovery lane for the low-level QEMU + GDB injected execution path. This is not the main RV32 proof; the stab… |
 | [Remote Baremetal Library Checks](remote_baremetal_library_spec.md) | Implemented | Thin | 3/5 | 22 | Checks the library surface that should remain usable for the `interpreter(remote(baremetal(riscv32)))` and `interpreter… |
 | [Remote Baremetal Runtime Checks](remote_baremetal_runtime_spec.md) | Implemented | Thin | 3/5 | 16 | Checks the current remote baremetal execution plumbing used by the Simple test runner. The spec covers: |
 
@@ -51,4 +53,3 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 | syntax.md | Legacy markdown |
 | tensor_dimensions.md | Legacy markdown |
 | types.md | Legacy markdown |
-

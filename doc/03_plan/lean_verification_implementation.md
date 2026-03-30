@@ -4,6 +4,11 @@
 **Status:** Complete (Phase 6 Complete - 100%)
 **Specification:** [lean_verification_with_aop.md](../research/lean_verification_with_aop.md)
 
+**Current repo state (2026-03-30):**
+- This document records a completed implementation plan, but README status remains TODO for end-to-end Lean verification integration.
+- The current evidence gap is workflow-level: generated Lean artifacts and proof machinery exist, but the repo does not yet prove a stable documented verification flow on representative fixtures.
+- Near-term work is to connect proof generation, runner/tool requirements, traceable specs, and reproducible fixture validation into one supported end-to-end path.
+
 ---
 
 ## Overview

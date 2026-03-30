@@ -1,7 +1,11 @@
 # Design: SFFI Bidirectional Class Interop
 
-**Related plan:** [parsed-questing-goose.md](/.claude/plans/parsed-questing-goose.md)
+**Related plan:** [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
 **Related architecture:** [doc/04_architecture/sffi_bidirectional_interop.md](../04_architecture/sffi_bidirectional_interop.md)
+
+**Current repo state (2026-03-30):**
+- Direction A export, manifest-backed Direction B extern registration, and the core verification suites are implemented.
+- Runtime `spl_verify_layouts()` remains a follow-on extension; current safety relies on generated compile-time layout assertions and linting.
 
 **Related requirements:**
 - [doc/02_requirements/feature/usage/sffi_bidirectional_interop.md](../02_requirements/feature/usage/sffi_bidirectional_interop.md) (REQ-SFFI-BIDIR001–012)
@@ -983,11 +987,13 @@ Simple follows the C bitfield packing rules for the target platform:
 
 ---
 
-## 4. Runtime Layout Verification (Debug Mode)
+## 4. Runtime Layout Verification (Deferred)
 
 **REQ:** REQ-SFFI-BIDIR006
 
-For debug builds, the library init function calls `spl_verify_layouts()`:
+This section describes a possible follow-on extension. The current implementation does not emit `spl_verify_layouts()` and instead relies on generated `_Static_assert` / `static_assert` checks in the emitted headers.
+
+If runtime layout verification is added later, the library init path can call `spl_verify_layouts()`:
 
 ```c
 void spl_verify_layouts(void) {
@@ -1025,8 +1031,8 @@ This catches cross-compiler ABI differences that `_Static_assert` alone cannot d
 | `src/compiler/70.backend/linker/linker_wrapper.spl` | Add `link_to_shared()` | BIDIR008 |
 | `src/compiler/80.driver/driver_api.spl` | Add `--shared`, `--emit-header`, `--emit-cxx-header` flags | BIDIR008 |
 | `src/compiler/30.types/type_layout.spl` | Add `compute_layout_verification()`, `LayoutVerification` | BIDIR006 |
-| `src/runtime/runtime.h` | Add `spl_library_init()`, `spl_library_shutdown()`, `spl_verify_layouts()` | BIDIR009 |
-| `src/runtime/runtime.c` | Implement library lifecycle functions | BIDIR009 |
+| `src/compiler/70.backend/backend/c_backend_translate.spl` | Emit guarded `spl_library_init()` / `spl_library_shutdown()` definitions and auto-init hooks | BIDIR009 |
+| `src/compiler/90.tools/header_gen/c_header.spl` | Emit lifecycle declarations in generated headers | BIDIR009 |
 
 ### New Files
 
@@ -1052,9 +1058,9 @@ This catches cross-compiler ABI differences that `_Static_assert` alone cannot d
 | REQ-SFFI-BIDIR006 | C2 | type_layout.spl, header_gen/layout_verifier.spl |
 | REQ-SFFI-BIDIR007 | C3 | lint/sffi_lint.spl |
 | REQ-SFFI-BIDIR008 | A6.1 | linker_wrapper.spl |
-| REQ-SFFI-BIDIR009 | A6.3 | runtime.h, runtime.c |
+| REQ-SFFI-BIDIR009 | A6.3 | c_backend_translate.spl, c_header.spl |
 | REQ-SFFI-BIDIR010 | C5 | type_layout.spl, c_header.spl |
-| REQ-SFFI-BIDIR011 | (Phase 4 — B1) | 35.semantics/ |
+| REQ-SFFI-BIDIR011 | B1 | interpreter_eval.rs, dynamic_ffi.rs, plugin_manifest.rs, src/app/plugin/ |
 | REQ-SFFI-BIDIR012 | A1, A4 | attributes.spl, c_backend_translate.spl |
 | NFR-SFFI-001 | A6.1 | linker_wrapper.spl (3-platform) |
 | NFR-SFFI-002 | C1, C2 | type_layout.spl, layout_verifier.spl |

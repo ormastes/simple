@@ -2,8 +2,8 @@
 
 **Date:** 2026-03-28
 **Status:** Implemented
-**Requirement:** [doc/02_requirements/feature/security_aop.md](../plan/requirement/security_aop.md)
-**Research:** [doc/01_research/security_aop_architecture_2026-03-28.md](../research/security_aop_architecture_2026-03-28.md)
+**Requirement:** [doc/02_requirements/feature/security_aop.md](../02_requirements/feature/security_aop.md)
+**Research:** [doc/01_research/local/security_aop_architecture_2026-03-28.md](../01_research/local/security_aop_architecture_2026-03-28.md)
 
 ## 1. Module Structure
 
@@ -637,8 +637,8 @@ Parsed by `parse_capability_config()` into a `CapabilityPolicy` with `default_de
 
 ## 10. Cross-References
 
-- Requirement: [doc/02_requirements/feature/security_aop.md](../plan/requirement/security_aop.md)
-- Research: [doc/01_research/security_aop_architecture_2026-03-28.md](../research/security_aop_architecture_2026-03-28.md)
-- Parser security: [doc/01_research/data_format_parser_security_2026-01-31.md](../research/data_format_parser_security_2026-01-31.md)
-- Sandbox strategies: [doc/01_research/sandbox_implementation_strategies.md](../research/sandbox_implementation_strategies.md)
-- Tauri requirement: [doc/02_requirements/feature/simple_tauri.md](../plan/requirement/simple_tauri.md)
+- Requirement: [doc/02_requirements/feature/security_aop.md](../02_requirements/feature/security_aop.md)
+- Research: [doc/01_research/local/security_aop_architecture_2026-03-28.md](../01_research/local/security_aop_architecture_2026-03-28.md)
+- Parser security: [doc/01_research/data_format_parser_security_2026-01-31.md](../01_research/data_format_parser_security_2026-01-31.md)
+- Sandbox strategies: [doc/01_research/sandbox_implementation_strategies.md](../01_research/sandbox_implementation_strategies.md)
+- Tauri requirement: [doc/02_requirements/feature/simple_tauri.md](../02_requirements/feature/simple_tauri.md)

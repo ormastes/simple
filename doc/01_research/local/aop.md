@@ -2,6 +2,12 @@ Simple Language — Unified Predicate Grammar for AOP, Hybrid DI, Mocking, and A
 
 Version: 2025-12 (concretized)
 
+Current repo state (2026-03-30):
+
+- This document remains the design/spec reference for AOP semantics.
+- Repo evidence now proves the current runtime-facing AOP slice end to end: proceed enforcement is covered on the Simple side and runtime `init(...)` interception is covered in the Rust interpreter integration test.
+- Remaining work is to expand the higher-level DI/AOP authoring surface without regressing the verified compiler/runtime baseline.
+
 This specification defines a single predicate expression language reused across:
 
 AOP weaving (compile-time base; optional link-time and runtime backends)

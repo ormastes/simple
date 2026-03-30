@@ -1,0 +1,171 @@
+# MCP Wrapper Validator
+#
+# Validates that MCP production wrapper scripts follow the required
+# pattern: they must execute cached compiled artifacts (native binary
+# or .smf), NOT raw .spl source entrypoints.
+#
+# Also validates:
+# - Wrapper uses bin/release/simple (not Rust bootstrap target)
+# - Error/log suppression is in place (SIMPLE_LOG=error, 2>/dev/null)
+# - SIMPLE_LIB is set for module resolution
+#
+# Usage:
+#   val result = validate_wrapper(wrapper_path)
+#   if result.errors.len() > 0:
+#       # handle failures
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+
+# ============================================================================
+# Validation Result
+# ============================================================================
+
+struct WrapperValidationResult:
+    path: text
+    errors: [text]
+    warnings: [text]
+    is_valid: bool
+
+    fn fmt() -> text:
+        if self.is_valid:
+            return "PASS: {self.path}"
+        "FAIL: {self.path} ({self.errors.len()} errors, {self.warnings.len()} warnings)"
+
+
+# ============================================================================
+# Main Validation Entry Point
+# ============================================================================
+
+fn validate_wrapper(wrapper_path: text) -> WrapperValidationResult:
+    """Validate a single MCP wrapper script for production readiness."""
+    var errors: [text] = []
+    var warnings: [text] = []
+
+    # Check file exists
+    if not rt_file_exists(wrapper_path):
+        errors.push("wrapper file does not exist: {wrapper_path}")
+        return WrapperValidationResult(
+            path: wrapper_path,
+            errors: errors,
+            warnings: warnings,
+            is_valid: false
+        )
+
+    val source = rt_file_read_text(wrapper_path)
+    if source == "":
+        errors.push("wrapper file is empty: {wrapper_path}")
+        return WrapperValidationResult(
+            path: wrapper_path,
+            errors: errors,
+            warnings: warnings,
+            is_valid: false
+        )
+
+    val lines = source.split("\n")
+
+    # Check for source entrypoint usage
+    var has_spl_entry = false
+    var has_runtime = false
+    var has_log_suppression = false
+    var has_stderr_suppression = false
+    var has_simple_lib = false
+    var uses_rust_bootstrap = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+
+        # Skip comments
+        if not trimmed.starts_with("#") and not trimmed.starts_with("::") and not trimmed.starts_with("REM"):
+            # Check for .spl entrypoint
+            if trimmed.contains("ENTRY") and trimmed.contains(".spl"):
+                has_spl_entry = true
+
+            # Check for runtime binary reference
+            if trimmed.contains("RUNTIME") or trimmed.contains("release/simple"):
+                has_runtime = true
+
+            # Check for Rust bootstrap path (anti-pattern)
+            if trimmed.contains("compiler_rust/target"):
+                uses_rust_bootstrap = true
+
+            # Check for log suppression
+            if trimmed.contains("SIMPLE_LOG=error") or trimmed.contains("SIMPLE_LOG=\"error\""):
+                has_log_suppression = true
+
+            # Check for stderr suppression
+            if trimmed.contains("2>/dev/null") or trimmed.contains("2>nul"):
+                has_stderr_suppression = true
+
+            # Check for SIMPLE_LIB
+            if trimmed.contains("SIMPLE_LIB"):
+                has_simple_lib = true
+
+        li = li + 1
+
+    # Apply rules
+    if has_spl_entry:
+        warnings.push("wrapper uses .spl source entrypoint instead of compiled artifact")
+
+    if uses_rust_bootstrap:
+        warnings.push("wrapper references Rust bootstrap path (compiler_rust/target) -- prefer bin/release/simple")
+
+    if not has_runtime:
+        errors.push("wrapper does not reference a runtime binary")
+
+    if not has_log_suppression:
+        warnings.push("wrapper does not set SIMPLE_LOG=error for production noise suppression")
+
+    if not has_stderr_suppression:
+        warnings.push("wrapper does not suppress stderr (2>/dev/null)")
+
+    if not has_simple_lib:
+        warnings.push("wrapper does not set SIMPLE_LIB for module resolution")
+
+    val is_valid = errors.len() == 0
+    WrapperValidationResult(
+        path: wrapper_path,
+        errors: errors,
+        warnings: warnings,
+        is_valid: is_valid
+    )
+
+
+fn validate_all_wrappers(bin_dir: text) -> [WrapperValidationResult]:
+    """Validate all MCP wrapper scripts in the bin directory."""
+    val wrapper_names = [
+        "simple_mcp_server",
+        "simple_lsp_mcp_server",
+        "t32_mcp_server",
+        "t32_lsp_mcp_server",
+        "obsidian_lsp_mcp_server"
+    ]
+
+    var results: [WrapperValidationResult] = []
+    var i = 0
+    while i < wrapper_names.len():
+        val name = wrapper_names[i]
+        val path = bin_dir + "/" + name
+        if rt_file_exists(path):
+            var result = validate_wrapper(path)
+            results.push(result)
+        # Also check .cmd variants
+        val cmd_path = bin_dir + "/" + name + ".cmd"
+        if rt_file_exists(cmd_path):
+            var cmd_result = validate_wrapper(cmd_path)
+            results.push(cmd_result)
+        i = i + 1
+
+    results
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export WrapperValidationResult
+export validate_wrapper
+export validate_all_wrappers

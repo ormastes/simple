@@ -1,7 +1,9 @@
 # Lean File Regeneration
 #
-# Regenerates all Lean files in verification/ from Simple models.
-# This module generates all 13 Lean verification projects with full proofs.
+# Regenerates the Lean verification artifacts tracked by the repo and
+# validates them against the checked-in/generated files on disk.
+
+use io.fs as fs
 
 # Import individual regeneration modules
 use verification.regenerate.nogc_compile as regen_nogc
@@ -18,6 +20,25 @@ use verification.regenerate.memory_capabilities as regen_mem_cap
 use verification.regenerate.memory_model_drf as regen_drf
 use verification.regenerate.async_effect_inference as regen_effect
 use verification.regenerate.tensor_dimensions as regen_tensor
+
+fn known_regenerated_files() -> [text]:
+    [
+        "verification/nogc_compile/src/NogcCompile.lean",
+        "verification/async_compile/src/AsyncCompile.lean",
+        "verification/gc_manual_borrow/src/GcManualBorrow.lean",
+        "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
+        "verification/module_resolution/src/ModuleResolution.lean",
+        "verification/visibility_export/src/VisibilityExport.lean",
+        "verification/macro_auto_import/src/MacroAutoImport.lean",
+        "verification/type_inference_compile/src/TypeInferenceCompile.lean",
+        "verification/type_inference_compile/src/Generics.lean",
+        "verification/type_inference_compile/src/Contracts.lean",
+        "verification/memory_capabilities/src/MemoryCapabilities.lean",
+        "verification/memory_model_drf/src/MemoryModelDRF.lean",
+        "verification/type_inference_compile/src/AsyncEffectInference.lean",
+        "verification/tensor_dimensions/src/TensorDimensions.lean",
+        "verification/tensor_dimensions/src/TensorMemory.lean"
+    ]
 
 # Regenerate all Lean files
 fn regenerate_all() -> Dict<text, text>:
@@ -52,49 +73,63 @@ fn regenerate_all() -> Dict<text, text>:
     print("  [15/15] regenerate_tensor_memory...")
     r15 = regen_tensor.regenerate_tensor_memory()
     print("  Building result dict...")
-    return {"verification/nogc_compile/src/NogcCompile.lean": r1, "verification/async_compile/src/AsyncCompile.lean": r2, "verification/gc_manual_borrow/src/GcManualBorrow.lean": r3, "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean": r4, "verification/module_resolution/src/ModuleResolution.lean": r5, "verification/visibility_export/src/VisibilityExport.lean": r6, "verification/macro_auto_import/src/MacroAutoImport.lean": r7, "verification/type_inference_compile/src/TypeInferenceCompile.lean": r8, "verification/type_inference_compile/src/Generics.lean": r9, "verification/type_inference_compile/src/Contracts.lean": r10, "verification/memory_capabilities/src/MemoryCapabilities.lean": r11, "verification/memory_model_drf/src/MemoryModelDRF.lean": r12, "verification/type_inference_compile/src/AsyncEffectInference.lean": r13, "verification/tensor_dimensions/src/TensorDimensions.lean": r14, "verification/tensor_dimensions/src/TensorMemory.lean": r15}
+    {
+        "verification/nogc_compile/src/NogcCompile.lean": r1,
+        "verification/async_compile/src/AsyncCompile.lean": r2,
+        "verification/gc_manual_borrow/src/GcManualBorrow.lean": r3,
+        "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean": r4,
+        "verification/module_resolution/src/ModuleResolution.lean": r5,
+        "verification/visibility_export/src/VisibilityExport.lean": r6,
+        "verification/macro_auto_import/src/MacroAutoImport.lean": r7,
+        "verification/type_inference_compile/src/TypeInferenceCompile.lean": r8,
+        "verification/type_inference_compile/src/Generics.lean": r9,
+        "verification/type_inference_compile/src/Contracts.lean": r10,
+        "verification/memory_capabilities/src/MemoryCapabilities.lean": r11,
+        "verification/memory_model_drf/src/MemoryModelDRF.lean": r12,
+        "verification/type_inference_compile/src/AsyncEffectInference.lean": r13,
+        "verification/tensor_dimensions/src/TensorDimensions.lean": r14,
+        "verification/tensor_dimensions/src/TensorMemory.lean": r15
+    }
 
 # Write regenerated files to disk
 fn write_regenerated_files(files: Dict<text, text>, base_path: text = ".") -> List<text>:
-    use io.fs as fs
-
-    written = []
+    var written = []
     for (path, content) in files.items():
-        full_path = base_path + "/" + path
-
-        # Ensure directory exists
-        dir_path = "/".join(full_path.split("/")[:-1])
-        if not fs.path_exists(dir_path):
+        val full_path = base_path + "/" + path
+        val dir_path = "/".join(full_path.split("/")[:-1])
+        if not fs.exist(dir_path):
             fs.create_dir_all(dir_path)
+        if fs.write_text(full_path, content):
+            written.append(full_path)
+    written
 
-        # Write file
-        fs.write_text(full_path, content)
-        written.append(full_path)
-
-    return written
-
-# Validate regenerated files match existing (simplified - always returns empty dict for now)
+# Validate regenerated files match existing files on disk.
 fn validate_regeneration(files: Dict<text, text>, base_path: text = ".") -> Dict<text, bool>:
-    return {}
+    var validation = {}
+    for (path, content) in files.items():
+        val full_path = base_path + "/" + path
+        if fs.exist(full_path):
+            validation[path] = fs.read_text(full_path) == content
+        else:
+            validation[path] = false
+    validation
 
 # Main entry point for CLI
 fn main():
     print("Regenerating Lean verification files...")
 
-    files = regenerate_all()
+    val files = regenerate_all()
 
     for (path, content) in files.items():
         print("Generated: {path} ({len(content)} bytes)")
 
     print("")
     print("Validating against existing files...")
-    validation = validate_regeneration(files)
+    val validation = validate_regeneration(files)
 
-    all_valid = true
+    var all_valid = true
     for (path, valid) in validation.items():
-        status = "MISMATCH"
-        if valid:
-            status = "OK"
+        val status = if valid: "OK" else "MISMATCH"
         print("  {path}: {status}")
         if not valid:
             all_valid = false

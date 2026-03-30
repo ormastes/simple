@@ -78,7 +78,7 @@ pub(crate) fn instantiate_class(
         //
         // Call new() if:
         // 1. Exact arg count match, OR
-        // 2. Has #[inject] attribute (missing args will be injected via DI)
+        // 2. Has @inject / @sys_inject marker (missing args will be injected via DI)
         let new_param_count = new_method.params.len();
         let has_inject = has_inject_attr(new_method);
         let should_call_new = args.len() == new_param_count || has_inject;
@@ -264,10 +264,17 @@ pub(crate) fn instantiate_class(
 }
 
 fn has_inject_attr(method: &FunctionDef) -> bool {
-    method
+    let has_attribute = method
         .attributes
         .iter()
-        .any(|attr| attr.name == "inject" || attr.name == "sys_inject")
+        .any(|attr| attr.name == "inject" || attr.name == "sys_inject");
+    let has_decorator = method.decorators.iter().any(|decorator| match &decorator.name {
+        simple_parser::ast::Expr::Identifier(name) => name == "inject" || name == "sys_inject",
+        _ => false,
+    });
+    let has_param_inject = method.params.iter().any(|param| param.inject);
+
+    has_attribute || has_decorator || has_param_inject
 }
 
 /// Clear class instantiation thread-local state.

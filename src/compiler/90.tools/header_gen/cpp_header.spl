@@ -13,6 +13,9 @@
 
 use compiler.mir.mir_data.*
 use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.types.type_layout.{layoutattr_c_repr, verify_c_layout, generate_cpp_static_asserts}
+use hir_definitions.{HirField}
+use hir_types.{HirType}
 
 # ============================================================================
 # C++ Header Emission
@@ -82,6 +85,14 @@ fn emit_cpp_header(lib_name: text, exported_types: [MirTypeDef], exported_fns: [
                 lines.push(fn_lines[fli])
                 fli = fli + 1
             fi = fi + 1
+
+    var lvi = 0
+    while lvi < exported_types.len():
+        val assert_block = _emit_cpp_layout_asserts(exported_types[lvi])
+        if assert_block != "":
+            lines.push(assert_block)
+            lines.push(r"")
+        lvi = lvi + 1
 
     # Close namespace
     lines.push(r"} // namespace spl")
@@ -363,6 +374,47 @@ fn _emit_function_wrapper(func: MirFunction) -> [text]:
     lines.push(r"}")
     lines.push(r"")
     lines
+
+fn _emit_cpp_layout_asserts(type_def: MirTypeDef) -> text:
+    match type_def.kind:
+        case Struct(fields):
+            if fields.len() == 0:
+                return ""
+
+            val c_name = _sanitize_c_name(type_def.name)
+            var hir_fields: [HirField] = []
+            var fi = 0
+            while fi < fields.len():
+                val field = fields[fi]
+                hir_fields.push(HirField(
+                    name: field.name,
+                    type_: _mir_type_to_hir_type(field.type_),
+                    has_bits_attr: field.has_bits_attr,
+                    bits_width: field.bits_width
+                ))
+                fi = fi + 1
+
+            val verification = verify_c_layout(c_name, hir_fields, layoutattr_c_repr())
+            generate_cpp_static_asserts(verification)
+        case _:
+            ""
+
+fn _mir_type_to_hir_type(ty: MirType) -> HirType:
+    match ty.kind:
+        case I64: HirType.named("i64")
+        case I32: HirType.named("i32")
+        case I16: HirType.named("i16")
+        case I8: HirType.named("i8")
+        case U64: HirType.named("u64")
+        case U32: HirType.named("u32")
+        case U16: HirType.named("u16")
+        case U8: HirType.named("u8")
+        case F64: HirType.named("f64")
+        case F32: HirType.named("f32")
+        case Bool: HirType.named("bool")
+        case Unit: HirType.named("unit")
+        case Ptr(_, _): HirType.named("usize")
+        case _: HirType.named("i64")
 
 # ============================================================================
 # Export

@@ -1,10 +1,12 @@
-# @cover src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl 80%
+# @cover src/app/test_runner_new/test_executor_composite.spl 80%
 # Remote Interpreter Backend Routing System Tests
 # @tag:system
 
-use app.test_runner_new.{extract_base_runtime, extract_platform_layer, extract_remote_backend}
-
-extern fn rt_file_read_text(path: text) -> text
+use app.test_runner_new.{
+    extract_base_runtime, extract_platform_layer, extract_arch_from_spec,
+    extract_target_from_spec, extract_remote_backend,
+    qemu_binary_for_arch, qemu_machine_for_arch
+}
 
 describe "Remote interpreter backend routing":
     it "extracts interpreter as the base runtime for T32 remote specs":
@@ -15,28 +17,37 @@ describe "Remote interpreter backend routing":
         val spec = "interpreter(remote(t32(stm32wb)))"
         expect(extract_platform_layer(spec)).to_equal("remote")
 
+    it "extracts arm32 as the effective architecture for T32 remote specs":
+        val spec = "interpreter(remote(t32(stm32wb)))"
+        expect(extract_arch_from_spec(spec)).to_equal("arm32")
+
     it "extracts t32 as the remote backend":
         val spec = "interpreter(remote(t32(stm32wb)))"
         expect(extract_remote_backend(spec)).to_equal("t32")
+
+    it "maps t32 stm32 targets to the trace32 board target":
+        val spec = "interpreter(remote(t32(stm32wb)))"
+        expect(extract_target_from_spec(spec)).to_equal("trace32_stm32wb")
 
     it "extracts openocd as the remote backend":
         val spec = "interpreter(remote(openocd(stm32wb)))"
         expect(extract_remote_backend(spec)).to_equal("openocd")
 
+    it "extracts ghdl as the remote backend":
+        val spec = "interpreter(remote(baremetal(ghdl(riscv32))))"
+        expect(extract_remote_backend(spec)).to_equal("ghdl")
+
+    it "maps ghdl riscv32 specs to the ghdl rv32 target":
+        val spec = "interpreter(remote(baremetal(ghdl(riscv32))))"
+        expect(extract_target_from_spec(spec)).to_equal("ghdl_rv32")
+        expect(extract_arch_from_spec(spec)).to_equal("riscv32")
+
     it "returns empty backend for legacy remote specs":
         val spec = "interpreter(remote(arm32))"
         expect(extract_remote_backend(spec)).to_equal("")
 
-    it "runner source contains explicit t32 routing and command env":
-        val source = rt_file_read_text("src/app/test_runner_new/test_executor_composite.spl")
-        val remote_source = rt_file_read_text("src/app/test_runner_new/test_remote.spl")
-        expect(source.contains("backend == \"t32\"")).to_equal(true)
-        expect(source.contains("remote_target_with_transport(\"localhost\", 20000, arch, \"t32\"")).to_equal(true)
-        expect(remote_source.contains("SIMPLE_REMOTE_T32_INTERPRETER_CMD")).to_equal(true)
-
-    it "runner source contains explicit openocd routing and command env":
-        val source = rt_file_read_text("src/app/test_runner_new/test_executor_composite.spl")
-        val remote_source = rt_file_read_text("src/app/test_runner_new/test_remote.spl")
-        expect(source.contains("backend == \"openocd\"")).to_equal(true)
-        expect(source.contains("remote_target_with_transport(\"localhost\", 3333, arch, \"openocd\"")).to_equal(true)
-        expect(remote_source.contains("SIMPLE_REMOTE_OPENOCD_INTERPRETER_CMD")).to_equal(true)
+    it "keeps qemu target resolution for legacy riscv32 remote specs":
+        val spec = "interpreter(remote(baremetal(riscv32)))"
+        expect(extract_target_from_spec(spec)).to_equal("riscv32")
+        expect(qemu_binary_for_arch("riscv32")).to_equal("qemu-system-riscv32")
+        expect(qemu_machine_for_arch("riscv32")).to_equal("virt")

@@ -21,7 +21,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Parser-friendly macro system**: compiler-integrated macro definitions, validation, and hygiene instead of editor-hostile text substitution.
 - **Math DSL blocks**: `m{}`, `loss{}`, and `nograd{}` parse and evaluate as dedicated math-oriented syntax, with pretty/LaTeX rendering support.
 - **SDN-backed project databases**: the repo uses textual SDN stores for tests, todos, dashboards, and other project metadata.
-- **Baremetal-friendly execution model**: in-tree support for baremetal builds, semihosting lanes, QEMU/GHDL flows, and remote baremetal test plumbing.
+- **Baremetal-friendly execution model**: in-tree support for baremetal builds, semihosting lanes, QEMU/GHDL flows, host-aware remote baremetal plumbing, and real CH32/STM adapter-backed lanes.
 - **Multiple execution paths**: interpreter, loader, native/LLVM-oriented compilation paths, and SMF/module-loading infrastructure coexist in one repo.
 - **Tooling-aware language rules**: Tree-sitter integration, primitive-public-API linting, traceability tooling, and language statistics are part of the platform story.
 - **UI test sharing**: the UI test client is designed to exercise both web UI backends and the TUI web proxy through one HTTP-oriented test surface.
@@ -37,7 +37,7 @@ Implemented and safe to advertise:
 - Borrow-checking infrastructure
 - Watch mode / auto-build support
 - mmap-backed loader primitives and executable-memory support
-- Baremetal build/test plumbing and remote baremetal mode parsing
+- Baremetal build/test plumbing, remote baremetal mode parsing, and adapter-backed CH32 composite execution
 
 Implemented but should be described carefully:
 - `loss{}` / `nograd{}` and math-block rendering work, but deeper DL automation around them is still evolving
@@ -46,12 +46,12 @@ Implemented but should be described carefully:
 - UI sharing exists through test surfaces and multiple frontends, but not as a single finished “one UI layer everywhere” claim
 
 Partial or experimental:
-- AOP support exists, but some runtime-facing pieces remain stubbed
-- Remote baremetal execution is host-aware and not fully green end-to-end on every lane
-- Loader/JIT instantiation still has stubbed pieces
-- VHDL backend code generation exists, but should still be treated as experimental
-- C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete
-- Lean generation and proof artifacts exist, but end-to-end formal verification integration is still partial
+- [todo] AOP support has a verified baseline: Simple-side proceed enforcement, MIR weaving helpers, and Rust-side runtime `init(...)` interception with `@inject` are covered. The broader DI/AOP authoring surface should still be treated as in progress. Current state: [doc/01_research/local/aop.md](doc/01_research/local/aop.md)
+- [todo] Remote baremetal execution is real but still lane-dependent. Stable RV32 ELF/shared-workload proof, CH32 composite-runner execution, and runtime/readiness checks are implemented; full repo-wide “all hardware lanes green” status is still host-dependent. Current state: [doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md](doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
+- [todo] Loader/JIT instantiation still has stubbed pieces. Current state: [doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md](doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md)
+- [todo] VHDL backend code generation exists, but should still be treated as experimental. Current state: [doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md](doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md)
+- [todo] C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
+- [todo] Lean generation and proof artifacts exist, but end-to-end formal verification integration is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 
@@ -517,6 +517,8 @@ bind on pc{ attr(Repository) } -> MockRepository
   when profile("test")
 ```
 
+Current repo status: compile-time weaving is the primary AOP path. The verified runtime slice currently covers `proceed()` enforcement and runtime `init(...)` interception with `@inject`, but broader DI/AOP authoring should still be treated as in progress.
+
 ### SDN Configuration
 
 Simple Data Notation - a minimal, token-efficient format for config files:
@@ -729,7 +731,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 
 **Advanced Features:**
 - [Macro System](doc/spec/macro.md) - Contract-first LL(1) macros
-- [AOP & Unified Predicates](doc/research/aop.md) - Aspect-oriented programming
+- [AOP & Unified Predicates](doc/01_research/local/aop.md) - Aspect-oriented programming and current implementation status
 - [SDN Format](doc/spec/sdn.md) - Simple Data Notation specification
 - [Doctest](doc/spec/testing/sdoctest.md) - Documentation testing
 - [Feature Documentation](doc/features/feature.md) - BDD-generated feature docs

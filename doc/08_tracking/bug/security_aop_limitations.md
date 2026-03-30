@@ -19,9 +19,9 @@
 
 ### L-3: AOP Weaving Requires Compiled Mode
 
-**Description:** AOP aspects are woven at MIR level during compilation. In interpreter mode, aspects are not applied — security advice functions do not execute.
-**Workaround:** Use compiled mode (`bin/simple build`) for production. Interpreter mode is for development only.
-**Severity:** Medium — consistent with existing interpreter limitations.
+**Description:** The main security-AOP path is still compile-time MIR weaving. The interpreter now has a narrow verified runtime interception slice for `init(...)` join points, but general security advice execution should still be treated as compiled-mode behavior unless explicitly covered by interpreter tests.
+**Workaround:** Use compiled mode (`bin/simple build`) for production security weaving. Treat interpreter-mode interception as feature-specific and test-backed, not as a blanket replacement for compiled weaving.
+**Severity:** Medium — the interpreter supports a limited runtime slice, but compiled weaving remains the primary execution model.
 
 ### L-4: Capability Policy Not Hot-Reloadable
 

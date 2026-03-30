@@ -3,6 +3,8 @@
 **Date:** 2026-03-28
 **Scope:** Cross-reference, REQ-ID, terminology, and test coverage audit for the SFFI Bidirectional Class Interop feature documentation suite.
 
+> Historical note: this audit reflects the 2026-03-28 document state before the phase-4/plugin-manifest completion work. The current implementation status and reconciled verification state are recorded in `doc/09_report/2026/03/sffi_bidirectional_interop_completion_2026-03-30.md`.
+
 ---
 
 ## 1. Documents Reviewed

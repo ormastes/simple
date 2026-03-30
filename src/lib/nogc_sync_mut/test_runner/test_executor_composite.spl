@@ -29,6 +29,7 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
     val base = extract_base_runtime(spec)
     val platform = extract_platform_layer(spec)
     val arch = extract_arch_from_spec(spec)
+    val remote_backend = extract_remote_backend(spec)
     val target = extract_target_from_spec(spec)
     val setup_end = time_now_unix_micros()
     val setup_ms = (setup_end - setup_start) / 1000
@@ -41,7 +42,7 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
     if platform == "baremetal":
         return run_test_file_baremetal(file_path, options, base, arch)
     if platform == "remote":
-        return run_test_file_remote(file_path, options, base, arch)
+        return run_test_file_remote(file_path, options, base, arch, target, remote_backend)
     if platform == "jit":
         return run_test_file_jit(file_path, options, arch, target)
 
@@ -93,6 +94,16 @@ fn extract_target_from_spec(spec: text) -> text:
     if spec.contains("x86_64"): return "x86_64"
     if spec.contains("x86"): return "x86"
     "host"
+
+fn extract_remote_backend(spec: text) -> text:
+    """Extract explicit remote transport backend from composite spec."""
+    if spec.contains("remote(t32(") or spec.contains("remote(trace32("):
+        return "t32"
+    if spec.contains("remote(openocd("):
+        return "openocd"
+    if spec.contains("remote(ghdl(") or spec.contains("baremetal(ghdl("):
+        return "ghdl"
+    ""
 
 fn run_test_file_baremetal(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
     """Execute test on bare-metal target.
@@ -171,6 +182,27 @@ fn qemu_machine_for_arch(arch: text) -> text:
     if arch == "x86_64": return "q35"
     "virt"
 
+fn run_test_file_baremetal_ghdl(file_path: text, options: TestOptions, elf_path: text) -> TestFileResult:
+    """Execute a prebuilt ELF on the RV32 GHDL semihosting runner."""
+    val setup_start = time_now_unix_micros()
+    val timeout_secs = if options.timeout <= 0: 30 else: options.timeout
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    val timeout_ms = timeout_secs * 1000
+    val test_start = time_now_unix_micros()
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "bash",
+        ["src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.shs", elf_path, "--timeout={timeout_secs}"],
+        timeout_ms
+    )
+    val test_end = time_now_unix_micros()
+    val duration_ms = (test_end - test_start) / 1000
+
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
+    result.setup_ms = setup_ms
+    result
+
 fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: text, elf_path: text) -> TestFileResult:
     """Execute a prebuilt ELF on QEMU with semihosting and parse results."""
     val setup_start = time_now_unix_micros()
@@ -206,7 +238,7 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
     result.setup_ms = setup_ms
     result
 
-fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
+fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text, target: text, remote_backend: text) -> TestFileResult:
     """Execute test on remote target via QEMU.
 
     For .spl files: run via host interpreter (same as baremetal mode).
@@ -220,11 +252,15 @@ fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch:
 
     # .elf files run directly on QEMU with semihosting
     if file_path.ends_with(".elf"):
+        if target == "ghdl_rv32" or remote_backend == "ghdl":
+            return run_test_file_baremetal_ghdl(file_path, options, file_path)
         return run_test_file_baremetal_qemu(file_path, options, arch, file_path)
 
     # Unknown file type — try to find a prebuilt ELF for this spec
     val elf_path = find_baremetal_elf(file_path, arch)
     if elf_path != "":
+        if target == "ghdl_rv32" or remote_backend == "ghdl":
+            return run_test_file_baremetal_ghdl(file_path, options, elf_path)
         return run_test_file_baremetal_qemu(file_path, options, arch, elf_path)
 
     # Fallback: run via host interpreter
@@ -313,7 +349,8 @@ fn run_test_file_jit_stm32h7(file_path: text, source: text, options: TestOptions
         name: file_path,
         bytes: bytes,
         entry_offset: 0,
-        stack_bytes: 0
+        stack_bytes: 0,
+        arch: Architecture.Arm32
     )
     val layout_result = plan_binary_layout_arm32(binary, limits)
     if layout_result.is_err():

@@ -4,6 +4,8 @@
 **Status:** P0 + P1 Complete; P2-P3 Deferred
 **Feature:** SFFI Bidirectional Class Interop (Simple <-> C/C++)
 
+> Historical note: this report captures the 2026-03-28 state. It is superseded by `doc/09_report/2026/03/sffi_bidirectional_interop_completion_2026-03-30.md`, which records the completed plugin-manifest implementation, C++ `static_assert` coverage, and shared-library lifecycle verification updates.
+
 ---
 
 ## 1. Overview
@@ -166,7 +168,7 @@ Data flows from `@export("C")` annotation at the frontend through every intermed
 | Doc Consistency Audit | `doc/09_report/2026/03/sffi_bidirectional_doc_consistency_2026-03-28.md` |
 | SFFI External Library Pattern | `doc/05_design/sffi_external_library_pattern.md` |
 | C++ Wrapper Generator Design | `doc/05_design/cpp_wrapper_generator_design.md` |
-| Phase 4 SFFI Plan | `doc/03_plan/phase4_sffi_implementation_plan.md` |
+| Phase 4 SFFI Plan | `doc/05_design/phase4_sffi_implementation_plan.md` |
 
 ---
 

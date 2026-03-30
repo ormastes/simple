@@ -1,98 +1,97 @@
-# Unified Verification Attributes Tests
-# Feature: Unified Lean and Contract Attribute System
-# Category: Verification, Parser
-# Status: In Progress
-#
-# Tests for the unified Lean and Contract attribute system.
-# This spec tests the parser and AST support for:
-# - @ghost effect on functions and classes
-# - decreases: clause for termination measures
-# - Integration with existing contract syntax (in:, out:)
-
+import sspec
+import verification.models.contracts as contracts
+import verification.lean.contracts as lean_contracts
 
 describe "Unified Verification Attributes":
-    # Tests for @ghost attributes, decreases clauses, and verification mode decorators.
-    # Validates parser support and runtime behavior for verification annotations.
+    context "Contract expressions":
+        it "classifies operators and renders summaries":
+            expect(contracts.ContractExprKind.Forall.is_quantifier()).to_equal(true)
+            expect(contracts.ContractExprKind.And.is_logical_operator()).to_equal(true)
+            expect(contracts.ContractExprKind.Ge.is_comparison()).to_equal(true)
+            expect(contracts.ContractExprKind.Neg.is_arithmetic()).to_equal(true)
+            expect(contracts.ContractExprKind.Len.is_unary_op()).to_equal(true)
+            expect(contracts.ContractExprKind.Call.is_variable_reference()).to_equal(false)
+            expect(contracts.ContractExprKind.Len.to_string()).to_equal("len")
+            expect(contracts.ContractExprKind.Not.summary()).to_contain("unary op")
 
-    context "@ghost functions":
-        it "parses @ghost decorator on functions":
-            # Parser should recognize @ghost as an effect
-            # Ghost functions are erased at runtime
-            expect true
+    context "Function contracts":
+        it "tracks requires, ensures, invariants, and termination":
+            var contract = contracts.FunctionContract.new()
+            contract = contract.add_precondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_postcondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.gt(
+                        contracts.ContractExpr.result(),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_invariant(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.with_termination(
+                contracts.TerminationClause.single(contracts.ContractExpr.variable("n"))
+            )
+            contract = contract.with_modifies(contracts.ModifiesClause.nothing())
 
-        it "ghost functions are included in Lean output":
-            # When generating Lean, ghost functions should be present
-            expect true
+            expect(contract.has_preconditions()).to_equal(true)
+            expect(contract.has_postconditions()).to_equal(true)
+            expect(contract.has_invariants()).to_equal(true)
+            expect(contract.is_total()).to_equal(true)
 
-        it "ghost functions are erased at runtime":
-            # Ghost functions should not exist in compiled output
-            expect true
+    context "Contract validation":
+        it "rejects impure calls in contracts":
+            var contract = contracts.FunctionContract.new()
+            contract = contract.add_precondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.call(
+                        "read_file",
+                        [contracts.ContractExpr.variable("path")]
+                    )
+                )
+            )
 
-    context "@ghost classes":
-        it "parses @ghost decorator on classes":
-            # Classes can also be marked as ghost
-            expect true
+            val errors = contracts.validate_contract(contract)
+            expect(errors.len()).to_equal(1)
+            expect(errors[0]).to_contain("pure expression")
 
-        it "ghost classes are erased at runtime":
-            # Ghost classes are for verification only
-            expect true
+    context "Class invariants":
+        it "can be marked public":
+            val inv = contracts.ClassInvariant.new(
+                "Counter",
+                contracts.ContractExpr.ge(
+                    contracts.ContractExpr.variable("value"),
+                    contracts.ContractExpr.int_val(0)
+                )
+            )
+            val public_inv = inv.public()
 
-    context "decreases clause":
-        it "parses decreases: block with expression":
-            # decreases:\n    n
-            expect true
+            expect(public_inv.class_name).to_equal("Counter")
+            expect(public_inv.is_public).to_equal(true)
 
-        it "parses inline decreases: clause":
-            # decreases: n
-            expect true
+    context "Lean contract translation":
+        it "renders invariant and theorem scaffolding":
+            val inv = lean_contracts.generate_invariant_prop("State", ["x >= 0", "y >= 0"])
+            val theorem = lean_contracts.LeanTheorem.create(
+                "counter_preserves_bounds",
+                [("n", "Nat")],
+                "n >= 0",
+                "rfl"
+            )
 
-        it "combines decreases with requires and ensures":
-            # Full verification contract:
-            # requires: n >= 0
-            # decreases: n
-            # ensures: ret >= 1
-            expect true
-
-        it "does not check decreases at runtime":
-            # decreases is for Lean termination_by only
-            expect true
-
-    context "Lean generation":
-        it "generates termination_by from decreases clause":
-            # def factorial (n : Nat) : Nat := ...
-            # termination_by n
-            expect true
-
-        it "generates hypothesis from requires clause":
-            # requires: n >= 0 becomes Lean precondition
-            expect true
-
-        it "generates conclusion from ensures clause":
-            # ensures: ret >= 1 becomes Lean postcondition
-            expect true
-
-    context "shared contracts":
-        it "uses same in: for runtime and Lean":
-            # in: block serves both purposes
-            expect true
-
-        it "uses same out: for runtime and Lean":
-            # out(ret): block serves both purposes
-            expect true
-
-        it "uses same invariant: for runtime and Lean":
-            # invariant: block serves both purposes
-            expect true
-
-    context "verification modes":
-        it "parses @verify decorator":
-            # Functions with @verify enable Lean generation
-            expect true
-
-        it "parses @trusted decorator":
-            # Functions with @trusted mark boundary
-            expect true
-
-        it "@pure is available for both contract and Lean":
-            # @pure functions have no side effects
-            expect true
+            expect(inv.to_lean()).to_contain("def inv_State")
+            expect(inv.to_lean()).to_contain("x >= 0")
+            expect(theorem.to_lean()).to_contain("theorem counter_preserves_bounds")
+            expect(theorem.to_lean()).to_contain("rfl")

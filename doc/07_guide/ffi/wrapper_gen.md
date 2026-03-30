@@ -1,169 +1,71 @@
 # Wrapper Generator
 
-**Status:** Planned (Not Yet Implemented)
+**Status:** Implemented
 
 ---
 
 ## Overview
 
-`simple wrapper-gen` will automatically generate all three tiers of SFFI wrappers from a single specification file. This eliminates manual boilerplate when wrapping external C/C++ libraries.
+`simple wrapper-gen` currently generates plugin-manifest scaffolding for the SFFI plugin flow.
+
+Given a `.wrapper_spec` file, it:
+
+- parses the wrapper spec
+- derives the exported `rt_*` symbol list
+- emits a `manifest.sdn`
+- emits a `wrapper_info.txt` summary
+
+This is the manifest/scaffold stage of the larger three-tier SFFI workflow. It does **not** currently generate the older tiered glue/class output described in earlier planning docs.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Generate wrappers from spec
-simple wrapper-gen specs/my_library.spec
+# Preview generated manifest and summary
+simple wrapper-gen examples/regex.wrapper_spec --dry-run
 
-# Preview without writing files
-simple wrapper-gen specs/my_library.spec --dry-run
+# Write scaffold files to the default plugin output dir
+simple wrapper-gen examples/regex.wrapper_spec
 
-# Generate specific tier only
-simple wrapper-gen specs/my_library.spec --tier=3
+# Write scaffold files to a custom output dir
+simple wrapper-gen examples/regex.wrapper_spec --output=.build/plugins/regex
 ```
 
 ---
 
-## Spec File Format
+## Output
 
-```spec
-# specs/my_library.spec
-library: my_library
-include: "my_library.h"
-link: "-lmylib"
+Default output directory:
 
-# Function declarations
-fn create() -> handle
-fn process(h: handle, data: text) -> i32
-fn destroy(h: handle) -> void
-
-# Type mappings
-type handle = void*    # Maps to i64 in Simple
-type matrix = void*    # Opaque handle
+```text
+.build/plugins/<spec-name>/
 ```
 
-### Supported Types
+Files written:
 
-| Spec Type | C Type | Simple Type |
-|-----------|--------|-------------|
-| `i32` | `int32_t` | `i32` |
-| `i64` | `int64_t` | `i64` |
-| `f32` | `float` | `f32` |
-| `f64` | `double` | `f64` |
-| `bool` | `bool` | `bool` |
-| `text` | `const char*` | `text` |
-| `handle` | `void*` | `i64` |
-| `void` | `void` | `()` |
+- `manifest.sdn`
+- `wrapper_info.txt`
 
-### Ownership Annotations
+Example manifest:
 
-```spec
-fn create() -> handle [own]           # Caller owns returned handle
-fn process(h: handle [borrow]) -> i32 # Borrows, does not free
-fn destroy(h: handle [consume]) -> void  # Consumes (frees) the handle
+```sdn
+plugins:
+    -
+        name: regex
+        library: .build/plugins/regex/libsimple_regex_ffi.so
+        version: "0.1.0"
+        functions: [rt_regex_new, rt_regex_is_match]
 ```
 
-| Annotation | Meaning |
-|-----------|---------|
-| `[own]` | Caller receives ownership, must free |
-| `[borrow]` | Temporary access, do not free |
-| `[consume]` | Callee takes ownership, frees internally |
+Example summary:
 
----
-
-## Generated Output
-
-From a single spec, the generator produces three files:
-
-### Tier 1: C Glue (`src/lib/ffi/my_library_glue.c`)
-
-```c
-#include "my_library.h"
-
-void* spl_my_library_create() {
-    return my_library_create();
-}
-
-int spl_my_library_process(void* h, const char* data) {
-    return my_library_process(h, data);
-}
-
-void spl_my_library_destroy(void* h) {
-    my_library_destroy(h);
-}
-```
-
-### Tier 2: FFI Declarations (`src/lib/ffi/my_library.spl`)
-
-```simple
-extern fn spl_my_library_create() -> i64
-extern fn spl_my_library_process(handle: i64, data: text) -> i32
-extern fn spl_my_library_destroy(handle: i64)
-```
-
-### Tier 3: Safe API (`src/lib/my_library/mod.spl`)
-
-```simple
-use std.ffi.my_library.{
-    spl_my_library_create,
-    spl_my_library_process,
-    spl_my_library_destroy
-}
-
-class MyLibrary:
-    handle: i64
-
-    static fn create() -> MyLibrary:
-        MyLibrary(handle: spl_my_library_create())
-
-    fn process(data: text) -> i32:
-        spl_my_library_process(self.handle, data)
-
-    fn destroy():
-        spl_my_library_destroy(self.handle)
-```
-
----
-
-## Real-World Example: PyTorch
-
-### Spec File
-
-```spec
-library: torch
-include: "torch/torch.h"
-link: "-ltorch -lc10"
-
-fn tensor_zeros(rows: i32, cols: i32) -> handle [own]
-fn tensor_ones(rows: i32, cols: i32) -> handle [own]
-fn tensor_add(a: handle [borrow], b: handle [borrow]) -> handle [own]
-fn tensor_matmul(a: handle [borrow], b: handle [borrow]) -> handle [own]
-fn tensor_numel(t: handle [borrow]) -> i64
-fn tensor_to_cuda(t: handle [borrow], device: i32) -> handle [own]
-fn tensor_is_cuda(t: handle [borrow]) -> bool
-fn tensor_free(t: handle [consume]) -> void
-```
-
-### Generate
-
-```bash
-simple wrapper-gen specs/torch.spec
-```
-
-This produces all three tiers automatically, ready to use:
-
-```simple
-use std.torch.{Tensor}
-
-fn main():
-    val a = Tensor.zeros(3, 4)
-    val b = Tensor.ones(3, 4)
-    val c = a.add(b)
-    print "Elements: {c.numel()}"
-    c.free()
-    b.free()
-    a.free()
+```text
+wrapper: regex
+lang: rust
+library: libsimple_regex_ffi.so
+output_dir: .build/plugins/regex
+functions: rt_regex_new, rt_regex_is_match
 ```
 
 ---
@@ -172,36 +74,59 @@ fn main():
 
 | Option | Description |
 |--------|-------------|
-| `--dry-run` | Preview generated code without writing |
-| `--tier=N` | Generate only tier N (1, 2, or 3) |
-| `--output=DIR` | Output directory (default: `src/lib/`) |
-| `--force` | Overwrite existing files |
-| `--no-class` | Generate functions only, no class wrapper |
+| `--dry-run` | Print `manifest.sdn` and `wrapper_info.txt` without writing files |
+| `--output=DIR` | Output directory override |
+| `--verbose` | Print parsed wrapper-spec details |
+| `--verify` | Reserved for follow-on verification flow |
+| `-h`, `--help` | Show help |
 
 ---
 
-## Best Practices
+## Wrapper Spec Notes
 
-1. **Start with the spec** -- Define the API contract before writing any code
-2. **Use ownership annotations** -- Prevents memory leaks and double-frees
-3. **Keep specs minimal** -- Only expose functions your Simple code actually needs
-4. **Review generated code** -- Auto-generated code may need manual tuning
-5. **Version your specs** -- Track spec files in version control alongside source
+The implemented command reads the existing `.wrapper_spec` format used by `src/app/wrapper_gen/spec_parser.spl`.
+
+Current fields used by manifest generation:
+
+- `name`
+- `version`
+- `lang`
+- `functions`
+- `methods`
+
+Exported symbol naming:
+
+- free function `new` in wrapper `regex` -> `rt_regex_new`
+- method `is_match` in wrapper `regex` -> `rt_regex_is_match`
 
 ---
 
-## Troubleshooting
+## Plugin Workflow
 
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| Type not recognized | Missing type mapping | Add `type X = C_type` to spec |
-| Link error | Library not found | Check `link:` path in spec |
-| Generated class conflicts | Name collision | Use `--no-class` or rename |
-| Handle leak | Missing `[own]` annotation | Add ownership annotations |
+Typical flow:
+
+```bash
+# 1. Generate manifest scaffold
+simple wrapper-gen examples/regex.wrapper_spec
+
+# 2. Install generated manifest into the plugin registry
+simple plugin install .build/plugins/regex/manifest.sdn
+
+# 3. Inspect installed plugins
+simple plugin list
+```
+
+Remove a plugin:
+
+```bash
+simple plugin remove regex
+```
 
 ---
 
 ## Related
 
-- SFFI guide: `doc/07_guide/ffi/sffi.md`
-- FFI module: `src/lib/ffi/mod.spl`
+- `doc/02_requirements/feature/usage/sffi_bidirectional_interop.md`
+- `doc/05_design/phase4_sffi_implementation_plan.md`
+- `doc/05_design/sffi_bidirectional_interop.md`
+- `doc/09_report/2026/03/sffi_bidirectional_interop_completion_2026-03-30.md`

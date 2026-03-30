@@ -238,8 +238,9 @@ Practical rule:
   `test/integration/remote_jit/ch32v307_composite_runner_spec.spl` now uses direct `wlink`
   instead of the stale adapter import path
   current proven operations are probe discovery, RAM write/readback, register dump,
-  and reuse of the shared baremetal workload fixture
-  full shared-workload execution on CH32V307 is still pending
+  workload-output probing, and reuse of the shared baremetal workload fixture
+  repo-side composite execution is now covered by:
+  `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl`
 - the remaining STM32H7 interpreter blocker was in `jit_util.spl`:
   `index_of()` was being treated as an integer in helper code, which triggered the documented runtime failure
   `semantic: type mismatch: cannot convert enum to int`
@@ -273,7 +274,7 @@ Current CH32V307 note:
 
 - the old adapter-based CH32 runner was stale and imported a non-existent adapter module
 - the direct WCH-Link path is real on this host and should be the basis for the first CH32 HAL/backend
-- full CH32 shared-workload execution remains a follow-up after direct control is stabilized
+- the composite-runner path is now real through the CH32 adapter-backed lane
 
 Practical note:
 

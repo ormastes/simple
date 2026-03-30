@@ -31,7 +31,7 @@ class WrappedRepo:
 class Service:
     repo: Repo
 
-    #[inject]
+    @inject
     fn new(self, repo: Repo):
         self.repo = repo
 

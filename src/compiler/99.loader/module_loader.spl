@@ -229,7 +229,12 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
         config: config,
         modules: {},
         global_symbols: {},
-        jit: JitInstantiator.new({})
+        jit: JitInstantiator.new(JitInstantiatorConfig(
+            update_smf: config.enable_cache,
+            max_depth: 50,
+            enabled: config.enable_jit,
+            verbose: config.verbose
+        ))
     )
 
 fn moduleloader_with_defaults() -> ModuleLoader:
@@ -252,7 +257,58 @@ fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     moduleloader_load(self, path)
 
 fn moduleloader_unload(self: ModuleLoader, path: text):
-    self.unload(path)
+    var remove_jit: [text] = []
+    for item in self.jit.jit_cache:
+        val sym_name = item[0]
+        val rec_cache = item[1]
+        var owner = "__jit__"
+        if rec_cache.contains_key("owner"):
+            owner = rec_cache["owner"]
+        else:
+            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+            if rec_opt.?:
+                owner = rec_opt.unwrap().owner_id
+
+        if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
+            remove_jit.push(sym_name)
+
+    for sym_name in remove_jit:
+        self.jit.drop_cached_symbol(sym_name)
+
+    var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = {}
+    for item in self.global_symbols:
+        val sym_name = item[0]
+        val owner_pair = item[1]
+        val kept_owner = owner_pair[0]
+        if kept_owner != path and not _name_in(remove_jit, sym_name):
+            rebuilt_globals[sym_name] = owner_pair
+
+    for item in self.jit.jit_cache:
+        val sym_name = item[0]
+        val rec_cache = item[1]
+        val code = rec_cache["code"]
+        val addr = rec_cache["address"]
+        var mapped_owner = "__jit__"
+        if rec_cache.contains_key("owner"):
+            mapped_owner = rec_cache["owner"]
+        else:
+            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+            if rec_opt.?:
+                mapped_owner = rec_opt.unwrap().owner_id
+        val sym = LoadedSymbol(
+            name: sym_name,
+            address: addr,
+            size: code.len() as i64,
+            ty: SymbolType.Function,
+            is_jit: true,
+            file_offset: 0
+        )
+        rebuilt_globals[sym_name] = (mapped_owner, sym)
+
+    self.global_symbols = rebuilt_globals
+
+    if self.modules.contains_key(path):
+        self.modules = self.modules.remove(path)
 
 fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
@@ -271,4 +327,3 @@ fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
 
 fn moduleloader_stats(self: ModuleLoader) -> LoaderStats:
     self.stats()
-

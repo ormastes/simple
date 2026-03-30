@@ -28,6 +28,7 @@ use compiler.loader.compiler_ffi.{
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
 extern fn json_parse(input: text) -> Result<JsonValue, SimpleError>
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Result Types
@@ -466,23 +467,11 @@ impl JitInstantiator:
     me update_smf_note_sdn(smf_path: text, entry: PossibleInstantiation) -> Result<(), text>:
         """Update note.sdn in SMF file after JIT compilation.
 
-        Currently updates in-memory metadata only. Writing back to the SMF file
-        requires SMF section rewriting infrastructure (read-modify-write of the
-        note.sdn section while preserving other sections and offsets).
+        Persists updated metadata to a sidecar file next to the SMF so the
+        loader/JIT path can observe stable metadata updates without depending
+        on a full binary SMF section rewriter.
         """
-        # Writing updated note.sdn back to the SMF file is the most complex
-        # and risky stub — it requires:
-        #   1. Reading the full SMF file
-        #   2. Locating the note.sdn section (type 13)
-        #   3. Serializing updated metadata to SDN format
-        #   4. Replacing the section in-place (or appending + updating section table)
-        #   5. Rewriting the file atomically
-        pass_todo("STUB-010: write updated note.sdn back to SMF file")
-
-        if self.config.verbose:
-            print "[jit] Updated in-memory metadata for {entry.mangled_name} (file write deferred)"
-
-        # Update local metadata
+        # Update local metadata first.
         if self.loaded_metadata.contains_key(smf_path):
             var metadata = self.loaded_metadata[smf_path]
 
@@ -503,6 +492,13 @@ impl JitInstantiator:
             metadata.instantiations = metadata.instantiations.push(new_inst)
 
             self.loaded_metadata[smf_path] = metadata
+            val sidecar_path = smf_path + ".jit.note.sdn"
+            val persisted = rt_file_write_text(sidecar_path, serialize_loaded_metadata(metadata))
+            if not persisted:
+                return Err("Failed to persist JIT metadata sidecar: {sidecar_path}")
+
+            if self.config.verbose:
+                print "[jit] Persisted metadata sidecar for {entry.mangled_name}: {sidecar_path}"
 
         Ok(())
 
@@ -530,6 +526,18 @@ struct JitStats:
     smf_cache_misses: i32
     smf_files_mapped: i32
     smf_memory_mapped: i64
+
+fn serialize_loaded_metadata(metadata: LoadedMetadata) -> text:
+    var lines: [text] = []
+    for item in metadata.possible:
+        lines.push("P|" + item.template_name + "|" + item.type_args + "|" + item.mangled_name)
+    for item in metadata.instantiations:
+        lines.push(
+            "I|" + item.id.to_string() + "|" + item.template_name + "|" + item.type_args + "|" +
+            item.mangled_name + "|" + item.from_file + "|" + item.from_loc + "|" +
+            item.to_obj + "|" + item.status
+        )
+    lines.join("\n")
 
 # ============================================================================
 # Symbol Resolver
@@ -580,4 +588,3 @@ impl JitSymbolResolver:
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -7,7 +7,7 @@ use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, RangeBound};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 
-use super::super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS;
+use super::super::interpreter_eval::initialize_extern_functions;
 use super::super::{
     evaluate_expr, exec_block, exec_function, Control, Enums, ImplMethods, ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER,
     EXTERN_FUNCTIONS,
@@ -62,13 +62,7 @@ pub(crate) fn spawn_actor_with_expr(
     let handle = ACTOR_SPAWNER.with(|s| {
         s.spawn(move |inbox, outbox| {
             // Initialize thread-local EXTERN_FUNCTIONS with prelude functions
-            EXTERN_FUNCTIONS.with(|cell| {
-                let mut externs = cell.borrow_mut();
-                externs.clear();
-                for &name in PRELUDE_EXTERN_FUNCTIONS {
-                    externs.insert(name.to_string());
-                }
-            });
+            initialize_extern_functions();
 
             let inbox = Arc::new(Mutex::new(inbox));
             ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));

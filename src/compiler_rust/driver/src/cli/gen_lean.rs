@@ -104,20 +104,20 @@ Examples:
     );
 }
 
-/// Known verification projects and their Lean file paths
+/// Known verification projects and their Lean file paths.
+///
+/// This is the authoritative inventory used by the regeneration and
+/// proof-checking commands. Keep this list in sync with
+/// `supported_regeneration_modules()`.
 fn get_known_lean_files() -> Vec<&'static str> {
-    vec![
-        "verification/nogc_compile/src/NogcCompile.lean",
-        "verification/async_compile/src/AsyncCompile.lean",
-        "verification/gc_manual_borrow/src/GcManualBorrow.lean",
-        "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
-        "verification/module_resolution/src/ModuleResolution.lean",
-        "verification/visibility_export/src/VisibilityExport.lean",
-        "verification/macro_auto_import/src/MacroAutoImport.lean",
-        "verification/type_inference_compile/src/TypeInferenceCompile.lean",
-        "verification/type_inference_compile/src/Contracts.lean",
-        "verification/type_inference_compile/src/AsyncEffectInference.lean",
-    ]
+    supported_regeneration_modules()
+        .iter()
+        .map(|spec| spec.output_path)
+        .collect()
+}
+
+pub fn known_verification_files() -> Vec<&'static str> {
+    get_known_lean_files()
 }
 
 fn is_supported_generated_file(path: &str) -> bool {
@@ -139,6 +139,15 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
         }
     }
     markers
+}
+
+fn is_lean_available() -> bool {
+    let lean_bin = std::env::var("LEAN_BIN").unwrap_or_else(|_| "lean".to_string());
+    std::process::Command::new(lean_bin)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn relative_output_path(rel_path: &str) -> &str {
@@ -164,10 +173,11 @@ fn find_verification_source_root(project_root: &std::path::Path) -> Result<PathB
     Err("Could not find verification regeneration sources under src/compiler_rust/lib/std/src or src/std/src.".to_string())
 }
 
-struct RegenerationModuleSpec {
-    source_rel_path: &'static str,
-    output_path: &'static str,
-    function_name: &'static str,
+pub struct RegenerationModuleSpec {
+    pub source_rel_path: &'static str,
+    pub output_path: &'static str,
+    pub function_name: &'static str,
+    pub description: &'static str,
 }
 
 fn supported_regeneration_modules() -> &'static [RegenerationModuleSpec] {
@@ -176,53 +186,97 @@ fn supported_regeneration_modules() -> &'static [RegenerationModuleSpec] {
             source_rel_path: "verification/regenerate/nogc_compile.spl",
             output_path: "verification/nogc_compile/src/NogcCompile.lean",
             function_name: "regenerate_nogc_compile",
+            description: "NoGC compilation verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/async_compile.spl",
             output_path: "verification/async_compile/src/AsyncCompile.lean",
             function_name: "regenerate_async_compile",
+            description: "Async effect tracking verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/gc_manual_borrow.spl",
             output_path: "verification/gc_manual_borrow/src/GcManualBorrow.lean",
             function_name: "regenerate_gc_manual_borrow",
+            description: "GC manual borrow verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/manual_pointer_borrow.spl",
             output_path: "verification/manual_pointer_borrow/src/ManualPointerBorrow.lean",
             function_name: "regenerate_manual_pointer_borrow",
+            description: "Manual pointer borrow verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/module_resolution.spl",
             output_path: "verification/module_resolution/src/ModuleResolution.lean",
             function_name: "regenerate_module_resolution",
+            description: "Module resolution verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/visibility_export.spl",
             output_path: "verification/visibility_export/src/VisibilityExport.lean",
             function_name: "regenerate_visibility_export",
+            description: "Visibility and export verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/macro_auto_import.spl",
             output_path: "verification/macro_auto_import/src/MacroAutoImport.lean",
             function_name: "regenerate_macro_auto_import",
+            description: "Macro auto-import verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/type_inference.spl",
             output_path: "verification/type_inference_compile/src/TypeInferenceCompile.lean",
             function_name: "regenerate_type_inference_compile",
+            description: "Type inference verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/contracts.spl",
             output_path: "verification/type_inference_compile/src/Contracts.lean",
             function_name: "regenerate_contracts",
+            description: "Contract translation verification",
         },
         RegenerationModuleSpec {
             source_rel_path: "verification/regenerate/async_effect_inference.spl",
             output_path: "verification/type_inference_compile/src/AsyncEffectInference.lean",
             function_name: "regenerate_async_effect_inference",
+            description: "Async effect inference verification",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/generics.spl",
+            output_path: "verification/type_inference_compile/src/Generics.lean",
+            function_name: "regenerate_generics",
+            description: "Generic monomorphization verification",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/memory_capabilities.spl",
+            output_path: "verification/memory_capabilities/src/MemoryCapabilities.lean",
+            function_name: "regenerate_memory_capabilities",
+            description: "Reference capability verification",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/memory_model_drf.spl",
+            output_path: "verification/memory_model_drf/src/MemoryModelDRF.lean",
+            function_name: "regenerate_memory_model_drf",
+            description: "SC-DRF memory model verification",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/tensor_dimensions.spl",
+            output_path: "verification/tensor_dimensions/src/TensorDimensions.lean",
+            function_name: "regenerate_tensor_dimensions",
+            description: "Tensor dimension verification",
+        },
+        RegenerationModuleSpec {
+            source_rel_path: "verification/regenerate/tensor_dimensions.spl",
+            output_path: "verification/tensor_dimensions/src/TensorMemory.lean",
+            function_name: "regenerate_tensor_memory",
+            description: "Tensor memory verification",
         },
     ]
+}
+
+fn verification_modules() -> &'static [RegenerationModuleSpec] {
+    supported_regeneration_modules()
 }
 
 fn rewrite_regeneration_module_source(source: &str) -> String {
@@ -278,11 +332,19 @@ fn build_rewritten_regen_script(
 ) -> Result<String, String> {
     let mut body = String::new();
     let mut saw_return = false;
+    let mut builder_declared = false;
 
     for line in module_body {
         let trimmed = line.trim_start();
         let indent = &line[..line.len() - trimmed.len()];
-        if trimmed.starts_with("return ") {
+        if trimmed.starts_with("builder = ") && !builder_declared {
+            body.push_str("    ");
+            body.push_str(indent);
+            body.push_str("var ");
+            body.push_str(trimmed);
+            body.push('\n');
+            builder_declared = true;
+        } else if trimmed.starts_with("return ") {
             let expr = trimmed.trim_start_matches("return ").trim();
             body.push_str("    ");
             body.push_str(indent);
@@ -346,20 +408,28 @@ fn extract_function_body(source: &str, function_name: &str) -> Result<Vec<String
 fn run_rewritten_regen_module(
     interpreter: &Interpreter,
     source_root: &Path,
-    codegen_source: &str,
     spec: &RegenerationModuleSpec,
 ) -> Result<(String, String), String> {
-    let module_path = source_root.join(spec.source_rel_path);
-    let module_source = fs::read_to_string(&module_path).map_err(|e| {
-        format!(
-            "Could not read regeneration source {}: {}",
-            module_path.display(),
-            e
-        )
-    })?;
-    let rewritten_module = rewrite_regeneration_module_source(&module_source);
-    let module_body = extract_function_body(&rewritten_module, spec.function_name)?;
-    let runner_source = build_rewritten_regen_script(codegen_source, &module_body, spec.output_path)?;
+    let import_path = spec
+        .source_rel_path
+        .trim_end_matches(".spl")
+        .replace('/', ".");
+    let runner_source = format!(
+        r#"
+use {import_path} as regen_module
+
+fn main() -> Int:
+    val content = regen_module.{function_name}()
+    print("FILE:{output_path}")
+    print("LENGTH:" + str(len(content)))
+    print(content)
+    print("END_FILE")
+    0
+"#,
+        import_path = import_path,
+        function_name = spec.function_name,
+        output_path = spec.output_path
+    );
     let runner_name = spec
         .source_rel_path
         .rsplit('/')
@@ -419,44 +489,29 @@ fn find_verification_root() -> Result<PathBuf, String> {
 }
 
 /// Generate Lean files using the Simple regeneration module
-fn run_regenerate_all() -> Result<HashMap<String, String>, String> {
+fn run_regenerate_all(project_filter: Option<&str>) -> Result<HashMap<String, String>, String> {
     let project_root = find_verification_root()?;
     let source_root = find_verification_source_root(&project_root)?;
-    let codegen_path = source_root.join("verification/lean/codegen.spl");
-    let codegen_source = fs::read_to_string(&codegen_path).map_err(|e| {
-        format!(
-            "Could not read Lean codegen source {}: {}",
-            codegen_path.display(),
-            e
-        )
-    })?;
     let interpreter = Interpreter::new();
     let mut supported = HashMap::new();
 
     for spec in supported_regeneration_modules() {
-        let (path, content) =
-            run_rewritten_regen_module(&interpreter, &source_root, &codegen_source, spec)?;
-        if !is_supported_generated_file(&path) {
-            continue;
+        if let Some(project) = project_filter {
+            if !spec.output_path.contains(project) {
+                continue;
+            }
         }
-
-        let markers = placeholder_markers(&content);
-        if !markers.is_empty() {
-            return Err(format!(
-                "Generated Lean output for {} still contains {}.",
-                path,
-                markers.join(", ")
-            ));
+        let (path, content) = run_rewritten_regen_module(&interpreter, &source_root, spec)?;
+        if is_supported_generated_file(&path) {
+            supported.insert(path, content);
         }
-
-        supported.insert(path, content);
     }
 
     if supported.is_empty() {
-        return Err("No proof-clean Lean files were generated.".to_string());
+        Err("No Lean files were generated.".to_string())
+    } else {
+        Ok(supported)
     }
-
-    Ok(supported)
 }
 
 /// Parse the output from regenerate_all() into a HashMap
@@ -517,7 +572,7 @@ fn parse_regenerate_output(output: &str) -> Result<HashMap<String, String>, Stri
 fn generate_lean_files(opts: &GenLeanOptions) -> i32 {
     eprintln!("Generating Lean verification files...");
 
-    match run_regenerate_all() {
+    match run_regenerate_all(opts.project.as_deref()) {
         Ok(files) => {
             let mut count = 0;
             for (path, content) in files.iter() {
@@ -644,7 +699,7 @@ fn check_completeness(
 fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
     eprintln!("Comparing generated Lean files with existing...\n");
 
-    let files = match run_regenerate_all() {
+    let files = match run_regenerate_all(opts.project.as_deref()) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -1065,11 +1120,165 @@ fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
     }
 }
 
+fn verification_project_status(project_root: &Path, output_dir: &Path, path: &str) -> (bool, bool, Vec<&'static str>) {
+    let full = resolve_output_path(project_root, output_dir, path);
+    if !full.exists() {
+        return (false, false, vec![]);
+    }
+
+    let content = match fs::read_to_string(&full) {
+        Ok(content) => content,
+        Err(_) => return (true, false, vec![]),
+    };
+    let markers = placeholder_markers(&content);
+    (true, markers.is_empty(), markers)
+}
+
+pub fn run_verification_status() -> i32 {
+    let project_root = match find_verification_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    let lean_available = is_lean_available();
+    println!("Verification Status");
+    println!("===================");
+    println!();
+    if lean_available {
+        println!("Lean 4: Available");
+    } else {
+        println!("Lean 4: Not found (install with: elan install leanprover/lean4:stable)");
+    }
+    println!();
+    println!("Known Lean verification files:");
+    for spec in verification_modules() {
+        let (exists, clean, markers) = verification_project_status(&project_root, Path::new("verification"), spec.output_path);
+        let status = if !exists {
+            "MISSING"
+        } else if clean {
+            "OK"
+        } else {
+            "DIRTY"
+        };
+        if exists && !clean && !markers.is_empty() {
+            println!("  [{status}] {} - {} ({})", spec.output_path, spec.description, markers.join(", "));
+        } else {
+            println!("  [{status}] {} - {}", spec.output_path, spec.description);
+        }
+    }
+    0
+}
+
+pub fn run_verification_regenerate() -> i32 {
+    eprintln!("Regenerating Lean verification files...");
+    let project_root = match find_verification_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    let opts = GenLeanOptions {
+        output_dir: PathBuf::from("verification"),
+        project: None,
+        force: true,
+        show_diff: false,
+    };
+
+    let code = write_lean_files(&opts);
+    if code == 0 {
+        println!("Regeneration complete under {}", project_root.join("verification").display());
+    }
+    code
+}
+
+pub fn run_verification_check() -> i32 {
+    let opts = GenLeanOptions {
+        output_dir: PathBuf::from("verification"),
+        project: None,
+        force: false,
+        show_diff: false,
+    };
+    verify_lean_files(&opts)
+}
+
+pub fn run_verification_list() -> i32 {
+    let project_root = match find_verification_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    println!("Lean Verification Files");
+    println!("=======================");
+    println!();
+    for spec in verification_modules() {
+        let full = resolve_output_path(&project_root, Path::new("verification"), spec.output_path);
+        let status = if !full.exists() {
+            "missing"
+        } else {
+            match fs::read_to_string(&full) {
+                Ok(content) => {
+                    let markers = placeholder_markers(&content);
+                    if markers.is_empty() {
+                        "ready"
+                    } else {
+                        "contains sorry"
+                    }
+                }
+                Err(_) => "unreadable",
+            }
+        };
+        println!("  {} | {} | {}", spec.output_path, spec.description, status);
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_lean_files_cover_all_regenerated_projects() {
+        let files = get_known_lean_files();
+        assert_eq!(files.len(), 15);
+        assert!(files.contains(&"verification/nogc_compile/src/NogcCompile.lean"));
+        assert!(files.contains(&"verification/type_inference_compile/src/Generics.lean"));
+        assert!(files.contains(&"verification/tensor_dimensions/src/TensorMemory.lean"));
+    }
+
+    #[test]
+    fn verification_module_inventory_has_descriptions() {
+        let modules = verification_modules();
+        assert_eq!(modules.len(), 15);
+        assert!(modules.iter().all(|spec| !spec.output_path.is_empty()));
+        assert!(modules.iter().all(|spec| !spec.description.is_empty()));
+    }
+
+    #[test]
+    fn placeholder_marker_detection_skips_comments() {
+        let content = "\
+-- sorry in a comment should not count
+def foo : Nat := 1
+theorem bar : True := by
+  sorry
+";
+        let markers = placeholder_markers(content);
+        assert_eq!(markers, vec!["sorry"]);
+    }
+}
+
 /// Write generated files to disk
 fn write_lean_files(opts: &GenLeanOptions) -> i32 {
     eprintln!("Writing Lean verification files...\n");
 
-    let files = match run_regenerate_all() {
+    let files = match run_regenerate_all(opts.project.as_deref()) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: {}", e);

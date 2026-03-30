@@ -8,12 +8,16 @@ use crate::CompileOptions;
 
 /// Handle 'compile' command - compile source to SMF or native binary
 pub fn handle_compile(args: &[String]) -> i32 {
-    if args.len() < 2 {
-        print_compile_help();
-        return 1;
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_compile_help(false);
+        return 0;
     }
 
-    let source = PathBuf::from(&args[1]);
+    let Some(source) = parse_source_arg(args) else {
+        print_compile_help(true);
+        return 1;
+    };
+
     let output = args
         .iter()
         .position(|a| a == "-o")
@@ -35,6 +39,12 @@ pub fn handle_compile(args: &[String]) -> i32 {
     if let Some(ref b) = backend {
         if b == "cuda" || b == "ptx" {
             return compile_file_to_ptx(&source, output);
+        }
+        if b == "vhdl" {
+            eprintln!(
+                "error: --backend=vhdl is not supported by the Rust compile frontend; use the Simple compiler entrypoint for VHDL emission"
+            );
+            return 1;
         }
     }
 
@@ -116,8 +126,28 @@ fn parse_linker_flag(args: &[String]) -> Option<NativeLinker> {
         })
 }
 
-fn print_compile_help() {
-    eprintln!("error: compile requires a source file");
+fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .skip(1)
+        .enumerate()
+        .find_map(|(idx, arg)| {
+            if arg == "-o" {
+                return None;
+            }
+            if idx > 0 && args[idx] == "-o" {
+                return None;
+            }
+            if arg.starts_with('-') {
+                return None;
+            }
+            Some(PathBuf::from(arg))
+        })
+}
+
+fn print_compile_help(show_error: bool) {
+    if show_error {
+        eprintln!("error: compile requires a source file");
+    }
     eprintln!(
         "Usage: simple compile <source.spl> [-o <output>] [--native] [--backend=<name>] [--target <arch>] [--linker <name>] [--snapshot]"
     );
@@ -125,7 +155,7 @@ fn print_compile_help() {
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
-    eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output)");
+    eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output), vhdl (Simple frontend only)");
     eprintln!("  --target <arch>     Target architecture (x86_64, aarch64, etc.)");
     eprintln!("  --linker <name>     Native linker to use (mold, lld, ld)");
     eprintln!("  --layout-optimize   Enable 4KB page layout optimization");
@@ -160,5 +190,31 @@ mod tests {
         let args = vec!["compile".to_string(), "test.spl".to_string()];
         let target = parse_target_flag(&args);
         assert!(target.is_none());
+    }
+
+    #[test]
+    fn test_parse_source_arg_allows_flags_before_source() {
+        let args = vec![
+            "compile".to_string(),
+            "--backend=vhdl".to_string(),
+            "test.spl".to_string(),
+            "-o".to_string(),
+            "out.vhd".to_string(),
+        ];
+        let source = parse_source_arg(&args);
+        assert_eq!(source, Some(PathBuf::from("test.spl")));
+    }
+
+    #[test]
+    fn test_parse_source_arg_skips_output_value() {
+        let args = vec![
+            "compile".to_string(),
+            "-o".to_string(),
+            "out.smf".to_string(),
+            "--snapshot".to_string(),
+            "test.spl".to_string(),
+        ];
+        let source = parse_source_arg(&args);
+        assert_eq!(source, Some(PathBuf::from("test.spl")));
     }
 }

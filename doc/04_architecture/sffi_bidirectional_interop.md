@@ -18,7 +18,7 @@
 This document describes the architecture for bidirectional class-level interop between Simple and C/C++. The feature enables:
 
 - **Direction A (Simple -> C/C++):** Write a class in Simple, annotate with `@export("C")`, compiler generates C ABI wrappers, C headers, and C++ wrapper headers.
-- **Direction B (C++ -> Simple):** Existing 3-tier SFFI (`.wrapper_spec` -> glue -> `extern fn` -> Simple class). Already designed, needs plugin manifest to unblock.
+- **Direction B (C++ -> Simple):** Existing 3-tier SFFI (`.wrapper_spec` -> generated manifest -> `extern fn` -> Simple class). Implemented via manifest-backed extern registration and dynamic library lookup.
 - **Direction C (Layout Verification):** `@repr("C")` layout enforcement, compile-time `_Static_assert` generation, SFFI lint rules.
 
 ---
@@ -289,7 +289,7 @@ New `link_to_shared()` function:
 
 - **Opaque handle pattern** ensures binary compatibility: internal class layout can change without breaking C consumers.
 - **`_Static_assert`** in generated headers catches layout mismatches at C compile time.
-- **Runtime `spl_verify_layouts()`** catches cross-compiler layout differences at load time (debug mode).
+- Runtime layout verification remains a future extension; the current implementation relies on generated compile-time layout assertions in C and C++ headers.
 - **`@repr("C")`** on value-type structs guarantees deterministic layout matching C rules.
 
 ### 6.3 Symbol Naming Convention
@@ -304,11 +304,10 @@ All exported symbols use the `spl_` prefix to avoid namespace collisions:
 | Standalone function `version` | `spl_version()` |
 | Library init | `spl_library_init()` |
 | Library shutdown | `spl_library_shutdown()` |
-| Layout verifier | `spl_verify_layouts()` |
 
 ### 6.4 Thread Safety
 
-- `spl_library_init()` uses an atomic flag for idempotent initialization.
+- `spl_library_init()` uses a guarded library state flag for idempotent initialization, with constructor / `DllMain` auto-init hooks in shared-library builds.
 - Handle-based API is inherently thread-safe if consumers don't share handles across threads without synchronization.
 - `me` (mutable) methods on shared handles require external synchronization — documented in generated headers.
 
@@ -362,8 +361,8 @@ Phase 4: C++ -> Simple (P2)
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| ABI differences between compilers (MSVC vs GCC padding) | Silent data corruption | `_Static_assert` in headers, runtime `spl_verify_layouts()` |
+| ABI differences between compilers (MSVC vs GCC padding) | Silent data corruption | `_Static_assert` / `static_assert` in generated headers |
 | Generic types in exported classes | Compile error or mangled symbols | Reject generics in SFFI001 lint rule |
 | GC interaction with C consumers | Use-after-free if C holds stale handle | Reference counting on handles, weak handle support |
 | Windows DLL complexity (import lib, DllMain) | Platform-specific build failures | Comprehensive CI on Windows (MSVC + MinGW) |
-| Thread safety of runtime init | Race condition on first call | Atomic init flag, `call_once` pattern |
+| Thread safety of runtime init | Race condition on first call | Guarded init state + auto-init hooks; tighten with `call_once` if lifecycle complexity grows |

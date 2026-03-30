@@ -1,6 +1,6 @@
 # Security Library Guide
 
-The security library provides cross-cutting security for Simple applications via MDSOC/AOP. Security concerns are woven at compile time — business modules contain zero security code.
+The security library provides cross-cutting security for Simple applications via MDSOC/AOP. Compile-time MIR weaving is the primary execution path, and business modules can stay free of direct security boilerplate. The interpreter also has a narrow verified runtime interception slice for `init(...)` join points, but that should not be treated as a blanket replacement for compiled security weaving.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ std.security
 ├── types           # SecurityEvent, AuditEntry, SecurityContext, AuditConfig
 ├── audit_log       # Structured JSON audit logging
 ├── sanitize        # HTML, URL, path, identifier sanitization
-└── aspects/        # AOP advice (woven automatically)
+└── aspects/        # AOP advice (primarily compile-time woven)
     ├── audit_advice      # Around/After: request + auth logging
     ├── auth_advice       # Before: authentication checks
     └── validation_advice # Around: output sanitization
@@ -314,7 +314,7 @@ Layer rules: lower layers cannot depend on upper layers. The audit layer observe
 
 ### AOP Aspects (Automatic)
 
-These are woven at compile time — you don't call them manually:
+These are primarily woven at compile time — you don't call them manually. Treat interpreter-mode interception as feature-specific and test-backed rather than as general security-AOP coverage:
 
 | Aspect | Form | What It Does | Predicate |
 |--------|------|-------------|-----------|
@@ -330,7 +330,7 @@ These are woven at compile time — you don't call them manually:
 ```simple
 @requires_auth
 fn get_user_profile(request: HttpRequestData) -> PhaseResult:
-    # Auth check is woven automatically before this runs
+    # Auth check is normally compile-time woven before this runs
     # If SecurityContext is not authenticated, returns 401
     pass_todo("implement profile handler")
 ```
@@ -359,8 +359,9 @@ auth_ctx.has_capability("fs_read")  # true
 
 ## Related Documents
 
-- [Design](../../design/security_aop.md) — Architecture diagrams and type definitions
-- [Requirements](../../plan/requirement/security_aop.md) — Acceptance criteria
-- [NFR](../../plan/nfr/security_baseline.md) — Performance and quality targets
-- [Research](../../research/security_aop_architecture_2026-03-28.md) — Gap analysis and decisions
-- [Limitations](../../tracking/bug/security_aop_limitations.md) — Known limitations
+- [Design](../../05_design/security_aop.md) — Architecture diagrams and type definitions
+- [Requirements](../../02_requirements/feature/security_aop.md) — Acceptance criteria
+- [NFR](../../02_requirements/nfr/security_baseline.md) — Performance and quality targets
+- [Research](../../01_research/local/security_aop_architecture_2026-03-28.md) — Gap analysis and decisions
+- [Limitations](../../08_tracking/bug/security_aop_limitations.md) — Known limitations
+- [AOP Verification](../../09_report/2026/03/aop_completion_verification_2026-03-31.md) — Verified AOP/compiler/runtime slice

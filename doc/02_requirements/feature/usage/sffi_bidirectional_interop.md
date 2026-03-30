@@ -1,9 +1,9 @@
 # SFFI Bidirectional Class Interop
 
 **Feature:** SFFI Bidirectional Class Interop
-**Status:** Design Complete
+**Status:** Implemented
 **Created:** 2026-03-28
-**Plan:** [parsed-questing-goose.md](/.claude/plans/parsed-questing-goose.md)
+**Plan:** [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
 **Related design:** [sffi_external_library_pattern.md](/doc/05_design/sffi_external_library_pattern.md), [cpp_wrapper_generator_design.md](/doc/05_design/cpp_wrapper_generator_design.md), [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
 **Related research:** [sffi_dynamic_loading_2026-02-21.md](/doc/01_research/local/sffi_dynamic_loading_2026-02-21.md)
 **NFR:** [sffi_bidirectional_interop.md](/doc/02_requirements/nfr/sffi_bidirectional_interop.md)
@@ -22,9 +22,9 @@ This is critical for incremental migration of C++ codebases to Simple, where bot
 
 | Direction | Status | Mechanism |
 |-----------|--------|-----------|
-| Simple -> C (functions) | WORKING | `extern fn rt_*()` + C/LLVM backend |
-| Simple -> C++ (classes) | PARTIAL | 3-tier SFFI: `.wrapper_spec` -> Rust glue -> `extern fn` -> Simple class. **Blocked**: semantic analyzer rejects unregistered extern fns |
-| C/C++ -> Simple | NOT IMPLEMENTED | No export mechanism, no wrapper generation |
+| Simple -> C/C++ export | IMPLEMENTED | `@export("C")` wrappers + generated `.h` / `.hpp` headers + shared-library build mode |
+| C/C++ -> Simple wrapper registration | IMPLEMENTED | `.wrapper_spec` -> manifest scaffold -> `extern fn` acceptance via plugin manifest + runtime dynamic loading |
+| Runtime layout verification helper | DEFERRED | Compile-time layout checks implemented; runtime `spl_verify_layouts()` remains a future extension |
 
 ### Existing Infrastructure
 
@@ -279,17 +279,17 @@ Embedded systems and protocol implementations frequently use bitfields. Without 
 **Dependencies:** None
 
 **Description:**
-A plugin manifest system (`plugins.sdn`) shall allow declaring extern function names per external library, so that the semantic analyzer accepts these functions provisionally without requiring them in the built-in runtime whitelist. This unblocks the C++ -> Simple direction of the existing three-tier SFFI pattern.
+A plugin manifest system (`manifest.sdn`) shall allow declaring extern function names per external library, so that the semantic analyzer accepts these functions provisionally without requiring them in the built-in runtime whitelist. This unblocks the C++ -> Simple direction of the existing three-tier SFFI pattern.
 
 **Rationale:**
 The semantic analyzer currently rejects all `extern fn` declarations that are not in the hardcoded runtime whitelist of 129 functions. This blocks the entire C++ -> Simple SFFI direction (Phase 4). A plugin manifest is the minimal change needed to make the semantic analyzer plugin-aware without requiring dynamic library loading at compile time.
 
 **Acceptance Criteria:**
-1. A `plugins.sdn` file in the project root or `~/.simple/plugins/` lists plugin libraries and their exported extern function names.
+1. A `manifest.sdn` file in `~/.simple/plugins/` lists plugin libraries and their exported extern function names. Tests may override the path with `SIMPLE_PLUGIN_MANIFEST`.
 2. The semantic analyzer reads the manifest before type-checking and registers listed functions as provisionally available.
 3. Code using `extern fn rt_regex_new(...)` compiles successfully when `rt_regex_new` is listed in the manifest.
 4. Code using an `extern fn` not in the manifest or runtime whitelist still produces a clear error.
-5. The CLI provides `bin/simple plugin register <library.wrapper_spec>` to auto-generate manifest entries from a wrapper spec.
+5. The CLI provides `bin/simple plugin install <manifest.sdn>`, `bin/simple plugin list`, and `bin/simple plugin remove <name>` for manifest-managed plugins.
 6. The manifest format is SDN (not JSON/YAML), consistent with Simple conventions.
 7. Missing plugin `.so` files at runtime produce a clear error message with the expected library path.
 

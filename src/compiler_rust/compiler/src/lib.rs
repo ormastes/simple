@@ -53,6 +53,7 @@ pub mod parallel;
 pub mod pattern_analysis;
 pub mod pipeline;
 pub mod pipeline_parallel;
+pub mod plugin_manifest;
 pub mod predicate;
 pub mod predicate_parser;
 pub mod project;

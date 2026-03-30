@@ -574,8 +574,8 @@ fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Template:
     - For each template: kind (u8), serialized AST node
 
     If the bytes contain a valid GTPL header, extracts the template kind.
-    Full AST node deserialization is not yet implemented; body bytes are
-    preserved for downstream compiler FFI to handle.
+    This linker-side parser preserves opaque body bytes for compiler FFI and
+    peels off a trailing constraint block when one is self-consistent.
     """
     # Validate minimum size for GTPL header (4 + 2 + 4 = 10 bytes)
     if bytes.len() >= 10:
@@ -605,19 +605,16 @@ fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Template:
                     case 4: TemplateKind.Trait
                     case _: TemplateKind.Function
 
-            # Extract body bytes (everything after kind byte)
-            # Full AST deserialization blocked — compiler FFI handles the raw bytes
-            var body: [u8] = []
-            if bytes.len() > 11:
-                body = bytes[11..]
+            # Preserve opaque body bytes for the compiler FFI, but peel off
+            # a valid trailing constraint block if one is present.
+            val (body, constraints) = split_gtpl_body_and_constraints(bytes, 11)
 
-            pass_todo("STUB-009: deserialize GTPL binary format — full AST node deserialization not yet implemented; body bytes passed through for compiler FFI")
             return Template(
                 name: symbol.name,
                 type_params: generate_type_params(symbol.template_param_count),
                 kind: kind,
                 body: body,
-                constraints: []
+                constraints: constraints
             )
 
     # No valid GTPL header — treat entire byte array as opaque body
@@ -628,6 +625,127 @@ fn parse_template(bytes: [u8], symbol: SmfSymbol) -> Template:
         body: bytes,
         constraints: []
     )
+
+fn parse_gtpl_constraints(bytes: [u8], offset: i32) -> [TypeConstraint]:
+    """Parse type constraints from GTPL binary data at the given offset.
+
+    Constraint block format (v1.1+):
+      count: u32 (4 bytes, little-endian)
+      For each constraint:
+        param_len: u16 (2 bytes) + param: [u8; param_len]
+        bound_len: u16 (2 bytes) + bound: [u8; bound_len]
+
+    Returns empty list if offset is beyond data or count is zero.
+    """
+    var constraints: [TypeConstraint] = []
+    # Need at least 4 bytes for the count field
+    if offset + 4 > bytes.len():
+        return constraints
+
+    # Read count (u32 little-endian)
+    val c0 = bytes[offset] as i32
+    val c1 = bytes[offset + 1] as i32
+    val c2 = bytes[offset + 2] as i32
+    val c3 = bytes[offset + 3] as i32
+    val count = c0 | (c1 << 8) | (c2 << 16) | (c3 << 24)
+
+    if count == 0:
+        return constraints
+
+    var pos = offset + 4
+    var i = 0
+    while i < count:
+        # Read param string (length-prefixed u16)
+        if pos + 2 > bytes.len():
+            return constraints
+        val p_len = (bytes[pos] as i32) | ((bytes[pos + 1] as i32) << 8)
+        pos = pos + 2
+        if pos + p_len > bytes.len():
+            return constraints
+        var param_chars: [text] = []
+        var j = 0
+        while j < p_len:
+            param_chars = param_chars.push(char_from_byte_obj(bytes[pos + j]))
+            j = j + 1
+        val param = param_chars.join("")
+        pos = pos + p_len
+
+        # Read bound string (length-prefixed u16)
+        if pos + 2 > bytes.len():
+            return constraints
+        val b_len = (bytes[pos] as i32) | ((bytes[pos + 1] as i32) << 8)
+        pos = pos + 2
+        if pos + b_len > bytes.len():
+            return constraints
+        var bound_chars: [text] = []
+        var k = 0
+        while k < b_len:
+            bound_chars = bound_chars.push(char_from_byte_obj(bytes[pos + k]))
+            k = k + 1
+        val bound = bound_chars.join("")
+        pos = pos + b_len
+
+        constraints = constraints.push(TypeConstraint(param: param, bound: bound))
+        i = i + 1
+
+    constraints
+
+fn split_gtpl_body_and_constraints(bytes: [u8], body_offset: i32) -> ([u8], [TypeConstraint]):
+    """Split GTPL payload into opaque body bytes and an optional trailing constraint block.
+
+    The current writer does not include a body-length field, so detection is
+    heuristic: scan candidate suffix offsets and accept the first offset whose
+    constraint block fully consumes the remaining bytes.
+    """
+    var body: [u8] = []
+    if body_offset >= bytes.len():
+        return (body, [])
+
+    body = bytes[body_offset..]
+    var candidate = body_offset
+    while candidate + 4 <= bytes.len():
+        val constraints = parse_gtpl_constraints(bytes, candidate)
+        if constraints.len() > 0 and gtpl_constraints_block_size(bytes, candidate, constraints.len() as i32) == (bytes.len() - candidate):
+            return (bytes[body_offset:candidate], constraints)
+        candidate = candidate + 1
+
+    (body, [])
+
+fn gtpl_constraints_block_size(bytes: [u8], offset: i32, expected_count: i32) -> i32:
+    """Return constraint block size when the block is well-formed, otherwise 0."""
+    if offset + 4 > bytes.len() or expected_count <= 0:
+        return 0
+
+    var pos = offset + 4
+    var i = 0
+    while i < expected_count:
+        if pos + 2 > bytes.len():
+            return 0
+        val p_len = (bytes[pos] as i32) | ((bytes[pos + 1] as i32) << 8)
+        pos = pos + 2
+        if pos + p_len > bytes.len():
+            return 0
+        pos = pos + p_len
+
+        if pos + 2 > bytes.len():
+            return 0
+        val b_len = (bytes[pos] as i32) | ((bytes[pos + 1] as i32) << 8)
+        pos = pos + 2
+        if pos + b_len > bytes.len():
+            return 0
+        pos = pos + b_len
+        i = i + 1
+
+    pos - offset
+
+fn char_from_byte_obj(b: u8) -> text:
+    """Convert byte to single-character string using ASCII mapping."""
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i32) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        ascii_table[idx:idx + 1]
+    else:
+        "?"
 
 fn generate_type_params(count: i32) -> [text]:
     """Generate type parameter names T, U, V, etc."""

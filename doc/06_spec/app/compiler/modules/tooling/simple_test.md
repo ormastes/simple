@@ -15,7 +15,7 @@ command.
 
 ## Current Baremetal Status
 
-Observed on this host on 2026-03-23:
+Observed on this host on 2026-03-31:
 
 - `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` passes end to end with `ghdl`
 - `test/integration/debug/hardware/stm32wb_openocd_spec.spl` passes as a repo-readiness spec
@@ -23,13 +23,17 @@ Observed on this host on 2026-03-23:
 - `test/integration/debug/hardware/stm32wb_stlink_spec.spl` passes as a checked-config spec
 - `test/integration/debug/hardware/stm32h7_stlink_spec.spl` passes as a checked-config spec
 - `test/integration/debug/hardware/hardware_check_spec.spl` passes and confirms local tool presence
-- `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` still has failures and stale assumptions
-- composite remote `--mode=interpreter(remote(baremetal(...)))` is currently not preserved by the Rust CLI entrypoint and falls back to plain interpreter mode
+- `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` is green for runtime/readiness checks
+- `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl` is green and verifies the CH32 composite path no longer short-circuits
+- `test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl` is green and isolates the raw RV32 injected path
+- composite JIT target selection for CH32 works through the adapter-backed runner path
 
 In practice this means:
 
 - the STM lanes are currently useful for readiness/config validation and for the live helper smokes inside the remote-baremetal feature spec
-- the RTL RISC-V32 emulator lane is the only checked-in baremetal lane that currently runs fully end to end in normal local use
+- the stable QEMU RV32 ELF/shared-workload lane is the primary checked-in remote baremetal execution proof
+- CH32 has a real composite-runner execution lane and a separate direct-probe readiness/output lane
+- the RTL RISC-V32 emulator lane remains a real in-tree execution lane
 - TRACE32 remains blocked by a mix of host startup issues and one repo-side spec/runtime issue
 
 ## Usage
@@ -64,12 +68,17 @@ instead of treating `--target` as the runtime selector.
 Recommended forms:
 
 ```bash
-# QEMU RV32 compatibility path
-# Note: the Rust CLI currently warns that this mode is unknown and falls back
-# to interpreter mode. Keep this command documented because it is still the
-# intended mode shape, but do not treat it as a verified CLI path yet.
-bin/simple test test/integration/baremetal/qemu_baremetal_lib_smoke_spec.spl \
-  '--mode=interpreter(remote(baremetal(riscv32)))'
+# Stable QEMU RV32 shared-workload proof
+bin/simple test test/integration/remote_jit/qemu_rv32_library_semihost_spec.spl
+
+# Raw RV32 injected regression lane
+bin/simple test test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl
+
+# CH32 composite-runner regression lane
+bin/simple test test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl
+
+# CH32 direct-probe readiness and SDI-output probe
+bin/simple test test/integration/remote_jit/ch32v307_composite_runner_spec.spl
 
 # RTL RV32I emulator path that works on this host today
 bin/simple test test/feature/baremetal/ghdl_riscv32_semihost_spec.spl
@@ -103,11 +112,9 @@ The first class verifies checked-in board metadata, helper fixture presence,
 and launch command construction. They do not by themselves prove full on-device
 test execution.
 
-The second class attempts live debugger/transport checks and is closer to a
-system smoke, but it is currently not cleanly green because:
-
-- the TRACE32 branch still fails before it can classify the host state cleanly
-- one expectation in that spec drifted after an ELF fixture was added
+The second class attempts live debugger/transport checks and is the low-level
+runtime proof for remote lanes. It is green for the current repo-side scope,
+while TRACE32 full execution still remains host-blocked.
 
 ### Current Meaning Of The RTL RISC-V32 Emulator Spec
 
@@ -122,6 +129,22 @@ representative working baremetal lane in-tree. It exercises:
 
 This is a real execution lane, not just a wiring/readiness check.
 
+### Current Meaning Of The CH32 Specs
+
+The CH32-related specs split into two classes:
+
+- composite-runner regression:
+  - `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl`
+- direct probe readiness and workload-output probe:
+  - `test/integration/remote_jit/ch32v307_composite_runner_spec.spl`
+  - `test/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl`
+
+The first class proves the repo-side JIT composite path is wired through the
+real adapter-backed CH32 execution path.
+
+The second class proves direct `wlink` hardware access, RAM/register access,
+and checked-in workload execution attempts using the probe’s own flow.
+
 ### Current Meaning Of The TRACE32 Specs
 
 Today the TRACE32 specs are readiness specs, not full hardware verification.
@@ -135,7 +158,7 @@ They validate:
 They do not yet prove real on-device execution because that still depends on a
 working local TRACE32 PowerView session.
 
-On this host on 2026-03-23, direct `t32rem ... PING` still times out, so these
+On this host on 2026-03-31, direct `t32rem ... PING` still times out, so these
 lanes should still be treated as blocked for full execution.
 
 ### TRACE32 Bring-Up Helpers

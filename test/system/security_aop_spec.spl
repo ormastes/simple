@@ -1,14 +1,18 @@
 # @cover src/compiler/85.mdsoc/security.spl 80%
+# @cover src/lib/common/security/types.spl 70%
+# @cover src/lib/common/security/audit_log.spl 70%
+# @cover src/lib/common/security/sanitize.spl 80%
+# @cover src/lib/common/ui/capability_policy.spl 80%
 """
 # Security AOP Architecture System Specification
 
 **Feature IDs:** #AC-1 through #AC-10
 **Category:** Infrastructure
 **Difficulty:** 4/5
-**Status:** In Progress
+**Status:** Implemented
 **Requirements:** doc/02_requirements/feature/security_aop.md
 **Plan:** N/A
-**Design:** N/A
+**Design:** doc/05_design/security_aop.md
 **Research:** doc/01_research/security_aop_architecture_2026-03-28.md
 
 ## Overview
@@ -27,6 +31,7 @@ join point kind.
 | AOP Aspect | Cross-cutting advice woven at compile time at matched join points |
 | Default-Deny | Capability policy that blocks all ungranted capabilities by default |
 | SecurityGate | Join point kind for capability-gated access points |
+| Security Layer Checker | Compile-time enforcement of security layer dependency ordering |
 
 ## Related Specifications
 
@@ -76,7 +81,21 @@ use std.http_server.types.{Phase, PhaseResult}
 
 # Imports: MDSOC weaving
 use compiler.mdsoc.weaving.join_point_kind.{JoinPointKind}
-use compiler.mdsoc.weaving.join_point.{JoinPointContext}
+use compiler.mdsoc.weaving.join_point.{JoinPoint, JoinPointContext}
+use compiler.mdsoc.weaving.weaving_config.{WeavingConfig, weavingconfig_disabled}
+
+# Imports: MDSOC security dimension integration
+use compiler.mdsoc.security.{
+    security_dimension_def, security_layer_order, is_valid_security_layer,
+    enable_security_weaving, has_security_dimension,
+    security_layer_checker, check_security_dependency,
+    detect_security_gate, is_security_gate,
+    validate_security_dimension
+}
+use compiler.mdsoc.types.mdsoc_manifest.{MdsocManifest}
+use compiler.mdsoc.types.dimension_def.{DimensionDef}
+use compiler.mdsoc.types.layer_def.{LayerDef}
+use compiler.mdsoc.types.layer_direction.{LayerDirection}
 
 
 # ============================================================================
@@ -1065,3 +1084,244 @@ describe "Capability SDN Config Parsing (AC-5 + AC-6 integration)":
             val sdn = "window:\n    id: test\n    default: deny\ngranted:\n    - FlyToMoon\n"
             val result = parse_capability_config(sdn, "test")
             expect(result.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Security Dimension Integration — Compile-Time Weaving Orchestrator
+# ============================================================================
+
+describe "Security Dimension Integration (compiler.mdsoc.security)":
+    """
+    ## Compile-Time Security Weaving Orchestrator
+
+    Tests for the MDSOC security dimension integration module that:
+    - Builds the canonical 5-layer security DimensionDef
+    - Validates layer ordering and dependency direction
+    - Merges security AOP aspects into the weaving pipeline
+    - Detects SecurityGate join points for capability-gated code
+    """
+
+    context "security_dimension_def":
+        it "returns dimension named security":
+            val dim = security_dimension_def()
+            expect(dim.name).to_equal("security")
+
+        it "has exactly 5 layers":
+            val dim = security_dimension_def()
+            expect(dim.layer.layer_count()).to_equal(5)
+
+        it "crypto is at level 0":
+            val dim = security_dimension_def()
+            val level = dim.layer.get_level("crypto")
+            expect(level).to_equal(0)
+
+        it "enforcement is at level 1":
+            val dim = security_dimension_def()
+            val level = dim.layer.get_level("enforcement")
+            expect(level).to_equal(1)
+
+        it "validation is at level 2":
+            val dim = security_dimension_def()
+            val level = dim.layer.get_level("validation")
+            expect(level).to_equal(2)
+
+        it "auth is at level 3":
+            val dim = security_dimension_def()
+            val level = dim.layer.get_level("auth")
+            expect(level).to_equal(3)
+
+        it "audit is at level 4":
+            val dim = security_dimension_def()
+            val level = dim.layer.get_level("audit")
+            expect(level).to_equal(4)
+
+        it "dimension_kind is horizontal":
+            val dim = security_dimension_def()
+            expect(dim.dimension_kind).to_equal("horizontal")
+
+    context "security_layer_order":
+        it "returns 5 layers in correct order":
+            val layers = security_layer_order()
+            expect(layers.len()).to_equal(5)
+            expect(layers[0]).to_equal("crypto")
+            expect(layers[1]).to_equal("enforcement")
+            expect(layers[2]).to_equal("validation")
+            expect(layers[3]).to_equal("auth")
+            expect(layers[4]).to_equal("audit")
+
+    context "is_valid_security_layer":
+        it "accepts all 5 valid layer names":
+            expect(is_valid_security_layer("crypto")).to_equal(true)
+            expect(is_valid_security_layer("enforcement")).to_equal(true)
+            expect(is_valid_security_layer("validation")).to_equal(true)
+            expect(is_valid_security_layer("auth")).to_equal(true)
+            expect(is_valid_security_layer("audit")).to_equal(true)
+
+        it "rejects invalid layer names":
+            expect(is_valid_security_layer("network")).to_equal(false)
+            expect(is_valid_security_layer("database")).to_equal(false)
+            expect(is_valid_security_layer("")).to_equal(false)
+
+    context "validate_security_dimension":
+        it "accepts canonical security dimension":
+            val dim = security_dimension_def()
+            val result = validate_security_dimension(dim)
+            expect(result.is_err()).to_equal(false)
+
+        it "rejects dimension with wrong name":
+            var dim = DimensionDef.new("logging", "logging/{name}")
+            dim.layer = LayerDef.new(security_layer_order(), LayerDirection.LowerToUpper)
+            val result = validate_security_dimension(dim)
+            expect(result.is_err()).to_equal(true)
+
+        it "rejects dimension with missing layers":
+            var dim = DimensionDef.new("security", "security/{name}")
+            dim.layer = LayerDef.new(["crypto", "auth"], LayerDirection.LowerToUpper)
+            val result = validate_security_dimension(dim)
+            expect(result.is_err()).to_equal(true)
+
+    context "enable_security_weaving":
+        it "enables weaving on a disabled base config":
+            val base = weavingconfig_disabled()
+            val sec = enable_security_weaving(base)
+            expect(sec.enabled).to_equal(true)
+
+        it "adds before advices for auth and validation":
+            val base = weavingconfig_disabled()
+            val sec = enable_security_weaving(base)
+            expect(sec.before_advices.len()).to_be_greater_than(0)
+
+        it "adds around advices for audit and sanitization":
+            val base = weavingconfig_disabled()
+            val sec = enable_security_weaving(base)
+            expect(sec.around_advices.len()).to_be_greater_than(0)
+
+        it "adds after_success advices for auth event logging":
+            val base = weavingconfig_disabled()
+            val sec = enable_security_weaving(base)
+            expect(sec.after_success_advices.len()).to_be_greater_than(0)
+
+        it "adds after_error advices for auth failure logging":
+            val base = weavingconfig_disabled()
+            val sec = enable_security_weaving(base)
+            expect(sec.after_error_advices.len()).to_be_greater_than(0)
+
+    context "has_security_dimension":
+        it "returns false for empty manifest":
+            val m = MdsocManifest.new("test")
+            expect(has_security_dimension(m)).to_equal(false)
+
+    context "security_layer_checker":
+        it "creates checker with no initial violations":
+            val checker = security_layer_checker()
+            expect(checker.has_violations()).to_equal(false)
+            expect(checker.violation_count()).to_equal(0)
+
+    context "check_security_dependency":
+        it "allows audit depending on crypto (higher on lower)":
+            val result = check_security_dependency("std.security.audit", "std.security.crypto")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+        it "allows auth depending on enforcement":
+            val result = check_security_dependency("std.security.auth", "std.security.enforcement")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+        it "allows audit depending on auth":
+            val result = check_security_dependency("std.security.audit", "std.security.auth")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+        it "allows audit depending on validation":
+            val result = check_security_dependency("std.security.audit", "std.security.validation")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+        it "allows same-layer dependency (crypto on crypto)":
+            val result = check_security_dependency("std.security.crypto", "std.security.crypto")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+        it "blocks crypto depending on audit (lower on higher)":
+            val result = check_security_dependency("std.security.crypto", "std.security.audit")
+            val has_error = result.?
+            expect(has_error).to_equal(true)
+
+        it "blocks enforcement depending on auth":
+            val result = check_security_dependency("std.security.enforcement", "std.security.auth")
+            val has_error = result.?
+            expect(has_error).to_equal(true)
+
+        it "blocks crypto depending on validation":
+            val result = check_security_dependency("std.security.crypto", "std.security.validation")
+            val has_error = result.?
+            expect(has_error).to_equal(true)
+
+        it "allows unregistered modules without constraint":
+            val result = check_security_dependency("std.http.server", "std.security.crypto")
+            val has_error = result.?
+            expect(has_error).to_equal(false)
+
+    context "detect_security_gate":
+        it "returns join point when cap= attribute present":
+            val jp = detect_security_gate("read_file", "std.io", ["cap=FileSystemRead", "resource=/data"])
+            val is_present = jp.?
+            expect(is_present).to_equal(true)
+
+        it "returns nil when no cap= attribute":
+            val jp = detect_security_gate("compute", "std.math", ["pure"])
+            val is_present = jp.?
+            expect(is_present).to_equal(false)
+
+        it "returns nil for empty attributes":
+            val jp = detect_security_gate("noop", "app", [])
+            val is_present = jp.?
+            expect(is_present).to_equal(false)
+
+    context "is_security_gate":
+        it "returns true for SecurityGate join point":
+            val kind = JoinPointKind.SecurityGate(capability: "net", resource: "tcp")
+            val ctx = JoinPointContext(
+                function_name: "connect",
+                module_path: "std.net",
+                signature: "",
+                attributes: [],
+                effects: []
+            )
+            val jp = JoinPoint(kind: kind, block_id: 0, instruction_index: 0, context: ctx)
+            expect(is_security_gate(jp)).to_equal(true)
+
+        it "returns false for Execution join point":
+            val kind = JoinPointKind.Execution(function_name: "main", signature: "fn()")
+            val ctx = JoinPointContext(
+                function_name: "main",
+                module_path: "app",
+                signature: "fn()",
+                attributes: [],
+                effects: []
+            )
+            val jp = JoinPoint(kind: kind, block_id: 0, instruction_index: 0, context: ctx)
+            expect(is_security_gate(jp)).to_equal(false)
+
+        it "returns false for Error join point":
+            val kind = JoinPointKind.Error(location: "test.spl:1", error_type: "IOError")
+            val ctx = JoinPointContext(
+                function_name: "fail",
+                module_path: "test",
+                signature: "",
+                attributes: [],
+                effects: []
+            )
+            val jp = JoinPoint(kind: kind, block_id: 0, instruction_index: 0, context: ctx)
+            expect(is_security_gate(jp)).to_equal(false)
+
+    context "negative — layer dependency violations produce error messages":
+        it "violation message mentions layer names":
+            val result = check_security_dependency("std.security.crypto", "std.security.audit")
+            match result:
+                Some(msg):
+                    val has_content = msg.len() > 0
+                    expect(has_content).to_equal(true)
+                nil:
+                    expect(true).to_equal(false)

@@ -1,0 +1,199 @@
+# CH32V307 Adapter
+#
+# ExecTarget implementation for CH32V307 real hardware via direct `wlink`
+# commands. Unlike the OpenOCD and GDB-backed adapters, each operation is a
+# short-lived CLI call, so connect/disconnect only validates availability and
+# target presence while register and memory operations reconnect per command.
+#
+# Feature ID: #RJE-013
+
+use std.io_runtime.{shell}
+use std.nogc_sync_mut.debug.remote.exec.types.{
+    MemoryMap, Architecture
+}
+use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
+use std.nogc_sync_mut.jit.jit_util.{hex_0x_i64, parse_hex}
+
+val CH32V307_PC_REG: i64 = 0x7B1
+val CH32V307_CHIP = "CH32V30X"
+
+fn ch32v307_wlink_base_cmd() -> text:
+    "wlink --chip {CH32V307_CHIP}"
+
+fn ch32v307_available() -> bool:
+    val result = shell("command -v wlink >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn ch32v307_detected() -> bool:
+    val result = shell("timeout 10 {ch32v307_wlink_base_cmd()} status 2>&1")
+    val combined = result.stdout + result.stderr
+    result.exit_code == 0 and combined.contains("CH32V307")
+
+fn ch32v307_register_id(reg: i64) -> i64:
+    if reg == 32:
+        return CH32V307_PC_REG
+    reg
+
+fn strip_ansi_escape(raw: text) -> text:
+    var result = ""
+    var i = 0
+    while i < raw.len():
+        val ch = raw[i:i + 1]
+        if ch == "\u001b":
+            i = i + 1
+            if i < raw.len() and raw[i:i + 1] == "[":
+                i = i + 1
+                while i < raw.len():
+                    val esc = raw[i:i + 1]
+                    val is_digit = esc >= "0" and esc <= "9"
+                    if is_digit or esc == ";" or esc == "?":
+                        i = i + 1
+                        continue
+                    i = i + 1
+                    break
+                continue
+            continue
+        result = result + ch
+        i = i + 1
+    result
+
+fn parse_ch32v307_register_value(raw: text, reg: i64) -> i64:
+    val cleaned = strip_ansi_escape(raw)
+    val lines = cleaned.split("\n")
+    val prefix = if reg == 32: "dpc(pc):" else: "x{reg}"
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with(prefix):
+            continue
+        val hex_start = trimmed.index_of("0x") ?? -1
+        if hex_start < 0:
+            return -1
+        return parse_hex(trimmed[hex_start:trimmed.len()])
+    -1
+
+fn parse_ch32v307_dump_bytes(raw: text, size: i64) -> [i32]:
+    val cleaned = strip_ansi_escape(raw)
+    val lines = cleaned.split("\n")
+    var bytes: [i32] = []
+    for line in lines:
+        val trimmed = line.trim()
+        val colon = trimmed.index_of(":") ?? -1
+        if colon < 0:
+            continue
+        val tail = trimmed[colon + 1:].trim()
+        val parts = tail.split(" ")
+        for part in parts:
+            val token = part.trim()
+            if token.len() != 2:
+                continue
+            val is_hex =
+                ((token[0:1] >= "0" and token[0:1] <= "9") or (token[0:1].lower() >= "a" and token[0:1].lower() <= "f")) and
+                ((token[1:2] >= "0" and token[1:2] <= "9") or (token[1:2].lower() >= "a" and token[1:2].lower() <= "f"))
+            if not is_hex:
+                continue
+            bytes.push(parse_hex("0x{token}") as i32)
+            if bytes.len() >= size:
+                return bytes
+    bytes
+
+class Ch32V307Adapter:
+    """CH32V307 adapter using direct wlink commands for SRAM execution."""
+    memory_map: MemoryMap
+    connected: bool
+
+    static fn new() -> Ch32V307Adapter:
+        Ch32V307Adapter(
+            memory_map: MemoryMap.ch32v307(),
+            connected: false
+        )
+
+    fn is_available() -> bool:
+        ch32v307_available()
+
+    me connect() -> Result<text, text>:
+        if not self.is_available():
+            return Err("wlink not available")
+        if not ch32v307_detected():
+            return Err("CH32V307 not detected through wlink")
+        self.connected = true
+        Ok("connected to CH32V307 via wlink")
+
+    me disconnect():
+        self.connected = false
+
+    fn run_cmd(cmd: text) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val result = shell("timeout 10 {ch32v307_wlink_base_cmd()} {cmd} 2>&1")
+        val combined = strip_ansi_escape(result.stdout + result.stderr)
+        if result.exit_code != 0:
+            return Err(combined.trim())
+        Ok(combined)
+
+    fn write_code(addr: i64, bytes: [i32]) -> Result<text, text>:
+        var offset = 0
+        while offset < bytes.len():
+            val b0 = bytes[offset]
+            val b1 = if offset + 1 < bytes.len(): bytes[offset + 1] else: 0
+            val b2 = if offset + 2 < bytes.len(): bytes[offset + 2] else: 0
+            val b3 = if offset + 3 < bytes.len(): bytes[offset + 3] else: 0
+            val word = ((b3 as i64) << 24) + ((b2 as i64) << 16) + ((b1 as i64) << 8) + (b0 as i64)
+            val write = self.run_cmd("write-mem {hex_0x_i64(addr + offset)} {hex_0x_i64(word)}")
+            if write.is_err():
+                return Err("write-mem failed at {hex_0x_i64(addr + offset)}: {write.err().unwrap()}")
+            offset = offset + 4
+        Ok("wrote {bytes.len()} bytes")
+
+    fn read_code(addr: i64, size: i64) -> Result<[i32], text>:
+        val dump = self.run_cmd("dump {hex_0x_i64(addr)} {size}")
+        if dump.is_err():
+            return Err(dump.err().unwrap())
+        val bytes = parse_ch32v307_dump_bytes(dump.ok.unwrap(), size)
+        if bytes.len() < size:
+            return Err("short dump response")
+        Ok(bytes)
+
+    fn write_register(reg: i64, value: i64) -> Result<text, text>:
+        val reg_id = ch32v307_register_id(reg)
+        self.run_cmd("write-reg {hex_0x_i64(reg_id)} {hex_0x_i64(value)}")
+
+    fn read_register(reg: i64) -> Result<i64, text>:
+        val regs = self.run_cmd("regs")
+        if regs.is_err():
+            return Err(regs.err().unwrap())
+        val value = parse_ch32v307_register_value(regs.ok.unwrap(), reg)
+        if value < 0:
+            return Err("failed to parse register {reg}")
+        Ok(value)
+
+    fn resume() -> Result<text, text>:
+        self.run_cmd("resume")
+
+    fn halt() -> Result<text, text>:
+        self.run_cmd("halt")
+
+    fn wait_halt(timeout_ms: i64) -> Result<text, text>:
+        shell("sleep 0.2")
+        val halt_result = self.halt()
+        if halt_result.is_err():
+            return Err(halt_result.err().unwrap())
+        Ok("halted")
+
+    fn create_manager() -> Result<RemoteExecutionManager, text>:
+        if not self.connected:
+            return Err("not connected — call connect() first")
+
+        Ok(RemoteExecutionManager.new(
+            arch: Architecture.RiscV32,
+            memory_map: self.memory_map,
+            write_code_fn: \addr, bytes: self.write_code(addr, bytes),
+            read_code_fn: \addr, size: self.read_code(addr, size),
+            write_register_fn: \reg, val_: self.write_register(reg, val_),
+            read_register_fn: \reg: self.read_register(reg),
+            resume_fn: \: self.resume(),
+            wait_halt_fn: \timeout: self.wait_halt(timeout)
+        ))
+
+export Ch32V307Adapter
+export ch32v307_available, ch32v307_detected, ch32v307_register_id
+export parse_ch32v307_register_value, parse_ch32v307_dump_bytes, strip_ansi_escape

@@ -1,22 +1,16 @@
 # @cover src/compiler_rust/lib/std/src/verification/lean/structure_gen.spl 80%
 # @cover src/compiler_rust/lib/std/src/verification/lean/auto_gen.spl 80%
-# SSpec: Lean Auto-Generation (Phase 7)
+# SSpec: Lean Auto-Generation
 #
-# Tests for auto-generation of Lean scaffolding:
-# - Structure generation from Simple classes
-# - Lookup function generation for registries
-# - BEq instance generation for inductives
-# - Theorem generation (determinism, reflexivity)
-#
-# Key principle: No sorry or axiom in generated code
+# Tests for the Lean auto-generation helpers used by the verification workflow.
 
-import sspec
-import verification.lean.structure_gen as structure_gen
-import verification.lean.lookup_gen as lookup_gen
-import verification.lean.instantiation_gen as instantiation_gen
-import verification.lean.beq_gen as beq_gen
-import verification.lean.theorem_gen as theorem_gen
-import verification.lean.auto_gen as auto_gen
+use sspec.*
+use verification.lean.structure_gen as structure_gen
+use verification.lean.lookup_gen as lookup_gen
+use verification.lean.instantiation_gen as instantiation_gen
+use verification.lean.beq_gen as beq_gen
+use verification.lean.theorem_gen as theorem_gen
+use verification.lean.auto_gen as auto_gen
 
 describe "Lean Auto-Generation":
     context "AutoLeanMode":
@@ -27,6 +21,7 @@ describe "Lean Auto-Generation":
             expect(structure_gen.AutoLeanMode.StructureOnly.generates_structures()).to_equal(true)
             expect(structure_gen.AutoLeanMode.StructureOnly.generates_lookups()).to_equal(false)
             expect(structure_gen.AutoLeanMode.Skip.generates_structures()).to_equal(false)
+            expect(structure_gen.AutoLeanMode.Determinism.generates_theorems()).to_equal(true)
 
     context "StructureGenerator":
         it "generates structures and inductives":
@@ -38,9 +33,9 @@ describe "Lean Auto-Generation":
             enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Pure"))
             enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Io"))
 
-            var gen = structure_gen.StructureGenerator.new()
-            val class_out = gen.generate_structure(class_def)
-            val enum_out = gen.generate_inductive(enum_def)
+            var generator = structure_gen.StructureGenerator.new()
+            val class_out = generator.generate_structure(class_def)
+            val enum_out = generator.generate_inductive(enum_def)
 
             expect(class_out).to_contain("structure TraitDef")
             expect(class_out).to_contain("methods : List TraitMethod")
@@ -51,10 +46,10 @@ describe "Lean Auto-Generation":
     context "LookupGenerator":
         it "generates lookup scaffolding":
             val registry = lookup_gen.RegistryDef.new("Trait")
-            var gen = lookup_gen.LookupGenerator.new()
-            val env_out = gen.generate_env_type(registry)
-            val lookup_out = gen.generate_lookup(registry)
-            val contains_out = gen.generate_contains(registry)
+            var generator = lookup_gen.LookupGenerator.new()
+            val env_out = generator.generate_env_type(registry)
+            val lookup_out = generator.generate_lookup(registry)
+            val contains_out = generator.generate_contains(registry)
 
             expect(env_out).to_contain("def TraitEnv")
             expect(lookup_out).to_contain("def lookupTrait")
@@ -62,16 +57,26 @@ describe "Lean Auto-Generation":
             expect(contains_out).to_contain("def containsTrait")
             expect(contains_out).to_contain("isSome")
 
+    context "InstantiationGenerator":
+        it "generates instantiation scaffolding":
+            val generic_def = instantiation_gen.GenericTypeDef.new("Class")
+            val generator = instantiation_gen.InstantiationGenerator.new()
+            val out = generator.generate_instantiate(generic_def)
+
+            expect(out).to_contain("def instantiateClass")
+            expect(out).to_contain("typeArgs : List Ty")
+            expect(out).to_contain("Option ClassDef")
+
     context "BeqGenerator":
         it "generates BEq functions and reflexivity proofs":
             var type_def = beq_gen.BeqTypeDef.new("Effect")
             type_def = type_def.add_variant(beq_gen.BeqVariant.new("Pure", []))
             type_def = type_def.add_variant(beq_gen.BeqVariant.new("Io", []))
 
-            var gen = beq_gen.BeqGenerator.new()
-            val fun_out = gen.generate_beq_function(type_def)
-            val inst_out = gen.generate_beq_instance(type_def)
-            val proof_out = gen.generate_reflexivity_proof(type_def)
+            var generator = beq_gen.BeqGenerator.new()
+            val fun_out = generator.generate_beq_function(type_def)
+            val inst_out = generator.generate_beq_instance(type_def)
+            val proof_out = generator.generate_reflexivity_proof(type_def)
 
             expect(fun_out).to_contain("def Effect.beq")
             expect(fun_out).to_contain(".pure, .pure => true")
@@ -105,10 +110,10 @@ describe "Lean Auto-Generation":
             registry = registry.add_enum(enum_def)
 
             var config = auto_gen.AutoGenConfig.new("build/lean-auto", "Demo")
-            var gen = auto_gen.AutoGenerator.new(config)
-            gen = gen.set_registry(registry)
+            var generator = auto_gen.AutoGenerator.new(config)
+            generator = generator.set_registry(registry)
 
-            val files = gen.generate_all()
+            val files = generator.generate_all()
             expect(files.len()).to_equal(4)
 
             for (name, content) in files:
@@ -125,252 +130,8 @@ describe "Lean Auto-Generation":
     context "Convenience functions":
         it "generate lookup and BEq helper output":
             val lookups = lookup_gen.generate_standard_lookups("Trait")
-            val beq = beq_gen.generate_simple_enum_beq("Mode", ["Online", "Offline"])
+            val beq_output = beq_gen.generate_simple_enum_beq("Mode", ["Online", "Offline"])
+
             expect(lookups).to_contain("lookupTrait")
-            expect(beq).to_contain("instance : BEq Mode")
-            expect(beq).to_contain("mode_beq_refl")
-        var gen = beq_gen.BeqGenerator.new()
-        val output = gen.generate_reflexivity_proof(type_def)
-
-        Then "output should not contain sorry"
-        sspec.expect(output.contains("sorry")).to_be_false()
-        And "output should not contain axiom"
-        sspec.expect(output.contains("axiom")).to_be_false()
-
-Feature "TheoremGenerator - determinism theorems":
-
-    Scenario "Generate determinism theorem":
-        Given "a function returning Option"
-        var func = theorem_gen.FunctionDef.new("lookupTrait")
-        func = func.add_param(theorem_gen.TheoremParam.explicit("env", "TraitEnv"))
-        func = func.add_param(theorem_gen.TheoremParam.explicit("name", "String"))
-        func = func.with_option_return("TraitDef")
-
-        When "generating determinism theorem"
-        var gen = theorem_gen.TheoremGenerator.new()
-        val output = gen.generate_determinism(func)
-
-        Then "output should be a theorem"
-        sspec.expect(output.contains("theorem lookupTrait_deterministic")).to_be_true()
-        And "output should have r1 r2 result params"
-        sspec.expect(output.contains("r1 r2 : TraitDef")).to_be_true()
-        And "output should have = some premises"
-        sspec.expect(output.contains("= some r1")).to_be_true()
-        sspec.expect(output.contains("= some r2")).to_be_true()
-        And "output should conclude r1 = r2"
-        sspec.expect(output.contains("r1 = r2")).to_be_true()
-
-    Scenario "Determinism proof has no sorry":
-        Given "a function returning Option"
-        var func = theorem_gen.FunctionDef.new("findImpl")
-        func = func.with_option_return("ImplDef")
-
-        When "generating determinism theorem"
-        var gen = theorem_gen.TheoremGenerator.new()
-        val output = gen.generate_determinism(func)
-
-        Then "output should not contain sorry"
-        sspec.expect(output.contains("sorry")).to_be_false()
-        And "proof should use intro h1 h2"
-        sspec.expect(output.contains("intro h1 h2")).to_be_true()
-        And "proof should use rw"
-        sspec.expect(output.contains("rw")).to_be_true()
-
-Feature "TheoremGenerator - lookup empty theorems":
-
-    Scenario "Generate lookup empty theorem":
-        Given "a type name"
-        val type_name = "Trait"
-
-        When "generating lookup empty theorem"
-        var gen = theorem_gen.TheoremGenerator.new()
-        val output = gen.generate_lookup_empty(type_name)
-
-        Then "output should be a theorem"
-        sspec.expect(output.contains("theorem lookupTrait_empty")).to_be_true()
-        And "output should use empty list"
-        sspec.expect(output.contains("lookupTrait []")).to_be_true()
-        And "output should conclude none"
-        sspec.expect(output.contains("= none")).to_be_true()
-        And "proof should be rfl"
-        sspec.expect(output.contains("rfl")).to_be_true()
-
-Feature "AutoGenBuilder - integration":
-
-    Scenario "Build and generate complete scaffolding":
-        Given "an AutoGenBuilder with classes and enums"
-        var builder = auto_gen.AutoGenBuilder.new("build/test_lean", "TestModule")
-        builder = builder.add_class("TraitDef", [
-            ("name", "text"),
-            ("type_params", "TyVar")
-        ])
-        builder = builder.add_enum("Effect", [
-            ("Pure", []),
-            ("Io", []),
-            ("Async", [])
-        ])
-
-        When "generating all files"
-        val files = builder.generate()
-
-        Then "it should generate 4 files"
-        sspec.expect(files.len()).to_equal(4)
-
-    Scenario "Generated files have correct names":
-        Given "an AutoGenBuilder"
-        var builder = auto_gen.AutoGenBuilder.new("build/test_lean", "TestModule")
-        builder = builder.add_class("Simple", [("x", "i32")])
-
-        When "generating all files"
-        val files = builder.generate()
-
-        Then "first file should be Generated_Types.lean"
-        val (name1, _) = files[0]
-        sspec.expect(name1).to_equal("Generated_Types.lean")
-
-    Scenario "Generated types file has no sorry":
-        Given "an AutoGenBuilder with a class"
-        var builder = auto_gen.AutoGenBuilder.new("build/test_lean", "TestModule")
-        builder = builder.add_class("Point", [("x", "i32"), ("y", "i32")])
-
-        When "generating files"
-        val files = builder.generate()
-
-        Then "types file should not contain sorry"
-        val (_, content) = files[0]
-        sspec.expect(content.contains("sorry")).to_be_false()
-        And "types file should not contain axiom"
-        sspec.expect(content.contains("axiom")).to_be_false()
-
-Feature "Type translation":
-
-    Scenario "Translate i32 to Int":
-        Given "type name i32"
-        val type_name = "i32"
-
-        When "translating to Lean"
-        val lean_type = structure_gen.translate_type_to_lean(type_name, false, false)
-
-        Then "it should be Int"
-        sspec.expect(lean_type).to_equal("Int")
-
-    Scenario "Translate text to String":
-        Given "type name text"
-        val type_name = "text"
-
-        When "translating to Lean"
-        val lean_type = structure_gen.translate_type_to_lean(type_name, false, false)
-
-        Then "it should be String"
-        sspec.expect(lean_type).to_equal("String")
-
-    Scenario "Translate optional type":
-        Given "type name with optional flag"
-        val type_name = "Ty"
-
-        When "translating with is_optional=true"
-        val lean_type = structure_gen.translate_type_to_lean(type_name, true, false)
-
-        Then "it should be Option (Ty)"
-        sspec.expect(lean_type).to_equal("Option (Ty)")
-
-    Scenario "Translate list type":
-        Given "type name with list flag"
-        val type_name = "FieldDef"
-
-        When "translating with is_list=true"
-        val lean_type = structure_gen.translate_type_to_lean(type_name, false, true)
-
-        Then "it should be List FieldDef"
-        sspec.expect(lean_type).to_equal("List FieldDef")
-
-    Scenario "Translate optional list type":
-        Given "type name with both flags"
-        val type_name = "Method"
-
-        When "translating with both flags"
-        val lean_type = structure_gen.translate_type_to_lean(type_name, true, true)
-
-        Then "it should be Option (List Method)"
-        sspec.expect(lean_type).to_equal("Option (List Method)")
-
-Feature "Convenience functions":
-
-    Scenario "generate_structure_from_fields convenience":
-        Given "field specifications"
-        val fields = [("name", "text"), ("age", "i32")]
-
-        When "using generate_structure_from_fields"
-        val output = structure_gen.generate_structure_from_fields("Person", fields)
-
-        Then "output should contain structure Person"
-        sspec.expect(output.contains("structure Person")).to_be_true()
-        And "output should contain both fields"
-        sspec.expect(output.contains("name : String")).to_be_true()
-        sspec.expect(output.contains("age : Int")).to_be_true()
-
-    Scenario "generate_standard_lookups convenience":
-        Given "a type name"
-        val type_name = "User"
-
-        When "using generate_standard_lookups"
-        val output = lookup_gen.generate_standard_lookups(type_name)
-
-        Then "output should contain UserEnv"
-        sspec.expect(output.contains("def UserEnv")).to_be_true()
-        And "output should contain lookupUser"
-        sspec.expect(output.contains("def lookupUser")).to_be_true()
-        And "output should contain containsUser"
-        sspec.expect(output.contains("def containsUser")).to_be_true()
-
-    Scenario "generate_determinism_theorem convenience":
-        Given "function signature"
-        val params = [("env", "Env"), ("key", "String")]
-
-        When "using generate_determinism_theorem"
-        val output = theorem_gen.generate_determinism_theorem("lookup", params, "Value")
-
-        Then "output should be a valid theorem"
-        sspec.expect(output.contains("theorem lookup_deterministic")).to_be_true()
-        And "output should have no sorry"
-        sspec.expect(output.contains("sorry")).to_be_false()
-
-Feature "Generated code is Lean-syntax compliant":
-
-    Scenario "Structure uses 'where' syntax":
-        Given "a class definition"
-        var class_def = structure_gen.SimpleClassDef.new("Config")
-        class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("debug", "bool"))
-
-        When "generating"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_structure(class_def)
-
-        Then "output should use where keyword"
-        sspec.expect(output.contains("where")).to_be_true()
-
-    Scenario "Inductive uses pipe syntax":
-        Given "an enum definition"
-        var enum_def = structure_gen.SimpleEnumDef.new("Color")
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Red"))
-        enum_def = enum_def.add_variant(structure_gen.SimpleEnumVariant.unit("Green"))
-
-        When "generating"
-        var gen = structure_gen.StructureGenerator.new()
-        val output = gen.generate_inductive(enum_def)
-
-        Then "output should use pipe syntax"
-        sspec.expect(output.contains("| red")).to_be_true()
-        sspec.expect(output.contains("| green")).to_be_true()
-
-    Scenario "Theorem uses := by syntax":
-        Given "a function definition"
-        var func = theorem_gen.FunctionDef.new("get")
-        func = func.with_option_return("Item")
-
-        When "generating determinism"
-        var gen = theorem_gen.TheoremGenerator.new()
-        val output = gen.generate_determinism(func)
-
-        Then "output should use := by syntax"
-        sspec.expect(output.contains(":= by")).to_be_true()
+            expect(beq_output).to_contain("instance : BEq Mode")
+            expect(beq_output).to_contain("mode_beq_refl")

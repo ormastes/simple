@@ -55,9 +55,9 @@ Security concerns (audit logging, authentication checks, input validation, capab
 
 ## Related Documents
 
-- Design: [doc/05_design/security_aop.md](../../design/security_aop.md)
+- Design: [doc/05_design/security_aop.md](../../05_design/security_aop.md)
 - NFR: [doc/02_requirements/nfr/security_baseline.md](../nfr/security_baseline.md)
-- Research: [doc/01_research/security_aop_architecture_2026-03-28.md](../../research/security_aop_architecture_2026-03-28.md)
-- Research: [doc/01_research/data_format_parser_security_2026-01-31.md](../../research/data_format_parser_security_2026-01-31.md)
-- Research: [doc/01_research/sandbox_implementation_strategies.md](../../research/sandbox_implementation_strategies.md)
+- Research: [doc/01_research/local/security_aop_architecture_2026-03-28.md](../../01_research/local/security_aop_architecture_2026-03-28.md)
+- Research: [doc/01_research/data_format_parser_security_2026-01-31.md](../../01_research/data_format_parser_security_2026-01-31.md)
+- Research: [doc/01_research/sandbox_implementation_strategies.md](../../01_research/sandbox_implementation_strategies.md)
 - Tauri Req: [doc/02_requirements/feature/simple_tauri.md](simple_tauri.md)

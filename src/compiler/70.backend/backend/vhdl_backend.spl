@@ -6,9 +6,11 @@
 use compiler.mir.mir_data.*
 use compiler.backend.backend_api.*
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
-use compiler.backend.hardware_codegen_types.{HardwareCodegen, VhdlProcessKind}
+use compiler.backend.hardware_codegen_types.{HardwareCodegen}
 use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+from hir_types import {SymbolId}
+from lexer import {Span}
 
 # ============================================================================
 # VHDL Backend
@@ -37,13 +39,20 @@ class VhdlBackend:
     type_mapper: VhdlTypeMapper
     options: CompileOptions
     use_resolved: bool
+    active_local_names: Dict<i64, text>
+    active_blocks: Dict<i64, MirBlock>
+
+    static fn empty_span() -> Span:
+        Span(start: 0, end_pos: 0, line: 1, col: 1)
 
     static fn create(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
         """Create VHDL backend with default options (unresolved types)."""
         VhdlBackend(
             type_mapper: VhdlTypeMapper.create(),
             options: options,
-            use_resolved: false
+            use_resolved: false,
+            active_local_names: {},
+            active_blocks: {}
         )
 
     static fn create_resolved(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
@@ -51,7 +60,9 @@ class VhdlBackend:
         VhdlBackend(
             type_mapper: VhdlTypeMapper.create_resolved(),
             options: options,
-            use_resolved: true
+            use_resolved: true,
+            active_local_names: {},
+            active_blocks: {}
         )
 
     fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
@@ -66,7 +77,9 @@ class VhdlBackend:
         if module.types.len() > 0 or module.constants.len() > 0:
             val pkg_builder = VhdlBuilder.create(module.name)
             pkg_builder.emit_library_header()
-            self.compile_package(pkg_builder, module)
+            val pkg_result = self.compile_package_into(pkg_builder, module)
+            if pkg_result.is_err():
+                return Err(pkg_result.unwrap_err())
             pkg_vhdl = pkg_builder.build()
 
         # Compile each function as an entity/architecture
@@ -88,7 +101,10 @@ class VhdlBackend:
             entities: entities
         ))
 
-    fn compile_package(builder: VhdlBuilder, module: MirModule):
+    fn backend_error(message: text) -> CompileError:
+        compileerror_backend_error(BackendKind.Vhdl, message)
+
+    fn compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
         """Compile type and constant definitions into a VHDL package."""
         builder.emit_package_begin(module.name)
 
@@ -98,7 +114,10 @@ class VhdlBackend:
                 case Struct(fields):
                     var field_pairs: [(text, text)] = []
                     for f in fields:
-                        val mapped = self.mir_type_to_vhdl(f.type_)
+                        val mapped_result = self.mir_type_to_vhdl(f.type_)
+                        if mapped_result.is_err():
+                            return Err(mapped_result.unwrap_err())
+                        val mapped = mapped_result.unwrap()
                         field_pairs = field_pairs.push((f.name, mapped))
                     val record_def = self.type_mapper.map_record(field_pairs)
                     builder.emit_type_decl(type_def.name, record_def)
@@ -111,19 +130,37 @@ class VhdlBackend:
                     builder.emit_type_decl(type_def.name, enum_def)
 
                 case _:
-                    builder.emit_comment("Unsupported type definition: {type_def.name}")
+                    return Err(self.backend_error(
+                        "Unsupported VHDL package type definition: {type_def.name}"
+                    ))
 
         # Emit constants
         for (symbol, constant) in module.constants:
-            val vhdl_type = self.mir_type_to_vhdl(constant.type_)
-            val vhdl_value = self.const_value_to_vhdl(constant.value)
+            val vhdl_type_result = self.mir_type_to_vhdl(constant.type_)
+            if vhdl_type_result.is_err():
+                return Err(vhdl_type_result.unwrap_err())
+            val vhdl_value_result = self.const_value_to_vhdl(constant.value, constant.type_)
+            if vhdl_value_result.is_err():
+                return Err(vhdl_value_result.unwrap_err())
+            val vhdl_type = vhdl_type_result.unwrap()
+            val vhdl_value = vhdl_value_result.unwrap()
             builder.emit_constant_decl(constant.name, vhdl_type, vhdl_value)
 
         builder.emit_package_end(module.name)
+        Ok(())
 
     fn compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
         """Compile a function as a VHDL entity/architecture pair."""
         val entity_name = func.name
+        self.active_local_names = {}
+        self.active_blocks = {}
+
+        for block in func.blocks:
+            self.active_blocks = self.active_blocks.set(block.id.id, block)
+
+        for local in func.locals:
+            val resolved_name = self.default_local_name(local)
+            self.active_local_names = self.active_local_names.set(local.id.id, resolved_name)
 
         # Emit entity
         builder.emit_entity_begin(entity_name)
@@ -135,13 +172,19 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Arg(idx):
-                    val vhdl_type = self.mir_type_to_vhdl(local.type_)
-                    val name = if local.name.?: local.name.unwrap() else: "p{idx}"
+                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    if vhdl_type_result.is_err():
+                        return Err(vhdl_type_result.unwrap_err())
+                    val vhdl_type = vhdl_type_result.unwrap()
+                    val name = self.default_local_name(local)
                     val is_last = port_idx == total_ports - 1
                     builder.emit_port(name, "in", vhdl_type, is_last)
                     port_idx = port_idx + 1
                 case Return:
-                    val vhdl_type = self.mir_type_to_vhdl(local.type_)
+                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    if vhdl_type_result.is_err():
+                        return Err(vhdl_type_result.unwrap_err())
+                    val vhdl_type = vhdl_type_result.unwrap()
                     val is_last = port_idx == total_ports - 1
                     builder.emit_port("result_out", "out", vhdl_type, is_last)
                     port_idx = port_idx + 1
@@ -158,8 +201,11 @@ class VhdlBackend:
         for local in func.locals:
             match local.kind:
                 case Var | Temp:
-                    val vhdl_type = self.mir_type_to_vhdl(local.type_)
-                    val name = if local.name.?: local.name.unwrap() else: "sig_{local.id.id}"
+                    val vhdl_type_result = self.mir_type_to_vhdl(local.type_)
+                    if vhdl_type_result.is_err():
+                        return Err(vhdl_type_result.unwrap_err())
+                    val vhdl_type = vhdl_type_result.unwrap()
+                    val name = self.default_local_name(local)
                     builder.emit_signal_decl(name, vhdl_type, nil)
                 case _:
                     ()
@@ -181,75 +227,182 @@ class VhdlBackend:
             port_count: total_ports
         ))
 
+    fn default_local_name(local: MirLocal) -> text:
+        match local.kind:
+            case Arg(idx):
+                if local.name.?:
+                    local.name.unwrap()
+                else:
+                    "p{idx}"
+            case Return:
+                "result_out"
+            case Var | Temp:
+                if local.name.?:
+                    local.name.unwrap()
+                else:
+                    "sig_{local.id.id}"
+
+    fn local_to_vhdl(local: LocalId) -> Result<text, CompileError>:
+        val found = self.active_local_names.get(local.id)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("No active VHDL name for local {local.id}"))
+
+    fn operand_to_vhdl(operand: MirOperand) -> Result<text, CompileError>:
+        """Convert operand to VHDL signal/variable name."""
+        match operand.kind:
+            case Copy(local): self.local_to_vhdl(local)
+            case Move(local): self.local_to_vhdl(local)
+            case Const(value, ty):
+                self.const_value_to_vhdl(value, ty)
+
+    fn block_by_id(id: BlockId) -> Result<MirBlock, CompileError>:
+        val found = self.active_blocks.get(id.id)
+        if found.?:
+            Ok(found.unwrap())
+        else:
+            Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
+
+    fn compile_block_instructions(builder: VhdlBuilder, block: MirBlock) -> Result<(), CompileError>:
+        for inst in block.instructions:
+            val result = self.compile_instruction(builder, inst)
+            if result.is_err():
+                return Err(result.unwrap_err())
+        Ok(())
+
+    fn compile_process_into(builder: VhdlBuilder, kind: compiler.mir.mir_data.VhdlProcessKind, block: MirBlock) -> Result<(), CompileError>:
+        val label = builder.alloc_label()
+        match kind:
+            case Combinational(sensitivity):
+                builder.emit_process_begin(Some(label), sensitivity)
+                builder.emit_process_body_begin()
+                val block_result = self.compile_block_instructions(builder, block)
+                if block_result.is_err():
+                    return Err(block_result.unwrap_err())
+                builder.emit_process_end(Some(label))
+            case Clocked(domain):
+                builder.emit_clocked_process_begin(Some(label), domain.clock_signal, domain.reset_signal)
+                builder.emit_process_body_begin()
+                match domain.edge:
+                    case Rising:
+                        builder.emit_rising_edge_check(domain.clock_signal)
+                    case Falling:
+                        builder.emit_falling_edge_check(domain.clock_signal)
+                val block_result = self.compile_block_instructions(builder, block)
+                if block_result.is_err():
+                    return Err(block_result.unwrap_err())
+                builder.emit_if_end()
+                builder.emit_process_end(Some(label))
+            case AsyncReset(domain):
+                builder.emit_clocked_process_begin(Some(label), domain.clock_signal, domain.reset_signal)
+                builder.emit_process_body_begin()
+                if domain.reset_signal.?:
+                    builder.emit_if_begin("{domain.reset_signal.unwrap()} = '1'")
+                    builder.emit_comment("async reset branch")
+                    builder.emit_else()
+                match domain.edge:
+                    case Rising:
+                        builder.emit_rising_edge_check(domain.clock_signal)
+                    case Falling:
+                        builder.emit_falling_edge_check(domain.clock_signal)
+                val block_result = self.compile_block_instructions(builder, block)
+                if block_result.is_err():
+                    return Err(block_result.unwrap_err())
+                builder.emit_if_end()
+                if domain.reset_signal.?:
+                    builder.emit_if_end()
+                builder.emit_process_end(Some(label))
+        Ok(())
+
     fn compile_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         """Compile a single MIR instruction to VHDL."""
         match inst.kind:
             case Const(dest, value, ty):
-                val dest_name = "sig_{dest.id}"
-                val vhdl_value = self.const_value_to_vhdl(value)
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val vhdl_value_result = self.const_value_to_vhdl(value, ty)
+                if vhdl_value_result.is_err():
+                    return Err(vhdl_value_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val vhdl_value = vhdl_value_result.unwrap()
                 builder.emit_signal_assign(dest_name, vhdl_value)
 
             case Copy(dest, src) | Move(dest, src):
-                val dest_name = "sig_{dest.id}"
-                val src_name = "sig_{src.id}"
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val src_name_result = self.local_to_vhdl(src)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val src_name = src_name_result.unwrap()
                 builder.emit_signal_assign(dest_name, src_name)
 
             case BinOp(dest, op, left, right):
-                val dest_name = "sig_{dest.id}"
-                val left_name = self.operand_to_vhdl(left)
-                val right_name = self.operand_to_vhdl(right)
-                val expr = self.binop_to_vhdl(op, left_name, right_name)
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val left_name_result = self.operand_to_vhdl(left)
+                if left_name_result.is_err():
+                    return Err(left_name_result.unwrap_err())
+                val right_name_result = self.operand_to_vhdl(right)
+                if right_name_result.is_err():
+                    return Err(right_name_result.unwrap_err())
+                val expr_result = self.binop_to_vhdl(op, left_name_result.unwrap(), right_name_result.unwrap())
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val expr = expr_result.unwrap()
                 builder.emit_signal_assign(dest_name, expr)
 
             case UnaryOp(dest, op, operand):
-                val dest_name = "sig_{dest.id}"
-                val src_name = self.operand_to_vhdl(operand)
-                val expr = self.unaryop_to_vhdl(op, src_name)
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val src_name_result = self.operand_to_vhdl(operand)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val expr_result = self.unaryop_to_vhdl(op, src_name_result.unwrap())
+                if expr_result.is_err():
+                    return Err(expr_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val expr = expr_result.unwrap()
                 builder.emit_signal_assign(dest_name, expr)
 
             # VHDL-specific instructions
             case VhdlProcess(kind, body_block):
-                match kind:
-                    case Combinational(sensitivity):
-                        builder.emit_process_begin(nil, sensitivity)
-                        builder.emit_process_body_begin()
-                        builder.emit_comment("Process body (block {body_block.id})")
-                        builder.emit_process_end(nil)
-                    case Clocked(domain):
-                        builder.emit_clocked_process_begin(nil, domain.clock_signal, domain.reset_signal)
-                        builder.emit_process_body_begin()
-                        match domain.edge:
-                            case Rising:
-                                builder.emit_rising_edge_check(domain.clock_signal)
-                            case Falling:
-                                builder.emit_falling_edge_check(domain.clock_signal)
-                        builder.emit_comment("Clocked process body (block {body_block.id})")
-                        builder.emit_if_end()
-                        builder.emit_process_end(nil)
-                    case AsyncReset(domain):
-                        builder.emit_clocked_process_begin(nil, domain.clock_signal, domain.reset_signal)
-                        builder.emit_process_body_begin()
-                        if domain.reset_signal.?:
-                            builder.emit_if_begin("{domain.reset_signal.unwrap()} = '1'")
-                            builder.emit_comment("Reset logic")
-                            builder.emit_else()
-                            builder.emit_rising_edge_check(domain.clock_signal)
-                            builder.emit_comment("Clocked logic")
-                            builder.emit_if_end()
-                            builder.emit_if_end()
-                        builder.emit_process_end(nil)
+                val block_result = self.block_by_id(body_block)
+                if block_result.is_err():
+                    return Err(block_result.unwrap_err())
+                val process_result = self.compile_process_into(builder, kind, block_result.unwrap())
+                if process_result.is_err():
+                    return Err(process_result.unwrap_err())
 
             case VhdlSignalAssign(target, value, delay_ns):
-                val target_name = self.operand_to_vhdl(target)
-                val value_name = self.operand_to_vhdl(value)
+                val target_name_result = self.operand_to_vhdl(target)
+                if target_name_result.is_err():
+                    return Err(target_name_result.unwrap_err())
+                val value_name_result = self.operand_to_vhdl(value)
+                if value_name_result.is_err():
+                    return Err(value_name_result.unwrap_err())
+                val target_name = target_name_result.unwrap()
+                val value_name = value_name_result.unwrap()
                 if delay_ns.?:
                     builder.emit_signal_assign_delay(target_name, value_name, delay_ns.unwrap())
                 else:
                     builder.emit_signal_assign(target_name, value_name)
 
             case VhdlVarAssign(target, value):
-                val target_name = self.operand_to_vhdl(target)
-                val value_name = self.operand_to_vhdl(value)
+                val target_name_result = self.operand_to_vhdl(target)
+                if target_name_result.is_err():
+                    return Err(target_name_result.unwrap_err())
+                val value_name_result = self.operand_to_vhdl(value)
+                if value_name_result.is_err():
+                    return Err(value_name_result.unwrap_err())
+                val target_name = target_name_result.unwrap()
+                val value_name = value_name_result.unwrap()
                 builder.emit_var_assign(target_name, value_name)
 
             case VhdlPortMap(entity, instance, connections):
@@ -257,109 +410,146 @@ class VhdlBackend:
                 builder.emit_port_map_begin()
                 var idx = 0
                 for conn in connections:
-                    val actual = self.operand_to_vhdl(conn.1)
+                    val actual_result = self.operand_to_vhdl(conn.1)
+                    if actual_result.is_err():
+                        return Err(actual_result.unwrap_err())
+                    val actual = actual_result.unwrap()
                     val is_last = idx == connections.len() - 1
                     builder.emit_port_map_entry(conn.0, actual, is_last)
                     idx = idx + 1
                 builder.emit_port_map_end()
 
             case VhdlResize(dest, operand, new_width, signed):
-                val dest_name = "sig_{dest.id}"
-                val src_name = self.operand_to_vhdl(operand)
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val src_name_result = self.operand_to_vhdl(operand)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val src_name = src_name_result.unwrap()
                 builder.emit_resize(dest_name, src_name, new_width, signed)
 
             case VhdlSlice(dest, signal, hi, lo):
-                val dest_name = "sig_{dest.id}"
-                val src_name = self.operand_to_vhdl(signal)
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val src_name_result = self.operand_to_vhdl(signal)
+                if src_name_result.is_err():
+                    return Err(src_name_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
+                val src_name = src_name_result.unwrap()
                 builder.emit_slice(dest_name, src_name, hi, lo)
 
             case VhdlConcat(dest, parts):
-                val dest_name = "sig_{dest.id}"
+                val dest_name_result = self.local_to_vhdl(dest)
+                if dest_name_result.is_err():
+                    return Err(dest_name_result.unwrap_err())
+                val dest_name = dest_name_result.unwrap()
                 var part_names: [text] = []
                 for p in parts:
-                    part_names = part_names.push(self.operand_to_vhdl(p))
+                    val part_name_result = self.operand_to_vhdl(p)
+                    if part_name_result.is_err():
+                        return Err(part_name_result.unwrap_err())
+                    part_names = part_names.push(part_name_result.unwrap())
                 builder.emit_concat(dest_name, part_names)
 
             case Nop:
                 ()
 
             case _:
-                builder.emit_comment("Unsupported instruction: {inst.kind}")
+                return Err(self.backend_error("Unsupported instruction: {inst.kind}"))
 
         Ok(())
 
-    fn mir_type_to_vhdl(ty: MirType) -> text:
+    fn integer_width(ty: MirType) -> i64?:
+        match ty.kind:
+            case I64 | U64: Some(64)
+            case I32 | U32: Some(32)
+            case I16 | U16: Some(16)
+            case I8 | U8: Some(8)
+            case _: nil
+
+    fn mir_type_to_vhdl(ty: MirType) -> Result<text, CompileError>:
         """Convert MIR type to VHDL type string."""
         match ty.kind:
-            case I64: "signed(63 downto 0)"
-            case I32: "signed(31 downto 0)"
-            case I16: "signed(15 downto 0)"
-            case I8: "signed(7 downto 0)"
-            case U64: "unsigned(63 downto 0)"
-            case U32: "unsigned(31 downto 0)"
-            case U16: "unsigned(15 downto 0)"
-            case U8: "unsigned(7 downto 0)"
+            case I64: Ok("signed(63 downto 0)")
+            case I32: Ok("signed(31 downto 0)")
+            case I16: Ok("signed(15 downto 0)")
+            case I8: Ok("signed(7 downto 0)")
+            case U64: Ok("unsigned(63 downto 0)")
+            case U32: Ok("unsigned(31 downto 0)")
+            case U16: Ok("unsigned(15 downto 0)")
+            case U8: Ok("unsigned(7 downto 0)")
             case Bool:
-                if self.use_resolved: "std_logic" else: "bit"
-            case Unit: "-- void"
+                if self.use_resolved:
+                    Ok("std_logic")
+                else:
+                    Ok("bit")
             case Array(elem, size):
-                val elem_type = self.mir_type_to_vhdl(elem)
-                "array (0 to {size - 1}) of {elem_type}"
-            case _: "-- unsupported type"
+                val elem_type_result = self.mir_type_to_vhdl(elem)
+                if elem_type_result.is_err():
+                    Err(elem_type_result.unwrap_err())
+                else:
+                    Ok("array (0 to {size - 1}) of {elem_type_result.unwrap()}")
+            case Unit:
+                Err(self.backend_error("Unit values cannot be lowered to a VHDL signal type"))
+            case _:
+                Err(self.backend_error("Unsupported VHDL type: {ty.kind}"))
 
-    fn const_value_to_vhdl(value: MirConstValue) -> text:
+    fn const_value_to_vhdl(value: MirConstValue, ty: MirType) -> Result<text, CompileError>:
         """Convert a constant value to VHDL literal."""
         match value:
             case Int(v):
-                "to_signed({v}, 64)"
+                val width = self.integer_width(ty)
+                if not width.?:
+                    return Err(self.backend_error("Integer constant requires fixed-width integer type, got {ty.kind}"))
+                match ty.kind:
+                    case I64 | I32 | I16 | I8:
+                        Ok("to_signed({v}, {width.unwrap()})")
+                    case U64 | U32 | U16 | U8:
+                        Ok("to_unsigned({v}, {width.unwrap()})")
+                    case _:
+                        Err(self.backend_error("Unsupported integer literal target type: {ty.kind}"))
             case Float(v):
-                "-- ERROR: float {v} not synthesizable"
+                Err(self.backend_error("Floating-point constant {v} is not synthesizable for the VHDL backend"))
             case Bool(v):
-                if self.use_resolved:
-                    if v: "'1'" else: "'0'"
-                else:
-                    if v: "'1'" else: "'0'"
+                Ok(if v: "'1'" else: "'0'")
             case Str(v):
-                "\"{v}\""
+                Ok("\"{v}\"")
             case Zero:
-                "(others => '0')"
+                Ok("(others => '0')")
             case _:
-                "-- unsupported constant"
+                Err(self.backend_error("Unsupported VHDL constant: {value}"))
 
-    fn operand_to_vhdl(operand: MirOperand) -> text:
-        """Convert operand to VHDL signal/variable name."""
-        match operand.kind:
-            case Copy(local): "sig_{local.id}"
-            case Move(local): "sig_{local.id}"
-            case Const(value, ty):
-                self.const_value_to_vhdl(value)
-
-    fn binop_to_vhdl(op: MirBinOp, left: text, right: text) -> text:
+    fn binop_to_vhdl(op: MirBinOp, left: text, right: text) -> Result<text, CompileError>:
         """Convert binary operation to VHDL expression."""
         match op:
-            case Add: "{left} + {right}"
-            case Sub: "{left} - {right}"
-            case Mul: "{left} * {right}"
-            case Div: "{left} / {right}"
-            case Eq: "'{if ({left} = {right}) then '1' else '0'}'"
-            case Ne: "'{if ({left} /= {right}) then '1' else '0'}'"
-            case Lt: "'{if ({left} < {right}) then '1' else '0'}'"
-            case Le: "'{if ({left} <= {right}) then '1' else '0'}'"
-            case Gt: "'{if ({left} > {right}) then '1' else '0'}'"
-            case Ge: "'{if ({left} >= {right}) then '1' else '0'}'"
-            case BitAnd: "{left} and {right}"
-            case BitOr: "{left} or {right}"
-            case BitXor: "{left} xor {right}"
-            case Shl: "shift_left({left}, to_integer({right}))"
-            case Shr: "shift_right({left}, to_integer({right}))"
-            case _: "-- unsupported binop"
+            case Add: Ok("{left} + {right}")
+            case Sub: Ok("{left} - {right}")
+            case Mul: Ok("{left} * {right}")
+            case Div: Ok("{left} / {right}")
+            case Eq: Ok("'1' when {left} = {right} else '0'")
+            case Ne: Ok("'1' when {left} /= {right} else '0'")
+            case Lt: Ok("'1' when {left} < {right} else '0'")
+            case Le: Ok("'1' when {left} <= {right} else '0'")
+            case Gt: Ok("'1' when {left} > {right} else '0'")
+            case Ge: Ok("'1' when {left} >= {right} else '0'")
+            case BitAnd: Ok("{left} and {right}")
+            case BitOr: Ok("{left} or {right}")
+            case BitXor: Ok("{left} xor {right}")
+            case Shl: Ok("shift_left({left}, to_integer({right}))")
+            case Shr: Ok("shift_right({left}, to_integer({right}))")
+            case _:
+                Err(self.backend_error("Unsupported VHDL binary operator: {op}"))
 
-    fn unaryop_to_vhdl(op: MirUnaryOp, operand: text) -> text:
+    fn unaryop_to_vhdl(op: MirUnaryOp, operand: text) -> Result<text, CompileError>:
         """Convert unary operation to VHDL expression."""
         match op:
-            case Neg: "-{operand}"
-            case Not: "not {operand}"
-            case _: "-- unsupported unaryop"
+            case Neg: Ok("-{operand}")
+            case Not: Ok("not {operand}")
+            case _:
+                Err(self.backend_error("Unsupported VHDL unary operator: {op}"))
 
 # ============================================================================
 # VHDL Compilation Results
@@ -403,7 +593,30 @@ impl HardwareCodegen for VhdlBackend:
     fn compile_entity(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val builder = VhdlBuilder.create(func_name)
         builder.emit_library_header()
-        val func = MirFunction(name: func_name, body: body, is_extern: false, signature: body.signature)
+        var params: [MirType] = []
+        for local in body.locals:
+            match local.kind:
+                case Arg(_):
+                    params = params.push(local.type_)
+                case _:
+                    ()
+        val func = MirFunction(
+            symbol: SymbolId(id: 0),
+            name: func_name,
+            signature: MirSignature(params: params, return_type: body.return_ty, is_variadic: false),
+            locals: body.locals,
+            blocks: body.blocks,
+            entry_block: BlockId.entry(),
+            span: VhdlBackend.empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
         val result = self.compile_function(builder, func)
         match result:
             case Ok(_):
@@ -412,13 +625,46 @@ impl HardwareCodegen for VhdlBackend:
                 Err(e)
 
     fn compile_package(module: MirModule) -> text:
-        "-- VHDL package"
+        val builder = VhdlBuilder.create(module.name)
+        builder.emit_library_header()
+        val result = self.compile_package_into(builder, module)
+        if result.is_err():
+            return "-- ERROR: {result.unwrap_err().message}"
+        builder.build()
 
-    fn compile_process(kind: VhdlProcessKind, body_block: MirBlock) -> text:
-        "-- VHDL process"
+    fn compile_process(kind: compiler.backend.hardware_codegen_types.VhdlProcessKind, body_block: MirBlock) -> text:
+        val builder = VhdlBuilder.create("process")
+        match kind:
+            case Combinational:
+                builder.emit_process_begin(Some(builder.alloc_label()), [])
+                builder.emit_process_body_begin()
+                for inst in body_block.instructions:
+                    builder.emit_comment("hardware trait process body instruction: {inst.kind}")
+                builder.emit_process_end(nil)
+                builder.build()
+            case Clocked:
+                builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", nil)
+                builder.emit_process_body_begin()
+                builder.emit_rising_edge_check("clk")
+                for inst in body_block.instructions:
+                    builder.emit_comment("hardware trait clocked body instruction: {inst.kind}")
+                builder.emit_if_end()
+                builder.emit_process_end(nil)
+                builder.build()
+            case AsyncReset:
+                builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", Some("rst"))
+                builder.emit_process_body_begin()
+                builder.emit_if_begin("rst = '1'")
+                builder.emit_comment("hardware trait async reset branch")
+                builder.emit_else()
+                builder.emit_rising_edge_check("clk")
+                for inst in body_block.instructions:
+                    builder.emit_comment("hardware trait async body instruction: {inst.kind}")
+                builder.emit_if_end()
+                builder.emit_if_end()
+                builder.emit_process_end(nil)
+                builder.build()
 
 # ============================================================================
 # Export
 # ============================================================================
-
-

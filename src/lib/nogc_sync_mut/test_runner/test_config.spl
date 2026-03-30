@@ -33,6 +33,18 @@ struct TestConfig:
     run_slow_tests: bool
     run_spl_doctests: bool
     ci_mode: bool
+    # Session sharing settings
+    session_share: bool
+    session_daemon: bool
+    session_idle_timeout_ms: i64
+    session_startup_timeout_ms: i64
+    session_debug: bool
+    session_max_qemu_vm: i64
+    session_max_container: i64
+    session_max_service: i64
+    session_max_openocd: i64
+    session_max_trace32: i64
+    session_max_simulator: i64
 
 fn parse_config_key_value(trimmed: text) -> (text, text):
     val sep_idx = trimmed.index_of(":") ?? -1
@@ -80,6 +92,16 @@ fn apply_test_config_value(config: TestConfig, key: text, value: text):
             config.run_slow_tests = value == "true"
         case "run_spl_doctests":
             config.run_spl_doctests = value == "true"
+        case "session_share":
+            config.session_share = value == "true"
+        case "session_daemon":
+            config.session_daemon = value == "true"
+        case "session_idle_timeout_ms":
+            config.session_idle_timeout_ms = value.to_int_or(config.session_idle_timeout_ms)
+        case "session_startup_timeout_ms":
+            config.session_startup_timeout_ms = value.to_int_or(config.session_startup_timeout_ms)
+        case "session_debug":
+            config.session_debug = value == "true"
         case _:
             ()
 
@@ -88,6 +110,8 @@ fn parse_test_config_content(config: TestConfig, content: text) -> TestConfig:
 
     var in_test_section = false
     var in_cpu_throttle = false
+    var in_session_max = false
+    var in_session_defaults = false
 
     for line in lines:
         val trimmed = line.trim()
@@ -96,10 +120,14 @@ fn parse_test_config_content(config: TestConfig, content: text) -> TestConfig:
         if trimmed == "test:":
             in_test_section = true
             in_cpu_throttle = false
+            in_session_max = false
+            in_session_defaults = false
             continue
         if not line.starts_with("  ") and trimmed.ends_with(":"):
             in_test_section = false
             in_cpu_throttle = false
+            in_session_max = false
+            in_session_defaults = false
             continue
         if not in_test_section:
             val (top_key, top_value) = parse_config_key_value(trimmed)
@@ -109,9 +137,23 @@ fn parse_test_config_content(config: TestConfig, content: text) -> TestConfig:
 
         if trimmed == "cpu_throttle:":
             in_cpu_throttle = true
+            in_session_max = false
+            in_session_defaults = false
+            continue
+        if trimmed == "session_max_sessions:":
+            in_session_max = true
+            in_cpu_throttle = false
+            in_session_defaults = false
+            continue
+        if trimmed == "session_defaults:":
+            in_session_defaults = true
+            in_cpu_throttle = false
+            in_session_max = false
             continue
         if line.starts_with("  ") and not line.starts_with("    ") and trimmed.ends_with(":"):
             in_cpu_throttle = false
+            in_session_max = false
+            in_session_defaults = false
             continue
 
         val (key, value) = parse_config_key_value(trimmed)
@@ -124,6 +166,11 @@ fn parse_test_config_content(config: TestConfig, content: text) -> TestConfig:
                 apply_test_config_value(config, "cpu_threshold", value)
             elif key == "memory_threshold":
                 apply_test_config_value(config, "memory_threshold", value)
+        elif in_session_max:
+            _apply_session_max(config, key, value)
+        elif in_session_defaults:
+            # session_defaults sub-keys are kind-specific; skip for now (future use)
+            ()
         else:
             apply_test_config_value(config, key, value)
 
@@ -167,8 +214,34 @@ impl TestConfig:
             run_sdoctests: true,
             run_slow_tests: false,
             run_spl_doctests: false,
-            ci_mode: false
+            ci_mode: false,
+            session_share: false,
+            session_daemon: false,
+            session_idle_timeout_ms: 300000,
+            session_startup_timeout_ms: 60000,
+            session_debug: false,
+            session_max_qemu_vm: 4,
+            session_max_container: 2,
+            session_max_service: 8,
+            session_max_openocd: 1,
+            session_max_trace32: 1,
+            session_max_simulator: 2
         )
+
+fn _apply_session_max(config: TestConfig, key: text, value: text):
+    """Apply session_max_sessions sub-keys."""
+    if key == "qemu_vm":
+        config.session_max_qemu_vm = value.to_int_or(config.session_max_qemu_vm)
+    elif key == "container_instance":
+        config.session_max_container = value.to_int_or(config.session_max_container)
+    elif key == "service_process":
+        config.session_max_service = value.to_int_or(config.session_max_service)
+    elif key == "openocd_board":
+        config.session_max_openocd = value.to_int_or(config.session_max_openocd)
+    elif key == "trace32_board":
+        config.session_max_trace32 = value.to_int_or(config.session_max_trace32)
+    elif key == "simulator_process":
+        config.session_max_simulator = value.to_int_or(config.session_max_simulator)
 
 fn load_test_config() -> TestConfig:
     load_test_config_from_path(find_config_file())

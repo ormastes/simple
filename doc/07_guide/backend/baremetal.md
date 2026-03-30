@@ -1,24 +1,45 @@
 # Bare-Metal Programming
 
 **Version:** 0.5.0
-**Status:** Production (QEMU), Development (Hardware Debugging)
+**Status:** Production (QEMU stable lanes), Development (hardware-debug and host-dependent remote lanes)
 
 ---
 
 ## Overview
 
 Simple supports bare-metal programming for embedded targets. Write programs in
-Simple or assembly, test in QEMU, and deploy to real hardware via OpenOCD or
-TRACE32.
+Simple or assembly, test in QEMU, and use host-aware remote execution lanes for
+real hardware through OpenOCD, `wlink`, or TRACE32 where available.
 
 **Supported Targets:**
 
 | Architecture | QEMU | Hardware | Status |
 |-------------|------|----------|--------|
-| ARM Cortex-M | Yes | STM32F4 | Production |
+| ARM Cortex-M | Yes | STM32H7 / STM32WB | Stable QEMU and host-aware hardware lanes |
+| RISC-V 32 | Yes | CH32V307 | Stable QEMU ELF lane, host-aware raw and hardware lanes |
 | x86_64 | Yes | -- | Production |
-| RISC-V 32 | Yes | -- | Production |
 | RISC-V 64 | Yes | -- | Development |
+
+## Current Lane Model
+
+The repo uses three distinct baremetal proof classes:
+
+- stable workload proof:
+  QEMU RV32 semihost ELF and the checked-in shared-workload lane
+- low-level runtime or transport proof:
+  remote debugger/readiness and memory/register access checks
+- host-aware hardware proof:
+  adapter-backed or direct-probe execution that may skip cleanly when tools or
+  devices are unavailable on the current host
+
+For remote baremetal specifically, keep these lanes separate:
+
+- CH32 composite-runner execution is covered by
+  [ch32v307_composite_runner_path_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/ch32v307_composite_runner_path_spec.md)
+- QEMU RV32 raw injected execution is covered by
+  [qemu_rv32_raw_injected_regression_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/qemu_rv32_raw_injected_regression_spec.md)
+- low-level remote runtime checks are covered by
+  [remote_baremetal_runtime_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/remote_baremetal_runtime_spec.md)
 
 ---
 
@@ -53,7 +74,9 @@ qemu-system-riscv32 -M virt -kernel hello_riscv32.elf -nographic -semihosting
 ### 3. Run SSpec Tests
 
 ```bash
-bin/simple test test/baremetal/hello_riscv32_semihost_spec.spl
+bin/simple test test/feature/baremetal/hello_riscv32_semihost_spec.spl
+bin/simple test test/integration/remote_jit/qemu_rv32_library_semihost_spec.spl
+bin/simple test test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl
 ```
 
 ---

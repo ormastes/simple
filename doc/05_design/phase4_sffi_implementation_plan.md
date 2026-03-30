@@ -1,6 +1,6 @@
 # Phase 4: SFFI Implementation Plan (2026-02-08)
 
-**Status:** Design Complete - Implementation Requires Runtime Changes
+**Status:** Implemented on 2026-03-30; keep this document as the baseline design plan
 **Effort:** 5-7 days full implementation
 **Priority:** Medium (blocked by runtime architecture)
 
@@ -191,7 +191,7 @@ manifest.sdn:
 
 3. **CLI:**
    ```bash
-   simple plugin install regex
+   simple plugin install /path/to/manifest.sdn
    simple plugin list
    simple plugin remove regex
    ```

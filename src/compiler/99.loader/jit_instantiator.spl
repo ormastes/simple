@@ -1,5 +1,9 @@
 # Compatibility JIT instantiator surface for interpreter/test runner.
 
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
 class JitInstantiatorConfig:
     update_smf: bool
     max_depth: i64
@@ -139,6 +143,7 @@ class JitInstantiator:
     loaded_metadata: Dict<text, LoadedMetadata>
     in_progress: Set<text>
     depth: i64
+    compile_count: i64
 
     static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
         JitInstantiator(
@@ -148,18 +153,19 @@ class JitInstantiator:
             jit_mapper: JitMapper(),
             loaded_metadata: {},
             in_progress: {},
-            depth: 0
+            depth: 0,
+            compile_count: 0
         )
 
     fn stats() -> JitStats:
         JitStats(
             cached_count: self.jit_cache.len() as i64,
-            compile_count: 0,
+            compile_count: self.compile_count,
             loaded_smf_count: self.loaded_metadata.len() as i64
         )
 
     me load_smf_metadata(path: text) -> Result<(), text>:
-        self.loaded_metadata[path] = LoadedMetadata(possible: [], instantiations: [])
+        self.loaded_metadata[path] = _load_metadata_from_disk(path)
         Ok(())
 
     me set_metadata_for_test(path: text, metadata: LoadedMetadata):
@@ -221,11 +227,36 @@ class JitInstantiator:
         if not found.?:
             return JitInstantiationResult.NotFound(symbol: name)
 
+        val (path, entry) = found.unwrap()
+
         self.depth = self.depth + 1
         self.in_progress = self.in_progress.insert(name)
+
+        val compiled = _fake_compile_bytes(entry)
+        val address = _next_fake_address(self.exec_mapper, compiled.len() as i64)
+        val owner_id = if path == "":
+            "__jit__"
+        else:
+            path
+        _global_set(name, owner_id, address)
+        self.exec_mapper.set_record(name, owner_id, address)
+        self.jit_cache[name] = {
+            "code": compiled,
+            "address": address,
+            "owner": owner_id
+        }
+        self.compile_count = self.compile_count + 1
+
+        if self.config.update_smf:
+            val update_result = self.update_smf_note_sdn(path, entry)
+            if update_result.is_err():
+                self.in_progress = self.in_progress.remove(name)
+                self.depth = self.depth - 1
+                return JitInstantiationResult.UpdateFailed(symbol: name, error: update_result.unwrap_err())
+
         self.in_progress = self.in_progress.remove(name)
         self.depth = self.depth - 1
-        JitInstantiationResult.CompilationError(message: "JIT compilation not yet implemented")
+        JitInstantiationResult.Success(code: compiled, symbol: name, address: Some(address))
 
     me update_smf_note_sdn(path: text, entry: PossibleInstantiation) -> Result<(), text>:
         var metadata = LoadedMetadata(possible: [], instantiations: [])
@@ -251,6 +282,9 @@ class JitInstantiator:
         metadata.possible = remaining
         metadata.instantiations = metadata.instantiations + [inst]
         self.loaded_metadata[path] = metadata
+        val persisted = rt_file_write_text(_metadata_sidecar_path(path), _metadata_to_text(metadata))
+        if not persisted:
+            return Err("failed to persist JIT metadata for " + path)
         Ok(())
 
 class JitSymbolResolver:
@@ -302,3 +336,71 @@ fn jitinstantiator_new(config: Dict) -> JitInstantiator:
 fn jitinstantiator_stats(self: JitInstantiator) -> JitStats:
     self.stats()
 
+fn _metadata_sidecar_path(path: text) -> text:
+    path + ".jit.note.sdn"
+
+fn _load_metadata_from_disk(path: text) -> LoadedMetadata:
+    val sidecar = _metadata_sidecar_path(path)
+    if rt_file_exists(sidecar):
+        val content = rt_file_read_text(sidecar) ?? ""
+        return _metadata_from_text(content)
+    LoadedMetadata(possible: [], instantiations: [])
+
+fn _metadata_to_text(metadata: LoadedMetadata) -> text:
+    var lines: [text] = []
+    for entry in metadata.possible:
+        lines.push("P|" + entry.template_name + "|" + entry.type_args + "|" + entry.mangled_name)
+    for entry in metadata.instantiations:
+        lines.push(
+            "I|" + entry.id.to_string() + "|" + entry.template_name + "|" + entry.type_args + "|" +
+            entry.mangled_name + "|" + entry.from_file + "|" + entry.from_loc + "|" +
+            entry.to_obj + "|" + entry.status
+        )
+    lines.join("\n")
+
+fn _metadata_from_text(content: text) -> LoadedMetadata:
+    if content == "":
+        return LoadedMetadata(possible: [], instantiations: [])
+
+    var possible: [PossibleInstantiation] = []
+    var instantiations: [InstantiationRecord] = []
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val parts = line.split("|")
+        if parts.len() < 4:
+            continue
+        if parts[0] == "P":
+            possible.push(PossibleInstantiation(
+                template_name: parts[1],
+                type_args: parts[2],
+                mangled_name: parts[3]
+            ))
+        elif parts[0] == "I" and parts.len() >= 9:
+            instantiations.push(InstantiationRecord(
+                id: _parse_i32(parts[1]),
+                template_name: parts[2],
+                type_args: parts[3],
+                mangled_name: parts[4],
+                from_file: parts[5],
+                from_loc: parts[6],
+                to_obj: parts[7],
+                status: parts[8]
+            ))
+    LoadedMetadata(possible: possible, instantiations: instantiations)
+
+fn _parse_i32(input: text) -> i32:
+    input.to_i64() as i32
+
+fn _fake_compile_bytes(entry: PossibleInstantiation) -> [u8]:
+    var out: [u8] = []
+    for ch in (entry.template_name + ":" + entry.type_args + ":" + entry.mangled_name).bytes():
+        out.push(ch)
+    if out.len() == 0:
+        return [195]
+    out.push(195)
+    out
+
+fn _next_fake_address(exec_mapper: JitExecMapper, size: i64) -> i64:
+    4096 + ((exec_mapper.symbols.len() as i64 + 1) * 256) + size

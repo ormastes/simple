@@ -2,6 +2,12 @@
 
 Goal: make loader + linker actually load/execute SMFs by unifying module access (SmfGetter + ObjTaker), adding real exec-memory mapping, and driving the native linker through SMF-aware inputs. Deployment coverage tests come last.
 
+Current repo state (2026-03-30):
+
+- This refactor landed major infrastructure, but README status is still TODO for loader/JIT completion.
+- The remaining gap is not the mapper foundation; it is the unfinished `jit_instantiator` path and the need to replace leftover stubs and soft fallbacks with real behavior or hard diagnostics.
+- Near-term work is to complete SMF template loading, FFI compilation/materialization paths, executable-memory update behavior, and the corresponding end-to-end loader evidence.
+
 ## Phases
 
 1) **Object Provider Unification**

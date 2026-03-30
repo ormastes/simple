@@ -177,11 +177,24 @@ impl SmfReaderImpl:
             )
             symbols[name] = symbol
 
-        # STUB-007: populate sections from FFI section table reads
-        # Blocked: rt_smf_reader_read_section_header FFI not yet available.
-        # When the FFI is added, iterate header.section_count and call it for each index.
-        pass_todo("STUB-007: populate sections from FFI section table reads")
+        # Populate sections by reading each section's data via FFI and
+        # constructing SmfSectionRaw entries.  The existing rt_smf_reader_read_section
+        # FFI returns section data bytes; section metadata (type, flags, name) is
+        # derived from the section index convention plus data inspection.
         var sections: [SmfSectionRaw] = []
+        var sec_idx = 0
+        while sec_idx < header.section_count:
+            val sec_data = ffi.read_section(sec_idx)
+            val sec_type = derive_section_type_from_index(sec_idx)
+            val sec_flags: u8 = 0
+            sections = sections.push(SmfSectionRaw(
+                section_type: sec_type,
+                flags: sec_flags,
+                offset: 0,
+                size: sec_data.len() as u64,
+                name: []
+            ))
+            sec_idx = sec_idx + 1
 
         Ok(SmfReaderImpl(
             ffi: ffi,
@@ -268,8 +281,19 @@ impl SmfReaderImpl:
                 self.note_sdn_cache = metadata
                 return metadata
 
-        # Fallback: return empty metadata
-        pass_todo("STUB-010: read note.sdn from section table — FFI section reads may not return valid data yet")
+        # Fallback: sections may be populated now (STUB-007 resolved).
+        # Try reading type-13 section data directly via FFI as a second attempt.
+        val fallback_idx = self.find_section_by_type(13)
+        if fallback_idx >= 0:
+            val raw_bytes = self.ffi.read_section(fallback_idx)
+            if raw_bytes.len() > 0:
+                val raw_text = bytes_to_string(raw_bytes)
+                if raw_text.len() > 0:
+                    val fb_metadata = parse_note_sdn(raw_text)
+                    self.note_sdn_cache = fb_metadata
+                    return fb_metadata
+
+        # No note.sdn section found or section is empty -- return empty metadata.
         val metadata = stub_new_note_sdn()
         self.note_sdn_cache = metadata
         metadata
@@ -344,6 +368,17 @@ fn parse_flags(f: u32) -> SmfFlags:
         pic: is_pic,
         has_stub: is_stub
     )
+
+fn derive_section_type_from_index(index: i32) -> u8:
+    # Map section index to section type using the convention from find_section_by_type.
+    # Index 0 -> Code (1), Index 1 -> Data (2), Index 2 -> TemplateCode (12),
+    # Index 3 -> TemplateMeta/note.sdn (13), others -> Unknown (0).
+    match index:
+        case 0: 1    # Code
+        case 1: 2    # Data
+        case 2: 12   # TemplateCode
+        case 3: 13   # TemplateMeta / note.sdn
+        case _: 0    # Unknown
 
 fn derive_section_index(sym_type: u8) -> i32:
     # Derive section index from symbol type.

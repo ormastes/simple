@@ -14,6 +14,7 @@ use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Nod
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::plugin_manifest;
 use crate::value::{Env, Value};
 
 use super::{
@@ -162,20 +163,26 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "arc_box_dec_weak",
 ];
 
+pub(crate) fn initialize_extern_functions() {
+    EXTERN_FUNCTIONS.with(|cell| {
+        let mut externs = cell.borrow_mut();
+        externs.clear();
+        for &name in PRELUDE_EXTERN_FUNCTIONS {
+            externs.insert(name.to_string());
+        }
+        for name in plugin_manifest::registered_plugin_symbols() {
+            externs.insert(name);
+        }
+    });
+}
+
 /// Main module evaluation implementation.
 /// Processes all top-level items and executes the main function if present.
 pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
     // Clear const names, extern functions, and moved variables from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
     super::clear_moved_vars();
-    EXTERN_FUNCTIONS.with(|cell| {
-        let mut externs = cell.borrow_mut();
-        externs.clear();
-        // Pre-populate with prelude functions (always available)
-        for &name in PRELUDE_EXTERN_FUNCTIONS {
-            externs.insert(name.to_string());
-        }
-    });
+    initialize_extern_functions();
     // Clear macro definition order from previous runs
     MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().clear());
     // Clear unit family info from previous runs

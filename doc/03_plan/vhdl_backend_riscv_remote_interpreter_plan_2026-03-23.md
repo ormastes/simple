@@ -1,9 +1,25 @@
 # VHDL Backend + RISC-V Simple Hardware + Simulated Remote Interpreter Plan
 
 **Date:** 2026-03-23
-**Status:** Planning
+**Status:** In Progress
 **Scope:** Complete the VHDL backend enough to generate real hardware from Simple, migrate the FPGA RISC-V example to Simple source, and run the embedded remote interpreter test runner on a simulated RV32 CPU
 **Strategy:** Simple-first, hardware-subset-specific, fail-fast on unsupported constructs
+
+**Current repo state (2026-03-31):**
+- Phase 1 is now substantially complete in the current tree:
+  - `src/compiler/70.backend/backend/vhdl_backend.spl` now hard-fails unsupported MIR/type/constant paths instead of emitting silent placeholder comments.
+  - `compile_package()` and `compile_process()` are implemented against live MIR-backed code paths.
+  - focused backend specs cover package emission, process emission, supported MIR lowering, and fail-fast behavior.
+- The remote baremetal composite runner now recognizes the GHDL RV32 remote shape used in this repo:
+  - `interpreter(remote(baremetal(ghdl(riscv32))))`
+  - composite execution can route checked-in ELF artifacts through the semihosted GHDL runner.
+- Verification is strong for the implemented slice:
+  - targeted unit, system, feature, and integration suites pass
+  - `bin/simple build lint` passes for the current tree, with existing repo-wide warnings still present outside this plan slice
+- The larger end-to-end goal is still not complete:
+  - the mailbox-based simulated remote interpreter lane is not implemented
+  - the RV32 hardware example is still handwritten RTL rather than Simple-defined hardware
+  - `tb_remote.vhd` image-loading and real transport wiring remain incomplete
 
 ---
 
@@ -15,9 +31,9 @@ This plan covers three linked goals:
 2. Move the `examples/09_embedded/fpga_riscv/` CPU example from handwritten VHDL to Simple-defined hardware source compiled through the VHDL backend.
 3. Add a simulation-backed remote baremetal lane so `simple test` can execute an embedded remote interpreter on the simulated RV32 CPU.
 
-Current repo state does not satisfy any of those goals end to end:
+Current repo state still does not satisfy all of those goals end to end:
 
-- `src/compiler/70.backend/backend/vhdl_backend.spl` exists, but still contains unsupported-instruction fallbacks and stub trait methods.
+- `src/compiler/70.backend/backend/vhdl_backend.spl` no longer relies on the old unsupported-instruction comment fallbacks for the implemented MIR subset, but the backend is still not a complete end-to-end hardware flow.
 - `examples/09_embedded/vhdl/vhdl/*.spl` are builder demos, not normal Simple programs lowered through the backend.
 - `examples/09_embedded/fpga_riscv/rtl/*.vhd` is handwritten VHDL today.
 - `examples/09_embedded/fpga_riscv/test/run_test.sh` proves an assembly-to-simulation smoke path only.
@@ -46,7 +62,7 @@ The required design decision is explicit:
 
 - `bin/simple compile --backend=vhdl ...` is not healthy enough for reliable end-to-end verification in the current workspace.
 - `src/compiler/70.backend/backend/vhdl_backend.spl` still emits comments for unsupported MIR instructions instead of hard errors.
-- `compile_package()` and `compile_process()` in the VHDL backend trait implementation are still stubs.
+- `compile_package()` and `compile_process()` in the VHDL backend trait implementation are now implemented, but broader subset validation and backend CLI integration still need more proof.
 - The VHDL examples under `examples/09_embedded/vhdl/` validate the builder API, not the backend.
 - The FPGA RISC-V design is not sourced from Simple code.
 - `tb_remote.vhd` has a partial `load_hex()` implementation and currently documents that real loading is not done there.
@@ -236,15 +252,15 @@ Extend the remote baremetal test runner to launch the GHDL-based target and pars
 
 ### Tasks
 
-- [ ] Audit all catch-all and comment-emission paths in `src/compiler/70.backend/backend/vhdl_backend.spl`
-- [ ] Replace comment-based unsupported emission with structured `CompileError`
-- [ ] Implement the currently stubbed trait methods:
+- [x] Audit all catch-all and comment-emission paths in `src/compiler/70.backend/backend/vhdl_backend.spl`
+- [x] Replace comment-based unsupported emission with structured `CompileError`
+- [x] Implement the currently stubbed trait methods:
   - `compile_package()`
   - `compile_process()`
-- [ ] Define the initial supported MIR instruction set for VHDL codegen
+- [x] Define and enforce an initial supported MIR instruction subset through explicit backend failures
 - [ ] Add a hardware-subset verifier pass before VHDL emission
 - [ ] Make unsupported software/runtime constructs fail during validation, not after emission
-- [ ] Add focused tests for each supported VHDL MIR pattern
+- [x] Add focused tests for supported VHDL MIR patterns and fail-fast cases
 
 ### Files
 
@@ -259,6 +275,14 @@ Extend the remote baremetal test runner to launch the GHDL-based target and pars
 - `--backend=vhdl` never succeeds by emitting partial nonsense with “Unsupported instruction” comments
 - every unsupported path returns a clear error
 - supported examples produce GHDL-valid output
+
+### 2026-03-31 Implementation Note
+
+This phase is functionally complete for the current backend slice, but not fully closed from a product perspective because the repo still lacks:
+
+- a pre-emission hardware-subset validator
+- a backend CLI smoke path that proves `bin/simple compile --backend=vhdl`
+- a generated RTL example that replaces builder-only proof
 
 ---
 
@@ -484,21 +508,31 @@ This transcript must be stable and ASCII-safe. Do not depend on pretty terminal 
 ### Tasks
 
 - [ ] Extend remote baremetal mode parsing to recognize `riscv32_sim_vhdl`
-- [ ] Add a launch adapter that:
-  - compiles the remote target payload
-  - generates the instruction image
-  - compiles/elaborates the testbench
-  - runs GHDL
-  - parses the transcript
-- [ ] Add host capability checks for:
+- [~] Add a launch adapter that:
+  - [x] routes checked-in ELF artifacts through the GHDL semihost runner for `interpreter(remote(baremetal(ghdl(riscv32))))`
+  - [ ] compiles the remote target payload
+  - [ ] generates the instruction image
+  - [ ] compiles/elaborates the testbench
+  - [ ] parses a mailbox-backed remote transcript
+- [x] Add host capability checks for:
   - GHDL availability
-  - RISC-V assembler/linker availability if needed in the pipeline
-- [ ] Add skip/blocked handling when host tools are missing
-- [ ] Keep runtime and docs aligned with real command lines
+  - existing remote-baremetal host tooling already covers the QEMU lane
+- [x] Add skip/blocked handling when host tools are missing
+- [~] Keep runtime and docs aligned with real command lines
 
 ### Exit Criteria
 
 - `simple test` can execute the VHDL-sim remote interpreter lane end to end
+
+### 2026-03-31 Implementation Note
+
+The current tree now supports a narrower proof than the original phase target:
+
+- parser and runner support for the GHDL RV32 remote shape
+- execution of checked-in ELF artifacts through the GHDL semihost runner
+- system/integration coverage for the live routing path
+
+It does not yet provide the full `riscv32_sim_vhdl` instruction-image plus mailbox-transport pipeline described in this plan.
 
 ---
 

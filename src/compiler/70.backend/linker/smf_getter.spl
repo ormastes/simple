@@ -13,6 +13,8 @@
 #   val smf_data = getter.get("std/io/mod")?
 
 use app.io.{file_read, file_exists, path_join}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
@@ -281,13 +283,19 @@ impl SmfGetter:
                 case SmfSourceType.LibraryFile:
                     pass_dn
 
-        # For library-embedded modules, bridging SmfReaderMemory to
-        # SmfReaderImpl interface requires either:
-        #   a) SmfReaderImpl accepting a byte buffer constructor, or
-        #   b) A trait-based SmfReader that SmfReaderMemory implements
-        # Neither adapter exists yet.
-        pass_todo("STUB-010: bridge SmfReaderMemory to SmfReaderImpl interface for library-embedded modules")
-        Err("SmfReaderImpl from in-memory data not yet implemented for library module {module_name}")
+        # For library-embedded modules, write the SMF data to a temporary
+        # file and open it with SmfReaderImpl.  This avoids requiring a new
+        # in-memory constructor on SmfReaderImpl (which depends on Rust FFI
+        # file handles).  The temp file is cleaned up by the caller via close().
+        val safe_name = module_name.replace("/", "_")
+        val tmp_path = "/tmp/smf_getter_{safe_name}.smf"
+        val ok = rt_file_write_bytes(tmp_path, data)
+        if not ok:
+            return Err("Failed to write temp SMF for library module {module_name}")
+        val reader_result = SmfReaderImpl.open(tmp_path)
+        if reader_result.is_err():
+            return Err("Failed to open temp SMF for {module_name}: {reader_result.unwrap_err()}")
+        reader_result
 
     """Check if a module exists.
 

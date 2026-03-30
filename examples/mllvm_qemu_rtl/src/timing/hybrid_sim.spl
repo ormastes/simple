@@ -1,0 +1,440 @@
+# HybridSimulator
+#
+# Top-level facade for the RV32 Hybrid Simulator (F7).
+# Combines fast emulation, timing overlay, native RTL, and mode switching
+# into a single API matching the requirement examples.
+#
+# Implements: REQ-SIM-001 through REQ-SIM-011
+
+use core.types.{IrTcTypeKind, GuestArch}
+use core.block.{IrTcModule, IrTcModuleMode}
+use core.builder.{IrTcBuilder}
+use guest.cpu_def.{GuestCpuDef, GuestState}
+use guest.riscv.cpu32.{build_rv32_cpu_def}
+use guest.riscv.decoder32.{Rv32Decoder}
+use runtime.memory.{GuestMemory}
+use runtime.io.{IoController, RiscvUartIO}
+use runtime.interrupt.{InterruptController}
+use rtl.types.{SimBackendKind, Rv32Checkpoint}
+use rtl.sim_engine.{NativeRtlBackend}
+use rtl.bridge.{RtlStateBridge}
+use transform.irtc_to_guest.{IrtcToGuestAdapter}
+use timing.types.{
+    SimMode, CycleCount, LatencyTable, TimingAnnotation,
+    InstructionCategory, StateSnapshot
+}
+use timing.pipeline.{PipelineModel}
+use timing.hazards.{HazardReport}
+use timing.classifier.{classify_rv32_instruction, InstructionClassification}
+use timing.mode_switcher.{SimModeSwitcher, ModeSwitchResult}
+use trace.retirement.{RetirementTrace, RetirementRecord, TandemChecker, TraceDivergence}
+use trace.vcd_dumper.{WaveformDumper}
+use std.io_runtime.{time_now_micros}
+
+# ============================================================================
+# HybridSimulator
+# ============================================================================
+
+class HybridSimulator:
+    """RV32 Hybrid Simulator — unified interface for fast, timing, and RTL modes.
+
+    Example:
+        val sim = HybridSimulator.new(SimMode.TimingApproximate)
+        sim.load_elf_bytes(program_bytes)
+        sim.run_until_halt()
+        print "Cycles: {sim.cycle_count()}"
+        print "IPC: {sim.ipc()}"
+        print "Branch misses: {sim.branch_misses()}"
+    """
+    # Core emulation state
+    cpu_def: GuestCpuDef
+    state: GuestState
+    memory: GuestMemory
+    io: IoController
+    interrupt: InterruptController
+    halted: bool
+    fast_cycle_count: i64
+
+    # Mode management
+    mode_switcher: SimModeSwitcher
+
+    # Timing overlay (active in TimingApproximate mode)
+    pipeline: PipelineModel
+
+    # RTL backend (active in RtlCycleAccurate mode)
+    rtl_backend: NativeRtlBackend
+    rtl_bridge: RtlStateBridge
+
+    # Trace and VCD
+    retirement_trace: RetirementTrace
+    vcd_dumper: WaveformDumper
+    trace_enabled: bool
+    hazard_report_enabled: bool
+
+impl HybridSimulator:
+    static fn new(mode: SimMode) -> HybridSimulator:
+        """Create a new hybrid simulator in the given mode."""
+        val cpu_def = build_rv32_cpu_def()
+        val state = GuestState.new(cpu_def)
+        val memory = GuestMemory.new(cpu_def)
+        var io = IoController.new()
+        io.register_riscv_uart(0x10000000, RiscvUartIO.new())
+        val interrupt = InterruptController.new(GuestArch.Riscv32)
+
+        var vcd = WaveformDumper.new("rv32_hybrid")
+        vcd.add_signal("clk", 1, true)
+        vcd.add_signal("pc", 32, true)
+        vcd.add_signal("inst_word", 32, false)
+        vcd.add_signal("rd", 5, false)
+        vcd.add_signal("rd_value", 32, false)
+        vcd.add_signal("stall", 1, false)
+        vcd.add_signal("branch_taken", 1, false)
+        vcd.add_signal("halted", 1, true)
+
+        HybridSimulator(
+            cpu_def: cpu_def,
+            state: state,
+            memory: memory,
+            io: io,
+            interrupt: interrupt,
+            halted: false,
+            fast_cycle_count: 0,
+            mode_switcher: SimModeSwitcher.new(mode),
+            pipeline: PipelineModel.new(),
+            rtl_backend: NativeRtlBackend.new(),
+            rtl_bridge: RtlStateBridge.new(),
+            retirement_trace: RetirementTrace.new(),
+            vcd_dumper: vcd,
+            trace_enabled: false,
+            hazard_report_enabled: false
+        )
+
+    # ========================================================================
+    # Program Loading
+    # ========================================================================
+
+    me load_elf_bytes(data: [i64]):
+        """Load program bytes at 0x80000000 (RV32 reset vector)."""
+        val base = 0x80000000
+        for i in 0..data.len():
+            self.memory.write_byte(base + i, data[i] & 0xFF)
+
+    me load_program_at(addr: i64, data: [i64]):
+        """Load program bytes at a specific address."""
+        for i in 0..data.len():
+            self.memory.write_byte(addr + i, data[i] & 0xFF)
+
+    me reset():
+        """Reset simulator to initial state."""
+        self.state = GuestState.new(self.cpu_def)
+        self.state.pc = 0x80000000
+        self.halted = false
+        self.fast_cycle_count = 0
+        self.pipeline.reset()
+        self.retirement_trace.clear()
+
+    # ========================================================================
+    # Execution
+    # ========================================================================
+
+    me step() -> i64:
+        """Execute one instruction and return cycles consumed."""
+        if self.halted:
+            return 0
+
+        # Deliver pending interrupts
+        self.state = self.interrupt.deliver_riscv(self.state)
+
+        val pc_before = self.state.pc
+
+        # Fetch instruction
+        val b0 = self.memory.read_byte(pc_before) & 0xFF
+        val b1 = self.memory.read_byte(pc_before + 1) & 0xFF
+        val b2 = self.memory.read_byte(pc_before + 2) & 0xFF
+        val b3 = self.memory.read_byte(pc_before + 3) & 0xFF
+        val inst_word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+        # Classify instruction for timing
+        val classification = classify_rv32_instruction(inst_word)
+
+        # Execute instruction through IR_TC path
+        var builder = IrTcBuilder.new("rv32_tb", IrTcModuleMode.Emulation)
+        builder.set_target(GuestArch.Riscv32)
+        builder.begin_function("tb", [], IrTcTypeKind.Void)
+        val entry = builder.new_block("entry")
+        builder.set_block(entry)
+        val decoder = Rv32Decoder(builder: builder, cpu_def: self.cpu_def)
+        val result = decoder.decode_instruction(inst_word, pc_before)
+
+        match result:
+            Ok(bytes_consumed):
+                val module = builder.finish()
+                var adapter = IrtcToGuestAdapter.new()
+                self.state = adapter.apply_to_state_with_memory(module, self.state, self.memory)
+                if self.state.pc == pc_before:
+                    self.state.pc = pc_before + bytes_consumed
+
+                val pc_after = self.state.pc
+                val branch_taken = classification.is_branch and (pc_after != pc_before + 4)
+
+                # Timing overlay: record in pipeline model
+                val mode = self.mode_switcher.mode()
+                var timing_cycles: i64 = 1
+                val mode_text = mode.to_text()
+                if mode_text == "timing-approximate":
+                    val annotation = self.pipeline.retire_instruction(
+                        pc_before, inst_word,
+                        classification.category,
+                        classification.rd, classification.rs1, classification.rs2,
+                        branch_taken
+                    )
+                    timing_cycles = annotation.total_cycles
+
+                    # VCD trace
+                    if self.trace_enabled:
+                        val time = self.pipeline.cycle_count() * 10
+                        self.vcd_dumper.set_time(time)
+                        self.vcd_dumper.emit_change("clk", 1, 1)
+                        self.vcd_dumper.emit_change("pc", pc_before, 32)
+                        self.vcd_dumper.emit_change("inst_word", inst_word, 32)
+                        if classification.rd >= 0:
+                            self.vcd_dumper.emit_change("rd", classification.rd, 5)
+                            var rd_val: i64 = 0
+                            if val Some(v) = self.state.get_reg_by_name("a0"):
+                                rd_val = v
+                            self.vcd_dumper.emit_change("rd_value", rd_val, 32)
+                        val stall_bit = if annotation.stall_cycles > 0: 1 else: 0
+                        self.vcd_dumper.emit_change("stall", stall_bit, 1)
+                        val branch_bit = if branch_taken: 1 else: 0
+                        self.vcd_dumper.emit_change("branch_taken", branch_bit, 1)
+                        self.vcd_dumper.emit_change("halted", 0, 1)
+                else if mode_text == "rtl-cycle-accurate":
+                    # In RTL mode, sync signals
+                    val checkpoint = Rv32Checkpoint.from_state(
+                        self.state, self.memory.memory,
+                        self.memory.read_count, self.memory.write_count,
+                        self.fast_cycle_count + 1, self.halted
+                    )
+                    var a0_value: i64 = 0
+                    var sp_value: i64 = 0
+                    if val Some(a0) = self.state.get_reg_by_name("a0"):
+                        a0_value = a0
+                    if val Some(sp) = self.state.get_reg_by_name("sp"):
+                        sp_value = sp
+                    self.rtl_backend.refresh(checkpoint, a0_value, sp_value, inst_word, self.memory.read_count, self.memory.write_count)
+                    self.rtl_backend.begin_cycle(self.fast_cycle_count + 1)
+                    self.rtl_backend.sample_all()
+                else:
+                    pass_dn
+
+                # Retirement trace
+                var rd_value: i64 = 0
+                if classification.rd > 0:
+                    if val Some(v) = self.state.get_reg_by_name(_reg_name(classification.rd)):
+                        rd_value = v
+                self.retirement_trace.record(pc_before, inst_word, classification.rd, rd_value, mode)
+
+                self.fast_cycle_count = self.fast_cycle_count + 1
+                timing_cycles
+            Err(_):
+                self.halted = true
+                0
+
+    me run_cycles(max_cycles: i64):
+        """Run for at most max_cycles."""
+        var remaining = max_cycles
+        while not self.halted:
+            if remaining <= 0:
+                return
+            val used = self.step()
+            if used == 0:
+                return
+            remaining = remaining - 1
+
+    me run_until_halt():
+        """Run until the emulator halts (EBREAK or unknown instruction)."""
+        self.run_cycles(1000000)
+
+    me run_until_pc(target_pc: i64):
+        """Run until PC reaches target_pc or halt."""
+        var safety: i64 = 0
+        while not self.halted:
+            if self.state.pc == target_pc:
+                return
+            val used = self.step()
+            if used == 0:
+                return
+            safety = safety + 1
+            if safety > 1000000:
+                return
+
+    # ========================================================================
+    # Mode Switching
+    # ========================================================================
+
+    me switch_mode(target: SimMode):
+        """Switch simulation mode, preserving full architectural state."""
+        val snapshot = StateSnapshot.new(
+            self.state.reg_values,
+            self.state.pc,
+            self.memory.memory,
+            self.cycle_count(),
+            self.retirement_trace.len(),
+            self.halted,
+            self.mode_switcher.mode()
+        )
+        self.mode_switcher.prepare_switch(target, snapshot)
+
+    fn mode() -> SimMode:
+        self.mode_switcher.mode()
+
+    # ========================================================================
+    # Statistics
+    # ========================================================================
+
+    fn cycle_count() -> i64:
+        """Return the cycle count based on current mode."""
+        val mode_text = self.mode_switcher.mode().to_text()
+        if mode_text == "timing-approximate":
+            return self.pipeline.cycle_count()
+        self.fast_cycle_count
+
+    fn ipc() -> i64:
+        """IPC * 100 (integer). E.g., 72 = IPC 0.72."""
+        self.pipeline.ipc()
+
+    fn branch_misses() -> i64:
+        """Total branch misprediction count."""
+        self.pipeline.branch_mispredict_count
+
+    fn retired_count() -> i64:
+        self.retirement_trace.len()
+
+    fn pipeline_stats() -> text:
+        self.pipeline.stats_text()
+
+    # ========================================================================
+    # Hazard Report
+    # ========================================================================
+
+    me enable_hazard_report():
+        self.hazard_report_enabled = true
+
+    fn hazard_report() -> HazardReport:
+        self.pipeline.hazard_report()
+
+    # ========================================================================
+    # Trace and VCD
+    # ========================================================================
+
+    me enable_trace(file_name: text):
+        """Enable VCD trace output."""
+        self.trace_enabled = true
+        self.rtl_backend.enable_trace()
+
+    me disable_trace():
+        self.trace_enabled = false
+        self.rtl_backend.disable_trace()
+
+    fn dump_waveform() -> text:
+        """Generate VCD waveform text."""
+        self.vcd_dumper.finish()
+
+    fn retirement_trace_ref() -> RetirementTrace:
+        """Access the retirement trace for tandem checking."""
+        self.retirement_trace
+
+    # ========================================================================
+    # Register Access
+    # ========================================================================
+
+    fn get_reg(name: text) -> i64?:
+        if name == "pc":
+            return Some(self.state.pc)
+        self.state.get_reg_by_name(name)
+
+    me set_reg(name: text, value: i64) -> bool:
+        if name == "pc":
+            self.state.pc = value
+            return true
+        self.state.set_reg_by_name(name, value)
+
+    # ========================================================================
+    # RTL Signal Access (RTL mode only)
+    # ========================================================================
+
+    fn read_signal(name: text) -> i64?:
+        self.rtl_backend.read_signal(name)
+
+    # ========================================================================
+    # State Snapshot/Restore
+    # ========================================================================
+
+    fn snapshot() -> StateSnapshot:
+        StateSnapshot.new(
+            self.state.reg_values,
+            self.state.pc,
+            self.memory.memory,
+            self.cycle_count(),
+            self.retirement_trace.len(),
+            self.halted,
+            self.mode_switcher.mode()
+        )
+
+    me restore_snapshot(snap: StateSnapshot):
+        self.state.reg_values = snap.reg_values
+        self.state.pc = snap.pc
+        self.memory.memory = snap.memory_snapshot
+        self.halted = snap.halted
+
+    fn stats_text() -> text:
+        var out = "HybridSimulator mode={self.mode_switcher.mode().to_text()}"
+        out = out + " pc=0x{self.state.pc}"
+        out = out + " cycles={self.cycle_count()}"
+        out = out + " retired={self.retirement_trace.len()}"
+        out = out + " halted={self.halted}"
+        val mode_text = self.mode_switcher.mode().to_text()
+        if mode_text == "timing-approximate":
+            out = out + " ipc_x100={self.ipc()}"
+            out = out + " branch_misses={self.branch_misses()}"
+        out
+
+# ============================================================================
+# Helper: register index to name
+# ============================================================================
+
+fn _reg_name(index: i64) -> text:
+    """Map register index to ABI name."""
+    if index == 0: return "zero"
+    if index == 1: return "ra"
+    if index == 2: return "sp"
+    if index == 3: return "gp"
+    if index == 4: return "tp"
+    if index == 5: return "t0"
+    if index == 6: return "t1"
+    if index == 7: return "t2"
+    if index == 8: return "s0"
+    if index == 9: return "s1"
+    if index == 10: return "a0"
+    if index == 11: return "a1"
+    if index == 12: return "a2"
+    if index == 13: return "a3"
+    if index == 14: return "a4"
+    if index == 15: return "a5"
+    if index == 16: return "a6"
+    if index == 17: return "a7"
+    if index == 18: return "s2"
+    if index == 19: return "s3"
+    if index == 20: return "s4"
+    if index == 21: return "s5"
+    if index == 22: return "s6"
+    if index == 23: return "s7"
+    if index == 24: return "s8"
+    if index == 25: return "s9"
+    if index == 26: return "s10"
+    if index == 27: return "s11"
+    if index == 28: return "t3"
+    if index == 29: return "t4"
+    if index == 30: return "t5"
+    if index == 31: return "t6"
+    "x{index}"

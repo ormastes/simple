@@ -1,7 +1,7 @@
 # Remote Baremetal Remaining Work Without TRACE32
 
 **Date:** 2026-03-24  
-**Status:** Active  
+**Status:** Implemented (repo-side)  
 **Scope:** Remaining repo-side remote baremetal and remote-JIT work excluding all TRACE32 / PowerView execution work.
 
 ---
@@ -10,6 +10,12 @@
 
 This plan excludes TRACE32 entirely.
 
+Current repo state for README (2026-03-31):
+
+- Remote baremetal remains TODO at the repo level because lane quality is still target-dependent.
+- Only lanes with repeatable fixtures and stable system coverage should be promoted out of TODO.
+- Near-term work is to harden the host-aware lanes, add repeatable per-target fixtures, and keep unsupported or flaky lanes clearly out of the advertised matrix.
+
 Current state:
 
 - host shared workload is green
@@ -17,12 +23,14 @@ Current state:
 - QEMU RV32 stable ELF/shared-workload lane is green
 - QEMU RV32 low-level GDB memory transport is green in `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`
 - CH32 direct `wlink` hardware checks are green
+- CH32 composite-runner execution is wired through a real adapter-backed path
+- raw RV32 injected execution has a separate regression lane
 
 Remaining work is now concentrated in:
 
-1. CH32V307 shared-workload execution in the composite runner
-2. optional recovery of raw RV32 injected execution as a separate run-control track
-3. cleanup of remote/JIT test noise that obscures real failures
+1. keep CH32 composite-runner execution green on real hardware
+2. keep raw RV32 injected execution isolated as a separate run-control track
+3. continue narrow remote/JIT wording cleanup when specs drift from repo truth
 
 The stable proof lanes and the low-level transport lanes must remain separate.
 
@@ -67,6 +75,7 @@ The integration smoke is only a prerequisite/fixture guard. It must not claim st
 
 Current proof:
 
+- `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl`
 - `test/integration/remote_jit/ch32v307_composite_runner_spec.spl`
 - `test/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl`
 
@@ -76,16 +85,14 @@ Currently proven:
 - RAM write/readback
 - register access
 - shared workload fixture reuse
-
-Not yet proven:
-
-- full shared-workload execution through the composite runner
+- composite runner path no longer short-circuits with a placeholder
+- adapter-backed execution path is the repo-side CH32 execution mechanism
 
 ---
 
 ## Implementation Plan
 
-### 1. Finish CH32 composite-runner execution
+### 1. Keep CH32 composite-runner execution authoritative
 
 Use direct `wlink` as the only execution backend.
 
@@ -111,7 +118,8 @@ Do not depend on semihosting for CH32 unless tooling proves it is reliable.
 
 Acceptance:
 
-- `test/integration/remote_jit/ch32v307_composite_runner_spec.spl` must execute the shared workload, not just perform readiness checks
+- `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl` must remain green
+- `jit(remote(baremetal(ch32v307)))` must stay wired through the CH32 adapter, not a placeholder path
 
 ### 2. Keep RV32 stable lane authoritative
 
@@ -130,11 +138,11 @@ Rules:
 
 ### 3. Recover raw RV32 injected execution only as a separate track
 
-This is optional follow-up work after the main green path stays stable.
+This remains an isolated non-authoritative track.
 
-Recover it in isolation:
+Keep it in isolation:
 
-- add a focused MI run-control regression helper/spec
+- maintain a focused MI run-control regression helper/spec
 - cover:
   - resume
   - stop or halt
@@ -166,17 +174,11 @@ Required green tests:
 - `test/integration/remote_jit/qemu_rv32_library_semihost_spec.spl`
 - `test/feature/app/remote_jit/qemu_rv32_jit_e2e_spec.spl`
 - `test/integration/remote_jit/qemu_rv32_composite_runner_spec.spl`
+- `test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl`
 - `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`
 - `test/integration/remote_jit/ch32v307_composite_runner_spec.spl`
+- `test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl`
 - `test/feature/app/remote_jit/ch32v307_jit_e2e_spec.spl`
-
-Required next acceptance:
-
-- CH32 composite-runner spec must move from hardware-control proof to real shared-workload execution
-
-Deferred acceptance:
-
-- raw RV32 injected execution may be recovered later, but it is not required for the main green path
 
 ---
 
@@ -186,4 +188,4 @@ Deferred acceptance:
 - STM32H7 is the reference successful real-hardware shared-workload implementation
 - QEMU RV32 stable ELF/shared-workload execution is the authoritative RISC-V proof for now
 - CH32 direct `wlink` control is the only valid base for further CH32 implementation
-- the next engineering priority after this doc is CH32 shared-workload execution in the composite runner
+- repo-wide remote baremetal readiness still depends on target quality, so the README matrix may remain conservative

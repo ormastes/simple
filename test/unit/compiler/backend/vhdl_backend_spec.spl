@@ -8,11 +8,43 @@
 # **Difficulty:** 3/5
 
 use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.backend.vhdl_backend.VhdlBackend
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
 use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
 use compiler.backend.backend.common.type_mapper.PrimitiveType
+use compiler.mir.mir_data.*
+from hir_types import {SymbolId}
+from lexer import {Span}
 
 fn check(condition: bool):
     expect(condition).to_equal(true)
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_i32() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn make_bool() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn make_arg_local(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index))
+
+fn make_return_local(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: ty, kind: LocalKind.Return)
+
+fn make_temp_local(id: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Temp)
+
+fn make_simple_backend() -> VhdlBackend:
+    val options = compileoptions_default_options()
+    VhdlBackend.create(CodegenTarget.Riscv32, options)
+
+fn single_block_module(name: text, func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
 
 # ============================================================================
 # Simple Function (Entity + Architecture)
@@ -243,3 +275,186 @@ describe "VHDL Backend - complete module compilation":
         check(ent_vhdl.contains("alu_proc: process(op, a, b)"))
         check(ent_vhdl.contains("end process alu_proc;"))
         check(ent_vhdl.contains("end architecture rtl;"))
+
+describe "VHDL Backend - real backend compilation":
+    it "compiles MIR locals to ports and result output":
+        val a_local = make_arg_local(1, 0, "a", make_i32())
+        val b_local = make_arg_local(2, 1, "b", make_i32())
+        val ret_local = make_return_local(3, make_i32())
+        val sum_local = make_temp_local(4, "sum_sig", make_i32())
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.BinOp(
+                        LocalId(id: 4),
+                        MirBinOp.Add,
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                    ),
+                    span: nil
+                ),
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 4)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+
+        val func = MirFunction(
+            symbol: SymbolId(id: 10),
+            name: "adder",
+            signature: MirSignature(params: [make_i32(), make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [a_local, b_local, ret_local, sum_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("adder_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("a : in signed(31 downto 0);"))
+        check(compiled.vhdl.contains("b : in signed(31 downto 0);"))
+        check(compiled.vhdl.contains("result_out : out signed(31 downto 0)"))
+        check(compiled.vhdl.contains("signal sum_sig : signed(31 downto 0);"))
+        check(compiled.vhdl.contains("sum_sig <= a + b;"))
+        check(compiled.vhdl.contains("result_out <= sum_sig;"))
+
+    it "compiles package declarations through the backend trait path":
+        val point_type = MirTypeDef(
+            symbol: SymbolId(id: 20),
+            name: "point_t",
+            kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "x", type_: make_i32(), offset: 0, has_bits_attr: false, bits_width: 0),
+                MirFieldDef(name: "valid", type_: make_bool(), offset: 4, has_bits_attr: false, bits_width: 0)
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        val max_constant = MirConstant(
+            symbol: SymbolId(id: 21),
+            name: "MAX_VALUE",
+            type_: make_i32(),
+            value: MirConstValue.Int(7)
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_type.symbol] = point_type
+        var constants: Dict<SymbolId, MirConstant> = {}
+        constants[max_constant.symbol] = max_constant
+        val module = MirModule(name: "pkg_demo", functions: {}, statics: {}, constants: constants, types: types)
+
+        val backend = make_simple_backend()
+        val pkg_vhdl = backend.compile_package(module)
+
+        check(pkg_vhdl.contains("package pkg_demo_pkg is"))
+        check(pkg_vhdl.contains("type point_t is record"))
+        check(pkg_vhdl.contains("x : signed(31 downto 0);"))
+        check(pkg_vhdl.contains("valid : bit;"))
+        check(pkg_vhdl.contains("constant MAX_VALUE : signed(31 downto 0) := to_signed(7, 32);"))
+
+    it "compiles MIR VHDL combinational processes with real block contents":
+        val src_local = make_arg_local(1, 0, "src_in", make_i32())
+        val ret_local = make_return_local(2, make_i32())
+        val body_block = MirBlock(
+            id: BlockId(id: 1),
+            label: Some("proc_body"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val entry_block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.VhdlProcess(
+                        VhdlProcessKind.Combinational(["src_in"]),
+                        BlockId(id: 1)
+                    ),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 30),
+            name: "passthrough",
+            signature: MirSignature(params: [make_i32()], return_type: make_i32(), is_variadic: false),
+            locals: [src_local, ret_local],
+            blocks: [entry_block, body_block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("proc_mod", func))
+        check(result.is_ok())
+        val compiled = result.unwrap()
+
+        check(compiled.vhdl.contains("process(src_in)"))
+        check(compiled.vhdl.contains("result_out <= src_in;"))
+
+    it "fails fast on unsupported MIR instructions":
+        val ret_local = make_return_local(1, make_i32())
+        val temp_local = make_temp_local(2, "tmp_sig", make_i32())
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            label: Some("entry"),
+            instructions: [
+                MirInst(
+                    kind: MirInstKind.Alloc(LocalId(id: 2), make_i32()),
+                    span: nil
+                )
+            ],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = MirFunction(
+            symbol: SymbolId(id: 40),
+            name: "bad_alloc",
+            signature: MirSignature(params: [], return_type: make_i32(), is_variadic: false),
+            locals: [ret_local, temp_local],
+            blocks: [block],
+            entry_block: BlockId.entry(),
+            span: empty_span(),
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {},
+            layout_phase: nil,
+            is_kernel: false,
+            is_export_c: false,
+            export_name: ""
+        )
+
+        val backend = make_simple_backend()
+        val result = backend.compile(single_block_module("bad_mod", func))
+        check(result.is_err())
+        val err = result.unwrap_err()
+        check(err.message.contains("Unsupported instruction"))
+        check(err.phase.contains("vhdl"))

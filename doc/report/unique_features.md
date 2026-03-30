@@ -1,6 +1,6 @@
 # Simple Unique Features Audit
 
-**Date:** 2026-03-30  
+**Date:** 2026-03-31  
 **Scope:** Audit of distinctive Simple features requested for README cleanup and repo documentation.  
 **Method:** local source/doc inspection plus parallel sub-agent verification across testing, runtime/backend, and language/tooling areas.
 
@@ -45,7 +45,7 @@ Several requested items are real but only partial, experimental, or host-depende
 | mmap file loading | Implemented | SMF/native loader support exists |
 | Interpreter / loader / compiler support | Implemented | Staged architecture is real |
 | Baremetal-friendly runtime/build | Implemented | Real build/test plumbing |
-| Remote baremetal test runner | Partial | Plumbing exists; host-dependent end-to-end status |
+| Remote baremetal test runner | Implemented with host-dependent lanes | Plumbing exists, CH32 composite execution is real, but repo-wide end-to-end status still depends on host tools and boards |
 | Test session sharing | Implemented | Test DB/run DB support |
 | UI sharing with TUI and GUI | Partial | Shared UI testing surface is real; one unified UI layer is not proven |
 | AOP | Partial | Real compiler/runtime surface, but some stubs remain |
@@ -165,7 +165,9 @@ Implemented:
 Qualification:
 
 - remote baremetal support is real enough to document as a differentiator
-- it should be described as plumbing/readiness/host-aware support, not as universally green full hardware execution
+- stable RV32 ELF/shared-workload proof is green
+- CH32 composite-runner execution is real through the `wlink` adapter path
+- docs should still avoid claiming universally green full hardware execution across every host and board
 
 ### 8. Loader, mmap, and Executable Memory
 

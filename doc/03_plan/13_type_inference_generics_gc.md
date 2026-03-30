@@ -1,5 +1,10 @@
 # Plan: Features #13 (Type Inference), #14 (Generics), #24 (GC-Managed Default)
 
+> **DEPRECATED (2026-03-30):** Actual implementation diverged from this plan.
+> Type inference uses HIR-based bidirectional type checking (not pure Hindley-Milner).
+> Generics implemented via monomorphization in `src/compiler/40.mono/`.
+> GC-managed default remains unimplemented (blocked by runtime limitations).
+
 ## Goals
 - Add Hindley–Milner-style local type inference for let-bindings/functions (Feature #13).
 - Support generic functions/types with monomorphization (Feature #14).

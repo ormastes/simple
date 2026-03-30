@@ -351,11 +351,14 @@ describe "SFFI Bidirectional Class Interop":
 
             expect(header).to_contain("namespace spl")
             expect(header).to_contain("class Library")
+            expect(header).to_contain("Library() { spl_library_init(); }")
+            expect(header).to_contain("~Library() { spl_library_shutdown(); }")
             expect(header).to_contain("class Calculator")
             expect(header).to_contain("~Calculator()")
             expect(header).to_contain("Calculator(const Calculator&) = delete;")
             expect(header).to_contain("Calculator(Calculator&& other) noexcept")
             expect(header).to_contain("spl_Calculator_destroy(handle_)")
+            expect(header).to_contain("static_assert")
 
     describe "driver header generation":
         it "generates real C and C++ header files from source-defined exported types and functions":
@@ -508,3 +511,15 @@ describe "SFFI Bidirectional Class Interop":
             expect(compile_flags.contains("-DSPL_SHARED_LIBRARY")).to_equal(true)
             expect(link_flags.len() > 0).to_equal(true)
             expect(output_path.ends_with(flags.output_extension)).to_equal(true)
+
+        it "emits guarded lifecycle definitions and auto-init hooks for shared libraries":
+            val translator = MirToC.create("test.sffi")
+            val output = translator.translate_module(make_mir_module_with_standalone(""))
+
+            expect(output).to_contain("static int spl_library_initialized = 0;")
+            expect(output).to_contain("void spl_library_init(void) {")
+            expect(output).to_contain("if (spl_library_initialized) return;")
+            expect(output).to_contain("void spl_library_shutdown(void) {")
+            expect(output).to_contain("if (!spl_library_initialized) return;")
+            expect(output).to_contain("_spl_auto_init")
+            expect(output).to_contain("_spl_auto_fini")

@@ -193,6 +193,16 @@ fn handle_ffi_gen_wrapper(_ctx: &CommandContext) -> i32 {
     0
 }
 
+fn handle_plugin_wrapper(_ctx: &CommandContext) -> i32 {
+    eprintln!("error: plugin app not found (install Simple or run from project root)");
+    1
+}
+
+fn handle_wrapper_gen_wrapper(_ctx: &CommandContext) -> i32 {
+    eprintln!("error: wrapper-gen app not found (install Simple or run from project root)");
+    1
+}
+
 fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
     handle_run(args, gc_log, gc_off)
 }
@@ -444,6 +454,20 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "",
         needs_rust_flags: &["--help", "-h"],
     },
+    CommandEntry {
+        name: "wrapper-gen",
+        app_path: "src/app/wrapper_gen/mod.spl",
+        rust_handler: Handler::Custom(handle_wrapper_gen_wrapper),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "plugin",
+        app_path: "src/app/plugin/main.spl",
+        rust_handler: Handler::Custom(handle_plugin_wrapper),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Brief view
     CommandEntry {
         name: "brief",
@@ -474,7 +498,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     // Verification
     CommandEntry {
         name: "verify",
-        app_path: "src/app/verify/main.spl",
+        app_path: "",
         rust_handler: Handler::ArgsGc(run_verify),
         env_override: "SIMPLE_VERIFY_RUST",
         needs_rust_flags: &[],
@@ -824,6 +848,8 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/app/cli/bootstrap_main.spl"
         && app_relative_path != "src/app/dashboard/main.spl"
         && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
+        && app_relative_path != "src/app/plugin/main.spl"
+        && app_relative_path != "src/app/wrapper_gen/mod.spl"
     {
         return None;
     }
