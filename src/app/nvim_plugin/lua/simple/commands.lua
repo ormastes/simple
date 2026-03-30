@@ -79,6 +79,35 @@ function M.setup(cfg)
     desc = "Run Simple formatter",
   })
 
+  -- :SimpleTestAtCursor - run test/sdoctest at cursor
+  vim.api.nvim_create_user_command("SimpleTestAtCursor", function()
+    require("simple.test_lens").run_at_cursor()
+  end, {
+    desc = "Run test or sdoctest at cursor position",
+  })
+
+  -- :SimpleSdoctest [file] - run sdoctest
+  vim.api.nvim_create_user_command("SimpleSdoctest", function(cmd_opts)
+    if cmd_opts.args and cmd_opts.args ~= "" then
+      local cmd_str = table.concat(M._config.commands.test_cmd, " ") .. " --sdoctest " .. cmd_opts.args
+      vim.cmd("botright split | terminal " .. cmd_str)
+      vim.cmd("startinsert")
+    else
+      require("simple.test_lens").run_sdoctest()
+    end
+  end, {
+    nargs = "?",
+    complete = "file",
+    desc = "Run Simple sdoctests (current file or specified path)",
+  })
+
+  -- :SimpleTestLensToggle - toggle test lens indicators
+  vim.api.nvim_create_user_command("SimpleTestLensToggle", function()
+    require("simple.test_lens").toggle()
+  end, {
+    desc = "Toggle test lens Run indicators",
+  })
+
   -- :SimpleInfo - show plugin info
   vim.api.nvim_create_user_command("SimpleInfo", function()
     M.show_info()
@@ -261,16 +290,19 @@ function M.show_info()
     "  Tree-sitter parser: " .. (ts.is_parser_available() and "installed" or "not installed"),
     "",
     "Commands:",
-    "  :SimpleTest [file]   - Run tests",
-    "  :SimpleBrief         - Brief view (fold all)",
-    "  :SimpleBriefExpand   - Expand all folds",
-    "  :SimpleLspRestart    - Restart LSP",
-    "  :SimpleLspLog        - Show LSP log",
-    "  :SimpleMathToggle    - Toggle math rendering",
-    "  :SimpleBuild [args]  - Run build",
-    "  :SimpleLint          - Run linter",
-    "  :SimpleFormat        - Run formatter",
-    "  :SimpleInfo          - This info panel",
+    "  :SimpleTest [file]      - Run tests",
+    "  :SimpleTestAtCursor     - Run test/sdoctest at cursor",
+    "  :SimpleSdoctest [file]  - Run sdoctests",
+    "  :SimpleTestLensToggle   - Toggle ▶ Run indicators",
+    "  :SimpleBrief            - Brief view (fold all)",
+    "  :SimpleBriefExpand      - Expand all folds",
+    "  :SimpleLspRestart       - Restart LSP",
+    "  :SimpleLspLog           - Show LSP log",
+    "  :SimpleMathToggle       - Toggle math rendering",
+    "  :SimpleBuild [args]     - Run build",
+    "  :SimpleLint             - Run linter",
+    "  :SimpleFormat           - Run formatter",
+    "  :SimpleInfo             - This info panel",
     "",
     "Health: Run :checkhealth simple",
   }
@@ -331,7 +363,9 @@ function M._setup_keymaps(cfg)
       local p = cfg.prefix
       local opts = { buffer = bufnr, silent = true }
 
-      vim.keymap.set("n", p .. "t", "<cmd>SimpleTest<cr>", vim.tbl_extend("force", opts, { desc = "Run test" }))
+      vim.keymap.set("n", p .. "t", "<cmd>SimpleTest<cr>", vim.tbl_extend("force", opts, { desc = "Run test file" }))
+      vim.keymap.set("n", p .. "T", "<cmd>SimpleTestAtCursor<cr>", vim.tbl_extend("force", opts, { desc = "Run test at cursor" }))
+      vim.keymap.set("n", p .. "d", "<cmd>SimpleSdoctest<cr>", vim.tbl_extend("force", opts, { desc = "Run sdoctest" }))
       vim.keymap.set("n", p .. "b", "<cmd>SimpleBrief<cr>", vim.tbl_extend("force", opts, { desc = "Brief view" }))
       vim.keymap.set("n", p .. "e", "<cmd>SimpleBriefExpand<cr>", vim.tbl_extend("force", opts, { desc = "Expand all" }))
       vim.keymap.set("n", p .. "m", "<cmd>SimpleMathToggle<cr>", vim.tbl_extend("force", opts, { desc = "Toggle math" }))

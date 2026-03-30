@@ -1,25 +1,26 @@
 # TRACE32 Compatibility Assets
 
-This directory contains repo-managed TRACE32 configuration files plus two
-legacy shared-library compatibility blobs used only by the local
-`trace32_x11_container.Dockerfile` flow:
+This directory contains repo-managed TRACE32 configuration files and container
+helpers for the local `trace32_x11_container.Dockerfile` flow.
 
-- `libXp.so.6`
-- `libjpeg.so.62.0.0`
-
-These files are not part of the intended Simple bootstrap/full release payloads.
-They exist only to help an older local TRACE32 runtime start inside the Ubuntu
-24.04-based container used for bring-up experiments.
+The current container path is headless and starts `t32mciserver`, not the older
+X11 or Qt frontends. The repo therefore does not ship bundled TRACE32 GUI
+compatibility shared libraries.
 
 Licensing and provenance:
 
-- treat these shared libraries as upstream-controlled third-party artifacts
-- do not assume they are covered by the repository root MIT license
-- do not redistribute them as part of Simple release bundles unless their
-  provenance and license terms have been independently validated
+- do not assume vendor-installed TRACE32 runtime files under `/opt/t32` are
+  covered by the repository root MIT license
+- treat any local compatibility libraries added for experimentation as
+  upstream-controlled third-party artifacts
+- do not redistribute vendor runtime files or ad-hoc compatibility blobs as
+  part of Simple release bundles unless their provenance and license terms have
+  been independently validated
 
 Release/archive policy:
 
-- the GitHub release workflow excludes them indirectly by not packaging `config/`
-- `.gitattributes` marks them `export-ignore` so `git archive` does not include them
-- `THIRD_PARTY_NOTICES.md` lists them as development-only local artifacts
+- the GitHub release workflow excludes local development payloads and validates
+  package contents before publish
+- `.gitattributes` marks local development caches and compatibility blobs
+  `export-ignore` so `git archive` does not include them
+- `THIRD_PARTY_NOTICES.md` documents the intended bundled third-party surface

@@ -37,6 +37,9 @@ function M.setup(opts)
     require("simple.commands").setup(M.config)
   end
 
+  -- Test lens: show ▶ Run buttons beside describe/it/sdoctest blocks
+  require("simple.test_lens").setup(M.config)
+
   M._initialized = true
 end
 

@@ -11,6 +11,10 @@ Repo-side preparation is now in place. The remaining blocker is a usable local
 TRACE32 PowerView session that can see the Lauterbach probe and expose the
 Remote API.
 
+For the repo-managed container flow, the current preferred path is headless
+`t32mciserver` on TCP port `20000`, not the older X11/NETASSIST `t32marm`
+startup path.
+
 ## Repo-Managed Assets
 
 The repo now ships the pieces needed to start and validate the STM TRACE32
@@ -27,6 +31,8 @@ lanes once the host runtime works:
   - `scripts/t32_start_stm.shs`
   - `scripts/t32_check_ready.shs`
   - `scripts/t32_enable_gdb.shs`
+  - `config/t32/trace32_x11_container.shs`
+  - `config/t32/trace32_entrypoint.shs`
 - shared STM smoke fixture:
   - `test/fixtures/baremetal/stm_semihost_smoke.s`
   - `test/fixtures/baremetal/stm_semihost_smoke.ld`
@@ -128,6 +134,21 @@ It enables:
 - `SCREEN=INVISIBLE`
 
 This is the config the repo startup helpers use by default.
+
+## Headless Container Path
+
+The repo-managed container helper:
+
+```bash
+config/t32/trace32_x11_container.shs build
+config/t32/trace32_x11_container.shs up-d
+config/t32/trace32_x11_container.shs ping
+```
+
+starts `t32mciserver` from the vendor install mounted at `/opt/t32`. The repo
+does not ship TRACE32 GUI compatibility shared libraries; if you need to debug
+older `t32marm` or `t32marm-qt` frontends, treat any extra compatibility libs
+as local, non-release artifacts.
 
 ## Start Commands
 

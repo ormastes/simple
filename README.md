@@ -1103,6 +1103,10 @@ Once the MCP server and LSP plugin are installed, try these prompts in Claude Co
 
 MCP servers, CMM language server, and CLI tools for [Lauterbach TRACE32](https://www.lauterbach.com/en/) debuggers. See [`examples/10_tooling/trace32_tools/README.md`](examples/10_tooling/trace32_tools/README.md) for full documentation.
 
+The repo-managed container flow is headless and uses `t32mciserver`. It does
+not ship bundled TRACE32 GUI compatibility libraries; vendor runtime files must
+come from your local `/opt/t32` installation.
+
 ### Install T32 MCP Servers
 
 ```bash
@@ -1173,6 +1177,8 @@ MIT License. See [LICENSE](LICENSE).
 
 Bundled third-party runtime components and redistribution notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Release packages also include `THIRD_PARTY_NOTICES.md`.
 
 ---
 

@@ -30,8 +30,6 @@ Some checked-in or workspace-populated paths may contain third-party binaries or
 - `src/app/vscode_extension/node_modules/`
 - `src/app/vscode_extension/.vscode-test/`
 - `src/compiler_rust/target/`
-- `config/t32/libXp.so.6`
-- `config/t32/libjpeg.so.62.0.0`
 - `build/`
 
 Treat those as upstream-controlled artifacts with their own licenses and do not assume they are covered solely by the root MIT license.

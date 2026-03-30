@@ -13,6 +13,7 @@ import { AIInlineCompletionProvider } from './ai/inlineCompletionProvider';
 import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDetector';
 import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
 import { activateMathFeatures } from './math';
+import { TestCodeLensProvider, runTestFile, runSdoctest, runTestAtCursor } from './testing/testCodeLensProvider';
 
 /** Path to bundled WASM LSP binary (relative to extension root) */
 const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
@@ -55,6 +56,9 @@ export function activate(context: vscode.ExtensionContext) {
     activateMathFeatures(context, (setter) => {
         setMathLspRunning = setter;
     });
+
+    // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
+    activateTestFeatures(context);
 
     console.log('Simple Language extension activated');
 }
@@ -446,6 +450,46 @@ function registerAICommands(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('simple.ai.completionAccepted', () => {
             aiOutputChannel?.appendLine('AI completion accepted');
+        })
+    );
+}
+
+function activateTestFeatures(context: vscode.ExtensionContext) {
+    // Register CodeLens provider for test blocks
+    const codeLensProvider = new TestCodeLensProvider();
+    context.subscriptions.push(
+        vscode.languages.registerCodeLensProvider(
+            { scheme: 'file', language: 'simple' },
+            codeLensProvider
+        )
+    );
+    context.subscriptions.push(codeLensProvider);
+
+    // Register test commands
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.runFile', (uri?: vscode.Uri) => {
+            if (uri) {
+                runTestFile(uri);
+            } else {
+                runTestAtCursor();
+            }
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.runSdoctest', (uri?: vscode.Uri) => {
+            if (uri) {
+                runSdoctest(uri);
+            } else {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    runSdoctest(editor.document.uri);
+                }
+            }
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.runAtCursor', () => {
+            runTestAtCursor();
         })
     );
 }
