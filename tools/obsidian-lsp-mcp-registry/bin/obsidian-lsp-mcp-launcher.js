@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Launcher for Obsidian Search MCP Server native binary.
+// Launcher for Obsidian LSP-MCP Server native binary.
 // This is a thin wrapper for npm distribution — the actual server
 // is a compiled native binary, not a Node.js application.
 
@@ -10,7 +10,7 @@ const os = require('os');
 
 function getBinaryName() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
-  return `obsidian_search_server${ext}`;
+  return `obsidian_lsp_mcp_server${ext}`;
 }
 
 function findBinary() {
@@ -47,11 +47,11 @@ const child = spawn(binary, process.argv.slice(2), {
 child.on('error', (err) => {
   if (err.code === 'ENOENT') {
     process.stderr.write(
-      `Error: Obsidian Search Server binary not found at: ${binary}\n` +
+      `Error: Obsidian LSP-MCP Server binary not found at: ${binary}\n` +
       `Run 'npm run postinstall' to download, or build from source.\n`
     );
   } else {
-    process.stderr.write(`Error launching Obsidian Search Server: ${err.message}\n`);
+    process.stderr.write(`Error launching Obsidian LSP-MCP Server: ${err.message}\n`);
   }
   process.exit(1);
 });

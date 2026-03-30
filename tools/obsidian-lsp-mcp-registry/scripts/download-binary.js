@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Postinstall script: downloads the correct platform-specific
-// Obsidian Search Server binary from GitHub Releases.
+// Obsidian LSP-MCP Server binary from GitHub Releases.
 
 const https = require('https');
 const fs = require('fs');
@@ -10,7 +10,7 @@ const os = require('os');
 const pkg = require('../package.json');
 const VERSION = pkg.version;
 const REPO = 'ormastes/simple';
-const BINARY_BASE = 'obsidian_search_server';
+const BINARY_BASE = 'obsidian_lsp_mcp_server';
 
 function getTriple() {
   const platform = os.platform();
