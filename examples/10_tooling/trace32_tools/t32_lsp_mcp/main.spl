@@ -80,12 +80,17 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
     if tool_name == "":
         return lsp_result_error(id, -32602, "Missing tool name in tools/call request")
     val args_raw = lsp_extract_nested_raw(body, "arguments")
+    if tool_name == "cmm_parse":
+        return lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
     val daemon_response = lsp_dispatch_tool_via_daemon(id, tool_name, body)
     if daemon_response != "":
         return daemon_response
     return lsp_run_tool_direct(id, tool_name, args_raw)
 
 fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
+    lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
+
+fn lsp_run_tool_direct_with_path(id: text, tool_name: text, args_raw: text, runner: text) -> text:
     val args_path = "/tmp/t32_lsp_mcp_args_" + id + ".json"
     if not rt_file_write_text(args_path, args_raw):
         return lsp_result_error(id, -32002, "Failed to write tool arguments")
@@ -95,7 +100,6 @@ fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
             rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runner_bin, id, tool_name, args_path])
         else:
             val runtime = lsp_tool_runtime_path()
-            val runner = lsp_tool_runner_path()
             rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runtime, runner, id, tool_name, args_path])
     rt_file_delete(args_path)
     if code == 124:
@@ -195,7 +199,8 @@ fn lsp_tool_daemon_log_hint() -> text:
     val raw = (rt_file_read_text(daemon_log) ?? "").trim()
     if raw == "":
         return ""
-    var compact = raw.replace("\r", " ").replace("\n", " ")
+    var compact = raw.replace("\r", " ")
+    compact = compact.replace("\n", " ")
     if compact.len() > 200:
         compact = compact[0:200]
     " (daemon.log: " + compact + ")"
@@ -286,6 +291,25 @@ fn lsp_tool_runner_path() -> text:
     if env_runner != "":
         return env_runner
     "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
+
+fn lsp_tool_runner_path_for_tool(tool_name: text) -> text:
+    if tool_name == "cmm_parse":
+        return lsp_parse_tool_runner_path()
+    if tool_name == "cmm_validate_cli":
+        return lsp_validate_tool_runner_path()
+    lsp_tool_runner_path()
+
+fn lsp_parse_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_PARSE_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_parse.spl"
+
+fn lsp_validate_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_VALIDATE_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_validate.spl"
 
 fn lsp_tool_runner_bin_path() -> text:
     rt_env_get("T32_LSP_MCP_TOOL_RUNNER_BIN") ?? ""

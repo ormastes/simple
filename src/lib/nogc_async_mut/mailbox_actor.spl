@@ -103,7 +103,9 @@ class MailboxStats:
 class Mailbox:
     config: MailboxConfig
     messages: [MessageRef]
+    messages_ready: [MessageRef]
     high_messages: [MessageRef]
+    high_messages_ready: [MessageRef]
     next_id: i64
     is_closed: bool
     stats: MailboxStats
@@ -148,17 +150,26 @@ class Mailbox:
         SEND_SUCCESS
 
     me receive():
-        # High priority first
-        if self.high_messages.len() > 0:
-            val msg = self.high_messages[0]
-            self.high_messages.remove(0)
+        # High priority first (two-stack queue: O(1) amortized dequeue)
+        if self.high_messages_ready.len() == 0 and self.high_messages.len() > 0:
+            self.high_messages.reverse()
+            self.high_messages_ready = self.high_messages
+            self.high_messages = []
+        if self.high_messages_ready.len() > 0:
+            val msg = self.high_messages_ready[self.high_messages_ready.len() - 1]
+            self.high_messages_ready = self.high_messages_ready[0:self.high_messages_ready.len() - 1]
             self.stats.current_size = Count(value: self.stats.current_size.value - 1)
             self.stats.total_processed = Count(value: self.stats.total_processed.value + 1)
             self.stats.off_heap_bytes = ByteSize(value: self.stats.off_heap_bytes.value - msg.size_bytes.value)
             return msg
-        if self.messages.len() > 0:
-            val msg = self.messages[0]
-            self.messages.remove(0)
+        # Normal priority (two-stack queue)
+        if self.messages_ready.len() == 0 and self.messages.len() > 0:
+            self.messages.reverse()
+            self.messages_ready = self.messages
+            self.messages = []
+        if self.messages_ready.len() > 0:
+            val msg = self.messages_ready[self.messages_ready.len() - 1]
+            self.messages_ready = self.messages_ready[0:self.messages_ready.len() - 1]
             self.stats.current_size = Count(value: self.stats.current_size.value - 1)
             self.stats.total_processed = Count(value: self.stats.total_processed.value + 1)
             self.stats.off_heap_bytes = ByteSize(value: self.stats.off_heap_bytes.value - msg.size_bytes.value)
@@ -166,20 +177,30 @@ class Mailbox:
         nil
 
     me select(pred: fn()):
-        var idx = 0
-        for msg in self.messages:
+        # Search ready queue first (oldest messages, FIFO order from the end)
+        var idx = self.messages_ready.len() - 1
+        while idx >= 0:
+            val msg = self.messages_ready[idx]
             if pred(msg):
-                self.messages.remove(idx)
+                self.messages_ready.remove(idx)
                 self.stats.current_size = Count(value: self.stats.current_size.value - 1)
                 return msg
-            idx = idx + 1
+            idx = idx - 1
+        # Then search incoming queue (oldest first)
+        var idx2 = 0
+        for msg in self.messages:
+            if pred(msg):
+                self.messages.remove(idx2)
+                self.stats.current_size = Count(value: self.stats.current_size.value - 1)
+                return msg
+            idx2 = idx2 + 1
         nil
 
     me select_by_sender(sid: i64):
         self.select(fn(m): m.sender_id.value == sid)
 
     fn total_size() -> i64:
-        self.messages.len() + self.high_messages.len()
+        self.messages.len() + self.messages_ready.len() + self.high_messages.len() + self.high_messages_ready.len()
 
     fn is_empty() -> bool:
         self.total_size() == 0
@@ -191,7 +212,9 @@ class Mailbox:
 
     me clear():
         self.messages = []
+        self.messages_ready = []
         self.high_messages = []
+        self.high_messages_ready = []
         self.stats.current_size = Count(value: 0)
         self.stats.off_heap_bytes = ByteSize(value: 0)
 
@@ -204,6 +227,13 @@ class Mailbox:
             else:
                 new_msgs.push(msg)
         self.messages = new_msgs
+        var new_msgs_ready = []
+        for msg in self.messages_ready:
+            if msg.is_stale(threshold_ms):
+                dropped = dropped + 1
+            else:
+                new_msgs_ready.push(msg)
+        self.messages_ready = new_msgs_ready
         var new_high = []
         for msg in self.high_messages:
             if msg.is_stale(threshold_ms):
@@ -211,6 +241,13 @@ class Mailbox:
             else:
                 new_high.push(msg)
         self.high_messages = new_high
+        var new_high_ready = []
+        for msg in self.high_messages_ready:
+            if msg.is_stale(threshold_ms):
+                dropped = dropped + 1
+            else:
+                new_high_ready.push(msg)
+        self.high_messages_ready = new_high_ready
         self.stats.current_size = Count(value: self.stats.current_size.value - dropped)
         dropped
 
@@ -241,7 +278,9 @@ class Mailbox:
         Mailbox(
             config: config,
             messages: [],
+            messages_ready: [],
             high_messages: [],
+            high_messages_ready: [],
             next_id: 0,
             is_closed: false,
             stats: MailboxStats.new()

@@ -135,7 +135,8 @@ fn export_target_names(target: &ImportTarget) -> Vec<String> {
 ///
 /// Rules:
 /// - `ExportUseStmt`: keep only if it re-exports at least one requested name
-/// - `UseStmt`: keep if it imports any requested name, or if it's a glob/bare import (needed for transitive deps)
+/// - `UseStmt`: always keep. Imported functions often depend on helper imports that
+///   do not share the same symbol names as the exported API surface.
 /// - `Function`: keep only if the function name is in the requested set
 /// - Everything else (classes, structs, enums, etc.): always keep (cheap to evaluate)
 fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool {
@@ -144,10 +145,7 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
             let export_names = export_target_names(&export_stmt.target);
             !export_names.is_empty() && export_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
         }
-        Node::UseStmt(use_stmt) => {
-            let import_names = export_target_names(&use_stmt.target);
-            import_names.is_empty() || import_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
-        }
+        Node::UseStmt(_) => true,
         Node::Function(f) => {
             requested_names.iter().any(|wanted| wanted == &f.name)
         }
@@ -488,32 +486,11 @@ pub fn load_and_merge_module(
     };
 
     let requested_names = requested_group_import_names(use_stmt);
-    // Apply selective import filtering for Group imports. This avoids evaluating large
-    // modules in full when only a few symbols are needed. The filter is safe for all
-    // modules since it always keeps classes/structs/enums (cheap to evaluate).
-    // Skip only for stdlib modules (src/lib/) which are small and heavily cached.
-    let is_project_module = {
-        let path_str = module_path.to_string_lossy();
-        !path_str.contains("src/lib/") && !path_str.contains("src\\lib\\")
-    };
-    let filtered_items: Vec<Node> =
-        if is_project_module {
-            if let Some(names) = requested_names.as_ref() {
-                let total = module.items.len();
-                let filtered: Vec<Node> = module
-                    .items
-                    .iter()
-                    .filter(|item| should_keep_selective_export(item, names))
-                    .cloned()
-                    .collect();
-                loader_trace!("selective-filter", "{} kept {}/{} items for {:?}", module_path.display(), filtered.len(), total, names);
-                filtered
-            } else {
-                module.items.clone()
-            }
-        } else {
-            module.items.clone()
-        };
+    // Selective filtering in the interpreter loader is too aggressive for real
+    // modules: exported entrypoints often depend on private helper functions and
+    // internal imports whose names do not match the requested export list. Keep
+    // the full module so runtime evaluation remains correct.
+    let filtered_items: Vec<Node> = module.items.clone();
     let load_start = Instant::now();
 
     // Evaluate the module to get its environment (including imports)

@@ -347,7 +347,7 @@ while [ -L "$SELF" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}/../.."
-RUNTIME="${SCRIPT_DIR}/../simple"
+RUNTIME="${SIMPLE_RUNTIME:-${SCRIPT_DIR}/../simple}"
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${SCRIPT_DIR}/simple"; fi
 ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
@@ -361,9 +361,9 @@ export T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-$DAEMON_DIR}"
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "tool_daemon.spl $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"
-  nohup "$RUNTIME" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
+  nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "$RUNTIME" "$ENTRY" "$@"
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@"
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

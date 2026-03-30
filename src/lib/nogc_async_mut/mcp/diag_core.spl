@@ -337,10 +337,11 @@ fn severity_tag(severity: text) -> text:
     "[?]"
 
 fn pad_line(line: text, target_col: i64) -> text:
-    var result = line
+    var parts: [text] = []
+    parts.push(line)
     for _i in range(0, target_col - line.len()):
-        result = result + " "
-    result
+        parts.push(" ")
+    parts.join("")
 
 fn overlay_virtual_text(source: text, entries: [DiagEntry], show_hints: Bool, fold_mode: text) -> text:
     val source_lines = source.split(NL)
@@ -359,16 +360,17 @@ fn overlay_virtual_text(source: text, entries: [DiagEntry], show_hints: Bool, fo
     # Build line number width
     val num_width = line_count.to_string().len()
 
-    var output = ""
+    var out_parts: [text] = []
     var line_idx = 0
     for sl in source_lines:
         line_idx = line_idx + 1
         val num_str = line_idx.to_string()
         # Pad line number
-        var padded_num = ""
+        var num_pad_parts: [text] = []
         for _p in range(0, num_width - num_str.len()):
-            padded_num = padded_num + " "
-        padded_num = padded_num + num_str
+            num_pad_parts.push(" ")
+        num_pad_parts.push(num_str)
+        val padded_num = num_pad_parts.join("")
 
         # Collect diagnostics for this line
         var line_diags: [DiagEntry] = []
@@ -377,26 +379,28 @@ fn overlay_virtual_text(source: text, entries: [DiagEntry], show_hints: Bool, fo
                 line_diags.push(entry)
 
         if line_diags.len() == 0:
-            output = output + padded_num + " | " + sl + NL
+            out_parts.push(padded_num + " | " + sl + NL)
         else:
             # First diagnostic inline
             val first_diag = line_diags[0]
             val tag = severity_tag(first_diag.severity)
             val padded = pad_line(sl, align_col)
-            output = output + padded_num + " | " + padded + "# " + tag + " " + first_diag.message + NL
+            out_parts.push(padded_num + " | " + padded + "# " + tag + " " + first_diag.message + NL)
 
             # Easyfix for first diagnostic
             val show_easy = show_hints and first_diag.easyfix != ""
             if show_easy:
                 val easy_expanded = fold_mode == "expanded"
-                var pad_prefix = ""
+                var pfx_parts: [text] = []
                 for _p in range(0, num_width):
-                    pad_prefix = pad_prefix + " "
-                pad_prefix = pad_prefix + " | "
-                var easy_pad = ""
+                    pfx_parts.push(" ")
+                pfx_parts.push(" | ")
+                val pad_prefix = pfx_parts.join("")
+                var ep_parts: [text] = []
                 for _p in range(0, align_col):
-                    easy_pad = easy_pad + " "
-                output = output + pad_prefix + easy_pad + "# [H] easyfix: " + first_diag.easyfix + NL
+                    ep_parts.push(" ")
+                val easy_pad = ep_parts.join("")
+                out_parts.push(pad_prefix + easy_pad + "# [H] easyfix: " + first_diag.easyfix + NL)
 
             # Additional diagnostics on continuation lines
             var diag_idx = 0
@@ -404,26 +408,28 @@ fn overlay_virtual_text(source: text, entries: [DiagEntry], show_hints: Bool, fo
                 diag_idx = diag_idx + 1
                 if diag_idx <= 1:
                     continue
-                var pad_prefix2 = ""
+                var pfx_parts2: [text] = []
                 for _p in range(0, num_width):
-                    pad_prefix2 = pad_prefix2 + " "
-                pad_prefix2 = pad_prefix2 + " | "
-                var easy_pad2 = ""
+                    pfx_parts2.push(" ")
+                pfx_parts2.push(" | ")
+                val pad_prefix2 = pfx_parts2.join("")
+                var ep_parts2: [text] = []
                 for _p in range(0, align_col):
-                    easy_pad2 = easy_pad2 + " "
+                    ep_parts2.push(" ")
+                val easy_pad2 = ep_parts2.join("")
                 val tag2 = severity_tag(extra_diag.severity)
-                output = output + pad_prefix2 + easy_pad2 + "# " + tag2 + " " + extra_diag.message + NL
+                out_parts.push(pad_prefix2 + easy_pad2 + "# " + tag2 + " " + extra_diag.message + NL)
                 val show_extra_easy = show_hints and extra_diag.easyfix != ""
                 if show_extra_easy:
-                    output = output + pad_prefix2 + easy_pad2 + "# [H] easyfix: " + extra_diag.easyfix + NL
+                    out_parts.push(pad_prefix2 + easy_pad2 + "# [H] easyfix: " + extra_diag.easyfix + NL)
 
     # Append file-level diagnostics (line_num == 0)
     for entry in entries:
         if entry.line_num == 0:
             val tag0 = severity_tag(entry.severity)
-            output = output + "  " + tag0 + " " + entry.message + NL
+            out_parts.push("  " + tag0 + " " + entry.message + NL)
 
-    output
+    out_parts.join("")
 
 # ============================================================================
 # Delta computation
@@ -468,7 +474,8 @@ fn compute_delta(baseline: [DiagEntry], current: [DiagEntry]) -> DiagDelta:
     DiagDelta(resolved: resolved, introduced: introduced, remaining: remaining)
 
 fn format_delta_text(delta: DiagDelta) -> text:
-    var output = "-- diagnostic delta --{NL}"
+    var parts: [text] = []
+    parts.push("-- diagnostic delta --{NL}")
     var res_err = 0
     var res_warn = 0
     for r in delta.resolved:
@@ -476,7 +483,7 @@ fn format_delta_text(delta: DiagDelta) -> text:
             res_err = res_err + 1
         elif r.severity == "warning":
             res_warn = res_warn + 1
-    output = output + "  resolved: " + res_err.to_string() + " error(s), " + res_warn.to_string() + " warning(s){NL}"
+    parts.push("  resolved: " + res_err.to_string() + " error(s), " + res_warn.to_string() + " warning(s){NL}")
 
     var intro_err = 0
     var intro_warn = 0
@@ -485,7 +492,7 @@ fn format_delta_text(delta: DiagDelta) -> text:
             intro_err = intro_err + 1
         elif i.severity == "warning":
             intro_warn = intro_warn + 1
-    output = output + "  introduced: " + intro_err.to_string() + " error(s), " + intro_warn.to_string() + " warning(s){NL}"
+    parts.push("  introduced: " + intro_err.to_string() + " error(s), " + intro_warn.to_string() + " warning(s){NL}")
 
     var rem_err = 0
     var rem_warn = 0
@@ -494,56 +501,66 @@ fn format_delta_text(delta: DiagDelta) -> text:
             rem_err = rem_err + 1
         elif rm.severity == "warning":
             rem_warn = rem_warn + 1
-    output = output + "  remaining: " + rem_err.to_string() + " error(s), " + rem_warn.to_string() + " warning(s){NL}"
+    parts.push("  remaining: " + rem_err.to_string() + " error(s), " + rem_warn.to_string() + " warning(s){NL}")
 
-    output
+    parts.join("")
 
 # ============================================================================
 # JSON serialization
 # ============================================================================
 
 fn diag_entry_to_json(entry: DiagEntry) -> text:
-    var r = LB()
-    r = r + jp("line", entry.line_num.to_string())
-    r = r + "," + jp("col", entry.col_num.to_string())
-    r = r + "," + jp("severity", js(entry.severity))
-    r = r + "," + jp("message", js(escape_json(entry.message)))
+    var rp: [text] = []
+    rp.push(LB())
+    rp.push(jp("line", entry.line_num.to_string()))
+    rp.push(",")
+    rp.push(jp("col", entry.col_num.to_string()))
+    rp.push(",")
+    rp.push(jp("severity", js(entry.severity)))
+    rp.push(",")
+    rp.push(jp("message", js(escape_json(entry.message))))
     if entry.easyfix != "":
-        r = r + "," + jp("easyfix", js(escape_json(entry.easyfix)))
+        rp.push(",")
+        rp.push(jp("easyfix", js(escape_json(entry.easyfix))))
     if entry.code != "":
-        r = r + "," + jp("code", js(escape_json(entry.code)))
-    r = r + RB()
-    r
+        rp.push(",")
+        rp.push(jp("code", js(escape_json(entry.code))))
+    rp.push(RB())
+    rp.join("")
 
 fn diag_entries_to_json(entries: [DiagEntry]) -> text:
-    var arr = "["
-    var first = true
+    var arr_parts: [text] = []
     for entry in entries:
-        if not first:
-            arr = arr + ","
-        first = false
-        arr = arr + diag_entry_to_json(entry)
-    arr = arr + "]"
-    arr
+        arr_parts.push(diag_entry_to_json(entry))
+    "[" + arr_parts.join(",") + "]"
 
 fn diag_result_to_json(result: DiagResult) -> text:
-    var r = LB()
-    r = r + jp("file", js(escape_json(result.file_path)))
-    r = r + "," + jp("status", js(result.status))
-    r = r + "," + jp("exit_code", result.exit_code.to_string())
-    r = r + "," + jp("error_count", result.error_count.to_string())
-    r = r + "," + jp("warning_count", result.warning_count.to_string())
-    r = r + "," + jp("diagnostics", diag_entries_to_json(result.entries))
-    r = r + RB()
-    r
+    var rp: [text] = []
+    rp.push(LB())
+    rp.push(jp("file", js(escape_json(result.file_path))))
+    rp.push(",")
+    rp.push(jp("status", js(result.status)))
+    rp.push(",")
+    rp.push(jp("exit_code", result.exit_code.to_string()))
+    rp.push(",")
+    rp.push(jp("error_count", result.error_count.to_string()))
+    rp.push(",")
+    rp.push(jp("warning_count", result.warning_count.to_string()))
+    rp.push(",")
+    rp.push(jp("diagnostics", diag_entries_to_json(result.entries)))
+    rp.push(RB())
+    rp.join("")
 
 fn diag_delta_to_json(delta: DiagDelta) -> text:
-    var r = LB()
-    r = r + jp("resolved", diag_entries_to_json(delta.resolved))
-    r = r + "," + jp("introduced", diag_entries_to_json(delta.introduced))
-    r = r + "," + jp("remaining", diag_entries_to_json(delta.remaining))
-    r = r + RB()
-    r
+    var rp: [text] = []
+    rp.push(LB())
+    rp.push(jp("resolved", diag_entries_to_json(delta.resolved)))
+    rp.push(",")
+    rp.push(jp("introduced", diag_entries_to_json(delta.introduced)))
+    rp.push(",")
+    rp.push(jp("remaining", diag_entries_to_json(delta.remaining)))
+    rp.push(RB())
+    rp.join("")
 
 # ============================================================================
 # Exports

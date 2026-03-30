@@ -352,3 +352,29 @@ describe "T32 LSP MCP Wrapper":
         expect(stdout.contains("Tool daemon timed out")).to_equal(false)
         expect(stdout.contains("failed to become ready")).to_equal(true)
         expect(stderr.contains("Transport closed")).to_equal(false)
+
+    it "passes escaped source text through tools/call arguments":
+        val mk_input = shell("mktemp /tmp/t32_lsp_mcp_input.XXXXXX")
+        val input_path = (mk_input.stdout ?? "").trim()
+        val daemon_dir = "/tmp/t32_lsp_mcp_spec_escaped_source"
+        val args_json = "{\"source\":\"PRINT \\\"arguments\\\": 1\",\"line\":0,\"character\":0}"
+        val messages = init_request("1") + tools_call_request("2", "cmm_parse", args_json) + shutdown_request("3")
+        expect(input_path != "").to_equal(true)
+        expect(rt_file_write_text(input_path, messages)).to_equal(true)
+
+        val setup = shell("rm -rf " + shell_escape_text(daemon_dir))
+        expect(setup.exit_code).to_equal(0)
+
+        val cmd = "timeout 20s env SIMPLE_RUNTIME=" + shell_escape_text("/home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple") + " T32_LSP_MCP_TOOL_DAEMON_DIR=" + shell_escape_text(daemon_dir) + " /home/ormastes/dev/pub/simple/bin/t32_lsp_mcp_server < " + shell_escape_text(input_path)
+        val result = shell(cmd)
+        val stdout = result.stdout ?? ""
+        val stderr = result.stderr ?? ""
+
+        rt_file_delete(input_path)
+        shell("rm -rf " + shell_escape_text(daemon_dir))
+
+        expect(result.exit_code).to_equal(0)
+        expect(stdout.contains("\"id\":\"2\"")).to_equal(true)
+        expect(stdout.contains("Missing required parameter: source")).to_equal(false)
+        expect(stdout.contains("\"node_count\"")).to_equal(true)
+        expect(stderr.contains("Transport closed")).to_equal(false)

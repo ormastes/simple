@@ -2,6 +2,7 @@
 #
 # Routes tool/call requests to the appropriate core module functions
 # and formats results as MCP tool responses.
+# 33 tools: 11 original + 4 write + 6 metadata + 5 search_ext + 3 analytics + 3 periodic
 
 use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, LB, RB, SB_L, SB_R}
 use src.core.indexer.{IndexDb, NoteRecord, get_note_by_path, ensure_indexed}
@@ -10,6 +11,11 @@ use src.core.graph.{find_backlinks, find_forward_links, find_related, find_autho
 use src.core.ranker.{rank_results, explain_scores, ScoredResult, ScoreBreakdown}
 use src.core.vault_scanner.{scan_vault, relative_path}
 use src.core.note_parser.{parse_frontmatter, extract_tags, extract_tasks}
+use src.mcp.handlers_write.{handle_write_tool}
+use src.mcp.handlers_metadata.{handle_metadata_tool}
+use src.mcp.handlers_search_ext.{handle_search_ext_tool}
+use src.mcp.handlers_analytics.{handle_analytics_tool}
+use src.mcp.handlers_periodic.{handle_periodic_tool}
 use src.util.query_parser.{parse_query, ParsedQuery}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -522,5 +528,25 @@ fn handle_tool_call(id: text, body: text, db: IndexDb, vault_path: text) -> text
         val json_breakdowns = format_breakdowns(breakdowns)
         val output = jo2(jp("breakdowns", json_breakdowns), jp("count", ji(breakdowns.len())))
         return tool_text_result(id, output)
+
+    # Phase A: Write tools
+    if tool_name == "create_note" or tool_name == "edit_note" or tool_name == "delete_note" or tool_name == "move_note":
+        return handle_write_tool(id, tool_name, body, vault_path)
+
+    # Phase B: Metadata tools
+    if tool_name == "manage_frontmatter" or tool_name == "add_tags" or tool_name == "remove_tags" or tool_name == "rename_tag" or tool_name == "batch_read_notes" or tool_name == "list_files":
+        return handle_metadata_tool(id, tool_name, body, vault_path)
+
+    # Phase C: Enhanced search tools
+    if tool_name == "fuzzy_search" or tool_name == "search_replace" or tool_name == "search_by_date" or tool_name == "search_with_aliases" or tool_name == "reindex_vault":
+        return handle_search_ext_tool(id, tool_name, body, vault_path)
+
+    # Phase D: Analytics tools
+    if tool_name == "vault_structure" or tool_name == "find_orphan_notes" or tool_name == "vault_stats":
+        return handle_analytics_tool(id, tool_name, body, vault_path)
+
+    # Phase E: Periodic notes tools
+    if tool_name == "daily_note" or tool_name == "periodic_note" or tool_name == "apply_template":
+        return handle_periodic_tool(id, tool_name, body, vault_path)
 
     make_error(id, -32602, "Unknown tool: " + tool_name)

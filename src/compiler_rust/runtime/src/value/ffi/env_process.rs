@@ -11,6 +11,10 @@ use crate::coverage::{rt_coverage_condition_probe, rt_coverage_decision_probe, r
 use crate::value::collections::{rt_array_get, rt_array_len, rt_string_new, rt_tuple_new, rt_tuple_set};
 use crate::value::{HeapObjectType, RuntimeString, RuntimeValue};
 
+fn clear_simple_child_stack_env(command: &mut std::process::Command) {
+    command.env_remove("_SIMPLE_STACK_SET");
+}
+
 // ============================================================================
 // Code Coverage & Instrumentation Probes
 // ============================================================================
@@ -279,6 +283,7 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
 
     // Build command with arguments
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
@@ -340,6 +345,7 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
 
     // Build command with arguments
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
@@ -389,6 +395,7 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
     };
 
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
@@ -526,6 +533,7 @@ pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, ar
 
     // Build command with arguments
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
     let args_len = rt_array_len(args);
@@ -583,6 +591,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
     };
 
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     let args_len = rt_array_len(args);
     if args_len > 0 {
@@ -716,6 +725,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
     };
 
     let mut command = Command::new(cmd_str);
+    clear_simple_child_stack_env(&mut command);
 
     // Extract args from List<String>
     let args_len = rt_array_len(args);

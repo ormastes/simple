@@ -286,6 +286,10 @@ uint64_t spl_str_hash(const char* s) {
     return h;
 }
 
+int64_t rt_str_hash(const char* s) {
+    return (int64_t)spl_str_hash(s);
+}
+
 int spl_str_contains(const char* s, const char* needle) {
     if (!s || !needle) return 0;
     return strstr(s, needle) != NULL;
@@ -530,27 +534,44 @@ char* spl_str_join(SplArray* arr, const char* delim) {
     if (!arr || arr->len == 0) return SPL_STRDUP("", "str");
     const char* safe_delim = delim ? delim : "";
     size_t delim_len = strlen(safe_delim);
+
+    /* Cache string pointers and lengths to avoid double-strlen */
+    int use_heap = (arr->len * (sizeof(size_t) + sizeof(const char*))) > 65536;
+    size_t* lens;
+    const char** strs;
+    if (use_heap) {
+        lens = (size_t*)malloc(arr->len * sizeof(size_t));
+        strs = (const char**)malloc(arr->len * sizeof(const char*));
+    } else {
+        lens = (size_t*)alloca(arr->len * sizeof(size_t));
+        strs = (const char**)alloca(arr->len * sizeof(const char*));
+    }
+
     size_t total = 0;
     for (int64_t i = 0; i < arr->len; i++) {
-        const char* s = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
-                        ? arr->items[i].as_str : "";
-        total += strlen(s);
+        strs[i] = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
+                   ? arr->items[i].as_str : "";
+        lens[i] = strlen(strs[i]);
+        total += lens[i];
         if (i < arr->len - 1) total += delim_len;
     }
+
     char* result = (char*)SPL_MALLOC(total + 1, "str");
     char* dst = result;
     for (int64_t i = 0; i < arr->len; i++) {
-        const char* s = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
-                        ? arr->items[i].as_str : "";
-        size_t slen = strlen(s);
-        memcpy(dst, s, slen);
-        dst += slen;
-        if (i < arr->len - 1) {
+        memcpy(dst, strs[i], lens[i]);
+        dst += lens[i];
+        if (i < arr->len - 1 && delim_len > 0) {
             memcpy(dst, safe_delim, delim_len);
             dst += delim_len;
         }
     }
     *dst = '\0';
+
+    if (use_heap) {
+        free(lens);
+        free(strs);
+    }
     return result;
 }
 

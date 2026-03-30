@@ -145,6 +145,17 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - MCP registry: `tools/mcp-registry/` (npm wrapper for native binary)
 - Guide: `doc/07_guide/tooling/ai_cli_registration.md`
 
+### MCP Servers (`.mcp.json`)
+| Server | Binary/Command | Purpose |
+|--------|---------------|---------|
+| `simple-mcp` | `bin/simple_mcp_server` | Simple language compiler MCP |
+| `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | Simple LSP via MCP bridge |
+| `t32-mcp` | `bin/t32_mcp_server` | TRACE32 debugger MCP |
+| `t32-lsp-mcp` | `bin/t32_lsp_mcp_server` | TRACE32 CMM LSP via MCP |
+| `obsidian-search` | `bin/simple run src/main.spl` | Obsidian vault search (11 tools: search, graph, tags, tasks, authority ranking) |
+
+**Obsidian Search:** `examples/obsidian-search/` submodule. Set `OBSIDIAN_VAULT_PATH` env var. Feature requests: `examples/obsidian-search/doc/requirement/feature_request_obsidian_search.md`
+
 ---
 
 ## Setup

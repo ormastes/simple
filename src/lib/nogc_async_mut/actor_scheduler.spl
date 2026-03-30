@@ -99,23 +99,29 @@ class SchedulerConfig:
 
 class RunQueue:
     # 4 priority queues: max(0), high(1), normal(2), low(3)
+    # Each uses a two-stack queue: enqueue pushes to main, dequeue pops from ready.
+    # When ready is empty, main is reversed into ready. O(1) amortized dequeue.
     max_q: [i64]
+    max_q_ready: [i64]
     high_q: [i64]
+    high_q_ready: [i64]
     normal_q: [i64]
+    normal_q_ready: [i64]
     low_q: [i64]
+    low_q_ready: [i64]
 
     fn is_empty() -> bool:
-        val total = self.max_q.len() + self.high_q.len() + self.normal_q.len() + self.low_q.len()
+        val total = self.max_q.len() + self.max_q_ready.len() + self.high_q.len() + self.high_q_ready.len() + self.normal_q.len() + self.normal_q_ready.len() + self.low_q.len() + self.low_q_ready.len()
         total == 0
 
     fn len() -> i64:
-        self.max_q.len() + self.high_q.len() + self.normal_q.len() + self.low_q.len()
+        self.max_q.len() + self.max_q_ready.len() + self.high_q.len() + self.high_q_ready.len() + self.normal_q.len() + self.normal_q_ready.len() + self.low_q.len() + self.low_q_ready.len()
 
     fn len_by_priority(priority: ActorPriority) -> i64:
-        if priority == ActorPriority.Max: return self.max_q.len()
-        if priority == ActorPriority.High: return self.high_q.len()
-        if priority == ActorPriority.Normal: return self.normal_q.len()
-        self.low_q.len()
+        if priority == ActorPriority.Max: return self.max_q.len() + self.max_q_ready.len()
+        if priority == ActorPriority.High: return self.high_q.len() + self.high_q_ready.len()
+        if priority == ActorPriority.Normal: return self.normal_q.len() + self.normal_q_ready.len()
+        self.low_q.len() + self.low_q_ready.len()
 
     me enqueue(actor_id: i64, priority: ActorPriority):
         if priority == ActorPriority.Max:
@@ -128,29 +134,53 @@ class RunQueue:
             self.low_q.push(actor_id)
 
     me dequeue():
-        if self.max_q.len() > 0:
-            val aid = self.max_q[0]
-            self.max_q.remove(0)
+        # Max priority
+        if self.max_q_ready.len() == 0 and self.max_q.len() > 0:
+            self.max_q.reverse()
+            self.max_q_ready = self.max_q
+            self.max_q = []
+        if self.max_q_ready.len() > 0:
+            val aid = self.max_q_ready[self.max_q_ready.len() - 1]
+            self.max_q_ready = self.max_q_ready[0:self.max_q_ready.len() - 1]
             return aid
-        if self.high_q.len() > 0:
-            val aid = self.high_q[0]
-            self.high_q.remove(0)
+        # High priority
+        if self.high_q_ready.len() == 0 and self.high_q.len() > 0:
+            self.high_q.reverse()
+            self.high_q_ready = self.high_q
+            self.high_q = []
+        if self.high_q_ready.len() > 0:
+            val aid = self.high_q_ready[self.high_q_ready.len() - 1]
+            self.high_q_ready = self.high_q_ready[0:self.high_q_ready.len() - 1]
             return aid
-        if self.normal_q.len() > 0:
-            val aid = self.normal_q[0]
-            self.normal_q.remove(0)
+        # Normal priority
+        if self.normal_q_ready.len() == 0 and self.normal_q.len() > 0:
+            self.normal_q.reverse()
+            self.normal_q_ready = self.normal_q
+            self.normal_q = []
+        if self.normal_q_ready.len() > 0:
+            val aid = self.normal_q_ready[self.normal_q_ready.len() - 1]
+            self.normal_q_ready = self.normal_q_ready[0:self.normal_q_ready.len() - 1]
             return aid
-        if self.low_q.len() > 0:
-            val aid = self.low_q[0]
-            self.low_q.remove(0)
+        # Low priority
+        if self.low_q_ready.len() == 0 and self.low_q.len() > 0:
+            self.low_q.reverse()
+            self.low_q_ready = self.low_q
+            self.low_q = []
+        if self.low_q_ready.len() > 0:
+            val aid = self.low_q_ready[self.low_q_ready.len() - 1]
+            self.low_q_ready = self.low_q_ready[0:self.low_q_ready.len() - 1]
             return aid
         nil
 
     me remove(actor_id: i64):
         self.max_q = self.remove_from(self.max_q, actor_id)
+        self.max_q_ready = self.remove_from(self.max_q_ready, actor_id)
         self.high_q = self.remove_from(self.high_q, actor_id)
+        self.high_q_ready = self.remove_from(self.high_q_ready, actor_id)
         self.normal_q = self.remove_from(self.normal_q, actor_id)
+        self.normal_q_ready = self.remove_from(self.normal_q_ready, actor_id)
         self.low_q = self.remove_from(self.low_q, actor_id)
+        self.low_q_ready = self.remove_from(self.low_q_ready, actor_id)
 
     fn remove_from(q, actor_id: i64):
         var new_q = []
@@ -160,7 +190,7 @@ class RunQueue:
         new_q
 
     static fn new() -> RunQueue:
-        RunQueue(max_q: [], high_q: [], normal_q: [], low_q: [])
+        RunQueue(max_q: [], max_q_ready: [], high_q: [], high_q_ready: [], normal_q: [], normal_q_ready: [], low_q: [], low_q_ready: [])
 
 # --- ActorContext ---
 

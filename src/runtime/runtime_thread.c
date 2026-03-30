@@ -49,61 +49,62 @@ typedef struct {
 } HandleEntry;
 
 static HandleEntry g_handles[MAX_HANDLES];
-static int64_t g_next_handle = 1;
 
+/* Freelist stack for O(1) handle alloc/free */
+static int64_t g_freelist[MAX_HANDLES];
+static int64_t g_freelist_top = -1;  /* -1 means empty (not yet initialized) */
+static int g_freelist_initialized = 0;
+
+/* Read-write lock: allows concurrent get_handle reads */
 #ifdef SPL_THREAD_PTHREAD
-static pthread_mutex_t g_handle_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_rwlock_t g_handle_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+#define HANDLE_RDLOCK()   pthread_rwlock_rdlock(&g_handle_rwlock)
+#define HANDLE_RDUNLOCK() pthread_rwlock_unlock(&g_handle_rwlock)
+#define HANDLE_WRLOCK()   pthread_rwlock_wrlock(&g_handle_rwlock)
+#define HANDLE_WRUNLOCK() pthread_rwlock_unlock(&g_handle_rwlock)
 #else
-static CRITICAL_SECTION g_handle_lock;
-static int g_handle_lock_initialized = 0;
+static SRWLOCK g_handle_srwlock = SRWLOCK_INIT;
+#define HANDLE_RDLOCK()   AcquireSRWLockShared(&g_handle_srwlock)
+#define HANDLE_RDUNLOCK() ReleaseSRWLockShared(&g_handle_srwlock)
+#define HANDLE_WRLOCK()   AcquireSRWLockExclusive(&g_handle_srwlock)
+#define HANDLE_WRUNLOCK() ReleaseSRWLockExclusive(&g_handle_srwlock)
 #endif
 
-static void init_handle_lock(void) {
-#ifdef SPL_THREAD_WINDOWS
-    if (!g_handle_lock_initialized) {
-        InitializeCriticalSection(&g_handle_lock);
-        g_handle_lock_initialized = 1;
+static void init_freelist(void) {
+    if (!g_freelist_initialized) {
+        /* Push all free slots onto the freelist (skip index 0 = invalid) */
+        g_freelist_top = -1;
+        for (int64_t i = MAX_HANDLES - 1; i >= 1; i--) {
+            g_freelist[++g_freelist_top] = i;
+        }
+        g_freelist_initialized = 1;
     }
-#endif
 }
 
 /* Public initialization function - called at startup */
 void spl_thread_init(void) {
-    init_handle_lock();
     /* Initialize handle array to zeros */
     for (int i = 0; i < MAX_HANDLES; i++) {
         g_handles[i].type = HANDLE_FREE;
         g_handles[i].ptr = NULL;
     }
+    /* Initialize the freelist for O(1) handle allocation */
+    init_freelist();
 }
 
 static int64_t alloc_handle(HandleType type, void* ptr) {
-    init_handle_lock();
+    init_freelist();
 
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&g_handle_lock);
-#else
-    EnterCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_WRLOCK();
 
     int64_t handle = 0;
-    for (int64_t i = 0; i < MAX_HANDLES; i++) {
-        int64_t idx = (g_next_handle + i) % MAX_HANDLES;
-        if (idx == 0) idx = 1;  /* Skip 0 (reserved for errors) */
-        if (g_handles[idx].type == HANDLE_FREE) {
-            g_handles[idx].type = type;
-            g_handles[idx].ptr = ptr;
-            handle = idx;
-            g_next_handle = (idx + 1) % MAX_HANDLES;
-            break;
-        }
+    if (g_freelist_top >= 0) {
+        handle = g_freelist[g_freelist_top--];
+        g_handles[handle].type = type;
+        g_handles[handle].ptr = ptr;
     }
 
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&g_handle_lock);
-#else
-    LeaveCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_WRUNLOCK();
 
     return handle;
 }
@@ -113,24 +114,14 @@ static void* get_handle(int64_t handle, HandleType expected_type) {
         return NULL;
     }
 
-    init_handle_lock();
-
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&g_handle_lock);
-#else
-    EnterCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_RDLOCK();
 
     void* ptr = NULL;
     if (g_handles[handle].type == expected_type) {
         ptr = g_handles[handle].ptr;
     }
 
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&g_handle_lock);
-#else
-    LeaveCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_RDUNLOCK();
 
     return ptr;
 }
@@ -140,22 +131,13 @@ static void free_handle(int64_t handle) {
         return;
     }
 
-    init_handle_lock();
-
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&g_handle_lock);
-#else
-    EnterCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_WRLOCK();
 
     g_handles[handle].type = HANDLE_FREE;
     g_handles[handle].ptr = NULL;
+    g_freelist[++g_freelist_top] = handle;
 
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&g_handle_lock);
-#else
-    LeaveCriticalSection(&g_handle_lock);
-#endif
+    HANDLE_WRUNLOCK();
 }
 
 /* ================================================================

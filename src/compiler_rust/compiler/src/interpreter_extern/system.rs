@@ -4,6 +4,10 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+
+fn clear_simple_child_stack_env(command: &mut std::process::Command) {
+    command.env_remove("_SIMPLE_STACK_SET");
+}
 use crate::value_bridge::runtime_to_value;
 
 use std::collections::HashMap;
@@ -312,7 +316,9 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let output = std::process::Command::new(&cmd)
+    let mut command = std::process::Command::new(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    let output = command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .output();
@@ -371,7 +377,9 @@ pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let status = std::process::Command::new(&cmd)
+    let mut command = std::process::Command::new(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    let status = command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -434,7 +442,9 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut child = match std::process::Command::new(&cmd)
+    let mut command = std::process::Command::new(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    let mut child = match command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -547,7 +557,9 @@ pub fn rt_process_spawn_async(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    match std::process::Command::new(&cmd)
+    let mut command = std::process::Command::new(&cmd);
+    clear_simple_child_stack_env(&mut command);
+    match command
         .args(&cmd_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -639,6 +651,7 @@ pub fn rt_exit(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_sys_get_args() {
@@ -646,6 +659,42 @@ mod tests {
         let result = sys_get_args(&[]);
         assert!(result.is_ok());
         // Value type depends on runtime implementation
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_run_clears_simple_stack_env_for_children() {
+        unsafe {
+            std::env::set_var("_SIMPLE_STACK_SET", "1");
+        }
+        let result = rt_process_run(&[
+            Value::Str("/bin/sh".to_string()),
+            Value::Array(Arc::new(vec![
+                Value::Str("-c".to_string()),
+                Value::Str(
+                    "if env | grep '^_SIMPLE_STACK_SET=' >/dev/null; then printf present; else printf unset; fi"
+                        .to_string(),
+                ),
+            ])),
+        ])
+        .expect("rt_process_run should succeed");
+
+        let Value::Tuple(parts) = result else {
+            panic!("expected tuple result");
+        };
+        assert_eq!(parts.len(), 3);
+        let Value::Str(stdout) = &parts[0] else {
+            panic!("expected stdout string");
+        };
+        let Value::Int(exit_code) = parts[2] else {
+            panic!("expected exit code int");
+        };
+
+        assert_eq!(stdout, "unset");
+        assert_eq!(exit_code, 0);
+        unsafe {
+            std::env::remove_var("_SIMPLE_STACK_SET");
+        }
     }
 
     // Note: Can't test sys_exit() as it terminates the process
