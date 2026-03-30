@@ -8,8 +8,8 @@ This plugin is intended for use from a Simple repository checkout. It needs a
 valid `OBSIDIAN_VAULT_PATH` and launches the checked-in example servers:
 
 ```bash
-bin/simple run examples/obsidian-search/src/main.spl
-bin/simple run examples/obsidian-search/src/main_bridge.spl
+bin/obsidian_lsp_mcp_server mcp
+bin/obsidian_lsp_mcp_server
 bin/simple run examples/obsidian-search/src/main_lsp.spl
 ```
 

@@ -171,3 +171,7 @@ STATUS: FAIL (5 failures must be fixed before release)
 - If no requirement doc exists for a feature, flag as WARN (not FAIL)
 - If design doc exists but is outdated (references deleted files/functions), flag as FAIL
 - Read actual source code — do not trust file names or comments alone
+- Fail wrapper verification if a production MCP or LSP launcher executes raw source instead of a cached compiled artifact
+- Audit request handlers for repeated scans, repeated rereads, and per-request subprocesses in hot paths
+- Verify cache invalidation exists for writes that affect cached or indexed data
+- Require startup and representative request perf evidence for performance-sensitive tooling changes

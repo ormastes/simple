@@ -4,7 +4,7 @@
 # Provides LSP-oriented operations: diagnostics, completions, hover,
 # link resolution, and semantic health status.
 
-use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, jnull, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, escape_json, LB, RB, SB_L, SB_R}
+use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, jo4, ja, ji, jf, jb, jnull, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, escape_json, LB, RB, SB_L, SB_R}
 use src.core.note_parser.{parse_frontmatter, extract_wikilinks, extract_tags}
 use src.core.vault_scanner.{scan_vault, relative_path}
 use src.core.warnings.{make_search_quality_json}
@@ -12,6 +12,23 @@ use src.core.md_diagnostics.{check_markdown_diagnostics, format_md_diagnostics_b
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(name: text) -> text
+
+struct BridgeNoteSummary:
+    rel_path: text
+    note_name: text
+    tags: [text]
+    outgoing_links: [text]
+
+struct BridgeVaultIndex:
+    vault_path: text
+    files: [text]
+    note_names: [text]
+    note_summaries: [BridgeNoteSummary]
+
+var BRIDGE_INDEX_VAULT_PATH = ""
+var BRIDGE_INDEX_FILES: [text] = []
+var BRIDGE_INDEX_NAMES: [text] = []
+var BRIDGE_INDEX_SUMMARIES: [BridgeNoteSummary] = []
 
 # --- Helper: build full path from vault + relative ---
 
@@ -34,18 +51,71 @@ fn note_name_from_path(rel_path: text) -> text:
         return safe_substr(name, 0, name.len() - 3)
     name
 
+fn unique_push(values: [text], candidate: text) -> [text]:
+    if candidate == "":
+        return values
+    for existing in values:
+        if existing == candidate:
+            return values
+    values + [candidate]
+
+fn build_bridge_vault_index(vault_path: text) -> BridgeVaultIndex:
+    val files = scan_vault(vault_path)
+    var names: [text] = []
+    var summaries: [BridgeNoteSummary] = []
+    for file in files:
+        val rel = relative_path(file, vault_path)
+        val note_name = note_name_from_path(rel)
+        names.push(note_name)
+
+        val content = rt_file_read_text(file) ?? ""
+        var all_tags: [text] = []
+        var outgoing_links: [text] = []
+        if content != "":
+            val meta = parse_frontmatter(content)
+            for t in meta.tags:
+                all_tags = unique_push(all_tags, t)
+            val inline_tags = extract_tags(content)
+            for t in inline_tags:
+                all_tags = unique_push(all_tags, t)
+            val links = extract_wikilinks(content)
+            for link in links:
+                outgoing_links = unique_push(outgoing_links, link.target)
+
+        summaries.push(BridgeNoteSummary(
+            rel_path: rel,
+            note_name: note_name,
+            tags: all_tags,
+            outgoing_links: outgoing_links
+        ))
+
+    BridgeVaultIndex(
+        vault_path: vault_path,
+        files: files,
+        note_names: names,
+        note_summaries: summaries
+    )
+
+fn bridge_get_vault_index(vault_path: text) -> BridgeVaultIndex:
+    if vault_path == "":
+        return BridgeVaultIndex(vault_path: "", files: [], note_names: [], note_summaries: [])
+    if BRIDGE_INDEX_VAULT_PATH != vault_path:
+        val rebuilt = build_bridge_vault_index(vault_path)
+        BRIDGE_INDEX_VAULT_PATH = rebuilt.vault_path
+        BRIDGE_INDEX_FILES = rebuilt.files
+        BRIDGE_INDEX_NAMES = rebuilt.note_names
+        BRIDGE_INDEX_SUMMARIES = rebuilt.note_summaries
+    BridgeVaultIndex(
+        vault_path: BRIDGE_INDEX_VAULT_PATH,
+        files: BRIDGE_INDEX_FILES,
+        note_names: BRIDGE_INDEX_NAMES,
+        note_summaries: BRIDGE_INDEX_SUMMARIES
+    )
+
 # --- Helper: collect all vault note names ---
 
 fn collect_vault_names(vault_path: text) -> [text]:
-    var names: [text] = []
-    if vault_path == "":
-        return names
-    val files = scan_vault(vault_path)
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        val name = note_name_from_path(rel)
-        names.push(name)
-    names
+    bridge_get_vault_index(vault_path).note_names
 
 # --- Helper: resolve wikilink target to file path ---
 
@@ -53,19 +123,16 @@ fn resolve_target_to_path(vault_path: text, target: text) -> text:
     if vault_path == "":
         return ""
     val lower_target = ("" + target).lower()
-    val files = scan_vault(vault_path)
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        val name = note_name_from_path(rel)
-        val lower_name = ("" + name).lower()
+    val index = bridge_get_vault_index(vault_path)
+    for summary in index.note_summaries:
+        val lower_name = ("" + summary.note_name).lower()
         if lower_name == lower_target:
-            return rel
+            return summary.rel_path
     # Try partial match on path
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        val lower_rel = ("" + rel).lower()
+    for summary in index.note_summaries:
+        val lower_rel = ("" + summary.rel_path).lower()
         if lower_rel.contains(lower_target):
-            return rel
+            return summary.rel_path
     ""
 
 # --- Helper: find close suggestions for unresolved link ---
@@ -75,13 +142,11 @@ fn find_suggestions(vault_path: text, target: text, limit: i64) -> [text]:
     if vault_path == "":
         return suggestions
     val lower_target = ("" + target).lower()
-    val files = scan_vault(vault_path)
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        val name = note_name_from_path(rel)
-        val lower_name = ("" + name).lower()
+    val index = bridge_get_vault_index(vault_path)
+    for summary in index.note_summaries:
+        val lower_name = ("" + summary.note_name).lower()
         if lower_name.contains(lower_target) or lower_target.contains(lower_name):
-            suggestions.push(name)
+            suggestions.push(summary.note_name)
             if suggestions.len() >= limit:
                 break
     suggestions
@@ -164,34 +229,20 @@ fn handle_vault_diagnostics(id: text, body: text, vault_path: text) -> text:
     if vault_path == "":
         return tool_text_result(id, jo1(jp("error", js("OBSIDIAN_VAULT_PATH not set"))))
 
-    val files = scan_vault(vault_path)
-    var total_notes = files.len()
+    val index = bridge_get_vault_index(vault_path)
+    var total_notes = index.note_summaries.len()
     var total_broken = 0
     var orphan_notes: [text] = []
     var diag_items: [text] = []
 
-    # Collect all note names for link checking
-    var all_names: [text] = []
-    var all_rels: [text] = []
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        all_rels.push(rel)
-        all_names.push(note_name_from_path(rel))
-
     # Track which notes are linked to
     var linked_notes: [text] = []
 
-    for file in files:
-        val rel = relative_path(file, vault_path)
-        val content = rt_file_read_text(file) ?? ""
-        if content == "":
-            continue
-
-        val links = extract_wikilinks(content)
-        for link in links:
-            val lower_target = ("" + link.target).lower()
+    for summary in index.note_summaries:
+        for link_target in summary.outgoing_links:
+            val lower_target = ("" + link_target).lower()
             var found = false
-            for name in all_names:
+            for name in index.note_names:
                 val lower_name = ("" + name).lower()
                 if lower_name == lower_target:
                     found = true
@@ -208,13 +259,13 @@ fn handle_vault_diagnostics(id: text, body: text, vault_path: text) -> text:
                 total_broken = total_broken + 1
                 var diag_pairs: [text] = []
                 diag_pairs.push(jp("severity", js("warning")))
-                diag_pairs.push(jp("source", js(rel)))
-                diag_pairs.push(jp("message", js("Broken wikilink: [[" + link.target + "]]")))
-                diag_pairs.push(jp("target", js(link.target)))
+                diag_pairs.push(jp("source", js(summary.rel_path)))
+                diag_pairs.push(jp("message", js("Broken wikilink: [[" + link_target + "]]")))
+                diag_pairs.push(jp("target", js(link_target)))
                 diag_items.push(jo(diag_pairs))
 
     # Find orphan notes (not linked to by any other note)
-    for name in all_names:
+    for name in index.note_names:
         var is_linked = false
         for ln in linked_notes:
             if ln == name:
@@ -295,31 +346,10 @@ fn handle_complete_tag(id: text, body: text, vault_path: text) -> text:
     var all_tags: [text] = []
 
     if vault_path != "":
-        val files = scan_vault(vault_path)
-        for file in files:
-            val content = rt_file_read_text(file) ?? ""
-            if content == "":
-                continue
-            val meta = parse_frontmatter(content)
-            for t in meta.tags:
-                if t != "":
-                    var already = false
-                    for existing in all_tags:
-                        if existing == t:
-                            already = true
-                            break
-                    if not already:
-                        all_tags.push(t)
-            val inline_tags = extract_tags(content)
-            for t in inline_tags:
-                if t != "":
-                    var already = false
-                    for existing in all_tags:
-                        if existing == t:
-                            already = true
-                            break
-                    if not already:
-                        all_tags.push(t)
+        val index = bridge_get_vault_index(vault_path)
+        for summary in index.note_summaries:
+            for t in summary.tags:
+                all_tags = unique_push(all_tags, t)
 
     var completions: [text] = []
     for tag in all_tags:
@@ -442,8 +472,7 @@ fn handle_resolve_link(id: text, body: text, vault_path: text) -> text:
 fn handle_semantic_health(id: text, body: text, vault_path: text) -> text:
     var note_count = 0
     if vault_path != "":
-        val files = scan_vault(vault_path)
-        note_count = files.len()
+        note_count = bridge_get_vault_index(vault_path).note_summaries.len()
 
     var output_pairs: [text] = []
     output_pairs.push(jp("semantic_search_available", jb(false)))

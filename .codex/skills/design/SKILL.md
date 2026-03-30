@@ -130,3 +130,7 @@ describe "<Feature>":
 - Generics use `<>` not `[]`
 - NO inheritance — use composition, traits, mixins
 - Use `Result<T, E>` + `?` for error handling
+- For MCP, LSP, and tool servers, explicitly review startup path, hot request paths, cache or index strategy, and invalidation strategy
+- Call out full-tree scans, repeated file reads, and per-request subprocesses as design risks unless the operation is explicitly maintenance or reindex work
+- Define startup and representative request-latency budgets for performance-sensitive features
+- Require an observability plan for perf-sensitive paths: timings, counters, or debug diagnostics

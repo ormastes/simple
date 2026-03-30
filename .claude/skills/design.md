@@ -73,3 +73,6 @@ Skip if feature has no UI component.
 - If another LLM already created artifacts, review and extend — never overwrite
 - Every REQ-NNN must have test coverage
 - User must approve architecture before detail design
+- For MCP, LSP, and tool servers, design must cover startup path, hot request path, cache or index strategy, and invalidation
+- Treat full-tree scans, repeated file rereads, and per-request subprocesses as first-class design risks
+- Define performance budgets and lightweight observability for perf-sensitive features before implementation

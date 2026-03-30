@@ -101,3 +101,7 @@ STATUS: FAIL (2 failures, 1 warning)
 - NEVER skip stub detection — STUB001 is non-negotiable
 - NEVER mark STATUS: PASS with outstanding FAILs
 - If verification finds issues, report them — do not auto-fix without user approval
+- Fail production wrapper verification if an MCP or LSP launcher executes a source entrypoint directly instead of a cached compiled artifact
+- Audit hot request paths for repeated full scans, repeated file rereads, and per-request subprocesses; flag uncached patterns as FAIL or WARN based on impact
+- Verify cache invalidation exists for write flows that affect cached or indexed data
+- Require startup and representative request performance evidence for performance-sensitive tooling changes

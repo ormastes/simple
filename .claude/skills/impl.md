@@ -110,3 +110,7 @@ Add/update guide docs in `doc/07_guide/` if needed.
 - **test**: fail-first verification, coverage target met
 - **review**: cross-ref consistency + stub scan on all new decls
 - **main**: docs approved before moving phases, verify stub stats in completion report
+- Production MCP or LSP wrappers must use cached compiled artifacts for normal execution
+- Avoid full-tree scans and per-request subprocesses in hot request handlers unless explicitly designed and justified
+- When adding caches or indexes tied to writable files, add invalidation on all relevant mutation paths
+- Add perf smoke checks for startup and representative tool requests when touching performance-sensitive tooling

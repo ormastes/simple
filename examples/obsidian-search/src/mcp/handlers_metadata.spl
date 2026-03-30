@@ -6,7 +6,7 @@
 use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jb, make_json_result, make_error, tool_text_result, extract_field, extract_nested, extract_arg, safe_substr, LB, RB, SB_L, SB_R}
 use src.core.frontmatter_manager.{get_frontmatter_field, set_frontmatter_field, delete_frontmatter_field, get_all_frontmatter}
 use src.core.tag_manager.{add_tag_to_note, remove_tag_from_note, rename_tag_in_vault, list_all_tags}
-use src.core.vault_scanner.{scan_vault, relative_path}
+use src.core.vault_scanner.{scan_vault, relative_path, invalidate_scan_vault_cache}
 use src.core.note_parser.{parse_frontmatter}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -83,6 +83,8 @@ fn handle_manage_frontmatter(id: text, body: text, vault_path: text) -> text:
             return make_error(id, -32602, "Missing required parameter: value (for set)")
         val new_content = set_frontmatter_field(content, field, value)
         val ok = rt_file_write_text(full_path, new_content)
+        if ok:
+            invalidate_scan_vault_cache(vault_path)
         val output = jo3(jp("path", js(path)), jp("field", js(field)), jp("success", jb(ok)))
         return tool_text_result(id, output)
 
@@ -91,6 +93,8 @@ fn handle_manage_frontmatter(id: text, body: text, vault_path: text) -> text:
             return make_error(id, -32602, "Missing required parameter: field (for delete)")
         val new_content = delete_frontmatter_field(content, field)
         val ok = rt_file_write_text(full_path, new_content)
+        if ok:
+            invalidate_scan_vault_cache(vault_path)
         val output = jo3(jp("path", js(path)), jp("field", js(field)), jp("success", jb(ok)))
         return tool_text_result(id, output)
 
@@ -113,6 +117,8 @@ fn handle_add_tags(id: text, body: text, vault_path: text) -> text:
         val ok = add_tag_to_note(vault_path, path, tag)
         if ok:
             added.push(tag)
+    if added.len() > 0:
+        invalidate_scan_vault_cache(vault_path)
 
     var added_js: [text] = []
     for a in added:
@@ -141,6 +147,8 @@ fn handle_remove_tags(id: text, body: text, vault_path: text) -> text:
         val ok = remove_tag_from_note(vault_path, path, tag)
         if ok:
             removed.push(tag)
+    if removed.len() > 0:
+        invalidate_scan_vault_cache(vault_path)
 
     var removed_js: [text] = []
     for r in removed:
@@ -164,6 +172,8 @@ fn handle_rename_tag(id: text, body: text, vault_path: text) -> text:
         return make_error(id, -32602, "Missing required parameter: new_tag")
 
     val count = rename_tag_in_vault(vault_path, old_tag, new_tag)
+    if count > 0:
+        invalidate_scan_vault_cache(vault_path)
     val output = jo3(
         jp("old_tag", js(old_tag)),
         jp("new_tag", js(new_tag)),
@@ -180,6 +190,9 @@ fn handle_batch_read_notes(id: text, body: text, vault_path: text) -> text:
         return make_error(id, -32602, "Missing required parameter: paths")
 
     val paths = split_comma_list(paths_str)
+    val max_notes = 50
+    if paths.len() > max_notes:
+        return make_error(id, -32602, "Too many paths: " + paths.len().to_text() + ". Maximum is " + max_notes.to_text())
     var items: [text] = []
 
     for path in paths:
@@ -212,20 +225,26 @@ fn handle_batch_read_notes(id: text, body: text, vault_path: text) -> text:
 fn handle_list_files(id: text, body: text, vault_path: text) -> text:
     val directory = extract_arg(body, "directory")
     val pattern = extract_arg(body, "pattern")
+    val limit_str = extract_arg(body, "limit")
+    var limit = if limit_str != "": int(limit_str) ?? 200 else: 200
+    if limit <= 0:
+        limit = 200
+    if limit > 1000:
+        limit = 1000
 
     val effective_pattern = if pattern != "": pattern else: "*.md"
     val files = scan_vault(vault_path)
     var items: [text] = []
 
     for file in files:
+        if items.len() >= limit:
+            break
         val rel = relative_path(file, vault_path)
 
-        # Filter by directory prefix
         if directory != "":
             if not rel.starts_with(directory):
                 continue
 
-        # Filter by pattern (simple glob: *.md, *.txt, etc.)
         if not matches_glob(rel, effective_pattern):
             continue
 
@@ -233,7 +252,8 @@ fn handle_list_files(id: text, body: text, vault_path: text) -> text:
         file_pairs.push(jp("path", js(rel)))
         items.push(jo(file_pairs))
 
-    val output = jo2(jp("files", ja(items)), jp("count", ji(items.len())))
+    var truncated = items.len() >= limit
+    val output = jo3(jp("files", ja(items)), jp("count", ji(items.len())), jp("truncated", jb(truncated)))
     tool_text_result(id, output)
 
 # --- Internal helpers ---

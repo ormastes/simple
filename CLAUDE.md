@@ -136,6 +136,10 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely
 - **DO NOT ADD REPORT TO GIT** unless requested
+- For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
+- Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
+- Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
+- Verify perf-sensitive tooling with warm startup time, representative request latency, and max RSS on realistic fixtures
 
 ---
 
@@ -152,7 +156,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | Simple LSP via MCP bridge |
 | `t32-mcp` | `bin/t32_mcp_server` | TRACE32 debugger MCP |
 | `t32-lsp-mcp` | `bin/t32_lsp_mcp_server` | TRACE32 CMM LSP via MCP |
-| `obsidian-search` | `bin/simple run src/main.spl` | Obsidian vault search (11 tools: search, graph, tags, tasks, authority ranking) |
+| `obsidian-search` | `bin/obsidian_lsp_mcp_server mcp` | Obsidian vault search (11 tools: search, graph, tags, tasks, authority ranking) |
+| `obsidian-lsp-mcp` | `bin/obsidian_lsp_mcp_server` | Obsidian markdown bridge MCP |
 
 **Obsidian Search:** `examples/obsidian-search/` submodule. Set `OBSIDIAN_VAULT_PATH` env var. Feature requests: `examples/obsidian-search/doc/requirement/feature_request_obsidian_search.md`
 

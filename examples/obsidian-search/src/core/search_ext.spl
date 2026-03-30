@@ -10,6 +10,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 use src.core.vault_scanner.{scan_vault, relative_path}
 use src.core.note_parser.{parse_frontmatter}
 use src.core.search_engine.{SearchResult, quicksort_results}
+use src.core.indexer.{IndexDb, reindex_vault as indexer_reindex_vault}
 use src.util.json_helpers.{safe_substr}
 
 # --- Trigram generation ---
@@ -44,35 +45,24 @@ fn trigram_similarity(a: text, b: text) -> f64:
     if tris_a.len() == 0 or tris_b.len() == 0:
         return 0.0
 
-    # Build union and intersection
-    var union_items: [text] = []
-    var intersection_count = 0
-
-    # Add all from a to union
+    var set_a: {text: bool} = {}
     for t in tris_a:
-        if not list_contains(union_items, t):
-            union_items.push(t)
+        set_a[t] = true
 
-    # Check b against a for intersection, add new to union
+    var set_b: {text: bool} = {}
     for t in tris_b:
-        if list_contains(tris_a, t):
-            # Only count each intersection match once
-            # Check if we already counted it
-            var already_counted = false
-            # We use a simple approach: count how many of b's trigrams are in a
-            pass_dn
-        if not list_contains(union_items, t):
-            union_items.push(t)
+        set_b[t] = true
 
-    # Count intersection: trigrams present in both
-    for t in union_items:
-        if list_contains(tris_a, t) and list_contains(tris_b, t):
+    var intersection_count = 0
+    for t in set_a.keys():
+        if set_b[t].?:
             intersection_count = intersection_count + 1
 
-    if union_items.len() == 0:
+    val union_count = set_a.len() + set_b.len() - intersection_count
+    if union_count == 0:
         return 0.0
 
-    float(intersection_count) / float(union_items.len())
+    float(intersection_count) / float(union_count)
 
 # --- Path title helper ---
 
@@ -89,24 +79,25 @@ fn path_title(rel_path: text) -> text:
 
 # --- Fuzzy search ---
 
-fn fuzzy_search(vault_path: text, query: text, threshold: f64, limit: i64) -> [SearchResult]:
+fn fuzzy_search(vault_path: text, query: text, threshold: f64, limit: i64, max_results: i64 = 200) -> [SearchResult]:
     var results: [SearchResult] = []
     if vault_path == "" or query.trim() == "":
         return results
 
+    val cap = if max_results > 0: max_results else: 200
     val files = scan_vault(vault_path)
     val lower_query = ("" + query).lower()
 
     for file in files:
+        if results.len() >= cap:
+            break
         val rel_path = relative_path(file, vault_path)
         val content = rt_file_read_text(file) ?? ""
         val meta = parse_frontmatter(content)
         val title = if meta.title != "": meta.title else: path_title(rel_path)
 
-        # Check title similarity
         var best_score = trigram_similarity(lower_query, title)
 
-        # Check alias similarities
         for alias in meta.aliases:
             val alias_score = trigram_similarity(lower_query, alias)
             if alias_score > best_score:
@@ -129,11 +120,9 @@ fn fuzzy_search(vault_path: text, query: text, threshold: f64, limit: i64) -> [S
                 mtime: 0
             ))
 
-    # Sort by score descending
     if results.len() > 1:
         quicksort_results(results, 0, results.len() - 1)
 
-    # Return top N
     if results.len() <= limit:
         return results
     var final_results: [SearchResult] = []
@@ -192,14 +181,17 @@ fn search_replace_in_note(vault_path: text, rel_path: text, search: text, replac
 
 # --- Search and replace vault-wide ---
 
-fn search_replace_in_vault(vault_path: text, search: text, replace: text, dry_run: bool) -> (i64, i64):
+fn search_replace_in_vault(vault_path: text, search: text, replace: text, dry_run: bool, max_files: i64 = 200) -> (i64, i64):
     if vault_path == "" or search == "":
         return (0, 0)
+    val cap = if max_files > 0: max_files else: 200
     val files = scan_vault(vault_path)
     var files_modified: i64 = 0
     var total_matches: i64 = 0
 
     for file in files:
+        if files_modified >= cap:
+            break
         val rel_path = relative_path(file, vault_path)
         val (match_count, _message) = search_replace_in_note(vault_path, rel_path, search, replace, dry_run)
         if match_count > 0:
@@ -224,7 +216,7 @@ fn extract_date_from_filename(rel_path: text) -> text:
             return candidate
     ""
 
-fn search_by_date_range(vault_path: text, start_date: text, end_date: text, query: text, limit: i64) -> [SearchResult]:
+fn search_by_date_range(vault_path: text, start_date: text, end_date: text, query: text, limit: i64, max_results: i64 = 200) -> [SearchResult]:
     var results: [SearchResult] = []
     if vault_path == "":
         return results
@@ -293,15 +285,18 @@ fn search_by_date_range(vault_path: text, start_date: text, end_date: text, quer
 
 # --- Search with alias matching ---
 
-fn search_with_aliases(vault_path: text, query: text, limit: i64) -> [SearchResult]:
+fn search_with_aliases(vault_path: text, query: text, limit: i64, max_results: i64 = 200) -> [SearchResult]:
     var results: [SearchResult] = []
     if vault_path == "" or query.trim() == "":
         return results
 
+    val cap = if max_results > 0: max_results else: 200
     val files = scan_vault(vault_path)
     val lower_query = ("" + query).lower()
 
     for file in files:
+        if results.len() >= cap:
+            break
         val rel_path = relative_path(file, vault_path)
         val content = rt_file_read_text(file) ?? ""
         val meta = parse_frontmatter(content)
@@ -309,19 +304,16 @@ fn search_with_aliases(vault_path: text, query: text, limit: i64) -> [SearchResu
 
         var score = 0.0
 
-        # Title match (10x boost)
         val lower_title = ("" + title).lower()
         if lower_title.contains(lower_query):
             score = score + 10.0
 
-        # Alias match (5x boost)
         for alias in meta.aliases:
             val lower_alias = ("" + alias).lower()
             if lower_alias.contains(lower_query):
                 score = score + 5.0
                 break
 
-        # Content match (1x)
         val lower_content = ("" + content).lower()
         if lower_content.contains(lower_query):
             score = score + 1.0
@@ -344,11 +336,9 @@ fn search_with_aliases(vault_path: text, query: text, limit: i64) -> [SearchResu
                 mtime: 0
             ))
 
-    # Sort by score descending
     if results.len() > 1:
         quicksort_results(results, 0, results.len() - 1)
 
-    # Return top N
     if results.len() <= limit:
         return results
     var final_results: [SearchResult] = []
@@ -365,21 +355,20 @@ fn search_with_aliases(vault_path: text, query: text, limit: i64) -> [SearchResu
 fn reindex_vault(vault_path: text) -> (i64, i64):
     if vault_path == "":
         return (0, 0)
-    val files = scan_vault(vault_path)
-    var total_files: i64 = 0
-    var total_links: i64 = 0
 
+    val db = IndexDb(is_valid: true)
+    val indexed = indexer_reindex_vault(db, vault_path)
+
+    val files = scan_vault(vault_path)
+    var total_links: i64 = 0
     for file in files:
-        total_files = total_files + 1
         val content = rt_file_read_text(file) ?? ""
-        # Count wikilinks in content
         var i = 0
         while i < content.len() - 1:
             val ch = safe_substr(content, i, i + 1)
             val next_ch = safe_substr(content, i + 1, i + 2)
             if ch == "[" and next_ch == "[":
                 total_links = total_links + 1
-                # Skip past this link
                 var j = i + 2
                 while j < content.len() - 1:
                     val c1 = safe_substr(content, j, j + 1)
@@ -393,4 +382,4 @@ fn reindex_vault(vault_path: text) -> (i64, i64):
             else:
                 i = i + 1
 
-    (total_files, total_links)
+    (files.len(), total_links)

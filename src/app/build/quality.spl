@@ -61,6 +61,7 @@ struct CheckResult:
     lint: QualityResult
     format: QualityResult
     test_passed: bool
+    policy_passed: bool
     overall_success: bool
 
 impl CheckResult:
@@ -75,6 +76,9 @@ impl CheckResult:
 
         if not self.test_passed:
             parts = parts.merge(["Tests: Failed"])
+
+        if not self.policy_passed:
+            parts = parts.merge(["MCP Perf: Failed"])
 
         # OPTIMIZATION: Use .? existence check
         if not parts.?:
@@ -221,6 +225,7 @@ class Check:
         var lint_result = empty_quality_result()
         var format_result = empty_quality_result()
         var test_passed = true
+        var policy_passed = true
 
         # Run lint
         if config.run_lint:
@@ -235,6 +240,7 @@ class Check:
                     lint: lint_result,
                     format: empty_quality_result(),
                     test_passed: true,
+                    policy_passed: true,
                     overall_success: false
                 )
 
@@ -251,6 +257,7 @@ class Check:
                     lint: lint_result,
                     format: format_result,
                     test_passed: true,
+                    policy_passed: true,
                     overall_success: false
                 )
 
@@ -264,12 +271,29 @@ class Check:
                 print stderr
             test_passed = test_exit == 0
 
-        val overall_success = lint_result.success and format_result.success and test_passed
+        print "\n=== Running MCP Static Audit ==="
+        val (audit_stdout, audit_stderr, audit_exit) = process_run("python3", ["scripts/mcp_performance_guard.py", "static-audit", "--strict", "--context", "build-check"])
+        if audit_stdout.?:
+            print audit_stdout
+        if audit_stderr.?:
+            print audit_stderr
+
+        print "\n=== Running MCP Perf Smoke ==="
+        val (perf_stdout, perf_stderr, perf_exit) = process_run("python3", ["scripts/mcp_performance_guard.py", "perf-smoke", "--strict", "--context", "build-check"])
+        if perf_stdout.?:
+            print perf_stdout
+        if perf_stderr.?:
+            print perf_stderr
+
+        policy_passed = audit_exit == 0 and perf_exit == 0
+
+        val overall_success = lint_result.success and format_result.success and test_passed and policy_passed
 
         CheckResult(
             lint: lint_result,
             format: format_result,
             test_passed: test_passed,
+            policy_passed: policy_passed,
             overall_success: overall_success
         )
 
@@ -383,4 +407,3 @@ fn default_check_config() -> CheckConfig:
         auto_fix: false,
         fail_fast: false
     )
-

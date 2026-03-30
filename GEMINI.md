@@ -161,6 +161,10 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 - User MUST select requirements — never auto-select
 - All code in `.spl` — no Python, no Bash (except 3 bootstrap scripts)
 - SSpec matchers: built-in only (`to_equal`, `to_be`, `to_be_nil`, `to_contain`, etc.)
+- For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
+- Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
+- Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
+- Verify perf-sensitive tooling with warm startup time, representative request latency, and max RSS on realistic fixtures
 
 ## Artifacts Summary
 

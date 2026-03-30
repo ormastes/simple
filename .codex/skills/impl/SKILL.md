@@ -103,3 +103,7 @@ Before declaring implementation complete, verify:
 - NEVER over-engineer — only make requested changes
 - NEVER add unused code — delete completely
 - NEVER convert TODO/FIXME to NOTE — implement or delete
+- Production MCP or LSP wrappers must execute cached compiled artifacts, not raw source entrypoints
+- Do not place full-tree scans or repeated file rereads in request handlers when a cache or index is viable
+- When cached or indexed data depends on writable files, implement explicit invalidation on create, edit, move, delete, rename, template application, and bulk replace flows
+- Add perf smoke coverage for startup and representative hot requests when changing performance-sensitive tooling

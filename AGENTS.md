@@ -156,6 +156,10 @@ MCP server available via npm: `@simple-lang/mcp-server`
 - All requirement options must include pros, cons, and effort estimate
 - User MUST select requirements — never auto-select
 - Unchosen options are DELETED, not archived
+- For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
+- Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
+- Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence
+- Verify perf-sensitive tooling with warm startup time, representative request latency, and max RSS on realistic fixtures
 
 ## Artifacts Summary
 
