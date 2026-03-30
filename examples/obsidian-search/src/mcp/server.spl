@@ -3,6 +3,7 @@
 # Content-Length framed stdio protocol with JSON Lines auto-detection.
 
 use src.util.json_helpers.{js, jp, jo1, jo2, jo3, jo4, make_json_result, make_error, safe_substr, extract_field, extract_field_raw, extract_id, extract_nested, extract_arg, tool_text_result, LB, RB}
+use src.util.protocol_headers.{parse_content_length_header}
 use src.mcp.tools.{make_tools_list}
 use src.mcp.handlers.{handle_tool_call}
 use src.core.indexer.{IndexDb, open_index_db, open_index_memory, close_index_db, create_schema}
@@ -49,11 +50,14 @@ fn read_stdin_chars(count: i64) -> text:
 
 fn read_stdin_message() -> text:
     var content_length = 0
+    var saw_header = false
     while true:
         var line = read_stdin_line()
         if line == "":
             if content_length > 0:
                 break
+            if saw_header:
+                return ""
             return ""
         if line == "\r\n" or line == "\r" or line == "\n":
             if content_length > 0:
@@ -64,10 +68,13 @@ fn read_stdin_message() -> text:
         if line.starts_with(LB()):
             USE_JSON_LINES = true
             return line
+        saw_header = true
         if line.starts_with("Content-Length:"):
-            var len_str = line.replace("Content-Length:", "")
-            len_str = len_str.trim()
-            content_length = int(len_str)
+            content_length = parse_content_length_header(line)
+            if content_length < 0:
+                return ""
+        elif line.starts_with("Content-Type:"):
+            continue
     if content_length <= 0:
         return ""
     read_stdin_chars(content_length)
