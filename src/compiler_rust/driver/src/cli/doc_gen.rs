@@ -3,7 +3,7 @@
 //! Commands:
 //! - `simple feature-gen` - Generate feature.md from feature_db.sdn
 //! - `simple task-gen` - Generate task.md from task_db.sdn
-//! - `simple spec-gen` - Generate doc/spec/ from tests/spec/*_spec.spl
+//! - `simple spec-gen` - Generate doc/06_spec/ from tests/spec/*_spec.spl
 //! - `simple todo-scan` - Scan source code and update todo_db.sdn
 //! - `simple todo-gen` - Generate TODO.md from todo_db.sdn
 //! - `simple test-result-gen` - Generate test_result.md from test_db.sdn
@@ -114,7 +114,7 @@ pub fn run_spec_gen(args: &[String]) -> i32 {
         .position(|a| a == "-o" || a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("doc/spec/generated"));
+        .unwrap_or_else(|| PathBuf::from("doc/06_spec"));
 
     println!("Generating spec docs from {}...", spec_dir.display());
 
@@ -743,7 +743,7 @@ pub fn print_doc_gen_help() {
     eprintln!("Defaults:");
     eprintln!("  feature-gen:     doc/feature/feature_db.sdn -> doc/feature/");
     eprintln!("  task-gen:        doc/task/task_db.sdn -> doc/task/");
-    eprintln!("  spec-gen:        tests/spec/ -> doc/spec/generated/");
+    eprintln!("  spec-gen:        tests/spec/ -> doc/06_spec/");
     eprintln!("  todo-scan:       . -> doc/todo/todo_db.sdn");
     eprintln!("  todo-gen:        doc/todo/todo_db.sdn -> doc/TODO.md");
     eprintln!("  test-result-gen: doc/test/test_db.sdn -> doc/test/");

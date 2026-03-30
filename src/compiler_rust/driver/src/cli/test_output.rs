@@ -229,7 +229,7 @@ fn generate_sspec_documentation(
         return Ok(());
     }
 
-    // Generate documentation in doc/spec/
+    // Generate documentation in doc/06_spec/
     let spec_dir = docs_dir.join("spec");
     sspec_docgen::generate_sspec_docs(&sspec_files, &spec_dir)?;
 

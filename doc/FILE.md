@@ -57,8 +57,8 @@
 
 | File | Frequency |
 |------|-----------|
-| `06_spec/generated/feature.md` | Every test run |
-| `06_spec/generated/pending_feature.md` | Every test run |
+| `06_spec/feature.md` | Every test run |
+| `06_spec/pending_feature.md` | Every test run |
 | `08_tracking/test/test_result.md` | Every test run |
 | `08_tracking/build/recent_build.md` | Every build |
 | `08_tracking/bug/bug_report.md` | `bin/simple bug-gen` |

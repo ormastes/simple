@@ -1,7 +1,7 @@
 //! SSpec documentation generator
 //!
 //! Extracts markdown documentation from sspec test files ("""...""" blocks)
-//! and generates comprehensive BDD-style documentation in doc/spec/
+//! and generates comprehensive BDD-style documentation in doc/06_spec/
 //!
 //! ## Features
 //!
