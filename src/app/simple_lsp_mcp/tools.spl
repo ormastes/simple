@@ -4,7 +4,6 @@
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_get_cwd() -> text
 
 fn lsp_find_simple_binary() -> text:
     val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
@@ -55,7 +54,46 @@ fn run_lsp_symbols(file: text) -> text:
     run_command_text([lsp_query_path(), "symbols", file])
 
 fn run_lsp_diagnostics(file: text) -> text:
-    run_command_text(["lint", file])
+    run_command_text(["lint", "--format", "json", file])
+
+fn lsp_severity_label(sev: i64) -> text:
+    if sev == 1:
+        return "Error"
+    if sev == 2:
+        return "Warning"
+    if sev == 3:
+        return "Information"
+    if sev == 4:
+        return "Hint"
+    "Unknown"
+
+fn lsp_format_diag_entry(json_line: text) -> text:
+    val severity = lsp_extract_field(json_line, "severity")
+    val code = lsp_extract_field(json_line, "code")
+    val message = lsp_extract_field(json_line, "message")
+    val line_num = lsp_extract_field(json_line, "line")
+    val col = lsp_extract_field(json_line, "col")
+    val source = lsp_extract_field(json_line, "source")
+    val sev_label = lsp_severity_label(severity.to_int())
+    var source_label = source
+    if source_label == "":
+        source_label = "simple-lint"
+    var code_part = ""
+    if code != "":
+        code_part = " [" + code + "]"
+    "  " + sev_label + " (line " + line_num + ", col " + col + "): " + message + code_part + " (" + source_label + ")"
+
+fn format_lsp_diagnostics_block(file: text, raw: text) -> text:
+    val lines = raw.split("\n")
+    var entries: [text] = []
+    var i = 0
+    while i < lines.len():
+        if lines[i].contains("\"severity\""):
+            entries.push(lsp_format_diag_entry(lines[i]))
+        i = i + 1
+    if entries.len() == 0:
+        return ""
+    "<new-diagnostics>\n" + file + ":\n" + entries.join("\n") + "\n</new-diagnostics>"
 
 fn make_empty_list_result(id: text, key: text) -> text:
     lsp_result_ok(id, lsp_jo1(lsp_jp(key, "[]")))
@@ -70,7 +108,7 @@ fn handle_prompts_list(id: text) -> text:
     make_empty_list_result(id, "prompts")
 
 fn handle_roots_list(id: text) -> text:
-    val cwd = rt_get_cwd()
+    val cwd = lsp_get_cwd()
     val root = lsp_jo2(
         lsp_jp("uri", lsp_js("file://" + cwd)),
         lsp_jp("name", lsp_js("workspace"))
@@ -130,6 +168,15 @@ fn handle_tool_call(id: text, body: text) -> text:
         val file = lsp_extract_field(args, "file")
         if tool_name == "lsp_symbols":
             return lsp_make_tool_result(id, run_lsp_symbols(file))
-        return lsp_make_tool_result(id, run_lsp_diagnostics(file))
+        val raw = run_lsp_diagnostics(file)
+        val diag_block = format_lsp_diagnostics_block(file, raw)
+        if diag_block != "":
+            return lsp_make_tool_result(id, raw + "\n" + diag_block)
+        return lsp_make_tool_result(id, raw)
 
     lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
+fn lsp_get_cwd() -> text:
+    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", "pwd"])
+    if code == 0 and stdout.trim() != "":
+        return stdout.trim()
+    "."

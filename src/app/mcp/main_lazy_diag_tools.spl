@@ -6,6 +6,65 @@
 #       are now handled by cli_passthrough via tool_table.spl
 
 # ============================================================================
+# Structured diagnostics helpers
+# ============================================================================
+
+fn severity_label(sev: i64) -> text:
+    if sev == 1:
+        return "Error"
+    if sev == 2:
+        return "Warning"
+    if sev == 3:
+        return "Information"
+    if sev == 4:
+        return "Hint"
+    "Unknown"
+
+fn format_diag_line(json_line: text) -> text:
+    val sev_str = extract_field(json_line, "severity")
+    val code = extract_field(json_line, "code")
+    val message = extract_field(json_line, "message")
+    val line_str = extract_field(json_line, "line")
+    val col_str = extract_field(json_line, "col")
+    val source = extract_field(json_line, "source")
+
+    val sev = sev_str.to_int()
+    val label = severity_label(sev)
+
+    var parts: [text] = []
+    parts.push("  " + label + " (line " + line_str + ", col " + col_str + "): " + message)
+    if code != "":
+        parts.push(" [" + code + "]")
+    if source != "":
+        parts.push(" (" + source + ")")
+    parts.join("")
+
+fn format_new_diagnostics_block(path: text, json_output: text) -> text:
+    val lines = json_output.split(NL)
+    var diag_lines: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val has_severity = (trimmed.index_of("\"severity\"") ?? -1) >= 0
+        if has_severity:
+            val formatted = format_diag_line(trimmed)
+            diag_lines.push(formatted)
+    if diag_lines.len() == 0:
+        return ""
+    var parts: [text] = []
+    parts.push("<new-diagnostics>" + NL)
+    parts.push(path + ":" + NL)
+    for dl in diag_lines:
+        parts.push(dl + NL)
+    parts.push("</new-diagnostics>")
+    parts.join("")
+
+fn run_structured_diagnostics(path: text) -> (text, i64):
+    val _bin = _mcp_find_simple_binary()
+    shell_cmd("timeout 30 " + _bin + " check " + path + " --format json 2>&1")
+
+# ============================================================================
 # simple_read — Read source file with line numbers + diagnostics
 # ============================================================================
 
@@ -28,23 +87,26 @@ fn handle_simple_read(id: text, body: text) -> text:
     val numbered = num_parts.join("")
 
     # Run diagnostics
-    val _bin = _mcp_find_simple_binary()
     var check_out = ""
     var check_exit: i64 = 0
-    (check_out, check_exit) = shell_cmd("timeout 30 " + _bin + " check " + path + " 2>&1")
+    (check_out, check_exit) = run_structured_diagnostics(path)
 
     var out_parts: [text] = []
     out_parts.push("-- " + path)
     if check_exit == 0:
         out_parts.push(" [clean]")
     else:
-        out_parts.push(" [has errors]")
+        out_parts.push(" [has diagnostics]")
     out_parts.push(" --" + NL)
     out_parts.push(numbered)
 
     if check_exit != 0:
-        out_parts.push(NL + "-- diagnostics --" + NL)
-        out_parts.push(check_out)
+        val diag_block = format_new_diagnostics_block(path, check_out)
+        if diag_block != "":
+            out_parts.push(NL + diag_block)
+        else:
+            out_parts.push(NL + "-- diagnostics --" + NL)
+            out_parts.push(check_out)
 
     make_tool_result(id, out_parts.join(""))
 
@@ -97,23 +159,41 @@ fn handle_simple_status(id: text, body: text) -> text:
         if file_count >= 10:
             continue
         file_count = file_count + 1
-        val _bin = _mcp_find_simple_binary()
         var co = ""
         var ce: i64 = 0
-        (co, ce) = shell_cmd("timeout 15 " + _bin + " check " + fp + " 2>&1")
+        (co, ce) = run_structured_diagnostics(fp)
         if ce == 0:
             out_parts.push("  " + fp + "  clean" + NL)
         else:
             total_errors = total_errors + 1
-            # Count error lines
-            val err_lines = co.split(NL)
+            # Count diagnostics by severity from JSON lines
+            val diag_lines = co.split(NL)
             var err_count = 0
-            for el in err_lines:
-                val et = el.trim()
-                val is_err = (et.starts_with("error") or et.starts_with("Error") or et.starts_with("Type error") or et.starts_with("Parse error"))
-                if is_err:
-                    err_count = err_count + 1
-            out_parts.push("  " + fp + "  " + str(err_count) + " error(s)" + NL)
+            var warn_count = 0
+            var info_count = 0
+            for dl in diag_lines:
+                val dt = dl.trim()
+                if dt == "":
+                    continue
+                val has_sev = (dt.index_of("\"severity\"") ?? -1) >= 0
+                if has_sev:
+                    val sev_val = extract_field(dt, "severity").to_int()
+                    if sev_val == 1:
+                        err_count = err_count + 1
+                    elif sev_val == 2:
+                        warn_count = warn_count + 1
+                    else:
+                        info_count = info_count + 1
+            var summary_parts: [text] = []
+            if err_count > 0:
+                summary_parts.push(str(err_count) + " error(s)")
+            if warn_count > 0:
+                summary_parts.push(str(warn_count) + " warning(s)")
+            if info_count > 0:
+                summary_parts.push(str(info_count) + " info")
+            if summary_parts.len() == 0:
+                summary_parts.push("has issues")
+            out_parts.push("  " + fp + "  " + summary_parts.join(", ") + NL)
 
     out_parts.push("-- " + str(total_errors) + " file(s) with errors out of " + str(file_count) + " checked")
     if total_files > 10:
@@ -166,10 +246,9 @@ fn handle_simple_edit(id: text, body: text) -> text:
     file_write(path, new_content)
 
     # Check diagnostics after edit
-    val _bin = _mcp_find_simple_binary()
     var check_out = ""
     var check_exit: i64 = 0
-    (check_out, check_exit) = shell_cmd("timeout 30 " + _bin + " check " + path + " 2>&1")
+    (check_out, check_exit) = run_structured_diagnostics(path)
 
     # Find edit line number
     val before_lines = before.split(NL)
@@ -182,8 +261,12 @@ fn handle_simple_edit(id: text, body: text) -> text:
     if check_exit == 0:
         out_parts.push("Diagnostics: clean (no errors)")
     else:
-        out_parts.push(NL + "-- post-edit diagnostics --" + NL)
-        out_parts.push(check_out)
+        val diag_block = format_new_diagnostics_block(path, check_out)
+        if diag_block != "":
+            out_parts.push(diag_block)
+        else:
+            out_parts.push(NL + "-- post-edit diagnostics --" + NL)
+            out_parts.push(check_out)
 
     make_tool_result(id, out_parts.join(""))
 
@@ -235,18 +318,21 @@ fn handle_simple_multi_edit(id: text, body: text) -> text:
 
     file_write(path, content)
 
-    val _bin = _mcp_find_simple_binary()
     var check_out = ""
     var check_exit: i64 = 0
-    (check_out, check_exit) = shell_cmd("timeout 30 " + _bin + " check " + path + " 2>&1")
+    (check_out, check_exit) = run_structured_diagnostics(path)
 
     var out_parts: [text] = []
     out_parts.push("-- multi-edit " + path + " (" + str(edit_count) + " edits applied) --" + NL)
     if check_exit == 0:
         out_parts.push("Diagnostics: clean (no errors)")
     else:
-        out_parts.push(NL + "-- post-edit diagnostics --" + NL)
-        out_parts.push(check_out)
+        val diag_block = format_new_diagnostics_block(path, check_out)
+        if diag_block != "":
+            out_parts.push(diag_block)
+        else:
+            out_parts.push(NL + "-- post-edit diagnostics --" + NL)
+            out_parts.push(check_out)
 
     make_tool_result(id, out_parts.join(""))
 

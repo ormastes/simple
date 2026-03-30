@@ -8,6 +8,7 @@ use src.util.json_helpers.{js, jp, jo, jo1, jo2, jo3, ja, ji, jf, jb, jnull, mak
 use src.core.note_parser.{parse_frontmatter, extract_wikilinks, extract_tags}
 use src.core.vault_scanner.{scan_vault, relative_path}
 use src.core.warnings.{make_search_quality_json}
+use src.core.md_diagnostics.{check_markdown_diagnostics, format_md_diagnostics_block, md_diagnostics_to_json, MdDiagnostic}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(name: text) -> text
@@ -112,7 +113,7 @@ fn handle_diagnostics(id: text, body: text, vault_path: text) -> text:
         else:
             valid_count = valid_count + 1
 
-    # Build diagnostics list
+    # Build legacy diagnostics list (backward-compatible JSON format)
     var diag_items: [text] = []
     for broken in broken_links:
         var diag_pairs: [text] = []
@@ -129,6 +130,12 @@ fn handle_diagnostics(id: text, body: text, vault_path: text) -> text:
         diag_items.push(jo(diag_pairs))
 
     val tags = extract_tags(content)
+
+    # Run full md_diagnostics for structured <new-diagnostics> block
+    val md_diags = check_markdown_diagnostics(path, content, vault_path)
+    val diag_block = format_md_diagnostics_block(path, md_diags)
+    val md_diag_json = md_diagnostics_to_json(md_diags)
+
     var output_pairs: [text] = []
     output_pairs.push(jp("path", js(path)))
     output_pairs.push(jp("title", js(if meta.title != "": meta.title else: path)))
@@ -137,7 +144,12 @@ fn handle_diagnostics(id: text, body: text, vault_path: text) -> text:
     output_pairs.push(jp("broken_links", ji(broken_links.len())))
     output_pairs.push(jp("tag_count", ji(tags.len())))
     output_pairs.push(jp("diagnostics", ja(diag_items)))
-    tool_text_result(id, jo(output_pairs))
+    if md_diags.len() > 0:
+        output_pairs.push(jp("_diagnostics", md_diag_json))
+    val output = jo(output_pairs)
+    if diag_block != "":
+        return tool_text_result(id, output + "\n" + diag_block)
+    tool_text_result(id, output)
 
 # --- 2. obsidian_vault_diagnostics ---
 
@@ -232,7 +244,21 @@ fn handle_vault_diagnostics(id: text, body: text, vault_path: text) -> text:
     output_pairs.push(jp("orphan_notes", ja(orphan_json)))
     output_pairs.push(jp("diagnostics", ja(diag_items)))
     output_pairs.push(jp("embedding_health", embedding_status))
-    tool_text_result(id, jo(output_pairs))
+
+    # Build vault-wide <new-diagnostics> summary block
+    var vault_diag_lines: [text] = []
+    vault_diag_lines.push("<new-diagnostics>")
+    vault_diag_lines.push("vault:")
+    if total_broken > 0:
+        vault_diag_lines.push("  Warning: " + str(total_broken) + " broken wikilink(s) across vault [MD-E001] (obsidian-lsp)")
+    if orphan_notes.len() > 0:
+        vault_diag_lines.push("  Information: " + str(orphan_notes.len()) + " orphan note(s) with no incoming links [MD-I003] (obsidian-lsp)")
+    vault_diag_lines.push("</new-diagnostics>")
+
+    val output = jo(output_pairs)
+    if total_broken > 0 or orphan_notes.len() > 0:
+        return tool_text_result(id, output + "\n" + vault_diag_lines.join("\n"))
+    tool_text_result(id, output)
 
 # --- 3. obsidian_complete_wikilink ---
 

@@ -47,33 +47,33 @@ impl Trace32Client:
         val explicit = shell("printenv SIMPLE_T32REM_BIN 2>/dev/null")
         val explicit_path = explicit.stdout.trim()
         if explicit.exit_code == 0 and explicit_path.len() > 0:
-            val check = shell("test -x '{explicit_path}' && echo yes")
+            val check = shell("test -x " + Trace32Client.shell_quote(explicit_path) + " && echo yes")
             if check.stdout.trim() == "yes":
                 return explicit_path
 
         val compat = shell("printenv T32REM_PATH 2>/dev/null")
         val compat_path = compat.stdout.trim()
         if compat.exit_code == 0 and compat_path.len() > 0:
-            val check = shell("test -x '{compat_path}' && echo yes")
+            val check = shell("test -x " + Trace32Client.shell_quote(compat_path) + " && echo yes")
             if check.stdout.trim() == "yes":
                 return compat_path
 
         # Check T32_PATH env var first
-        val env_check = shell("echo $T32_PATH")
+        val env_check = shell("printenv T32_PATH 2>/dev/null")
         val t32_path = env_check.stdout.trim()
         if t32_path.len() > 0:
             val candidate = "{t32_path}/bin/pc_linux64/t32rem"
-            val check = shell("test -x {candidate} && echo yes")
+            val check = shell("test -x " + Trace32Client.shell_quote(candidate) + " && echo yes")
             if check.stdout.trim() == "yes":
                 return candidate
 
         # Try system PATH
-        val which = shell("which t32rem 2>/dev/null")
+        val which = shell("command -v t32rem 2>/dev/null")
         if which.exit_code == 0:
             return which.stdout.trim()
 
         val bundled = "/opt/t32/bin/pc_linux64/t32rem"
-        val bundled_check = shell("test -x {bundled} && echo yes")
+        val bundled_check = shell("test -x " + Trace32Client.shell_quote(bundled) + " && echo yes")
         if bundled_check.stdout.trim() == "yes":
             return bundled
 
@@ -93,11 +93,46 @@ impl Trace32Client:
         ""
 
     static fn build_command(t32rem_path: text, host: text, port: i32, protocol: text, cmd: text) -> text:
-        var parts = [t32rem_path, host, "port={port}"]
-        if protocol.trim() != "":
-            parts.push("protocol={protocol.trim()}")
-        parts.push(cmd)
+        var parts = [
+            Trace32Client.shell_quote(t32rem_path),
+            Trace32Client.shell_quote(host),
+            Trace32Client.shell_quote("port=" + str(port))
+        ]
+        val trimmed_protocol = protocol.trim()
+        if trimmed_protocol != "":
+            parts.push(Trace32Client.shell_quote("protocol=" + trimmed_protocol))
+        parts.push(Trace32Client.shell_quote(cmd))
         parts.join(" ")
+
+    static fn shell_quote(value: text) -> text:
+        if value == "":
+            return "''"
+        var parts: [text] = []
+        parts.push("'")
+        var i = 0
+        while i < value.len():
+            val ch = value.substring(i, i + 1)
+            if ch == "'":
+                parts.push("'\\''")
+            else:
+                parts.push(ch)
+            i = i + 1
+        parts.push("'")
+        parts.join("")
+
+    static fn sleep_seconds_from_ms(duration_ms: i32) -> text:
+        if duration_ms <= 0:
+            return "0"
+        val whole = duration_ms / 1000
+        val remainder = duration_ms % 1000
+        str(whole) + "." + Trace32Client.pad_millis(remainder)
+
+    static fn pad_millis(value: i32) -> text:
+        if value < 10:
+            return "00" + str(value)
+        if value < 100:
+            return "0" + str(value)
+        str(value)
 
     static fn wait_seconds(timeout_ms: i32) -> i32:
         if timeout_ms <= 0:
@@ -203,7 +238,7 @@ impl Trace32Client:
 
     # --- Breakpoint Management ---
 
-    me set_breakpoint(location: text) -> Result<i32, text>:
+    fn set_breakpoint(location: text) -> Result<i32, text>:
         self.run_command("Break.Set {location}")?
         self.bp_counter = self.bp_counter + 1
         Ok(self.bp_counter)
@@ -233,7 +268,7 @@ impl Trace32Client:
         self.run_command("Trace.Size 8192.")?
         self.run_command("Trace.Arm")?
         self.run_command("Go")?
-        shell("sleep 0.{duration_ms}")
+        shell("sleep " + Trace32Client.sleep_seconds_from_ms(duration_ms))
         self.run_command("Break")?
         self.run_command("Trace.List")
 

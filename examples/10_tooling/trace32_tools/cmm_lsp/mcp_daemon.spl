@@ -12,6 +12,8 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_get_cwd() -> text
 
 fn q() -> text: "\""
 fn lb() -> text: "{"
@@ -163,8 +165,8 @@ fn main():
     elif args.len() >= 1 and args[0].ends_with(".spl"):
         args = args[1:args.len()]
 
-    val root = if args.len() >= 1: args[0] else: "/tmp/t32_lsp_mcp_shared"
-    rt_process_run("/bin/sh", ["-c", "mkdir -p " + root])
+    val root = if args.len() >= 1: args[0] else: lsp_default_daemon_root()
+    rt_process_run(lsp_shell_bin_path(), ["-c", "mkdir -p " + lsp_shell_quote(root)])
     rt_file_write_text(root + "/ready", "ready")
 
     while true:
@@ -178,7 +180,58 @@ fn main():
                 handle_request(root, root + "/" + name)
             i = i + 1
         if not handled:
-            rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+            rt_process_run(lsp_shell_bin_path(), ["-c", "sleep 0.05"])
+
+fn lsp_default_daemon_root() -> text:
+    val env_root = rt_env_get("T32_LSP_MCP_TOOL_DAEMON_DIR") ?? ""
+    if env_root != "":
+        return env_root
+    val cwd = rt_get_cwd()
+    var suffix = "workspace"
+    if cwd != "":
+        suffix = lsp_sanitize_path_segment(cwd)
+    "/tmp/t32_lsp_mcp_shared_" + suffix
+
+fn lsp_sanitize_path_segment(value: text) -> text:
+    if value == "":
+        return "empty"
+    var parts: [text] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
+            parts.push(ch)
+        else:
+            parts.push("_")
+        i = i + 1
+    val sanitized = parts.join("")
+    if sanitized == "":
+        return "empty"
+    sanitized
+
+fn lsp_shell_bin_path() -> text:
+    val env_shell = rt_env_get("T32_LSP_MCP_SHELL_BIN") ?? ""
+    if env_shell != "":
+        return env_shell
+    if rt_file_exists("/usr/bin/sh"):
+        return "/usr/bin/sh"
+    "/bin/sh"
+
+fn lsp_shell_quote(value: text) -> text:
+    if value == "":
+        return "''"
+    var parts: [text] = []
+    parts.push("'")
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "'":
+            parts.push("'\\''")
+        else:
+            parts.push(ch)
+        i = i + 1
+    parts.push("'")
+    parts.join("")
 
 fn handle_request(root: text, req_path: text):
     val raw = rt_file_read_text(req_path) ?? ""

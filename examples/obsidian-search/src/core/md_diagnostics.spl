@@ -1,0 +1,308 @@
+# Markdown Diagnostics for Obsidian Notes
+#
+# Provides LSP-style diagnostics for markdown files.
+# Severity: 1=Error, 2=Warning, 3=Information, 4=Hint
+
+use src.util.json_helpers.{js, jp, jo, ja, ji, escape_json, Q, LB, RB, SB_L, SB_R}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+struct MdDiagnostic:
+    severity: i64
+    line: i64
+    col: i64
+    message: text
+    code: text
+    source: text
+
+# --- Factory ---
+
+fn md_diag(sev: i64, line: i64, col: i64, msg: text, code: text) -> MdDiagnostic:
+    MdDiagnostic(severity: sev, line: line, col: col, message: msg, code: code, source: "obsidian-lsp")
+
+# --- Check: frontmatter ---
+
+fn check_md_frontmatter(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    if not content.starts_with("---"):
+        diags.push(md_diag(2, 1, 1, "Missing frontmatter block", "MD-W001"))
+        return diags
+    # Has opening ---, look for closing ---
+    val after_open = content.substring(3, content.len())
+    val rest = after_open.trim_start()
+    # Find closing --- on its own line
+    val lines = content.split("\n")
+    var found_close = false
+    var i = 1
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "---":
+            found_close = true
+            break
+        i = i + 1
+    if not found_close:
+        diags.push(md_diag(1, 1, 1, "Unclosed frontmatter block", "MD-E002"))
+    diags
+
+# --- Check: empty note ---
+
+fn check_md_empty_note(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    var body = content
+    # Strip frontmatter if present
+    if content.starts_with("---"):
+        val lines = content.split("\n")
+        var end_idx = -1
+        var i = 1
+        while i < lines.len():
+            if lines[i].trim() == "---":
+                end_idx = i
+                break
+            i = i + 1
+        if end_idx > 0:
+            # Rebuild body from lines after frontmatter
+            var body_lines: [text] = []
+            var j = end_idx + 1
+            while j < lines.len():
+                body_lines.push(lines[j])
+                j = j + 1
+            body = body_lines.join("\n")
+        else:
+            # No closing ---, treat whole thing as content
+            body = content
+    if body.trim() == "":
+        diags.push(md_diag(2, 1, 1, "Empty note (no content beyond frontmatter)", "MD-W002"))
+    diags
+
+# --- Check: heading gaps ---
+
+fn heading_level(line: text) -> i64:
+    var level = 0
+    var i = 0
+    while i < line.len():
+        if line.substring(i, i + 1) == "#":
+            level = level + 1
+        else:
+            break
+        i = i + 1
+    # Must be followed by space or end of line to be a heading
+    if level > 0 and level < line.len():
+        val next_char = line.substring(level, level + 1)
+        if next_char != " ":
+            return 0
+    if level > 0 and level == line.len():
+        return level
+    level
+
+fn check_md_heading_gaps(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    var prev_level = 0
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        val level = heading_level(line)
+        if level > 0:
+            if prev_level > 0 and level > prev_level + 1:
+                diags.push(md_diag(4, line_num, 1, "Heading level jumps from h" + str(prev_level) + " to h" + str(level) + " (skipped " + str(level - prev_level - 1) + " level(s))", "MD-H001"))
+            prev_level = level
+    diags
+
+# --- Check: list marker consistency ---
+
+fn check_md_list_markers(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    var first_marker = ""
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        var marker = ""
+        if trimmed.starts_with("- "):
+            marker = "-"
+        elif trimmed.starts_with("* "):
+            marker = "*"
+        elif trimmed.starts_with("+ "):
+            marker = "+"
+        if marker != "":
+            if first_marker == "":
+                first_marker = marker
+            elif marker != first_marker:
+                diags.push(md_diag(4, line_num, 1, "Inconsistent list markers (found '" + marker + "', expected '" + first_marker + "')", "MD-H002"))
+                return diags
+    diags
+
+# --- Check: image alt text ---
+
+fn check_md_image_alt(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        # Find ![](  patterns — empty alt text
+        var search_pos = 0
+        while search_pos < line.len():
+            val remaining = line.substring(search_pos, line.len())
+            val idx_opt = remaining.index_of("![](")
+            match idx_opt:
+                Some(i):
+                    val col = search_pos + i + 1
+                    diags.push(md_diag(4, line_num, col, "Missing alt text on image", "MD-H003"))
+                    search_pos = search_pos + i + 4
+                nil:
+                    break
+    diags
+
+# --- Check: large note ---
+
+fn check_md_large_note(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    val lines = content.split("\n")
+    if lines.len() > 1000:
+        diags.push(md_diag(3, 1, 1, "Large note (" + str(lines.len()) + " lines), consider splitting", "MD-I001"))
+    diags
+
+# --- Check: broken wikilinks ---
+
+fn check_md_broken_wikilinks(content: text, vault_path: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    if vault_path == "":
+        return diags
+    val lines = content.split("\n")
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        var search_pos = 0
+        while search_pos < line.len():
+            val remaining = line.substring(search_pos, line.len())
+            val idx_opt = remaining.index_of("[[")
+            match idx_opt:
+                Some(i):
+                    # Skip embeds: ![[
+                    if i > 0 and remaining.substring(i - 1, i) == "!":
+                        search_pos = search_pos + i + 2
+                        continue
+                    elif i == 0 and search_pos > 0 and line.substring(search_pos - 1, search_pos) == "!":
+                        search_pos = search_pos + i + 2
+                        continue
+                    val after_open = remaining.substring(i + 2, remaining.len())
+                    val close_opt = after_open.index_of("]]")
+                    match close_opt:
+                        Some(j):
+                            val target = after_open.substring(0, j)
+                            # Strip heading/alias: [[target#heading|alias]] -> target
+                            var clean_target = target
+                            val pipe_opt = clean_target.index_of("|")
+                            match pipe_opt:
+                                Some(p):
+                                    clean_target = clean_target.substring(0, p)
+                                nil: pass_dn
+                            val hash_opt = clean_target.index_of("#")
+                            match hash_opt:
+                                Some(h):
+                                    clean_target = clean_target.substring(0, h)
+                                nil: pass_dn
+                            clean_target = clean_target.trim()
+                            if clean_target != "":
+                                val check_path = vault_path + "/" + clean_target + ".md"
+                                if not rt_file_exists(check_path):
+                                    val col = search_pos + i + 1
+                                    diags.push(md_diag(1, line_num, col, "Broken wikilink: note '" + clean_target + "' not found", "MD-E001"))
+                            search_pos = search_pos + i + 2 + j + 2
+                        nil:
+                            search_pos = search_pos + i + 2
+                nil:
+                    break
+    diags
+
+# --- Orchestrator: fast local checks ---
+
+fn check_md_local(content: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    for d in check_md_frontmatter(content):
+        diags.push(d)
+    for d in check_md_empty_note(content):
+        diags.push(d)
+    for d in check_md_heading_gaps(content):
+        diags.push(d)
+    for d in check_md_list_markers(content):
+        diags.push(d)
+    for d in check_md_image_alt(content):
+        diags.push(d)
+    for d in check_md_large_note(content):
+        diags.push(d)
+    diags
+
+# --- Full diagnostics (local + wikilinks) ---
+
+fn check_markdown_diagnostics(path: text, content: text, vault_path: text) -> [MdDiagnostic]:
+    var diags: [MdDiagnostic] = []
+    for d in check_md_local(content):
+        diags.push(d)
+    for d in check_md_broken_wikilinks(content, vault_path):
+        diags.push(d)
+    # Sort by severity (errors first = lower number first)
+    var sorted: [MdDiagnostic] = []
+    # Pass 1: severity 1 (Error)
+    for d in diags:
+        if d.severity == 1:
+            sorted.push(d)
+    # Pass 2: severity 2 (Warning)
+    for d in diags:
+        if d.severity == 2:
+            sorted.push(d)
+    # Pass 3: severity 3 (Information)
+    for d in diags:
+        if d.severity == 3:
+            sorted.push(d)
+    # Pass 4: severity 4 (Hint)
+    for d in diags:
+        if d.severity == 4:
+            sorted.push(d)
+    sorted
+
+# --- Severity label ---
+
+fn md_severity_label(sev: i64) -> text:
+    if sev == 1:
+        return "Error"
+    elif sev == 2:
+        return "Warning"
+    elif sev == 3:
+        return "Information"
+    elif sev == 4:
+        return "Hint"
+    "Unknown"
+
+# --- Format diagnostics block ---
+
+fn format_md_diagnostics_block(path: text, diags: [MdDiagnostic]) -> text:
+    if diags.len() == 0:
+        return ""
+    var lines: [text] = []
+    lines.push("<new-diagnostics>")
+    lines.push(path + ":")
+    for d in diags:
+        val label = md_severity_label(d.severity)
+        val entry = "  " + label + " (line " + str(d.line) + ", col " + str(d.col) + "): " + d.message + " [" + d.code + "] (" + d.source + ")"
+        lines.push(entry)
+    lines.push("</new-diagnostics>")
+    lines.join("\n")
+
+# --- JSON serialization ---
+
+fn md_diagnostics_to_json(diags: [MdDiagnostic]) -> text:
+    var items: [text] = []
+    for d in diags:
+        var pairs: [text] = []
+        pairs.push(jp("severity", ji(d.severity)))
+        pairs.push(jp("line", ji(d.line)))
+        pairs.push(jp("col", ji(d.col)))
+        pairs.push(jp("message", js(d.message)))
+        pairs.push(jp("code", js(d.code)))
+        pairs.push(jp("source", js(d.source)))
+        items.push(jo(pairs))
+    ja(items)

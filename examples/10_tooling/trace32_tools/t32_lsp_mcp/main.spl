@@ -22,6 +22,7 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_env_get(name: text) -> text
+extern fn rt_get_cwd() -> text
 
 val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
 val LSP_SERVER_VERSION = "0.1.2"
@@ -91,16 +92,23 @@ fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
     lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
 
 fn lsp_run_tool_direct_with_path(id: text, tool_name: text, args_raw: text, runner: text) -> text:
-    val args_path = "/tmp/t32_lsp_mcp_args_" + id + ".json"
+    val args_path = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id) + ".args.json"
     if not rt_file_write_text(args_path, args_raw):
         return lsp_result_error(id, -32002, "Failed to write tool arguments")
     val runner_bin = lsp_tool_runner_bin_path()
+    val timeout_bin = lsp_timeout_bin_path()
     val (stdout, stderr, code) =
         if runner_bin != "":
-            rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runner_bin, id, tool_name, args_path])
+            if timeout_bin != "":
+                rt_process_run(timeout_bin, [lsp_tool_timeout_secs(), runner_bin, id, tool_name, args_path])
+            else:
+                rt_process_run(runner_bin, [id, tool_name, args_path])
         else:
             val runtime = lsp_tool_runtime_path()
-            rt_process_run("/usr/bin/timeout", [lsp_tool_timeout_secs(), runtime, runner, id, tool_name, args_path])
+            if timeout_bin != "":
+                rt_process_run(timeout_bin, [lsp_tool_timeout_secs(), runtime, runner, id, tool_name, args_path])
+            else:
+                rt_process_run(runtime, [runner, id, tool_name, args_path])
     rt_file_delete(args_path)
     if code == 124:
         return lsp_result_error(id, -32002, "Tool backend timed out" + lsp_tool_daemon_log_hint())
@@ -141,7 +149,7 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
 fn lsp_start_tool_daemon() -> bool:
     val daemon_dir = lsp_tool_daemon_dir()
     LSP_TOOL_DAEMON_ERROR = ""
-    rt_process_run("/bin/sh", ["-c", "mkdir -p " + lsp_shell_quote(daemon_dir)])
+    rt_process_run(lsp_shell_bin_path(), ["-c", "mkdir -p " + lsp_shell_quote(daemon_dir)])
     if lsp_tool_daemon_is_alive(daemon_dir):
         if lsp_wait_for_daemon_ready(daemon_dir, 1500):
             LSP_TOOL_DAEMON_PID = 1
@@ -154,7 +162,7 @@ fn lsp_start_tool_daemon() -> bool:
     val daemon_entry = lsp_tool_daemon_path()
     val daemon_log = daemon_dir + "/daemon.log"
     val launch_cmd = "nohup " + lsp_shell_quote(runtime) + " " + lsp_shell_quote(daemon_entry) + " " + lsp_shell_quote(daemon_dir) + " >" + lsp_shell_quote(daemon_log) + " 2>&1 < /dev/null &"
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", launch_cmd])
+    val (stdout, stderr, code) = rt_process_run(lsp_shell_bin_path(), ["-c", launch_cmd])
     if code != 0:
         LSP_TOOL_DAEMON_ERROR = "Failed to launch CMM tool daemon: " + lsp_trim_error_text(stderr, stdout)
         return false
@@ -170,7 +178,7 @@ fn lsp_shell_quote(value: text) -> text:
 fn lsp_tool_daemon_is_alive(daemon_dir: text) -> bool:
     val match_text = lsp_tool_daemon_path() + " " + daemon_dir
     val cmd = "ps -ef | grep -F -- " + lsp_shell_quote(match_text) + " | grep -Fv grep >/dev/null 2>&1"
-    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    val (_stdout, _stderr, code) = rt_process_run(lsp_shell_bin_path(), ["-c", cmd])
     code == 0
 
 fn lsp_wait_for_daemon_ready(daemon_dir: text, timeout_ms: i64) -> bool:
@@ -182,7 +190,7 @@ fn lsp_wait_for_daemon_ready(daemon_dir: text, timeout_ms: i64) -> bool:
         val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
         if elapsed_ms >= timeout_ms:
             return false
-        rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+        rt_process_run(lsp_shell_bin_path(), ["-c", "sleep 0.05"])
 
 fn lsp_reset_tool_daemon_state(daemon_dir: text):
     val entries = rt_dir_list(daemon_dir) ?? []
@@ -220,7 +228,11 @@ fn lsp_tool_daemon_dir() -> text:
     if env_dir != "":
         LSP_TOOL_DAEMON_DIR = env_dir
         return LSP_TOOL_DAEMON_DIR
-    LSP_TOOL_DAEMON_DIR = "/tmp/t32_lsp_mcp_shared"
+    val cwd = rt_get_cwd()
+    var suffix = "workspace"
+    if cwd != "":
+        suffix = lsp_sanitize_path_segment(cwd)
+    LSP_TOOL_DAEMON_DIR = "/tmp/t32_lsp_mcp_shared_" + suffix
     LSP_TOOL_DAEMON_DIR
 
 fn lsp_tool_daemon_path() -> text:
@@ -231,7 +243,34 @@ fn lsp_tool_daemon_path() -> text:
 
 fn lsp_next_tool_request_key(id: text) -> text:
     LSP_TOOL_DAEMON_SEQ = LSP_TOOL_DAEMON_SEQ + 1
-    "req_" + str(LSP_TOOL_DAEMON_SEQ) + "_" + id
+    "req_" + str(LSP_TOOL_DAEMON_SEQ) + "_" + lsp_sanitize_path_segment(id) + "_" + str(rt_time_now_unix_micros())
+
+fn lsp_sanitize_path_segment(value: text) -> text:
+    if value == "":
+        return "empty"
+    var parts: [text] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
+            parts.push(ch)
+        else:
+            parts.push("_")
+        i = i + 1
+    val sanitized = parts.join("")
+    if sanitized == "":
+        return "empty"
+    sanitized
+
+fn lsp_shell_bin_path() -> text:
+    val env_shell = rt_env_get("T32_LSP_MCP_SHELL_BIN") ?? ""
+    if env_shell != "":
+        return env_shell
+    if rt_file_exists("/bin/sh"):
+        return "/bin/sh"
+    if rt_file_exists("/usr/bin/sh"):
+        return "/usr/bin/sh"
+    "sh"
 
 fn lsp_wait_for_tool_response(path: text, timeout_ms: i64) -> text:
     val started = rt_time_now_unix_micros()
@@ -241,7 +280,7 @@ fn lsp_wait_for_tool_response(path: text, timeout_ms: i64) -> text:
         val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
         if elapsed_ms >= timeout_ms:
             return ""
-        rt_process_run("/bin/sh", ["-c", "sleep 0.05"])
+        rt_process_run(lsp_shell_bin_path(), ["-c", "sleep 0.05"])
 
 fn lsp_has_method(msg: text, name: text) -> bool:
     msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
@@ -284,7 +323,23 @@ fn lsp_tool_runtime_path() -> text:
     val env_runtime = rt_env_get("SIMPLE_RUNTIME") ?? ""
     if env_runtime != "":
         return env_runtime
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if rt_file_exists("bin/release/simple.exe"):
+        return "bin/release/simple.exe"
     "bin/release/simple"
+
+fn lsp_timeout_bin_path() -> text:
+    val env_timeout = rt_env_get("T32_LSP_MCP_TIMEOUT_BIN") ?? ""
+    if env_timeout != "":
+        return env_timeout
+    if rt_file_exists("/usr/bin/timeout"):
+        return "/usr/bin/timeout"
+    if rt_file_exists("/bin/timeout"):
+        return "/bin/timeout"
+    ""
 
 fn lsp_tool_runner_path() -> text:
     val env_runner = rt_env_get("T32_LSP_MCP_TOOL_RUNNER") ?? ""
