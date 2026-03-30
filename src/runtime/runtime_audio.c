@@ -1,8 +1,8 @@
 /*
  * Simple Runtime — Audio subsystem (miniaudio backend)
  *
- * Requires miniaudio.h — download from https://github.com/mackron/miniaudio
- * Place miniaudio.h in src/runtime/ or install system-wide.
+ * Uses the vendored miniaudio.h copy in this directory.
+ * See THIRD_PARTY_NOTICES.md for redistribution details.
  * Build: cc -c -fPIC -O2 -std=gnu11 -I. -lpthread -lm runtime_audio.c -o runtime_audio.o
  */
 

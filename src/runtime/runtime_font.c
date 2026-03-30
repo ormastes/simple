@@ -1,8 +1,8 @@
 /*
  * Simple Runtime — Font rendering subsystem (stb_truetype backend)
  *
- * Requires stb_truetype.h — download from https://github.com/nothings/stb
- * Place stb_truetype.h in src/runtime/ or install system-wide.
+ * Uses the vendored stb_truetype.h copy in this directory.
+ * See THIRD_PARTY_NOTICES.md for redistribution details.
  * Build: cc -c -fPIC -O2 -std=gnu11 -I. -lm runtime_font.c -o runtime_font.o
  */
 

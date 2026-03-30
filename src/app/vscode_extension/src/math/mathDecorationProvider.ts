@@ -1,12 +1,12 @@
 /**
- * Math Block Decoration Provider
+ * Math-Mode Block Decoration Provider
  *
- * Detects `m{ ... }` math blocks in Simple source files and applies
- * text decorations for visual rendering:
- * - Highlights math block content with a distinctive color
- * - Hides `m{` and `}` delimiters via opacity styling
- * - Shows rendered Unicode preview via before.contentText
- * - Cursor-aware reveal: removes decorations when cursor is on a math block line
+ * Detects math-mode custom blocks (`m{}`, `loss{}`, `nograd{}`) in Simple
+ * source files and applies text decorations for visual rendering:
+ * - Highlights block content with a distinctive color
+ * - Hides delimiters (`m{`, `loss{`, `nograd{`, `}`) via opacity styling
+ * - Shows rendered Unicode preview with block-type indicator (∂/ℒ/∅)
+ * - Cursor-aware reveal: removes decorations when cursor is on a block line
  *
  * Rendering infrastructure:
  * - Local preview: Uses mathConverter.ts simpleToUnicode() for quick inline decoration.
@@ -19,11 +19,23 @@
 import * as vscode from 'vscode';
 import { simpleToUnicode } from './mathConverter';
 
-/** Represents a detected math block range in the document */
+/** Block type for math-mode custom blocks */
+type MathBlockType = 'math' | 'loss' | 'nograd';
+
+/** Indicator symbols shown when block delimiters are concealed */
+const BLOCK_INDICATORS: Record<MathBlockType, string> = {
+    math: '\u2202',    // ∂ partial derivative
+    loss: '\u2112',    // ℒ Lagrangian/Loss
+    nograd: '\u2205',  // ∅ no-gradient
+};
+
+/** Represents a detected math-mode block range in the document */
 interface MathBlockRange {
-    /** Full range covering m{ ... } including delimiters */
+    /** Block type: math (m{}), loss (loss{}), or nograd (nograd{}) */
+    blockType: MathBlockType;
+    /** Full range covering the block including delimiters */
     fullRange: vscode.Range;
-    /** Range of just the opening `m{` delimiter */
+    /** Range of just the opening delimiter (e.g. `m{`, `loss{`) */
     openRange: vscode.Range;
     /** Range of just the closing `}` delimiter */
     closeRange: vscode.Range;
@@ -34,11 +46,12 @@ interface MathBlockRange {
 }
 
 /**
- * Regex for detecting m{ ... } math blocks.
+ * Regex for detecting math-mode custom blocks: m{}, loss{}, nograd{}.
  * Handles one level of nested braces (e.g., m{ x^{2} + y^{2} }).
  * Uses the 's' (dotAll) flag so `.` matches newlines for multi-line blocks.
+ * Named group `prefix` captures the block keyword for type detection.
  */
-const MATH_BLOCK_REGEX = /m\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
+const MATH_BLOCK_REGEX = /\b(?<prefix>m|loss|nograd)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
 
 export class MathDecorationProvider implements vscode.Disposable {
     /** Decoration for the math content itself */
@@ -66,8 +79,9 @@ export class MathDecorationProvider implements vscode.Disposable {
 
         this.openDelimiterDecorationType = vscode.window.createTextEditorDecorationType({
             opacity: '0',
+            // Default before text is overridden per-block via renderOptions
             before: {
-                contentText: '\u2202',  // mathematical partial derivative symbol as indicator
+                contentText: '',
                 color: new vscode.ThemeColor('editorLineNumber.foreground'),
                 fontStyle: 'normal',
                 margin: '0 2px 0 0',
@@ -215,19 +229,22 @@ export class MathDecorationProvider implements vscode.Disposable {
             }
 
             const rendered = this.renderMathBlock(block.content);
+            const indicator = BLOCK_INDICATORS[block.blockType];
+            const label = block.blockType === 'math' ? 'Math' :
+                          block.blockType === 'loss' ? 'Loss' : 'NoGrad';
 
             // Content decoration with hover message showing rendered Unicode
             contentDecorations.push({
                 range: block.contentRange,
-                hoverMessage: new vscode.MarkdownString(`**Math Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}`),
+                hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}`),
             });
 
-            // Hide opening delimiter and show rendered Unicode preview
+            // Hide opening delimiter and show indicator + rendered Unicode preview
             openDecorations.push({
                 range: block.openRange,
                 renderOptions: {
                     before: {
-                        contentText: rendered,
+                        contentText: `${indicator} ${rendered}`,
                         color: new vscode.ThemeColor('editorLineNumber.foreground'),
                         fontStyle: 'normal',
                         margin: '0 2px 0 0',
@@ -247,7 +264,7 @@ export class MathDecorationProvider implements vscode.Disposable {
     }
 
     /**
-     * Detect all m{ ... } math blocks in a document.
+     * Detect all math-mode custom blocks (m{}, loss{}, nograd{}) in a document.
      */
     public detectMathBlocks(document: vscode.TextDocument): MathBlockRange[] {
         const text = document.getText();
@@ -257,24 +274,31 @@ export class MathDecorationProvider implements vscode.Disposable {
         let match: RegExpExecArray | null;
 
         while ((match = MATH_BLOCK_REGEX.exec(text)) !== null) {
+            const prefix = match.groups!.prefix;
+            const prefixLen = prefix.length + 1; // prefix + `{`
+            const blockType: MathBlockType =
+                prefix === 'loss' ? 'loss' :
+                prefix === 'nograd' ? 'nograd' : 'math';
+
             const fullStart = document.positionAt(match.index);
             const fullEnd = document.positionAt(match.index + match[0].length);
 
-            // `m{` is 2 characters
+            // Opening delimiter: prefix + `{`
             const openStart = fullStart;
-            const openEnd = document.positionAt(match.index + 2);
+            const openEnd = document.positionAt(match.index + prefixLen);
 
             // `}` is last character
             const closeStart = document.positionAt(match.index + match[0].length - 1);
             const closeEnd = fullEnd;
 
-            // Content is between `m{` and `}`
+            // Content is between opening delimiter and `}`
             const contentStart = openEnd;
             const contentEnd = closeStart;
 
-            const content = match[1].trim();
+            const content = match[2].trim();
 
             blocks.push({
+                blockType,
                 fullRange: new vscode.Range(fullStart, fullEnd),
                 openRange: new vscode.Range(openStart, openEnd),
                 closeRange: new vscode.Range(closeStart, closeEnd),

@@ -527,8 +527,10 @@
 ;; Pointcut Expressions
 (pointcut_expression) @embedded.pointcut
 
-;; Math Blocks
+;; Math-mode Blocks (m{}, loss{}, nograd{})
 (math_block) @embedded.math
+(loss_block) @embedded.math
+(nograd_block) @embedded.math
 
 ;; ============================================================================
 ;; Errors (highlight known error patterns)

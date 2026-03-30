@@ -1,8 +1,8 @@
 /*
  * Simple Runtime — Image loading subsystem (stb_image backend)
  *
- * Requires stb_image.h — download from https://github.com/nothings/stb
- * Place stb_image.h in src/runtime/ or install system-wide.
+ * Uses the vendored stb_image.h copy in this directory.
+ * See THIRD_PARTY_NOTICES.md for redistribution details.
  * Build: cc -c -fPIC -O2 -std=gnu11 -I. runtime_image.c -o runtime_image.o
  */
 

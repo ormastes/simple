@@ -510,6 +510,7 @@ jj git push --bookmark main
 ## 📄 License
 
 **License:** MIT License (see LICENSE file)
+**Third-party notices:** See THIRD_PARTY_NOTICES.md for vendored runtime components
 **Copyright:** 2024-2026 Simple Language Contributors
 
 ---

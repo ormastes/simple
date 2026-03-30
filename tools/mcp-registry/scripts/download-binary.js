@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Postinstall script: downloads the correct platform-specific
-// Simple MCP Server binary from GitHub Releases.
+// Simple bootstrap package (.spk) from GitHub Releases.
+// The .spk contains the Simple runtime binary + source tree,
+// which is needed to run MCP servers.
 
 const https = require('https');
 const fs = require('fs');
@@ -9,27 +11,24 @@ const os = require('os');
 const { execSync } = require('child_process');
 
 const pkg = require('../package.json');
-const VERSION = pkg.version;
+const VERSION = pkg.runtimeVersion || pkg.version;
 const REPO = 'ormastes/simple';
 
-function getTriple() {
+function getPlatform() {
   const platform = os.platform();
   const arch = os.arch();
 
-  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-gnu';
-  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-gnu';
-  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
-  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
-  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
-  if (platform === 'freebsd' && arch === 'x64') return 'x86_64-unknown-freebsd';
+  if (platform === 'linux' && arch === 'x64') return 'linux-x86_64';
+  if (platform === 'linux' && arch === 'arm64') return 'linux-aarch64';
+  if (platform === 'darwin' && arch === 'x64') return 'darwin-x86_64';
+  if (platform === 'darwin' && arch === 'arm64') return 'darwin-arm64';
+  if (platform === 'win32' && arch === 'x64') return 'windows-x86_64';
+  if (platform === 'win32' && arch === 'arm64') return 'windows-aarch64';
+  if (platform === 'freebsd' && arch === 'x64') return 'freebsd-x86_64';
 
   console.warn(`Unsupported platform: ${platform}-${arch}`);
-  console.warn('You will need to build Simple MCP Server from source.');
+  console.warn('You will need to build Simple from source.');
   process.exit(0); // Don't fail install on unsupported platforms
-}
-
-function getBinaryName() {
-  return os.platform() === 'win32' ? 'simple_mcp_server.exe' : 'simple_mcp_server';
 }
 
 function download(url, dest) {
@@ -58,36 +57,57 @@ function download(url, dest) {
 }
 
 async function main() {
-  const triple = getTriple();
-  const binaryName = getBinaryName();
-  const ext = os.platform() === 'win32' ? '.exe' : '';
-  const assetName = `simple_mcp_server-${triple}${ext}`;
-
-  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
+  const platform = getPlatform();
   const nativeDir = path.join(__dirname, '..', 'native');
-  const dest = path.join(nativeDir, binaryName);
+  const marker = path.join(nativeDir, '.installed');
 
-  // Skip if binary already exists
-  if (fs.existsSync(dest)) {
-    console.log(`Simple MCP Server binary already exists at ${dest}`);
-    return;
+  // Skip if already installed
+  if (fs.existsSync(marker)) {
+    const installed = fs.readFileSync(marker, 'utf8').trim();
+    if (installed === `${VERSION}-${platform}`) {
+      console.log('Simple runtime already installed.');
+      return;
+    }
   }
 
-  console.log(`Downloading Simple MCP Server v${VERSION} for ${triple}...`);
+  const assetName = `simple-bootstrap-${VERSION}-${platform}.spk`;
+  const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
+  const dest = path.join(nativeDir, assetName);
+
+  console.log(`Downloading Simple runtime v${VERSION} for ${platform}...`);
   console.log(`URL: ${url}`);
 
+  // Clean previous install
+  if (fs.existsSync(nativeDir)) {
+    fs.rmSync(nativeDir, { recursive: true, force: true });
+  }
   fs.mkdirSync(nativeDir, { recursive: true });
 
   try {
     await download(url, dest);
-    // Make executable on Unix
-    if (os.platform() !== 'win32') {
-      fs.chmodSync(dest, 0o755);
+
+    // Extract — tar is available on Windows 10+, macOS, Linux
+    console.log('Extracting...');
+    execSync(`tar xzf "${assetName}"`, { cwd: nativeDir, stdio: 'inherit' });
+
+    // Remove archive after extraction
+    fs.unlinkSync(dest);
+
+    // Make binary executable on Unix
+    const ext = os.platform() === 'win32' ? '.exe' : '';
+    const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
+    if (entries.length > 0) {
+      const binary = path.join(nativeDir, entries[0], 'bin', `simple${ext}`);
+      if (fs.existsSync(binary) && os.platform() !== 'win32') {
+        fs.chmodSync(binary, 0o755);
+      }
     }
-    console.log(`Installed Simple MCP Server to ${dest}`);
+
+    fs.writeFileSync(marker, `${VERSION}-${platform}\n`);
+    console.log(`Installed Simple runtime to ${nativeDir}`);
   } catch (err) {
-    console.warn(`Warning: Could not download binary: ${err.message}`);
-    console.warn('The MCP server will look for the binary in PATH.');
+    console.warn(`Warning: Could not download runtime: ${err.message}`);
+    console.warn('The MCP server will look for "simple" in PATH.');
     console.warn('Build from source: https://github.com/ormastes/simple');
     // Don't fail the install
   }

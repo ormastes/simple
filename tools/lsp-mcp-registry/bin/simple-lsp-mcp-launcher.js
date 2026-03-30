@@ -1,52 +1,60 @@
 #!/usr/bin/env node
-// Launcher for Simple LSP-MCP Server native binary.
-// This is a thin wrapper for npm distribution — the actual server
-// is a compiled native binary, not a Node.js application.
+// Launcher for Simple LSP-MCP Server.
+// Finds the Simple runtime from the downloaded bootstrap package
+// and runs the LSP-MCP bridge entry point.
 
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-function getBinaryName() {
+const ENTRY = 'src/app/simple_lsp_mcp/main.spl';
+
+function findRuntime() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
-  return `simple_lsp_mcp_server${ext}`;
+  const nativeDir = path.join(__dirname, '..', 'native');
+
+  // 1. Check extracted bootstrap package
+  if (fs.existsSync(nativeDir)) {
+    const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
+    if (entries.length > 0) {
+      const pkgDir = path.join(nativeDir, entries[0]);
+      const binary = path.join(pkgDir, 'bin', `simple${ext}`);
+      if (fs.existsSync(binary)) {
+        return { binary, repoRoot: pkgDir };
+      }
+    }
+  }
+
+  // 2. Check project checkout (development)
+  const projectRoot = path.join(__dirname, '..', '..', '..');
+  const devBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
+  if (fs.existsSync(devBinary)) {
+    return { binary: devBinary, repoRoot: projectRoot };
+  }
+
+  // 3. Fall back to PATH
+  return { binary: `simple${ext}`, repoRoot: process.cwd() };
 }
 
-function findBinary() {
-  const name = getBinaryName();
+const { binary, repoRoot } = findRuntime();
+const entryPath = path.join(repoRoot, ENTRY);
 
-  // 1. Check native/ directory (npm postinstall download location)
-  const nativePath = path.join(__dirname, '..', 'native', name);
-  if (fs.existsSync(nativePath)) return nativePath;
-
-  // 2. Check project checkout bin/ directory
-  const projectPath = path.join(__dirname, '..', '..', '..', 'bin', name);
-  if (fs.existsSync(projectPath)) return projectPath;
-
-  // 3. Check bin/release/ directory
-  const releasePath = path.join(__dirname, '..', '..', '..', 'bin', 'release', name);
-  if (fs.existsSync(releasePath)) return releasePath;
-
-  // 4. Fall back to PATH
-  return name;
-}
-
-const binary = findBinary();
-
-const child = spawn(binary, process.argv.slice(2), {
+const child = spawn(binary, [entryPath, ...process.argv.slice(2)], {
   stdio: 'inherit',
   env: {
     ...process.env,
-    SIMPLE_LIB: process.env.SIMPLE_LIB || path.join(__dirname, '..', '..', '..', 'src'),
-    SIMPLE_LOG: process.env.SIMPLE_LOG || 'error'
+    SIMPLE_LIB: path.join(repoRoot, 'src'),
+    SIMPLE_BINARY: binary,
+    SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
+    RUST_LOG: process.env.RUST_LOG || 'error'
   }
 });
 
 child.on('error', (err) => {
   if (err.code === 'ENOENT') {
     process.stderr.write(
-      `Error: Simple LSP-MCP Server binary not found at: ${binary}\n` +
+      `Error: Simple runtime not found at: ${binary}\n` +
       `Run 'npm run postinstall' to download, or build from source.\n`
     );
   } else {

@@ -136,5 +136,27 @@ export function simpleToUnicode(source: string): string {
     // Explicit * → ·
     result = result.replace(/\s*\*\s*/g, '\u00B7');
 
+    // Matrix multiply @ → ⊗
+    result = result.replace(/\s*@\s*/g, '\u2297');
+
+    // Broadcast operators: .+ .− .* ./ .^ → ⊕ ⊖ ⊙ ⊘ (dot-prefixed element-wise)
+    result = result.replace(/\.\+/g, '\u2295');
+    result = result.replace(/\.\-/g, '\u2296');
+    result = result.replace(/\.\*/g, '\u2299');
+    result = result.replace(/\.\//g, '\u2298');
+
+    // sum → ∑, product → ∏, integral → ∫
+    result = result.replace(/\bsum\b/g, '\u2211');
+    result = result.replace(/\bproduct\b/g, '\u220F');
+    result = result.replace(/\bintegral\b/g, '\u222B');
+    result = result.replace(/\binfinity\b/g, '\u221E');
+
+    // Arrow/relation operators
+    result = result.replace(/\bto\b/g, '\u2192');
+    result = result.replace(/\bleq\b/g, '\u2264');
+    result = result.replace(/\bgeq\b/g, '\u2265');
+    result = result.replace(/\bneq\b/g, '\u2260');
+    result = result.replace(/\bapprox\b/g, '\u2248');
+
     return result;
 }

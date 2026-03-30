@@ -1,5 +1,6 @@
 -- lua/simple/math.lua
--- Math block detection, concealment, and extmark rendering for m{ ... } syntax
+-- Math-mode block detection, concealment, and extmark rendering for
+-- m{}, loss{}, and nograd{} syntax.
 --
 -- NOTE: The LSP hover handler (src/app/lsp/handlers/hover.spl) already provides
 -- full math rendering in hover popups via src/lib/math_repr.spl, including:
@@ -7,7 +8,7 @@
 --   - Unicode pretty text (to_pretty)
 --
 -- This module provides ADDITIONAL inline visual feedback by concealing the
--- m{ } delimiters and showing a quick Unicode preview as virtual text.
+-- block delimiters and showing a quick Unicode preview as virtual text.
 -- Full rendering is done by the LSP server in hover. This provides quick inline preview.
 
 local M = {}
@@ -24,13 +25,22 @@ M._timer = nil
 --- Whether math rendering is currently enabled
 M._enabled = false
 
---- Parsed math block info
+--- Block type indicators shown when delimiters are concealed
+local BLOCK_INDICATORS = {
+  math = "∂",     -- partial derivative
+  loss = "ℒ",     -- Lagrangian/Loss
+  nograd = "∅",   -- no-gradient
+}
+
+--- Parsed math-mode block info
 ---@class MathBlock
+---@field block_type string "math"|"loss"|"nograd"
+---@field prefix_len integer Length of prefix + `{` (e.g. 2 for m{, 5 for loss{, 7 for nograd{)
 ---@field start_row integer 0-indexed
 ---@field start_col integer 0-indexed
 ---@field end_row integer 0-indexed
 ---@field end_col integer 0-indexed (exclusive)
----@field content string The expression inside m{ ... }
+---@field content string The expression inside the block
 
 --- Setup math block detection and concealment
 ---@param cfg SimpleMathConfig
@@ -85,18 +95,30 @@ function M.setup(cfg)
   })
 end
 
---- Scan buffer for m{ ... } blocks using regex (tree-sitter fallback)
+--- Block prefix patterns: keyword -> (block_type, prefix_len including `{`)
+--- Block prefix patterns ordered longest-first to avoid false matches.
+--- Each entry uses %f[%a] (frontier pattern) before the keyword to ensure
+--- it only matches at word boundaries (prevents "sum{" matching as "m{").
+local BLOCK_PREFIXES = {
+  { pattern = "%f[%a]nograd%s*{", block_type = "nograd", base_len = 7 },
+  { pattern = "%f[%a]loss%s*{",   block_type = "loss",   base_len = 5 },
+  { pattern = "%f[%a]m%s*{",      block_type = "math",   base_len = 2 },
+}
+
+--- Scan buffer for math-mode blocks (m{}, loss{}, nograd{}) using regex
 ---@param bufnr integer
 ---@return MathBlock[]
 function M.find_math_blocks(bufnr)
   local blocks = {}
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-  -- State machine to handle multi-line m{ ... } blocks
+  -- State machine to handle multi-line blocks
   local in_block = false
   local brace_depth = 0
   local block_start_row = 0
   local block_start_col = 0
+  local cur_block_type = "math"
+  local cur_prefix_len = 2
   local content_parts = {}
 
   for row, line in ipairs(lines) do
@@ -104,19 +126,28 @@ function M.find_math_blocks(bufnr)
 
     while col <= #line do
       if not in_block then
-        -- Look for m{ pattern (m followed by {, possibly with whitespace)
-        local m_start, m_end = line:find("m%s*{", col)
-        if m_start then
+        -- Try each block prefix pattern, longest first to avoid false matches
+        local best_start, best_end, best_type, best_plen = nil, nil, nil, nil
+        for _, bp in ipairs(BLOCK_PREFIXES) do
+          local s, e = line:find(bp.pattern, col)
+          if s and (not best_start or s < best_start) then
+            -- Calculate actual prefix length (accounts for whitespace between keyword and {)
+            local actual_plen = e - s + 1
+            best_start, best_end, best_type, best_plen = s, e, bp.block_type, actual_plen
+          end
+        end
+
+        if best_start then
           in_block = true
           brace_depth = 1
           block_start_row = row - 1 -- convert to 0-indexed
-          block_start_col = m_start - 1 -- convert to 0-indexed
+          block_start_col = best_start - 1 -- convert to 0-indexed
+          cur_block_type = best_type
+          cur_prefix_len = best_plen
           content_parts = {}
-          -- Capture content after the opening brace
-          local after_brace = line:sub(m_end + 1)
           -- Check for closing brace in the same segment
-          local rest_col = m_end + 1
-          col = m_end + 1
+          local rest_col = best_end + 1
+          col = best_end + 1
           local found_close = false
           while col <= #line do
             local ch = line:sub(col, col)
@@ -129,6 +160,8 @@ function M.find_math_blocks(bufnr)
                 local content = line:sub(rest_col, col - 1)
                 table.insert(content_parts, content)
                 table.insert(blocks, {
+                  block_type = cur_block_type,
+                  prefix_len = cur_prefix_len,
                   start_row = block_start_row,
                   start_col = block_start_col,
                   end_row = row - 1,
@@ -164,6 +197,8 @@ function M.find_math_blocks(bufnr)
               local content = line:sub(line_start, col - 1)
               table.insert(content_parts, content)
               table.insert(blocks, {
+                block_type = cur_block_type,
+                prefix_len = cur_prefix_len,
                 start_row = block_start_row,
                 start_col = block_start_col,
                 end_row = row - 1,
@@ -252,6 +287,16 @@ local function to_pretty_lua(content)
     s = s:gsub("%f[%a]" .. name .. "%f[^%a]", sym)
   end
 
+  -- Explicit * → · (multiplication dot)
+  s = s:gsub("%s*%*%s*", "·")
+  -- Matrix multiply @ → ⊗
+  s = s:gsub("%s*@%s*", "⊗")
+  -- Broadcast operators: .+ .- .* ./ → ⊕ ⊖ ⊙ ⊘ (element-wise)
+  s = s:gsub("%.%+", "⊕")
+  s = s:gsub("%.%-", "⊖")
+  s = s:gsub("%.%*", "⊙")
+  s = s:gsub("%.%/", "⊘")
+
   return s
 end
 
@@ -266,22 +311,14 @@ function M.apply_conceal(bufnr, blocks)
   end
 
   for _, block in ipairs(blocks) do
-    -- Highlight the entire math block region
-    if block.start_row == block.end_row then
-      -- Single-line math block: conceal m{ and } delimiters
-      -- Mark the opening "m{" with conceal
-      local open_len = 2 -- "m{"
-      -- Check for whitespace between m and {
-      local line = vim.api.nvim_buf_get_lines(bufnr, block.start_row, block.start_row + 1, false)[1]
-      if line then
-        local segment = line:sub(block.start_col + 1, block.start_col + 10)
-        local ws = segment:match("^m(%s*){")
-        if ws then
-          open_len = 2 + #ws
-        end
-      end
+    local open_len = block.prefix_len
+    local indicator = BLOCK_INDICATORS[block.block_type] or "∂"
 
-      -- Conceal opening delimiter "m{" or "m {"
+    -- Highlight the block region
+    if block.start_row == block.end_row then
+      -- Single-line block: conceal delimiters and show rendered preview
+
+      -- Conceal opening delimiter (e.g. "m{", "loss{", "nograd{")
       pcall(vim.api.nvim_buf_set_extmark, bufnr, M._ns, block.start_row, block.start_col, {
         end_col = block.start_col + open_len,
         conceal = "",
@@ -301,19 +338,22 @@ function M.apply_conceal(bufnr, blocks)
         hl_group = "SimpleMathDelimiter",
       })
 
-      -- Show inline Unicode preview as virtual text at end of line.
-      -- This is a quick visual hint; full rendering (LaTeX + pretty) is
-      -- provided by the LSP hover handler (src/app/lsp/handlers/hover.spl)
-      -- which calls to_pretty() and render_latex_raw() from src/lib/math_repr.spl.
+      -- Show indicator + inline Unicode preview as virtual text at end of line
       local pretty = to_pretty_lua(block.content)
       if pretty ~= block.content then
         pcall(vim.api.nvim_buf_set_extmark, bufnr, M._ns, block.start_row, 0, {
-          virt_text = { { "  " .. pretty, "SimpleMathPretty" } },
+          virt_text = { { "  " .. indicator .. " " .. pretty, "SimpleMathPretty" } },
+          virt_text_pos = "eol",
+        })
+      else
+        -- Even without conversion, show the block type indicator
+        pcall(vim.api.nvim_buf_set_extmark, bufnr, M._ns, block.start_row, 0, {
+          virt_text = { { "  " .. indicator, "SimpleMathPretty" } },
           virt_text_pos = "eol",
         })
       end
     else
-      -- Multi-line math block: highlight the entire region
+      -- Multi-line block: highlight the entire region
       pcall(vim.api.nvim_buf_set_extmark, bufnr, M._ns, block.start_row, block.start_col, {
         end_row = block.end_row,
         end_col = block.end_col,

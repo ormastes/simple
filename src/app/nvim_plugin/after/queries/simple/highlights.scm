@@ -12,8 +12,10 @@
 ;; ("|>" @operator.pipeline) => @operator
 ;; (">>" @operator.pipeline) => @operator
 
-;; Math blocks
+;; Math-mode blocks (m{}, loss{}, nograd{})
 ;; (math_block) @embedded.math => @string.special
+;; (loss_block) @embedded.math => @string.special
+;; (nograd_block) @embedded.math => @string.special
 
 ;; Pass variants as TODO-like highlights
 ;; ("pass_todo") @keyword.control => @todo

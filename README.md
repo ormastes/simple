@@ -1169,7 +1169,10 @@ See [CLAUDE.md](CLAUDE.md) for development guidelines and [AGENTS.md](AGENTS.md)
 
 ## License
 
-MIT License
+MIT License. See [LICENSE](LICENSE).
+
+Bundled third-party runtime components and redistribution notices are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

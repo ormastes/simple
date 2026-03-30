@@ -684,10 +684,20 @@ jobs:
           cp -r examples "${PKG_DIR}/" 2>/dev/null || true
           cp README.md "${PKG_DIR}/" 2>/dev/null || true
           cp LICENSE "${PKG_DIR}/" 2>/dev/null || true
+          cp THIRD_PARTY_NOTICES.md "${PKG_DIR}/" 2>/dev/null || true
+
+          # Prune development-only dependency caches and downloaded test runtimes
+          # so release artifacts do not redistribute unrelated third-party payloads.
+          rm -rf "${PKG_DIR}/src/app/vscode_extension/node_modules"
+          rm -rf "${PKG_DIR}/src/app/vscode_extension/.vscode-test"
+          rm -rf "${PKG_DIR}/src/compiler_rust/target"
+
+          python3 scripts/check_release_payload.py --dir "${PKG_DIR}"
 
           # Create archive
           echo "✓ Creating archive"
           tar czf "simple-bootstrap-${VERSION}-${PLATFORM}.spk" "${PKG_DIR}"
+          python3 scripts/check_release_payload.py --tar "simple-bootstrap-${VERSION}-${PLATFORM}.spk"
 
           echo "✓ Package created: simple-bootstrap-${VERSION}-${PLATFORM}.spk"
           ls -lh "simple-bootstrap-${VERSION}-${PLATFORM}.spk"
@@ -799,6 +809,7 @@ jobs:
             cp -r src/lib/. staging-deb/usr/local/lib/simple/lib/ || true
             cp README.md staging-deb/usr/local/share/doc/simple-lang/ || true
             cp LICENSE staging-deb/usr/local/share/doc/simple-lang/ || true
+            cp THIRD_PARTY_NOTICES.md staging-deb/usr/local/share/doc/simple-lang/ || true
 
             fpm -s dir -t deb \
               --name simple-lang \
@@ -887,6 +898,7 @@ jobs:
             cp -r src/lib/. staging-win/lib/ || true
             cp README.md staging-win/doc/ || true
             cp LICENSE staging-win/doc/ || true
+            cp THIRD_PARTY_NOTICES.md staging-win/doc/ || true
 
             # Process NSIS template
             sed -e "s|\${VERSION}|${VERSION}|g" \
@@ -946,7 +958,15 @@ jobs:
             mkdir -p dist
             tar czf dist/simple-full-$(grep 'version:' simple.sdn | head -1 | awk '{print $2}').tar.gz \
               --exclude='.git' --exclude='build' --exclude='target' \
-              src/ doc/ examples/ bin/ CHANGELOG.md README.md LICENSE simple.sdn || true
+              --exclude='src/app/vscode_extension/node_modules' \
+              --exclude='src/app/vscode_extension/.vscode-test' \
+              --exclude='src/compiler_rust/target' \
+              src/ doc/ examples/ bin/ CHANGELOG.md README.md LICENSE THIRD_PARTY_NOTICES.md simple.sdn || true
+          fi
+
+          PKG=$(ls simple-full-*.tar.gz dist/simple-full-*.tar.gz 2>/dev/null | head -1)
+          if [ -n "$PKG" ]; then
+            python3 scripts/check_release_payload.py --tar "$PKG"
           fi
 
       - name: Calculate checksums
@@ -991,6 +1011,7 @@ jobs:
           find artifacts -name '*.spk' -exec cp {} release/ \;
           find artifacts -name '*.sha256' -exec cp {} release/ \;
           find artifacts -name '*.tar.gz' -exec cp {} release/ \;
+          cp LICENSE THIRD_PARTY_NOTICES.md release/ 2>/dev/null || true
           # Copy installer packages
           find artifacts -name '*.deb' -exec cp {} release/ \;
           find artifacts -name '*.rpm' -exec cp {} release/ \;
@@ -1099,6 +1120,12 @@ jobs:
           ## 📝 What's New
 
           See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for detailed changes.
+
+          ## 📄 Licensing
+
+          Simple is distributed under the MIT license. Release artifacts that
+          bundle vendored runtime components also include
+          \`THIRD_PARTY_NOTICES.md\` describing bundled third-party notices.
 
           ## 📊 Package Information
 
@@ -1230,7 +1257,12 @@ jobs:
           mkdir -p compiler-bootstrap-tmp
           cp -r src/app compiler-bootstrap-tmp/
           cp -r src/std compiler-bootstrap-tmp/
+          cp LICENSE THIRD_PARTY_NOTICES.md compiler-bootstrap-tmp/
+          rm -rf compiler-bootstrap-tmp/app/vscode_extension/node_modules
+          rm -rf compiler-bootstrap-tmp/app/vscode_extension/.vscode-test
+          python3 scripts/check_release_payload.py --dir compiler-bootstrap-tmp
           tar czf "simple-compiler-bootstrap-${VERSION}.tar.gz" -C compiler-bootstrap-tmp .
+          python3 scripts/check_release_payload.py --tar "simple-compiler-bootstrap-${VERSION}.tar.gz"
 
           REF="ghcr.io/${{ github.repository_owner }}/simple-compiler:${VERSION}"
           oras push "$REF" \
