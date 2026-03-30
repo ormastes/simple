@@ -26,6 +26,10 @@ fn _heavy_query_cmd(subcmd: text) -> text:
     val bin = _find_simple_binary()
     "timeout 60 " + bin + " src/app/cli/query.spl " + subcmd
 
+fn _visibility_query_cmd(subcmd: text) -> text:
+    val bin = _find_simple_binary()
+    "timeout 60 " + bin + " src/app/cli/query_visibility.spl " + subcmd
+
 fn _shell_cmd(command: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
@@ -89,12 +93,16 @@ fn lsp_handle_initialize(id: text) -> text:
     val completion_provider = jo1(jp("triggerCharacters", SB_L() + js(".") + "," + js(":") + "," + js("&") + SB_R()))
     var caps: [text] = []
     val sync_opts = jo3(jp("openClose", "true"), jp("change", "1"), jp("save", jo1(jp("includeText", "false"))))
+    val token_types = SB_L() + js("namespace") + "," + js("type") + "," + js("class") + "," + js("enum") + "," + js("struct") + "," + js("function") + "," + js("method") + "," + js("property") + "," + js("variable") + "," + js("parameter") + "," + js("enumMember") + "," + js("keyword") + "," + js("comment") + "," + js("string") + "," + js("number") + "," + js("operator") + SB_R()
+    val token_mods = SB_L() + js("declaration") + "," + js("definition") + "," + js("readonly") + "," + js("static") + "," + js("deprecated") + "," + js("abstract") + "," + js("async") + "," + js("modification") + "," + js("documentation") + "," + js("visibilityPublic") + "," + js("visibilityBoundary") + "," + js("visibilityPrivate") + SB_R()
+    val semantic_provider = jo3(jp("legend", jo2(jp("tokenTypes", token_types), jp("tokenModifiers", token_mods))), jp("range", "true"), jp("full", "true"))
     caps.push(jp("textDocumentSync", sync_opts))
     caps.push(jp("completionProvider", completion_provider))
     caps.push(jp("hoverProvider", "true"))
     caps.push(jp("definitionProvider", "true"))
     caps.push(jp("referencesProvider", "true"))
     caps.push(jp("documentSymbolProvider", "true"))
+    caps.push(jp("semanticTokensProvider", semantic_provider))
     caps.push(jp("implementationProvider", "true"))
     caps.push(jp("workspaceSymbolProvider", "true"))
     caps.push(jp("callHierarchyProvider", "true"))
@@ -105,7 +113,8 @@ fn lsp_handle_initialize(id: text) -> text:
     caps.push(jp("diagnosticProvider", diag_provider))
     val capabilities_obj = LB() + caps.join(",") + RB()
     val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
-    val result = jo2(jp("capabilities", capabilities_obj), jp("serverInfo", server_info))
+    val experimental = jo1(jp("simpleVisibilityProvider", "true"))
+    val result = jo3(jp("capabilities", capabilities_obj), jp("serverInfo", server_info), jp("experimental", experimental))
     make_json_result(id, result)
 
 # --- Document sync ---
@@ -365,15 +374,13 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
+    var cmd = _visibility_query_cmd("hover " + file_path + " " + query_line + " " + query_col)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id, "null")
-    val content = jo2(jp("kind", js("markdown")), jp("value", js(out.trim())))
-    val result = jo1(jp("contents", content))
-    make_json_result(id, result)
+    make_json_result(id, out.trim())
 
 # --- Completion (fast path) ---
 
@@ -384,32 +391,13 @@ fn lsp_handle_completion(id: text, body: text) -> text:
     val col = _extract_character(body)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = _fast_query_cmd("completions " + file_path + " " + query_line + " " + query_col)
+    var cmd = _visibility_query_cmd("completions " + file_path + " " + query_line + " " + query_col)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id, SB_L() + SB_R())
-    val lines = out.split("\n")
-    var items: [text] = []
-    for comp_line in lines:
-        val trimmed = comp_line.trim()
-        if trimmed == "":
-            continue
-        val tab_idx = trimmed.index_of("\t")
-        var label = trimmed
-        var detail = ""
-        match tab_idx:
-            Some(ti):
-                label = trimmed.substring(0, ti)
-                detail = trimmed.substring(ti + 1)
-            nil:
-                val _x = 0
-        var item = jo2(jp("label", js(label)), jp("kind", "6"))
-        if detail != "":
-            item = jo3(jp("label", js(label)), jp("kind", "6"), jp("detail", js(detail)))
-        items.push(item)
-    make_json_result(id, SB_L() + items.join(",") + SB_R())
+    make_json_result(id, out.trim())
 
 # --- Document Symbol (fast path) ---
 
@@ -418,41 +406,13 @@ fn lsp_handle_document_symbol(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         return make_json_result(id, SB_L() + SB_R())
-    var cmd = _fast_query_cmd("symbols " + file_path)
+    var cmd = _visibility_query_cmd("symbols " + file_path + " --requester " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id, SB_L() + SB_R())
-    # Parse symbols output (one per line: name:kind:line or name:kind:line (in parent))
-    val lines = out.split("\n")
-    var symbols: [text] = []
-    for sym_line in lines:
-        val trimmed = sym_line.trim()
-        if trimmed == "":
-            continue
-        # Strip "(in parent)" suffix if present
-        var sym_text = trimmed
-        val paren_idx = sym_text.index_of(" (in ")
-        match paren_idx:
-            Some(pi): sym_text = sym_text.substring(0, pi)
-            nil: val _x = 0
-        val parts = sym_text.split(":")
-        if parts.len() < 3:
-            continue
-        val name = parts[0]
-        val kind_str = parts[1]
-        val line_num = int(parts[2]) - 1
-        if line_num < 0:
-            continue
-        var kind = _symbol_kind_number(kind_str)
-        val range = jo2(
-            jp("start", jo2(jp("line", str(line_num)), jp("character", "0"))),
-            jp("end", jo2(jp("line", str(line_num)), jp("character", "0")))
-        )
-        val sym = jo4(jp("name", js(name)), jp("kind", str(kind)), jp("range", range), jp("selectionRange", range))
-        symbols.push(sym)
-    make_json_result(id, SB_L() + symbols.join(",") + SB_R())
+    make_json_result(id, out.trim())
 
 fn _symbol_kind_number(kind_str: text) -> i64:
     if kind_str == "fn" or kind_str == "function" or kind_str == "extern_fn":
@@ -501,34 +461,51 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
 
 fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
     val query = extract_nested(body, "query")
-    var cmd = _fast_query_cmd("symbols src/")
+    var cmd = _visibility_query_cmd("workspace-symbols --query " + query + " --requester src/")
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id, SB_L() + SB_R())
-    val lines = out.split("\n")
-    var symbols: [text] = []
-    for sym_line in lines:
-        val trimmed = sym_line.trim()
-        if trimmed == "":
-            continue
-        val parts = trimmed.split(":")
-        if parts.len() < 3:
-            continue
-        val name = parts[0]
-        val kind_str = parts[1]
-        # Filter by query if provided
-        if query != "" and not name.starts_with(query):
-            continue
-        var kind = _symbol_kind_number(kind_str)
-        val loc = jo2(jp("uri", js("file://unknown")), jp("range", jo2(
-            jp("start", jo2(jp("line", "0"), jp("character", "0"))),
-            jp("end", jo2(jp("line", "0"), jp("character", "0")))
-        )))
-        val sym = jo3(jp("name", js(name)), jp("kind", str(kind)), jp("location", loc))
-        symbols.push(sym)
-    make_json_result(id, SB_L() + symbols.join(",") + SB_R())
+    make_json_result(id, out.trim())
+
+fn lsp_handle_semantic_tokens_full(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_json_result(id, "{\"data\":[]}")
+    var cmd = _visibility_query_cmd("semantic-tokens " + file_path)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, "{\"data\":[]}")
+    make_json_result(id, out.trim())
+
+fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_json_result(id, "{\"data\":[]}")
+    val range_raw = extract_nested(body, "range")
+    val start_line = extract_field(range_raw, "line")
+    val end_idx = range_raw.last_index_of("\"line\"")
+    var end_line = start_line
+    match end_idx:
+        Some(i):
+            val tail = range_raw.substring(i)
+            val maybe_end = extract_field(tail, "line")
+            if maybe_end != "":
+                end_line = maybe_end
+        nil:
+            val _x = 0
+    var cmd = _visibility_query_cmd("semantic-tokens " + file_path + " --start-line " + start_line + " --end-line " + end_line)
+    var out = ""
+    var exit_code: i64 = 0
+    (out, exit_code) = _shell_cmd(cmd)
+    if exit_code != 0 or out.trim() == "":
+        return make_json_result(id, "{\"data\":[]}")
+    make_json_result(id, out.trim())
 
 # --- Call Hierarchy (fast path) ---
 

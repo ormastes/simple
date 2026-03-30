@@ -40,6 +40,11 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 use app.cli.query_engine.{engine_find_definition, engine_find_references, engine_hover, engine_completions, engine_type_at, engine_signature_help, engine_document_symbols}
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process}
 use app.cli.query_lsp_extras.{query_document_highlight, query_type_definition, query_implementation, query_folding_range}
+use app.cli.query_visibility.{
+    query_visibility_hover, query_visibility_completions,
+    query_visibility_symbols, query_visibility_workspace_symbols,
+    query_visibility_semantic_tokens
+}
 use app.cli.query_ast_query.{engine_ast_query}
 use app.cli.query_sem_query.{engine_sem_query}
 use app.cli.query_schema.{engine_query_schema}
@@ -160,6 +165,11 @@ fn run_query(args: [text]) -> i64:
         print "  selection-range     <file> <line> [col]  Nested selection ranges"
         print "  workspace-symbols   [--query X] [--kind fn|class|struct|enum|trait]"
         print "  semantic-tokens     <file> [--start-line N] [--end-line N]"
+        print "  lsp-hover-json      <file> <line> [col]  Structured hover with visibility"
+        print "  lsp-completions-json <file> <line> [col] Structured completions with visibility"
+        print "  lsp-symbols-json    <file> [--requester X]  Document symbols with visibility"
+        print "  lsp-workspace-symbols-json --query X --requester X"
+        print "  lsp-semantic-tokens-json <file> [--start-line N] [--end-line N]"
         print "  inlay-hints         <file> [--start-line N] [--end-line N] [--format text|json]"
         print "  document-formatting <file>               Format file"
         print "  document-highlight  <file> <line> [col]  Same-file references (R/W)"
@@ -187,8 +197,27 @@ fn run_query(args: [text]) -> i64:
         return query_workspace_symbols(cmd_args)
     if subcmd == "document-formatting" and cmd_args.len() >= 2:
         return query_document_formatting(cmd_args[1])
+    if subcmd == "lsp-symbols-json" and cmd_args.len() >= 2:
+        val sym_file = sanitize_path(cmd_args[1])
+        if sym_file == "":
+            print "[]"
+            return 1
+        val requester = _extract_flag(cmd_args, "--requester", sym_file)
+        return query_visibility_symbols(sym_file, requester)
+    if subcmd == "lsp-workspace-symbols-json":
+        val query = _extract_flag(cmd_args, "--query", "")
+        val requester = _extract_flag(cmd_args, "--requester", "")
+        return query_visibility_workspace_symbols(query, requester)
     if subcmd == "semantic-tokens" and cmd_args.len() >= 2:
         return query_semantic_tokens(cmd_args[1], cmd_args)
+    if subcmd == "lsp-semantic-tokens-json" and cmd_args.len() >= 2:
+        val st_file = sanitize_path(cmd_args[1])
+        if st_file == "":
+            print "{\"data\":[]}"
+            return 1
+        val start_line_str = _extract_flag(cmd_args, "--start-line", "0")
+        val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+        return query_visibility_semantic_tokens(st_file, start_line_str.to_int(), end_line_str.to_int())
     if subcmd == "inlay-hints" and cmd_args.len() >= 2:
         return query_inlay_hints(cmd_args[1], cmd_args)
     if subcmd == "folding-range" and cmd_args.len() >= 2:
@@ -241,6 +270,8 @@ fn run_query(args: [text]) -> i64:
         return query_references(symbol, file)
     elif subcmd == "hover":
         return query_hover(symbol, file, line_num)
+    elif subcmd == "lsp-hover-json":
+        return query_visibility_hover(file, line_num, col)
     elif subcmd == "completions":
         var prefix = symbol
         # Check for --prefix flag
@@ -250,6 +281,8 @@ fn run_query(args: [text]) -> i64:
                 prefix = cmd_args[i + 1]
             i = i + 1
         return query_completions(prefix, file)
+    elif subcmd == "lsp-completions-json":
+        return query_visibility_completions(file, line_num, col)
     elif subcmd == "type-at":
         return query_type_at(symbol, file, line_num)
     elif subcmd == "signature-help":

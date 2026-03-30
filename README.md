@@ -1,63 +1,59 @@
 # Simple Language
 
-[![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](PRODUCTION_READY.md)
-[![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/session/full_test_suite_results_2026-02-14.md)
+[![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
+[![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
 [![LLVM Cross](https://github.com/simple-lang/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **🎉 Production Ready (2026-02-14)** - 100% test pass rate (4,067/4,067), all critical features complete. [Read the announcement](PRODUCTION_READY.md)
+Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
 
-A statically typed programming language with Python-like syntax, modern safety features, and GPU computing support.
+The repo is unusually broad: language, compiler, interpreter, loader, test runner, doc generation, traceability tooling, SDN-backed project databases, editor tooling, and hardware-oriented test flows all live together.
 
-**Quick Navigation:** [Production Ready](#production-ready) | [Features](#key-features) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Documentation](#documentation)
-
----
-
-## Production Ready
-
-**Simple Language Compiler v1.0** achieved production ready status on February 14, 2026.
-
-**Test Results:**
-```
-Results: 4,067 total, 4,067 passed, 0 failed
-Time:    17.4 seconds
-Status:  ✅ Production Ready
-```
-
-**What's Complete:**
-- ✅ **Package Management** - Full SemVer, manifest, lockfile support
-- ✅ **Effect System** - Type-level effect tracking (@pure, @io, @net, @fs, @unsafe, @async)
-- ✅ **Parser Error Recovery** - Multi-language syntax mistake detection
-- ✅ **Platform Abstraction** - Cross-platform support (Linux, macOS, Windows)
-- ✅ **Process Management** - Sync and async execution
-- ✅ **File I/O** - Text, binary, directory operations
-- ✅ **Comprehensive Testing** - 4,067 tests, 100% pass rate
-
-**Documentation:**
-- [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) - Development guide, agent definitions
-- [Release Notes](doc/RELEASE_2026-02-14.md) - Complete release information
-- [Production Summary](doc/PRODUCTION_READY_SUMMARY.md) - Quick reference
-- [Test Results](doc/session/full_test_suite_results_2026-02-14.md) - Detailed test analysis
+**Quick Navigation:** [Distinctive Features](#distinctive-features) | [Feature Status](#feature-status-highlights) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Documentation](#documentation)
 
 ---
 
-## Key Features
+## Distinctive Features
 
-- **Self-Hosting Build System** - Complete build system written in Simple itself
-- **Python-like syntax** - Indentation-based blocks, clean readable code
-- **Static typing with inference** - Type safety without verbosity (Hindley-Milner)
-- **Unit types** - Type-safe postfix literals (`10_cm`, `200_kmph`, `42_uid`)
-- **Multiple memory modes** - GC-managed (default), manual, or reference-counted
-- **Actor-based concurrency** - Safe concurrent programming with async/await
-- **GPU computing** - Cross-platform Vulkan backend with `this.index()` / `gpu.global_id()`
-- **Pattern matching** - Exhaustiveness checking with strong enums
-- **Contracts** - Pre/postconditions, invariants (DbC - Design by Contract)
-- **Parser-friendly macros** - Contract-first LL(1) macros with IDE support
-- **AOP & Unified Predicates** - Aspect-oriented programming, DI, mocking, architecture rules
-- **SDN configuration** - Simple Data Notation for human-readable config files
-- **Doctest** - Executable examples in docstrings (`>>> prompt` style)
-- **BDD Feature Docs** - Living documentation generated from passing tests
-- **SMF binary format** - Compile once, run anywhere
+- **Self-hosted staged toolchain**: real source layers for frontend, types, borrow checking, backend, driver, interpreter, and loader.
+- **Verification-first workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec markdown all ship in-tree.
+- **MDSOC architecture support**: virtual capsules, capsule manifests, and architecture-oriented repo structure are first-class concepts.
+- **Parser-friendly macro system**: compiler-integrated macro definitions, validation, and hygiene instead of editor-hostile text substitution.
+- **Math DSL blocks**: `m{}`, `loss{}`, and `nograd{}` parse and evaluate as dedicated math-oriented syntax, with pretty/LaTeX rendering support.
+- **SDN-backed project databases**: the repo uses textual SDN stores for tests, todos, dashboards, and other project metadata.
+- **Baremetal-friendly execution model**: in-tree support for baremetal builds, semihosting lanes, QEMU/GHDL flows, and remote baremetal test plumbing.
+- **Multiple execution paths**: interpreter, loader, native/LLVM-oriented compilation paths, and SMF/module-loading infrastructure coexist in one repo.
+- **Tooling-aware language rules**: Tree-sitter integration, primitive-public-API linting, traceability tooling, and language statistics are part of the platform story.
+- **UI test sharing**: the UI test client is designed to exercise both web UI backends and the TUI web proxy through one HTTP-oriented test surface.
+
+## Feature Status Highlights
+
+Implemented and safe to advertise:
+- SSpec, SDoctest, coverage, traceability checks, and generated spec docs
+- MDSOC manifests and architecture-focused project structure
+- Tree-sitter outline/query tooling
+- SDN project/test/todo databases
+- Primitive public API linting
+- Borrow-checking infrastructure
+- Watch mode / auto-build support
+- mmap-backed loader primitives and executable-memory support
+- Baremetal build/test plumbing and remote baremetal mode parsing
+
+Implemented but should be described carefully:
+- `loss{}` / `nograd{}` and math-block rendering work, but deeper DL automation around them is still evolving
+- LLVM support is real, but some flows still depend on external LLVM tools
+- GC and no-GC families both exist, but their completeness is not uniform across every toolchain path
+- UI sharing exists through test surfaces and multiple frontends, but not as a single finished “one UI layer everywhere” claim
+
+Partial or experimental:
+- AOP support exists, but some runtime-facing pieces remain stubbed
+- Remote baremetal execution is host-aware and not fully green end-to-end on every lane
+- Loader/JIT instantiation still has stubbed pieces
+- VHDL backend code generation exists, but should still be treated as experimental
+- C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete
+- Lean generation and proof artifacts exist, but end-to-end formal verification integration is still partial
+
+See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 
 ---
 

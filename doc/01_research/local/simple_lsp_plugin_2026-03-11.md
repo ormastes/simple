@@ -320,15 +320,15 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 
 ### Phase 1: COMPLETE
 
-- [x] LSP server implemented at `src/app/lsp/main.spl` (zero-stdlib, extern fn only)
-- [x] JSON helpers: `src/app/lsp/lsp_json.spl`
-- [x] Protocol I/O (Content-Length framing): `src/app/lsp/lsp_protocol.spl`
-- [x] Handlers (delegate to `simple query` CLI): `src/app/lsp/lsp_handlers.spl`
+- [x] LSP server implemented at `src/lib/nogc_sync_mut/lsp/main.spl` (zero-stdlib, extern fn only)
+- [x] JSON helpers: `src/lib/nogc_sync_mut/lsp/lsp_json.spl`
+- [x] Protocol I/O (Content-Length framing): `src/lib/nogc_sync_mut/lsp/lsp_protocol.spl`
+- [x] Handlers (delegate to `simple query` CLI): `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl`
 - [x] Plugin structure: `tools/claude-plugin/simple-lsp/`
 - [x] Plugin installed at `~/.claude/plugins/cache/simple-lsp/`
 - [x] `ENABLE_LSP_TOOL=1` set in `~/.claude/settings.json`
 - [x] `simple-lsp@local` enabled in settings
-- [x] `cli_run_lsp` updated to dispatch to `src/app/lsp/main.spl`
+- [x] `cli_run_lsp` updated to dispatch to `src/lib/nogc_sync_mut/lsp/main.spl`
 - [x] LSP lifecycle verified: initialize, initialized, shutdown, exit
 
 ### Supported LSP Methods
@@ -355,7 +355,7 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 ### Known Limitations
 
 1. **Query startup latency:** Each `simple query` subprocess takes ~5-30s due to module loading. Not an issue for Claude Code (async tool calls) but noticeable for interactive use.
-2. **Binary rebuild needed:** `bin/release/simple lsp` requires binary rebuild to use `cli_run_file` dispatch. Currently uses `bin/release/simple run src/app/lsp/main.spl`.
+2. **Binary rebuild needed:** `bin/release/simple lsp` requires binary rebuild to use `cli_run_file` dispatch. Currently uses `bin/release/simple run src/lib/nogc_sync_mut/lsp/main.spl`.
 3. **DEBUG output on stderr:** Interpreter prints module registration debug info to stderr (harmless for LSP, but noisy).
 
 ---
@@ -369,7 +369,7 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 | Agent | Task | Files |
 |-------|------|-------|
 | **code** | Extract query engine functions as importable module | `src/app/cli/query_engine.spl` → `src/lib/common/pure/query.spl` |
-| **code** | Wire LSP handlers to call query engine directly (no subprocess) | `src/app/lsp/lsp_handlers.spl` |
+| **code** | Wire LSP handlers to call query engine directly (no subprocess) | `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` |
 | **test** | Write LSP protocol integration tests | `test/integration/lsp/lsp_protocol_spec.spl` |
 | **build** | Rebuild binary with LSP dispatch | `src/app/io/cli_commands.spl` → `bin/release/simple` |
 | **infra** | Update MCP server to mark LSP-duplicate tools as deprecated | `src/app/mcp/main_lazy_query_tools.spl` |
@@ -395,8 +395,8 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 | Agent | Task | Files |
 |-------|------|-------|
 | **code** | Integrate tree-sitter FFI into LSP handlers | `src/lib/nogc_sync_mut/lsp/handlers/*.spl` |
-| **code** | Implement incremental document sync | `src/app/lsp/lsp_handlers.spl` |
-| **code** | Add semantic tokens provider | `src/app/lsp/lsp_handlers.spl` |
+| **code** | Implement incremental document sync | `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` |
+| **code** | Add semantic tokens provider | `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` |
 | **test** | Tree-sitter handler unit tests | `test/unit/lsp/` |
 | **infra** | Tree-sitter grammar for Simple language | `src/compiler/10.frontend/core/` |
 
@@ -407,13 +407,13 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 ### New Files
 - `tools/claude-plugin/simple-lsp/.claude-plugin/plugin.json` — Plugin metadata
 - `tools/claude-plugin/simple-lsp/.lsp.json` — LSP server config
-- `src/app/lsp/lsp_json.spl` — JSON helpers (zero-stdlib)
-- `src/app/lsp/lsp_protocol.spl` — Content-Length I/O
-- `src/app/lsp/lsp_handlers.spl` — LSP handlers → `simple query` bridge
+- `src/lib/nogc_sync_mut/lsp/lsp_json.spl` — JSON helpers (zero-stdlib)
+- `src/lib/nogc_sync_mut/lsp/lsp_protocol.spl` — Content-Length I/O
+- `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` — LSP handlers → `simple query` bridge
 
 ### Modified Files
-- `src/app/lsp/main.spl` — Replaced stub with working LSP server loop
-- `src/app/io/cli_commands.spl` — `cli_run_lsp` now dispatches to `src/app/lsp/main.spl`
+- `src/lib/nogc_sync_mut/lsp/main.spl` — Replaced stub with working LSP server loop
+- `src/app/io/cli_commands.spl` — `cli_run_lsp` now dispatches to `src/lib/nogc_sync_mut/lsp/main.spl`
 - `~/.claude/settings.json` — Added `ENABLE_LSP_TOOL=1`, enabled `simple-lsp@local`
 - `~/.claude/plugins/installed_plugins.json` — Registered `simple-lsp@local`
 
@@ -423,7 +423,7 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 
 - Claude Code LSP Plugin System: `github.com/anthropics/claude-plugins-official`
 - Simple LSP Server (library): `src/lib/nogc_sync_mut/lsp/`
-- Simple LSP Server (app): `src/app/lsp/`
+- Simple LSP Server (library): `src/lib/nogc_sync_mut/lsp/`
 - Simple MCP Server: `src/app/mcp/`
 - Simple Query CLI: `src/app/cli/query.spl`
 - LSP Specification 3.17: `microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/`

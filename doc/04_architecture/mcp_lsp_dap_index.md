@@ -12,7 +12,7 @@
 - **[Integration Analysis](research/mcp_lsp_dap_integration_analysis.md)** - Full 6-phase roadmap and architecture
 
 ### Implementation
-- **[Compiler Query API](../src/compiler/query_api.spl)** - LSP integration API (450 lines)
+- **[Compiler Query API](../src/compiler/90.tools/query_api.spl)** - LSP integration API (450 lines)
 - **[Interpreter Hook API](../src/runtime/hooks.spl)** - DAP integration API (550 lines)
 
 ### Guides
@@ -22,7 +22,7 @@
 
 ### Existing Implementations
 - **[MCP Server](../src/app/mcp/main.spl)** - Complete, self-hosted in Simple
-- **[LSP Server](../src/app/lsp/)** - Phase 1 complete (protocol layer)
+- **[LSP Server](../src/lib/nogc_sync_mut/lsp/)** - Phase 1 complete (protocol layer)
 - **[DAP Server](../src/app/dap/)** - Phase 1 complete (protocol layer)
 
 ---
@@ -190,7 +190,7 @@
 ### For LSP Development
 
 1. Read: [Compiler Query API Guide](guide/compiler_query_api_guide.md)
-2. Review: [Query API Implementation](../src/compiler/query_api.spl)
+2. Review: [Query API Implementation](../src/compiler/90.tools/query_api.spl)
 3. Check: [Integration Analysis](research/mcp_lsp_dap_integration_analysis.md#lsp-language-server-protocol-analysis)
 
 ### For DAP Development
