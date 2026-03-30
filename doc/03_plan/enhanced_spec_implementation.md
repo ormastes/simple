@@ -118,7 +118,7 @@ def categorize_spec(spec_name):
 
 ### 2.2 Root TOC Structure
 
-**Generated:** `doc/06_spec/generated/README.md`
+**Generated:** `doc/06_spec/README.md`
 
 ```markdown
 # Simple Language Specifications - Index
@@ -209,7 +209,7 @@ Hindley-Milner type inference and unification.
 
 ### 2.3 Per-Category TOC
 
-**Generated:** `doc/06_spec/generated/categories/core_language.md`
+**Generated:** `doc/06_spec/categories/core_language.md`
 
 ```markdown
 # Core Language Specifications
@@ -349,7 +349,7 @@ test "type_inference_basic":
 ## File Structure After Implementation
 
 ```
-doc/06_spec/generated/
+doc/06_spec/
 ├── README.md                  # Root TOC with all categories
 ├── categories/
 │   ├── core_language.md      # Core language specs TOC

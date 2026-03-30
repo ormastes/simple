@@ -10,7 +10,7 @@ This file contains executable test cases extracted from data_structures.md. The 
 | Type | Extracted Examples (Category B) |
 | Reference | data_structures.md |
 | Source | `/home/ormastes/dev/pub/simple/test/specs/data_structures_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary

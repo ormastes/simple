@@ -146,7 +146,7 @@ Comprehensive verification of all 67 features listed in `doc/02_requirements/fea
 | 26 | Tuples | ✅ COMPLETE | `hir/types/type_system.rs` (HirType::Tuple) |
 | 33 | Sets | ✅ COMPLETE | `core/set.spl`, union/intersection/difference |
 | 34 | Ranges | ✅ COMPLETE | Extensively used in tests, inclusive/exclusive syntax |
-| 193 | Tensor Dimension Inference | ✅ COMPLETE | `doc/06_spec/generated/tensor_dimensions.md`, compile-time tracking |
+| 193 | Tensor Dimension Inference | ✅ COMPLETE | `doc/06_spec/tensor_dimensions.md`, compile-time tracking |
 
 ### Key Data Structures Highlights
 

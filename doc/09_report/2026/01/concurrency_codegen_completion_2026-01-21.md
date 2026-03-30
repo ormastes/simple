@@ -178,7 +178,7 @@ Updated 5 features based on codebase verification:
 
 **7. Test Coverage (100%)**
 - ✅ Specification: `tests/specs/suspension_operator_spec.spl` (24 tests)
-- ✅ Generated docs: `doc/06_spec/generated/suspension_operator.md`
+- ✅ Generated docs: `doc/06_spec/suspension_operator.md`
 - ✅ Async integration tests
 
 #### What's Missing ❌

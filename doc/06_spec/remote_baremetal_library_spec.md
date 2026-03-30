@@ -14,7 +14,7 @@ Checks the library surface that should remain usable for the `interpreter(remote
 | Plan | [doc/03_plan/trace32_x11_container_recovery_2026-03-12.md](doc/03_plan/trace32_x11_container_recovery_2026-03-12.md) |
 | Research | [doc/01_research/remote_interpreter_failures_2026-03-12.md](doc/01_research/remote_interpreter_failures_2026-03-12.md) |
 | Source | `/home/ormastes/dev/pub/simple/test/feature/app/remote_baremetal/remote_baremetal_library_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary

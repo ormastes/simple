@@ -1,16 +1,16 @@
-# Module System Specification - Test Specification
+# Macro Specification
 
-This file contains executable test cases extracted from modules.md. The original specification file remains as architectural reference documentation.
+This file contains executable test cases extracted from macro.md. The original specification file remains as architectural reference documentation.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Status | Reference |
+| Status | SPECIFICATION (Partially Implemented) |
 | Type | Extracted Examples (Category B) |
-| Reference | modules.md |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/modules_spec.spl` |
-| Updated | 2026-03-29 |
+| Reference | macro.md |
+| Source | `/home/ormastes/dev/pub/simple/test/specs/macro_spec.spl` |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary
@@ -25,11 +25,11 @@ This file contains executable test cases extracted from modules.md. The original
 
 ## Overview
 
-This file contains executable test cases extracted from modules.md.
+This file contains executable test cases extracted from macro.md.
 The original specification file remains as architectural reference documentation.
 
 **Note:** This is a test extraction file. For complete specification text,
-design rationale, and architecture, see doc/06_spec/modules.md
+design rationale, and architecture, see doc/06_spec/macro.md
 
 ## Extracted Test Cases
 

@@ -87,7 +87,7 @@ pub fn generate_index_page(
     if !unmanaged_files.is_empty() {
         md.push_str("## Residual Files\n\n");
         md.push_str(
-            "These files are present in `doc/06_spec/generated` but were not regenerated in this run.\n\n",
+            "These files are present in `doc/06_spec` but were not regenerated in this run.\n\n",
         );
         md.push_str("| File | Type |\n");
         md.push_str("|------|------|\n");

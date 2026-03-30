@@ -456,7 +456,7 @@ pub fn check_import_compatibility(
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
 pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
-    load_module_with_imports_validated(path, visited, None)
+    load_module_with_imports_internal(path, visited, None, true)
 }
 
 /// Load module with imports and validate imported function effects against capabilities.
@@ -467,6 +467,15 @@ pub fn load_module_with_imports_validated(
     path: &Path,
     visited: &mut HashSet<PathBuf>,
     importing_capabilities: Option<&[Capability]>,
+) -> Result<Module, CompileError> {
+    load_module_with_imports_internal(path, visited, importing_capabilities, true)
+}
+
+fn load_module_with_imports_internal(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    importing_capabilities: Option<&[Capability]>,
+    flatten_imports: bool,
 ) -> Result<Module, CompileError> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(path.clone()) {
@@ -520,139 +529,12 @@ pub fn load_module_with_imports_validated(
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
-                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
-                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
-                    imported.items.extend(load_matching_package_siblings(
-                        &resolved,
-                        use_stmt,
-                        visited,
-                        Some(effective_caps),
-                    )?);
-                }
-
-                // Validate imported functions against our capabilities
-                if !effective_caps.is_empty() {
-                    let func_effects = extract_function_effects(&imported);
-                    for (func_name, effects) in func_effects {
-                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(format!(
-                                    "Function `{}` uses effects not allowed by module capabilities",
-                                    func_name
-                                ));
-                            return Err(CompileError::semantic_with_context(err, ctx));
-                        }
-                    }
-                }
-
-                // Add imported items for flattened access (functions/classes in global scope)
-                items.extend(imported.items);
-                // ALSO keep the UseStmt so evaluate_module can create the module binding
-                // The module exports cache prevents redundant re-parsing
-                items.push(item);
-                continue;
-            }
-        } else if let Node::ExportUseStmt(export_use) = &item {
-            // Handle export use statements (e.g., `export describe, context from dsl`)
-            // Skip bare exports (empty path) - they only mark local symbols for export
-            if export_use.path.segments.is_empty() {
-                items.push(item);
-                continue;
-            }
-            let temp_use = UseStmt {
-                span: export_use.span,
-                path: export_use.path.clone(),
-                target: export_use.target.clone(),
-                is_type_only: false,
-                is_lazy: false,
-            };
-            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
-                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
-                    imported.items.extend(load_matching_package_siblings(
-                        &resolved,
-                        &temp_use,
-                        visited,
-                        Some(effective_caps),
-                    )?);
-                }
-
-                if !effective_caps.is_empty() {
-                    let func_effects = extract_function_effects(&imported);
-                    for (func_name, effects) in func_effects {
-                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(format!(
-                                    "Function `{}` uses effects not allowed by module capabilities",
-                                    func_name
-                                ));
-                            return Err(CompileError::semantic_with_context(err, ctx));
-                        }
-                    }
-                }
-
-                items.extend(imported.items);
-                items.push(item);
-                continue;
-            }
-        } else if let Node::CommonUseStmt(common_use) = &item {
-            // Handle common use statements
-            let temp_use = UseStmt {
-                span: common_use.span,
-                path: common_use.path.clone(),
-                target: common_use.target.clone(),
-                is_type_only: false,
-                is_lazy: false,
-            };
-            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
-                if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
-                    imported.items.extend(load_matching_package_siblings(
-                        &resolved,
-                        &temp_use,
-                        visited,
-                        Some(effective_caps),
-                    )?);
-                }
-
-                if !effective_caps.is_empty() {
-                    let func_effects = extract_function_effects(&imported);
-                    for (func_name, effects) in func_effects {
-                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::UNSUPPORTED_FEATURE)
-                                .with_help(format!(
-                                    "Function `{}` uses effects not allowed by module capabilities",
-                                    func_name
-                                ));
-                            return Err(CompileError::semantic_with_context(err, ctx));
-                        }
-                    }
-                }
-
-                items.extend(imported.items);
-                items.push(item);
-                continue;
-            }
-        } else if let Node::MultiUse(multi_use) = &item {
-            // Handle comma-separated imports: use a.B, c.D
-            for (module_path, target) in &multi_use.imports {
-                // Create a temporary UseStmt to reuse the resolution logic
-                let temp_use = UseStmt {
-                    span: multi_use.span,
-                    path: module_path.clone(),
-                    target: target.clone(),
-                    is_type_only: multi_use.is_type_only,
-                    is_lazy: false,
-                };
-                if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
-                    let mut imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+                if flatten_imports {
+                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
-                            &temp_use,
+                            use_stmt,
                             visited,
                             Some(effective_caps),
                         )?);
@@ -674,8 +556,144 @@ pub fn load_module_with_imports_validated(
                         }
                     }
 
-                    // Add imported items for flattened access
+                    // Add imported items for flattened access (functions/classes in global scope)
                     items.extend(imported.items);
+                }
+                // ALSO keep the UseStmt so evaluate_module can create the module binding
+                // The module exports cache prevents redundant re-parsing
+                items.push(item);
+                continue;
+            }
+        } else if let Node::ExportUseStmt(export_use) = &item {
+            // Handle export use statements (e.g., `export describe, context from dsl`)
+            // Skip bare exports (empty path) - they only mark local symbols for export
+            if export_use.path.segments.is_empty() {
+                items.push(item);
+                continue;
+            }
+            let temp_use = UseStmt {
+                span: export_use.span,
+                path: export_use.path.clone(),
+                target: export_use.target.clone(),
+                is_type_only: false,
+                is_lazy: false,
+            };
+            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                if flatten_imports {
+                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                        imported.items.extend(load_matching_package_siblings(
+                            &resolved,
+                            &temp_use,
+                            visited,
+                            Some(effective_caps),
+                        )?);
+                    }
+
+                    if !effective_caps.is_empty() {
+                        let func_effects = extract_function_effects(&imported);
+                        for (func_name, effects) in func_effects {
+                            if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNSUPPORTED_FEATURE)
+                                    .with_help(format!(
+                                        "Function `{}` uses effects not allowed by module capabilities",
+                                        func_name
+                                    ));
+                                return Err(CompileError::semantic_with_context(err, ctx));
+                            }
+                        }
+                    }
+
+                    items.extend(imported.items);
+                }
+                items.push(item);
+                continue;
+            }
+        } else if let Node::CommonUseStmt(common_use) = &item {
+            // Handle common use statements
+            let temp_use = UseStmt {
+                span: common_use.span,
+                path: common_use.path.clone(),
+                target: common_use.target.clone(),
+                is_type_only: false,
+                is_lazy: false,
+            };
+            if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                if flatten_imports {
+                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                        imported.items.extend(load_matching_package_siblings(
+                            &resolved,
+                            &temp_use,
+                            visited,
+                            Some(effective_caps),
+                        )?);
+                    }
+
+                    if !effective_caps.is_empty() {
+                        let func_effects = extract_function_effects(&imported);
+                        for (func_name, effects) in func_effects {
+                            if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::UNSUPPORTED_FEATURE)
+                                    .with_help(format!(
+                                        "Function `{}` uses effects not allowed by module capabilities",
+                                        func_name
+                                    ));
+                                return Err(CompileError::semantic_with_context(err, ctx));
+                            }
+                        }
+                    }
+
+                    items.extend(imported.items);
+                }
+                items.push(item);
+                continue;
+            }
+        } else if let Node::MultiUse(multi_use) = &item {
+            // Handle comma-separated imports: use a.B, c.D
+            for (module_path, target) in &multi_use.imports {
+                // Create a temporary UseStmt to reuse the resolution logic
+                let temp_use = UseStmt {
+                    span: multi_use.span,
+                    path: module_path.clone(),
+                    target: target.clone(),
+                    is_type_only: multi_use.is_type_only,
+                    is_lazy: false,
+                };
+                if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
+                    if flatten_imports {
+                        let mut imported =
+                            load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                        if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
+                            imported.items.extend(load_matching_package_siblings(
+                                &resolved,
+                                &temp_use,
+                                visited,
+                                Some(effective_caps),
+                            )?);
+                        }
+
+                        // Validate imported functions against our capabilities
+                        if !effective_caps.is_empty() {
+                            let func_effects = extract_function_effects(&imported);
+                            for (func_name, effects) in func_effects {
+                                if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::UNSUPPORTED_FEATURE)
+                                        .with_help(format!(
+                                            "Function `{}` uses effects not allowed by module capabilities",
+                                            func_name
+                                        ));
+                                    return Err(CompileError::semantic_with_context(err, ctx));
+                                }
+                            }
+                        }
+
+                        // Add imported items for flattened access
+                        items.extend(imported.items);
+                    }
                 }
             }
             // Keep the MultiUse so evaluate_module can create the module binding
@@ -986,6 +1004,43 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "env_get"));
 
         assert!(has_env_get);
+    }
+
+    #[test]
+    fn nested_whole_module_imports_are_not_flattened_into_group_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("main.spl");
+        let wrapper = temp.path().join("wrapper.spl");
+        let helper = temp.path().join("helper.spl");
+
+        fs::write(
+            &entry,
+            "use wrapper.{run}\nfn main() -> int:\n    print(\"ok\")\n    0\n",
+        )
+        .unwrap();
+        fs::write(
+            &wrapper,
+            "use helper\n\nfn run() -> int:\n    0\n",
+        )
+        .unwrap();
+        fs::write(
+            &helper,
+            "fn helper_fn() -> int:\n    1\n",
+        )
+        .unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+        let has_run = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "run"));
+        let has_helper = loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "helper_fn"));
+
+        assert!(has_run);
+        assert!(!has_helper);
     }
 
     #[test]

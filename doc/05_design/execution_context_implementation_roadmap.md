@@ -649,7 +649,7 @@ Example: let x: Host<Int> = Host(42)
 
 **Files to create:**
 - `doc/07_guide/execution_context_guide.md` - User guide
-- `doc/06_spec/generated/execution_context.md` - Spec (auto-generated)
+- `doc/06_spec/execution_context.md` - Spec (auto-generated)
 - `examples/gpu_computation.spl` - Multi-GPU example
 - `examples/heterogeneous_pipeline.spl` - CPU/GPU pipeline
 

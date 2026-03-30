@@ -10,7 +10,7 @@ This file contains executable test cases extracted from traits.md. The original 
 | Type | Extracted Examples (Category B) |
 | Reference | traits.md |
 | Source | `/home/ormastes/dev/pub/simple/test/specs/traits_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary

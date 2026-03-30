@@ -1187,7 +1187,7 @@ See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16
 
 ## See Also
 
-- [doc/06_spec/generated/syntax.md](../spec/generated/syntax.md) - Auto-generated syntax spec
+- [doc/06_spec/syntax.md](../spec/syntax.md) - Auto-generated syntax spec
 - [doc/07_guide/fn_lambda_syntax.md](fn_lambda_syntax.md) - Detailed function/lambda guide
 - [doc/07_guide/resource_cleanup.md](resource_cleanup.md) - Resource management guide
 - [doc/07_guide/coding_style.md](coding_style.md) - Coding conventions

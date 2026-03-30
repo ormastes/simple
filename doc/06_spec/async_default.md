@@ -9,7 +9,7 @@ This document specifies Simple's async-default execution model where functions a
 | Feature IDs | #276-285 |
 | Status | Draft |
 | Source | `/home/ormastes/dev/pub/simple/test/specs/async_default_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary

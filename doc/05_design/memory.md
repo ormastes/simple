@@ -254,7 +254,7 @@ simple run --debug-rc script.spl
 
 - **Plan:** `doc/03_plan/manual_memory_safety_plan.md`
 - **Architecture:** `doc/04_architecture/memory_model_implementation.md`
-- **Spec:** `doc/06_spec/generated/memory.md`
+- **Spec:** `doc/06_spec/memory.md`
 - **Tests:** `simple/std_lib/test/features/types/memory_safety_spec.spl`
 
 ---

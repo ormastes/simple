@@ -1,6 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-03-29 23:49:21*
+*Generated: 2026-03-30 00:09:40*
 
 ## Quick Stats
 
@@ -37,7 +37,7 @@
 
 ## Residual Files
 
-These files are present in `doc/06_spec/generated` but were not regenerated in this run.
+These files are present in `doc/06_spec` but were not regenerated in this run.
 
 | File | Type |
 |------|------|

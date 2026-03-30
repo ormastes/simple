@@ -37,7 +37,7 @@
 
 ### 5. Feature Registration ✅
 - ✅ **Feature database entry** (feature #193) - Status: **COMPLETE**
-- ✅ **Spec documentation generated** at `doc/06_spec/generated/tensor_dimensions.md`
+- ✅ **Spec documentation generated** at `doc/06_spec/tensor_dimensions.md`
 - ✅ Properly categorized under "Data Structures"
 
 ### 6. Bug Fixes ✅
@@ -133,7 +133,7 @@ import verification.models.tensor_dimensions.{
 - **ID**: #193
 - **Category**: Data Structures
 - **Status**: **COMPLETE**
-- **Spec**: `doc/06_spec/generated/tensor_dimensions.md` ✅
+- **Spec**: `doc/06_spec/tensor_dimensions.md` ✅
 - **Registered**: Yes ✅
 
 ---

@@ -57,14 +57,14 @@ The codebase is migrating from deprecated `[]` generic syntax to the new `<>` sy
 ### Medium Priority (Session 3)
 
 **Generated Specs (auto-generated from SSpec tests):**
-- `doc/06_spec/generated/traits.md`
-- `doc/06_spec/generated/functions.md`
-- `doc/06_spec/generated/data_structures.md`
-- `doc/06_spec/generated/memory.md`
-- `doc/06_spec/generated/metaprogramming.md`
-- `doc/06_spec/generated/concurrency.md`
-- `doc/06_spec/generated/async_default.md`
-- `doc/06_spec/generated/suspension_operator.md`
+- `doc/06_spec/traits.md`
+- `doc/06_spec/functions.md`
+- `doc/06_spec/data_structures.md`
+- `doc/06_spec/memory.md`
+- `doc/06_spec/metaprogramming.md`
+- `doc/06_spec/concurrency.md`
+- `doc/06_spec/async_default.md`
+- `doc/06_spec/suspension_operator.md`
 
 **Migration Documentation (keep both for education):**
 - `doc/05_design/generic_syntax_deprecation_plan.md` - Keep both syntaxes

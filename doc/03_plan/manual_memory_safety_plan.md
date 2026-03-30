@@ -310,6 +310,6 @@ Legend: ✅ Complete | 🔄 In Progress | ⏳ Planned
 
 - **Design:** `doc/05_design/memory.md`
 - **Architecture:** `doc/04_architecture/memory_model_implementation.md`
-- **Spec:** `doc/06_spec/generated/memory.md`
+- **Spec:** `doc/06_spec/memory.md`
 - **Tests:** `simple/std_lib/test/features/types/memory_types_spec.spl`
 - **Tests:** `simple/std_lib/test/features/types/borrowing_spec.spl`

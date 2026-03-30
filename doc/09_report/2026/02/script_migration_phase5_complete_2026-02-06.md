@@ -79,7 +79,7 @@ Successfully completed Phase 5 migration - all verification tools AND the comple
 ./src/app/doc/spec_gen/main.spl --input tests/specs/syntax_spec.spl
 
 # Process all spec files
-./src/app/doc/spec_gen/main.spl --all --output doc/06_spec/generated/
+./src/app/doc/spec_gen/main.spl --all --output doc/06_spec/
 
 # Generate root index
 ./src/app/doc/spec_gen/main.spl --index

@@ -15,7 +15,7 @@ Checks the current remote baremetal execution plumbing used by the Simple test r
 | Design | [doc/05_design/remote_jit_architecture.md](doc/05_design/remote_jit_architecture.md) |
 | Research | [doc/01_research/trace32_remote_interfaces_2026-03-08.md](doc/01_research/trace32_remote_interfaces_2026-03-08.md) |
 | Source | `/home/ormastes/dev/pub/simple/test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary

@@ -431,7 +431,7 @@ doc/06_spec/doctest_readme.md:      1 new syntax, 0 old ✅
 ## Remaining Work
 
 **Session 3 (Medium Priority): ~45 minutes estimated**
-- 8 generated spec files (`doc/06_spec/generated/*.md`)
+- 8 generated spec files (`doc/06_spec/*.md`)
 - Regenerate from SSpec tests (preferred approach)
 - ~12-20 files in research/reports with old syntax
 

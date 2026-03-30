@@ -242,7 +242,7 @@ cargo run --bin gen-sspec-docs -- simple/test/system/features/**/*_spec.spl
 
 **Command:**
 ```bash
-simple spec-gen --input tests/specs/ --output doc/06_spec/generated/
+simple spec-gen --input tests/specs/ --output doc/06_spec/
 ```
 
 ## Validation and Quality

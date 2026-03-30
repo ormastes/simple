@@ -39,7 +39,7 @@ Both features are now fully documented with Lean 4 syntax fixes applied.
 **Script Used**: `scripts/spec_gen.py`
 
 **Generated**:
-- `doc/06_spec/generated/tensor_dimensions.md`
+- `doc/06_spec/tensor_dimensions.md`
 - Timestamp: 2026-01-10 06:24:30
 - Source: `simple/std_lib/test/spec/tensor_dimensions_spec.spl`
 
@@ -127,7 +127,7 @@ $ cd verification/tensor_dimensions && lake build
 python3 scripts/spec_gen.py --input simple/std_lib/test/spec/tensor_dimensions_spec.spl
 ```
 
-**Output**: `doc/06_spec/generated/tensor_dimensions.md`
+**Output**: `doc/06_spec/tensor_dimensions.md`
 
 **Features**:
 - Auto-generation from executable specs
@@ -191,7 +191,7 @@ python3 scripts/spec_gen.py --input simple/std_lib/test/spec/tensor_dimensions_s
 3. `doc/02_requirements/feature/feature_db.sdn`
    - Updated feature #194 description and status
 
-4. `doc/06_spec/generated/tensor_dimensions.md`
+4. `doc/06_spec/tensor_dimensions.md`
    - Regenerated from spec file
 
 ### New Files

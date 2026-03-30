@@ -10,7 +10,7 @@ This file contains executable test cases extracted from functions.md. The origin
 | Type | Extracted Examples (Category B) |
 | Reference | functions.md |
 | Source | `/home/ormastes/dev/pub/simple/test/specs/functions_spec.spl` |
-| Updated | 2026-03-29 |
+| Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 
 ## Scenario Summary
