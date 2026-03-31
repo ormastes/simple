@@ -1,78 +1,27 @@
 @allow(unnamed_duplicate_typed_args)
 # Simple LSP MCP — tool implementations
+#
+# Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
+
+use app.simple_lsp_mcp.json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, run_command_text, make_tool_result, make_tool_error, has_method}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(name: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-
-fn lsp_find_simple_binary() -> text:
-    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
-    if env_bin != "":
-        return env_bin
-    val os_env = rt_env_get("OS") ?? ""
-    if os_env.contains("Windows"):
-        if rt_file_exists("bin/release/simple.exe"):
-            return "bin/release/simple.exe"
-        if rt_file_exists("bin/simple.exe"):
-            return "bin/simple.exe"
-    if rt_file_exists("bin/release/simple"):
-        return "bin/release/simple"
-    "bin/simple"
 
 fn lsp_query_path() -> text:
     "src/lib/nogc_sync_mut/lsp/lsp_query.spl"
 
-fn clean_command_output(stdout: text) -> text:
-    val lines = stdout.split("\n")
-    var kept: [text] = []
-    var i = 0
-    while i < lines.len():
-        if not lines[i].starts_with("[DEBUG] "):
-            kept.push(lines[i])
-        i = i + 1
-    var joined = kept.join("\n")
-    while joined.ends_with("\n"):
-        joined = joined.substring(0, joined.len() - 1)
-    joined
-
-fn run_command_text(args: [text]) -> text:
-    val simple_bin = lsp_find_simple_binary()
-    val (stdout, stderr, code) = rt_process_run(simple_bin, args)
-    val clean = clean_command_output(stdout)
-    if code == 0:
-        return clean
-    if stderr.trim() != "":
-        return stderr.trim()
-    if clean != "":
-        return clean
-    "command failed with exit code " + str(code)
-
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    run_command_text([lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+    run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 fn run_lsp_symbols(file: text) -> text:
-    run_command_text([lsp_query_path(), "symbols", file])
+    run_command_text(find_simple_binary(), [lsp_query_path(), "symbols", file])
 
 fn run_lsp_diagnostics(file: text) -> text:
-    run_command_text(["lint", file])
-
-fn lsp_strip_ansi(s: text) -> text:
-    var parts: [text] = []
-    var in_escape = false
-    for ch in s:
-        if in_escape:
-            if ch == "m":
-                in_escape = false
-            continue
-        if ch == "\033" or ch == "\x1b":
-            in_escape = true
-            continue
-        parts.push(ch)
-    parts.join("")
+    run_command_text(find_simple_binary(), ["lint", file])
 
 fn lsp_parse_diag_line(line: text) -> text:
     # Parses: path:line:col: error/warning: message
-    val clean = lsp_strip_ansi(line)
+    val clean = strip_ansi(line)
     val trimmed = clean.trim()
     if trimmed == "":
         return ""
@@ -145,7 +94,7 @@ fn format_lsp_diagnostics_block(file: text, raw: text) -> text:
     "<new-diagnostics>\n" + file + ":\n" + entries.join("\n") + "\n</new-diagnostics>"
 
 fn make_empty_list_result(id: text, key: text) -> text:
-    lsp_result_ok(id, lsp_jo1(lsp_jp(key, "[]")))
+    jsonrpc_result(id, jo1(jp(key, "[]")))
 
 fn handle_resources_list(id: text) -> text:
     make_empty_list_result(id, "resources")
@@ -158,11 +107,11 @@ fn handle_prompts_list(id: text) -> text:
 
 fn handle_roots_list(id: text) -> text:
     val cwd = lsp_get_cwd()
-    val root = lsp_jo2(
-        lsp_jp("uri", lsp_js("file://" + cwd)),
-        lsp_jp("name", lsp_js("workspace"))
+    val root = jo2(
+        jp("uri", js("file://" + cwd)),
+        jp("name", js("workspace"))
     )
-    lsp_result_ok(id, lsp_jo1(lsp_jp("roots", "[" + root + "]")))
+    jsonrpc_result(id, jo1(jp("roots", "[" + root + "]")))
 
 fn handle_logging_set_level(id: text, body: text) -> text:
     var level = "info"
@@ -174,11 +123,11 @@ fn handle_logging_set_level(id: text, body: text) -> text:
         level = "warn"
     elif body.contains("\"level\":\"error\"") or body.contains("\"level\": \"error\""):
         level = "error"
-    lsp_result_ok(id, lsp_jo1(lsp_jp("level", lsp_js(level))))
+    jsonrpc_result(id, jo1(jp("level", js(level))))
 
 fn arg_field(args: text, key: text) -> text:
-    val search1 = lsp_Q() + key + lsp_Q() + ":" + lsp_Q()
-    val search2 = lsp_Q() + key + lsp_Q() + ": " + lsp_Q()
+    val search1 = Q() + key + Q() + ":" + Q()
+    val search2 = Q() + key + Q() + ": " + Q()
     val idx1_result = args.index_of(search1)
     match idx1_result:
         Some(i):
@@ -187,7 +136,7 @@ fn arg_field(args: text, key: text) -> text:
             var pos = start
             while pos < args.len():
                 val ch = args.substring(pos, pos + 1)
-                if ch == lsp_Q():
+                if ch == Q():
                     return parts.join("")
                 parts.push(ch)
                 pos = pos + 1
@@ -200,12 +149,12 @@ fn arg_field(args: text, key: text) -> text:
             var pos = start
             while pos < args.len():
                 val ch = args.substring(pos, pos + 1)
-                if ch == lsp_Q():
+                if ch == Q():
                     return parts.join("")
                 parts.push(ch)
                 pos = pos + 1
         nil: pass_dn
-    val search_num = lsp_Q() + key + lsp_Q() + ":"
+    val search_num = Q() + key + Q() + ":"
     val idx_num_result = args.index_of(search_num)
     match idx_num_result:
         Some(i):
@@ -223,57 +172,80 @@ fn arg_field(args: text, key: text) -> text:
     ""
 
 fn detect_tool_name(body: text) -> text:
-    if body.contains("\"name\":\"lsp_definition\"") or body.contains("\"name\": \"lsp_definition\""):
+    # Original 5 tools
+    if has_method(body, "lsp_definition"):
         return "lsp_definition"
-    if body.contains("\"name\":\"lsp_references\"") or body.contains("\"name\": \"lsp_references\""):
+    if has_method(body, "lsp_references"):
         return "lsp_references"
-    if body.contains("\"name\":\"lsp_hover\"") or body.contains("\"name\": \"lsp_hover\""):
+    if has_method(body, "lsp_hover"):
         return "lsp_hover"
-    if body.contains("\"name\":\"lsp_symbols\"") or body.contains("\"name\": \"lsp_symbols\""):
+    if has_method(body, "lsp_symbols"):
         return "lsp_symbols"
-    if body.contains("\"name\":\"lsp_diagnostics\"") or body.contains("\"name\": \"lsp_diagnostics\""):
+    if has_method(body, "lsp_diagnostics"):
         return "lsp_diagnostics"
-    ""
-
-fn require_arg(id: text, args: text, name: text) -> text:
-    val value = arg_field(args, name)
-    if value == "":
-        return lsp_make_tool_error(id, -32602, "Missing required argument: " + name)
+    # New 6 tools
+    if has_method(body, "lsp_completion"):
+        return "lsp_completion"
+    if has_method(body, "lsp_type_at"):
+        return "lsp_type_at"
+    if has_method(body, "lsp_signature_help"):
+        return "lsp_signature_help"
+    if has_method(body, "lsp_implementation"):
+        return "lsp_implementation"
+    if has_method(body, "lsp_document_highlight"):
+        return "lsp_document_highlight"
+    if has_method(body, "lsp_type_definition"):
+        return "lsp_type_definition"
     ""
 
 fn handle_tool_call(id: text, body: text) -> text:
     val tool_name = detect_tool_name(body)
     if tool_name == "":
-        return lsp_make_tool_error(id, -32602, "Missing tool name")
+        return make_tool_error(id, "Missing tool name")
 
-    if tool_name == "lsp_definition" or tool_name == "lsp_references" or tool_name == "lsp_hover":
+    # Position-based tools (file + line + character)
+    if tool_name == "lsp_definition" or tool_name == "lsp_references" or tool_name == "lsp_hover" or tool_name == "lsp_completion" or tool_name == "lsp_type_at" or tool_name == "lsp_signature_help" or tool_name == "lsp_implementation" or tool_name == "lsp_document_highlight" or tool_name == "lsp_type_definition":
         val file = arg_field(body, "file")
         val line_raw = arg_field(body, "line")
         val char_raw = arg_field(body, "character")
         if file == "" or line_raw == "" or char_raw == "":
-            return lsp_make_tool_error(id, -32602, "Missing required argument: file/line/character")
+            return make_tool_error(id, "Missing required argument: file/line/character")
         val line0 = line_raw.to_int()
         val char0 = char_raw.to_int()
 
         if tool_name == "lsp_definition":
-            return lsp_make_tool_result(id, run_lsp_query("definition", file, line0, char0))
+            return make_tool_result(id, run_lsp_query("definition", file, line0, char0))
         if tool_name == "lsp_references":
-            return lsp_make_tool_result(id, run_lsp_query("references", file, line0, char0))
-        return lsp_make_tool_result(id, run_lsp_query("hover", file, line0, char0))
+            return make_tool_result(id, run_lsp_query("references", file, line0, char0))
+        if tool_name == "lsp_hover":
+            return make_tool_result(id, run_lsp_query("hover", file, line0, char0))
+        if tool_name == "lsp_completion":
+            return make_tool_result(id, run_lsp_query("completions", file, line0, char0))
+        if tool_name == "lsp_type_at":
+            return make_tool_result(id, run_lsp_query("type-at", file, line0, char0))
+        if tool_name == "lsp_signature_help":
+            return make_tool_result(id, run_lsp_query("signature-help", file, line0, char0))
+        if tool_name == "lsp_implementation":
+            return make_tool_result(id, run_lsp_query("implementation", file, line0, char0))
+        if tool_name == "lsp_document_highlight":
+            return make_tool_result(id, run_lsp_query("document-highlight", file, line0, char0))
+        return make_tool_result(id, run_lsp_query("type-definition", file, line0, char0))
 
+    # File-only tools
     if tool_name == "lsp_symbols" or tool_name == "lsp_diagnostics":
         val file = arg_field(body, "file")
         if file == "":
-            return lsp_make_tool_error(id, -32602, "Missing required argument: file")
+            return make_tool_error(id, "Missing required argument: file")
         if tool_name == "lsp_symbols":
-            return lsp_make_tool_result(id, run_lsp_symbols(file))
+            return make_tool_result(id, run_lsp_symbols(file))
         val raw = run_lsp_diagnostics(file)
         val diag_block = format_lsp_diagnostics_block(file, raw)
         if diag_block != "":
-            return lsp_make_tool_result(id, raw + "\n" + diag_block)
-        return lsp_make_tool_result(id, raw)
+            return make_tool_result(id, raw + "\n" + diag_block)
+        return make_tool_result(id, raw)
 
-    lsp_result_error(id, -32602, "Unknown tool: " + tool_name)
+    jsonrpc_error(id, -32602, "Unknown tool: " + tool_name)
+
 fn lsp_get_cwd() -> text:
     val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", "pwd"])
     if code == 0 and stdout.trim() != "":

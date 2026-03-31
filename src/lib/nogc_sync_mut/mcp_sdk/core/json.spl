@@ -195,5 +195,157 @@ fn extract_json_int(json: String, key: String) -> i64:
         return 0
     int(raw)
 
+# --- Square bracket helpers ---
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+# --- Robust JSON parsing helpers ---
+
+fn char_at(s: text, index: i64) -> text:
+    s.substring(index, index + 1)
+
+fn skip_ws(s: text, start: i64) -> i64:
+    var i = start
+    while i < s.len():
+        val ch = char_at(s, i)
+        if ch != " " and ch != "\t" and ch != "\r" and ch != "\n":
+            return i
+        i = i + 1
+    return i
+
+fn read_string_end(s: text, start_quote: i64) -> i64:
+    var i = start_quote + 1
+    var escaped = false
+    while i < s.len():
+        val ch = char_at(s, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == Q():
+            return i
+        i = i + 1
+    return -1
+
+fn read_nested_end(s: text, start_index: i64) -> i64:
+    var i = start_index
+    var depth = 0
+    var in_string = false
+    var escaped = false
+    while i < s.len():
+        val ch = char_at(s, i)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                in_string = false
+        else:
+            if ch == Q():
+                in_string = true
+            elif ch == LB() or ch == SB_L():
+                depth = depth + 1
+            elif ch == RB() or ch == SB_R():
+                depth = depth - 1
+                if depth == 0:
+                    return i
+        i = i + 1
+    return -1
+
+fn find_text(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack[i:i + needle.len()] == needle:
+            return i
+        i = i + 1
+    return -1
+
+fn unescape_json_string(s: text) -> text:
+    var out = s
+    out = out.replace("\\\\", "__MCP_SDK_JSON_BS__")
+    out = out.replace("\\\"", "\"")
+    out = out.replace("\\n", "\n")
+    out = out.replace("\\r", "\r")
+    out = out.replace("\\t", "\t")
+    out = out.replace("__MCP_SDK_JSON_BS__", "\\")
+    out
+
+# Extract raw JSON value for a given key (handles whitespace around colon, nested objects, escape sequences)
+fn extract_field_raw(json: text, key: text) -> text:
+    val search = Q() + key + Q()
+    val idx_result = json.index_of(search)
+    var idx = -1
+    match idx_result:
+        Some(i): idx = i
+        nil: return "null"
+    if idx < 0:
+        return "null"
+    var start = idx + search.len()
+    start = skip_ws(json, start)
+    if start >= json.len() or char_at(json, start) != ":":
+        return "null"
+    start = skip_ws(json, start + 1)
+    if start >= json.len():
+        return "null"
+    var rest = json.substring(start)
+    rest = rest.trim()
+    if rest == "":
+        return "null"
+    if rest.starts_with(Q()):
+        val end_idx = read_string_end(rest, 0)
+        if end_idx < 0:
+            return "null"
+        return rest[0:end_idx + 1]
+    if rest.starts_with(LB()) or rest.starts_with(SB_L()):
+        val end_idx = read_nested_end(rest, 0)
+        if end_idx < 0:
+            return "null"
+        return rest[0:end_idx + 1]
+    var parts: [text] = []
+    for ch in rest:
+        if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            break
+        parts.push(ch)
+    val raw = parts.join("")
+    if raw == "":
+        return "null"
+    raw
+
+# Extract and unquote a string field value
+fn extract_field(json: text, key: text) -> text:
+    val raw = extract_field_raw(json, key)
+    if raw == "null":
+        return ""
+    if raw.len() >= 2 and raw.starts_with(Q()) and raw.ends_with(Q()):
+        return unescape_json_string(raw[1:raw.len() - 1])
+    return raw
+
+# Extract JSON-RPC id (string or number, returned raw)
+fn extract_id(json: text) -> text:
+    extract_field_raw(json, "id")
+
+# Extract a field from the nested "params" object
+fn extract_nested(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return ""
+    extract_field(params, key)
+
+# Extract a raw field from the nested "params" object
+fn extract_nested_raw(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return "null"
+    extract_field_raw(params, key)
+
 # --- Exports ---
 

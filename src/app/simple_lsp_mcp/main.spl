@@ -1,38 +1,38 @@
 @allow(unnamed_duplicate_typed_args)
 # Simple LSP MCP Server — Simple-native replacement for the Python shim
+#
+# Uses shared mcp_sdk for JSON, transport, and shell helpers.
 
-use app.simple_lsp_mcp.json_helpers
+use app.simple_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, extract_field, extract_id, jsonrpc_result, jsonrpc_error, has_method}
 use app.simple_lsp_mcp.protocol
 use app.simple_lsp_mcp.tools
 
-val LSP_SERVER_NAME = "simple-lsp-mcp"
-val LSP_SERVER_VERSION = "0.1.0-mvp"
-val LSP_NL = "\n"
+val SERVER_NAME = "simple-lsp-mcp"
+val SERVER_VERSION = "0.2.0"
 
-var LSP_USE_JSON_LINES = false
-var LSP_TOOLS_CACHE = ""
-var LSP_INIT_CACHE = ""
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
 
 fn main():
     while true:
-        val msg = lsp_read_stdin_message()
+        val msg = read_stdin_message()
         if msg == "":
             return
 
-        val method = lsp_detect_method(msg)
-        val id = lsp_extract_id(msg)
+        val method = detect_mcp_method(msg)
+        val id = extract_id(msg)
         var response = ""
 
         if method == "initialize":
-            response = lsp_make_init_response(id)
+            response = make_init_response(id)
         elif method == "initialized" or method == "notifications/initialized" or method == "notifications/cancelled" or method == "notifications/roots/list_changed":
             response = ""
         elif method == "shutdown":
-            response = lsp_result_ok(id, "null")
+            response = jsonrpc_result(id, "null")
         elif method == "ping":
-            response = lsp_result_ok(id, lsp_LB() + lsp_RB())
+            response = jsonrpc_result(id, LB() + RB())
         elif method == "tools/list":
-            response = lsp_make_tools_list(id)
+            response = make_tools_list(id)
         elif method == "tools/call":
             response = handle_tool_call(id, msg)
         elif method == "resources/list":
@@ -47,41 +47,42 @@ fn main():
             response = handle_logging_set_level(id, msg)
         else:
             if id != "" and id != "null":
-                response = lsp_result_error(id, -32601, "Method not found: " + method)
+                response = jsonrpc_error(id, -32601, "Method not found: " + method)
 
         if response != "":
-            lsp_write_stdout_message(response)
+            write_stdout_message(response)
 
 main()
 
-fn lsp_has_method(msg: text, name: text) -> bool:
-    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
-
-fn lsp_detect_method(msg: text) -> text:
-    if lsp_has_method(msg, "initialize"):
+fn detect_mcp_method(msg: text) -> text:
+    if has_method(msg, "initialize"):
         return "initialize"
-    if lsp_has_method(msg, "initialized") or lsp_has_method(msg, "notifications/initialized"):
+    if has_method(msg, "initialized"):
         return "initialized"
-    if lsp_has_method(msg, "notifications/cancelled"):
+    if has_method(msg, "notifications/initialized"):
+        return "notifications/initialized"
+    if has_method(msg, "notifications/cancelled"):
         return "notifications/cancelled"
-    if lsp_has_method(msg, "notifications/roots/list_changed"):
+    if has_method(msg, "notifications/roots/list_changed"):
         return "notifications/roots/list_changed"
-    if lsp_has_method(msg, "shutdown"):
+    if has_method(msg, "shutdown"):
         return "shutdown"
-    if lsp_has_method(msg, "ping"):
+    if has_method(msg, "ping"):
         return "ping"
-    if lsp_has_method(msg, "tools/list"):
+    if has_method(msg, "tools/list"):
         return "tools/list"
-    if lsp_has_method(msg, "tools/call"):
+    if has_method(msg, "tools/call"):
         return "tools/call"
-    if lsp_has_method(msg, "resources/list"):
+    if has_method(msg, "resources/list"):
         return "resources/list"
-    if lsp_has_method(msg, "resources/templates/list"):
+    if has_method(msg, "resources/templates/list"):
         return "resources/templates/list"
-    if lsp_has_method(msg, "prompts/list"):
+    if has_method(msg, "prompts/list"):
         return "prompts/list"
-    if lsp_has_method(msg, "roots/list"):
+    if has_method(msg, "roots/list"):
         return "roots/list"
-    if lsp_has_method(msg, "logging/setLevel") or lsp_has_method(msg, "logging/setlevel"):
+    if has_method(msg, "logging/setLevel"):
         return "logging/setLevel"
-    lsp_extract_field(msg, "method")
+    if has_method(msg, "logging/setlevel"):
+        return "logging/setLevel"
+    extract_field(msg, "method")

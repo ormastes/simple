@@ -125,7 +125,11 @@ pub fn handle_examples_check(args: &[String]) -> i32 {
 
     print_summary(&total_stats, &config.report_path);
     if let Err(err) = report.write() {
-        eprintln!("error: failed to write report {}: {}", config.report_path.display(), err);
+        eprintln!(
+            "error: failed to write report {}: {}",
+            config.report_path.display(),
+            err
+        );
         return 1;
     }
 
@@ -358,12 +362,7 @@ fn classify_status(status: ExitStatus, output: &std::process::Output) -> CheckRe
 fn print_group_summary(label: &str, stats: &GroupStats) {
     println!(
         "SUMMARY {} total={} ok={} error={} timeout={} crash={}",
-        label,
-        stats.total,
-        stats.ok,
-        stats.error,
-        stats.timeout,
-        stats.crash
+        label, stats.total, stats.ok, stats.error, stats.timeout, stats.crash
     );
 }
 

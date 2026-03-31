@@ -8,6 +8,7 @@
 //! Supports incremental compilation via content-hash keyed .o cache,
 //! and auto-detected linker selection via `LinkerBuilder`.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -205,7 +206,7 @@ impl NativeProjectBuilder {
     /// Build the project.
     pub fn build(self) -> Result<NativeBuildResult, String> {
         // 1. Discover files
-        let files = self.discover_files();
+        let files = self.discover_files()?;
         if files.is_empty() {
             return Err("No .spl files found in source directories".to_string());
         }
@@ -494,7 +495,14 @@ impl NativeProjectBuilder {
     }
 
     /// Discover all .spl files in source directories.
-    fn discover_files(&self) -> Vec<PathBuf> {
+    fn discover_files(&self) -> Result<Vec<PathBuf>, String> {
+        if let Some(entry_file) = &self.entry_file {
+            return self.discover_reachable_files(entry_file);
+        }
+        Ok(self.discover_files_full_scan())
+    }
+
+    fn discover_files_full_scan(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
         for dir in &self.source_dirs {
             if dir.is_dir() {
@@ -510,6 +518,44 @@ impl NativeProjectBuilder {
         files.sort();
         files.dedup_by(|a, b| same_file_path(a, b));
         files
+    }
+
+    fn discover_reachable_files(&self, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
+        let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.to_path_buf());
+        let mut resolver = ModuleResolver::new(self.project_root.clone(), self.source_root.clone());
+        let mut queue = VecDeque::from([canonical_entry.clone()]);
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
+
+        while let Some(path) = queue.pop_front() {
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            files.push(canonical.clone());
+
+            let mut source = std::fs::read_to_string(&canonical)
+                .map_err(|e| format!("failed to read {}: {}", canonical.display(), e))?;
+            if source.contains('\r') {
+                source = source.replace('\r', "");
+            }
+
+            let mut parser = simple_parser::Parser::new(&source);
+            let module = parser
+                .parse()
+                .map_err(|e| format!("failed to parse {} during discovery: {}", canonical.display(), e))?;
+
+            for dep in extract_reachable_module_paths(&module, &canonical, &mut resolver) {
+                let dep_canonical = std::fs::canonicalize(&dep).unwrap_or(dep);
+                if !seen.contains(&dep_canonical) {
+                    queue.push_back(dep_canonical);
+                }
+            }
+        }
+
+        files.sort();
+        files.dedup_by(|a, b| same_file_path(a, b));
+        Ok(files)
     }
 
     /// Compile entries (index, path, source) in parallel using rayon.
@@ -2454,6 +2500,78 @@ fn same_file_path(a: &Path, b: &Path) -> bool {
     canon_a == canon_b
 }
 
+fn extract_reachable_module_paths(
+    module: &simple_parser::ast::Module,
+    from_file: &Path,
+    resolver: &mut ModuleResolver,
+) -> Vec<PathBuf> {
+    use simple_parser::ast::{
+        AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath, MultiUse, Node, UseStmt,
+    };
+
+    fn resolve_candidate(
+        resolver: &mut ModuleResolver,
+        from_file: &Path,
+        path: &ModulePath,
+        target: Option<&ImportTarget>,
+    ) -> Option<PathBuf> {
+        match target {
+            Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) => {
+                let mut module_segments = path.segments.clone();
+                module_segments.push(name.clone());
+                let module_path = ModulePath::new(module_segments);
+                if let Ok(resolved) = resolver.resolve(&module_path, from_file) {
+                    return Some(std::fs::canonicalize(&resolved.path).unwrap_or(resolved.path));
+                }
+            }
+            _ => {}
+        }
+        resolver
+            .resolve(path, from_file)
+            .ok()
+            .map(|resolved| std::fs::canonicalize(&resolved.path).unwrap_or(resolved.path))
+    }
+
+    fn push_dep(
+        deps: &mut Vec<PathBuf>,
+        resolver: &mut ModuleResolver,
+        from_file: &Path,
+        path: &ModulePath,
+        target: Option<&ImportTarget>,
+    ) {
+        if let Some(resolved) = resolve_candidate(resolver, from_file, path, target) {
+            if !deps.iter().any(|existing| same_file_path(existing, &resolved)) {
+                deps.push(resolved);
+            }
+        }
+    }
+
+    let mut deps = Vec::new();
+    for item in &module.items {
+        match item {
+            Node::UseStmt(UseStmt { path, target, .. }) => push_dep(&mut deps, resolver, from_file, path, Some(target)),
+            Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => {
+                push_dep(&mut deps, resolver, from_file, path, Some(target))
+            }
+            Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => {
+                push_dep(&mut deps, resolver, from_file, path, Some(target))
+            }
+            Node::MultiUse(MultiUse { imports, .. }) => {
+                for (path, target) in imports {
+                    push_dep(&mut deps, resolver, from_file, path, Some(target));
+                }
+            }
+            Node::AutoImportStmt(AutoImportStmt { path, .. }) => push_dep(&mut deps, resolver, from_file, path, None),
+            Node::ModDecl(ModDecl { name, body, .. }) if body.is_none() => {
+                let path = ModulePath::new(vec![name.clone()]);
+                push_dep(&mut deps, resolver, from_file, &path, None);
+            }
+            _ => {}
+        }
+    }
+    deps
+}
+
 /// Compute a content hash for a source string (same algorithm as SourceInfo).
 fn content_hash(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -3245,9 +3363,41 @@ mod tests {
             .source_dir(src_dir)
             .entry_file(entry_file.clone());
 
-        let files = builder.discover_files();
-        assert!(files.iter().any(|path| same_file_path(path, &lib_file)));
+        let files = builder.discover_files().unwrap();
+        assert!(!files.iter().any(|path| same_file_path(path, &lib_file)));
         assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn test_discover_files_from_entry_excludes_unrelated_source_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        let src_app_dir = project_root.join("src/app/mcp_t32");
+        let examples_dir = project_root.join("examples/tool");
+        std::fs::create_dir_all(&src_app_dir).unwrap();
+        std::fs::create_dir_all(&examples_dir).unwrap();
+
+        let helper_file = src_app_dir.join("helper.spl");
+        let unrelated_file = project_root.join("src/unrelated.spl");
+        let entry_file = examples_dir.join("main.spl");
+
+        std::fs::write(&helper_file, "fn helper() -> i64:\n    return 1\n").unwrap();
+        std::fs::write(&unrelated_file, "fn unrelated() -> i64:\n    return 2\n").unwrap();
+        std::fs::write(
+            &entry_file,
+            "use app.mcp_t32.helper\nfn main() -> i64:\n    return helper()\n",
+        )
+        .unwrap();
+
+        let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+            .source_dir(project_root.join("src"))
+            .entry_file(entry_file.clone());
+
+        let files = builder.discover_files().unwrap();
+        assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+        assert!(files.iter().any(|path| same_file_path(path, &helper_file)));
+        assert!(!files.iter().any(|path| same_file_path(path, &unrelated_file)));
         assert_eq!(files.len(), 2);
     }
 }

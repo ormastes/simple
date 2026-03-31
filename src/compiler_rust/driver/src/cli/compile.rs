@@ -1,5 +1,6 @@
 //! Compilation commands: compile, list targets, list linkers.
 
+use crate::cli::examples_safety::{is_timeout_error, timeout_error_message, ExamplesWatchdogGuard};
 use simple_common::target::{Target, TargetArch};
 use crate::runner::Runner;
 use crate::CompileOptions;
@@ -50,6 +51,7 @@ fn compile_file_impl(
         std::env::set_var("SIMPLE_ALLOW_DEPRECATED", "1");
     }
 
+    let watchdog = ExamplesWatchdogGuard::for_path(source);
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
@@ -149,7 +151,11 @@ fn compile_file_impl(
             0
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            if watchdog.is_active() && is_timeout_error(&e) {
+                eprintln!("error: {}", timeout_error_message(source, watchdog.timeout_secs()));
+            } else {
+                eprintln!("error: {}", e);
+            }
 
             // Record failed compilation event
             build_state.events.push(BuildEvent::CompilationFailed {
@@ -206,6 +212,8 @@ pub fn compile_file_native(
     use simple_compiler::linker::{NativeBinaryOptions, NativeLinker};
     use simple_compiler::pipeline::CompilerPipeline;
 
+    let watchdog = ExamplesWatchdogGuard::for_path(source);
+
     // Determine output path
     let out_path = output.unwrap_or_else(|| {
         // Default: remove extension for native binary
@@ -253,7 +261,12 @@ pub fn compile_file_native(
             0
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            let message = e.to_string();
+            if watchdog.is_active() && is_timeout_error(&message) {
+                eprintln!("error: {}", timeout_error_message(source, watchdog.timeout_secs()));
+            } else {
+                eprintln!("error: {}", message);
+            }
             1
         }
     }
@@ -263,6 +276,7 @@ pub fn compile_file_native(
 pub fn compile_file_to_ptx(source: &Path, output: Option<PathBuf>) -> i32 {
     use simple_compiler::pipeline::CompilerPipeline;
 
+    let watchdog = ExamplesWatchdogGuard::for_path(source);
     let out_path = output.unwrap_or_else(|| source.with_extension("ptx"));
 
     let mut pipeline = match CompilerPipeline::new() {
@@ -279,7 +293,12 @@ pub fn compile_file_to_ptx(source: &Path, output: Option<PathBuf>) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            let message = e.to_string();
+            if watchdog.is_active() && is_timeout_error(&message) {
+                eprintln!("error: {}", timeout_error_message(source, watchdog.timeout_secs()));
+            } else {
+                eprintln!("error: {}", message);
+            }
             1
         }
     }

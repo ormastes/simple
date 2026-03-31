@@ -1,8 +1,11 @@
 //! Basic CLI operations: running files, code, and watching for changes.
 
+use crate::cli::examples_safety::{
+    is_timeout_error, run_isolated_example_file, timeout_error_message, ExamplesWatchdogGuard,
+};
 use crate::runner::Runner;
 use crate::watcher::watch;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Create a runner with appropriate GC configuration
 pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
@@ -22,8 +25,13 @@ pub fn run_file(path: &Path, gc_log: bool, gc_off: bool) -> i32 {
 
 /// Run a source file (.spl) with command-line arguments
 pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<String>) -> i32 {
+    if let Some(code) = run_isolated_example_file(path, gc_log, gc_off, &args) {
+        return code;
+    }
+
     let path = path.to_path_buf();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let watchdog = ExamplesWatchdogGuard::for_path(&path);
         let runner = create_runner(gc_log, gc_off);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let result = if matches!(extension, "spl" | "simple" | "sscript" | "shs" | "") {
@@ -34,7 +42,11 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
         match result {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("error: {}", e);
+                if watchdog.is_active() && is_timeout_error(&e) {
+                    eprintln!("error: {}", timeout_error_message(&path, watchdog.timeout_secs()));
+                } else {
+                    eprintln!("error: {}", e);
+                }
                 1
             }
         }

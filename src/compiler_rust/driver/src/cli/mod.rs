@@ -11,6 +11,7 @@ pub mod diagram_gen;
 pub mod doc_gen;
 pub mod electron;
 pub mod env;
+pub mod examples_safety;
 pub mod gen_lean;
 pub mod help;
 pub mod interactive_fix;

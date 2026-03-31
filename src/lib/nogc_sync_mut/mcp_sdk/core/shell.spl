@@ -1,0 +1,79 @@
+@allow(unnamed_duplicate_typed_args)
+# MCP SDK - Shell and Binary Detection Helpers
+#
+# Configurable binary detection via env vars with fallback paths.
+# Shell execution helpers and ANSI stripping.
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Find a binary by checking an env var first, then a list of fallback paths
+fn find_binary(env_var: text, fallback_paths: [text]) -> text:
+    val env_val = rt_env_get(env_var) ?? ""
+    if env_val != "":
+        return env_val
+    var i = 0
+    while i < fallback_paths.len():
+        if rt_file_exists(fallback_paths[i]):
+            return fallback_paths[i]
+        i = i + 1
+    if fallback_paths.len() > 0:
+        return fallback_paths[fallback_paths.len() - 1]
+    ""
+
+# Find the Simple compiler binary (checks SIMPLE_BINARY env var, then standard paths)
+fn find_simple_binary() -> text:
+    val os_env = rt_env_get("OS") ?? ""
+    val is_win = os_env.contains("Windows")
+    if is_win:
+        return find_binary("SIMPLE_BINARY", ["bin/release/simple.exe", "bin/simple.exe"])
+    find_binary("SIMPLE_BINARY", ["bin/release/simple", "bin/simple"])
+
+# Strip ANSI escape codes from a string
+fn strip_ansi(s: text) -> text:
+    var parts: [text] = []
+    var in_escape = false
+    for ch in s:
+        if in_escape:
+            if ch == "m":
+                in_escape = false
+            continue
+        if ch == "\033" or ch == "\x1b":
+            in_escape = true
+            continue
+        parts.push(ch)
+    parts.join("")
+
+# Remove [DEBUG] lines from command output
+fn clean_command_output(stdout: text) -> text:
+    val lines = stdout.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        if not lines[i].starts_with("[DEBUG] "):
+            kept.push(lines[i])
+        i = i + 1
+    var joined = kept.join("\n")
+    while joined.ends_with("\n"):
+        joined = joined.substring(0, joined.len() - 1)
+    joined
+
+# Run a command and return cleaned stdout, handling errors
+fn run_command_text(binary: text, args: [text]) -> text:
+    val (stdout, stderr, code) = rt_process_run(binary, args)
+    val clean = clean_command_output(stdout)
+    if code == 0:
+        return clean
+    if stderr.trim() != "":
+        return stderr.trim()
+    if clean != "":
+        return clean
+    "command failed with exit code " + str(code)
+
+# Detect the system shell and its command flag
+fn detect_shell() -> (text, text):
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        return ("cmd.exe", "/c")
+    ("sh", "-c")

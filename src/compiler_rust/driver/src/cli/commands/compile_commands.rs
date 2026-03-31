@@ -115,10 +115,7 @@ fn parse_target_flag(args: &[String]) -> Result<Option<Target>, String> {
     args.iter()
         .position(|a| a == "--target")
         .and_then(|i| args.get(i + 1))
-        .map(|s| {
-            s.parse::<TargetArch>()
-                .map_err(|e| e.to_string())
-        })
+        .map(|s| s.parse::<TargetArch>().map_err(|e| e.to_string()))
         .transpose()
         .map(|arch| arch.map(|arch| Target::new(arch, simple_common::target::TargetOS::host())))
 }
@@ -127,10 +124,7 @@ fn parse_linker_flag(args: &[String]) -> Result<Option<NativeLinker>, String> {
     args.iter()
         .position(|a| a == "--linker")
         .and_then(|i| args.get(i + 1))
-        .map(|s| {
-            NativeLinker::from_name(s)
-                .ok_or_else(|| format!("unknown linker '{}'. Available: mold, lld, ld", s))
-        })
+        .map(|s| NativeLinker::from_name(s).ok_or_else(|| format!("unknown linker '{}'. Available: mold, lld, ld", s)))
         .transpose()
 }
 
