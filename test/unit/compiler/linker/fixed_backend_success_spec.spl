@@ -1,0 +1,149 @@
+"""Fixed backend success-path specification tests."""
+
+use app.io.{shell}
+use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+use compiler.backend.linker.smf_enums.{Arch, Platform}
+use compiler.backend.linker.smf_header.{SmfHeader}
+use compiler.driver.cache.compile_options_hash.{
+    compile_options_hash_compute,
+    compile_options_hash_to_bytes
+}
+use std.io_runtime.{file_read_bytes}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn delete_if_exists(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn append_u32_le(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 0xFF) as u8)
+    out.push(((value >> 8) & 0xFF) as u8)
+    out.push(((value >> 16) & 0xFF) as u8)
+    out.push(((value >> 24) & 0xFF) as u8)
+    out
+
+fn append_u64_le(bytes: [u8], value: i64) -> [u8]:
+    var out = bytes
+    out.push((value & 0xFF) as u8)
+    out.push(((value >> 8) & 0xFF) as u8)
+    out.push(((value >> 16) & 0xFF) as u8)
+    out.push(((value >> 24) & 0xFF) as u8)
+    out.push(((value >> 32) & 0xFF) as u8)
+    out.push(((value >> 40) & 0xFF) as u8)
+    out.push(((value >> 48) & 0xFF) as u8)
+    out.push(((value >> 56) & 0xFF) as u8)
+    out
+
+fn build_section_entry(offset: i64, size: i64) -> [u8]:
+    var entry: [u8] = []
+    entry.push(1)
+    entry.push(0)
+    entry.push(0)
+    entry.push(0)
+    entry = append_u32_le(entry, 0x05)
+    entry = append_u64_le(entry, offset)
+    entry = append_u64_le(entry, size)
+    entry = append_u64_le(entry, size)
+    entry = append_u32_le(entry, 16)
+    entry = entry + "code".to_bytes()
+    while entry.len() < 64:
+        entry.push(0)
+    entry
+
+fn build_symbol_entry(size: i64) -> [u8]:
+    var entry: [u8] = []
+    entry = append_u32_le(entry, 0)
+    entry = append_u64_le(entry, 0)
+    entry.push(0)
+    entry.push(1)
+    entry.push(0)
+    entry.push(0)
+    entry = append_u64_le(entry, 0)
+    entry = append_u64_le(entry, size)
+    entry = append_u32_le(entry, 0)
+    entry = append_u32_le(entry, 0)
+    entry.push(0)
+    entry.push(0)
+    entry.push(0)
+    entry = append_u64_le(entry, 0)
+    entry
+
+fn build_fixed_backend_smf(object_bytes: [u8]) -> [u8]:
+    val options = compile_options_hash_compute("llvm", 3, true, false, false)
+
+    var header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+    header.set_executable(true)
+    header.set_pic(true)
+    header.set_compile_options_bytes(compile_options_hash_to_bytes(options))
+    header.section_count = 1
+    header.section_table_offset = 128
+    header.symbol_table_offset = 192
+    header.symbol_count = 1
+    header.exported_count = 1
+    header.entry_point = 0
+    header.set_stub_info(0, 0)
+
+    val code_offset = 249
+    var smf_bytes = header.to_bytes()
+    smf_bytes = smf_bytes + build_section_entry(code_offset, object_bytes.len() as i64)
+    smf_bytes = smf_bytes + build_symbol_entry(object_bytes.len() as i64)
+    smf_bytes = smf_bytes + "main\0".to_bytes()
+    smf_bytes = smf_bytes + object_bytes
+    smf_bytes
+
+describe "Fixed backend success path":
+    it "links a valid library module when --fixed-be is enabled":
+        val tmpdir = shell("mktemp -d").stdout.trim()
+        if tmpdir == "":
+            fail("failed to create a temporary directory")
+
+        val src_path = "{tmpdir}/fixed_backend_fixture.c"
+        val obj_path = "{tmpdir}/fixed_backend_fixture.o"
+        val lib_path = "{tmpdir}/fixed_backend_fixture.lsm"
+        val out_path = "{tmpdir}/fixed_backend_fixture.out"
+
+        delete_if_exists(src_path)
+        delete_if_exists(obj_path)
+        delete_if_exists(lib_path)
+        delete_if_exists(out_path)
+
+        expect(rt_file_write_text(src_path, "int main(void) { return 0; }\n")).to_equal(true)
+
+        val compile = shell("cc -c -O0 -fPIC -fPIE -o '{obj_path}' '{src_path}' 2>&1")
+        if compile.exit_code != 0:
+            _ = shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+            fail("cc failed: {compile.stdout}{compile.stderr}")
+
+        val object_bytes = file_read_bytes(obj_path)
+        val smf_bytes = build_fixed_backend_smf(object_bytes)
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data_with_object("pkg/fixed_backend", smf_bytes, object_bytes).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        val cfg = NativeLinkConfig.default()
+        val fixed_cfg = NativeLinkConfig(
+            libraries: cfg.libraries,
+            library_paths: cfg.library_paths,
+            runtime_path: "none",
+            pie: cfg.pie,
+            debug: cfg.debug,
+            verbose: cfg.verbose,
+            extra_flags: cfg.extra_flags.push("--fixed-be")
+        )
+
+        val link_result = link_to_native([lib_path], out_path, fixed_cfg)
+        expect(link_result.is_ok()).to_equal(true)
+        expect(link_result.unwrap()).to_equal(out_path)
+        expect(rt_file_exists(out_path)).to_equal(true)
+
+        delete_if_exists(src_path)
+        delete_if_exists(obj_path)
+        delete_if_exists(lib_path)
+        delete_if_exists(out_path)
+        _ = shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")

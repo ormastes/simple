@@ -22,9 +22,8 @@ use compiler.loader.compiler_ffi.{
     serialize_types_json,
     parse_types_json
 }
+use .smf_cache.{SmfCache, CacheStats}
 
-# mmap functions not yet available in app.io.mod; SmfCache/MappedSmf stubbed locally
-# use compiler.loader.smf_cache (SmfCache, MappedSmf)
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
 extern fn json_parse(input: text) -> Result<JsonValue, SimpleError>
@@ -132,82 +131,6 @@ fn type_from_string(type_str: text) -> text:
 # Executable memory now delegates to shared loader/object mapper.
 
 # ============================================================================
-# Note.sdn Metadata Structures (local stubs for JIT context)
-# ============================================================================
-
-# Note.sdn metadata structures (stub versions)
-struct NoteSdnPossible:
-    template: text
-    type_args: text
-    mangled_name: text
-
-struct NoteSdnInstantiation:
-    template: text
-    type_args: text
-    mangled_name: text
-    from_file: text
-    from_loc: text
-    output_file: text
-    status: InstantiationStatus
-
-enum InstantiationStatus:
-    Pending
-    Success
-    Failed
-
-impl InstantiationStatus:
-    fn as_str() -> text:
-        match self:
-            case Pending: "pending"
-            case Success: "success"
-            case Failed: "failed"
-
-struct NoteSdnMetadata:
-    possible: [NoteSdnPossible]
-    instantiations: [NoteSdnInstantiation]
-
-struct SmfCache:
-    """Stub for SMF cache (requires mmap infrastructure)."""
-    cached_files: Dict<text, i32>
-    enabled: bool
-    stats: CacheStats
-
-impl SmfCache:
-    me get(path: text) -> Result<MappedSmf, text>:
-        """Stub: Returns empty MappedSmf for testing."""
-        # Track that we accessed this file
-        if not self.cached_files.contains_key(path):
-            self.cached_files[path] = 1
-        Ok(MappedSmf(path: path))
-
-    fn get_stats() -> CacheStats:
-        CacheStats(
-            total_files: self.cached_files.len(),
-            total_memory: 0,
-            cache_hits: 0,
-            cache_misses: 0
-        )
-
-struct MappedSmf:
-    """Stub for mapped SMF file."""
-    path: text
-
-impl MappedSmf:
-    fn read_note_sdn() -> Result<NoteSdnMetadata, text>:
-        """Stub: Returns empty metadata for testing."""
-        Ok(NoteSdnMetadata(
-            possible: [],
-            instantiations: []
-        ))
-
-struct CacheStats:
-    """Cache statistics."""
-    total_files: i32
-    total_memory: i64
-    cache_hits: i32
-    cache_misses: i32
-
-# ============================================================================
 # JIT Instantiator
 # ============================================================================
 
@@ -218,6 +141,7 @@ struct JitInstantiator:
     loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
     in_progress: Set<text>
     depth: i32
+    compile_count: i32
     jit_cache: Dict<text, ([u8], i64)>
     symbol_table: Dict<text, i64>
     exec_mapper: SharedExecMapper
@@ -233,6 +157,7 @@ impl JitInstantiator:
             loaded_metadata: {},
             in_progress: {},
             depth: 0,
+            compile_count: 0,
             jit_cache: {},
             symbol_table: {},
             exec_mapper: SharedExecMapper.new(SharedExecMapperConfig(verbose: config.verbose)),
@@ -240,16 +165,7 @@ impl JitInstantiator:
                 default_owner: "__jit__",
                 allow_replace: true
             )),
-            smf_cache: SmfCache(
-                cached_files: {},
-                enabled: true,
-                stats: CacheStats(
-                    total_files: 0,
-                    total_memory: 0,
-                    cache_hits: 0,
-                    cache_misses: 0
-                )
-            )
+            smf_cache: SmfCache.new()
         )
 
     me load_smf_metadata(smf_path: text) -> Result<(), text>:
@@ -279,15 +195,13 @@ impl JitInstantiator:
 
     me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
         """Read note.sdn section from SMF file using mmap cache."""
-        # Get mapped SMF file from cache (auto-loads if not cached)
-        var mapped_smf = self.smf_cache.get(smf_path)?
+        # Get mapped SMF file from the shared cache (auto-loads if not cached).
+        val mapped_smf = self.smf_cache.get(smf_path)?
+        val note_metadata = mapped_smf.read_note_sdn()?
 
-        # Read note.sdn metadata
-        val metadata = mapped_smf.read_note_sdn()?
-
-        # Convert NoteSdnMetadata to LoadedMetadata
+        # Convert shared note.sdn metadata to the local JIT bookkeeping shape.
         var possible: [PossibleInstantiation] = []
-        for entry in metadata.possible:
+        for entry in note_metadata.possible:
             possible = possible.push(PossibleInstantiation(
                 template_name: entry.template,
                 type_args: entry.type_args,
@@ -296,7 +210,7 @@ impl JitInstantiator:
 
         var instantiations: [InstantiationRecord] = []
         var id = 0
-        for entry in metadata.instantiations:
+        for entry in note_metadata.instantiations:
             instantiations = instantiations.push(InstantiationRecord(
                 id: id,
                 template_name: entry.template,
@@ -445,6 +359,7 @@ impl JitInstantiator:
 
                 # Register in symbol table
                 self.symbol_table[entry.mangled_name] = fn_pointer
+                self.compile_count = self.compile_count + 1
 
                 # Update SMF file if configured
                 if self.config.update_smf:
@@ -507,6 +422,7 @@ impl JitInstantiator:
         val cache_stats = self.smf_cache.get_stats()
         JitStats(
             cached_count: self.jit_cache.len(),
+            compile_count: self.compile_count,
             loaded_smf_count: self.loaded_metadata.len(),
             smf_cache_hits: cache_stats.cache_hits,
             smf_cache_misses: cache_stats.cache_misses,
@@ -521,6 +437,7 @@ impl JitInstantiator:
 struct JitStats:
     """JIT instantiation statistics."""
     cached_count: i32
+    compile_count: i32
     loaded_smf_count: i32
     smf_cache_hits: i32
     smf_cache_misses: i32

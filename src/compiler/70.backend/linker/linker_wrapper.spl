@@ -76,6 +76,16 @@ struct CrtFiles:
     lib_dirs: [text]     # System library search paths
     found: bool
 
+fn detect_preferred_backend(extra_flags: [text]) -> text:
+    for flag in extra_flags:
+        if flag == "--fixed-be":
+            return "llvm"
+        elif flag.starts_with("--fixed-be="):
+            val backend = flag.substring(11)
+            if backend != "":
+                return backend
+    ""
+
 # ============================================================================
 # Native Linking
 # ============================================================================
@@ -259,7 +269,9 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
         return Err("No SMF inputs")
 
     val verbose = config.verbose
-    val provider = create_default_provider(verbose)
+    val prefer_backend = detect_preferred_backend(config.extra_flags)
+    val provider = create_default_provider(verbose, prefer_backend)
+    val strict_preference = prefer_backend != nil and prefer_backend != ""
 
     # Create shared ObjTaker for extraction/instantiation across all inputs
     var obj_taker = objtaker_with_defaults()
@@ -294,6 +306,9 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
 
                     val code_res = provider.get_exported_code(m)
                     if code_res.is_err():
+                        if strict_preference:
+                            cleanup_temp_dir(tmp_dir)
+                            return Err(code_res.unwrap_err())
                         if verbose:
                             print "[linker-wrapper] missing object for {m}: {code_res.unwrap_err()}"
                         continue
@@ -315,6 +330,9 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
                     val code_objs = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
                     for p in code_objs:
                         objs.push(p)
+                elif strict_preference:
+                    cleanup_temp_dir(tmp_dir)
+                    return Err(code_res.unwrap_err())
 
         if objs.len() == 0:
             cleanup_temp_dir(tmp_dir)
@@ -354,6 +372,8 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
             cleanup_temp_dir(tmp_dir)
             return link_res
         cleanup_temp_dir(tmp_dir)
+    elif strict_preference:
+        return Err(code_result.unwrap_err())
 
     # Fallback: self-contained binary
     val data = file_read_bytes(path)
@@ -367,13 +387,13 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
     )
     link_to_self_contained(data, output, sc_config)
 
-fn create_default_provider(verbose: bool) -> ObjectProvider:
+fn create_default_provider(verbose: bool, prefer_backend: text) -> ObjectProvider:
     ObjectProvider.new(ObjectProviderConfig(
         search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
         libraries: [],
         enable_cache: true,
         verbose: verbose,
-        prefer_backend: nil
+        prefer_backend: prefer_backend
     ))
 
 fn materialize_code_units(units: [ObjectCodeUnit], tmp_dir: text, verbose: bool) -> [text]:
@@ -785,4 +805,3 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 # ============================================================================
 # Exports
 # ============================================================================
-

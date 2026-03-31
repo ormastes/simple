@@ -1,7 +1,7 @@
 # JIT Infrastructure - Complete Documentation Index
 
-**Status:** ✅ Simple Implementation Complete | 🔄 Rust FFI Pending
-**Date:** 2026-02-04
+**Status:** ✅ Active loader/JIT path in use | ✅ Shared cache + shared mapper wired | ⚠️ Full-suite `/verify` still separate
+**Date:** 2026-03-31
 
 ## Quick Links
 
@@ -28,16 +28,16 @@
 - Status: ✅ Compiles successfully
 
 **3. SMF File Cache**
-- File: `src/compiler/loader/smf_cache.spl`
-- Auto-loading mmap cache
+- File: `src/compiler/99.loader/loader/smf_cache.spl`
+- Auto-loading shared cache path used by JIT metadata reads
 - Statistics tracking
-- Status: ✅ Compiles successfully
+- Status: ✅ Active in loader/JIT path
 
 **4. JitInstantiator Updates**
-- File: `src/compiler/loader/jit_instantiator.spl`
-- Real memory allocation (no stubs)
-- SDN metadata parsing
-- Status: ✅ Compiles successfully
+- File: `src/compiler/99.loader/loader/jit_instantiator.spl`
+- Uses the shared cache path instead of local stub cache structures
+- Uses the shared executable mapper / JitMapper for mapped code
+- Status: ✅ Active in loader/JIT path
 
 **5. Documentation**
 - Quick start guide (400+ lines)
@@ -45,18 +45,17 @@
 - API reference with examples
 - Status: ✅ Complete
 
-### 🔄 Pending (Rust Side)
+### ✅ Verified in Current Refactor
 
-**1. Rust FFI Implementation**
-- Files: `rust/runtime/src/ffi/{mmap,exec_memory}.rs`
-- Estimated: 8-11 hours
-- Status: 📋 Plan ready
+**1. Loader/JIT Integration**
+- Shared cache-backed metadata reads
+- Shared executable mapper for loader + JIT
+- Status: ✅ Covered by targeted loader/JIT tests
 
-**2. Testing**
-- Rust unit tests
-- Simple integration tests
-- 44 JIT instantiator tests
-- Status: 🔄 Waiting for FFI
+**2. Loader Relocation Path**
+- Module load applies relocations before publish
+- Provider-backed module bytes are used for relocation source data
+- Status: ✅ Covered by relocation regression tests
 
 ## File Locations
 
@@ -72,9 +71,11 @@ src/
 │       └── mod.spl                   # ✅ Updated with new exports
 │
 └── compiler/
-    └── loader/
-        ├── smf_cache.spl             # ✅ NEW: mmap-based SMF cache
-        └── jit_instantiator.spl      # ✅ UPDATED: Real implementation
+    └── 99.loader/
+        └── loader/
+            ├── smf_cache.spl             # ✅ Shared SMF cache path
+            ├── jit_instantiator.spl      # ✅ Shared cache + shared mapper
+            └── module_loader.spl         # ✅ Relocation-aware load path
 ```
 
 ### Documentation
@@ -96,8 +97,10 @@ doc/
 test/
 ├── compiler/
 │   └── jit_infrastructure_smoke_test.spl  # ✅ Basic API test
-└── lib/std/unit/compiler/loader/
-    └── jit_instantiator_spec.spl          # 🔄 44 tests (pending FFI)
+└── unit/compiler/loader/
+    ├── jit_instantiator_spec.spl          # ✅ Active targeted coverage
+    ├── module_loader_spec.spl             # ✅ Loader/JIT integration coverage
+    └── module_loader_relocation_spec.spl  # ✅ Real relocation-bearing SMF coverage
 ```
 
 ## API Overview
@@ -163,10 +166,11 @@ get_function_pointer(addr)                  # Get fn pointer
 
 ### Test Impact
 
-- **Test file:** `jit_instantiator_spec.spl`
-- **Tests affected:** 44 tests
-- **Current status:** All failing (stubs)
-- **After FFI:** All should pass
+- `test/unit/compiler/loader/jit_instantiator_spec.spl`
+- `test/unit/compiler/loader/module_loader_spec.spl`
+- `test/unit/compiler/loader/module_loader_relocation_spec.spl`
+- `test/unit/compiler/loader/object_mapper_spec.spl`
+- Status: targeted loader/JIT verification passed in the refactor sweep
 
 ## Getting Started
 
@@ -236,27 +240,15 @@ val metadata = mapped.read_note_sdn()?
 print "Found {metadata.possible.len()} templates"
 
 # Statistics
-val stats = cache.get_stats()
+val stats = cache.stats()
 print "Hit rate: {stats.cache_hits}/{stats.cache_hits + stats.cache_misses}"
 ```
 
 ## Next Steps
 
-### Immediate (Rust FFI)
-
-1. **Implement mmap.rs** (2-3 hours)
-   - Basic mmap/munmap operations
-   - Memory advice functions
-   - File size utilities
-
-2. **Implement exec_memory.rs** (3-4 hours)
-   - RWX memory allocation
-   - Code writing and flushing
-   - Function pointer calling
-
-3. **Register FFI** (30 min)
-   - Add to FFI registry
-   - Update mod.rs
+1. Run broader repo `/verify` before release work.
+2. Expand platform/backend coverage only when new linker targets need it.
+3. Keep this index aligned with the active `src/compiler/99.loader/loader/*` paths rather than the older flattened loader paths.
 
 4. **Test** (1-2 hours)
    - Rust unit tests

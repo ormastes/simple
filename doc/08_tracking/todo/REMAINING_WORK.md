@@ -140,7 +140,7 @@ src/app/audit/ffi_analyzer.spl:287
 
 #### 3.3 Compiler Module Stubs (2 days)
 ```
-src/compiler/loader/jit_instantiator.spl - JIT compilation stubs
+src/compiler/loader/jit_instantiator.spl - completed by loader/linker object-provider refactor; remove from active stub list on next tracker regeneration
 src/compiler/monomorphize/deferred.spl - Deferred instantiation
 src/compiler/linker/smf_reader.spl - SMF format reading
 ```

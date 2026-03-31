@@ -2,48 +2,91 @@
 
 Goal: make loader + linker actually load/execute SMFs by unifying module access (SmfGetter + ObjTaker), adding real exec-memory mapping, and driving the native linker through SMF-aware inputs. Deployment coverage tests come last.
 
-Current repo state (2026-03-30):
+Current repo state (2026-03-31):
 
-- This refactor landed major infrastructure, but README status is still TODO for loader/JIT completion.
-- The remaining gap is not the mapper foundation; it is the unfinished `jit_instantiator` path and the need to replace leftover stubs and soft fallbacks with real behavior or hard diagnostics.
-- Near-term work is to complete SMF template loading, FFI compilation/materialization paths, executable-memory update behavior, and the corresponding end-to-end loader evidence.
+- The loader/linker object-provider refactor is implemented in the compiler and test tree.
+- `jit_instantiator` now uses the shared SMF cache path instead of local stubbed cache structures, and JIT compile bookkeeping exposes real compile counts.
+- `module_loader` now applies relocations during the real load path and sources relocation bytes through `ObjectProvider`, so provider-backed `.lsm` / `.smf` loads relocate against the same module bytes that produced the reader.
+- `ObjectProvider` now enforces `prefer_backend` and PIC compatibility instead of treating backend preference as dead config.
+- `--fixed-be` is wired through CLI parsing, driver output, and linker wrapper flows as the stable LLVM-backed validation path for this refactor.
+- Targeted loader/linker regression coverage is in place; full-repo `/verify` and full-suite execution are still separate follow-up work.
 
 ## Phases
 
 1) **Object Provider Unification**
+- Status: done
 - Build `object_provider` (wrap SmfGetter + ObjTaker) with a shared cache.
 - API: locate modules, emit objects (with optional type args), surface metadata.
 - Tests: cache hit/miss unit tests; missing-module error path.
 
 2) **Executable Memory Backing**
+- Status: done
 - Replace mmap stubs with FFI (mmap/munmap/mprotect/msync/mlock); keep RW→RX and icache flush.
 - Exec arena allocator shared by loader.
 - Tests: integration exec-memory roundtrip; oversize allocation error.
 
 3) **Loader Execution Path**
+- Status: done
 - Loader maps SMF via provider, installs symbols into exec arena, sets real addresses; resolves generics via provider.
 - Hot-reload reuses provider cache.
 - Tests: load+execute fixture function; generic instantiation; hot-reload changed return value.
 
 4) **SMF-Aware Linker Wrapper**
+- Status: done
 - Prepass accepts SMF/LSM inputs → temp .o via provider (ObjTaker-backed), then native link (mold/cc).
 - Library support reuses provider instance.
 - Build pipeline calls this instead of raw `mold` on .smf.
 - Tests: link/execute small SMF binary; library resolution case.
 
 5) **Backend Selection + PIC Handling**
+- Status: done
 - Provider honors LLVM vs Cranelift tags; reject or patch non-PIC.
 - Tests: backend-switch unit covering release vs debug choice.
 
 6) **Deployment Coverage (@deployment_coverage)**
+- Status: done
 - New spec grouping the integration tests; register coverage targets (loader, linker_wrapper, obj_taker).
 - Run after other tests; thresholds start modest (e.g., 50% branch).
 
-## Immediate next steps (Phase 2 kickoff)
-- Implement real mmap FFI backing in `compiler_shared/loader/smf_mmap_native.spl` and wire an exec arena helper.
-- Add exec-memory integration test stub (to be enabled once FFI lands).
-- Add `--fixed-be` CLI toggle to force a fixed backend (alias to LLVM) when running builds/tests during this refactor so we can validate with a stable codegen path.
-- Next: replace temporary SMF-to-.o assembly shim with ObjTaker-backed object emission (one or more symbols), and thread provider through linker_wrapper_lib_support for library resolution.
+## Completion update (2026-03-31)
+
+- Shared-cache JIT wiring is complete in `src/compiler/99.loader/loader/jit_instantiator.spl`.
+- Loader relocation wiring is complete in `src/compiler/99.loader/loader/module_loader.spl`.
+- Backend preference / PIC validation is complete in `src/compiler/70.backend/linker/object_provider.spl`.
+- Fixed backend CLI/driver/linker plumbing is complete in:
+  - `src/app/cli/bootstrap_main.spl`
+  - `src/app/cli/main.spl`
+  - `src/compiler/80.driver/driver_aot_output.spl`
+  - `src/compiler/70.backend/linker/linker_wrapper.spl`
+  - `src/compiler/70.backend/linker/linker_wrapper_lib_support.spl`
+- Coverage now includes:
+  - `test/unit/compiler/loader/jit_instantiator_spec.spl`
+  - `test/unit/compiler/loader/module_loader_spec.spl`
+  - `test/unit/compiler/loader/module_loader_relocation_spec.spl`
+  - `test/unit/compiler/linker/object_provider_spec.spl`
+  - `test/unit/compiler/linker/linker_wrapper_smf_spec.spl`
+  - `test/unit/compiler/linker/fixed_backend_success_spec.spl`
+  - `test/system/infrastructure/deployment_loader_linker_spec.spl`
+
+## Verification runbook used for this refactor
+
+- Single-spec verification remains useful for new regressions.
+- Directory-level `bin/simple test` is the reliable broad verification form in this repo.
+- Multi-file `bin/simple test file1 file2 ...` is not reliable here; it can report cached success while discovering only one spec.
+- Broad subtree verification run:
+  - `bin/simple test test/unit/compiler/loader`
+  - `bin/simple test test/unit/compiler/linker`
+  - `bin/simple test test/unit/compiler/build`
+  - `bin/simple test test/unit/compiler/cache`
+  - `bin/simple test test/unit/app/tooling`
+  - `bin/simple test test/system/infrastructure`
+- All of the above passed on 2026-03-31.
+
+## Follow-up outside this refactor
+
+- Run a full-suite repository pass when ready.
+- Run the dedicated `/verify` production-readiness workflow.
+- If README / feature-status summaries still describe loader/JIT completion as pending, update them to match the implemented state and the narrower qualification that coverage is targeted rather than universal.
 
 ## Progress (2026-02-18 evening)
 - ObjectProvider now caches SMF/object bytes, exposes `get_reader`/`get_exported_code`, and is threaded into loader + linker wrapper.

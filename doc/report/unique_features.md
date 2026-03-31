@@ -178,8 +178,8 @@ Implemented:
 
 Qualification:
 
-- loader/JIT support is not uniformly complete
-- `src/compiler/99.loader/loader/jit_instantiator.spl` still contains stubbed areas
+- loader/JIT now has a real shared-cache and executable-mapping path through `module_loader.spl` and `jit_instantiator.spl`
+- docs should still avoid claiming universal end-to-end coverage across every runtime/backend combination; the verified evidence here is targeted compiler loader/linker coverage
 
 ### 9. Backends
 

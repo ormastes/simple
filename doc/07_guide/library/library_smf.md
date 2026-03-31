@@ -157,13 +157,29 @@ config.verbose = true
 val result = link_with_libraries(["app/main.o"], "myapp", config)
 ```
 
+### Fixed Backend Validation
+
+When you want linker/provider resolution to reject backend-mismatched or non-PIC SMF modules instead of using soft fallback behavior, enable the fixed backend flag:
+
+```bash
+simple build app.spl --fixed-be
+simple build app.spl --fixed-be=llvm
+```
+
+Behavior:
+
+- `--fixed-be` aliases to the LLVM validation path.
+- ObjectProvider requires matching compile-options metadata and PIC-safe SMF materialization for strict backend mode.
+- Library linking through `.lsm` uses the same provider policy as direct `.smf` inputs.
+
 ### Symbol Resolution Process
 
 1. Scans library paths for .lsm files
 2. Extracts undefined symbols from your object files
 3. Finds which library modules provide those symbols
-4. Locates companion .o files for those modules
-5. Links everything together
+4. Requests embedded object bytes first; if absent, it can materialize temporary objects from exported code units
+5. In fixed-backend mode, rejects modules that cannot prove compatible backend/PIC metadata
+6. Links everything together
 
 ---
 

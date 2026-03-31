@@ -19,14 +19,43 @@ struct LocalGlobalFlags:
     use_notui: bool
     macro_trace: bool
     debug_mode: bool
+    backend: text
 
 fn parse_global_flags(args: [text]) -> LocalGlobalFlags:
+    var backend = "auto"
     LocalGlobalFlags(
         gc_log: args.any(\arg: arg == "--gc-log"),
         gc_off: args.any(\arg: arg == "--gc=off" or arg == "--gc=OFF"),
         use_notui: args.any(\arg: arg == "--notui"),
         macro_trace: args.any(\arg: arg == "--macro-trace"),
-        debug_mode: args.any(\arg: arg == "--debug")
+        debug_mode: args.any(\arg: arg == "--debug"),
+        backend: backend
+    )
+
+fn parse_fixed_backend(args: [text]) -> LocalGlobalFlags:
+    var backend = "auto"
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+        elif arg.starts_with("--backend="):
+            backend = arg[10:]
+        elif arg == "--fixed-be":
+            backend = "llvm"
+        elif arg.starts_with("--fixed-be="):
+            val fixed_backend = arg[11:]
+            backend = if fixed_backend == "": "llvm" else: fixed_backend
+        i = i + 1
+
+    LocalGlobalFlags(
+        gc_log: false,
+        gc_off: false,
+        use_notui: false,
+        macro_trace: false,
+        debug_mode: false,
+        backend: backend
     )
 
 fn parse_lang_flag_value(args: [text]) -> text?:
@@ -93,6 +122,23 @@ describe "GlobalFlags parsing":
         it "sets use_notui to true":
             val flags = parse_global_flags(["--notui"])
             expect(flags.use_notui).to_equal(true)
+
+    context "parses fixed backend flags":
+        it "defaults --fixed-be to llvm":
+            val flags = parse_fixed_backend(["--fixed-be"])
+            expect(flags.backend).to_equal("llvm")
+
+        it "keeps an explicit fixed backend":
+            val flags = parse_fixed_backend(["--fixed-be=llvm-lib"])
+            expect(flags.backend).to_equal("llvm-lib")
+
+        it "normalizes an empty fixed backend value to llvm":
+            val flags = parse_fixed_backend(["--fixed-be="])
+            expect(flags.backend).to_equal("llvm")
+
+        it "lets fixed-be override an earlier backend flag":
+            val flags = parse_fixed_backend(["--backend=cranelift", "--fixed-be"])
+            expect(flags.backend).to_equal("llvm")
 
 describe "filter_internal_flags":
     context "removes single flags":

@@ -142,7 +142,8 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
             libraries: [],
             enable_cache: config.enable_cache,
-            verbose: config.verbose
+            verbose: config.verbose,
+            prefer_backend: ""
         ))
         val jit_config = JitInstantiatorConfig(
             update_smf: false,
@@ -241,6 +242,22 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
         self.modules[path] = module
 
+        # Apply relocations after symbol addresses are installed so patching
+        # sees the final module/global symbol table. Use provider-backed bytes
+        # so library-resolved module loads relocate against the same SMF data
+        # that produced the reader.
+        var smf_data_result = self.provider.get_module_bytes(path)
+        if smf_data_result.is_err():
+            return loadresult_Error(message: smf_data_result.unwrap_err())
+        val smf_data = smf_data_result.unwrap()
+        val reloc_result = moduleloader_apply_relocations(self, path, smf_data)
+        if reloc_result.is_err():
+            val reloc_error = reloc_result.unwrap_err()
+            if self.config.verbose:
+                print "[loader] relocation failed for {path}: {reloc_error}"
+            moduleloader_unload(self, path)
+            return loadresult_Error(message: reloc_error)
+
         if self.config.verbose:
             print "[loader] Loaded {symbols.len()} symbols from {path}"
 
@@ -270,8 +287,20 @@ fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]
         if self.config.verbose:
             print "[loader] Applying {relocs.len()} relocations for {path}"
 
-        # Build symbol resolution table from global_symbols
+        # Build symbol resolution table in symbol-index order from the parsed
+        # SMF symbol table, then map those names to the loaded module addresses.
         var resolved: [ResolvedSymbol] = []
+        for (sym_name, _) in mem_reader.symbols:
+            var addr = 0i64
+            if self.modules.contains_key(path):
+                val module = self.modules[path]
+                if module.symbols.contains_key(sym_name):
+                    addr = module.symbols[sym_name].address
+            resolved = resolved.push(ResolvedSymbol(
+                name: sym_name,
+                address: addr
+            ))
+
         var global_addrs: Dict<text, i64> = {}
         for (sym_name, entry) in self.global_symbols:
             val loaded_sym = entry[1]
@@ -341,14 +370,14 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                         moduleloader_allocate_exec_jit(self, owner_id, sym_name, code)
                     if exec_addr == 0:
                         return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
-                        val loaded_sym = LoadedSymbol(
-                            name: sym_name,
-                            address: exec_addr,
-                            size: code_bytes_len(code) as i64,
-                            ty: SymbolType.Function,
-                            is_jit: true,
-                            file_offset: 0
-                        )
+                    val loaded_sym = LoadedSymbol(
+                        name: sym_name,
+                        address: exec_addr,
+                        size: code_bytes_len(code) as i64,
+                        ty: SymbolType.Function,
+                        is_jit: true,
+                        file_offset: 0
+                    )
                     self.global_symbols[sym_name] = (owner_id, loaded_sym)
                     # Track JIT symbol origin for lifecycle-aware unload.
                     lifecycle_on_jit_triggered(self.lifecycle, owner_id, sym_name)

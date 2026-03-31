@@ -16,6 +16,7 @@ Linker wrapper is the native link entry point.
 - For native objects it calls platform linker directly (prefer `mold`, then `lld`, then `ld`/`cc` fallback).
 - For `.smf`/`.lsm` it asks ObjectProvider for object bytes.
 - If object bytes are missing, it falls back to exported code units and assembles temporary `.o` files through shared `object_emitter`.
+- `--fixed-be` is the strict validation flag for this path. It aliases to the fixed LLVM backend preference and disables soft fallback for backend-mismatched SMF materialization.
 - Then it links all resolved objects into final native binary (or self-contained fallback when needed).
 
 ## Smf Getter 
@@ -35,9 +36,9 @@ Loader runtime path:
 1. Resolve module through ObjectProvider.
 2. Read exported symbols/code.
 3. Allocate executable memory.
-4. Copy code into memory, then apply RW->RX protection.
-5. Register loaded symbols in global symbol table.
-6. JIT/ObjTaker path handles deferred/generic symbols on demand.
+4. Copy code into memory, apply relocations, then apply RW->RX protection.
+5. Register loaded symbols in global symbol table only after relocation succeeds.
+6. JIT/ObjTaker path handles deferred/generic symbols on demand using the shared SMF cache and shared executable mapper.
 
 PIC rule:
 - Loader assumes PIC for direct code embedding path.
@@ -141,6 +142,8 @@ Policy:
 - Release/native link path should prefer LLVM-compatible object generation.
 - Debug/dev can keep Cranelift path.
 - SMF metadata/flags must carry enough backend/PIC info so loader/linker can enforce compatibility.
+- `ObjectProvider.prefer_backend` is enforced behavior, not advisory config.
+- `--fixed-be` maps to the LLVM-fixed validation path used by builds and linker tests.
 
 ## Fully shared frontend
 Frontend must be one shared implementation: Lexer -> Treesitter -> Parser.
