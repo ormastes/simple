@@ -58,7 +58,7 @@ Numbered categories (01-11) create natural progression:
 All 67 loose files organized into appropriate subdirectories.
 
 ### 3. Separated Concerns
-- **Learning examples** (01-11): Stable, documented, ready to use
+- **Learning examples** (01-11): Intended learning path, documented, organized by topic
 - **Experiments**: WIP/research, clearly marked as unstable
 - **Projects**: Full-scale applications
 
@@ -228,14 +228,18 @@ Possible future improvements:
 
 ## Testing
 
+Status note on 2026-03-31:
+
+- This report documents the reorganization work, not the current pass/fail state of every example.
+- Current validation should use `bin/simple examples-check ...`.
+- See `doc/09_report/session/examples_check_2026-03-31.md` and `doc/09_report/session/examples_safe_failure_2026-03-31.md` for newer verification results.
+
 Verify examples still work:
 ```bash
-# Test a sample from each category
-bin/simple run examples/01_getting_started/hello_native.spl
-bin/simple run examples/02_language_features/blocks/custom_blocks.spl
-bin/simple run examples/03_concurrency/async_basics.spl
-bin/simple run examples/07_ml/pure_nn/01_basics/xor_minimal.spl
-# ... etc
+# Validate examples with per-file isolation
+bin/simple examples-check examples
+bin/simple examples-check examples/02_language_features --compile --timeout 5
+bin/simple examples-check examples/03_concurrency --run --timeout 5
 ```
 
 ## Commit Message
@@ -265,7 +269,7 @@ Structure:
 Benefits:
 - Clear learning progression
 - Easy discovery by topic
-- Separated stable examples from experiments
+- Separated learning-path examples from experiments
 - Comprehensive documentation per category
 
 Files: 215 total (was 209)
@@ -277,6 +281,6 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 
 ## Conclusion
 
-The examples folder is now well-organized, documented, and ready for both new learners and experienced users. The numbered category system provides a natural learning path, while the separation of experiments ensures users know which examples are production-ready.
+The examples folder is now well-organized and documented for both new learners and experienced users. The numbered category system provides a natural learning path, while the separation of experiments makes intent clearer.
 
-All examples remain functional with their new paths, and the comprehensive README files make discovery and usage straightforward.
+Current functionality should be validated with `bin/simple examples-check`, because the reorganization status and the current runtime/compiler compatibility state are separate concerns.

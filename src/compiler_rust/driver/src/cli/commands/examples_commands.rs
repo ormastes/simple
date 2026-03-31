@@ -11,6 +11,7 @@ struct ExamplesCheckConfig {
     root: PathBuf,
     timeout: Duration,
     run_mode: bool,
+    report_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,31 @@ struct CheckResult {
 struct ExampleGroup {
     label: String,
     files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GroupStats {
+    total: usize,
+    ok: usize,
+    error: usize,
+    timeout: usize,
+    crash: usize,
+}
+
+impl GroupStats {
+    fn record(&mut self, kind: &CheckKind) {
+        self.total += 1;
+        match kind {
+            CheckKind::Ok => self.ok += 1,
+            CheckKind::Error => self.error += 1,
+            CheckKind::Timeout => self.timeout += 1,
+            CheckKind::Crash => self.crash += 1,
+        }
+    }
+
+    fn has_failures(&self) -> bool {
+        self.error > 0 || self.timeout > 0 || self.crash > 0
+    }
 }
 
 pub fn handle_examples_check(args: &[String]) -> i32 {
@@ -73,51 +99,40 @@ pub fn handle_examples_check(args: &[String]) -> i32 {
         }
     };
 
-    let mut total_files = 0usize;
-    let mut total_ok = 0usize;
-    let mut total_failed = 0usize;
+    let mut total_stats = GroupStats::default();
+    let mut report = ExamplesReport::new(config.clone());
+    report.push_header();
 
     for group in groups {
         println!("=== {} ===", group.label);
-        let mut group_ok = 0usize;
-        let mut first_failure: Option<(PathBuf, CheckResult)> = None;
+        let mut group_stats = GroupStats::default();
+        let mut failures: Vec<(PathBuf, CheckResult)> = Vec::new();
 
         for (idx, file) in group.files.iter().enumerate() {
-            total_files += 1;
             let result = run_example_check(&exe, file, idx, &config, temp_dir.path());
-            if result.kind == CheckKind::Ok {
-                group_ok += 1;
-                total_ok += 1;
-            } else if first_failure.is_none() {
-                total_failed += 1;
-                first_failure = Some((file.clone(), result));
+            group_stats.record(&result.kind);
+            total_stats.record(&result.kind);
+            if result.kind != CheckKind::Ok {
+                failures.push((file.clone(), result));
             }
         }
 
-        if let Some((file, result)) = first_failure {
-            let code_text = result
-                .code
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            println!(
-                "FIRST_FAIL {} {} code={} {}",
-                kind_label(&result.kind),
-                file.display(),
-                code_text,
-                result.preview
-            );
-        } else {
-            println!("OK all {} files", group_ok);
-        }
+        print_group_summary(&group.label, &group_stats);
+        print_group_failures(&group.label, &failures);
+        report.push_group(&group.label, &group_stats, &failures);
         println!();
     }
 
-    println!("SUMMARY total={} ok={} failed={}", total_files, total_ok, total_failed);
+    print_summary(&total_stats, &config.report_path);
+    if let Err(err) = report.write() {
+        eprintln!("error: failed to write report {}: {}", config.report_path.display(), err);
+        return 1;
+    }
 
-    if total_failed == 0 {
-        0
-    } else {
+    if total_stats.has_failures() {
         1
+    } else {
+        0
     }
 }
 
@@ -125,6 +140,7 @@ fn parse_examples_check_args(args: &[String]) -> Result<ExamplesCheckConfig, Str
     let mut root = PathBuf::from("examples");
     let mut timeout_secs = 10u64;
     let mut run_mode = false;
+    let mut report_path = PathBuf::from("doc/09_report/session/examples_check_latest.md");
 
     let mut i = 1usize;
     while i < args.len() {
@@ -147,6 +163,17 @@ fn parse_examples_check_args(args: &[String]) -> Result<ExamplesCheckConfig, Str
                     .parse::<u64>()
                     .map_err(|_| "--timeout requires a positive integer".to_string())?;
             }
+            "--report" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err("--report requires a path".to_string());
+                };
+                report_path = PathBuf::from(value);
+                i += 1;
+            }
+            other if other.starts_with("--report=") => {
+                let value = other.trim_start_matches("--report=");
+                report_path = PathBuf::from(value);
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option '{}'", other));
             }
@@ -159,6 +186,7 @@ fn parse_examples_check_args(args: &[String]) -> Result<ExamplesCheckConfig, Str
         root,
         timeout: Duration::from_secs(timeout_secs.max(1)),
         run_mode,
+        report_path,
     })
 }
 
@@ -327,6 +355,96 @@ fn classify_status(status: ExitStatus, output: &std::process::Output) -> CheckRe
     }
 }
 
+fn print_group_summary(label: &str, stats: &GroupStats) {
+    println!(
+        "SUMMARY {} total={} ok={} error={} timeout={} crash={}",
+        label,
+        stats.total,
+        stats.ok,
+        stats.error,
+        stats.timeout,
+        stats.crash
+    );
+}
+
+fn print_group_failures(label: &str, failures: &[(PathBuf, CheckResult)]) {
+    for (file, result) in failures {
+        let code_text = result
+            .code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        println!(
+            "FAIL {} {} code={} {}",
+            label,
+            file.display(),
+            code_text,
+            result.preview
+        );
+    }
+}
+
+fn print_summary(stats: &GroupStats, report_path: &Path) {
+    println!(
+        "SUMMARY total={} ok={} error={} timeout={} crash={}",
+        stats.total, stats.ok, stats.error, stats.timeout, stats.crash
+    );
+    println!("Report: {}", report_path.display());
+}
+
+struct ExamplesReport {
+    path: PathBuf,
+    content: String,
+}
+
+impl ExamplesReport {
+    fn new(config: ExamplesCheckConfig) -> Self {
+        Self {
+            path: config.report_path,
+            content: String::new(),
+        }
+    }
+
+    fn push_header(&mut self) {
+        self.content.push_str("# Examples Check\n\n");
+    }
+
+    fn push_group(&mut self, label: &str, stats: &GroupStats, failures: &[(PathBuf, CheckResult)]) {
+        self.content.push_str(&format!("## {}\n\n", label));
+        self.content.push_str(&format!("- Total: `{}`\n", stats.total));
+        self.content.push_str(&format!("- Ok: `{}`\n", stats.ok));
+        self.content.push_str(&format!("- Error: `{}`\n", stats.error));
+        self.content.push_str(&format!("- Timeout: `{}`\n", stats.timeout));
+        self.content.push_str(&format!("- Crash: `{}`\n", stats.crash));
+        if failures.is_empty() {
+            self.content.push_str("\nAll files passed.\n\n");
+            return;
+        }
+
+        self.content.push_str("\n### Failures\n\n");
+        for (file, result) in failures {
+            let code_text = result
+                .code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            self.content.push_str(&format!(
+                "- `{}` `{}` code={} {}\n",
+                file.display(),
+                kind_label(&result.kind),
+                code_text,
+                result.preview
+            ));
+        }
+        self.content.push('\n');
+    }
+
+    fn write(&self) -> Result<(), std::io::Error> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&self.path, &self.content)
+    }
+}
+
 fn preview_output(stdout: &[u8], stderr: &[u8], fallback: &str) -> String {
     let stderr_text = String::from_utf8_lossy(stderr);
     if let Some(line) = stderr_text.lines().find(|line| !line.trim().is_empty()) {
@@ -360,17 +478,23 @@ fn print_examples_check_help() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  simple examples-check [path] [--compile|--run] [--timeout <secs>]");
+    eprintln!("  simple examples-check [path] [--compile|--run] [--timeout <secs>] [--report <path>]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --compile         Compile each example in a child process (default)");
     eprintln!("  --run             Run each example in a child process");
     eprintln!("  --timeout <secs>  Wall-clock timeout per file (default: 10)");
+    eprintln!("  --report <path>   Markdown report output path");
     eprintln!("  -h, --help        Show this help");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Output;
+
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn parse_examples_check_defaults() {
@@ -378,6 +502,10 @@ mod tests {
         assert_eq!(config.root, PathBuf::from("examples"));
         assert_eq!(config.timeout, Duration::from_secs(10));
         assert!(!config.run_mode);
+        assert_eq!(
+            config.report_path,
+            PathBuf::from("doc/09_report/session/examples_check_latest.md")
+        );
     }
 
     #[test]
@@ -395,8 +523,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_examples_check_report_path() {
+        let config = parse_examples_check_args(&[
+            "examples-check".to_string(),
+            "examples".to_string(),
+            "--report=tmp/examples_check.md".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(config.report_path, PathBuf::from("tmp/examples_check.md"));
+    }
+
+    #[test]
     fn preview_prefers_stderr() {
         let preview = preview_output(b"stdout line\n", b"stderr line\n", "fallback");
         assert_eq!(preview, "stderr line");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_status_code_1_is_error() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"parse error".to_vec(),
+        };
+        let result = classify_status(output.status, &output);
+        assert_eq!(result.kind, CheckKind::Error);
+        assert_eq!(result.code, Some(1));
+        assert_eq!(result.preview, "parse error");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_status_signal_is_crash() {
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(11),
+            stdout: Vec::new(),
+            stderr: b"segfault".to_vec(),
+        };
+        let result = classify_status(output.status, &output);
+        assert_eq!(result.kind, CheckKind::Crash);
+        assert_eq!(result.code, None);
+        assert_eq!(result.preview, "segfault");
     }
 }

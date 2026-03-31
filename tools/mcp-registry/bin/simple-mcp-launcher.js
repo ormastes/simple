@@ -19,9 +19,15 @@ function findRuntime() {
     const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
     if (entries.length > 0) {
       const pkgDir = path.join(nativeDir, entries[0]);
+      // Primary: bin/simple (correct packaging)
       const binary = path.join(pkgDir, 'bin', `simple${ext}`);
       if (fs.existsSync(binary)) {
         return { binary, repoRoot: pkgDir };
+      }
+      // Fallback: src/compiler_rust/bin/release/simple (legacy SPK layout)
+      const legacyBinary = path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`);
+      if (fs.existsSync(legacyBinary)) {
+        return { binary: legacyBinary, repoRoot: pkgDir };
       }
     }
   }

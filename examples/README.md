@@ -78,7 +78,7 @@ Compiler internals and optimization
 
 **[experiments/](experiments/)** - Work-in-progress and research prototypes
 
-⚠️ These examples may be incomplete or broken. For stable examples, use categories 01-11.
+⚠️ These examples may be incomplete or broken. Categories `01-11` are the intended learning path, but current status should be checked with `bin/simple examples-check`.
 
 ## 🚀 Full-Scale Projects
 
@@ -90,6 +90,9 @@ Compiler internals and optimization
 ### Running Examples
 
 ```bash
+# Validate a folder or file with safe classification
+bin/simple examples-check examples/03_concurrency --run --timeout 5
+
 # Interpreted mode (fast startup)
 bin/simple run examples/01_getting_started/hello_native.spl
 
@@ -115,6 +118,18 @@ Examples are organized by:
 3. **Use Case** - Learning vs Research vs Production
 
 Each category has its own README.md with detailed information.
+
+## ✅ Validation
+
+Use the built-in validator instead of assuming every example in `01-11` currently passes:
+
+```bash
+bin/simple examples-check examples
+bin/simple examples-check examples/02_language_features --compile --timeout 5
+bin/simple examples-check examples/03_concurrency --run --timeout 5
+```
+
+The validator classifies results as normal errors, timeouts, or crashes with per-file isolation.
 
 ## 📊 Statistics
 
