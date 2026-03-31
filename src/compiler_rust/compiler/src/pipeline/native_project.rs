@@ -358,10 +358,13 @@ impl NativeProjectBuilder {
 
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
+            // Exclude non-essential app modules (dashboards, examples)
+            let non_critical = ["llm_dashboard", "web_dashboard", "obsidian", "korean_stock"];
             let critical_failures: Vec<_> = failures
                 .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
+                    if non_critical.iter().any(|s| p.contains(s)) { return false; }
                     p.contains("/src/compiler/")
                         || p.contains("\\src\\compiler\\")
                         || p.contains("/src/app/")
@@ -399,10 +402,13 @@ impl NativeProjectBuilder {
 
         if failed > 0 {
             // Only abort if compiler-critical files failed (src/compiler/, src/app/)
+            // Exclude non-essential app modules (dashboards, examples)
+            let non_critical = ["llm_dashboard", "web_dashboard", "obsidian", "korean_stock"];
             let critical_failures: Vec<_> = failures
                 .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
+                    if non_critical.iter().any(|s| p.contains(s)) { return false; }
                     p.contains("/src/compiler/")
                         || p.contains("\\src\\compiler\\")
                         || p.contains("/src/app/")
