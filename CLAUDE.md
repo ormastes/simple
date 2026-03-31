@@ -154,6 +154,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 |--------|---------------|---------|
 | `simple-mcp` | `bin/simple_mcp_server` | Simple language compiler MCP |
 | `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | Simple LSP via MCP bridge |
+| `t32-mcp` | `bin/t32_mcp_server` | TRACE32 debugger MCP (fast-start wrapper) |
 | `t32-lsp-mcp` | `bin/t32_lsp_mcp_server` | TRACE32 CMM LSP via MCP |
 
 ---
