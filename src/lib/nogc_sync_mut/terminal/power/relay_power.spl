@@ -15,6 +15,58 @@ extern fn rt_shell_exec(cmd: text) -> (text, text, i64)
 extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
+# Relay Environment Builder
+# ============================================================================
+
+fn relay_env_prefix(config: PowerConfig) -> text:
+    """Build an environment variable prefix string from relay config fields.
+
+    Non-empty config fields are prepended as VAR=value so that each relay
+    instance gets its own device, baud rate, commands, etc.
+
+    Args:
+        config: PowerConfig with relay-specific fields
+
+    Returns:
+        Shell env prefix like "RELAY_DEVICE=/dev/ttyACM0 RELAY_BAUD=9600 "
+        or "" if all fields are empty (use script defaults)
+    """
+    var parts: [text] = []
+    if config.relay_device != "":
+        parts.push("RELAY_DEVICE=" + config.relay_device)
+    if config.relay_baud != "":
+        parts.push("RELAY_BAUD=" + config.relay_baud)
+    if config.relay_usb_vid != "":
+        parts.push("RELAY_USB_VID=" + config.relay_usb_vid)
+    if config.relay_usb_pid != "":
+        parts.push("RELAY_USB_PID=" + config.relay_usb_pid)
+    if config.relay_cmd_on != "":
+        parts.push("RELAY_CMD_ON=" + config.relay_cmd_on)
+    if config.relay_cmd_off != "":
+        parts.push("RELAY_CMD_OFF=" + config.relay_cmd_off)
+    if config.relay_cmd_state != "":
+        parts.push("RELAY_CMD_STATE=" + config.relay_cmd_state)
+    if config.relay_cmd_toggle != "":
+        parts.push("RELAY_CMD_TOGGLE=" + config.relay_cmd_toggle)
+    if config.relay_reset_delay != "":
+        parts.push("RELAY_RESET_DELAY=" + config.relay_reset_delay)
+    if parts.len() == 0:
+        return ""
+    parts.join(" ") + " "
+
+fn relay_cmd(config: PowerConfig, script: text) -> text:
+    """Build the full shell command for a relay script with env prefix.
+
+    Args:
+        config: PowerConfig with relay fields
+        script: Script path field (e.g., config.on_script)
+
+    Returns:
+        Command string like "RELAY_DEVICE=/dev/ttyACM0 scripts/relay_on.shs"
+    """
+    relay_env_prefix(config) + script
+
+# ============================================================================
 # Relay Power Operations
 # ============================================================================
 
@@ -33,7 +85,7 @@ fn relay_power_on(config: PowerConfig) -> PowerState:
     val timestamp = rt_time_now_unix_micros()
     if config.on_script == "":
         return make_power_state(POWER_STATE_UNKNOWN, timestamp)
-    val (stdout, stderr, exit_code) = rt_shell_exec(config.on_script)
+    val (stdout, stderr, exit_code) = rt_shell_exec(relay_cmd(config, config.on_script))
     if exit_code == 0:
         make_power_state(POWER_STATE_ON, timestamp)
     else:
@@ -54,7 +106,7 @@ fn relay_power_off(config: PowerConfig) -> PowerState:
     val timestamp = rt_time_now_unix_micros()
     if config.off_script == "":
         return make_power_state(POWER_STATE_UNKNOWN, timestamp)
-    val (stdout, stderr, exit_code) = rt_shell_exec(config.off_script)
+    val (stdout, stderr, exit_code) = rt_shell_exec(relay_cmd(config, config.off_script))
     if exit_code == 0:
         make_power_state(POWER_STATE_OFF, timestamp)
     else:
@@ -75,7 +127,7 @@ fn relay_power_toggle(config: PowerConfig) -> PowerState:
     val timestamp = rt_time_now_unix_micros()
     if config.toggle_script == "":
         return make_power_state(POWER_STATE_UNKNOWN, timestamp)
-    val (stdout, stderr, exit_code) = rt_shell_exec(config.toggle_script)
+    val (stdout, stderr, exit_code) = rt_shell_exec(relay_cmd(config, config.toggle_script))
     if exit_code == 0:
         # Query resulting state after toggle
         return relay_power_state(config)
@@ -96,7 +148,7 @@ fn relay_power_reset(config: PowerConfig) -> PowerState:
     val timestamp = rt_time_now_unix_micros()
     if config.reset_script == "":
         return make_power_state(POWER_STATE_UNKNOWN, timestamp)
-    val (stdout, stderr, exit_code) = rt_shell_exec(config.reset_script)
+    val (stdout, stderr, exit_code) = rt_shell_exec(relay_cmd(config, config.reset_script))
     if exit_code == 0:
         make_power_state(POWER_STATE_ON, timestamp)
     else:
@@ -117,7 +169,7 @@ fn relay_power_state(config: PowerConfig) -> PowerState:
     val timestamp = rt_time_now_unix_micros()
     if config.state_script == "":
         return make_power_state(POWER_STATE_UNKNOWN, timestamp)
-    val (stdout, stderr, exit_code) = rt_shell_exec(config.state_script)
+    val (stdout, stderr, exit_code) = rt_shell_exec(relay_cmd(config, config.state_script))
     if exit_code == 0:
         val trimmed = stdout.trim()
         if trimmed == "on":

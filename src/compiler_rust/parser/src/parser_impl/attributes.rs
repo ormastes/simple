@@ -157,7 +157,9 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::At)?;
 
-        // Handle keywords specially since they can be decorator names
+        // Handle keywords specially since they can be decorator names.
+        // Allow/Warn/Deny/Forbid are also keywords (used in arch rules) but can
+        // appear as decorator names in @allow(...), @warn(...), etc.
         let expr = if self.check(&TokenKind::Async) {
             self.advance();
             Expr::Identifier("async".to_string())
@@ -167,6 +169,15 @@ impl<'a> Parser<'a> {
         } else if self.check(&TokenKind::Extern) {
             self.advance();
             Expr::Identifier("extern".to_string())
+        } else if self.check(&TokenKind::Allow) {
+            self.advance();
+            Expr::Identifier("allow".to_string())
+        } else if self.check(&TokenKind::Forbid) {
+            self.advance();
+            Expr::Identifier("forbid".to_string())
+        } else if self.check(&TokenKind::Default) {
+            self.advance();
+            Expr::Identifier("default".to_string())
         } else {
             // Parse the decorator expression (can be dotted/called: @module.decorator or @trainer.on(Events.X))
             self.parse_postfix()?

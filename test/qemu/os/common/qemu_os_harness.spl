@@ -1,0 +1,150 @@
+# QEMU OS Test Harness — Host-Side Launch, Capture, Parse
+#
+# Provides helper functions for QEMU-based OS tests:
+# - Launch QEMU with a kernel ELF, capture serial output
+# - Parse [PASS]/[FAIL]/[SKIP] markers from serial output
+# - Check test prerequisites (QEMU binary + kernel ELF exist)
+#
+# Test Pattern:
+#   1. Check prerequisites: qemu_available() + file_exists(binary)
+#   2. Launch QEMU: run_os_qemu(arch, timeout)
+#   3. Assert: expect(output).to_contain("[PASS] test_name")
+
+use os.qemu_runner.{OsTarget, get_target, arch_display_name, build_qemu_command}
+use os.kernel.arch.arch_context.{Architecture}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+# ===========================================================================
+# Prerequisites
+# ===========================================================================
+
+fn can_run_test(arch: Architecture) -> bool:
+    """Check if QEMU test can run for the given architecture.
+
+    Verifies both QEMU binary availability and kernel ELF existence.
+    """
+    val target = get_target(arch)
+
+    # Check QEMU binary
+    val qemu_check = rt_process_run_timeout("which", [target.qemu_system], 5000)
+    if qemu_check[2] != 0:
+        print "SKIP: {target.qemu_system} not found on PATH"
+        return false
+
+    # Check kernel ELF
+    if not rt_file_exists(target.output):
+        print "SKIP: Kernel not built: {target.output}"
+        return false
+
+    true
+
+fn file_exists(path: text) -> bool:
+    """Check if a file exists at the given path."""
+    rt_file_exists(path)
+
+# ===========================================================================
+# QEMU Execution
+# ===========================================================================
+
+fn run_os_qemu(arch: Architecture, timeout_ms: i64) -> (text, text, i32):
+    """Launch QEMU with the OS kernel and capture output.
+
+    Returns (stdout, stderr, exit_code).
+    """
+    val target = get_target(arch)
+    val cmd_parts = build_qemu_command(target)
+
+    # First element is the QEMU binary, rest are args
+    val qemu_bin = cmd_parts[0]
+    var args: [text] = []
+    for i in 1..cmd_parts.len():
+        args.push(cmd_parts[i])
+
+    rt_process_run_timeout(qemu_bin, args, timeout_ms)
+
+fn run_os_qemu_output(arch: Architecture, timeout_ms: i64) -> text:
+    """Launch QEMU and return combined stdout+stderr as serial output."""
+    val result = run_os_qemu(arch, timeout_ms)
+    val stdout = result[0]
+    val stderr = result[1]
+    stdout + stderr
+
+fn run_os_qemu_with_target(target: OsTarget, timeout_ms: i64) -> (text, text, i32):
+    """Launch QEMU with explicit target config."""
+    val cmd_parts = build_qemu_command(target)
+    val qemu_bin = cmd_parts[0]
+    var args: [text] = []
+    for i in 1..cmd_parts.len():
+        args.push(cmd_parts[i])
+    rt_process_run_timeout(qemu_bin, args, timeout_ms)
+
+# ===========================================================================
+# Output Parsing
+# ===========================================================================
+
+fn count_passes(output: text) -> u64:
+    """Count [PASS] markers in QEMU serial output."""
+    var count: u64 = 0
+    var pos: i64 = 0
+    while true:
+        val idx = output.index_of("[PASS]", pos)
+        if idx < 0:
+            break
+        count = count + 1
+        pos = idx + 6
+    count
+
+fn count_failures(output: text) -> u64:
+    """Count [FAIL] markers in QEMU serial output."""
+    var count: u64 = 0
+    var pos: i64 = 0
+    while true:
+        val idx = output.index_of("[FAIL]", pos)
+        if idx < 0:
+            break
+        count = count + 1
+        pos = idx + 6
+    count
+
+fn has_test_marker(output: text, marker: text) -> bool:
+    """Check if output contains a specific test marker string."""
+    output.contains(marker)
+
+# ===========================================================================
+# Cross-Architecture Test Runner
+# ===========================================================================
+
+fn run_cross_arch_test(test_name: text, timeout_ms: i64, check_fn: fn(text) -> bool) -> (u64, u64, u64):
+    """Run a test across all 4 architectures.
+
+    Returns (passed, failed, skipped) counts.
+    """
+    val arches: [Architecture] = [
+        Architecture.Arm64,
+        Architecture.X86_64,
+        Architecture.Riscv32,
+        Architecture.Riscv64
+    ]
+
+    var passed: u64 = 0
+    var failed: u64 = 0
+    var skipped: u64 = 0
+
+    for arch in arches:
+        val name = arch_display_name(arch)
+        if not can_run_test(arch):
+            skipped = skipped + 1
+            continue
+
+        val output = run_os_qemu_output(arch, timeout_ms)
+        if check_fn(output):
+            print "[PASS] {test_name} on {name}"
+            passed = passed + 1
+        else:
+            print "[FAIL] {test_name} on {name}"
+            print "  Output: {output}"
+            failed = failed + 1
+
+    (passed, failed, skipped)

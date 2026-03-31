@@ -183,7 +183,7 @@ bin/simple terminal exec t32_swd_serial ""
 
 ## 4. Relay Wiring Guide
 
-### 4.1 USB Relay Board Connection
+### 4.1 USB HID Relay (usbrelay)
 
 Common setup with a USB HID relay module:
 
@@ -268,6 +268,150 @@ exit 0
 ```bash
 chmod +x scripts/relay_*.shs
 ```
+
+### 4.2 Arduino Serial Relay (USB-Serial)
+
+For relay boards that use Arduino-style serial communication (CH340, CP2102, or native Arduino USB). These appear as `/dev/ttyACM*` or `/dev/ttyUSB*`.
+
+```
+                 USB (serial)
+  Host PC  ==================  Arduino/CH340 Relay Board
+                                  |
+                                  | Relay contacts (NO/NC/COM)
+                                  |
+                            +-----+------+
+                            |            |
+                          Power        Device
+                          Supply       Under Test
+```
+
+#### Device Detection
+
+The included relay scripts auto-detect the device. Detection priority:
+
+1. **`RELAY_DEVICE` env var** (explicit override)
+2. **USB VID:PID** via `lsusb` + sysfs (configurable: `RELAY_USB_VID`, `RELAY_USB_PID`)
+3. **Fallback**: first `/dev/ttyACM*` or `/dev/ttyUSB*`
+
+Find your device manually:
+
+```bash
+# List serial devices
+ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
+
+# Find USB vendor/product ID
+lsusb | grep -i ch340    # CH340 chips: 1a86:7523
+lsusb | grep -i cp210    # CP2102 chips: 10c4:ea60
+lsusb | grep -i arduino  # Arduino Uno: 2341:0043
+```
+
+#### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RELAY_DEVICE` | (auto) | Explicit device path, e.g. `/dev/ttyACM0` |
+| `RELAY_USB_VID` | `1a86` | USB vendor ID (CH340 default) |
+| `RELAY_USB_PID` | `7523` | USB product ID (CH340 default) |
+| `RELAY_BAUD` | `9600` | Serial baud rate |
+| `RELAY_CMD_ON` | `ON` | Serial command for relay ON |
+| `RELAY_CMD_OFF` | `OFF` | Serial command for relay OFF |
+| `RELAY_CMD_STATE` | `STATE` | Serial command to query state |
+| `RELAY_CMD_TOGGLE` | `TOGGLE` | Serial command to toggle |
+| `RELAY_RESET_DELAY` | `2` | Seconds between off/on during reset |
+
+#### Quick Start
+
+```bash
+# 1. Plug in the relay board
+# 2. Check it appeared
+ls /dev/ttyACM* /dev/ttyUSB*
+
+# 3. Ensure permissions (add yourself to dialout group)
+sudo usermod -aG dialout $USER
+# Log out and back in for group change to take effect
+
+# 4. Test directly
+RELAY_DEVICE=/dev/ttyACM0 scripts/relay_state.shs   # prints "on" or "off"
+RELAY_DEVICE=/dev/ttyACM0 scripts/relay_off.shs      # relay clicks, board powers off
+RELAY_DEVICE=/dev/ttyACM0 scripts/relay_on.shs       # relay clicks, board powers on
+
+# 5. Use via power control (reads config from config/t32/t32_terminal.sdn)
+bin/simple power state board_power
+bin/simple power off board_power
+bin/simple power on board_power
+bin/simple power reset board_power   # off -> 2s delay -> on
+```
+
+#### Custom Protocols
+
+If your relay firmware uses non-standard commands (e.g. hex bytes, different keywords), override via environment variables:
+
+```bash
+# Example: relay that uses "RELAY_SET 1" / "RELAY_SET 0" / "RELAY_GET"
+export RELAY_CMD_ON="RELAY_SET 1"
+export RELAY_CMD_OFF="RELAY_SET 0"
+export RELAY_CMD_STATE="RELAY_GET"
+export RELAY_BAUD=115200
+```
+
+### 4.3 Arduino Relay Firmware Requirements
+
+The relay scripts expect a simple text serial protocol at 9600 baud (configurable):
+
+| Command | Expected Response | Meaning |
+|---------|-------------------|---------|
+| `ON\n` | `OK` or none | Close relay (power on) |
+| `OFF\n` | `OK` or none | Open relay (power off) |
+| `STATE\n` | `ON` or `OFF` | Query current state |
+| `TOGGLE\n` | `OK` or none | Flip current state |
+
+Minimal Arduino sketch for reference:
+
+```cpp
+const int RELAY_PIN = 7;
+bool relayOn = true;  // default ON (normally closed)
+
+void setup() {
+    Serial.begin(9600);
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, HIGH);
+}
+
+void loop() {
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd == "ON")       { relayOn = true;  digitalWrite(RELAY_PIN, HIGH); Serial.println("OK"); }
+        else if (cmd == "OFF") { relayOn = false; digitalWrite(RELAY_PIN, LOW);  Serial.println("OK"); }
+        else if (cmd == "STATE")  { Serial.println(relayOn ? "ON" : "OFF"); }
+        else if (cmd == "TOGGLE") { relayOn = !relayOn; digitalWrite(RELAY_PIN, relayOn ? HIGH : LOW); Serial.println("OK"); }
+    }
+}
+```
+
+Test the firmware interactively:
+
+```bash
+screen /dev/ttyACM0 9600
+# Type: STATE<Enter> — should see ON or OFF
+# Ctrl-A, K, Y to exit screen
+```
+
+### 4.4 Troubleshooting Serial Relay
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| "Permission denied" | Not in dialout group | `sudo usermod -aG dialout $USER`, re-login |
+| "No USB relay device found" | Device not plugged in or wrong VID:PID | Check `lsusb`, set `RELAY_USB_VID`/`RELAY_USB_PID` |
+| No response from relay | Wrong baud rate | Set `RELAY_BAUD` to match firmware (try 9600, 115200) |
+| Relay resets on script run | Arduino DTR reset on serial open | Scripts use `stty -hupcl` to prevent this |
+| Wrong device picked | Multiple serial devices | Set `RELAY_DEVICE=/dev/ttyACMN` explicitly |
+| "could not acquire lock" | Another script holds the port | Wait or check for stuck processes |
+| macOS: device not found | Different device naming | Use `/dev/cu.usbmodem*` or `/dev/cu.usbserial*` |
+
+### 4.5 Create Custom Relay Scripts
+
+If the included scripts (`scripts/relay_on.shs`, etc.) don't fit your hardware, create custom ones following this contract:
 
 ---
 

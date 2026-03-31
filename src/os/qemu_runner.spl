@@ -8,6 +8,20 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+
+fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
+    """Interpret QEMU exit code based on architecture.
+
+    x86/x86_64 with isa-debug-exit: guest writes 0 -> QEMU exits with (0 << 1) | 1 = 1
+    ARM64/RISC-V with semihosting: exit code 0 = success
+    """
+    match target.arch:
+        Architecture.X86_64: exit_code == 1
+        Architecture.X86: exit_code == 1
+        _: exit_code == 0
+
 # ===========================================================================
 # OS Target Configuration
 # ===========================================================================
@@ -171,15 +185,19 @@ fn arch_display_name(arch: Architecture) -> text:
 fn build_os(target: OsTarget) -> bool:
     """Builds the OS kernel for the given target.
 
-    Constructs and prints the native-build command. Returns true on success.
-    Actual process spawning deferred to std.process integration.
+    Runs the native-build command via rt_process_run_timeout. Returns true on success.
     """
-    val cmd = "bin/simple native-build --entry {target.entry} --target {target.target_triple} -o {target.output} --linker-script {target.linker_script}"
-    print "[build] {arch_display_name(target.arch)}: {cmd}"
-    # TODO: actual process execution via std.process when available
-    # val result = shell(cmd)
-    # return result.exit_code == 0
-    false
+    val args = ["native-build", "--entry", target.entry, "--target", target.target_triple, "-o", target.output, "--linker-script", target.linker_script]
+    print "[build] {arch_display_name(target.arch)}: bin/simple {args.join(" ")}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, 60000)
+    if exit_code != 0:
+        print "[build] FAILED (exit code {exit_code})"
+        if stdout != "":
+            print "[build] stdout: {stdout}"
+        if stderr != "":
+            print "[build] stderr: {stderr}"
+        return false
+    true
 
 # ===========================================================================
 # QEMU Command Construction
@@ -242,16 +260,25 @@ fn build_qemu_command(target: OsTarget) -> [text]:
 fn run_os(target: OsTarget) -> bool:
     """Runs QEMU with the built kernel for the given target.
 
-    Prints the full command. Returns true on success.
-    Actual process spawning deferred to std.process integration.
+    Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
+    if not rt_file_exists(target.output):
+        print "[run] ERROR: kernel binary not found: {target.output}"
+        print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
+        return false
     val cmd_parts = build_qemu_command(target)
-    val cmd = cmd_parts.join(" ")
-    print "[run] {arch_display_name(target.arch)}: {cmd}"
-    # TODO: actual process execution via std.process when available
-    # val result = shell(cmd)
-    # return result.exit_code == 0
-    false
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, 30000)
+    if stdout != "":
+        print "[run] serial output:\n{stdout}"
+    if stderr != "":
+        print "[run] stderr:\n{stderr}"
+    val success = is_qemu_success(target, exit_code)
+    if not success:
+        print "[run] FAILED (exit code {exit_code})"
+    success
 
 # ===========================================================================
 # Test
@@ -260,16 +287,26 @@ fn run_os(target: OsTarget) -> bool:
 fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     """Runs QEMU and checks serial output for 'SimpleOS' within timeout.
 
-    Returns true if the kernel boots and prints the expected banner.
-    Actual process spawning and output capture deferred to std.process.
+    Returns true if the kernel boots, prints the expected banner, and exits successfully.
     """
+    if not rt_file_exists(target.output):
+        print "[test] ERROR: kernel binary not found: {target.output}"
+        print "[test] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
+        return false
     val cmd_parts = build_qemu_command(target)
-    val cmd = cmd_parts.join(" ")
-    print "[test] {arch_display_name(target.arch)} (timeout: {timeout_ms}ms): {cmd}"
-    # TODO: spawn QEMU, capture serial output, check for "SimpleOS" string
-    # val result = shell_with_timeout(cmd, timeout_ms)
-    # return result.stdout.contains("SimpleOS")
-    false
+    val qemu_bin = cmd_parts[0]
+    val qemu_args = cmd_parts.slice(1)
+    print "[test] {arch_display_name(target.arch)} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+    val serial_output = stdout + stderr
+    print "[test] serial output:\n{serial_output}"
+    val has_banner = serial_output.contains("SimpleOS")
+    val success = has_banner and is_qemu_success(target, exit_code)
+    if not has_banner:
+        print "[test] FAILED: 'SimpleOS' banner not found in serial output"
+    if not is_qemu_success(target, exit_code):
+        print "[test] FAILED: unexpected exit code {exit_code}"
+    success
 
 # ===========================================================================
 # Batch Operations
