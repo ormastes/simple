@@ -74,6 +74,8 @@ pub struct NativeBuildConfig {
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
+    /// Discover files from the explicit entrypoint's reachable import closure.
+    pub entry_closure: bool,
 }
 
 impl Default for NativeBuildConfig {
@@ -91,6 +93,7 @@ impl Default for NativeBuildConfig {
             no_mangle: false,
             backend: "cranelift".to_string(),
             runtime_path: None,
+            entry_closure: false,
         }
     }
 }
@@ -496,8 +499,11 @@ impl NativeProjectBuilder {
 
     /// Discover all .spl files in source directories.
     fn discover_files(&self) -> Result<Vec<PathBuf>, String> {
-        if let Some(entry_file) = &self.entry_file {
-            return self.discover_reachable_files(entry_file);
+        if self.config.entry_closure {
+            if let Some(entry_file) = &self.entry_file {
+                return self.discover_reachable_files(entry_file);
+            }
+            return Err("entry-closure requires --entry".to_string());
         }
         Ok(self.discover_files_full_scan())
     }
@@ -3360,6 +3366,10 @@ mod tests {
         std::fs::write(&entry_file, "fn main(): pass").unwrap();
 
         let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
             .source_dir(src_dir)
             .entry_file(entry_file.clone());
 
@@ -3391,6 +3401,10 @@ mod tests {
         .unwrap();
 
         let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
             .source_dir(project_root.join("src"))
             .entry_file(entry_file.clone());
 

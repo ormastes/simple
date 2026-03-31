@@ -72,6 +72,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut no_mangle = false;
     let mut backend = "cranelift".to_string();
     let mut runtime_path: Option<PathBuf> = None;
+    let mut entry_closure = false;
 
     // Parse arguments (skip "native-build" at index 0)
     let mut i = 1;
@@ -96,6 +97,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --no-mangle         Disable name mangling");
                 println!("  --backend <name>    Codegen backend: cranelift (default) or llvm");
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
+                println!("  --entry-closure     Compile only modules reachable from --entry");
                 return 0;
             }
             "--source" => {
@@ -202,6 +204,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            "--entry-closure" => {
+                entry_closure = true;
+                i += 1;
+            }
             other => {
                 // Handle --key=value forms for flags that take values
                 if let Some(val) = other.strip_prefix("--backend=") {
@@ -286,6 +292,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         if let Some(ref rp) = runtime_path {
             eprintln!("  Runtime path: {}", rp.display());
         }
+        eprintln!("  Entry closure: {}", entry_closure);
     }
 
     // Set runtime path override before building (works in C-compiled binaries)
@@ -310,6 +317,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
     config.runtime_path = runtime_path;
+    config.entry_closure = entry_closure;
 
     // Normalize backend aliases
     if backend == "llvm-lib" {

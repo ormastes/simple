@@ -218,6 +218,7 @@ echo "=== Stage 1: Rust seed → stage1 ==="
 run_logged stage1-native-build env RUST_LOG="${RUST_LOG:-error}" \
   "${seed_bin}" native-build \
     --source src/compiler --source src/lib --source src/app \
+    --entry-closure \
     --entry src/app/cli/bootstrap_main.spl \
     "${backend_flag[@]}" \
     -o "${stage1_bin}" \
@@ -235,6 +236,7 @@ echo ""
 echo "=== Stage 2: stage1 → stage2 (${backend:-default}) ==="
 run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage1_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
+  --entry-closure \
   --entry src/app/cli/bootstrap_main.spl \
   "${backend_flag[@]}" \
   -o "${stage2_bin}" \
@@ -252,6 +254,7 @@ echo ""
 echo "=== Stage 3: stage2 → stage3 (${backend:-default}, verify) ==="
 run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage2_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
+  --entry-closure \
   --entry src/app/cli/bootstrap_main.spl \
   "${backend_flag[@]}" \
   -o "${stage3_bin}" \
@@ -292,6 +295,7 @@ full_bin="${full_dir}/simple.exe"
 
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage3_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
+  --entry-closure \
   --entry src/app/cli/main.spl \
   "${backend_flag[@]}" \
   -o "${full_bin}" \

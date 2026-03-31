@@ -174,7 +174,20 @@ run_logged() {
 
 seed_bin="src/compiler_rust/target/bootstrap/simple"
 
-if [ ! -x "${seed_bin}" ]; then
+# Detect stale seed: rebuild if any Rust source is newer than the seed binary.
+# A stale seed causes hard-to-diagnose parse errors when new language features
+# (e.g., @allow annotations) are used in Simple source but the seed's parser
+# predates them.
+seed_stale=0
+if [ -x "${seed_bin}" ]; then
+  stale_files=$(find src/compiler_rust -name '*.rs' -newer "${seed_bin}" -not -path '*/target/*' 2>/dev/null | head -1)
+  if [ -n "${stale_files}" ]; then
+    seed_stale=1
+    echo "Seed binary is stale (Rust sources changed since last build). Rebuilding..."
+  fi
+fi
+
+if [ ! -x "${seed_bin}" ] || [ "${seed_stale}" -eq 1 ]; then
   echo "Building Rust seed compiler..."
   run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
 fi
@@ -212,6 +225,7 @@ else
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage2/${PLATFORM}/simple"
@@ -227,6 +241,7 @@ else
   run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
     -o "${output_dir}/stage3/${PLATFORM}/simple"
@@ -275,6 +290,7 @@ rm -rf .simple/native_cache/
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage_for_build}" native-build \
   --backend "${backend}" \
   --source src/compiler --source src/app --source src/lib \
+  --entry-closure \
   --entry src/app/cli/main.spl \
   --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
   -o "${full_dir}/simple"

@@ -17,6 +17,7 @@
 //!   --cache-dir <dir>   Cache directory for incremental builds
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
+//!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
 
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut no_mangle = false;
     let mut backend = String::new();
     let mut runtime_path: Option<PathBuf> = None;
+    let mut entry_closure = false;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -158,6 +160,10 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 runtime_path = Some(PathBuf::from(other.strip_prefix("--runtime-path=").unwrap_or("")));
                 i += 1;
             }
+            "--entry-closure" => {
+                entry_closure = true;
+                i += 1;
+            }
             other => {
                 // Treat as source directory
                 source_dirs.push(PathBuf::from(other));
@@ -215,6 +221,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         if let Some(ref rp) = runtime_path {
             eprintln!("  Runtime path: {}", rp.display());
         }
+        eprintln!("  Entry closure: {}", entry_closure);
     }
 
     // Set runtime path override before building
@@ -242,6 +249,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         cache_dir,
         no_mangle,
         runtime_path,
+        entry_closure,
         ..Default::default()
     };
     if !backend.is_empty() {
@@ -322,6 +330,7 @@ fn print_help() {
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
     println!("  --backend <name>    Compilation backend (cranelift, llvm)");
+    println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
     println!();
     println!("Examples:");
