@@ -1,6 +1,44 @@
+use compiler.backend.{LlvmTypeMapper, LlvmContext}
+use compiler.backend.common.type_mapper.{PrimitiveType, Mutability}
+use compiler.mir.mir_data.*
+
 describe "Llvm Type Mapper":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "maps primitive and pointer types":
+        val mapper = LlvmTypeMapper.create()
+
+        expect(mapper.map_primitive(PrimitiveType.I64)).to_equal("i64")
+        expect(mapper.map_primitive(PrimitiveType.F32)).to_equal("float")
+        expect(mapper.map_primitive(PrimitiveType.Bool)).to_equal("i1")
+        expect(mapper.map_pointer("i64", Mutability.Mutable)).to_equal("ptr")
+
+    it "maps structs arrays tuples and function signatures":
+        val mapper = LlvmTypeMapper.create()
+
+        expect(mapper.map_struct([("x", MirType.i64()), ("y", MirType.f64())])).to_equal("{ i64, double }")
+        expect(mapper.map_array(MirType.i64(), 3)).to_equal("[3 x i64]")
+        expect(mapper.map_tuple([MirType.i64(), MirType.bool()])).to_equal("{ i64, i1 }")
+        expect(mapper.map_function([MirType.i64()], MirType.i64())).to_equal("ptr")
+        expect(mapper.map_function_signature([MirType.i64(), MirType.i64()], MirType.i64())).to_equal("i64 (i64, i64)")
+
+    it "tracks target-specific pointer size and alignment":
+        val mapper32 = LlvmTypeMapper.create_32bit()
+        val mapper64 = LlvmTypeMapper.create_64bit()
+        val ptr_ty = MirType.ptr(MirType.i64(), false)
+
+        expect(mapper32.target_bits).to_equal(32)
+        expect(mapper64.target_bits).to_equal(64)
+        expect(mapper32.size_of(ptr_ty)).to_equal(4)
+        expect(mapper64.size_of(ptr_ty)).to_equal(8)
+        expect(mapper32.align_of(ptr_ty)).to_equal(4)
+        expect(mapper64.align_of(ptr_ty)).to_equal(8)
+
+    it "keeps named struct registrations in the context":
+        var ctx = LlvmContext.empty()
+        ctx.register_struct("Point", "%struct.Point")
+
+        expect(ctx.get_struct("Point")).to_equal(Some("%struct.Point"))
+        expect(ctx.get_struct("Missing")).to_be_nil()
+        expect(ctx.next_struct_name()).to_equal("%struct.anon.0")
 
 # # LLVM Type Mapper Unit Tests
 # #
