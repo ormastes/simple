@@ -1,6 +1,83 @@
+use compiler.backend.{VhdlConstraintChecker, VhdlConstraint, VhdlConstraintErrorKind}
+from lexer import {Span}
+
+fn test_span() -> Span:
+    Span(start: 0, end_pos: 10, line: 1, col: 1)
+
 describe "Vhdl Constraints":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "accepts matching widths and rejects mismatched widths":
+        val ok_checker = VhdlConstraintChecker.create()
+        ok_checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "a", signal2: "b",
+            width1: 32, width2: 32,
+            span: test_span()
+        ))
+        expect(ok_checker.check_all().is_ok()).to_be(true)
+
+        val bad_checker = VhdlConstraintChecker.create()
+        bad_checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "narrow", signal2: "wide",
+            width1: 8, width2: 16,
+            span: test_span()
+        ))
+        val errors = bad_checker.check_all().unwrap_err()
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].code).to_equal("E0700")
+        expect(errors[0].kind).to_equal(VhdlConstraintErrorKind.WidthMismatch)
+        expect(errors[0].message).to_contain("narrow")
+        expect(errors[0].message).to_contain("wide")
+
+    it "checks clock domains, loops, and drivers":
+        val checker = VhdlConstraintChecker.create()
+        checker.register_signal_domain("sig_a", "clk_100")
+        checker.register_signal_domain("sig_b", "clk_50")
+        checker.add_constraint(VhdlConstraint.SameClockDomain(
+            signal1: "sig_a", signal2: "sig_b",
+            span: test_span()
+        ))
+        checker.add_constraint(VhdlConstraint.NoCombLoop(
+            signals: ["a", "b"],
+            dependencies: [("a", "b"), ("b", "a")],
+            span: test_span()
+        ))
+        checker.add_constraint(VhdlConstraint.SingleDriver(
+            signal: "shared",
+            drivers: ["drv0", "drv1"],
+            span: test_span()
+        ))
+
+        val errors = checker.check_all().unwrap_err()
+
+        expect(errors.len()).to_equal(3)
+        expect(errors[0].code).to_equal("E0710")
+        expect(errors[0].kind).to_equal(VhdlConstraintErrorKind.ClockDomainCrossing)
+        expect(errors[1].code).to_equal("E0721")
+        expect(errors[1].kind).to_equal(VhdlConstraintErrorKind.CombinationalLoop)
+        expect(errors[2].code).to_equal("E0740")
+        expect(errors[2].kind).to_equal(VhdlConstraintErrorKind.MultipleDrivers)
+
+    it "reports incomplete sensitivity and latch coverage":
+        val checker = VhdlConstraintChecker.create()
+        checker.add_constraint(VhdlConstraint.SensitivityComplete(
+            process_label: "p0",
+            used_signals: ["clk", "rst", "data"],
+            sensitivity: ["clk", "rst"],
+            span: test_span()
+        ))
+        checker.add_constraint(VhdlConstraint.NoLatchInference(
+            process_label: "p1",
+            assigned_signals: ["q"],
+            branch_coverage: [("then", true), ("else", false)],
+            span: test_span()
+        ))
+
+        val errors = checker.check_all().unwrap_err()
+
+        expect(errors.len()).to_equal(2)
+        expect(errors[0].code).to_equal("E0720")
+        expect(errors[0].kind).to_equal(VhdlConstraintErrorKind.IncompleteSensitivity)
+        expect(errors[1].code).to_equal("E0722")
+        expect(errors[1].kind).to_equal(VhdlConstraintErrorKind.LatchInferred)
 
 # # VHDL Constraints Specification
 # #

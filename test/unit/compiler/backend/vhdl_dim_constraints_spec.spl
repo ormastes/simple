@@ -1,6 +1,74 @@
+use compiler.types.{
+    DimConstraint,
+    DimSolver,
+    DimErrorKind
+}
+use compiler.hir.hir_types.{DimExpr}
+from lexer import {Span}
+
+fn test_span() -> Span:
+    Span(start: 0, end_pos: 10, line: 1, col: 1)
+
+fn lit(value: i64) -> DimExpr:
+    DimExpr.literal(value, test_span())
+
 describe "Vhdl Dim Constraints":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "accepts and rejects width matches":
+        val ok_solver = DimSolver.new()
+        ok_solver.add(DimConstraint.WidthMatch(lit(32), lit(32), "<=", test_span()))
+        expect(ok_solver.solve().is_ok()).to_equal(true)
+
+        val bad_solver = DimSolver.new()
+        bad_solver.add(DimConstraint.WidthMatch(lit(8), lit(16), "<=", test_span()))
+        val bad_result = bad_solver.solve()
+
+        expect(bad_result.is_err()).to_equal(true)
+        val bad_errors = bad_result.unwrap_err()
+        expect(bad_errors.len()).to_equal(1)
+        expect(bad_errors[0].error_code).to_equal("E0700")
+        expect(bad_errors[0].kind).to_equal(DimErrorKind.WidthMismatch)
+
+    it "checks width safety for addition and multiplication":
+        val add_ok = DimSolver.new()
+        add_ok.add(DimConstraint.WidthSafe([lit(16), lit(16)], "+", lit(17), test_span()))
+        expect(add_ok.solve().is_ok()).to_equal(true)
+
+        val add_bad = DimSolver.new()
+        add_bad.add(DimConstraint.WidthSafe([lit(16), lit(16)], "+", lit(16), test_span()))
+        val add_bad_result = add_bad.solve()
+        expect(add_bad_result.is_err()).to_equal(true)
+        expect(add_bad_result.unwrap_err()[0].error_code).to_equal("E0701")
+        expect(add_bad_result.unwrap_err()[0].kind).to_equal(DimErrorKind.WidthOverflow)
+
+        val mul_bad = DimSolver.new()
+        mul_bad.add(DimConstraint.WidthSafe([lit(32), lit(32)], "*", lit(32), test_span()))
+        expect(mul_bad.solve().is_err()).to_equal(true)
+
+    it "accepts bounded loops within the limit and rejects unbounded ones":
+        val ok_solver = DimSolver.new()
+        ok_solver.add(DimConstraint.BoundedLoop(lit(256), 1024, test_span()))
+        expect(ok_solver.solve().is_ok()).to_equal(true)
+
+        val bad_solver = DimSolver.new()
+        bad_solver.add(DimConstraint.BoundedLoop(lit(2048), 1024, test_span()))
+        val bad_result = bad_solver.solve()
+
+        expect(bad_result.is_err()).to_equal(true)
+        expect(bad_result.unwrap_err()[0].error_code).to_equal("E0730")
+        expect(bad_result.unwrap_err()[0].kind).to_equal(DimErrorKind.UnboundedLoop)
+
+    it "checks valid ranges in both directions":
+        val ok_solver = DimSolver.new()
+        ok_solver.add(DimConstraint.ValidRange(lit(7), lit(0), test_span()))
+        expect(ok_solver.solve().is_ok()).to_equal(true)
+
+        val bad_solver = DimSolver.new()
+        bad_solver.add(DimConstraint.ValidRange(lit(3), lit(7), test_span()))
+        val bad_result = bad_solver.solve()
+
+        expect(bad_result.is_err()).to_equal(true)
+        expect(bad_result.unwrap_err()[0].error_code).to_equal("E0740")
+        expect(bad_result.unwrap_err()[0].kind).to_equal(DimErrorKind.InvalidRange)
 
 # # VHDL Dimension Constraints Specification
 # #

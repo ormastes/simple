@@ -1,3 +1,81 @@
+use compiler.backend.{
+    WffiParam,
+    WffiFunction,
+    WffiBinding,
+    wffi_param_new,
+    wffi_function_new,
+    wffi_binding_new,
+    wffi_binding_add_fn,
+    lib_name_to_safe,
+    wffi_rt_call_fn,
+    wffi_params_to_text,
+    wffi_param_names_to_text,
+    wffi_generate_loader,
+    wffi_generate_function,
+    generate_wffi_wrappers
+}
+
+fn sample_params() -> [WffiParam]:
+    [
+        wffi_param_new("x", "f64"),
+        wffi_param_new("count", "i32")
+    ]
+
+fn sample_fn(name: text, has_return: bool, return_type: text) -> WffiFunction:
+    wffi_function_new(name, sample_params(), has_return, return_type)
+
 describe "WFFI Bindgen":
-    it "skipped":
-        skip("assertion failures - WFFI type mapping returns incorrect values in interpreter")
+    it "sanitizes library names into safe identifiers":
+        expect(lib_name_to_safe("libm.so")).to_equal("m")
+        expect(lib_name_to_safe("libsqlite3.so.0")).to_equal("sqlite3")
+        expect(lib_name_to_safe("zlib.so")).to_equal("zlib")
+
+    it "maps wrapper call helpers by return type":
+        expect(wffi_rt_call_fn("f64")).to_equal("rt_wffi_call_f64")
+        expect(wffi_rt_call_fn("i64")).to_equal("rt_wffi_call_i64")
+        expect(wffi_rt_call_fn("bool")).to_equal("rt_wffi_call_bool")
+        expect(wffi_rt_call_fn("text")).to_equal("rt_wffi_call_text")
+        expect(wffi_rt_call_fn("i32")).to_equal("rt_wffi_call_i32")
+        expect(wffi_rt_call_fn("custom")).to_equal("rt_wffi_call_i64")
+
+    it "formats parameter lists and names deterministically":
+        val params = sample_params()
+
+        expect(wffi_params_to_text(params)).to_equal("x: f64, count: i32")
+        expect(wffi_param_names_to_text(params)).to_equal("x, count")
+        expect(wffi_params_to_text([])).to_equal("")
+        expect(wffi_param_names_to_text([])).to_equal("")
+
+    it "builds bindings and loader text for a library":
+        val binding = wffi_binding_new("libm.so")
+        val output = wffi_generate_loader(binding)
+
+        expect(binding.lib_name).to_equal("libm.so")
+        expect(binding.handle_var).to_equal("wffi_m_handle")
+        expect(output).to_contain("fn wffi_load_m() -> i64:")
+        expect(output).to_contain("rt_wffi_load(\"libm.so\")")
+        expect(output).to_contain("var wffi_m_handle: i64 = 0")
+        expect(output).to_contain("fn m_init():")
+
+    it "generates wrappers and complete wrapper bundles":
+        val binding = wffi_binding_add_fn(
+            wffi_binding_new("libm.so"),
+            sample_fn("sqrt", true, "f64")
+        )
+        val binding2 = wffi_binding_add_fn(
+            binding,
+            sample_fn("sink", false, "i64")
+        )
+
+        val sqrt_code = wffi_generate_function(binding2, binding2.functions[0])
+        val sink_code = wffi_generate_function(binding2, binding2.functions[1])
+        val bundle = generate_wffi_wrappers(binding2)
+
+        expect(sqrt_code).to_contain("fn sqrt(x: f64, count: i32) -> f64:")
+        expect(sqrt_code).to_contain("rt_wffi_call_f64(wffi_m_handle, \"sqrt\", x, count)")
+        expect(sink_code).to_contain("fn sink(x: f64, count: i32):")
+        expect(sink_code).to_contain("rt_wffi_call_void(wffi_m_handle, \"sink\", x, count)")
+        expect(bundle).to_contain("# Auto-generated WFFI wrappers for libm.so")
+        expect(bundle).to_contain("fn wffi_load_m() -> i64:")
+        expect(bundle).to_contain("fn sqrt(x: f64, count: i32) -> f64:")
+        expect(bundle).to_contain("fn sink(x: f64, count: i32):")

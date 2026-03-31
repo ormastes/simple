@@ -1,6 +1,67 @@
+use compiler.backend.{
+    LlvmTypeMapper,
+    CraneliftTypeMapper,
+    WasmTypeMapper,
+    InterpreterTypeMapper
+}
+use compiler.backend.backend_types.CodegenTarget
+use compiler.mir.mir_data.*
+
 describe "Type Mapper":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "maps core primitive types consistently across backends":
+        val llvm = LlvmTypeMapper.create()
+        val cranelift = CraneliftTypeMapper.create()
+        val wasm = WasmTypeMapper.create()
+        val interp = InterpreterTypeMapper.create()
+
+        expect(llvm.map_type(MirType.i64())).to_equal("i64")
+        expect(cranelift.map_type(MirType.i64())).to_equal("I64")
+        expect(wasm.map_type(MirType.i64())).to_equal("i64")
+        expect(interp.map_type(MirType.i64())).to_equal("Int")
+        expect(llvm.map_type(MirType.bool())).to_equal("i1")
+        expect(cranelift.map_type(MirType.bool())).to_equal("I8")
+        expect(wasm.map_type(MirType.bool())).to_equal("i32")
+        expect(interp.map_type(MirType.bool())).to_equal("Bool")
+
+    it "maps pointers according to backend memory model":
+        val ptr_ty = MirType.ptr(MirType.i64(), false)
+        val llvm = LlvmTypeMapper.create()
+        val cranelift = CraneliftTypeMapper.create()
+        val wasm32 = WasmTypeMapper.create_for_target(CodegenTarget.Wasm32)
+        val wasm64 = WasmTypeMapper.create_for_target(CodegenTarget.Wasm64)
+        val interp = InterpreterTypeMapper.create()
+
+        expect(llvm.map_type(ptr_ty)).to_equal("ptr")
+        expect(cranelift.map_type(ptr_ty)).to_equal("R64")
+        expect(wasm32.map_type(ptr_ty)).to_equal("i32")
+        expect(wasm64.map_type(ptr_ty)).to_equal("i64")
+        expect(interp.map_type(ptr_ty)).to_equal("Ptr<Int>")
+
+    it "handles composite types using each backend strategy":
+        val tuple_ty = MirType(kind: MirTypeKind.Tuple([MirType.i64(), MirType.bool()]))
+        val array_ty = MirType(kind: MirTypeKind.Array(MirType.i64(), 4))
+        val llvm = LlvmTypeMapper.create()
+        val cranelift = CraneliftTypeMapper.create()
+        val wasm = WasmTypeMapper.create()
+        val interp = InterpreterTypeMapper.create()
+
+        expect(llvm.map_type(tuple_ty)).to_equal("{ i64, i1 }")
+        expect(cranelift.map_type(tuple_ty)).to_equal("R64")
+        expect(wasm.map_type(array_ty)).to_equal("i32")
+        expect(interp.map_type(array_ty)).to_equal("Array<Int>")
+
+    it "keeps target-sensitive size and signature helpers stable":
+        val llvm = LlvmTypeMapper.create_64bit()
+        val cranelift = CraneliftTypeMapper.create()
+        val wasm = WasmTypeMapper.create_wasm32()
+        val interp = InterpreterTypeMapper.create()
+        val params = [MirType.i64(), MirType.bool()]
+
+        expect(llvm.map_function_signature(params, MirType.i64())).to_equal("i64 (i64, i1)")
+        expect(cranelift.map_function_signature(params, MirType.i64())).to_equal("(I64, I8) -> I64")
+        expect(wasm.map_function_signature(params, MirType.unit())).to_equal("(param i64 i32)")
+        expect(interp.map_function_signature(params, MirType.bool())).to_equal("Function<(Int, Bool) -> Bool>")
+        expect(llvm.size_of(MirType.ptr(MirType.i64(), false))).to_equal(8)
 
 # # Type Mapper Specification
 # #

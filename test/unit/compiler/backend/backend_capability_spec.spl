@@ -1,6 +1,68 @@
+use compiler.backend.{MirToC, MirToLlvm}
+use compiler.backend.backend_types.CodegenTarget
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn c_output_for(block: fn(MirToC)) -> text:
+    val translator = MirToC.create("test.backend.capability")
+    block(translator)
+    translator.builder.build()
+
+fn llvm_output_for(block: fn(MirToLlvm)) -> text:
+    val translator = MirToLlvm.create("test.backend.capability", CodegenTarget.X86_64, nil)
+    block(translator)
+    translator.builder.build()
+
 describe "Backend Capability":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "names the backend and unsupported async operation in C lowering":
+        val output = c_output_for(\translator:
+            translator.translate_create_promise(
+                LocalId(id: 1),
+                LocalId(id: 2),
+                MirType.promise(MirType.i64())
+            )
+        )
+
+        expect(output).to_contain("C backend does not support async CreatePromise lowering")
+        expect(output).to_not_contain("not implemented")
+
+    it "names the backend and unsupported actor operation in C lowering":
+        val output = c_output_for(\translator:
+            translator.translate_receive(LocalId(id: 1), nil)
+        )
+
+        expect(output).to_contain("C backend does not support actor Receive lowering")
+        expect(output).to_not_contain("Instruction not implemented")
+
+    it "names the backend and unsupported matrix operation in LLVM lowering":
+        val output = llvm_output_for(\translator:
+            translator.local_types[0] = "ptr"
+            translator.local_types[1] = "ptr"
+            translator.local_types[2] = "ptr"
+            translator.translate_binop(
+                LocalId(id: 2),
+                MirBinOp.MatMul,
+                mir_operand_copy(LocalId(id: 0)),
+                mir_operand_copy(LocalId(id: 1))
+            )
+        )
+
+        expect(output).to_contain("LLVM backend does not support MatMul lowering")
+        expect(output).to_not_contain("@__simple_runtime_matmul")
+
+    it "keeps unsupported messages actionable instead of generic":
+        val output = llvm_output_for(\translator:
+            translator.local_types[0] = "ptr"
+            translator.local_types[2] = "ptr"
+            translator.translate_unaryop(
+                LocalId(id: 2),
+                MirUnaryOp.Transpose,
+                mir_operand_copy(LocalId(id: 0))
+            )
+        )
+
+        expect(output).to_contain("LLVM backend does not support Transpose lowering")
+        expect(output).to_not_contain("Instruction not implemented")
 
 # # # Backend Capability Detection Specification
 # #
