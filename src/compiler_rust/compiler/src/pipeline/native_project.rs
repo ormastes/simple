@@ -251,6 +251,11 @@ impl NativeProjectBuilder {
             file_sources.push((path.clone(), source));
         }
 
+        // Deduplicate files for compilation (symlink aliases compile once, but
+        // all paths remain in file_sources for import map indexing).
+        let compile_indices: std::collections::HashSet<usize> =
+            Self::deduplicate_for_compilation(&files).into_iter().collect();
+
         // Determine which files need recompilation via content hash
         let mut to_compile: Vec<(usize, PathBuf, String)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
@@ -260,6 +265,10 @@ impl NativeProjectBuilder {
             let canon_entry_for_cache: Option<PathBuf> =
                 self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
             for (i, (path, source)) in file_sources.iter().enumerate() {
+                // Skip symlink aliases — only compile each physical file once
+                if !compile_indices.contains(&i) {
+                    continue;
+                }
                 // Always recompile the entry file (its main→spl_main renaming depends on is_entry)
                 let is_entry = is_entry_file(path, &canon_entry_for_cache);
                 if !is_entry {
@@ -278,6 +287,10 @@ impl NativeProjectBuilder {
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
+                // Skip symlink aliases — only compile each physical file once
+                if !compile_indices.contains(&i) {
+                    continue;
+                }
                 to_compile.push((i, path.clone(), source.clone()));
             }
         }
@@ -498,6 +511,8 @@ impl NativeProjectBuilder {
     }
 
     /// Discover all .spl files in source directories.
+    /// Returns ALL paths including symlink aliases (needed for import map indexing).
+    /// Use `deduplicate_for_compilation` to get the unique set for actual compilation.
     fn discover_files(&self) -> Result<Vec<PathBuf>, String> {
         if self.config.entry_closure {
             if let Some(entry_file) = &self.entry_file {
@@ -518,11 +533,10 @@ impl NativeProjectBuilder {
         if let Some(entry_file) = &self.entry_file {
             let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.clone());
             if !files.iter().any(|path| same_file_path(path, &canonical_entry)) {
-                files.push(canonical_entry);
+                files.push(entry_file.clone());
             }
         }
         files.sort();
-        files.dedup_by(|a, b| same_file_path(a, b));
         files
     }
 
@@ -562,6 +576,20 @@ impl NativeProjectBuilder {
         files.sort();
         files.dedup_by(|a, b| same_file_path(a, b));
         Ok(files)
+    }
+
+    /// Deduplicate files by canonical path for compilation.
+    /// Returns indices into the original file list of files to actually compile.
+    fn deduplicate_for_compilation(files: &[PathBuf]) -> Vec<usize> {
+        let mut seen = std::collections::HashSet::new();
+        let mut indices = Vec::new();
+        for (i, path) in files.iter().enumerate() {
+            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if seen.insert(canonical) {
+                indices.push(i);
+            }
+        }
+        indices
     }
 
     /// Compile entries (index, path, source) in parallel using rayon.
@@ -1459,11 +1487,23 @@ fn is_system_symbol(sym: &str) -> bool {
         return is_windows_system_name(sym) || is_windows_system_name(name);
     }
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't).
-    #[cfg(not(target_os = "windows"))]
-    {
-        let name = sym.strip_prefix('_').unwrap_or(sym);
-        is_known_system_name(sym) || is_known_system_name(name)
+    // Check both original and stripped form so __errno_location matches
+    // whether or not the leading _ is stripped.
+    let name = sym.strip_prefix('_').unwrap_or(sym);
+    if is_known_system_name(sym) || is_known_system_name(name) {
+        return true;
     }
+    // On macOS, /usr/lib/libSystem.B.dylib is in the dyld shared cache and nm
+    // cannot scan it. Use prefix-based heuristics to identify system/C++/ObjC
+    // symbols that will be resolved by dylibs at runtime.
+    if cfg!(target_os = "macos") {
+        return is_macos_system_symbol(sym);
+    }
+    #[cfg(target_os = "windows")]
+    if is_windows_system_name(sym) || is_windows_system_name(name) {
+        return true;
+    }
+    false
 }
 
 /// Windows-only system symbols — only the subset that actually exists in msvcrt/ucrt.
@@ -1488,6 +1528,60 @@ fn is_windows_system_name(name: &str) -> bool {
         "__security_cookie" | "__security_check_cookie" | "__GSHandlerCheck" |
         "__acrt_iob_func" | "__stdio_common_vfprintf" | "__stdio_common_vsprintf"
     )
+}
+
+/// Identify macOS system symbols that are resolved from dylibs at load time.
+/// On macOS 11+, system dylibs live in the dyld shared cache and nm cannot
+/// scan them, so we must identify system symbols by name patterns.
+fn is_macos_system_symbol(sym: &str) -> bool {
+    // macOS C ABI adds _ prefix. Strip it for matching.
+    let name = sym.strip_prefix('_').unwrap_or(sym);
+
+    // macOS stdio globals: __stderrp, __stdinp, __stdoutp
+    if matches!(name, "__stderrp" | "__stdinp" | "__stdoutp" | "_stderrp" | "_stdinp" | "_stdoutp") {
+        return true;
+    }
+
+    // C++ runtime symbols (libc++, libc++abi, libcxxrt)
+    if name.starts_with("_ZN") || name.starts_with("_ZT") || name.starts_with("_ZS") ||
+       name.starts_with("__cxa_") || name.starts_with("__cxx") {
+        return true;
+    }
+
+    // Objective-C runtime
+    if name.starts_with("objc_") || name.starts_with("_objc_") || name.starts_with("OBJC_") {
+        return true;
+    }
+
+    // CoreFoundation basics (linked via libSystem)
+    if name.starts_with("kCF") {
+        return true;
+    }
+
+    // macOS syscalls and libc extras
+    if matches!(name,
+        "arc4random" | "arc4random_buf" | "arc4random_uniform" |
+        "__error" | "__maskrune" | "__tolower" | "__toupper" |
+        "_NSGetExecutablePath" | "_NSGetEnviron" | "_NSGetArgc" | "_NSGetArgv" |
+        "__NSConcreteStackBlock" | "__NSConcreteGlobalBlock" |
+        "os_unfair_lock_lock" | "os_unfair_lock_unlock" |
+        "mach_absolute_time" | "mach_timebase_info" | "mach_task_self_" |
+        "vm_allocate" | "vm_deallocate" |
+        "kevent" | "kqueue" | "pipe2" |
+        "flock" | "ftruncate" | "pread" | "pwrite" | "writev" | "readv" |
+        "getifaddrs" | "freeifaddrs" | "if_nametoindex" |
+        "sysctl" | "sysctlbyname" | "proc_pidpath" |
+        "issetugid" | "sandbox_check"
+    ) {
+        return true;
+    }
+
+    // Prefix-based: pthread, dispatch, mach (all from libSystem on macOS)
+    if name.starts_with("pthread_") || name.starts_with("dispatch_") || name.starts_with("mach_") {
+        return true;
+    }
+
+    false
 }
 
 fn is_known_system_name(name: &str) -> bool {
@@ -2833,9 +2927,16 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
     // raw_name → list of mangled names (one per defining module)
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
 
+    // Deduplicate by canonical path so symlink aliases don't produce duplicate entries.
+    // Use the raw (non-canonical) path for prefix computation to match compilation.
+    let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
         if path.to_string_lossy().contains("check.spl") {
             continue;
+        }
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !seen_canonical.insert(canonical_path) {
+            continue; // skip symlink duplicate — already indexed under first-seen path
         }
         let prefix = module_prefix_from_path(path, source_root);
         // Try to parse the file; skip files that fail to parse
@@ -2992,7 +3093,12 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
     // (e.g., `use app.io.mod.{process_run}`) to find the actual definition even when
     // the re-exporting module doesn't define the function itself.
     let mut re_exports: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut seen_canonical_reexport = HashSet::new();
     for (path, source) in file_sources {
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if !seen_canonical_reexport.insert(canonical_path) {
+            continue; // skip symlink duplicate
+        }
         let prefix = module_prefix_from_path(path, source_root);
         let mut parser = simple_parser::Parser::new(source);
         if let Ok(ast) = parser.parse() {
