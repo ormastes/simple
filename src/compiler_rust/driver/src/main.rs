@@ -840,6 +840,8 @@ fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
+    let compile_vhdl_requested = args.iter().any(|arg| arg == "--backend=vhdl");
+
     // Keep Simple app dispatch narrow. Most compiler/build commands still rely on
     // Rust handlers, but selected app surfaces need a real Simple entrypoint.
     if app_relative_path != "src/app/ui/cli_entry.spl"
@@ -850,6 +852,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         && app_relative_path != "src/compiler/90.tools/ffi_gen/main.spl"
         && app_relative_path != "src/app/plugin/main.spl"
         && app_relative_path != "src/app/wrapper_gen/mod.spl"
+        && !(app_relative_path == "src/app/compile/main.spl" && compile_vhdl_requested)
     {
         return None;
     }

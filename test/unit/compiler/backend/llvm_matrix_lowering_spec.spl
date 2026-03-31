@@ -1,0 +1,95 @@
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend_types.CodegenTarget
+use compiler.mir.mir_data.*
+from hir_types import {SymbolId}
+from lexer import {Span}
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn matrix_ptr_type() -> MirType:
+    MirType.ptr(MirType.i64(), false)
+
+fn local(id: i64, name: text, ty: MirType, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: kind)
+
+fn copy_of(id: i64) -> MirOperand:
+    mir_operand_copy(LocalId(id: id))
+
+fn make_matrix_module(body_name: text, insts: [MirInst]) -> MirModule:
+    val ptr_ty = matrix_ptr_type()
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: body_name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            local(0, "lhs", ptr_ty, LocalKind.Temp),
+            local(1, "rhs", ptr_ty, LocalKind.Temp),
+            local(2, "dest", ptr_ty, LocalKind.Temp)
+        ],
+        blocks: [
+            MirBlock(
+                id: BlockId.entry(),
+                label: Some("entry"),
+                instructions: insts,
+                terminator: MirTerminator.Return(nil)
+            )
+        ],
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: ""
+    )
+
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    MirModule(
+        name: "test.llvm.matrix",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn translate(module: MirModule) -> text:
+    val translator = MirToLlvm.create("test.llvm.matrix", CodegenTarget.X86_64, nil)
+    translator.translate_module(module)
+
+describe "LLVM matrix lowering":
+    it "fails explicitly for MatMul and BroadcastAdd instead of emitting unresolved runtime calls":
+        val module = make_matrix_module("matrix_ops", [
+            MirInst(
+                kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.MatMul, copy_of(0), copy_of(1)),
+                span: nil
+            ),
+            MirInst(
+                kind: MirInstKind.BinOp(LocalId(id: 2), MirBinOp.BroadcastAdd, copy_of(0), copy_of(1)),
+                span: nil
+            )
+        ])
+
+        val output = translate(module)
+
+        expect(output).to_contain("LLVM backend does not support MatMul lowering")
+        expect(output).to_contain("LLVM backend does not support BroadcastAdd lowering")
+        expect(output).to_not_contain("@__simple_runtime_matmul")
+        expect(output).to_not_contain("@__simple_runtime_broadcast_add")
+
+    it "fails explicitly for Transpose instead of emitting an unresolved runtime call":
+        val module = make_matrix_module("transpose_op", [
+            MirInst(
+                kind: MirInstKind.UnaryOp(LocalId(id: 2), MirUnaryOp.Transpose, copy_of(0)),
+                span: nil
+            )
+        ])
+
+        val output = translate(module)
+
+        expect(output).to_contain("LLVM backend does not support Transpose lowering")
+        expect(output).to_not_contain("@__simple_runtime_transpose")

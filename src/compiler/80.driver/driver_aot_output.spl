@@ -269,6 +269,32 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         driver_log_info(log, "PTX assembly written to {output}")
         CompileResult.Success(output)
 
+    me compile_to_vhdl(output: text) -> CompileResult:
+        """Compile all MIR modules to VHDL source (VHDL backend)."""
+        val log = self.ctx.logger
+        val is_release = self.ctx.options.release
+        driver_log_debug(log, "AOT VHDL: generating VHDL to {output}")
+
+        var all_vhdl = ""
+        val keys = self.ctx.mir_modules.keys()
+        for name in keys:
+            driver_log_trace(log, "translating module to VHDL: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend("vhdl", mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("VHDL compile error in {name}: {err}")
+            val module_result = compiled.unwrap()
+            val vhdl = module_result.assembly ?? ""
+            if all_vhdl != "" and vhdl != "":
+                all_vhdl = all_vhdl + "\n\n"
+            all_vhdl = all_vhdl + vhdl
+
+        if not rt_file_write_text(output, all_vhdl):
+            return CompileResult.CodegenError("Failed to write VHDL to {output}")
+        driver_log_info(log, "VHDL source written to {output}")
+        CompileResult.Success(output)
+
     me compile_to_smf(output: text) -> CompileResult:
         val log = self.ctx.logger
         val backend_name = self.ctx.options.backend
@@ -417,4 +443,3 @@ fn collect_dependency_hashes(ctx: any) -> [SmfDependencyEntry]:
             deps = deps + [SmfDependencyEntry(module_path: input_path, interface_hash: hash)]
 
     deps
-

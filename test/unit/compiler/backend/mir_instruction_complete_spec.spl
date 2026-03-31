@@ -1,6 +1,59 @@
+use compiler.backend.{
+    BackendTarget,
+    MirTestInst,
+    new_builder,
+    simple_arithmetic,
+    simd_reduction,
+    gpu_kernel
+}
+
 describe "Mir Instruction Complete":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+    it "emits core builder instructions in order":
+        val builder = new_builder("core")
+        builder.add_const_int(0, 10)
+        builder.add_const_bool(1, true)
+        builder.add_add(2, 0, 0)
+        builder.add_branch(1, 3, 4)
+        builder.add_ret(2)
+
+        val tc = builder.build()
+
+        expect(tc.instructions.len()).to_equal(5)
+        expect(tc.instructions[0]).to_equal(MirTestInst.ConstInt(VReg(id: 0), 10))
+        expect(tc.instructions[1]).to_equal(MirTestInst.ConstBool(VReg(id: 1), true))
+        expect(tc.instructions[2]).to_equal(MirTestInst.Add(VReg(id: 2), VReg(id: 0), VReg(id: 0)))
+        expect(tc.instructions[4]).to_equal(MirTestInst.Ret(VReg(id: 2)))
+
+    it "tracks the next virtual register from sparse destinations":
+        val builder = new_builder("vregs")
+
+        expect(builder.next_vreg).to_equal(0)
+        builder.add_const_int(5, 100)
+        expect(builder.next_vreg).to_equal(6)
+        builder.add_gpu_global_id(2, 0)
+        expect(builder.next_vreg).to_equal(6)
+        builder.add_mul(20, 5, 2)
+        expect(builder.next_vreg).to_equal(21)
+
+    it "supports explicit backend restrictions":
+        val builder = new_builder("backends")
+        builder.only_backends([BackendTarget.LLVM, BackendTarget.Interpreter])
+
+        val tc = builder.build()
+
+        expect(tc.expected_backends.len()).to_equal(2)
+        expect(tc.expected_backends[0]).to_equal(BackendTarget.LLVM)
+        expect(tc.expected_backends[1]).to_equal(BackendTarget.Interpreter)
+
+    it "keeps helper patterns deterministic":
+        val arithmetic = simple_arithmetic()
+        val simd = simd_reduction()
+        val gpu = gpu_kernel()
+
+        expect(arithmetic.name).to_equal("simple_arithmetic")
+        expect(arithmetic.instructions.len()).to_equal(4)
+        expect(simd.expected_backends).to_equal([BackendTarget.LLVM, BackendTarget.Interpreter])
+        expect(gpu.expected_backends).to_equal([BackendTarget.Vulkan])
 
 # # # MIR Instruction Coverage - Complete Test Suite
 # #
