@@ -66,14 +66,30 @@ Config files: `config/mcp/common/.mcp.json` (Linux/macOS), `config/mcp/win/.mcp.
 
 ```bash
 npm install -g @simple-lang/mcp-server
+npm install -g @simple-lang/lsp-mcp-server
 ```
 
 Then in any `.mcp.json`:
 ```json
-{ "mcpServers": { "simple-mcp": { "command": "npx", "args": ["@simple-lang/mcp-server"] } } }
+{
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "npx",
+      "args": ["@simple-lang/mcp-server"]
+    },
+    "simple-lsp-mcp": {
+      "command": "npx",
+      "args": ["@simple-lang/lsp-mcp-server"]
+    }
+  }
+}
 ```
 
-npm package: [`@simple-lang/mcp-server`](https://www.npmjs.com/package/@simple-lang/mcp-server) (`tools/mcp-registry/package.json`). Downloads platform binary on `postinstall`.
+npm packages:
+- [`@simple-lang/mcp-server`](https://www.npmjs.com/package/@simple-lang/mcp-server) — main MCP server (`tools/mcp-registry/package.json`)
+- [`@simple-lang/lsp-mcp-server`](https://www.npmjs.com/package/@simple-lang/lsp-mcp-server) — LSP bridge MCP server (`tools/lsp-mcp-registry/package.json`)
+
+Both packages download a platform binary on `postinstall` and now include package-local usage examples in their published `README.md`.
 
 ---
 

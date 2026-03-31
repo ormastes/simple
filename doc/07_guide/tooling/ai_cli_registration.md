@@ -194,10 +194,24 @@ Users can then install via:
 ```bash
 # npm global install
 npm install -g @simple-lang/mcp-server
+npm install -g @simple-lang/lsp-mcp-server
 
 # Or use npx in MCP config
 # .mcp.json:
 # { "mcpServers": { "simple-mcp": { "command": "npx", "args": ["@simple-lang/mcp-server"] } } }
+```
+
+LSP bridge example:
+
+```json
+{
+  "mcpServers": {
+    "simple-lsp-mcp": {
+      "command": "npx",
+      "args": ["@simple-lang/lsp-mcp-server"]
+    }
+  }
+}
 ```
 
 ---
