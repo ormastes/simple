@@ -445,27 +445,19 @@ Identified and analyzed 11 files exceeding 1000 lines:
 - Several files already use modular organization (instr.rs, gpu_vulkan.rs)
 - Code generation scripts (regenerate.spl, generate_docs.spl) are acceptable
 
-## 2025-12-29: Lean Verification Mode - 100% COMPLETE! 🎉
+## 2025-12-29: Lean Verification Implementation Snapshot
 
-**[LEAN_VERIFICATION_COMPLETE_2025-12-29.md](LEAN_VERIFICATION_COMPLETE_2025-12-29.md)** ✅ **70/70 FEATURES COMPLETE (#1840-#1909)**
+**[LEAN_VERIFICATION_COMPLETE_2025-12-29.md](LEAN_VERIFICATION_COMPLETE_2025-12-29.md)** 📘 Historical implementation snapshot
 
-All 6 phases complete with full self-hosting in Simple:
-- **Phase 1:** Verification context, contract parsing, verified subset enforcement
-- **Phase 2:** AOP constraint enforcement, ghost aspect validation
-- **Phase 3:** Macro introduction contracts, verified context restrictions
-- **Phase 4:** Lean backend infrastructure, contract/function translation
-- **Phase 5:** Diagnostics (24 error codes), build integration, LSP integration
-- **Phase 6:** Self-hosting in Simple language
+This report captures the 2025-12-29 implementation milestone for Lean verification infrastructure and self-hosting work.
 
-📦 **New Files (Simple):**
-- `simple/std_lib/src/verification/models/` - 10 verification model files
-- `simple/std_lib/src/verification/lean/` - 5 code generator files
-- `simple/std_lib/src/verification/proofs/` - 3 proof management files
-- `simple/app/verify/` - CLI tool with regenerate, check, status, list commands
+Current repo-wide status should be taken from:
+- [doc/03_plan/lean_verification_implementation.md](../03_plan/lean_verification_implementation.md)
+- [README.md](../../README.md)
 
-🎯 **Features:** @verify/@trusted/@unsafe attributes, requires/ensures/invariant clauses, Lean 4 code generation, proof obligation management
-
-🏆 **ALL 1196 FEATURES NOW 100% COMPLETE!**
+Current wording remains:
+- Lean generation, artifact inventory, and proof-checking commands exist
+- the supported end-to-end formal verification workflow is still partial
 
 ## 2025-12-29: Startup Decorators - 100% COMPLETE! 🎉
 

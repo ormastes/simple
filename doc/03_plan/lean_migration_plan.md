@@ -305,12 +305,16 @@ Before migration is considered complete:
 
 ## Conclusion
 
-The Lean verification infrastructure is in excellent condition:
+This migration plan captures a Lean colocation strategy, not the authoritative current-status assessment for the repository.
 
-1. **No axioms or sorry** - All proofs are complete
-2. **18 active projects** - Comprehensive coverage
-3. **11,000+ LOC** - Substantial verification effort
-4. **Clean builds** - All projects compile successfully
+For current repo truth, use:
+- [lean_verification_implementation.md](lean_verification_implementation.md)
+- [README.md](../../README.md)
+
+Current repo-wide position:
+- Lean generation, artifact inventory, and proof-checking commands exist
+- the supported end-to-end verification workflow is still partial
+- generated verification artifacts are not present by default in a clean checkout
 
 The migration to colocated `.lean`/`.spl` files will:
 
@@ -327,21 +331,23 @@ The migration to colocated `.lean`/`.spl` files will:
 
 ### CLI Commands
 
-The Simple compiler provides CLI commands for Lean code generation and verification:
+The Simple compiler provides CLI commands for Lean code generation and verification.
+The current supported flow from a clean checkout is:
 
 ```bash
-# Verification status and management
-simple verify status        # Show verification project status
-simple verify regenerate    # Regenerate Lean files from models
-simple verify check         # Check all proof obligations
-simple verify list          # List all proof obligations
+# Verification status and inventory
+simple verify status        # Show Lean availability and generated-artifact status
+simple verify list          # List the authoritative verification artifact inventory
 
-# Code generation
-simple gen-lean generate    # Generate Lean files from Simple code
-simple gen-lean compare     # Compare with existing Lean files
-simple gen-lean write       # Write generated files
-simple gen-lean verify      # Run Lean proof checker
+# Generation and proof checking
+simple gen-lean write --force   # Generate tracked Lean files into verification/
+simple verify check             # Forward to gen-lean verify over generated files
 ```
+
+Clean-checkout behavior to expect:
+- `simple verify status` succeeds even when no generated Lean artifacts exist.
+- `simple verify check` fails fast until the tracked artifacts have been generated.
+- `simple gen-lean verify` shares the same missing-artifact preflight failure mode.
 
 ### SSpec Tests
 

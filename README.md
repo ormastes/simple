@@ -51,7 +51,7 @@ Partial or experimental:
 - [todo] Loader/JIT instantiation still has stubbed pieces. Current state: [doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md](doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md)
 - [todo] VHDL backend code generation exists, but should still be treated as experimental. Current state: [doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md](doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md)
 - [todo] C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
-- [todo] Lean generation and proof artifacts exist, but end-to-end formal verification integration is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
+- [todo] Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 

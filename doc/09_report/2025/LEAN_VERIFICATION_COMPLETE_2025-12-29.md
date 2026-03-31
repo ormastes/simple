@@ -1,12 +1,18 @@
-# Lean Verification Mode — 100% Complete
+# Lean Verification Mode — 2025-12-29 Implementation Snapshot
 
 **Date:** 2025-12-29
-**Status:** Complete (70/70 features)
+**Status at the time:** Reported complete (70/70 features)
 **Feature IDs:** #1840-#1909
+
+> Historical note
+>
+> This document records the 2025-12-29 implementation milestone and is not the authoritative current-state status page.
+> For the current repo truth, use [doc/03_plan/lean_verification_implementation.md](../../03_plan/lean_verification_implementation.md) and [README.md](../../../README.md).
+> The current repo position is narrower: Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end verification workflow is still partial.
 
 ## Summary
 
-The Lean Verification Mode is now fully implemented, including both the core Rust infrastructure and self-hosting in Simple language. This enables formal verification of Simple programs using Lean 4.
+This report described the Lean verification milestone as fully implemented, including both the core Rust infrastructure and self-hosting in Simple language. It remains useful as a record of the implementation scope landed at that time.
 
 ## Phase Completion
 
