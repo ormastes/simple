@@ -170,7 +170,10 @@ fn find_verification_source_root(project_root: &std::path::Path) -> Result<PathB
         }
     }
 
-    Err("Could not find verification regeneration sources under src/compiler_rust/lib/std/src or src/std/src.".to_string())
+    Err(
+        "Could not find verification regeneration sources under src/compiler_rust/lib/std/src or src/std/src."
+            .to_string(),
+    )
 }
 
 pub struct RegenerationModuleSpec {
@@ -306,8 +309,7 @@ fn replace_identifier(source: &str, from: &str, to: &str) -> String {
         let matches = i + from_chars.len() <= chars.len()
             && chars[i..i + from_chars.len()] == from_chars[..]
             && (i == 0 || !is_identifier_char(chars[i - 1]))
-            && (i + from_chars.len() == chars.len()
-                || !is_identifier_char(chars[i + from_chars.len()]));
+            && (i + from_chars.len() == chars.len() || !is_identifier_char(chars[i + from_chars.len()]));
 
         if matches {
             out.push_str(to);
@@ -410,10 +412,7 @@ fn run_rewritten_regen_module(
     source_root: &Path,
     spec: &RegenerationModuleSpec,
 ) -> Result<(String, String), String> {
-    let import_path = spec
-        .source_rel_path
-        .trim_end_matches(".spl")
-        .replace('/', ".");
+    let import_path = spec.source_rel_path.trim_end_matches(".spl").replace('/', ".");
     let runner_source = format!(
         r#"
 use {import_path} as regen_module
@@ -430,19 +429,10 @@ fn main() -> Int:
         function_name = spec.function_name,
         output_path = spec.output_path
     );
-    let runner_name = spec
-        .source_rel_path
-        .rsplit('/')
-        .next()
-        .unwrap_or("regen_runner.spl");
+    let runner_name = spec.source_rel_path.rsplit('/').next().unwrap_or("regen_runner.spl");
     let runner_path = source_root.join(format!("_{}", runner_name));
-    fs::write(&runner_path, runner_source).map_err(|e| {
-        format!(
-            "Could not create regeneration runner {}: {}",
-            runner_path.display(),
-            e
-        )
-    })?;
+    fs::write(&runner_path, runner_source)
+        .map_err(|e| format!("Could not create regeneration runner {}: {}", runner_path.display(), e))?;
 
     let config = RunConfig {
         capture_output: true,
@@ -1155,7 +1145,8 @@ pub fn run_verification_status() -> i32 {
     println!();
     println!("Known Lean verification files:");
     for spec in verification_modules() {
-        let (exists, clean, markers) = verification_project_status(&project_root, Path::new("verification"), spec.output_path);
+        let (exists, clean, markers) =
+            verification_project_status(&project_root, Path::new("verification"), spec.output_path);
         let status = if !exists {
             "MISSING"
         } else if clean {
@@ -1164,7 +1155,12 @@ pub fn run_verification_status() -> i32 {
             "DIRTY"
         };
         if exists && !clean && !markers.is_empty() {
-            println!("  [{status}] {} - {} ({})", spec.output_path, spec.description, markers.join(", "));
+            println!(
+                "  [{status}] {} - {} ({})",
+                spec.output_path,
+                spec.description,
+                markers.join(", ")
+            );
         } else {
             println!("  [{status}] {} - {}", spec.output_path, spec.description);
         }
@@ -1191,7 +1187,10 @@ pub fn run_verification_regenerate() -> i32 {
 
     let code = write_lean_files(&opts);
     if code == 0 {
-        println!("Regeneration complete under {}", project_root.join("verification").display());
+        println!(
+            "Regeneration complete under {}",
+            project_root.join("verification").display()
+        );
     }
     code
 }

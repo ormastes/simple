@@ -243,7 +243,6 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             _ => {}
         }
     }
-
 }
 
 /// Convert ParseError to CheckError
@@ -347,13 +346,7 @@ fn print_error(error: &CheckError) {
     };
     println!(
         "{}{}:{}:{}: {}{}: {}",
-        color,
-        error.file,
-        error.line,
-        error.column,
-        level,
-        reset,
-        error.message
+        color, error.file, error.line, error.column, level, reset, error.message
     );
 
     if let Some(expected) = &error.expected {

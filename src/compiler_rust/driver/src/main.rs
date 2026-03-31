@@ -284,6 +284,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_WATCH_RUST",
         needs_rust_flags: &[],
     },
+    CommandEntry {
+        name: "examples-check",
+        app_path: "",
+        rust_handler: Handler::Args(handle_examples_check),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Testing - always use Rust handler (mature implementation with Rust test integration + DB tracking)
     CommandEntry {
         name: "test",
@@ -864,12 +871,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
         let forced_args = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
         std::env::set_var("SIMPLE_FORCE_ARGS", forced_args);
 
-        let exit_code = run_file_with_args(
-            &path,
-            gc_log,
-            gc_off,
-            vec![path.to_string_lossy().to_string()],
-        );
+        let exit_code = run_file_with_args(&path, gc_log, gc_off, vec![path.to_string_lossy().to_string()]);
 
         match previous_force_args {
             Some(value) => std::env::set_var("SIMPLE_FORCE_ARGS", value),

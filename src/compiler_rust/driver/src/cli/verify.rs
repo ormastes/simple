@@ -82,11 +82,7 @@ fn cmd_status() -> i32 {
 }
 
 fn cmd_regenerate() -> i32 {
-    let mut forwarded = vec![
-        "gen-lean".to_string(),
-        "write".to_string(),
-        "--force".to_string(),
-    ];
+    let mut forwarded = vec!["gen-lean".to_string(), "write".to_string(), "--force".to_string()];
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 3 {
         forwarded.extend_from_slice(&args[3..]);

@@ -47,7 +47,14 @@ impl ResultCache {
                         };
                         entries.insert(
                             parts[0].to_string(),
-                            CachedResult { mtime, size, passed, failed, skipped, duration_ms },
+                            CachedResult {
+                                mtime,
+                                size,
+                                passed,
+                                failed,
+                                skipped,
+                                duration_ms,
+                            },
                         );
                     }
                 }
@@ -90,7 +97,14 @@ impl ResultCache {
                 .unwrap_or(0);
             self.entries.insert(
                 key,
-                CachedResult { mtime, size, passed, failed, skipped, duration_ms },
+                CachedResult {
+                    mtime,
+                    size,
+                    passed,
+                    failed,
+                    skipped,
+                    duration_ms,
+                },
             );
         }
     }

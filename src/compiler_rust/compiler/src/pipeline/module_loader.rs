@@ -88,7 +88,9 @@ fn load_matching_package_siblings(
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| {
                 path.extension().is_some_and(|ext| ext == "spl")
-                    && path.file_name().is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
                     && path.is_file()
                     && file_might_define_requested_symbol(path, &requested_names)
             })
@@ -530,7 +532,8 @@ fn load_module_with_imports_internal(
         if let Node::UseStmt(use_stmt) = &item {
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported =
+                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -580,7 +583,8 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported =
+                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -621,7 +625,8 @@ fn load_module_with_imports_internal(
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
-                    let mut imported = load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
+                    let mut imported =
+                        load_module_with_imports_internal(&resolved, visited, Some(effective_caps), false)?;
                     if resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,
@@ -680,12 +685,13 @@ fn load_module_with_imports_internal(
                             let func_effects = extract_function_effects(&imported);
                             for (func_name, effects) in func_effects {
                                 if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                                    let ctx = ErrorContext::new()
-                                        .with_code(codes::UNSUPPORTED_FEATURE)
-                                        .with_help(format!(
-                                            "Function `{}` uses effects not allowed by module capabilities",
-                                            func_name
-                                        ));
+                                    let ctx =
+                                        ErrorContext::new()
+                                            .with_code(codes::UNSUPPORTED_FEATURE)
+                                            .with_help(format!(
+                                                "Function `{}` uses effects not allowed by module capabilities",
+                                                func_name
+                                            ));
                                     return Err(CompileError::semantic_with_context(err, ctx));
                                 }
                             }
@@ -1018,16 +1024,8 @@ mod tests {
             "use wrapper.{run}\nfn main() -> int:\n    print(\"ok\")\n    0\n",
         )
         .unwrap();
-        fs::write(
-            &wrapper,
-            "use helper\n\nfn run() -> int:\n    0\n",
-        )
-        .unwrap();
-        fs::write(
-            &helper,
-            "fn helper_fn() -> int:\n    1\n",
-        )
-        .unwrap();
+        fs::write(&wrapper, "use helper\n\nfn run() -> int:\n    0\n").unwrap();
+        fs::write(&helper, "fn helper_fn() -> int:\n    1\n").unwrap();
 
         let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
         let has_run = loaded

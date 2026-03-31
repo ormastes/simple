@@ -126,8 +126,8 @@ pub fn parse_plugin_manifest(path: &Path) -> Result<PluginManifest, String> {
         return Ok(PluginManifest::default());
     }
 
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("failed to read plugin manifest '{}': {}", path.display(), e))?;
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("failed to read plugin manifest '{}': {}", path.display(), e))?;
 
     let mut plugins = Vec::new();
     let mut current_name = String::new();

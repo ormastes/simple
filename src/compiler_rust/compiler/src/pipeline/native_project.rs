@@ -782,9 +782,12 @@ int main(int argc, char** argv) {
         // libc initialization, and library paths automatically.
         // When libsimple_native_all.a is present (always contains LLVM C++ objects),
         // use clang++ to ensure proper C++ runtime initialization ordering.
-        let has_native_all = self.config.runtime_path.as_ref().map_or(false, |rp| {
-            rp.join("libsimple_native_all.a").exists()
-        }) || find_native_all_library().is_some();
+        let has_native_all = self
+            .config
+            .runtime_path
+            .as_ref()
+            .map_or(false, |rp| rp.join("libsimple_native_all.a").exists())
+            || find_native_all_library().is_some();
         let cc = if has_native_all {
             find_cxx_compiler()
         } else {

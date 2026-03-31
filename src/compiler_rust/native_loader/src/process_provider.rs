@@ -97,7 +97,8 @@ fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
 #[cfg(windows)]
 fn lookup_symbol(handle: ProcessHandle, name: &str) -> Option<*const u8> {
     let c_name = std::ffi::CString::new(name).ok()?;
-    let sym = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(handle, c_name.as_ptr() as *const u8) };
+    let sym =
+        unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(handle, c_name.as_ptr() as *const u8) };
     match sym {
         Some(f) => Some(f as *const () as *const u8),
         None => None,

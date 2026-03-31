@@ -118,10 +118,7 @@ fn extract_list_field(lines: &[&str], index: &mut usize, prefix: &str) -> Vec<St
         if trimmed.starts_with("**") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
             break;
         }
-        if let Some(item) = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "))
-        {
+        if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
             let item = item.trim();
             if !item.is_empty() {
                 values.push(item.to_string());

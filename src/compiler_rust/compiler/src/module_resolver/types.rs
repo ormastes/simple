@@ -219,7 +219,14 @@ impl ModuleResolver {
 
         // Try to detect stdlib even in single-file mode
         // Check multiple possible stdlib locations
-        let stdlib_candidates = ["src/lib", "src/std", "src/std/src", "src/lib/std/src", "simple/std_lib/src", "std_lib/src"];
+        let stdlib_candidates = [
+            "src/lib",
+            "src/std",
+            "src/std/src",
+            "src/lib/std/src",
+            "simple/std_lib/src",
+            "std_lib/src",
+        ];
 
         let stdlib_root = {
             // First try relative to current file

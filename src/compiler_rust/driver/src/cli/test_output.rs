@@ -53,15 +53,17 @@ fn print_summary_text(result: &TestRunResult) {
     }
 
     // Print slowest tests (top 10 by duration)
-    let mut sorted_files: Vec<_> = result.files.iter()
-        .filter(|f| f.duration_ms > 0)
-        .collect();
+    let mut sorted_files: Vec<_> = result.files.iter().filter(|f| f.duration_ms > 0).collect();
     sorted_files.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
     if !sorted_files.is_empty() {
         println!();
         println!("Slowest tests:");
         for file in sorted_files.iter().take(10) {
-            let flag = if file.duration_ms >= 60000 { " \x1b[31m[PERF BUG]\x1b[0m" } else { "" };
+            let flag = if file.duration_ms >= 60000 {
+                " \x1b[31m[PERF BUG]\x1b[0m"
+            } else {
+                ""
+            };
             println!("  {:>8}ms  {}{}", file.duration_ms, file.path.display(), flag);
         }
     }
@@ -409,7 +411,11 @@ fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), 
 
     // Add summary
     md.push_str("\n---\n\n## Summary\n\n");
-    let total_items = if result.total_listed > 0 { result.total_listed } else { result.files.len() };
+    let total_items = if result.total_listed > 0 {
+        result.total_listed
+    } else {
+        result.files.len()
+    };
     md.push_str(&format!("- **Total:** {} tests\n", total_items));
     md.push_str(&format!("- **Passed:** {} ✅\n", result.total_passed));
     md.push_str(&format!("- **Failed:** {} ❌\n", result.total_failed));

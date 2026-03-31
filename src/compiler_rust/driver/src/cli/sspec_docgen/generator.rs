@@ -161,16 +161,10 @@ fn build_metadata_rows(sspec_doc: &SspecDoc) -> Vec<(String, String)> {
         rows.push(("Related".to_string(), sspec_doc.metadata.related.join(", ")));
     }
     if !sspec_doc.metadata.dependencies.is_empty() {
-        rows.push((
-            "Dependencies".to_string(),
-            sspec_doc.metadata.dependencies.join(", "),
-        ));
+        rows.push(("Dependencies".to_string(), sspec_doc.metadata.dependencies.join(", ")));
     }
     rows.push(("Source".to_string(), format!("`{}`", sspec_doc.file_path.display())));
-    rows.push((
-        "Updated".to_string(),
-        Local::now().format("%Y-%m-%d").to_string(),
-    ));
+    rows.push(("Updated".to_string(), Local::now().format("%Y-%m-%d").to_string()));
     rows.push(("Generator".to_string(), "`simple sspec-docgen` (Rust)".to_string()));
 
     rows
@@ -381,10 +375,7 @@ fn append_extracted_examples_section(md: &mut String, sspec_doc: &SspecDoc) {
     md.push_str("| Example | Kind | Reference |\n");
     md.push_str("|---------|------|-----------|\n");
     for (idx, example) in examples.iter().enumerate() {
-        let reference = example
-            .source_hint
-            .clone()
-            .unwrap_or_else(|| "—".to_string());
+        let reference = example.source_hint.clone().unwrap_or_else(|| "—".to_string());
         md.push_str(&format!(
             "| {} | {} | {} |\n",
             idx + 1,

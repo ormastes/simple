@@ -146,10 +146,7 @@ pub fn is_msvc_target(cc: &str) -> bool {
     }
     // For plain clang/clang++, check the effective target triple
     if base.starts_with("clang") {
-        if let Ok(output) = std::process::Command::new(cc)
-            .arg("--print-effective-triple")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new(cc).arg("--print-effective-triple").output() {
             let triple = String::from_utf8_lossy(&output.stdout);
             return triple.contains("windows-msvc");
         }

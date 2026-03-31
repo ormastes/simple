@@ -17,8 +17,8 @@ mod scenario_artifacts;
 use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
     clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state, clear_io_state,
-    clear_macro_state, clear_module_cache, clear_module_cache_selective, clear_net_state, clear_collection_registries, clear_ast_ffi_registries,
-    clear_env_ffi_registry, clear_error_ffi_registry, clear_span_ffi_registry,
+    clear_macro_state, clear_module_cache, clear_module_cache_selective, clear_net_state, clear_collection_registries,
+    clear_ast_ffi_registries, clear_env_ffi_registry, clear_error_ffi_registry, clear_span_ffi_registry,
 };
 use simple_compiler::runtime_profile::profiler::clear_global_profiler;
 use simple_compiler::layout_recorder::clear_recording;
@@ -608,11 +608,7 @@ fn build_safe_mode_child_args(path: &Path, options: &super::types::TestOptions) 
     args
 }
 
-fn emit_test_artifacts(
-    path: &Path,
-    result: &TestFileResult,
-    artifacts: ExecutionArtifacts<'_>,
-) {
+fn emit_test_artifacts(path: &Path, result: &TestFileResult, artifacts: ExecutionArtifacts<'_>) {
     if let Err(e) = write_test_artifacts(path, result, artifacts) {
         eprintln!("[WARN] Failed to write test artifacts for {}: {}", path.display(), e);
     }
@@ -872,16 +868,7 @@ mod tests {
         let (_tempdir, _cwd_guard) = with_temp_cwd();
 
         let spec_path = Path::new("test/unit/app/tooling/test_runner_simple_spec.spl");
-        write_artifact_bundle(
-            spec_path,
-            3,
-            1,
-            2,
-            0,
-            42,
-            Some("boom"),
-            Some("combined runner output"),
-        );
+        write_artifact_bundle(spec_path, 3, 1, 2, 0, 42, Some("boom"), Some("combined runner output"));
 
         let artifact_dir = artifact_dir_for_test(spec_path);
         let summary = fs::read_to_string(artifact_dir.join("summary.txt")).expect("summary");

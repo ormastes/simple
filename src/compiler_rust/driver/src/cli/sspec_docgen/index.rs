@@ -86,16 +86,11 @@ pub fn generate_index_page(
 
     if !unmanaged_files.is_empty() {
         md.push_str("## Residual Files\n\n");
-        md.push_str(
-            "These files are present in `doc/06_spec` but were not regenerated in this run.\n\n",
-        );
+        md.push_str("These files are present in `doc/06_spec` but were not regenerated in this run.\n\n");
         md.push_str("| File | Type |\n");
         md.push_str("|------|------|\n");
         for path in unmanaged_files {
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("unknown");
+            let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown");
             let file_type = path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -324,8 +319,8 @@ fn docs_status(validation: &ValidationResult) -> String {
 
 fn extract_summary(sspec_doc: &SspecDoc) -> String {
     let body = render_doc_body(sspec_doc);
-    let summary = extract_summary_from_markdown(&body)
-        .unwrap_or_else(|| "Summary not provided in the doc blocks.".to_string());
+    let summary =
+        extract_summary_from_markdown(&body).unwrap_or_else(|| "Summary not provided in the doc blocks.".to_string());
     truncate_summary(&summary, 120)
 }
 
@@ -579,7 +574,12 @@ expect(true).to_equal(true)
         let unmanaged = find_unmanaged_files(&parsed, dir.path()).expect("unmanaged");
         let names: Vec<_> = unmanaged
             .iter()
-            .map(|path| path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string())
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
             .collect();
 
         assert_eq!(names, vec!["feature_db.sdn".to_string(), "shell_api.md".to_string()]);

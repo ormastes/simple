@@ -318,10 +318,7 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut command = std::process::Command::new(&cmd);
     clear_simple_child_stack_env(&mut command);
-    let output = command
-        .args(&cmd_args)
-        .stdin(std::process::Stdio::null())
-        .output();
+    let output = command.args(&cmd_args).stdin(std::process::Stdio::null()).output();
 
     match output {
         Ok(out) => {

@@ -154,12 +154,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 |--------|---------------|---------|
 | `simple-mcp` | `bin/simple_mcp_server` | Simple language compiler MCP |
 | `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | Simple LSP via MCP bridge |
-| `t32-mcp` | `bin/t32_mcp_server` | TRACE32 debugger MCP |
 | `t32-lsp-mcp` | `bin/t32_lsp_mcp_server` | TRACE32 CMM LSP via MCP |
-| `obsidian-search` | `bin/obsidian_lsp_mcp_server mcp` | Obsidian vault search (11 tools: search, graph, tags, tasks, authority ranking) |
-| `obsidian-lsp-mcp` | `bin/obsidian_lsp_mcp_server` | Obsidian markdown bridge MCP |
-
-**Obsidian Search:** `examples/obsidian-search/` submodule. Set `OBSIDIAN_VAULT_PATH` env var. Feature requests: `examples/obsidian-search/doc/requirement/feature_request_obsidian_search.md`
 
 ---
 

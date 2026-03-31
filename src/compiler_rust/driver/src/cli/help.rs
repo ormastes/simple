@@ -17,6 +17,7 @@ pub fn print_help() {
     eprintln!("  simple -c \"code\"            Run code string");
     eprintln!("  simple compile <src> [-o <out>] [options]  Compile source file");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
+    eprintln!("  simple examples-check [path]  Validate examples with per-file isolation");
     eprintln!("  simple targets              List available target architectures");
     eprintln!("  simple linkers              List available native linkers");
     eprintln!();

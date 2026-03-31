@@ -907,13 +907,17 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
     if needle_len == 0 {
         // Empty needle: return Some(0)
         let payload = RuntimeValue::from_int(0);
-        return super::objects::rt_enum_new(0, {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            "Some".hash(&mut hasher);
-            (hasher.finish() & 0xFFFFFFFF) as u32
-        }, payload);
+        return super::objects::rt_enum_new(
+            0,
+            {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                "Some".hash(&mut hasher);
+                (hasher.finish() & 0xFFFFFFFF) as u32
+            },
+            payload,
+        );
     }
 
     if needle_len > str_len {
@@ -933,13 +937,17 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
         match haystack.find(needle_str) {
             Some(idx) => {
                 let payload = RuntimeValue::from_int(idx as i64);
-                super::objects::rt_enum_new(0, {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    "Some".hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as u32
-                }, payload)
+                super::objects::rt_enum_new(
+                    0,
+                    {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        "Some".hash(&mut hasher);
+                        (hasher.finish() & 0xFFFFFFFF) as u32
+                    },
+                    payload,
+                )
             }
             None => RuntimeValue::NIL,
         }

@@ -524,20 +524,20 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     for search_start in &search_roots {
         let mut current = search_start.to_path_buf();
         for _ in 0..10 {
-        // Only search stdlib paths if this looks like a stdlib import
+            // Only search stdlib paths if this looks like a stdlib import
             if is_stdlib && !stdlib_parts.is_empty() {
-            // Canonical paths first (most likely to hit), then legacy
+                // Canonical paths first (most likely to hit), then legacy
                 for stdlib_subpath in &[
-                "src/compiler_rust/lib/std/src",
-                "src/std",
-                "src/lib",
-                "src/std/src",
-                "src/lib/std/src",
-                "lib/std/src",
-                "rust/lib/std/src",
-                "simple/std_lib/src",
-                "std_lib/src",
-            ] {
+                    "src/compiler_rust/lib/std/src",
+                    "src/std",
+                    "src/lib",
+                    "src/std/src",
+                    "src/lib/std/src",
+                    "lib/std/src",
+                    "rust/lib/std/src",
+                    "simple/std_lib/src",
+                    "std_lib/src",
+                ] {
                     let stdlib_candidate = current.join(stdlib_subpath);
                     if !stdlib_candidate.exists() {
                         continue;

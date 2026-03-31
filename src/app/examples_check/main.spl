@@ -1,0 +1,256 @@
+# Example checker with timeout-based failure containment.
+#
+# Usage:
+#   simple examples-check [path]
+#   simple examples-check [path] --run
+#   simple examples-check [path] --compile
+#   simple examples-check [path] --timeout 20
+#   simple examples-check [path] --limit 10
+
+use std.cli.cli_util.{get_cli_args, get_flag_value, has_flag}
+use app.io.mod.{dir_walk, file_exists, file_write, file_append, process_run_timeout}
+
+struct ExampleCheckConfig:
+    binary: text
+    root: text
+    mode: text
+    timeout_seconds: i64
+    fail_fast: bool
+    limit: i64
+    report_path: text
+
+struct ExampleCheckStats:
+    total: i64
+    passed: i64
+    failed: i64
+    crashed: i64
+    timed_out: i64
+
+struct ExampleCheckResult:
+    path: text
+    result_type: text
+    exit_code: i64
+    stdout: text
+    stderr: text
+
+fn print_help():
+    print "Usage: simple examples-check [path] [options]"
+    print ""
+    print "Safely check example files one by one with per-file timeout containment."
+    print ""
+    print "Arguments:"
+    print "  [path]              File or directory to scan (default: examples)"
+    print ""
+    print "Options:"
+    print "  --compile           Compile each example only (default)"
+    print "  --run               Run each example"
+    print "  --timeout <secs>    Per-file timeout in seconds (default: 15)"
+    print "  --limit <count>     Stop after N example files"
+    print "  --fail-fast         Stop on first non-pass result"
+    print "  --binary <path>     Binary to invoke (default: bin/simple)"
+    print "  --report <path>     Markdown report path"
+    print "  -h, --help          Show this help"
+
+fn parse_args(args: [text]) -> ExampleCheckConfig:
+    var root = "examples"
+    var mode = "compile"
+    var timeout_seconds = 15
+    var fail_fast = false
+    var limit = 0
+    var binary = "bin/simple"
+    var report_path = "doc/09_report/session/examples_check_latest.md"
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "examples-check":
+            val _unused = 0
+        elif arg == "--run":
+            mode = "run"
+        elif arg == "--compile":
+            mode = "compile"
+        elif arg == "--fail-fast":
+            fail_fast = true
+        elif arg == "--timeout" and i + 1 < args.len():
+            i = i + 1
+            timeout_seconds = args[i].to_i64()
+        elif arg.starts_with("--timeout="):
+            timeout_seconds = arg.slice(10, arg.len()).to_i64()
+        elif arg == "--limit" and i + 1 < args.len():
+            i = i + 1
+            limit = args[i].to_i64()
+        elif arg.starts_with("--limit="):
+            limit = arg.slice(8, arg.len()).to_i64()
+        elif arg == "--binary" and i + 1 < args.len():
+            i = i + 1
+            binary = args[i]
+        elif arg.starts_with("--binary="):
+            binary = arg.slice(9, arg.len())
+        elif arg == "--report" and i + 1 < args.len():
+            i = i + 1
+            report_path = args[i]
+        elif arg.starts_with("--report="):
+            report_path = arg.slice(9, arg.len())
+        elif not arg.starts_with("-"):
+            root = arg
+        i = i + 1
+
+    if timeout_seconds <= 0:
+        timeout_seconds = 15
+
+    ExampleCheckConfig(
+        binary: binary,
+        root: root,
+        mode: mode,
+        timeout_seconds: timeout_seconds,
+        fail_fast: fail_fast,
+        limit: limit,
+        report_path: report_path
+    )
+
+fn collect_example_files(root: text) -> [text]:
+    if file_exists(root) and root.ends_with(".spl"):
+        return [root]
+
+    var files: [text] = []
+    for path in dir_walk(root):
+        if path.ends_with(".spl"):
+            files.push(path)
+
+    files.sort()
+
+fn classify_result(exit_code: i64) -> text:
+    if exit_code == 0:
+        return "PASS"
+    if exit_code == -1 or exit_code == 124 or exit_code == 137:
+        return "TIMEOUT"
+    if exit_code >= 128:
+        return "CRASH"
+    "FAIL"
+
+fn report_excerpt(content: text) -> text:
+    if content == "":
+        return ""
+
+    val lines = content.split("\n")
+    val kept = if lines.len() > 12:
+        lines.slice(0, 12)
+    else:
+        lines
+    kept.join("\n").trim()
+
+fn run_one(config: ExampleCheckConfig, path: text) -> ExampleCheckResult:
+    val timeout_ms = config.timeout_seconds * 1000
+    val out_path = "/tmp/simple-example-check.smf"
+
+    val args = if config.mode == "run":
+        [path]
+    else:
+        ["compile", path, "-o", out_path]
+
+    val (stdout, stderr, exit_code) = process_run_timeout(config.binary, args, timeout_ms)
+
+    ExampleCheckResult(
+        path: path,
+        result_type: classify_result(exit_code),
+        exit_code: exit_code,
+        stdout: stdout,
+        stderr: stderr
+    )
+
+fn append_result_report(report_path: text, result: ExampleCheckResult):
+    if result.result_type == "PASS":
+        return
+
+    var section = "\n## {result.path}\n\n"
+    section = section + "- Result: `{result.result_type}`\n"
+    section = section + "- Exit code: `{result.exit_code}`\n"
+
+    val stderr_excerpt = report_excerpt(result.stderr)
+    if stderr_excerpt != "":
+        section = section + "\n### Stderr\n\n```text\n{stderr_excerpt}\n```\n"
+
+    val stdout_excerpt = report_excerpt(result.stdout)
+    if stdout_excerpt != "":
+        section = section + "\n### Stdout\n\n```text\n{stdout_excerpt}\n```\n"
+
+    file_append(report_path, section)
+
+fn print_result(result: ExampleCheckResult):
+    print "[{result.result_type}] {result.path}"
+    if result.result_type != "PASS":
+        val stderr_excerpt = report_excerpt(result.stderr)
+        if stderr_excerpt != "":
+            print stderr_excerpt
+        elif result.stdout != "":
+            print report_excerpt(result.stdout)
+
+fn write_report_header(config: ExampleCheckConfig, files: [text]):
+    var content = "# Examples Check\n\n"
+    content = content + "- Root: `{config.root}`\n"
+    content = content + "- Mode: `{config.mode}`\n"
+    content = content + "- Binary: `{config.binary}`\n"
+    content = content + "- Timeout: `{config.timeout_seconds}s`\n"
+    content = content + "- Files discovered: `{files.len()}`\n"
+    content = content + "\n"
+    file_write(config.report_path, content)
+
+fn write_summary(report_path: text, stats: ExampleCheckStats):
+    var summary = "\n## Summary\n\n"
+    summary = summary + "- Total: `{stats.total}`\n"
+    summary = summary + "- Passed: `{stats.passed}`\n"
+    summary = summary + "- Failed: `{stats.failed}`\n"
+    summary = summary + "- Crashed: `{stats.crashed}`\n"
+    summary = summary + "- Timed out: `{stats.timed_out}`\n"
+    file_append(report_path, summary)
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if has_flag(args, "-h") or has_flag(args, "--help"):
+        print_help()
+        return 0
+
+    val config = parse_args(args)
+    val files = collect_example_files(config.root)
+    if files.len() == 0:
+        print "No .spl files found under {config.root}"
+        return 1
+
+    write_report_header(config, files)
+
+    var stats = ExampleCheckStats(total: 0, passed: 0, failed: 0, crashed: 0, timed_out: 0)
+    var checked = 0
+
+    for path in files:
+        if config.limit > 0 and checked >= config.limit:
+            break
+
+        checked = checked + 1
+        val result = run_one(config, path)
+        stats.total = stats.total + 1
+
+        match result.result_type:
+            case "PASS":
+                stats.passed = stats.passed + 1
+            case "TIMEOUT":
+                stats.timed_out = stats.timed_out + 1
+            case "CRASH":
+                stats.crashed = stats.crashed + 1
+            case _:
+                stats.failed = stats.failed + 1
+
+        print_result(result)
+        append_result_report(config.report_path, result)
+
+        if config.fail_fast and result.result_type != "PASS":
+            break
+
+    write_summary(config.report_path, stats)
+
+    print ""
+    print "Summary: total={stats.total} pass={stats.passed} fail={stats.failed} crash={stats.crashed} timeout={stats.timed_out}"
+    print "Report: {config.report_path}"
+
+    if stats.failed > 0 or stats.crashed > 0 or stats.timed_out > 0:
+        return 1
+    0

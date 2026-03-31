@@ -54,11 +54,7 @@ impl Lowerer {
         })
     }
 
-    fn register_imported_symbols_from_items(
-        &mut self,
-        items: &[Node],
-        target: &ImportTarget,
-    ) -> LowerResult<usize> {
+    fn register_imported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget) -> LowerResult<usize> {
         let mut imported_count = 0;
 
         for item in items {
@@ -220,7 +216,9 @@ impl Lowerer {
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|path| {
                     path.extension().is_some_and(|ext| ext == "spl")
-                        && path.file_name().is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
                         && path.is_file()
                         && Self::file_might_define_requested_symbol(path, &requested_names)
                 })

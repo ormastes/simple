@@ -174,7 +174,13 @@ mod tests {
         let artifact_json_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/result.json");
         let artifact_txt_path = PathBuf::from("target/test-artifacts/app/web_dashboard/tmux_rest_api/notes.txt");
 
-        for path in [&screenshot_path, &tui_path, &log_path, &artifact_json_path, &artifact_txt_path] {
+        for path in [
+            &screenshot_path,
+            &tui_path,
+            &log_path,
+            &artifact_json_path,
+            &artifact_txt_path,
+        ] {
             fs::create_dir_all(path.parent().expect("parent dir")).expect("create dir");
         }
 

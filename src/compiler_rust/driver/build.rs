@@ -248,7 +248,8 @@ fn {prefix}_{test_name}() {{
 ///
 /// "unit/doctest/parser_spec.spl" -> "unit_doctest_parser_spec_a1b2c3d4"
 fn sanitize_test_name(path: &str) -> String {
-    let base: String = path.trim_end_matches(".spl")
+    let base: String = path
+        .trim_end_matches(".spl")
         .trim_end_matches(".simple")
         .trim_end_matches(".sscript")
         .chars()

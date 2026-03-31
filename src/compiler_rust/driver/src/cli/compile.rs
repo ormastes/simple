@@ -13,6 +13,35 @@ pub fn compile_file(
     snapshot: bool,
     options: CompileOptions,
 ) -> i32 {
+    let source = source.to_path_buf();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        compile_file_impl(&source, output, target, snapshot, options)
+    }));
+
+    match result {
+        Ok(code) => code,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown internal error".to_string()
+            };
+            eprintln!("fatal: compiler crashed: {}", msg);
+            eprintln!("This is a bug in the Simple compiler. Please report it.");
+            101
+        }
+    }
+}
+
+fn compile_file_impl(
+    source: &Path,
+    output: Option<PathBuf>,
+    target: Option<Target>,
+    snapshot: bool,
+    options: CompileOptions,
+) -> i32 {
     use crate::jj::{BuildEvent, BuildState, JJConnector};
     use std::time::Instant;
 
@@ -33,30 +62,47 @@ pub fn compile_file(
     });
 
     // Use file-based compilation (enables module resolution for imports)
-    let result = if let Some(target) = target {
-        println!("Cross-compiling for target: {}", target);
-        // For cross-compilation, we still need to read the source content
-        let source_content = match std::fs::read_to_string(source) {
-            Ok(content) => {
-                // Normalize CRLF → LF for cross-platform compatibility
-                if content.contains('\r') {
-                    content.replace('\r', "")
-                } else {
-                    content
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(target) = target {
+            println!("Cross-compiling for target: {}", target);
+            // For cross-compilation, we still need to read the source content
+            let source_content = match std::fs::read_to_string(source) {
+                Ok(content) => {
+                    // Normalize CRLF → LF for cross-platform compatibility
+                    if content.contains('\r') {
+                        content.replace('\r', "")
+                    } else {
+                        content
+                    }
                 }
-            }
-            Err(e) => {
-                eprintln!("error: cannot read {}: {}", source.display(), e);
-                return 1;
-            }
-        };
-        runner.compile_to_smf_for_target(&source_content, &out_path, target)
-    } else {
-        // Use file-based compilation which enables import resolution
-        runner.compile_file_to_smf_with_options(source, &out_path, &options)
-    };
+                Err(e) => {
+                    return Err(format!("cannot read {}: {}", source.display(), e));
+                }
+            };
+            runner.compile_to_smf_for_target(&source_content, &out_path, target)
+        } else {
+            // Use file-based compilation which enables import resolution
+            runner.compile_file_to_smf_with_options(source, &out_path, &options)
+        }
+    }));
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown internal error".to_string()
+            };
+            eprintln!("fatal: compiler crashed: {}", msg);
+            eprintln!("This is a bug in the Simple compiler. Please report it.");
+            return 101;
+        }
+    };
 
     match result {
         Ok(()) => {

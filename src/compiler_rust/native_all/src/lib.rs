@@ -292,8 +292,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     if let Some(ref rp) = runtime_path {
         simple_compiler::pipeline::native_project::set_runtime_path_override(rp.clone());
         // Also set env var in-process as fallback (for code that checks env vars directly)
-        unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", rp); }
-        unsafe { std::env::set_var("SIMPLE_NATIVE_ALL_PATH", rp.join("libsimple_native_all.a")); }
+        unsafe {
+            std::env::set_var("SIMPLE_RUNTIME_PATH", rp);
+        }
+        unsafe {
+            std::env::set_var("SIMPLE_NATIVE_ALL_PATH", rp.join("libsimple_native_all.a"));
+        }
     }
 
     let mut config = NativeBuildConfig::default();

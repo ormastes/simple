@@ -14,19 +14,56 @@ use super::core::Parser;
 /// These are non-effect, non-decorator tags used for metadata, lint control, test config, etc.
 pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     // Lint control
-    "allow", "warn", "deny",
+    "allow",
+    "warn",
+    "deny",
     // Test/spec metadata
-    "timeout", "tag", "skip", "ignore", "only", "slow", "flaky", "test",
-    "modes", "skip_modes", "only_modes", "mode_failure_strategy",
+    "timeout",
+    "tag",
+    "skip",
+    "ignore",
+    "only",
+    "slow",
+    "flaky",
+    "test",
+    "modes",
+    "skip_modes",
+    "only_modes",
+    "mode_failure_strategy",
     // Module/compiler directives
-    "inline", "bypass", "no_gc", "no_prelude", "no_auto_defer", "no_mangle",
-    "default", "derive", "repr", "packed", "cfg",
+    "inline",
+    "bypass",
+    "no_gc",
+    "no_prelude",
+    "no_auto_defer",
+    "no_mangle",
+    "default",
+    "derive",
+    "repr",
+    "packed",
+    "cfg",
     // Layout/memory
-    "layout", "variant", "id", "no_alloc", "alloc", "immutable",
+    "layout",
+    "variant",
+    "id",
+    "no_alloc",
+    "alloc",
+    "immutable",
     // Misc
-    "retry", "ratelimit", "gpu", "gpu_kernel", "distributed", "cache", "mock",
-    "deprecated", "config", "extern", "async", "unsafe",
-    "concurrency_mode", "no_auto_defer",
+    "retry",
+    "ratelimit",
+    "gpu",
+    "gpu_kernel",
+    "distributed",
+    "cache",
+    "mock",
+    "deprecated",
+    "config",
+    "extern",
+    "async",
+    "unsafe",
+    "concurrency_mode",
+    "no_auto_defer",
 ];
 
 /// Check if a name is a known attribute (should produce Attribute, not Decorator)
@@ -182,10 +219,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 name
             }
-            TokenKind::Allow => { self.advance(); "allow".to_string() }
-            TokenKind::Default => { self.advance(); "default".to_string() }
-            TokenKind::Async => { self.advance(); "async".to_string() }
-            TokenKind::Extern => { self.advance(); "extern".to_string() }
+            TokenKind::Allow => {
+                self.advance();
+                "allow".to_string()
+            }
+            TokenKind::Default => {
+                self.advance();
+                "default".to_string()
+            }
+            TokenKind::Async => {
+                self.advance();
+                "async".to_string()
+            }
+            TokenKind::Extern => {
+                self.advance();
+                "extern".to_string()
+            }
             _ => {
                 return Err(ParseError::unexpected_token(
                     "attribute name",

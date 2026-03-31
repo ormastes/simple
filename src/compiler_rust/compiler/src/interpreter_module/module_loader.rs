@@ -49,8 +49,7 @@ use super::module_cache::{
     cache_module_definitions, cache_module_exports, clear_partial_module_exports, decrement_load_depth,
     get_cached_module_exports, get_partial_module_exports, increment_load_depth, increment_total_modules,
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
-    record_module_visit, record_module_eval_time, record_sibling_preload,
-    MAX_MODULE_DEPTH, MAX_TOTAL_MODULES,
+    record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH, MAX_TOTAL_MODULES,
 };
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
@@ -60,7 +59,8 @@ type Enums = HashMap<String, EnumDef>;
 fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
     match &use_stmt.target {
         ImportTarget::Group(items) => Some(
-            items.iter()
+            items
+                .iter()
                 .filter_map(|item| match item {
                     ImportTarget::Single(name) => Some(name.clone()),
                     ImportTarget::Aliased { name, .. } => Some(name.clone()),
@@ -143,12 +143,13 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
     match item {
         Node::ExportUseStmt(export_stmt) => {
             let export_names = export_target_names(&export_stmt.target);
-            !export_names.is_empty() && export_names.iter().any(|name| requested_names.iter().any(|wanted| wanted == name))
+            !export_names.is_empty()
+                && export_names
+                    .iter()
+                    .any(|name| requested_names.iter().any(|wanted| wanted == name))
         }
         Node::UseStmt(_) => true,
-        Node::Function(f) => {
-            requested_names.iter().any(|wanted| wanted == &f.name)
-        }
+        Node::Function(f) => requested_names.iter().any(|wanted| wanted == &f.name),
         _ => true,
     }
 }
@@ -394,7 +395,12 @@ pub fn load_and_merge_module(
     let original_module_path = module_path.clone();
     let module_path = prefer_package_init_for_member_import(&module_path, use_stmt);
     if module_path != original_module_path {
-        loader_trace!("init-redirect", "{} -> {}", original_module_path.display(), module_path.display());
+        loader_trace!(
+            "init-redirect",
+            "{} -> {}",
+            original_module_path.display(),
+            module_path.display()
+        );
     }
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
@@ -512,7 +518,8 @@ pub fn load_and_merge_module(
                     // Collect sibling .spl files (not __init__.spl itself)
                     let requested_names = requested_names.clone().map(|names| {
                         let local_names = locally_defined_names(&filtered_items);
-                        names.into_iter()
+                        names
+                            .into_iter()
                             .filter(|name| !local_names.iter().any(|local| local == name))
                             .collect::<Vec<_>>()
                     });
@@ -527,15 +534,13 @@ pub fn load_and_merge_module(
                                     && p.file_name().map_or(false, |f| f != "__init__.spl")
                                     && p.file_name().map_or(false, |f| f != "mod_stub.spl")
                                     && p.is_file()
-                                    && requested_names
-                                        .as_ref()
-                                        .is_none_or(|names| {
-                                            let might = sibling_might_define_requested_names(p, names);
-                                            if !might {
-                                                loader_trace!("sibling-skip", "{} (no matching names)", p.display());
-                                            }
-                                            might
-                                        })
+                                    && requested_names.as_ref().is_none_or(|names| {
+                                        let might = sibling_might_define_requested_names(p, names);
+                                        if !might {
+                                            loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                                        }
+                                        might
+                                    })
                             })
                             .collect();
                         // Sort for deterministic load order; mod.spl first if present
@@ -552,12 +557,21 @@ pub fn load_and_merge_module(
                             // Early termination: if all requested names are already found, skip remaining siblings
                             if let Some(names) = requested_names.as_ref() {
                                 if !names.is_empty() && names.iter().all(|n| merged_exports.contains_key(n)) {
-                                    loader_trace!("sibling-skip", "{} (all requested names already found)", sibling_path.display());
+                                    loader_trace!(
+                                        "sibling-skip",
+                                        "{} (all requested names already found)",
+                                        sibling_path.display()
+                                    );
                                     break;
                                 }
                             }
                             record_sibling_preload();
-                            loader_trace!("sibling-preload", "{} (requested: {:?})", sibling_path.display(), requested_names);
+                            loader_trace!(
+                                "sibling-preload",
+                                "{} (requested: {:?})",
+                                sibling_path.display(),
+                                requested_names
+                            );
                             debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
                             if let Ok(sib_source) = fs::read_to_string(sibling_path) {
                                 let sib_source = if sib_source.contains('\r') {
@@ -704,7 +718,14 @@ pub fn load_and_merge_module(
     let elapsed_us = load_start.elapsed().as_micros();
     let elapsed_ms = elapsed_us / 1000;
     record_module_eval_time(&module_path, elapsed_us);
-    loader_trace!("loaded", "{} ({} exports, {}d, {}ms)", module_path.display(), exports.len(), depth, elapsed_ms);
+    loader_trace!(
+        "loaded",
+        "{} ({} exports, {}d, {}ms)",
+        module_path.display(),
+        exports.len(),
+        depth,
+        elapsed_ms
+    );
     debug!(path = ?module_path, exports = exports.len(), "Successfully loaded module");
 
     // If importing a specific item, extract it from exports
@@ -726,7 +747,10 @@ pub fn load_and_merge_module(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_and_merge_module, loader_trace_enabled, prefer_package_init_for_member_import, should_keep_selective_export};
+    use super::{
+        load_and_merge_module, loader_trace_enabled, prefer_package_init_for_member_import,
+        should_keep_selective_export,
+    };
     use crate::value::Value;
     use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
@@ -1001,8 +1025,14 @@ mod tests {
         };
 
         assert!(matches!(exports.get("aot_llvm_file"), Some(Value::Function { .. })));
-        assert!(matches!(exports.get("aot_llvm_native_file"), Some(Value::Function { .. })));
-        assert!(matches!(exports.get("aot_native_file_with_backend"), Some(Value::Function { .. })));
+        assert!(matches!(
+            exports.get("aot_llvm_native_file"),
+            Some(Value::Function { .. })
+        ));
+        assert!(matches!(
+            exports.get("aot_native_file_with_backend"),
+            Some(Value::Function { .. })
+        ));
         assert!(matches!(exports.get("aot_cuda_file"), Some(Value::Function { .. })));
         assert!(matches!(exports.get("aot_vhdl_file"), Some(Value::Function { .. })));
     }
@@ -1066,7 +1096,9 @@ mod tests {
         let items: Vec<ImportTarget> = names.iter().map(|n| ImportTarget::Single(n.to_string())).collect();
         Node::UseStmt(UseStmt {
             span: simple_parser::token::Span::new(0, 0, 0, 0),
-            path: ModulePath { segments: vec!["some".to_string(), "module".to_string()] },
+            path: ModulePath {
+                segments: vec!["some".to_string(), "module".to_string()],
+            },
             target: ImportTarget::Group(items),
             is_type_only: false,
             is_lazy: false,
@@ -1107,7 +1139,9 @@ mod tests {
         use simple_parser::ast::*;
         let node = Node::UseStmt(UseStmt {
             span: simple_parser::token::Span::new(0, 0, 0, 0),
-            path: ModulePath { segments: vec!["std".to_string(), "io".to_string()] },
+            path: ModulePath {
+                segments: vec!["std".to_string(), "io".to_string()],
+            },
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,

@@ -120,7 +120,8 @@ impl ModuleResolver {
                     };
 
                     if !stdlib_segments.is_empty() {
-                        let mut stdlib_roots = vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
+                        let mut stdlib_roots =
+                            vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
                         if let Some(ref stdlib_root) = self.stdlib_root {
                             stdlib_roots.push(stdlib_root.clone());
                         }
@@ -137,9 +138,7 @@ impl ModuleResolver {
                                         }
                                     }
                                 }
-                                if let Ok(resolved) =
-                                    resolve_stdlib_from_root(self, &root, stdlib_segments, path)
-                                {
+                                if let Ok(resolved) = resolve_stdlib_from_root(self, &root, stdlib_segments, path) {
                                     return Ok(resolved);
                                 }
                             }

@@ -23,13 +23,10 @@ pub struct DoctestCache {
 pub fn discover_all_doctests(options: &TestOptions) -> DoctestCache {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let targeted_path = options.path.clone().map(|path| {
-        if path.is_absolute() {
-            path
-        } else {
-            cwd.join(path)
-        }
-    });
+    let targeted_path = options
+        .path
+        .clone()
+        .map(|path| if path.is_absolute() { path } else { cwd.join(path) });
     let targeted_ext = targeted_path
         .as_ref()
         .and_then(|path| path.extension().and_then(|ext| ext.to_str()))
@@ -53,18 +50,17 @@ pub fn discover_all_doctests(options: &TestOptions) -> DoctestCache {
     };
 
     let doc_examples = if options.doctest_doc {
-        let doc_path = targeted_path.clone().unwrap_or_else(|| {
-            options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc"))
-        });
+        let doc_path = targeted_path
+            .clone()
+            .unwrap_or_else(|| options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc")));
         discover_doctests(&doc_path).unwrap_or_default()
     } else {
         Vec::new()
     };
 
     let md_examples = if options.doctest_md {
-        let md_path = targeted_path.unwrap_or_else(|| {
-            options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc"))
-        });
+        let md_path =
+            targeted_path.unwrap_or_else(|| options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc")));
         discover_md_doctests(&md_path).unwrap_or_default()
     } else {
         Vec::new()
@@ -115,11 +111,7 @@ mod tests {
     fn discover_all_doctests_honors_targeted_markdown_path() {
         let temp = tempdir().expect("tempdir");
         let readme = temp.path().join("README.md");
-        fs::write(
-            &readme,
-            "# Sample\n\n```sdoctest\n>>> 1 + 1\n2\n```\n",
-        )
-        .expect("write doctest");
+        fs::write(&readme, "# Sample\n\n```sdoctest\n>>> 1 + 1\n2\n```\n").expect("write doctest");
 
         let mut options = TestOptions::default();
         options.path = Some(readme.clone());

@@ -184,21 +184,23 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Start test run tracking (only for full suite — DB lock is expensive)
     let db_path = PathBuf::from("doc/test/test_db.sdn");
     let test_run = if options.path.is_some() {
-        None  // Skip DB tracking for targeted runs
-    } else { match crate::test_db::start_test_run(&db_path) {
-        Ok(run) => {
-            if !quiet {
-                debug_log!(DebugLevel::Basic, "Runner", "Started test run: {}", run.run_id);
+        None // Skip DB tracking for targeted runs
+    } else {
+        match crate::test_db::start_test_run(&db_path) {
+            Ok(run) => {
+                if !quiet {
+                    debug_log!(DebugLevel::Basic, "Runner", "Started test run: {}", run.run_id);
+                }
+                Some(run)
             }
-            Some(run)
-        }
-        Err(e) => {
-            if !quiet {
-                eprintln!("Note: Test run tracking disabled ({})", e);
+            Err(e) => {
+                if !quiet {
+                    eprintln!("Note: Test run tracking disabled ({})", e);
+                }
+                None
             }
-            None
         }
-    } };
+    };
 
     // Create build cache for SMF/native modes
     let build_cache = if matches!(options.execution_mode, TestExecutionMode::Native) {
@@ -785,7 +787,9 @@ fn execute_test_files(
             if result.duration_ms > threshold {
                 eprintln!(
                     "\x1b[33m[SLOW] {} took {}ms (threshold: {}ms)\x1b[0m",
-                    path.display(), result.duration_ms, threshold
+                    path.display(),
+                    result.duration_ms,
+                    threshold
                 );
             }
         }

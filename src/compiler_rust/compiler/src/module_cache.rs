@@ -402,7 +402,10 @@ pub fn print_loader_summary() {
 
         eprintln!("[loader-summary] === Module Loader Summary ===");
         eprintln!("[loader-summary] Total unique modules loaded: {}", s.total_loaded);
-        eprintln!("[loader-summary] Total module visits (incl. cache): {}", s.visit_counts.values().sum::<u32>());
+        eprintln!(
+            "[loader-summary] Total module visits (incl. cache): {}",
+            s.visit_counts.values().sum::<u32>()
+        );
         eprintln!("[loader-summary] Max recursion depth: {}", s.max_depth_seen);
         eprintln!("[loader-summary] Sibling preload evaluations: {}", s.sibling_preloads);
 

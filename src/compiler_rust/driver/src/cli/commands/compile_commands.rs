@@ -49,10 +49,22 @@ pub fn handle_compile(args: &[String]) -> i32 {
     }
 
     // Parse target architecture
-    let target = parse_target_flag(args);
+    let target = match parse_target_flag(args) {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!("error: {}", err);
+            return 1;
+        }
+    };
 
     // Parse linker
-    let linker = parse_linker_flag(args);
+    let linker = match parse_linker_flag(args) {
+        Ok(linker) => linker,
+        Err(err) => {
+            eprintln!("error: {}", err);
+            return 1;
+        }
+    };
 
     // Print linker info if specified
     if let Some(l) = linker {
@@ -99,49 +111,42 @@ pub fn handle_linkers() -> i32 {
     list_linkers()
 }
 
-fn parse_target_flag(args: &[String]) -> Option<Target> {
+fn parse_target_flag(args: &[String]) -> Result<Option<Target>, String> {
     args.iter()
         .position(|a| a == "--target")
         .and_then(|i| args.get(i + 1))
         .map(|s| {
             s.parse::<TargetArch>()
-                .map_err(|e| {
-                    eprintln!("error: {}", e);
-                    std::process::exit(1);
-                })
-                .unwrap()
+                .map_err(|e| e.to_string())
         })
-        .map(|arch| Target::new(arch, simple_common::target::TargetOS::host()))
+        .transpose()
+        .map(|arch| arch.map(|arch| Target::new(arch, simple_common::target::TargetOS::host())))
 }
 
-fn parse_linker_flag(args: &[String]) -> Option<NativeLinker> {
+fn parse_linker_flag(args: &[String]) -> Result<Option<NativeLinker>, String> {
     args.iter()
         .position(|a| a == "--linker")
         .and_then(|i| args.get(i + 1))
         .map(|s| {
-            NativeLinker::from_name(s).unwrap_or_else(|| {
-                eprintln!("error: unknown linker '{}'. Available: mold, lld, ld", s);
-                std::process::exit(1);
-            })
+            NativeLinker::from_name(s)
+                .ok_or_else(|| format!("unknown linker '{}'. Available: mold, lld, ld", s))
         })
+        .transpose()
 }
 
 fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
-    args.iter()
-        .skip(1)
-        .enumerate()
-        .find_map(|(idx, arg)| {
-            if arg == "-o" {
-                return None;
-            }
-            if idx > 0 && args[idx] == "-o" {
-                return None;
-            }
-            if arg.starts_with('-') {
-                return None;
-            }
-            Some(PathBuf::from(arg))
-        })
+    args.iter().skip(1).enumerate().find_map(|(idx, arg)| {
+        if arg == "-o" {
+            return None;
+        }
+        if idx > 0 && args[idx] == "-o" {
+            return None;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        Some(PathBuf::from(arg))
+    })
 }
 
 fn print_compile_help(show_error: bool) {
@@ -181,14 +186,14 @@ mod tests {
             "--target".to_string(),
             "x86_64".to_string(),
         ];
-        let target = parse_target_flag(&args);
+        let target = parse_target_flag(&args).unwrap();
         assert!(target.is_some());
     }
 
     #[test]
     fn test_parse_no_target() {
         let args = vec!["compile".to_string(), "test.spl".to_string()];
-        let target = parse_target_flag(&args);
+        let target = parse_target_flag(&args).unwrap();
         assert!(target.is_none());
     }
 

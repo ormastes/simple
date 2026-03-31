@@ -94,13 +94,8 @@ pub(super) fn write_scenario_manifest(
     }
 
     let manifest_path = plan.scenario_root.join(MANIFEST_FILE);
-    fs::write(&manifest_path, build_manifest_text(&plan)).map_err(|e| {
-        format!(
-            "failed to write scenario manifest {}: {}",
-            manifest_path.display(),
-            e
-        )
-    })?;
+    fs::write(&manifest_path, build_manifest_text(&plan))
+        .map_err(|e| format!("failed to write scenario manifest {}: {}", manifest_path.display(), e))?;
 
     Ok(Some(manifest_path))
 }
@@ -155,7 +150,11 @@ fn build_manifest_text(plan: &ScenarioArtifactPlan) -> String {
         lines.push(format!("directory: {}", entry.directory.display()));
         lines.push("planned_artifacts:".to_string());
         for artifact in &entry.artifacts {
-            lines.push(format!("- {} => {}", artifact.kind.file_name(), artifact.path.display()));
+            lines.push(format!(
+                "- {} => {}",
+                artifact.kind.file_name(),
+                artifact.path.display()
+            ));
         }
         lines.push(String::new());
     }
@@ -242,10 +241,7 @@ fn spec_relative_dir(source_path: &Path) -> PathBuf {
     }
 
     if relative_parts.is_empty() {
-        let stem = source_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("spec");
+        let stem = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("spec");
         return PathBuf::from(strip_test_suffix(stem));
     }
 

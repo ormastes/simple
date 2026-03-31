@@ -256,7 +256,11 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
-    if VulkanInstance::is_available() { 1 } else { 0 }
+    if VulkanInstance::is_available() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -288,7 +292,10 @@ pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
     let mut state = STATE.lock();
     let idx = id as usize;
     if idx >= state.physical_devices.len() {
-        state.set_error(format!("Device index {id} out of range (count={})", state.physical_devices.len()));
+        state.set_error(format!(
+            "Device index {id} out of range (count={})",
+            state.physical_devices.len()
+        ));
         return 0;
     }
 
@@ -344,7 +351,11 @@ pub extern "C" fn rt_vulkan_select_device(_id: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_get_device() -> i64 {
     let state = STATE.lock();
-    if state.device.is_some() { 1 } else { 0 }
+    if state.device.is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -429,7 +440,10 @@ pub extern "C" fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     // Decode usage flags from the Simple-side enum encoding:
@@ -474,7 +488,11 @@ pub extern "C" fn rt_vulkan_alloc_buffer(_size: i64, _usage: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_free_buffer(handle: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.buffers.remove(&handle).is_some() { 1 } else { 0 }
+    if state.buffers.remove(&handle).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -492,7 +510,11 @@ pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
     // exposed.  Return success (1) if the buffer exists so the Simple side
     // can proceed with copy_to / copy_from.
     let state = STATE.lock();
-    if state.buffers.contains_key(&_handle) { 1 } else { 0 }
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -507,7 +529,11 @@ pub extern "C" fn rt_vulkan_map_memory(_handle: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
     let state = STATE.lock();
-    if state.buffers.contains_key(&_handle) { 1 } else { 0 }
+    if state.buffers.contains_key(&_handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -666,7 +692,10 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     if spirv_ptr == 0 {
@@ -714,7 +743,12 @@ pub extern "C" fn rt_vulkan_compile_spirv(spirv_ptr: i64) -> i64 {
         if pos + 4 > max_len {
             break;
         }
-        let word = u32::from_le_bytes([spirv_slice[pos], spirv_slice[pos+1], spirv_slice[pos+2], spirv_slice[pos+3]]);
+        let word = u32::from_le_bytes([
+            spirv_slice[pos],
+            spirv_slice[pos + 1],
+            spirv_slice[pos + 2],
+            spirv_slice[pos + 3],
+        ]);
         let word_count = (word >> 16) as usize;
         if word_count == 0 {
             break;
@@ -774,7 +808,11 @@ pub extern "C" fn rt_vulkan_compile_glsl(_source: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_shader(module: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.shader_modules.remove(&module).is_some() { 1 } else { 0 }
+    if state.shader_modules.remove(&module).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -796,7 +834,10 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, _entry: i64, _p
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     // The shader_module handle points at an Arc<ShaderModule> which wraps a
@@ -843,12 +884,23 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, _entry: i64, _p
     let spirv_slice = unsafe { std::slice::from_raw_parts(base, max_len) };
     let mut pos = 5 * 4;
     loop {
-        if pos + 4 > max_len { break; }
-        let word = u32::from_le_bytes([spirv_slice[pos], spirv_slice[pos+1], spirv_slice[pos+2], spirv_slice[pos+3]]);
+        if pos + 4 > max_len {
+            break;
+        }
+        let word = u32::from_le_bytes([
+            spirv_slice[pos],
+            spirv_slice[pos + 1],
+            spirv_slice[pos + 2],
+            spirv_slice[pos + 3],
+        ]);
         let wc = (word >> 16) as usize;
-        if wc == 0 { break; }
+        if wc == 0 {
+            break;
+        }
         let advance = wc * 4;
-        if pos + advance > max_len { break; }
+        if pos + advance > max_len {
+            break;
+        }
         pos += advance;
     }
     let spirv_bytes = &spirv_slice[..pos];
@@ -880,7 +932,11 @@ pub extern "C" fn rt_vulkan_destroy_pipeline(pipe: i64) -> i64 {
     let mut state = STATE.lock();
     let removed_compute = state.compute_pipelines.remove(&pipe).is_some();
     let removed_graphics = state.graphics_pipelines.remove(&pipe).is_some();
-    if removed_compute || removed_graphics { 1 } else { 0 }
+    if removed_compute || removed_graphics {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -899,23 +955,35 @@ pub extern "C" fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     // Create a simple storage-buffer descriptor set layout + pool + set
     let layout = match DescriptorSetLayout::new_uniform_buffer(device.clone()) {
         Ok(l) => l,
-        Err(e) => { state.set_error(format!("create_descriptor_set layout: {e}")); return 0; }
+        Err(e) => {
+            state.set_error(format!("create_descriptor_set layout: {e}"));
+            return 0;
+        }
     };
 
     let pool = match DescriptorPool::new_for_uniform_buffers(device.clone(), 16) {
         Ok(p) => p,
-        Err(e) => { state.set_error(format!("create_descriptor_set pool: {e}")); return 0; }
+        Err(e) => {
+            state.set_error(format!("create_descriptor_set pool: {e}"));
+            return 0;
+        }
     };
 
     let ds = match DescriptorSet::new(device, &pool, &layout) {
         Ok(s) => s,
-        Err(e) => { state.set_error(format!("create_descriptor_set: {e}")); return 0; }
+        Err(e) => {
+            state.set_error(format!("create_descriptor_set: {e}"));
+            return 0;
+        }
     };
 
     let h = alloc_handle();
@@ -971,7 +1039,11 @@ pub extern "C" fn rt_vulkan_bind_buffer(_desc_set: i64, _binding: i64, _buf: i64
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_descriptor_set(desc_set: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.descriptor_sets.remove(&desc_set).is_some() { 1 } else { 0 }
+    if state.descriptor_sets.remove(&desc_set).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -993,7 +1065,10 @@ pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
     match device.begin_compute_command() {
         Ok(cmd) => cmd.as_raw() as i64,
@@ -1026,11 +1101,9 @@ pub extern "C" fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> i64 {
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
-        device.handle().cmd_bind_pipeline(
-            vk_cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            pipeline.pipeline(),
-        );
+        device
+            .handle()
+            .cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline());
     }
     1
 }
@@ -1068,14 +1141,9 @@ pub extern "C" fn rt_vulkan_bind_descriptors(cmd: i64, desc_set: i64) -> i64 {
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     let sets = [ds.handle()];
     unsafe {
-        device.handle().cmd_bind_descriptor_sets(
-            vk_cmd,
-            vk::PipelineBindPoint::COMPUTE,
-            layout,
-            0,
-            &sets,
-            &[],
-        );
+        device
+            .handle()
+            .cmd_bind_descriptor_sets(vk_cmd, vk::PipelineBindPoint::COMPUTE, layout, 0, &sets, &[]);
     }
     1
 }
@@ -1219,7 +1287,10 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
     match Fence::new(device, false) {
         Ok(fence) => {
@@ -1246,7 +1317,11 @@ pub extern "C" fn rt_vulkan_create_fence() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_fence(fence: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.fences.remove(&fence).is_some() { 1 } else { 0 }
+    if state.fences.remove(&fence).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1331,11 +1406,20 @@ pub extern "C" fn rt_vulkan_get_last_error() -> *const c_char {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_create_render_pass(_device: i64, color_fmt: i64, depth_fmt: i64, _load_op: i64, _store_op: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_render_pass(
+    _device: i64,
+    color_fmt: i64,
+    depth_fmt: i64,
+    _load_op: i64,
+    _store_op: i64,
+) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     let color_format = vk::Format::from_raw(color_fmt as i32);
@@ -1362,7 +1446,13 @@ pub extern "C" fn rt_vulkan_create_render_pass(_device: i64, color_fmt: i64, dep
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_create_render_pass(_device: i64, _color_fmt: i64, _depth_fmt: i64, _load_op: i64, _store_op: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_render_pass(
+    _device: i64,
+    _color_fmt: i64,
+    _depth_fmt: i64,
+    _load_op: i64,
+    _store_op: i64,
+) -> i64 {
     0
 }
 
@@ -1372,7 +1462,11 @@ pub extern "C" fn rt_vulkan_create_render_pass(_device: i64, _color_fmt: i64, _d
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_render_pass(rp: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.render_passes.remove(&rp).is_some() { 1 } else { 0 }
+    if state.render_passes.remove(&rp).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1387,11 +1481,21 @@ pub extern "C" fn rt_vulkan_destroy_render_pass(_rp: i64) -> i64 {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, vs: i64, fs: i64, rp: i64, _blend: i64, _topo: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_graphics_pipeline(
+    _device: i64,
+    vs: i64,
+    fs: i64,
+    rp: i64,
+    _blend: i64,
+    _topo: i64,
+) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     let vertex_shader = match state.shader_modules.get(&vs) {
@@ -1404,7 +1508,9 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, vs: i64, fs: 
     let fragment_shader = match state.shader_modules.get(&fs) {
         Some(s) => s.clone(),
         None => {
-            state.set_error(format!("create_graphics_pipeline: fragment shader handle {fs} not found"));
+            state.set_error(format!(
+                "create_graphics_pipeline: fragment shader handle {fs} not found"
+            ));
             return 0;
         }
     };
@@ -1419,16 +1525,19 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, vs: i64, fs: 
     // Use default settings: no vertex bindings/attributes, no descriptor layouts,
     // default viewport extent matching a common size (will be overridden by
     // dynamic viewport).
-    let extent = vk::Extent2D { width: 800, height: 600 };
+    let extent = vk::Extent2D {
+        width: 800,
+        height: 600,
+    };
 
     match GraphicsPipeline::new(
         device,
         &render_pass,
         &vertex_shader,
         &fragment_shader,
-        &[],  // vertex bindings
-        &[],  // vertex attributes
-        &[],  // descriptor layouts
+        &[], // vertex bindings
+        &[], // vertex attributes
+        &[], // descriptor layouts
         extent,
     ) {
         Ok(pipe) => {
@@ -1445,7 +1554,14 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, vs: i64, fs: 
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, _vs: i64, _fs: i64, _rp: i64, _blend: i64, _topo: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_graphics_pipeline(
+    _device: i64,
+    _vs: i64,
+    _fs: i64,
+    _rp: i64,
+    _blend: i64,
+    _topo: i64,
+) -> i64 {
     0
 }
 
@@ -1455,7 +1571,11 @@ pub extern "C" fn rt_vulkan_create_graphics_pipeline(_device: i64, _vs: i64, _fs
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_graphics_pipeline(pipeline: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.graphics_pipelines.remove(&pipeline).is_some() { 1 } else { 0 }
+    if state.graphics_pipelines.remove(&pipeline).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1474,7 +1594,10 @@ pub extern "C" fn rt_vulkan_create_image(_device: i64, w: i64, h: i64, fmt: i64,
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     let format = vk::Format::from_raw(fmt as i32);
@@ -1520,7 +1643,11 @@ pub extern "C" fn rt_vulkan_create_image(_device: i64, _w: i64, _h: i64, _fmt: i
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_image(image: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.images.remove(&image).is_some() { 1 } else { 0 }
+    if state.images.remove(&image).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1537,7 +1664,10 @@ pub extern "C" fn rt_vulkan_create_sampler(_device: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     match Sampler::new(device, FilterMode::Linear, AddressMode::Repeat) {
@@ -1565,7 +1695,11 @@ pub extern "C" fn rt_vulkan_create_sampler(_device: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_sampler(sampler: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.samplers.remove(&sampler).is_some() { 1 } else { 0 }
+    if state.samplers.remove(&sampler).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1584,7 +1718,10 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     let render_pass = match state.render_passes.get(&rp) {
@@ -1628,7 +1765,11 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, _rp: i64, _image: i
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_framebuffer(fb: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.framebuffers.remove(&fb).is_some() { 1 } else { 0 }
+    if state.framebuffers.remove(&fb).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1647,7 +1788,10 @@ pub extern "C" fn rt_vulkan_create_swapchain(_device: i64, surface: i64, w: i64,
     let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(e) => { state.set_error(e); return 0; }
+        Err(e) => {
+            state.set_error(e);
+            return 0;
+        }
     };
 
     let surf = match state.surfaces.get(&surface) {
@@ -1674,7 +1818,14 @@ pub extern "C" fn rt_vulkan_create_swapchain(_device: i64, surface: i64, w: i64,
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_create_swapchain(_device: i64, _surface: i64, _w: i64, _h: i64, _fmt: i64, _vsync: i64) -> i64 {
+pub extern "C" fn rt_vulkan_create_swapchain(
+    _device: i64,
+    _surface: i64,
+    _w: i64,
+    _h: i64,
+    _fmt: i64,
+    _vsync: i64,
+) -> i64 {
     0
 }
 
@@ -1684,7 +1835,11 @@ pub extern "C" fn rt_vulkan_create_swapchain(_device: i64, _surface: i64, _w: i6
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_destroy_swapchain(sc: i64) -> i64 {
     let mut state = STATE.lock();
-    if state.swapchains.remove(&sc).is_some() { 1 } else { 0 }
+    if state.swapchains.remove(&sc).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -1752,7 +1907,15 @@ pub extern "C" fn rt_vulkan_present(_sc: i64, _image_index: i64) -> i64 {
 
 #[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_begin_render_pass_gfx(cmd: i64, rp: i64, fb: i64, cr: f64, cg: f64, cb: f64, ca: f64) -> i64 {
+pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
+    cmd: i64,
+    rp: i64,
+    fb: i64,
+    cr: f64,
+    cg: f64,
+    cb: f64,
+    ca: f64,
+) -> i64 {
     let state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
@@ -1789,14 +1952,24 @@ pub extern "C" fn rt_vulkan_begin_render_pass_gfx(cmd: i64, rp: i64, fb: i64, cr
         .clear_values(&clear_values);
 
     unsafe {
-        device.handle().cmd_begin_render_pass(vk_cmd, &begin_info, vk::SubpassContents::INLINE);
+        device
+            .handle()
+            .cmd_begin_render_pass(vk_cmd, &begin_info, vk::SubpassContents::INLINE);
     }
     1
 }
 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
-pub extern "C" fn rt_vulkan_begin_render_pass_gfx(_cmd: i64, _rp: i64, _fb: i64, _cr: f64, _cg: f64, _cb: f64, _ca: f64) -> i64 {
+pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
+    _cmd: i64,
+    _rp: i64,
+    _fb: i64,
+    _cr: f64,
+    _cg: f64,
+    _cb: f64,
+    _ca: f64,
+) -> i64 {
     0
 }
 
@@ -1839,7 +2012,9 @@ pub extern "C" fn rt_vulkan_bind_graphics_pipeline(cmd: i64, pipeline: i64) -> i
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
-        device.handle().cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::GRAPHICS, pipe.handle());
+        device
+            .handle()
+            .cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::GRAPHICS, pipe.handle());
     }
     1
 }
@@ -1866,7 +2041,9 @@ pub extern "C" fn rt_vulkan_bind_vertex_buffer(cmd: i64, buffer: i64) -> i64 {
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
-        device.handle().cmd_bind_vertex_buffers(vk_cmd, 0, &[buf.handle()], &[0]);
+        device
+            .handle()
+            .cmd_bind_vertex_buffers(vk_cmd, 0, &[buf.handle()], &[0]);
     }
     1
 }
@@ -1893,7 +2070,9 @@ pub extern "C" fn rt_vulkan_bind_index_buffer(cmd: i64, buffer: i64) -> i64 {
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
-        device.handle().cmd_bind_index_buffer(vk_cmd, buf.handle(), 0, vk::IndexType::UINT32);
+        device
+            .handle()
+            .cmd_bind_index_buffer(vk_cmd, buf.handle(), 0, vk::IndexType::UINT32);
     }
     1
 }
@@ -1974,8 +2153,14 @@ pub extern "C" fn rt_vulkan_set_scissor(cmd: i64, x: i64, y: i64, w: i64, h: i64
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     let scissor = vk::Rect2D {
-        offset: vk::Offset2D { x: x as i32, y: y as i32 },
-        extent: vk::Extent2D { width: w as u32, height: h as u32 },
+        offset: vk::Offset2D {
+            x: x as i32,
+            y: y as i32,
+        },
+        extent: vk::Extent2D {
+            width: w as u32,
+            height: h as u32,
+        },
     };
     unsafe {
         device.handle().cmd_set_scissor(vk_cmd, 0, &[scissor]);

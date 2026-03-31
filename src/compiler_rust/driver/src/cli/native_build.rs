@@ -221,10 +221,14 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     if let Some(ref rp) = runtime_path {
         simple_compiler::pipeline::native_project::set_runtime_path_override(rp.clone());
         // Also set env vars in-process as fallback
-        unsafe { std::env::set_var("SIMPLE_RUNTIME_PATH", rp); }
+        unsafe {
+            std::env::set_var("SIMPLE_RUNTIME_PATH", rp);
+        }
         let native_all = rp.join("libsimple_native_all.a");
         if native_all.exists() {
-            unsafe { std::env::set_var("SIMPLE_NATIVE_ALL_PATH", &native_all); }
+            unsafe {
+                std::env::set_var("SIMPLE_NATIVE_ALL_PATH", &native_all);
+            }
         }
     }
 

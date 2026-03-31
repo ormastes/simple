@@ -42,18 +42,15 @@ pub fn write_test_artifacts(
 
     let log_path = output_dir.join("run.log");
     let log_content = build_log_text(result, &artifacts);
-    fs::write(&log_path, &log_content)
-        .map_err(|e| format!("failed to write {}: {}", log_path.display(), e))?;
+    fs::write(&log_path, &log_content).map_err(|e| format!("failed to write {}: {}", log_path.display(), e))?;
 
     if let Some(stdout) = artifacts.stdout {
         let stdout_path = output_dir.join("stdout.log");
-        fs::write(&stdout_path, stdout)
-            .map_err(|e| format!("failed to write {}: {}", stdout_path.display(), e))?;
+        fs::write(&stdout_path, stdout).map_err(|e| format!("failed to write {}: {}", stdout_path.display(), e))?;
     }
     if let Some(stderr) = artifacts.stderr {
         let stderr_path = output_dir.join("stderr.log");
-        fs::write(&stderr_path, stderr)
-            .map_err(|e| format!("failed to write {}: {}", stderr_path.display(), e))?;
+        fs::write(&stderr_path, stderr).map_err(|e| format!("failed to write {}: {}", stderr_path.display(), e))?;
     }
     if let Some(combined) = artifacts.combined {
         let combined_path = output_dir.join("combined.log");
@@ -62,8 +59,7 @@ pub fn write_test_artifacts(
     }
 
     let output_path = output_dir.join("output.log");
-    fs::write(&output_path, &log_content)
-        .map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
+    fs::write(&output_path, &log_content).map_err(|e| format!("failed to write {}: {}", output_path.display(), e))?;
 
     write_result_json_at_dir(source_path, result, &output_dir)?;
 
@@ -131,17 +127,12 @@ fn build_log_text(result: &TestFileResult, artifacts: &ExecutionArtifacts<'_>) -
     lines.join("\n")
 }
 
-fn write_result_json_at_dir(
-    source_path: &Path,
-    result: &TestFileResult,
-    output_dir: &Path,
-) -> Result<(), String> {
+fn write_result_json_at_dir(source_path: &Path, result: &TestFileResult, output_dir: &Path) -> Result<(), String> {
     let result_json_path = output_dir.join("result.json");
     let result_json = ResultJson::from_parts(source_path, result, output_dir);
     let json = serde_json::to_string_pretty(&result_json)
         .map_err(|e| format!("failed to serialize {}: {}", result_json_path.display(), e))?;
-    fs::write(&result_json_path, json)
-        .map_err(|e| format!("failed to write {}: {}", result_json_path.display(), e))?;
+    fs::write(&result_json_path, json).map_err(|e| format!("failed to write {}: {}", result_json_path.display(), e))?;
     Ok(())
 }
 
@@ -180,10 +171,7 @@ fn spec_relative_dir(source_path: &Path) -> PathBuf {
     }
 
     if relative_parts.is_empty() {
-        let stem = source_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("spec");
+        let stem = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("spec");
         return PathBuf::from(strip_test_suffix(stem));
     }
 
@@ -262,11 +250,26 @@ impl<'a> ResultJson<'a> {
             artifacts: ResultArtifacts {
                 summary_txt: output_dir.join("summary.txt"),
                 result_json: output_dir.join("result.json"),
-                run_log: output_dir.join("run.log").is_file().then_some(output_dir.join("run.log")),
-                output_log: output_dir.join("output.log").is_file().then_some(output_dir.join("output.log")),
-                stdout_log: output_dir.join("stdout.log").is_file().then_some(output_dir.join("stdout.log")),
-                stderr_log: output_dir.join("stderr.log").is_file().then_some(output_dir.join("stderr.log")),
-                combined_log: output_dir.join("combined.log").is_file().then_some(output_dir.join("combined.log")),
+                run_log: output_dir
+                    .join("run.log")
+                    .is_file()
+                    .then_some(output_dir.join("run.log")),
+                output_log: output_dir
+                    .join("output.log")
+                    .is_file()
+                    .then_some(output_dir.join("output.log")),
+                stdout_log: output_dir
+                    .join("stdout.log")
+                    .is_file()
+                    .then_some(output_dir.join("stdout.log")),
+                stderr_log: output_dir
+                    .join("stderr.log")
+                    .is_file()
+                    .then_some(output_dir.join("stderr.log")),
+                combined_log: output_dir
+                    .join("combined.log")
+                    .is_file()
+                    .then_some(output_dir.join("combined.log")),
             },
         }
     }
@@ -279,7 +282,10 @@ mod tests {
     #[test]
     fn test_spec_relative_dir_prefers_test_root() {
         let rel = spec_relative_dir(Path::new("test/app/web_dashboard/tmux_rest_api_spec.spl"));
-        assert_eq!(rel.to_string_lossy().replace('\\', "/"), "app/web_dashboard/tmux_rest_api");
+        assert_eq!(
+            rel.to_string_lossy().replace('\\', "/"),
+            "app/web_dashboard/tmux_rest_api"
+        );
     }
 
     #[test]
