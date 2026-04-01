@@ -19,10 +19,9 @@ All functions under test are pure (no I/O, no side effects).
 `examples/10_tooling/trace32_tools/t32_mcp/window_tools.spl`
 """
 
-use app.mcp_t32.action_tools.{t32_field_to_eval, t32_field_to_set_cmd}
+use app.mcp_t32.action_tools.{t32_field_to_eval, t32_field_to_set_cmd, t32_is_status_field, t32_normalize_current_status, t32_toolbar_run_enabled, t32_toolbar_stop_enabled}
 use app.mcp_t32.window_tools.{t32_hardcoded_window_catalog, t32_parse_window_sdn, t32_parse_catalog_entry}
 use app.mcp_t32.headless_tools.{t32_build_cmm_command_db, t32_to_lower, t32_text_contains}
-use app.mcp_t32.session_tools.{t32_check_blocking, t32_has_blocking}
 
 # ============================================================================
 # Field Mapping — EVAL expressions
@@ -59,9 +58,52 @@ describe "T32 MCP Field Mapping":
             val result = t32_field_to_eval("memory.0x1000")
             expect(result).to_equal("Data.Long(0x1000)")
 
+        it "maps status.mode to DEBUGMODE()":
+            val result = t32_field_to_eval("status.mode")
+            expect(result).to_equal("DEBUGMODE()")
+
+        it "maps status.system to SYStem.MODE()":
+            val result = t32_field_to_eval("status.system")
+            expect(result).to_equal("SYStem.MODE()")
+
+        it "maps status.trace to Trace.STATE()":
+            val result = t32_field_to_eval("status.trace")
+            expect(result).to_equal("Trace.STATE()")
+
+        it "maps status.cursor to TRACK.ADDRESS()":
+            val result = t32_field_to_eval("status.cursor")
+            expect(result).to_equal("TRACK.ADDRESS()")
+
         it "returns raw expression for unknown fields":
             val result = t32_field_to_eval("PRACTICE.STATE()")
             expect(result).to_equal("PRACTICE.STATE()")
+
+    context "status field helpers":
+        it "recognizes status alias keys":
+            expect(t32_is_status_field("status")).to_equal(true)
+            expect(t32_is_status_field("status.current")).to_equal(true)
+            expect(t32_is_status_field("mode")).to_equal(true)
+            expect(t32_is_status_field("cursor")).to_equal(true)
+
+        it "normalizes running state":
+            val result = t32_normalize_current_status("1", "RUN", "Attach")
+            expect(result).to_equal("running")
+
+        it "normalizes stopped state":
+            val result = t32_normalize_current_status("0", "Break", "Attach")
+            expect(result).to_equal("stopped")
+
+        it "normalizes disconnected state":
+            val result = t32_normalize_current_status("0", "Down", "Down")
+            expect(result).to_equal("disconnected")
+
+        it "maps toolbar buttons for running":
+            expect(t32_toolbar_run_enabled("running")).to_equal("false")
+            expect(t32_toolbar_stop_enabled("running")).to_equal("true")
+
+        it "maps toolbar buttons for stopped":
+            expect(t32_toolbar_run_enabled("stopped")).to_equal("true")
+            expect(t32_toolbar_stop_enabled("stopped")).to_equal("false")
 
 # ============================================================================
 # Field Mapping — SET commands
@@ -101,9 +143,9 @@ describe "T32 MCP Field Set Commands":
 describe "T32 MCP Window Catalog":
 
     context "hardcoded catalog":
-        it "has 19 entries in hardcoded catalog":
+        it "has 15 entries in hardcoded catalog":
             val catalog = t32_hardcoded_window_catalog()
-            expect(catalog.len()).to_equal(19)
+            expect(catalog.len()).to_equal(15)
 
         it "finds register_view entry":
             val catalog = t32_hardcoded_window_catalog()
@@ -124,78 +166,13 @@ describe "T32 MCP Window Catalog":
                         found_capture = seg[4]
             expect(found_capture).to_equal("WinPrint.Register.view")
 
-        it "includes riscv csr view":
-            val catalog = t32_hardcoded_window_catalog()
-            var found = false
-            for entry in catalog:
-                if entry.starts_with("riscv_csr_view|"):
-                    found = true
-                    expect(entry).to_contain("Register.view /SpotLight /CSR")
-            expect(found).to_equal(true)
-
-        it "includes flash and system status windows":
-            val catalog = t32_hardcoded_window_catalog()
-            var found_flash = false
-            var found_system = false
-            var found_nexus = false
-            for entry in catalog:
-                if entry.starts_with("flash_status|"):
-                    found_flash = true
-                    expect(entry).to_contain("FLASH.List")
-                if entry.starts_with("system_status|"):
-                    found_system = true
-                    expect(entry).to_contain("System.state")
-                if entry.starts_with("nexus_trace|"):
-                    found_nexus = true
-                    expect(entry).to_contain("Trace.List /Nexus")
-            expect(found_flash).to_equal(true)
-            expect(found_system).to_equal(true)
-            expect(found_nexus).to_equal(true)
-
     context "SDN parsing":
         it "parses SDN catalog format":
-            val sdn = "window my_win\n  title: Test Window\n  kind: custom\n  capture_mode: print_parse\n  arch: riscv\n  open_command: MyCmd\n  capture_command: WinPrint.MyCmd\n  notes: demo\n"
+            val sdn = "window my_win\n  title: Test Window\n  kind: custom\n  open_command: MyCmd\n  capture_command: WinPrint.MyCmd\n"
             val catalog = t32_parse_window_sdn(sdn)
-            expect(catalog[0]).to_contain("my_win")
             expect(catalog.len()).to_equal(1)
+            expect(catalog[0]).to_contain("my_win")
             expect(catalog[0]).to_contain("Test Window")
-            expect(catalog[0]).to_contain("print_parse")
-            expect(catalog[0]).to_contain("riscv")
-            expect(catalog[0]).to_contain("demo")
-
-# ============================================================================
-# Blocking Guard
-# ============================================================================
-
-describe "T32 MCP Blocking Guard":
-
-    context "blocking commands":
-        it "blocks dialog ok":
-            val warnings = t32_check_blocking("DIALOG.OK \"Continue?\"")
-            expect(t32_has_blocking(warnings)).to_equal(true)
-            expect(warnings.join("\n")).to_contain("DIALOG.OK")
-
-        it "blocks enter and pause":
-            val warnings = t32_check_blocking("ENTER\nPAUSE")
-            expect(t32_has_blocking(warnings)).to_equal(true)
-            expect(warnings.join("\n")).to_contain("ENTER")
-            expect(warnings.join("\n")).to_contain("PAUSE")
-
-        it "does not block entry symbol names":
-            val warnings = t32_check_blocking("ENTRY main")
-            expect(t32_has_blocking(warnings)).to_equal(false)
-
-    context "warn and info commands":
-        it "warns for wait without blocking":
-            val warnings = t32_check_blocking("WAIT 100.ms")
-            expect(t32_has_blocking(warnings)).to_equal(false)
-            expect(warnings.join("\n")).to_contain("WAIT")
-
-        it "adds info for screen and winpos":
-            val warnings = t32_check_blocking("SCREEN.ON\nWinPOS 0. 0. 80. 40.")
-            expect(t32_has_blocking(warnings)).to_equal(false)
-            expect(warnings.join("\n")).to_contain("SCREEN.ON")
-            expect(warnings.join("\n")).to_contain("WINPOS")
 
 # ============================================================================
 # Headless Setup Helpers

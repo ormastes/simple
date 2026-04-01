@@ -225,6 +225,59 @@ fn tp_parse_register_list(raw: text) -> Dict<text, i64>:
                     Err(_): pass
     result
 
+fn tp_to_lower_ascii(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch >= "A" and ch <= "Z":
+            result = result + ch.to_lower()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn tp_text_contains(hay: text, needle: text) -> bool:
+    if needle.len() > hay.len():
+        return false
+    var i = 0
+    while i <= hay.len() - needle.len():
+        if hay[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+fn tp_normalize_boolish(raw: text) -> text:
+    val lower = tp_to_lower_ascii(raw.trim())
+    if lower == "1" or lower == "true" or lower == "on" or lower == "yes":
+        return "true"
+    if lower == "0" or lower == "false" or lower == "off" or lower == "no":
+        return "false"
+    lower
+
+fn tp_normalize_current_status(state_run: text, state_target: text, system_mode: text) -> text:
+    val run_norm = tp_normalize_boolish(state_run)
+    val target_norm = tp_to_lower_ascii(state_target.trim())
+    val system_norm = tp_to_lower_ascii(system_mode.trim())
+
+    if run_norm == "true":
+        return "running"
+    if tp_text_contains(target_norm, "down") or
+       tp_text_contains(target_norm, "no target") or
+       tp_text_contains(target_norm, "disconnect") or
+       tp_text_contains(system_norm, "down") or
+       tp_text_contains(system_norm, "off"):
+        return "disconnected"
+    if run_norm == "false":
+        return "stopped"
+    if tp_text_contains(target_norm, "run"):
+        return "running"
+    if tp_text_contains(target_norm, "stop") or
+       tp_text_contains(target_norm, "break") or
+       tp_text_contains(target_norm, "halt"):
+        return "stopped"
+    "unknown"
+
 # --- Tests ---
 
 describe "Trace32Parser":
@@ -360,6 +413,16 @@ describe "Trace32Parser":
         it "returns empty dict for empty input":
             val regs = tp_parse_register_list("")
             expect(regs.keys().len()).to_equal(0)
+
+    context "normalize_current_status":
+        it "maps STATE.RUN true to running":
+            expect(tp_normalize_current_status("1", "RUN", "Attach")).to_equal("running")
+
+        it "maps break state to stopped":
+            expect(tp_normalize_current_status("0", "Break", "Attach")).to_equal("stopped")
+
+        it "maps down state to disconnected":
+            expect(tp_normalize_current_status("0", "Down", "Down")).to_equal("disconnected")
 
     context "hex utilities":
         it "converts integer to hex string":

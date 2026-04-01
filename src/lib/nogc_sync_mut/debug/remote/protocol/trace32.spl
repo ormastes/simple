@@ -1,9 +1,8 @@
-@allow(primitive_api)
 # Trace32 Protocol Client
 # Communicates with Lauterbach Trace32 via t32rem CLI.
 # Returns parsed data structs (VarInfo, FrameInfo, etc.) matching GdbMiClient.
 
-use std.io.{shell, ProcessResult}
+use app.io.{shell, ProcessResult}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use app.debug.remote.types.{DebugConfig, DebugError}
 
@@ -43,28 +42,13 @@ impl Trace32Client:
 
     # Find t32rem binary
     static fn find_t32rem() -> text:
-        # Allow a repo-managed wrapper script or alternate client binary.
-        val explicit = shell("printenv SIMPLE_T32REM_BIN 2>/dev/null")
-        val explicit_path = explicit.stdout.trim()
-        if explicit.exit_code == 0 and explicit_path.len() > 0:
-            val check = shell("test -x '{explicit_path}' && echo yes")
-            if check.stdout.trim() == "yes":
-                return explicit_path
-
-        val compat = shell("printenv T32REM_PATH 2>/dev/null")
-        val compat_path = compat.stdout.trim()
-        if compat.exit_code == 0 and compat_path.len() > 0:
-            val check = shell("test -x '{compat_path}' && echo yes")
-            if check.stdout.trim() == "yes":
-                return compat_path
-
         # Check T32_PATH env var first
         val env_check = shell("echo $T32_PATH")
         val t32_path = env_check.stdout.trim()
         if t32_path.len() > 0:
             val candidate = "{t32_path}/bin/pc_linux64/t32rem"
-            val check = shell("test -x {candidate} && echo yes")
-            if check.stdout.trim() == "yes":
+            val exists = shell("test -x {candidate} && echo yes")
+            if exists.stdout.trim() == "yes":
                 return candidate
 
         # Try system PATH
@@ -72,46 +56,11 @@ impl Trace32Client:
         if which.exit_code == 0:
             return which.stdout.trim()
 
-        val bundled = "/opt/t32/bin/pc_linux64/t32rem"
-        val bundled_check = shell("test -x {bundled} && echo yes")
-        if bundled_check.stdout.trim() == "yes":
-            return bundled
-
         ""
-
-    static fn protocol() -> text:
-        val explicit = shell("printenv SIMPLE_T32_PROTOCOL 2>/dev/null")
-        val explicit_protocol = explicit.stdout.trim()
-        if explicit.exit_code == 0 and explicit_protocol.len() > 0:
-            return explicit_protocol
-
-        val compat = shell("printenv T32_PROTOCOL 2>/dev/null")
-        val compat_protocol = compat.stdout.trim()
-        if compat.exit_code == 0 and compat_protocol.len() > 0:
-            return compat_protocol
-
-        ""
-
-    static fn build_command(t32rem_path: text, host: text, port: i32, protocol: text, cmd: text) -> text:
-        var parts = [t32rem_path, host, "port={port}"]
-        if protocol.trim() != "":
-            parts.push("protocol={protocol.trim()}")
-        parts.push(cmd)
-        parts.join(" ")
-
-    static fn wait_seconds(timeout_ms: i32) -> i32:
-        if timeout_ms <= 0:
-            return 1
-        val whole = timeout_ms / 1000
-        if whole < 1:
-            return 1
-        whole
 
     # Execute a t32rem command and return raw output
     fn run_command(cmd: text) -> Result<text, text>:
-        val full_cmd = Trace32Client.build_command(
-            self.t32rem_path, self.host, self.port, Trace32Client.protocol(), cmd
-        )
+        val full_cmd = "{self.t32rem_path} {self.host} port={self.port} {cmd}"
         val result = shell(full_cmd)
         if result.exit_code != 0:
             return Err("t32rem error: {result.stderr}")
@@ -277,11 +226,6 @@ impl Trace32Client:
     fn practice_state() -> Result<text, text>:
         self.run_command("PRACTICE.STATE()")
 
-    fn wait_for_stop(timeout_ms: i32) -> Result<text, text>:
-        val secs = Trace32Client.wait_seconds(timeout_ms)
-        shell("sleep {secs}")
-        self.halt()
-
     # --- InterCom ---
 
     fn intercom_execute(target: text, cmd: text) -> Result<text, text>:
@@ -295,6 +239,22 @@ impl Trace32Client:
     fn eval_string() -> Result<text, text>:
         self.run_command("EVAL.STRing()")
 
+    fn eval_value(expr: text) -> Result<text, text>:
+        self.run_command("EVAL {expr}")
+
+    fn read_state_line_status() -> Result<Dict<text, text>, text>:
+        var snapshot: Dict<text, text> = {}
+        snapshot["state_run"] = self.eval_value("STATE.RUN()")?
+        snapshot["state_target"] = self.eval_value("STATE.TARGET()")?
+        snapshot["debug_mode"] = self.eval_value("DEBUGMODE()")?
+        snapshot["system_mode"] = self.eval_value("SYStem.MODE()")?
+        snapshot["trace_state"] = self.eval_value("Trace.STATE()")?
+        snapshot["cursor"] = self.eval_value("TRACK.ADDRESS()")?
+        snapshot["debugger_activity"] = ""
+        snapshot["debugger_activity_supported"] = "false"
+        snapshot["current_status"] = Trace32Parser.normalize_current_status(snapshot["state_run"], snapshot["state_target"], snapshot["system_mode"])
+        Ok(snapshot)
+
     # --- Cleanup ---
 
     fn disconnect():
@@ -305,6 +265,64 @@ impl Trace32Client:
 # Parser for Trace32 output formats
 # Converts t32rem text output into typed data structures
 class Trace32Parser:
+
+    static fn to_lower_ascii(s: text) -> text:
+        var result = ""
+        var i = 0
+        while i < s.len():
+            val ch = s[i:i + 1]
+            if ch >= "A" and ch <= "Z":
+                result = result + ch.to_lower()
+            else:
+                result = result + ch
+            i = i + 1
+        result
+
+    static fn text_contains(hay: text, needle: text) -> bool:
+        if needle.len() > hay.len():
+            return false
+        var i = 0
+        while i <= hay.len() - needle.len():
+            if hay[i:i + needle.len()] == needle:
+                return true
+            i = i + 1
+        false
+
+    static fn normalize_boolish(raw: text) -> text:
+        val lower = Trace32Parser.to_lower_ascii(raw.trim())
+        if lower == "1" or lower == "true" or lower == "on" or lower == "yes":
+            return "true"
+        if lower == "0" or lower == "false" or lower == "off" or lower == "no":
+            return "false"
+        lower
+
+    static fn normalize_current_status(state_run: text, state_target: text, system_mode: text) -> text:
+        val run_norm = Trace32Parser.normalize_boolish(state_run)
+        val target_norm = Trace32Parser.to_lower_ascii(state_target.trim())
+        val system_norm = Trace32Parser.to_lower_ascii(system_mode.trim())
+
+        if run_norm == "true":
+            return "running"
+
+        if Trace32Parser.text_contains(target_norm, "down") or
+           Trace32Parser.text_contains(target_norm, "no target") or
+           Trace32Parser.text_contains(target_norm, "disconnect") or
+           Trace32Parser.text_contains(system_norm, "down") or
+           Trace32Parser.text_contains(system_norm, "off"):
+            return "disconnected"
+
+        if run_norm == "false":
+            return "stopped"
+
+        if Trace32Parser.text_contains(target_norm, "run"):
+            return "running"
+
+        if Trace32Parser.text_contains(target_norm, "stop") or
+           Trace32Parser.text_contains(target_norm, "break") or
+           Trace32Parser.text_contains(target_norm, "halt"):
+            return "stopped"
+
+        "unknown"
 
     # Parse variable list output into [VarInfo]
     # Format: "name  type  value" (whitespace-separated columns)
@@ -322,13 +340,13 @@ class Trace32Parser:
                 continue
 
             # Parse: "varname  type  value"
-            val parts = Trace32Parser.tokenize_whitespace(trimmed)
+            val parts = Trace32Parser.split_whitespace(trimmed)
             if parts.len() >= 3:
                 val name = parts[0]
                 val type_name = parts[1]
                 val value = parts[2]
                 result.push(VarInfo.of(name, value, type_name))
-            elif parts.len() == 2:
+            else if parts.len() == 2:
                 result.push(VarInfo.of(parts[0], parts[1], ""))
         result
 
@@ -345,7 +363,7 @@ class Trace32Parser:
             if trimmed.starts_with("---"):
                 continue
 
-            val parts = Trace32Parser.tokenize_whitespace(trimmed)
+            val parts = Trace32Parser.split_whitespace(trimmed)
             if parts.len() >= 3:
                 # Try to parse "#N" prefix
                 var func_name = parts[1]
@@ -384,7 +402,7 @@ class Trace32Parser:
                 if after < trimmed.len():
                     data_part = trimmed.slice(after, trimmed.len())
 
-            val parts = Trace32Parser.tokenize_whitespace(data_part.trim())
+            val parts = Trace32Parser.split_whitespace(data_part.trim())
             for part in parts:
                 if part.len() == 2:
                     val byte_val = Trace32Parser.parse_hex_byte(part)
@@ -421,7 +439,7 @@ class Trace32Parser:
             val trimmed = line.trim()
             if trimmed.len() == 0:
                 continue
-            val tokens = Trace32Parser.tokenize_whitespace(trimmed)
+            val tokens = Trace32Parser.split_whitespace(trimmed)
             for token in tokens:
                 val eq_parts = token.split("=")
                 if eq_parts.len() == 2:
@@ -516,7 +534,7 @@ class Trace32Parser:
             _: "?"
 
     # Split text on whitespace (multiple spaces treated as one delimiter)
-    static fn tokenize_whitespace(input: text) -> [text]:
+    static fn split_whitespace(input: text) -> [text]:
         var result: [text] = []
         var current_parts: [text] = []
         var in_word = false
