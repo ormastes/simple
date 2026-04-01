@@ -5,6 +5,13 @@ use cmm_parser_runtime.{parse_cmm_source}
 use cmm_analyzer.{analyze_program, CmmSymbol, CmmSymbolKind}
 use cmm_commands.{build_command_db, get_completions}
 use cmm_diagnostics.{severity_text}
+use lsp_goto.{DefinitionResult, get_definition_at}
+use t32_lsp_mcp.json_helpers.{
+    Q, LB, RB, SB_L, SB_R,
+    escape_json, js, jp, jo1, jo2, jo3, jo4,
+    extract_field, extract_field_raw, unescape_json_string,
+    make_tool_result
+}
 
 extern fn sys_get_args() -> [text]
 extern fn rt_dir_list(path: text) -> [text]
@@ -15,144 +22,20 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
 extern fn rt_get_cwd() -> text
 
-fn q() -> text: "\""
-fn lb() -> text: "{"
-fn rb() -> text: "}"
-fn sb_l() -> text: "["
-fn sb_r() -> text: "]"
-fn jp(key: text, value: text) -> text: q() + key + q() + ":" + value
-fn js(s: text) -> text: q() + escape_json(s) + q()
-fn jo1(p1: text) -> text: lb() + p1 + rb()
-fn jo2(p1: text, p2: text) -> text: lb() + p1 + "," + p2 + rb()
-fn jo3(p1: text, p2: text, p3: text) -> text: lb() + p1 + "," + p2 + "," + p3 + rb()
-fn jo4(p1: text, p2: text, p3: text, p4: text) -> text: lb() + p1 + "," + p2 + "," + p3 + "," + p4 + rb()
-
-fn escape_json(s: text) -> text:
-    var result = s
-    result = result.replace(r"\", r"\\")
-    result = result.replace(q(), r"\" + q())
-    result = result.replace("\n", r"\n")
-    result = result.replace("\r", r"\r")
-    result = result.replace("\t", r"\t")
-    result
-
-fn extract_field(json: text, key: text) -> text:
-    val raw = extract_field_raw(json, key)
-    if raw == "null":
-        return ""
-    if raw.len() >= 2 and raw.starts_with(q()) and raw.ends_with(q()):
-        return unescape_json_string(raw[1:raw.len() - 1])
-    raw
-
-fn unescape_json_string(s: text) -> text:
-    var parts: [text] = []
-    var i = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch != "\\":
-            parts.push(ch)
-            i = i + 1
-            continue
-        if i + 1 >= s.len():
-            parts.push(ch)
-            i = i + 1
-            continue
-        val next = s.substring(i + 1, i + 2)
-        if next == "n":
-            parts.push("\n")
-        elif next == "r":
-            parts.push("\r")
-        elif next == "t":
-            parts.push("\t")
-        elif next == "\"":
-            parts.push("\"")
-        elif next == "\\":
-            parts.push("\\")
-        else:
-            parts.push(next)
-        i = i + 2
-    parts.join("")
-
-fn read_string_end(s: text, start_quote: i64) -> i64:
-    var i = start_quote + 1
-    var escaped = false
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if escaped:
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == q():
-            return i
-        i = i + 1
-    -1
-
-fn read_nested_end(s: text, start_index: i64) -> i64:
-    var i = start_index
-    var depth = 0
-    var in_string = false
-    var escaped = false
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == q():
-                in_string = false
-        else:
-            if ch == q():
-                in_string = true
-            elif ch == lb() or ch == sb_l():
-                depth = depth + 1
-            elif ch == rb() or ch == sb_r():
-                depth = depth - 1
-                if depth == 0:
-                    return i
-        i = i + 1
-    -1
-
-fn extract_field_raw(json: text, key: text) -> text:
-    val search = q() + key + q() + ":"
-    val idx_result = json.index_of(search)
-    var idx = -1
-    match idx_result:
-        Some(i): idx = i
-        nil: return "null"
-    var rest = json.substring(idx + search.len()).trim()
-    if rest == "":
-        return "null"
-    if rest.starts_with(q()):
-        val end_idx = read_string_end(rest, 0)
-        if end_idx < 0:
-            return "null"
-        return rest[0:end_idx + 1]
-    if rest.starts_with(lb()) or rest.starts_with(sb_l()):
-        val end_idx = read_nested_end(rest, 0)
-        if end_idx < 0:
-            return "null"
-        return rest[0:end_idx + 1]
-    var parts: [text] = []
-    for ch in rest:
-        if ch == "," or ch == rb() or ch == sb_r() or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
-            break
-        parts.push(ch)
-    val raw = parts.join("")
-    if raw == "":
-        return "null"
-    raw
+# Lowercase aliases for backward compatibility within this file
+fn q() -> text: Q()
+fn lb() -> text: LB()
+fn rb() -> text: RB()
+fn sb_l() -> text: SB_L()
+fn sb_r() -> text: SB_R()
 
 fn result_ok(id: text, result: text) -> text:
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-fn make_tool_result(id: text, output: text) -> text:
-    val content = sb_l() + jo2(jp("type", js("text")), jp("text", js(output))) + sb_r()
-    result_ok(id, jo1(jp("content", content)))
-
+# 3-arg variant: wraps code into the error message, then delegates
 fn make_tool_error(id: text, code: i64, msg: text) -> text:
-    val content = sb_l() + jo2(jp("type", js("text")), jp("text", js("ERROR " + str(code) + ": " + msg))) + sb_r()
-    result_ok(id, lb() + jp("content", content) + "," + jp("isError", "true") + rb())
+    val text_obj = jo2(jp("type", js("text")), jp("text", js("ERROR " + str(code) + ": " + msg)))
+    result_ok(id, lb() + jp("content", "[" + text_obj + "]") + "," + jp("isError", "true") + rb())
 
 fn main():
     val raw_args = sys_get_args()
@@ -259,6 +142,8 @@ fn dispatch_tool(id: text, tool_name: text, args: text) -> text:
         return handle_cmm_hover(id, args)
     if tool_name == "cmm_symbols":
         return handle_cmm_symbols(id, args)
+    if tool_name == "cmm_definition":
+        return handle_cmm_definition(id, args)
     if tool_name == "cmm_validate_cli":
         return handle_cmm_validate_cli(id, args)
     make_tool_error(id, -32601, "Unknown tool: " + tool_name)
@@ -352,6 +237,53 @@ fn handle_cmm_symbols(id: text, args: text) -> text:
         i = i + 1
     arr = arr + sb_r()
     make_tool_result(id, jo2(jp("count", str(syms.len())), jp("symbols", arr)))
+
+fn handle_cmm_definition(id: text, args: text) -> text:
+    val source = extract_field(args, "source")
+    if source == "":
+        return make_tool_error(id, -32602, "Missing required parameter: source")
+    val target_line = parse_i64(extract_field(args, "line"))
+    val target_char = parse_i64(extract_field(args, "character"))
+    val program = parse_cmm_source(source)
+    val analysis = analyze_program(program)
+    val def_result = get_definition_at(program, analysis.symbols, target_line, target_char, "input")
+    if not def_result.?:
+        val word = extract_word_from_lines(source.split("\n"), target_line, target_char)
+        if word == "":
+            return make_tool_result(id, jo1(jp("found", "false")))
+        var lookup_name = word
+        if word.starts_with("&"):
+            lookup_name = word.substring(1)
+        val all_labels = analysis.symbols.labels()
+        var li = 0
+        while li < all_labels.len():
+            if all_labels[li].name == lookup_name or all_labels[li].name == word:
+                return make_tool_result(id, jo4(
+                    jp("found", "true"),
+                    jp("symbol", js(all_labels[li].name)),
+                    jp("line", str(all_labels[li].def_line)),
+                    jp("column", str(all_labels[li].def_column))
+                ))
+            li = li + 1
+        val all_macros = analysis.symbols.macros()
+        var mi = 0
+        while mi < all_macros.len():
+            if all_macros[mi].name == lookup_name:
+                return make_tool_result(id, jo4(
+                    jp("found", "true"),
+                    jp("symbol", js(all_macros[mi].name)),
+                    jp("line", str(all_macros[mi].def_line)),
+                    jp("column", str(all_macros[mi].def_column))
+                ))
+            mi = mi + 1
+        return make_tool_result(id, jo1(jp("found", "false")))
+    val location = def_result ?? DefinitionResult(uri: "", line: 0, column: 0)
+    make_tool_result(id, jo4(
+        jp("found", "true"),
+        jp("uri", js(location.uri)),
+        jp("line", str(location.line)),
+        jp("column", str(location.column))
+    ))
 
 fn handle_cmm_validate_cli(id: text, args: text) -> text:
     val source = extract_field(args, "source")

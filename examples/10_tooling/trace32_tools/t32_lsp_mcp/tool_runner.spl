@@ -5,6 +5,7 @@
 # The old t32_lsp_mcp.tools wrapper module can hang during startup in direct mode.
 
 use t32_lsp_mcp.json_helpers
+use t32_lsp_mcp.tool_runner_common.{arg_field, runner_arg0_is_executable_path, debug_args, is_ident_char, line_text_for_position, extract_word_from_lines, parse_i64, check_gui_keywords, check_has_command}
 use cmm_lsp.cmm_parser_runtime.{parse_cmm_source}
 use cmm_lsp.cmm_analyzer.{analyze_program, CmmSymbol, CmmSymbolKind}
 use cmm_lsp.cmm_commands.{build_command_db, get_completions}
@@ -14,28 +15,6 @@ extern fn sys_get_args() -> [text]
 extern fn sys_exit(code: i64)
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-
-fn arg_field(args: text, key: text) -> text:
-    val value = lsp_extract_field(args, key)
-    if value != "":
-        return value
-    val nested = lsp_extract_field_raw(args, key)
-    if nested == "null":
-        return ""
-    if nested.starts_with(lsp_Q()) and nested.ends_with(lsp_Q()) and nested.len() >= 2:
-        return lsp_unescape_json_string(nested.substring(1, nested.len() - 1))
-    nested
-
-fn runner_arg0_is_executable_path(arg0: text) -> bool:
-    arg0.contains("/") or arg0.contains("\\") or arg0.ends_with(".exe") or arg0.ends_with("t32_lsp_mcp_tool_runner")
-
-fn debug_args(args: [text]) -> text:
-    var out = "argc=" + str(args.len())
-    var i = 0
-    while i < args.len():
-        out = out + " argv[" + str(i) + "]=" + args[i]
-        i = i + 1
-    out
 
 fn dispatch_tool(id: text, tool_name: text, args: text) -> text:
     if tool_name == "cmm_parse":
@@ -197,41 +176,6 @@ fn handle_cmm_validate_cli(id: text, args: text) -> text:
     val valid = if issues.len() == 0: "true" else: "false"
     lsp_make_tool_result(id, lsp_jo3(lsp_jp("valid", valid), lsp_jp("issue_count", str(issues.len())), lsp_jp("issues", issues_arr)))
 
-fn line_text_for_position(lines: [text], target_line: i64) -> text:
-    if target_line >= 0 and target_line < lines.len():
-        return lines[target_line]
-    if target_line >= 1 and target_line <= lines.len():
-        return lines[target_line - 1]
-    ""
-
-fn extract_word_from_lines(lines: [text], target_line: i64, target_char: i64) -> text:
-    val line = line_text_for_position(lines, target_line)
-    if line == "":
-        return ""
-    var idx = target_char
-    if idx < 0:
-        idx = 0
-    if idx > line.len():
-        idx = line.len()
-    var start = idx
-    while start > 0 and is_ident_char(line.substring(start - 1, start)):
-        start = start - 1
-    var end = idx
-    while end < line.len() and is_ident_char(line.substring(end, end + 1)):
-        end = end + 1
-    if end <= start:
-        return ""
-    line.substring(start, end)
-
-fn is_ident_char(ch: text) -> bool:
-    if ch == "_":
-        return true
-    val upper = ch.to_upper()
-    val lower = ch.to_lower()
-    if upper != lower:
-        return true
-    ch >= "0" and ch <= "9"
-
 fn lookup_hover_text(db, word: text) -> text:
     val lower_word = word.to_lower()
     val matches = get_completions(db, word)
@@ -257,39 +201,6 @@ fn symbol_kind_str(kind: CmmSymbolKind) -> text:
         case CmmSymbolKind.SubroutineSym: "subroutine"
         case CmmSymbolKind.FileRefSym: "file"
         case _: "symbol"
-
-fn check_gui_keywords(source: text) -> [text]:
-    val lower = source.to_lower()
-    val keywords = ["dialog.", "menu.", "screen.wait", "inkey", "enter "]
-    var found: [text] = []
-    var i = 0
-    while i < keywords.len():
-        if lower.contains(keywords[i]):
-            found.push(keywords[i])
-        i = i + 1
-    found
-
-fn check_has_command(source: text, cmd: text) -> bool:
-    val lower_source = source.to_lower()
-    val lower_cmd = cmd.to_lower()
-    lower_source.contains(lower_cmd)
-
-fn parse_i64(s: text) -> i64:
-    if s == "":
-        return 0
-    var i = 0
-    var sign = 1
-    if s.starts_with("-"):
-        sign = -1
-        i = 1
-    var value = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch < "0" or ch > "9":
-            break
-        value = value * 10 + int(ch)
-        i = i + 1
-    value * sign
 
 fn main():
     val raw_args = sys_get_args()

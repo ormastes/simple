@@ -1,0 +1,102 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP - Shared tool runner helpers
+#
+# Common utility functions used by tool_runner, tool_runner_parse,
+# tool_runner_validate, and cmm_lsp/tool_runner_analyze and tool_runner_commands.
+
+use t32_lsp_mcp.json_helpers
+
+fn arg_field(args: text, key: text) -> text:
+    val value = lsp_extract_field(args, key)
+    if value != "":
+        return value
+    val wrapped = lsp_extract_field_raw(args, "arguments")
+    if wrapped != "null":
+        val wrapped_value = lsp_extract_field(wrapped, key)
+        if wrapped_value != "":
+            return wrapped_value
+    val nested = lsp_extract_field_raw(args, key)
+    if nested == "null":
+        return ""
+    if nested.starts_with(lsp_Q()) and nested.ends_with(lsp_Q()) and nested.len() >= 2:
+        return lsp_unescape_json_string(nested.substring(1, nested.len() - 1))
+    nested
+
+fn runner_arg0_is_executable_path(arg0: text) -> bool:
+    arg0.contains("/") or arg0.contains("\\") or arg0.ends_with(".exe") or arg0.ends_with("t32_lsp_mcp_tool_runner")
+
+fn debug_args(args: [text]) -> text:
+    var out = "argc=" + str(args.len())
+    var i = 0
+    while i < args.len():
+        out = out + " argv[" + str(i) + "]=" + args[i]
+        i = i + 1
+    out
+
+fn is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val upper = ch.to_upper()
+    val lower = ch.to_lower()
+    if upper != lower:
+        return true
+    ch >= "0" and ch <= "9"
+
+fn line_text_for_position(lines: [text], target_line: i64) -> text:
+    if target_line >= 0 and target_line < lines.len():
+        return lines[target_line]
+    if target_line >= 1 and target_line <= lines.len():
+        return lines[target_line - 1]
+    ""
+
+fn extract_word_from_lines(lines: [text], target_line: i64, target_char: i64) -> text:
+    val line = line_text_for_position(lines, target_line)
+    if line == "":
+        return ""
+    var idx = target_char
+    if idx < 0:
+        idx = 0
+    if idx > line.len():
+        idx = line.len()
+    var start = idx
+    while start > 0 and is_ident_char(line.substring(start - 1, start)):
+        start = start - 1
+    var end = idx
+    while end < line.len() and is_ident_char(line.substring(end, end + 1)):
+        end = end + 1
+    if end <= start:
+        return ""
+    line.substring(start, end)
+
+fn parse_i64(s: text) -> i64:
+    if s == "":
+        return 0
+    var i = 0
+    var sign = 1
+    if s.starts_with("-"):
+        sign = -1
+        i = 1
+    var value = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            break
+        value = value * 10 + int(ch)
+        i = i + 1
+    value * sign
+
+fn check_gui_keywords(source: text) -> [text]:
+    val lower = source.to_lower()
+    val keywords = ["dialog.", "menu.", "screen.wait", "inkey", "enter "]
+    var found: [text] = []
+    var i = 0
+    while i < keywords.len():
+        if lower.contains(keywords[i]):
+            found.push(keywords[i])
+        i = i + 1
+    found
+
+fn check_has_command(source: text, cmd: text) -> bool:
+    val lower_source = source.to_lower()
+    val lower_cmd = cmd.to_lower()
+    lower_source.contains(lower_cmd)

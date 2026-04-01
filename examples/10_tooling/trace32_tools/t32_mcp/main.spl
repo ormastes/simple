@@ -88,37 +88,45 @@ fn t32_startup_diag(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
     stderr_flush()
 
-fn t32_load_default_config():
-    # 1. Config file
-    val config_candidates = ["config/t32/t32_mcp.sdn", "../config/t32/t32_mcp.sdn", "../../config/t32/t32_mcp.sdn"]
-    for config_path in config_candidates:
-        if rt_file_exists(config_path):
-            val content = rt_file_read_text(config_path) ?? ""
-            if content == "":
-                continue
-            val lines = content.split("\n")
-            for line in lines:
-                val trimmed = line.trim()
-                if trimmed.starts_with("default_port:"):
-                    val port_str = trimmed[13:trimmed.len()].trim()
-                    T32_DEFAULT_PORT = int(port_str)
-                if trimmed.starts_with("default_host:"):
-                    T32_DEFAULT_HOST = trimmed[13:trimmed.len()].trim()
-                if trimmed.starts_with("rcl_port:"):
-                    val port_str = trimmed[9:trimmed.len()].trim()
-                    T32_RCL_PORT = int(port_str)
-                if trimmed.starts_with("rcl_host:"):
-                    T32_RCL_HOST = trimmed[9:trimmed.len()].trim()
-                if trimmed.starts_with("backend_preference:"):
-                    T32_BACKEND_PREFERENCE = trimmed[19:trimmed.len()].trim()
-                if trimmed.starts_with("python_binary:"):
-                    T32_PYTHON_BINARY = trimmed[14:trimmed.len()].trim()
-                if trimmed.starts_with("python_bridge:"):
-                    T32_PYTHON_BRIDGE_PATH = trimmed[14:trimmed.len()].trim()
-                if trimmed.starts_with("api_lib_path:"):
-                    T32_API_LIB_PATH = trimmed[13:trimmed.len()].trim()
-            break
-    # 2. Environment variables (override config file)
+fn t32_value_after_prefix(line: text, prefix: text) -> text:
+    if line.len() <= prefix.len():
+        return ""
+    return line.substring(prefix.len()).trim()
+
+fn t32_apply_config_file(config_path: text):
+    if not rt_file_exists(config_path):
+        t32_startup_diag("startup warning: config file not found: " + config_path)
+        return
+    val content = rt_file_read_text(config_path) ?? ""
+    if content == "":
+        return
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("default_port:"):
+            val port_str = t32_value_after_prefix(trimmed, "default_port:")
+            T32_DEFAULT_PORT = int(port_str)
+        if trimmed.starts_with("default_host:"):
+            T32_DEFAULT_HOST = t32_value_after_prefix(trimmed, "default_host:")
+        if trimmed.starts_with("rcl_port:"):
+            val port_str = t32_value_after_prefix(trimmed, "rcl_port:")
+            T32_RCL_PORT = int(port_str)
+        if trimmed.starts_with("rcl_host:"):
+            T32_RCL_HOST = t32_value_after_prefix(trimmed, "rcl_host:")
+        if trimmed.starts_with("backend_preference:"):
+            T32_BACKEND_PREFERENCE = t32_value_after_prefix(trimmed, "backend_preference:")
+        if trimmed.starts_with("python_binary:"):
+            T32_PYTHON_BINARY = t32_value_after_prefix(trimmed, "python_binary:")
+        if trimmed.starts_with("python_bridge:"):
+            T32_PYTHON_BRIDGE_PATH = t32_value_after_prefix(trimmed, "python_bridge:")
+        if trimmed.starts_with("api_lib_path:"):
+            T32_API_LIB_PATH = t32_value_after_prefix(trimmed, "api_lib_path:")
+
+fn t32_load_default_config(config_path: text):
+    # Config file loading is opt-in to keep native startup small and predictable.
+    if config_path != "":
+        t32_apply_config_file(config_path)
+    # Environment variables override defaults/config file.
     val env_port = rt_env_get("T32_DEFAULT_PORT") ?? ""
     if env_port != "":
         T32_DEFAULT_PORT = int(env_port)
@@ -148,24 +156,11 @@ fn t32_load_default_config():
     if T32_DEFAULT_PORT == 0:
         T32_DEFAULT_PORT = T32_RCL_PORT
 
-extern fn sys_get_args() -> [text]
-
 # --- Entry point ---
 
 fn main():
-    t32_load_default_config()
-    # CLI args (highest priority)
-    val args = sys_get_args()
-    var ai = 0
-    while ai < args.len():
-        val arg = args[ai]
-        if arg.starts_with("--port="):
-            T32_DEFAULT_PORT = int(arg[7:arg.len()])
-        if arg.starts_with("--host="):
-            T32_DEFAULT_HOST = arg[7:arg.len()]
-        ai = ai + 1
-    if rt_env_get("SIMPLE_LIB") == "":
-        t32_startup_diag("startup warning: SIMPLE_LIB is not set; relative imports/resources may fail in some launch modes")
+    # Keep startup minimal. Session/backend configuration is resolved lazily
+    # in the tool paths that actually need it.
     t32_start_server()
 
 fn t32_start_server():

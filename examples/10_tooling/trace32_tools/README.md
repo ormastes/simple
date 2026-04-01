@@ -69,7 +69,11 @@ git clone https://github.com/ormastes/simple.git
 cd simple
 # Build the compiler first (see main README)
 bin/release/simple native-build \
-  --source src --entry examples/10_tooling/trace32_tools/t32_mcp/main.spl \
+  --entry-closure \
+  --source examples/10_tooling/trace32_tools \
+  --source src/lib \
+  --entry examples/10_tooling/trace32_tools/t32_mcp/main.spl \
+  --runtime-path src/compiler_rust/target/release \
   -o t32-mcp-server
 ```
 

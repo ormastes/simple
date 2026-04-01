@@ -34,7 +34,7 @@
 use crate::value::core::RuntimeValue;
 use crate::value::heap::{HeapHeader, HeapObjectType};
 use crate::value::collections::RuntimeString;
-use super::io_capture::{append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal};
+use super::io_capture::{append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal, rt_read_stdin_char};
 use std::io::Write;
 
 // ============================================================================
@@ -94,6 +94,25 @@ pub unsafe extern "C" fn rt_eprint_str(ptr: *const u8, len: u64) {
         eprint!("{}", s);
         let _ = std::io::stderr().flush();
     }
+}
+
+/// Legacy alias used by source-level `extern fn stderr_write(data: text) -> i64`.
+///
+/// Accepts a RuntimeValue string handle encoded as a raw u64/i64 payload.
+#[no_mangle]
+pub extern "C" fn stderr_write(data: i64) -> i64 {
+    let s = value_to_display_string(RuntimeValue::from_raw(data as u64));
+    unsafe {
+        rt_eprint_str(s.as_ptr(), s.len() as u64);
+    }
+    0
+}
+
+/// Legacy alias used by source-level `extern fn stderr_flush() -> i64`.
+#[no_mangle]
+pub extern "C" fn stderr_flush() -> i64 {
+    let _ = std::io::stderr().flush();
+    0
 }
 
 /// Print a string to stderr with newline (with optional capture).
@@ -218,6 +237,25 @@ pub extern "C" fn rt_read_stdin_line_ffi() -> RuntimeValue {
             let bytes = line.as_bytes();
             unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
         }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Legacy alias used by source-level `extern fn stdin_read_char() -> text`.
+#[no_mangle]
+pub extern "C" fn stdin_read_char() -> RuntimeValue {
+    if let Some(ch) = rt_read_stdin_char() {
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        return unsafe { crate::value::collections::rt_string_new(encoded.as_ptr(), encoded.len() as u64) };
+    }
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let mut buf = [0u8; 1];
+    match std::io::Read::read(&mut reader, &mut buf) {
+        Ok(0) => RuntimeValue::NIL,
+        Ok(_) => unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), 1) },
         Err(_) => RuntimeValue::NIL,
     }
 }

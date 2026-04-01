@@ -1280,6 +1280,15 @@ fn generate_stub_object(
         .filter(|s| !defined.contains(s))
         // Skip system/dyld symbols only
         .filter(|s| !s.starts_with("_dyld_") && *s != "_main" && *s != "main")
+        // Never stub libstdc++ / libc++ mangled std:: symbols. Some of these,
+        // notably _ZSt11__once_call, are thread-local and a non-TLS weak stub
+        // causes the exact linker failure we are trying to avoid.
+        .filter(|s| {
+            !s.starts_with("_ZSt")
+                && !s.starts_with("_ZNSt")
+                && !s.starts_with("ZSt")
+                && !s.starts_with("ZNSt")
+        })
         // Skip known C standard library / system builtins
         .filter(|s| !is_system_symbol(s))
         // Skip MSVC C++ mangled symbols (start with ?) and __imp_ import thunks
@@ -1418,12 +1427,14 @@ fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, Strin
         return Ok(lib.to_path_buf());
     }
 
+    let archive_path = std::fs::canonicalize(lib).unwrap_or_else(|_| lib.to_path_buf());
+
     let extract_dir = temp_dir.join("_rt_ctor_strip");
     std::fs::create_dir_all(&extract_dir).map_err(|e| format!("mkdir: {e}"))?;
 
     // Extract archive members
     let status = std::process::Command::new("ar")
-        .arg("x").arg(lib)
+        .arg("x").arg(&archive_path)
         .current_dir(&extract_dir)
         .status()
         .map_err(|e| format!("ar x: {e}"))?;
