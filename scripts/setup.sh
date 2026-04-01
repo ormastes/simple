@@ -3,7 +3,7 @@ set -eu
 
 # Simple Language — Post-clone / post-bootstrap setup
 #
-# Creates bin/simple → bin/release/<triple>/simple(.exe) symlink
+# Creates symlink-only runtime entry points under bin/ and bin/release/
 # and sets up the development environment.
 #
 # Usage:
@@ -21,8 +21,10 @@ Usage: scripts/setup.sh [options]
 
 Post-clone / post-bootstrap setup for Simple Language.
 
-Creates:
-  bin/simple → bin/release/<arch>-<vendor>-<os>-<abi>/simple(.exe)
+Creates symlink-only runtime entry points:
+  bin/simple
+  bin/release/simple
+  bin/release/<arch>-<vendor>-<os>-<abi>/simple(.exe)
 
 Options:
   --prefix=<dir>   Install prefix for symlink (default: repo bin/)
@@ -225,6 +227,18 @@ else
   echo "Release binary: bin/release/${release_bin}"
 fi
 
+# Prefer the live Rust build outputs when they exist. Those binaries are rebuilt
+# alongside the current source tree, while bin/release/<triple>/simple can be a
+# stale deployed artifact.
+preferred_runtime=""
+if [ "${os}" != "windows" ]; then
+  if [ -x "${repo_root}/src/compiler_rust/target/release/simple" ]; then
+    preferred_runtime="${repo_root}/src/compiler_rust/target/release/simple"
+  elif [ -x "${repo_root}/src/compiler_rust/target/bootstrap/simple" ]; then
+    preferred_runtime="${repo_root}/src/compiler_rust/target/bootstrap/simple"
+  fi
+fi
+
 # ===========================================================================
 # Create symlinks
 # ===========================================================================
@@ -246,6 +260,16 @@ create_link() {
   echo "  ${name} → ${target}"
 }
 
+create_release_link() {
+  local target="$1" link_path="$2"
+  if [ -L "${link_path}" ] || [ -f "${link_path}" ]; then
+    rm -f "${link_path}"
+  fi
+  mkdir -p "$(dirname "${link_path}")"
+  ln -sf "${target}" "${link_path}"
+  echo "  ${link_path#${repo_root}/} → ${target}"
+}
+
 if [ "${dry_run}" -eq 1 ]; then
   echo ""
   echo "[dry-run] would create:"
@@ -253,7 +277,15 @@ if [ "${dry_run}" -eq 1 ]; then
     [ -n "${mingw_bin}" ] && echo "  bin/simple → release/${mingw_bin}"
     [ -n "${msvc_bin}" ]  && echo "  bin/simple.exe → release/${msvc_bin}"
   else
-    echo "  bin/simple → release/${release_bin}"
+    if [ -n "${preferred_runtime}" ]; then
+      echo "  bin/simple → ${preferred_runtime}"
+      echo "  bin/release/simple → ${preferred_runtime}"
+      echo "  bin/release/${PLATFORM}/simple → ${preferred_runtime}"
+      echo "  bin/release/${os}-${arch}/simple → ${preferred_runtime}"
+    else
+      echo "  bin/simple → release/${release_bin}"
+      echo "  bin/release/simple → ${release_bin}"
+    fi
   fi
   exit 0
 fi
@@ -271,7 +303,13 @@ if [ "${os}" = "windows" ]; then
     create_link "release/${msvc_bin}" "simple.exe"
   fi
 else
-  create_link "release/${release_bin}" "simple"
+  if [ -n "${preferred_runtime}" ]; then
+    create_link "${preferred_runtime}" "simple"
+    create_release_link "${preferred_runtime}" "${release_dir}/${PLATFORM}/simple"
+    create_release_link "${preferred_runtime}" "${release_dir}/${os}-${arch}/simple"
+  else
+    create_link "release/${release_bin}" "simple"
+  fi
 fi
 
 # Also create bin/release/simple → <platform>/simple symlink
@@ -279,13 +317,17 @@ release_link_path="${release_dir}/simple${exe}"
 if [ "${os}" = "windows" ]; then
   release_link_target="${msvc_bin:-${mingw_bin}}"
 else
-  release_link_target="${release_bin}"
+  if [ -n "${preferred_runtime}" ]; then
+    release_link_target="${preferred_runtime}"
+  else
+    release_link_target="${release_bin}"
+  fi
 fi
 if [ -L "${release_link_path}" ] || [ -f "${release_link_path}" ]; then
   rm -f "${release_link_path}"
 fi
-cd "${release_dir}"
-ln -sf "${release_link_target}" "simple${exe}"
+mkdir -p "${release_dir}"
+ln -sf "${release_link_target}" "${release_link_path}"
 
 echo "Created: bin/release/simple${exe} → ${release_link_target}"
 
