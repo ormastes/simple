@@ -8,23 +8,24 @@
 # and extern fn declarations.
 
 extern fn stdin_read_char() -> text
+extern fn rt_read_stdin_line() -> text
 
 # --- JSON building helpers ---
 
 fn Q() -> text:
-    "\""
+    return "\""
 
 fn LB() -> text:
-    (123 as char).to_string()
+    return "{"
 
 fn RB() -> text:
-    (125 as char).to_string()
+    return "}"
 
 fn SB_L() -> text:
-    "["
+    return "["
 
 fn SB_R() -> text:
-    "]"
+    return "]"
 
 fn escape_json(s: text) -> text:
     var out = s
@@ -33,85 +34,103 @@ fn escape_json(s: text) -> text:
     out = out.replace("\n", "\\n")
     out = out.replace("\r", "\\r")
     out = out.replace("\t", "\\t")
-    out
+    return out
 
 fn js(value: text) -> text:
-    Q() + escape_json(value) + Q()
+    return Q() + escape_json(value) + Q()
 
 fn jp(key: text, value: text) -> text:
-    Q() + key + Q() + ":" + value
+    return Q() + key + Q() + ":" + value
 
 fn jo1(p1: text) -> text:
-    LB() + p1 + RB()
+    return LB() + p1 + RB()
 
 fn jo2(p1: text, p2: text) -> text:
-    LB() + p1 + "," + p2 + RB()
+    return LB() + p1 + "," + p2 + RB()
 
 fn jo3(p1: text, p2: text, p3: text) -> text:
-    LB() + p1 + "," + p2 + "," + p3 + RB()
+    return LB() + p1 + "," + p2 + "," + p3 + RB()
 
 fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
-    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
+    return LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
 
 # --- JSON parsing helpers ---
 
-fn extract_field(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx_opt = json.index_of(search)
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: return ""
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if after.starts_with(Q()):
-        val rest = after.substring(1)
-        val end_opt = rest.index_of(Q())
-        var end_idx = -1
-        match end_opt:
-            Some(i): end_idx = i
-            nil: return ""
-        if end_idx >= 0:
-            return rest.substring(0, end_idx)
-    # Non-string values
-    var parts: [text] = []
-    for ch in after:
-        if ch == "," or ch == RB() or ch == "]" or ch == " " or ch == "\n" or ch == "\r":
-            break
-        parts.push(ch)
-    parts.join("")
+fn _char_at(s: text, i: i64) -> text:
+    return s.substring(i, i + 1)
 
-fn extract_field_raw(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx_opt = json.index_of(search)
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        nil: return "null"
-    val start = idx + search.len()
-    val after = json.substring(start).trim()
-    if after.starts_with(Q()):
-        # String value: find closing quote (skip escaped)
-        var i2 = 1
+fn _is_ws(ch: text) -> bool:
+    return ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var i = 0
+    while i + search.len() <= json.len():
+        if json.substring(i).starts_with(search):
+            var j = i + search.len()
+            while j < json.len() and _is_ws(_char_at(json, j)):
+                j = j + 1
+            if j < json.len() and _char_at(json, j) == ":":
+                j = j + 1
+                while j < json.len() and _is_ws(_char_at(json, j)):
+                    j = j + 1
+                return j
+        i = i + 1
+    return -1
+
+fn extract_field(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = _char_at(json, start)
+    if first == Q():
+        var i = start + 1
         var escaped = false
-        while i2 < after.len():
-            val ch = after.substring(i2, i2 + 1)
+        while i < json.len():
+            val ch = _char_at(json, i)
             if escaped:
                 escaped = false
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                return after.substring(0, i2 + 1)
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    return json.substring(start, end)
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = _char_at(json, start)
+    if first == Q():
+        # String value: find closing quote (skip escaped)
+        var i2 = start + 1
+        var escaped = false
+        while i2 < json.len():
+            val ch = _char_at(json, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i2 + 1)
             i2 = i2 + 1
         return "null"
-    if after.starts_with(LB()) or after.starts_with("["):
+    if first == LB() or first == "[":
         # Nested object or array: find matching close
         var depth = 0
-        var i3 = 0
+        var i3 = start
         var in_str = false
         var esc = false
-        while i3 < after.len():
-            val ch = after.substring(i3, i3 + 1)
+        while i3 < json.len():
+            val ch = _char_at(json, i3)
             if in_str:
                 if esc:
                     esc = false
@@ -127,22 +146,23 @@ fn extract_field_raw(json: text, key: text) -> text:
                 elif ch == RB() or ch == "]":
                     depth = depth - 1
                     if depth == 0:
-                        return after.substring(0, i3 + 1)
+                        return json.substring(start, i3 + 1)
             i3 = i3 + 1
         return "null"
     # Bare value (number, bool, null)
-    var parts: [text] = []
-    for ch in after:
-        if ch == "," or ch == RB() or ch == "]" or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
-        parts.push(ch)
-    val raw = parts.join("")
+        end = end + 1
+    val raw = json.substring(start, end)
     if raw == "":
         return "null"
-    raw
+    return raw
 
 fn extract_id(json: text) -> text:
-    extract_field_raw(json, "id")
+    return extract_field_raw(json, "id")
 
 fn unescape_json_string(s: text) -> text:
     var parts: [text] = []
@@ -171,35 +191,35 @@ fn unescape_json_string(s: text) -> text:
         else:
             parts.push(next)
         i = i + 2
-    parts.join("")
+    return parts.join("")
 
 fn extract_nested(json: text, key: text) -> text:
     val params = extract_field_raw(json, "params")
     if params == "null":
         return ""
-    extract_field(params, key)
+    return extract_field(params, key)
 
 fn extract_nested_raw(json: text, key: text) -> text:
     val params = extract_field_raw(json, "params")
     if params == "null":
         return "null"
-    extract_field_raw(params, key)
+    return extract_field_raw(params, key)
 
 # --- JSON-RPC builders ---
 
 fn jsonrpc_result(id: text, result: text) -> text:
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn jsonrpc_error(id: text, code: i64, message: text) -> text:
     val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
 
 # --- Tool result helpers ---
 
 fn make_tool_result(id: text, content: text) -> text:
     val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(content))))
     val result = jo1(jp("content", "[" + text_obj + "]"))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn make_tool_error(id: text, message: text) -> text:
     val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(message))))
@@ -207,12 +227,12 @@ fn make_tool_error(id: text, message: text) -> text:
     result = result + jp("content", "[" + text_obj + "]")
     result = result + "," + jp("isError", "true")
     result = result + RB()
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 # --- Method detection ---
 
 fn has_method(msg: text, name: text) -> bool:
-    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+    return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
 
 # --- Stdio transport ---
 
@@ -220,27 +240,18 @@ fn has_method(msg: text, name: text) -> bool:
 var _USE_JSON_LINES = false
 
 fn _read_line() -> text:
-    var result = ""
-    while true:
-        val ch = stdin_read_char()
-        if ch == "":
-            if result == "":
-                return ""
-            return result
-        result = result + ch
-        if ch == "\n":
-            return result
+    return rt_read_stdin_line()
 
 fn _read_chars(count: i64) -> text:
     var result = ""
     var i = 0
     while i < count:
         val ch = stdin_read_char()
-        if ch == "":
+        if ch.len() == 0:
             break
         result = result + ch
         i = i + 1
-    result
+    return result
 
 fn _strip_line_end(line: text) -> text:
     if line.ends_with("\r\n"):
@@ -249,13 +260,13 @@ fn _strip_line_end(line: text) -> text:
         return line.substring(0, line.len() - 1)
     if line.ends_with("\r"):
         return line.substring(0, line.len() - 1)
-    line
+    return line
 
 fn read_stdin_message() -> text:
     var content_length = 0
     while true:
         var line = _read_line()
-        if line == "":
+        if line.len() == 0:
             if content_length > 0:
                 break
             return ""

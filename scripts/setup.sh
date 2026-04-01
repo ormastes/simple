@@ -283,7 +283,14 @@ PREFERRED_BINARY=""
 if [ -n "${preferred_binary}" ]; then
   PREFERRED_BINARY="\${REPO_ROOT}/${preferred_binary}"
 fi
-if [ "\${T32_MCP_USE_NATIVE:-0}" = "1" ] && [ -n "\$PREFERRED_BINARY" ] && [ -x "\$PREFERRED_BINARY" ]; then
+HOST_KERNEL="\$(uname -s 2>/dev/null || echo unknown)"
+PREFER_NATIVE=0
+if [ "\${T32_MCP_USE_NATIVE:-0}" = "1" ]; then
+  PREFER_NATIVE=1
+elif [ "\$HOST_KERNEL" = "FreeBSD" ]; then
+  PREFER_NATIVE=1
+fi
+if [ "\$PREFER_NATIVE" = "1" ] && [ -n "\$PREFERRED_BINARY" ] && [ -x "\$PREFERRED_BINARY" ]; then
   exec "\$PREFERRED_BINARY" "\$@"
 fi
 # Prefer bin/simple (user-managed link) so all tools follow the same binary

@@ -33,10 +33,6 @@ use t32_mcp.json_helpers.{t32_extract_field, t32_extract_id, t32_extract_nested,
 use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list}
 use t32_mcp.session_list_tools.{handle_t32_sessions_list}
 
-val T32_SERVER_NAME = "simple-mcp-t32"
-val T32_SERVER_VERSION = "0.1.2"
-val T32_NL = "\n"
-
 # Protocol auto-detection
 var T32_USE_JSON_LINES = false
 
@@ -87,6 +83,34 @@ var T32_PYTHON_BRIDGE_PATH = ""
 fn t32_startup_diag(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
     stderr_flush()
+
+fn t32_server_name() -> text:
+    return "simple-mcp-t32"
+
+fn t32_server_version() -> text:
+    return "0.1.2"
+
+fn t32_nl() -> text:
+    return "\n"
+
+fn t32_debug_enabled() -> bool:
+    return (rt_env_get("T32_MCP_DEBUG") ?? "") != ""
+
+fn t32_debug_diag(message: text):
+    if t32_debug_enabled():
+        t32_startup_diag("debug: " + message)
+
+fn t32_debug_file_path() -> text:
+    rt_env_get("T32_MCP_DEBUG_FILE") ?? ""
+
+fn t32_debug_file_write(message: text):
+    val path = t32_debug_file_path()
+    if path != "":
+        rt_file_write_text(path, message)
+
+fn t32_debug_trace(message: text):
+    t32_debug_diag(message)
+    t32_debug_file_write(message)
 
 fn t32_value_after_prefix(line: text, prefix: text) -> text:
     if line.len() <= prefix.len():
@@ -166,6 +190,7 @@ fn main():
 fn t32_start_server():
     while true:
         var msg = t32_read_stdin_message()
+        t32_debug_trace("read message bytes=" + str(msg.len()))
         if msg == "":
             if not T32_SEEN_FIRST_MESSAGE:
                 t32_startup_diag("startup error: no MCP request received on stdin")
@@ -175,8 +200,9 @@ fn t32_start_server():
             var method = t32_extract_field(msg, "method")
             var id = t32_extract_id(msg)
             var response = ""
+            t32_debug_trace("parsed method=<" + method + "> id=<" + id + ">")
             if method == "initialize":
-                t32_startup_diag("initialize received; server version " + T32_SERVER_VERSION)
+                t32_startup_diag("initialize received; server version " + t32_server_version())
                 response = t32_make_init_response(id)
             elif method == "initialized" or method == "notifications/initialized":
                 response = ""
@@ -211,5 +237,7 @@ fn t32_start_server():
                     t32_startup_diag("protocol error: request missing method field: " + msg)
                 if id != "" and id != "null":
                     response = t32_make_error(id, -32601, "Method not found: " + method)
+            t32_debug_trace("response bytes=" + str(response.len()))
             if response != "":
+                t32_debug_trace("writing response")
                 t32_write_stdout_message(response)

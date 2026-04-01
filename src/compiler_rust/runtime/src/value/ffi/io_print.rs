@@ -108,6 +108,31 @@ pub extern "C" fn stderr_write(data: i64) -> i64 {
     0
 }
 
+/// Legacy alias used by source-level `extern fn stdout_write(data: text) -> i64`.
+///
+/// Accepts a RuntimeValue string handle encoded as a raw u64/i64 payload.
+#[no_mangle]
+pub extern "C" fn stdout_write(data: i64) -> i64 {
+    let s = value_to_display_string(RuntimeValue::from_raw(data as u64));
+    unsafe {
+        rt_print_str(s.as_ptr(), s.len() as u64);
+    }
+    0
+}
+
+/// Runtime-prefixed stdout alias used by native-built entry closures.
+#[no_mangle]
+pub extern "C" fn rt_stdout_write(data: i64) -> i64 {
+    stdout_write(data)
+}
+
+/// Runtime-prefixed stdout flush alias used by native-built entry closures.
+#[no_mangle]
+pub extern "C" fn rt_stdout_flush() -> i64 {
+    let _ = std::io::stdout().flush();
+    0
+}
+
 /// Legacy alias used by source-level `extern fn stderr_flush() -> i64`.
 #[no_mangle]
 pub extern "C" fn stderr_flush() -> i64 {
@@ -254,9 +279,9 @@ pub extern "C" fn stdin_read_char() -> RuntimeValue {
     let mut reader = stdin.lock();
     let mut buf = [0u8; 1];
     match std::io::Read::read(&mut reader, &mut buf) {
-        Ok(0) => RuntimeValue::NIL,
+        Ok(0) => unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) },
         Ok(_) => unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), 1) },
-        Err(_) => RuntimeValue::NIL,
+        Err(_) => unsafe { crate::value::collections::rt_string_new(std::ptr::null(), 0) },
     }
 }
 

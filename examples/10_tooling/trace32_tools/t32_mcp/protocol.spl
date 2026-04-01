@@ -3,7 +3,7 @@
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
 # JSON helpers delegated to t32_lsp_mcp/json_helpers.spl (canonical source).
-# Transport implemented here via stdin_read_char/print_raw.
+# Transport implemented here via stdin_read_char and direct fd-backed stdout sinks.
 # This avoids loading the entire src/lib/ module tree (8GB+ RSS).
 
 use t32_lsp_mcp.json_helpers.{
@@ -13,33 +13,42 @@ use t32_lsp_mcp.json_helpers.{
 }
 
 extern fn stdin_read_char() -> text
+extern fn rt_read_stdin_line() -> text
 extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
 
 fn t32_stderr(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
     stderr_flush()
 
+fn t32_protocol_debug_enabled() -> bool:
+    (rt_env_get("T32_MCP_DEBUG") ?? "") != ""
+
+fn t32_protocol_debug(message: text):
+    if t32_protocol_debug_enabled():
+        t32_stderr("proto: " + message)
+
+fn t32_protocol_trace(message: text):
+    val debug_path = rt_env_get("T32_MCP_DEBUG_FILE") ?? ""
+    if debug_path != "":
+        rt_file_write_text(debug_path, "protocol: " + message)
+
 # --- Protocol I/O (inlined, zero imports) ---
 
 fn t32_mcp_read_line() -> text:
-    var result = ""
-    while true:
-        val ch = stdin_read_char()
-        if ch == "":
-            if result == "":
-                return ""
-            return result
-        result = result + ch
-        if ch == "\n":
-            return result
+    val line = rt_read_stdin_line()
+    t32_protocol_debug("read_line via rt_read_stdin_line len=" + str(line.len()) + " val=<" + line + ">")
+    line
 
 fn t32_mcp_read_chars(count: i64) -> text:
     var result = ""
     var i = 0
     while i < count:
         val ch = stdin_read_char()
-        if ch == "":
+        if ch.len() == 0:
             break
         result = result + ch
         i = i + 1
@@ -49,7 +58,7 @@ fn t32_read_stdin_message() -> text:
     var content_length = 0
     while true:
         var line = t32_mcp_read_line()
-        if line == "":
+        if line.len() == 0:
             if content_length > 0:
                 break
             return ""
@@ -63,6 +72,7 @@ fn t32_read_stdin_message() -> text:
             line = strip_last(line)
         elif line.ends_with("\r"):
             line = strip_last(line)
+        t32_protocol_debug("line starts literal={?} " + str(line.starts_with("{")) + " helper={?} " + str(line.starts_with(LB())) + " line=<" + line + ">")
         if line.starts_with(LB()):
             T32_USE_JSON_LINES = true
             return line
@@ -75,17 +85,28 @@ fn t32_read_stdin_message() -> text:
     t32_mcp_read_chars(content_length)
 
 fn t32_write_stdout_message(body: text):
+    t32_protocol_trace("write_stdout_message body_bytes=" + str(body.len()))
+    var payload = body
     if T32_USE_JSON_LINES:
-        print_raw(body + T32_NL)
+        t32_protocol_trace("write_stdout_message mode=json-lines")
+        payload = body + t32_nl()
     else:
         val byte_count = t32_text_byte_len(body)
-        var header = "Content-Length: " + str(byte_count) + "\r" + T32_NL + "\r" + T32_NL
-        print_raw(header)
-        print_raw(body)
+        val header = "Content-Length: " + str(byte_count) + "\r" + t32_nl() + "\r" + t32_nl()
+        t32_protocol_trace("write_stdout_message mode=framed")
+        payload = header + body
+    # Keep the native closure tiny by using fd-backed stdout sinks that work on
+    # Linux and FreeBSD without pulling in the heavier std.mcp transport layer.
+    if rt_file_append_text("/proc/self/fd/1", payload):
+        return
+    if rt_file_append_text("/dev/stdout", payload):
+        return
+    rt_file_append_text("/dev/fd/1", payload)
 
 # --- JSON-RPC helpers (inlined) ---
 
 fn t32_make_json_result(id: text, result: text) -> text:
+    t32_protocol_debug("make_json_result payload_len=" + str(result.len()) + " id=<" + id + ">")
     jsonrpc_result(id, result)
 
 fn t32_make_error(id: text, code: i64, message: text) -> text:
@@ -272,33 +293,32 @@ fn t32_is_ascii_digits(s: text) -> bool:
 # --- Initialize response ---
 
 fn t32_make_init_response(id: text) -> text:
-    if T32_INIT_CACHE != "":
-        return jsonrpc_result(id, T32_INIT_CACHE)
     var tools_cap = jo1(jp("listChanged", "true"))
+    t32_protocol_debug("tools_cap len=" + str(tools_cap.len()))
     var resources_cap = jo2(jp("subscribe", "false"), jp("listChanged", "true"))
+    t32_protocol_debug("resources_cap len=" + str(resources_cap.len()))
     var caps = jo2(
         jp("tools", tools_cap),
         jp("resources", resources_cap)
     )
+    t32_protocol_debug("caps len=" + str(caps.len()))
     val server_info = jo3(
-        jp("name", js(T32_SERVER_NAME)),
-        jp("version", js(T32_SERVER_VERSION)),
+        jp("name", js(t32_server_name())),
+        jp("version", js(t32_server_version())),
         jp("instructions", js("TRACE32 debug session control via MCP protocol. 35 tools for session management, window capture, action invocation, field manipulation, headless setup, command database, CMM validation, async jobs, and dialog interaction."))
     )
+    t32_protocol_debug("server_info len=" + str(server_info.len()))
     val result = jo3(
         jp("protocolVersion", js("2025-06-18")),
         jp("capabilities", caps),
         jp("serverInfo", server_info)
     )
-    T32_INIT_CACHE = result
+    t32_protocol_debug("init payload len=" + str(result.len()))
     jsonrpc_result(id, result)
 
 # --- Tools list (35 T32 tools) ---
 
 fn t32_make_tools_list(id: text) -> text:
-    if T32_TOOLS_CACHE != "":
-        return jsonrpc_result(id, T32_TOOLS_CACHE)
-
     var tool_parts: [text] = []
 
     # Session tools (9)
@@ -355,7 +375,7 @@ fn t32_make_tools_list(id: text) -> text:
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
-    T32_TOOLS_CACHE = result
+    t32_protocol_debug("tools payload len=" + str(result.len()))
     jsonrpc_result(id, result)
 
 # --- Tool schema builder ---

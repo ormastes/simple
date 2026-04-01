@@ -206,6 +206,33 @@ impl NativeProjectBuilder {
             .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))
     }
 
+    fn effective_source_root_for(&self, path: &Path) -> PathBuf {
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut best: Option<PathBuf> = None;
+        let mut best_depth = 0usize;
+        for dir in &self.source_dirs {
+            let canonical_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+            if canonical_path.starts_with(&canonical_dir) {
+                let depth = canonical_dir.components().count();
+                if depth > best_depth {
+                    best_depth = depth;
+                    best = Some(canonical_dir);
+                }
+            }
+        }
+        best.unwrap_or_else(|| self.source_root.clone())
+    }
+
+    fn effective_source_root(&self) -> PathBuf {
+        if let Some(entry_file) = &self.entry_file {
+            return self.effective_source_root_for(entry_file);
+        }
+        self.source_dirs
+            .first()
+            .and_then(|dir| std::fs::canonicalize(dir).ok())
+            .unwrap_or_else(|| self.source_root.clone())
+    }
+
     /// Build the project.
     pub fn build(self) -> Result<NativeBuildResult, String> {
         // 1. Discover files
@@ -313,8 +340,9 @@ impl NativeProjectBuilder {
         // Parse all files to find top-level function definitions and compute their
         // mangled names. Functions with unique names get direct import map entries;
         // ambiguous names (multiple definitions) are left unresolved.
+        let effective_source_root = self.effective_source_root();
         let imports = if !self.config.no_mangle {
-            let result = build_import_map(&file_sources, &self.source_root);
+            let result = build_import_map(&file_sources, &effective_source_root);
             if self.config.verbose {
                 eprintln!(
                     "Import map: {} unique, {} ambiguous function entries, {} modules with re-exports",
@@ -322,6 +350,16 @@ impl NativeProjectBuilder {
                     result.ambiguous.len(),
                     result.re_exports.len()
                 );
+                if let Ok(symbol) = std::env::var("SIMPLE_DEBUG_IMPORT_SYMBOL") {
+                    if let Some(candidates) = result.all_mangled.get(&symbol) {
+                        eprintln!("Import candidates for {}:", symbol);
+                        for candidate in candidates {
+                            eprintln!("  {}", candidate);
+                        }
+                    } else {
+                        eprintln!("Import candidates for {}: <none>", symbol);
+                    }
+                }
             }
             ModuleImports {
                 import_map: std::sync::Arc::new(result.map),
@@ -467,7 +505,7 @@ impl NativeProjectBuilder {
 
         // 7. Link
         let link_start = Instant::now();
-        let link_result = self.link_objects(&object_paths);
+        let link_result = self.link_objects(&object_paths, &imports);
         let link_time = link_start.elapsed();
 
         // On link failure, optionally keep objects for debugging
@@ -542,7 +580,8 @@ impl NativeProjectBuilder {
 
     fn discover_reachable_files(&self, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
         let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.to_path_buf());
-        let mut resolver = ModuleResolver::new(self.project_root.clone(), self.source_root.clone());
+        let resolver_root = self.effective_source_root_for(&canonical_entry);
+        let mut resolver = ModuleResolver::new(self.project_root.clone(), resolver_root);
         let mut queue = VecDeque::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();
         let mut files = Vec::new();
@@ -606,7 +645,7 @@ impl NativeProjectBuilder {
         }
 
         let project_root = self.project_root.clone();
-        let source_root = self.source_root.clone();
+        let source_root = self.effective_source_root();
         let file_timeout = self.config.file_timeout;
         let stack_size = self.config.stack_size;
         let verbose = self.config.verbose;
@@ -673,7 +712,7 @@ impl NativeProjectBuilder {
                     source.clone(),
                     path.clone(),
                     self.project_root.clone(),
-                    self.source_root.clone(),
+                    self.effective_source_root(),
                     self.config.file_timeout,
                     self.config.stack_size,
                     self.config.no_mangle,
@@ -853,7 +892,7 @@ int main(int argc, char** argv) {
     }
 
     /// Link object files into a native binary using LinkerBuilder.
-    fn link_objects(&self, object_paths: &[PathBuf]) -> Result<(), String> {
+    fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         // Compile the C main stub (defines main() which calls spl_main())
@@ -1114,13 +1153,13 @@ int main(int argc, char** argv) {
         // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
         #[cfg(not(target_os = "windows"))]
         {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &imports)?;
             cmd.arg(&stubs_o);
         }
         #[cfg(target_os = "windows")]
         if !is_msvc && !is_clang_cl {
             // MinGW/GNU: generate stubs like Linux
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &imports)?;
             cmd.arg(&stubs_o);
         }
         for flag in &link_config.unresolved_symbol_flags {
@@ -1178,6 +1217,7 @@ fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
     main_o: &std::path::Path,
+    imports: &ModuleImports,
 ) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
@@ -1296,6 +1336,30 @@ fn generate_stub_object(
         // resolved by the system DLLs at load time, not by our stubs.
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
+
+    // Internal Simple symbols must never be silently stubbed. If a source-defined
+    // symbol from the discovered entry closure is still unresolved here, native-build
+    // produced an incomplete object graph and the output binary would be bogus.
+    let mut simple_symbols = HashSet::new();
+    for (raw, mangled_variants) in imports.all_mangled.iter() {
+        simple_symbols.insert(raw.clone());
+        for mangled in mangled_variants {
+            simple_symbols.insert(mangled.clone());
+        }
+    }
+    let internal_missing: Vec<String> = needs_stub
+        .iter()
+        .filter(|sym| simple_symbols.contains(*sym))
+        .cloned()
+        .collect();
+    if !internal_missing.is_empty() {
+        let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "native-build aborted: unresolved internal Simple symbols would be stubbed: {}{}",
+            preview,
+            if internal_missing.len() > 12 { " ..." } else { "" }
+        ));
+    }
 
     if needs_stub.is_empty() {
         // Generate a minimal empty object
@@ -2604,7 +2668,7 @@ fn compile_file_to_object(
     let ast = monomorphize_module(&ast);
 
     // HIR
-    let hir_source_root = project_root.join("src");
+    let hir_source_root = source_root.to_path_buf();
     let resolver = ModuleResolver::new(project_root.to_path_buf(), hir_source_root);
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
     lowerer.set_strict_mode(false);
@@ -2975,14 +3039,11 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
                         }
                     }
                     simple_parser::ast::Node::Extern(e) => {
-                        // extern fn foo(...) -> ... :
-                        // - Runtime FFIs (rt_*) should keep their raw name (unmangled C symbol).
-                        // - Other externs still get a module prefix.
-                        let mangled = if e.name.starts_with("rt_") {
-                            e.name.clone()
-                        } else {
-                            format!("{}__{}", prefix, e.name)
-                        };
+                        // extern fn declarations are runtime/C symbols and must stay raw.
+                        // Mangling them here breaks cross-module imports such as
+                        // `use t32_lsp_mcp.json_helpers.{stdin_read_char}` because
+                        // codegen correctly leaves extern calls unmangled.
+                        let mangled = e.name.clone();
                         raw_to_mangled.entry(e.name.clone()).or_default().push(mangled);
                     }
                     simple_parser::ast::Node::ExternClass(ec) => {
@@ -3722,6 +3783,38 @@ mod tests {
         assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
         assert!(files.iter().any(|path| same_file_path(path, &helper_file)));
         assert!(!files.iter().any(|path| same_file_path(path, &unrelated_file)));
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn test_discover_files_from_entry_uses_matching_source_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("project");
+        let examples_root = project_root.join("examples/tooling");
+        let package_dir = examples_root.join("t32_mcp");
+        std::fs::create_dir_all(&package_dir).unwrap();
+
+        let entry_file = package_dir.join("main.spl");
+        let dep_file = package_dir.join("protocol.spl");
+
+        std::fs::write(&dep_file, "fn ping() -> text:\n    return \"pong\"\n").unwrap();
+        std::fs::write(
+            &entry_file,
+            "use t32_mcp.protocol.{ping}\nfn main() -> text:\n    return ping()\n",
+        )
+        .unwrap();
+
+        let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+            .config(NativeBuildConfig {
+                entry_closure: true,
+                ..NativeBuildConfig::default()
+            })
+            .source_dir(examples_root)
+            .entry_file(entry_file.clone());
+
+        let files = builder.discover_files().unwrap();
+        assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+        assert!(files.iter().any(|path| same_file_path(path, &dep_file)));
         assert_eq!(files.len(), 2);
     }
 }
