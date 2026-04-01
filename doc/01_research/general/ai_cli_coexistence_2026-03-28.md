@@ -144,8 +144,8 @@ your-project/
 | **context7** | Yes | Yes | Yes | External library docs lookup |
 | **simple-mcp** | Yes | Yes | Yes | Codebase query (workspace-symbols, references, hover) |
 | **simple-lsp-mcp** | Yes | Yes | Yes | Code navigation (definition, completions) |
-| **chrome-mcp** | -- | -- | Yes | Browser control, visual testing |
-| **stitch-mcp** | -- | -- | Yes | Multi-file code editing |
+| **chrome-devtools** | -- | Yes | Yes | Browser control, visual testing |
+| **stitch-mcp** | -- | Yes | Yes | Multi-file code editing |
 | **jj-git-mcp** | Yes | -- | -- | JJ/Git VCS operations |
 
 ### Non-MCP CLI Tools
@@ -199,7 +199,7 @@ SIMPLE_LOG = "error"
 Claude Code and Gemini CLI use **nearly identical JSON format** (`mcpServers` key, same `command`/`args`/`env` structure). Codex CLI uses TOML with slightly different key names but same semantics.
 
 **Shared servers (all 3 tools):** context7, simple-mcp, simple-lsp-mcp
-**Gemini-only:** chrome-mcp, stitch-mcp
+**Codex + Gemini:** chrome-devtools, stitch-mcp
 **Claude-only:** jj-git-mcp
 
 ### MCP CLI Commands
@@ -568,12 +568,12 @@ simple/
     release/SKILL.md
 
   .codex/
-    config.toml          # MCP: context7, simple-mcp, simple-lsp-mcp
+    config.toml          # Project MCP: context7, chrome-devtools, stitch-mcp
     skills/              # + fallback: reads CLAUDE.md
       mdsoc-architecture-writing/
 
   .gemini/
-    settings.json        # MCP: context7, simple-mcp, simple-lsp-mcp, chrome-mcp, stitch-mcp
+    settings.json        # MCP: context7, simple-mcp, simple-lsp-mcp, chrome-devtools, stitch-mcp
     commands/            # research, design, impl, verify, release (TOML)
 ```
 
@@ -592,8 +592,8 @@ simple/
 | context7 | Yes | Yes | Yes |
 | simple-mcp | Yes | Yes | Yes |
 | simple-lsp-mcp | Yes | Yes | Yes |
-| chrome-mcp | -- | -- | Yes |
-| stitch-mcp | -- | -- | Yes |
+| chrome-devtools | -- | Yes | Yes |
+| stitch-mcp | -- | Yes | Yes |
 | jj-git-mcp | Yes | -- | -- |
 | Playwright CLI | -- | Yes (AGENTS.md) | Yes (GEMINI.md) |
 

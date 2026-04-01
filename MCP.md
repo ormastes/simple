@@ -189,7 +189,7 @@ Auto-discovered via `gemini-cli-extension` GitHub topic. Manifest: `gemini-exten
 
 Commands: `coding`, `design`, `impl`, `refactor`, `release`, `research`, `sync`, `verify`, `ui_design`, `visual_test`, `browser_research`, `stitch`
 
-MCP servers in Gemini settings (`.gemini/settings.json`): `simple-mcp`, `simple-lsp-mcp`, `t32-mcp`, `t32-lsp-mcp`, plus `context-mode`, `context7`, `chrome-mcp`, `stitch-mcp`.
+MCP servers in Gemini settings (`.gemini/settings.json`): `simple-mcp`, `simple-lsp-mcp`, `t32-mcp`, `t32-lsp-mcp`, plus `context-mode`, `context7`, `chrome-devtools`, `stitch-mcp`.
 
 ### User Installation
 

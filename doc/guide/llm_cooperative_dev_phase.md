@@ -279,8 +279,8 @@ If multiple LLMs participate in research:
 | **context7** | Yes | Yes | Yes | External library docs |
 | **simple-mcp** | Yes | Yes | Yes | Codebase query (workspace-symbols, references, hover) |
 | **simple-lsp-mcp** | Yes | Yes | Yes | Code navigation (definition, completions) |
-| **chrome-mcp** | -- | -- | Yes | Browser control, visual testing |
-| **stitch-mcp** | -- | -- | Yes | Multi-file code editing |
+| **chrome-devtools** | -- | Yes | Yes | Browser control, visual testing |
+| **stitch-mcp** | -- | Yes | Yes | Multi-file code editing |
 | **jj-git-mcp** | Yes | -- | -- | JJ/Git VCS operations |
 
 ### CLI Tools
