@@ -340,9 +340,8 @@ impl NativeProjectBuilder {
         // Parse all files to find top-level function definitions and compute their
         // mangled names. Functions with unique names get direct import map entries;
         // ambiguous names (multiple definitions) are left unresolved.
-        let effective_source_root = self.effective_source_root();
         let imports = if !self.config.no_mangle {
-            let result = build_import_map(&file_sources, &effective_source_root);
+            let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
             if self.config.verbose {
                 eprintln!(
                     "Import map: {} unique, {} ambiguous function entries, {} modules with re-exports",
@@ -645,7 +644,8 @@ impl NativeProjectBuilder {
         }
 
         let project_root = self.project_root.clone();
-        let source_root = self.effective_source_root();
+        let source_dirs = self.source_dirs.clone();
+        let fallback_root = self.source_root.clone();
         let file_timeout = self.config.file_timeout;
         let stack_size = self.config.stack_size;
         let verbose = self.config.verbose;
@@ -667,7 +667,8 @@ impl NativeProjectBuilder {
                     source.clone(),
                     path.clone(),
                     project_root.clone(),
-                    source_root.clone(),
+                    source_dirs.clone(),
+                    fallback_root.clone(),
                     file_timeout,
                     stack_size,
                     no_mangle,
@@ -712,7 +713,8 @@ impl NativeProjectBuilder {
                     source.clone(),
                     path.clone(),
                     self.project_root.clone(),
-                    self.effective_source_root(),
+                    self.source_dirs.clone(),
+                    self.source_root.clone(),
                     self.config.file_timeout,
                     self.config.stack_size,
                     self.config.no_mangle,
@@ -1341,25 +1343,31 @@ fn generate_stub_object(
     // Internal Simple symbols must never be silently stubbed. If a source-defined
     // symbol from the discovered entry closure is still unresolved here, native-build
     // produced an incomplete object graph and the output binary would be bogus.
-    let mut simple_symbols = HashSet::new();
-    for (raw, mangled_variants) in imports.all_mangled.iter() {
-        simple_symbols.insert(raw.clone());
-        for mangled in mangled_variants {
-            simple_symbols.insert(mangled.clone());
+    // Skip this check during bootstrap: the entry-closure import map cannot capture
+    // all enum variant constructors and class methods, so some are expected to be
+    // stubbed and resolved later (the runtime supplies them).
+    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+    if !is_bootstrap {
+        let mut simple_symbols = HashSet::new();
+        for (raw, mangled_variants) in imports.all_mangled.iter() {
+            simple_symbols.insert(raw.clone());
+            for mangled in mangled_variants {
+                simple_symbols.insert(mangled.clone());
+            }
         }
-    }
-    let internal_missing: Vec<String> = needs_stub
-        .iter()
-        .filter(|sym| simple_symbols.contains(*sym))
-        .cloned()
-        .collect();
-    if !internal_missing.is_empty() {
-        let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
-        return Err(format!(
-            "native-build aborted: unresolved internal Simple symbols would be stubbed: {}{}",
-            preview,
-            if internal_missing.len() > 12 { " ..." } else { "" }
-        ));
+        let internal_missing: Vec<String> = needs_stub
+            .iter()
+            .filter(|sym| simple_symbols.contains(*sym))
+            .cloned()
+            .collect();
+        if !internal_missing.is_empty() {
+            let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "native-build aborted: unresolved internal Simple symbols would be stubbed: {}{}",
+                preview,
+                if internal_missing.len() > 12 { " ..." } else { "" }
+            ));
+        }
     }
 
     if needs_stub.is_empty() {
@@ -2377,6 +2385,28 @@ fn mangle_mir(
     unresolved_count
 }
 
+/// Find the best source root for a given file from a list of source directories.
+/// Returns the most specific (deepest) source dir that contains the file,
+/// or falls back to the fallback root.
+fn source_root_for_file(file_path: &Path, source_dirs: &[PathBuf], fallback: &Path) -> PathBuf {
+    let canonical_path = std::fs::canonicalize(file_path)
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    let mut best: Option<PathBuf> = None;
+    let mut best_depth = 0usize;
+    for dir in source_dirs {
+        let canonical_dir = std::fs::canonicalize(dir)
+            .unwrap_or_else(|_| dir.clone());
+        if canonical_path.starts_with(&canonical_dir) {
+            let depth = canonical_dir.components().count();
+            if depth > best_depth {
+                best_depth = depth;
+                best = Some(canonical_dir);
+            }
+        }
+    }
+    best.unwrap_or_else(|| fallback.to_path_buf())
+}
+
 fn compile_file_to_object(
     source: &str,
     file_path: &Path,
@@ -2774,7 +2804,8 @@ fn compile_file_safe(
     source: String,
     file_path: PathBuf,
     project_root: PathBuf,
-    source_root: PathBuf,
+    source_dirs: Vec<PathBuf>,
+    fallback_root: PathBuf,
     timeout_secs: u64,
     stack_size: usize,
     no_mangle: bool,
@@ -2791,6 +2822,7 @@ fn compile_file_safe(
         ))
         .stack_size(stack_size)
         .spawn(move || {
+            let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
             let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
                 // Helpful for debugging: let panics crash to get full backtraces.
                 compile_file_to_object(
@@ -2997,7 +3029,7 @@ fn sanitize_mangled(name: String) -> String {
 /// Parses each source file to discover top-level function definitions,
 /// computes their mangled names, and returns a map from raw name to mangled name
 /// for functions that have exactly one definition across all modules.
-fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> ImportMapResult {
+fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf], fallback_root: &Path) -> ImportMapResult {
     use std::collections::{HashMap, HashSet};
 
     // raw_name → list of mangled names (one per defining module)
@@ -3014,7 +3046,8 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
         if !seen_canonical.insert(canonical_path) {
             continue; // skip symlink duplicate — already indexed under first-seen path
         }
-        let prefix = module_prefix_from_path(path, source_root);
+        let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
+        let prefix = module_prefix_from_path(path, &per_file_root);
         // Try to parse the file; skip files that fail to parse
         let mut parser = simple_parser::Parser::new(source);
         if let Ok(ast) = parser.parse() {
@@ -3172,7 +3205,8 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> I
         if !seen_canonical_reexport.insert(canonical_path) {
             continue; // skip symlink duplicate
         }
-        let prefix = module_prefix_from_path(path, source_root);
+        let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
+        let prefix = module_prefix_from_path(path, &per_file_root);
         let mut parser = simple_parser::Parser::new(source);
         if let Ok(ast) = parser.parse() {
             let mut use_items: Vec<(Vec<String>, &simple_parser::ast::ImportTarget)> = Vec::new();

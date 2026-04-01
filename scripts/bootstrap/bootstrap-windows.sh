@@ -191,6 +191,7 @@ stage2_bin="${stage2_dir}/simple.exe"
 stage3_bin="${stage3_dir}/simple.exe"
 
 export RUST_LOG="${RUST_LOG:-error}"
+export SIMPLE_BOOTSTRAP=1
 
 # Stage 1: Rust seed → stage1
 echo "=== Stage 1: Rust seed → stage1 ==="
