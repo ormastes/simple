@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use simple_compiler::module_resolver::ModuleResolver;
 use simple_parser::ast::Node;
 use simple_parser::{Parser, ParseError};
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Check options
 #[derive(Debug, Clone, Default)]
@@ -23,6 +23,8 @@ pub struct CheckOptions {
     pub verbose: bool,
     /// Quiet mode (only show errors, no progress)
     pub quiet: bool,
+    /// Additional source roots for module resolution
+    pub source_roots: Vec<PathBuf>,
 }
 
 /// Check result for a single file
@@ -81,7 +83,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
             println!("Checking {}...", file.display());
         }
 
-        let result = check_file(file);
+        let result = check_file(file, &options.source_roots);
 
         match &result.status {
             CheckStatus::Success => {
@@ -90,7 +92,13 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
                 }
             }
             CheckStatus::Error => {
-                has_errors = true;
+                if result
+                    .errors
+                    .iter()
+                    .any(|error| error.severity == ErrorSeverity::Error)
+                {
+                    has_errors = true;
+                }
                 if !options.json {
                     for error in &result.errors {
                         print_error(error);
@@ -108,7 +116,15 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
     } else if !options.quiet {
         println!();
         if has_errors {
-            let error_count: usize = all_results.iter().map(|r| r.errors.len()).sum();
+            let error_count: usize = all_results
+                .iter()
+                .map(|r| {
+                    r.errors
+                        .iter()
+                        .filter(|e| e.severity == ErrorSeverity::Error)
+                        .count()
+                })
+                .sum();
             println!(
                 "\x1b[31m✗ {} error(s) found in {} file(s)\x1b[0m",
                 error_count,
@@ -127,7 +143,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
 }
 
 /// Check a single file
-fn check_file(path: &Path) -> FileCheckResult {
+fn check_file(path: &Path, source_roots: &[PathBuf]) -> FileCheckResult {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -155,7 +171,7 @@ fn check_file(path: &Path) -> FileCheckResult {
     match parser.parse() {
         Ok(module) => {
             // Parsing succeeded, validate imports
-            validate_imports(path, &module.items, &mut errors);
+            validate_imports(path, &module.items, &mut errors, source_roots);
         }
         Err(e) => {
             // Convert ParseError to CheckError
@@ -163,10 +179,11 @@ fn check_file(path: &Path) -> FileCheckResult {
         }
     }
 
-    let status = if errors.is_empty() {
-        CheckStatus::Success
-    } else {
+    let has_hard_errors = errors.iter().any(|error| error.severity == ErrorSeverity::Error);
+    let status = if has_hard_errors {
         CheckStatus::Error
+    } else {
+        CheckStatus::Success
     };
 
     FileCheckResult {
@@ -177,9 +194,8 @@ fn check_file(path: &Path) -> FileCheckResult {
 }
 
 /// Validate import statements in a module
-fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
-    // Create a project-aware module resolver
-    // Use absolute path so project root detection works from any CWD
+fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>, source_roots: &[PathBuf]) {
+    // Create one or more project-aware module resolvers.
     let abs_path = if file_path.is_absolute() {
         file_path.to_path_buf()
     } else {
@@ -187,27 +203,55 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             .map(|cwd| cwd.join(file_path))
             .unwrap_or_else(|_| file_path.to_path_buf())
     };
-    let resolver = ModuleResolver::single_file(&abs_path);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut resolvers = Vec::new();
+    if source_roots.is_empty() {
+        resolvers.push(ModuleResolver::single_file(&abs_path));
+    } else {
+        for source_root in source_roots {
+            let abs_root = if source_root.is_absolute() {
+                source_root.clone()
+            } else {
+                cwd.join(source_root)
+            };
+            resolvers.push(ModuleResolver::new(cwd.clone(), abs_root));
+        }
+    }
 
     for item in items {
         match item {
             Node::UseStmt(use_stmt) => {
-                // Try to resolve the import path
-                if let Err(e) = resolver.resolve(&use_stmt.path, &abs_path) {
+                let resolved = resolvers
+                    .iter()
+                    .any(|resolver| resolver.resolve(&use_stmt.path, &abs_path).is_ok());
+                if !resolved {
+                    let msg = resolvers
+                        .iter()
+                        .find_map(|resolver| resolver.resolve(&use_stmt.path, &abs_path).err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown import resolution failure".to_string());
                     // Only report as warning since the module might be in a different project location
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
                         line: use_stmt.span.line,
                         column: use_stmt.span.column,
                         severity: ErrorSeverity::Warning,
-                        message: format!("unresolved import '{}': {}", use_stmt.path.segments.join("."), e),
+                        message: format!("unresolved import '{}': {}", use_stmt.path.segments.join("."), msg),
                         expected: None,
                         found: None,
                     });
                 }
             }
             Node::CommonUseStmt(common_use) => {
-                if let Err(e) = resolver.resolve(&common_use.path, &abs_path) {
+                let resolved = resolvers
+                    .iter()
+                    .any(|resolver| resolver.resolve(&common_use.path, &abs_path).is_ok());
+                if !resolved {
+                    let msg = resolvers
+                        .iter()
+                        .find_map(|resolver| resolver.resolve(&common_use.path, &abs_path).err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown import resolution failure".to_string());
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
                         line: common_use.span.line,
@@ -216,7 +260,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         message: format!(
                             "unresolved common import '{}': {}",
                             common_use.path.segments.join("."),
-                            e
+                            msg
                         ),
                         expected: None,
                         found: None,
@@ -224,7 +268,15 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                 }
             }
             Node::ExportUseStmt(export_use) => {
-                if let Err(e) = resolver.resolve(&export_use.path, &abs_path) {
+                let resolved = resolvers
+                    .iter()
+                    .any(|resolver| resolver.resolve(&export_use.path, &abs_path).is_ok());
+                if !resolved {
+                    let msg = resolvers
+                        .iter()
+                        .find_map(|resolver| resolver.resolve(&export_use.path, &abs_path).err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unknown import resolution failure".to_string());
                     errors.push(CheckError {
                         file: file_path.display().to_string(),
                         line: export_use.span.line,
@@ -233,7 +285,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         message: format!(
                             "unresolved export import '{}': {}",
                             export_use.path.segments.join("."),
-                            e
+                            msg
                         ),
                         expected: None,
                         found: None,

@@ -18,6 +18,8 @@
 #   - job_manager.spl     — Async job manager: create, get, list, cancel, cleanup
 #   - snapshot_store.spl  — Window snapshot store: hash, diff (structured/table/text), capture-with-diff
 #   - headless_tools.spl  — Headless setup, AREA read, CMM command database
+#   - tool_common.spl     — Shared leaf helpers used across families
+#   - action_tools.spl    — Action/field/history/resource handlers + dispatcher
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -27,17 +29,9 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
 
-use app.mcp_t32.json_helpers
-use app.mcp_t32.protocol
-use app.mcp_t32.session_tools
-use app.mcp_t32.window_tools
-use app.mcp_t32.action_tools
-use app.mcp_t32.gap_tools
-use app.mcp_t32.job_manager
-use app.mcp_t32.snapshot_store
-use app.mcp_t32.headless_tools
-# dialog_tools loaded on-demand — cmm_lsp parser is too heavy for eager import (2GB RSS)
-use app.mcp_t32.ctypes_bridge
+use t32_mcp.json_helpers.{t32_extract_field, t32_extract_id, t32_extract_nested, t32_LB, t32_RB}
+use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list}
+use t32_mcp.session_list_tools.{handle_t32_sessions_list}
 
 val T32_SERVER_NAME = "simple-mcp-t32"
 val T32_SERVER_VERSION = "0.1.2"
@@ -196,11 +190,23 @@ fn t32_start_server():
             elif method == "tools/list":
                 response = t32_make_tools_list(id)
             elif method == "tools/call":
-                response = t32_dispatch_tool(id, msg)
+                val tool_name = t32_extract_nested(msg, "name")
+                if tool_name == "t32_sessions_list":
+                    response = handle_t32_sessions_list(id, msg)
+                else:
+                    response = t32_dispatch_tool(id, msg)
             elif method == "resources/list":
                 response = t32_make_resources_list(id)
+            elif method == "resources/templates/list":
+                response = t32_make_resource_templates_list(id)
             elif method == "resources/read":
                 response = t32_handle_resource_read(id, msg)
+            elif method == "prompts/list":
+                response = t32_make_json_result(id, "{\"prompts\":[]}")
+            elif method == "roots/list":
+                response = t32_make_json_result(id, "{\"roots\":[]}")
+            elif method == "logging/setLevel" or method == "logging/setlevel":
+                response = t32_make_json_result(id, "null")
             elif method == "ping":
                 response = t32_make_json_result(id, t32_LB() + t32_RB())
             elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":

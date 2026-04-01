@@ -264,7 +264,7 @@ done
 # ===========================================================================
 
 generate_mcp_launcher() {
-  local name="$1" entry="$2" extra_env="$3"
+  local name="$1" entry="$2" extra_env="$3" preferred_binary="${4:-}"
   local launcher="${release_dir}/${name}"
   cat > "${launcher}" <<LAUNCHER_EOF
 #!/bin/sh
@@ -279,6 +279,13 @@ while [ -L "\$SELF" ]; do
 done
 SCRIPT_DIR="\$(cd "\$(dirname "\$SELF")" && pwd)"
 REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
+PREFERRED_BINARY=""
+if [ -n "${preferred_binary}" ]; then
+  PREFERRED_BINARY="\${REPO_ROOT}/${preferred_binary}"
+fi
+if [ "\${T32_MCP_USE_NATIVE:-0}" = "1" ] && [ -n "\$PREFERRED_BINARY" ] && [ -x "\$PREFERRED_BINARY" ]; then
+  exec "\$PREFERRED_BINARY" "\$@"
+fi
 # Prefer bin/simple (user-managed link) so all tools follow the same binary
 RUNTIME="\${REPO_ROOT}/bin/simple"
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
@@ -295,18 +302,20 @@ echo ""
 echo "Generating MCP launcher scripts in bin/release/:"
 
 generate_mcp_launcher "simple_mcp_server" \
-  "src/app/mcp/main.spl" ""
+  "src/app/mcp/main.spl" "" ""
 echo "  simple_mcp_server"
 
 generate_mcp_launcher "simple_lsp_mcp_server" \
   "src/app/simple_lsp_mcp/main.spl" \
-  'export SIMPLE_BINARY="$RUNTIME"'
+  'export SIMPLE_BINARY="$RUNTIME"' ""
 echo "  simple_lsp_mcp_server"
 
 generate_mcp_launcher "t32_mcp_server" \
   "examples/10_tooling/trace32_tools/t32_mcp/main.spl" \
-  'export SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
-cd "$REPO_ROOT"'
+   'export SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
+export SIMPLE_TIMEOUT_SECONDS=86400
+cd "$REPO_ROOT"' \
+   "bin/release/t32_mcp_native"
 echo "  t32_mcp_server"
 
 cat > "${release_dir}/t32_lsp_mcp_server" <<'T32LSP_EOF'
@@ -332,8 +341,9 @@ export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
 export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
 export T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-$DAEMON_DIR}"
+export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
-if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "tool_daemon.spl $DAEMON_DIR" >/dev/null 2>&1; then
+if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"
   nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
 fi

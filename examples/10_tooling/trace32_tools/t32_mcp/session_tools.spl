@@ -3,7 +3,10 @@
 # Handles: sessions_list, session_open, session_resume, session_close,
 #          core_list, core_select, cmd_run, cmm_run, eval
 
-use app.t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
+use t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
+use t32_mcp.tool_common.{t32_mcp_session_ids}
+use t32_mcp.window_tools.{t32_get_window_catalog, t32_parse_catalog_entry}
+use t32_mcp.snapshot_store.{t32_snapshot_store, t32_capture_with_diff}
 
 # --- Backend detection (t32rem primary, python t32-rcl fallback) ---
 
@@ -165,7 +168,7 @@ fn t32_query_status_bar(session: McpT32Session) -> (text, text, text):
         # Subprocess path: extra t32_run_remote calls
         var msg_out = ""
         var msg_rc: i64 = 0
-        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STR()")
+        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STRing()")
         if msg_rc == 0:
             message = msg_out.trim()
         var state_out = ""
@@ -254,7 +257,7 @@ fn t32_query_errors(session: McpT32Session) -> (text, text, text):
     else:
         var msg_out = ""
         var msg_rc: i64 = 0
-        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STR()")
+        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STRing()")
         if msg_rc == 0:
             message = msg_out.trim()
     (message, msg_type, MCP_T32_LAST_STDERR)
@@ -303,9 +306,130 @@ fn t32_capture_status_before_json(session: McpT32Session) -> text:
     var sb = t32_LB()
     sb = sb + t32_jp("message", t32_js(msg))
     sb = sb + "," + t32_jp("type", t32_js(msg_type))
+    sb = sb + "," + t32_jp("message_line", t32_js(msg))
+    sb = sb + "," + t32_jp("message_type", t32_js(msg_type))
+    sb = sb + "," + t32_jp("state_line", t32_js(target_state))
     sb = sb + "," + t32_jp("target_state", t32_js(target_state))
     sb = sb + t32_RB()
     sb
+
+fn t32_parse_observe_windows(body: text) -> [text]:
+    var watched = ["semihost_area"]
+    val raw = t32_extract_field(body, "observe_windows")
+    if raw == "":
+        return watched
+    for part in raw.split(","):
+        val key = part.trim()
+        if key == "":
+            continue
+        var seen = false
+        for existing in watched:
+            if existing == key:
+                seen = true
+        if not seen:
+            watched.push(key)
+    watched
+
+fn t32_capture_window_content(session: McpT32Session, window_key: text) -> (text, text, text, text, i64):
+    val catalog = t32_get_window_catalog()
+    var found_capture = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_capture = capture_cmd
+            found_title = title
+    if found_capture == "":
+        return ("", "", "", "", -2)
+    var stdout = ""
+    var rc: i64 = 0
+    (stdout, rc) = t32_run_remote(session, found_capture)
+    var content = stdout.trim()
+    var capture_method = "winprint"
+    if content == "" and rc == 0:
+        val temp_file = "/tmp/t32_capture_" + window_key + ".txt"
+        val printer_cmd = "PRinTer.FILE " + temp_file + " " + found_capture.replace("WinPrint.", "")
+        var stdout2 = ""
+        var rc2: i64 = 0
+        (stdout2, rc2) = t32_run_remote(session, printer_cmd)
+        if rc2 == 0:
+            val file_content = rt_file_read_text(temp_file) ?? ""
+            if file_content != "":
+                content = file_content.trim()
+                capture_method = "printer_file"
+    (found_title, content, found_capture, capture_method, rc)
+
+fn t32_prime_observed_windows(session: McpT32Session, watched: [text]):
+    for window_key in watched:
+        var title = ""
+        var content = ""
+        var capture_cmd = ""
+        var capture_method = ""
+        var rc: i64 = 0
+        (title, content, capture_cmd, capture_method, rc) = t32_capture_window_content(session, window_key)
+        if rc == 0:
+            t32_snapshot_store(session.id, MCP_T32_CURRENT_CORE, window_key, title, content)
+
+fn t32_collect_observed_window_changes_json(session: McpT32Session, watched: [text]) -> text:
+    var arr = t32_SB_L()
+    var first = true
+    for window_key in watched:
+        var title = ""
+        var content = ""
+        var capture_cmd = ""
+        var capture_method = ""
+        var rc: i64 = 0
+        (title, content, capture_cmd, capture_method, rc) = t32_capture_window_content(session, window_key)
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = t32_LB()
+        obj = obj + t32_jp("window", t32_js(window_key))
+        if title != "":
+            obj = obj + "," + t32_jp("title", t32_js(title))
+        if capture_cmd != "":
+            obj = obj + "," + t32_jp("capture_command", t32_js(capture_cmd))
+        if capture_method != "":
+            obj = obj + "," + t32_jp("capture_method", t32_js(capture_method))
+        if rc == -2:
+            obj = obj + "," + t32_jp("error", t32_js("unknown window"))
+        elif rc != 0:
+            obj = obj + "," + t32_jp("error", t32_js("capture failed"))
+        else:
+            obj = obj + "," + t32_jp("diff", t32_capture_with_diff(session.id, MCP_T32_CURRENT_CORE, window_key, title, content, "diff"))
+        obj = obj + t32_RB()
+        arr = arr + obj
+    arr = arr + t32_SB_R()
+    arr
+
+fn t32_bool_json(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn t32_append_interaction_observer_json(r: text, session: McpT32Session, status_before: text, watched: [text]) -> text:
+    val status_after = t32_capture_status_before_json(session)
+    val before_message = t32_extract_field(status_before, "message_line")
+    val after_message = t32_extract_field(status_after, "message_line")
+    val before_state = t32_extract_field(status_before, "state_line")
+    val after_state = t32_extract_field(status_after, "state_line")
+    val window_changes = t32_collect_observed_window_changes_json(session, watched)
+    var interaction = t32_LB()
+    interaction = interaction + t32_jp("before", status_before)
+    interaction = interaction + "," + t32_jp("after", status_after)
+    interaction = interaction + "," + t32_jp("message_line_changed", t32_bool_json(before_message != after_message))
+    interaction = interaction + "," + t32_jp("state_line_changed", t32_bool_json(before_state != after_state))
+    interaction = interaction + "," + t32_jp("window_changes", window_changes)
+    interaction = interaction + t32_RB()
+    var result = r
+    result = result + "," + t32_jp("status_after", status_after)
+    result = result + "," + t32_jp("interaction", interaction)
+    result
 
 fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
     var result = r
@@ -491,29 +615,6 @@ fn t32_scan_cmm_file(path: text) -> [text]:
 
 # --- Tool handlers ---
 
-fn handle_t32_sessions_list(id: text, body: text) -> text:
-    var arr = t32_SB_L()
-    var first = true
-    for s in MCP_T32_SESSIONS:
-        if not first:
-            arr = arr + ","
-        first = false
-        var obj = t32_LB()
-        obj = obj + t32_jp("id", t32_js(s.id))
-        obj = obj + "," + t32_jp("host", t32_js(s.host))
-        obj = obj + "," + t32_jp("port", str(s.port))
-        obj = obj + "," + t32_jp("intercom_name", t32_js(s.intercom_name))
-        obj = obj + "," + t32_jp("architecture", t32_js(s.architecture))
-        obj = obj + "," + t32_jp("connected", t32_js(str(s.connected)))
-        var core_count: i64 = 0
-        for _c in s.cores:
-            core_count = core_count + 1
-        obj = obj + "," + t32_jp("core_count", str(core_count))
-        obj = obj + t32_RB()
-        arr = arr + obj
-    arr = arr + t32_SB_R()
-    t32_make_tool_result(id, arr)
-
 fn handle_t32_session_open(id: text, body: text) -> text:
     var host = t32_extract_field(body, "host")
     val port_str = t32_extract_field(body, "port")
@@ -604,38 +705,6 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 
-fn handle_t32_session_resume(id: text, body: text) -> text:
-    val session_id = t32_extract_field(body, "session_id")
-    if session_id == "":
-        return t32_make_tool_error(id, -32602, t32_err_missing_param("session_id", "t32_session_resume", "t32_session_resume(session_id: \"<id>\")", "t32_session_resume(session_id: \"t32_1\")"))
-    var found = false
-    for s in MCP_T32_SESSIONS:
-        if s.id == session_id:
-            found = true
-    if not found:
-        return t32_make_tool_error(id, -32602, t32_err_not_found(T4010, "session", session_id, t32_mcp_session_ids()))
-    MCP_T32_CURRENT_SESSION = session_id
-    t32_make_tool_result(id, t32_jo2(t32_jp("current_session", t32_js(session_id)), t32_jp("status", t32_js("ok"))))
-
-fn handle_t32_session_close(id: text, body: text) -> text:
-    val session_id = t32_extract_field(body, "session_id")
-    if session_id == "":
-        return t32_make_tool_error(id, -32602, t32_err_missing_param("session_id", "t32_session_close", "t32_session_close(session_id: \"<id>\")", "t32_session_close(session_id: \"t32_1\")"))
-    var found = false
-    var kept: [McpT32Session] = []
-    for s in MCP_T32_SESSIONS:
-        if s.id == session_id:
-            found = true
-        else:
-            kept = kept + [s]
-    if not found:
-        return t32_make_tool_error(id, -32602, t32_err_not_found(T4010, "session", session_id, t32_mcp_session_ids()))
-    MCP_T32_SESSIONS = kept
-    if MCP_T32_CURRENT_SESSION == session_id:
-        MCP_T32_CURRENT_SESSION = ""
-    t32_add_history("session_close", "ok", session_id, "")
-    t32_make_tool_result(id, t32_jo2(t32_jp("closed", t32_js(session_id)), t32_jp("status", t32_js("ok"))))
-
 fn handle_t32_core_list(id: text, body: text) -> text:
     var session_id = t32_extract_field(body, "session_id")
     if session_id == "":
@@ -709,6 +778,87 @@ fn handle_t32_core_select(id: text, body: text) -> text:
             t32_add_history("CORE.select " + core_id, "ok", session.id, core_id)
             return t32_make_tool_result(id, t32_jo2(t32_jp("current_core", t32_js(core_id)), t32_jp("status", t32_js("ok"))))
 
+fn handle_t32_window_open(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_window_open", "t32_window_open(window: \"<key>\")", "t32_window_open(window: \"register\")"))
+    val catalog = t32_get_window_catalog()
+    var found_cmd = ""
+    var found_title = ""
+    for entry in catalog:
+        var key = ""
+        var title = ""
+        var kind = ""
+        var open_cmd = ""
+        var capture_cmd = ""
+        (key, title, kind, open_cmd, capture_cmd) = t32_parse_catalog_entry(entry)
+        if key == window_key:
+            found_cmd = open_cmd
+            found_title = title
+    if found_cmd == "":
+        return t32_make_tool_error(id, -32602, t32_err_window_not_found(window_key, t32_mcp_window_keys()))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            val watched = t32_parse_observe_windows(body)
+            val status_before = t32_capture_status_before_json(session)
+            t32_prime_observed_windows(session, watched)
+            var stdout = ""
+            var rc: i64 = 0
+            (stdout, rc) = t32_run_remote(session, found_cmd)
+            t32_add_history(found_cmd, "opened", session.id, MCP_T32_CURRENT_CORE)
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, "Window open failed (exit " + str(rc) + "): " + stdout.trim())
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, stdout.trim())
+            var r = t32_LB()
+            r = r + t32_jp("window", t32_js(window_key))
+            r = r + "," + t32_jp("title", t32_js(found_title))
+            r = r + "," + t32_jp("command", t32_js(found_cmd))
+            r = r + "," + t32_jp("status", t32_js("opened"))
+            r = r + "," + t32_jp("status_before", status_before)
+            r = t32_append_interaction_observer_json(r, session, status_before, watched)
+            r = t32_append_status_bar_json(r, session)
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
+fn handle_t32_window_capture(id: text, body: text) -> text:
+    val window_key = t32_extract_field(body, "window")
+    if window_key == "":
+        return t32_make_tool_error(id, -32602, t32_err_missing_param("window", "t32_window_capture", "t32_window_capture(window: \"<key>\")", "t32_window_capture(window: \"register\")"))
+    val session_opt = t32_find_current_session()
+    match session_opt:
+        nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
+        Some(session):
+            val watched = t32_parse_observe_windows(body)
+            val status_before = t32_capture_status_before_json(session)
+            t32_prime_observed_windows(session, watched)
+            var found_title = ""
+            var content = ""
+            var found_capture = ""
+            var capture_method = ""
+            var rc: i64 = 0
+            (found_title, content, found_capture, capture_method, rc) = t32_capture_window_content(session, window_key)
+            if rc == -2:
+                return t32_make_tool_error(id, -32602, t32_err_window_not_found(window_key, t32_mcp_window_keys()))
+            if rc != 0 and rc != -1:
+                return t32_make_tool_error(id, -32000, "Window capture failed (exit " + str(rc) + "): " + content.trim())
+            if rc == -1:
+                return t32_make_tool_error(id, -32000, content.trim())
+            t32_add_history("capture " + window_key, "captured", session.id, MCP_T32_CURRENT_CORE)
+            var r = t32_LB()
+            r = r + t32_jp("window", t32_js(window_key))
+            r = r + "," + t32_jp("title", t32_js(found_title))
+            r = r + "," + t32_jp("content", t32_js(content))
+            r = r + "," + t32_jp("capture_command", t32_js(found_capture))
+            r = r + "," + t32_jp("capture_method", t32_js(capture_method))
+            r = r + "," + t32_jp("status_before", status_before)
+            r = t32_append_interaction_observer_json(r, session, status_before, watched)
+            r = t32_append_status_bar_json(r, session)
+            r = r + t32_RB()
+            return t32_make_tool_result(id, r)
+
 fn handle_t32_cmd_run(id: text, body: text) -> text:
     val command = t32_extract_field(body, "command")
     if command == "":
@@ -729,8 +879,10 @@ fn handle_t32_cmd_run(id: text, body: text) -> text:
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
+            val watched = t32_parse_observe_windows(body)
             # Capture status BEFORE command
             val status_before = t32_capture_status_before_json(session)
+            t32_prime_observed_windows(session, watched)
             var stdout = ""
             var rc: i64 = 0
             (stdout, rc) = t32_run_remote(session, command)
@@ -760,6 +912,7 @@ fn handle_t32_cmd_run(id: text, body: text) -> text:
                     warn_arr = warn_arr + t32_js(w)
                 warn_arr = warn_arr + t32_SB_R()
                 r = r + "," + t32_jp("warnings", warn_arr)
+            r = t32_append_interaction_observer_json(r, session, status_before, watched)
             r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
@@ -804,6 +957,7 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
+            val watched = t32_parse_observe_windows(body)
             # Auto-setup AREA if capture requested and not yet ready
             if capture_area and not MCP_T32_AREA_READY:
                 var area_name = MCP_T32_AREA_NAME
@@ -822,6 +976,7 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
                 MCP_T32_AREA_NAME = area_name
             # Capture status BEFORE running script
             val status_before = t32_capture_status_before_json(session)
+            t32_prime_observed_windows(session, watched)
             val do_cmd = "DO " + script
             var stdout = ""
             var rc: i64 = 0
@@ -854,6 +1009,7 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
             r = r + "," + t32_jp("status_before", status_before)
             if area_output != "":
                 r = r + "," + t32_jp("area_output", t32_js(area_output))
+            r = t32_append_interaction_observer_json(r, session, status_before, watched)
             r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)
@@ -888,6 +1044,9 @@ fn handle_t32_eval(id: text, body: text) -> text:
     match session_opt:
         nil: return t32_make_tool_error(id, -32602, t32_err_no_session_mcp())
         Some(session):
+            val watched = t32_parse_observe_windows(body)
+            val status_before = t32_capture_status_before_json(session)
+            t32_prime_observed_windows(session, watched)
             val eval_cmd = "EVAL " + expression
             var stdout = ""
             var rc: i64 = 0
@@ -900,6 +1059,8 @@ fn handle_t32_eval(id: text, body: text) -> text:
             var r = t32_LB()
             r = r + t32_jp("expression", t32_js(expression))
             r = r + "," + t32_jp("result", t32_js(stdout.trim()))
+            r = r + "," + t32_jp("status_before", status_before)
+            r = t32_append_interaction_observer_json(r, session, status_before, watched)
             r = t32_append_status_bar_json(r, session)
             r = r + t32_RB()
             return t32_make_tool_result(id, r)

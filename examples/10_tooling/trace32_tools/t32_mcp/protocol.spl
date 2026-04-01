@@ -2,9 +2,15 @@
 # T32 MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
-# Zero stdlib imports: all JSON helpers inlined in json_helpers.spl,
-# transport implemented here via stdin_read_char/print_raw.
+# JSON helpers delegated to t32_lsp_mcp/json_helpers.spl (canonical source).
+# Transport implemented here via stdin_read_char/print_raw.
 # This avoids loading the entire src/lib/ module tree (8GB+ RSS).
+
+use t32_lsp_mcp.json_helpers.{
+    Q, LB, RB, SB_L, SB_R,
+    escape_json, js, jp, jo1, jo2, jo3, jo4,
+    jsonrpc_result, jsonrpc_error
+}
 
 extern fn stdin_read_char() -> text
 extern fn stderr_write(data: text) -> i64
@@ -90,6 +96,24 @@ fn t32_make_error(id: text, code: i64, message: text) -> text:
 fn t32_tool_output_has_key(output: text, key: text) -> bool:
     output.contains(Q() + key + Q() + ":")
 
+fn t32_unknown_gui_status_json() -> text:
+    var gui = LB()
+    gui = gui + jp("message_line", js(""))
+    gui = gui + "," + jp("message_type", js("info"))
+    gui = gui + "," + jp("cursor", js(""))
+    gui = gui + "," + jp("debug", js(""))
+    gui = gui + "," + jp("debugger_activity", js(""))
+    gui = gui + "," + jp("trace", js(""))
+    gui = gui + "," + jp("mode", js(""))
+    gui = gui + "," + jp("system", js(""))
+    gui = gui + "," + jp("task", js(""))
+    gui = gui + "," + jp("cores", js(""))
+    gui = gui + "," + jp("target", js(""))
+    gui = gui + "," + jp("monitor", js(""))
+    gui = gui + "," + jp("target_state", js("unknown"))
+    gui = gui + RB()
+    gui
+
 fn t32_normalize_tool_output(output: text) -> text:
     val trimmed = output.trim()
     var normalized = trimmed
@@ -101,29 +125,16 @@ fn t32_normalize_tool_output(output: text) -> text:
         normalized = jo1(jp("value", js(trimmed)))
     if t32_tool_output_has_key(normalized, "gui_status"):
         return normalized
-    val gui_status = t32_current_gui_status_json()
-    val msg = extract_field(gui_status, "message_line")
-    val msg_type = extract_field(gui_status, "message_type")
-    val target_state = extract_field(gui_status, "target_state")
     var body = normalized
     if body.starts_with(LB()) and body.ends_with(RB()):
         body = body.substring(1, body.len() - 1)
     var parts: [text] = []
     if body != "":
         parts.push(body)
-    parts.push(jp("gui_status", gui_status))
-    if not t32_tool_output_has_key(normalized, "status_bar"):
-        val status_bar = jo2(jp("message", js(msg)), jp("type", js(msg_type)))
-        parts.push(jp("status_bar", status_bar))
-    if not t32_tool_output_has_key(normalized, "target_state"):
-        parts.push(jp("target_state", js(target_state)))
-    var wrapped = LB() + parts.join(",") + RB()
-    val session_opt = t32_find_current_session()
-    match session_opt:
-        Some(session):
-            return t32_append_errors_json(wrapped, session)
-        nil:
-            return wrapped
+    parts.push(jp("gui_status", t32_unknown_gui_status_json()))
+    parts.push(jp("status_bar", jo2(jp("message", js("")), jp("type", js("info")))))
+    parts.push(jp("target_state", js("unknown")))
+    LB() + parts.join(",") + RB()
 
 fn t32_make_tool_result(id: text, output: text) -> text:
     val normalized = t32_normalize_tool_output(output)
@@ -384,6 +395,7 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         p = p + jp("command", jo2(jp("type", js("string")), jp("description", js("PRACTICE command to execute"))))
         p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
         p = p + "," + jp("force", jo2(jp("type", js("string")), jp("description", js("If 'true', bypass blocking pattern detection and execute anyway"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after execution; semihost_area is always observed"))))
         p = p + RB()
         props = p
         req = "[" + js("command") + "]"
@@ -395,50 +407,71 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
         p = p + "," + jp("capture_area", jo2(jp("type", js("string")), jp("description", js("If 'true', capture AREA buffer output after script completes"))))
         p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
         p = p + "," + jp("force", jo2(jp("type", js("string")), jp("description", js("If 'true', bypass blocking pattern detection and execute anyway"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after execution; semihost_area is always observed"))))
         p = p + RB()
         props = p
         req = "[" + js("script") + "]"
     elif name == "t32_eval":
-        props = jo2(
-            jp("expression", jo2(jp("type", js("string")), jp("description", js("TRACE32 expression to evaluate")))),
-            jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
-        )
+        var p = LB()
+        p = p + jp("expression", jo2(jp("type", js("string")), jp("description", js("TRACE32 expression to evaluate"))))
+        p = p + "," + jp("session_id", jo2(jp("type", js("string")), jp("description", js("Session ID (optional, uses current)"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after evaluation; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("expression") + "]"
 
     # Window tools
     elif name == "t32_window_list":
         props = LB() + RB()
     elif name == "t32_window_open":
-        props = jo1(jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to open (e.g. data_list, register)")))))
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to open (e.g. data_list, register)"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after opening; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("window") + "]"
     elif name == "t32_window_capture":
-        props = jo1(jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to capture")))))
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to capture"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after capture; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("window") + "]"
     elif name == "t32_window_describe":
         props = jo1(jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to describe")))))
         req = "[" + js("window") + "]"
     elif name == "t32_screenshot":
-        props = jo2(
-            jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to screenshot")))),
-            jp("output_path", jo2(jp("type", js("string")), jp("description", js("Output file path for screenshot"))))
-        )
+        var p = LB()
+        p = p + jp("window", jo2(jp("type", js("string")), jp("description", js("Window key to screenshot"))))
+        p = p + "," + jp("output_path", jo2(jp("type", js("string")), jp("description", js("Output file path for screenshot"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after screenshot; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("window") + "]"
 
     # Action/Field tools
     elif name == "t32_action_invoke":
-        props = jo2(
-            jp("action_key", jo2(jp("type", js("string")), jp("description", js("Action key to invoke")))),
-            jp("args", jo2(jp("type", js("string")), jp("description", js("Optional arguments for action"))))
-        )
+        var p = LB()
+        p = p + jp("action_key", jo2(jp("type", js("string")), jp("description", js("Action key to invoke"))))
+        p = p + "," + jp("args", jo2(jp("type", js("string")), jp("description", js("Optional arguments for action"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after invocation; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("action_key") + "]"
     elif name == "t32_field_get":
-        props = jo1(jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to get")))))
+        var p = LB()
+        p = p + jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to get"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after get; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("field_key") + "]"
     elif name == "t32_field_set":
-        props = jo2(
-            jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to set")))),
-            jp("value", jo2(jp("type", js("string")), jp("description", js("New value for the field"))))
-        )
+        var p = LB()
+        p = p + jp("field_key", jo2(jp("type", js("string")), jp("description", js("Field key to set"))))
+        p = p + "," + jp("value", jo2(jp("type", js("string")), jp("description", js("New value for the field"))))
+        p = p + "," + jp("observe_windows", jo2(jp("type", js("string")), jp("description", js("Comma-separated TRACE32 window keys to diff before/after setting; semihost_area is always observed"))))
+        p = p + RB()
+        props = p
         req = "[" + js("field_key") + "," + js("value") + "]"
     elif name == "t32_history_tail":
         props = jo1(jp("count", jo2(jp("type", js("string")), jp("description", js("Number of history entries to return (default 20)")))))

@@ -11,7 +11,7 @@
 #   - protocol.spl     — Protocol I/O, initialize, tools list, schemas
 #   - tools.spl        — Tool handler implementations
 
-use t32_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, extract_id, extract_nested, extract_nested_raw, escape_json, jsonrpc_result, jsonrpc_error, has_method}
+use t32_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, extract_field_raw, extract_id, extract_nested, extract_nested_raw, escape_json, jsonrpc_result, jsonrpc_error, has_method}
 use t32_lsp_mcp.protocol
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -64,6 +64,16 @@ fn lsp_start_server():
                 response = lsp_make_tools_list(id)
             elif method == "tools/call":
                 response = lsp_dispatch_tool(id, msg)
+            elif method == "resources/list":
+                response = lsp_make_resources_list(id)
+            elif method == "resources/templates/list":
+                response = lsp_make_resource_templates_list(id)
+            elif method == "prompts/list":
+                response = lsp_make_prompts_list(id)
+            elif method == "roots/list":
+                response = lsp_make_roots_list(id)
+            elif method == "logging/setLevel" or method == "logging/setlevel":
+                response = jsonrpc_result(id, "null")
             elif method == "ping":
                 response = jsonrpc_result(id, LB() + RB())
             elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
@@ -80,7 +90,7 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
     val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return jsonrpc_error(id, -32602, "Missing tool name in tools/call request")
-    val args_raw = extract_nested_raw(body, "arguments")
+    val args_raw = body
     if tool_name == "cmm_parse":
         return lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
     val daemon_response = lsp_dispatch_tool_via_daemon(id, tool_name, body)
@@ -126,7 +136,7 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
     val ready_path = lsp_tool_daemon_dir() + "/ready"
     if not rt_file_exists(ready_path):
         return ""
-    val args_raw = extract_nested_raw(body, "arguments")
+    val args_raw = body
     val base = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id)
     val args_path = base + ".args.json"
     val req_path = base + ".req"
@@ -145,6 +155,7 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
         LSP_TOOL_DAEMON_PID = -1
         return ""
     response
+
 
 fn lsp_start_tool_daemon() -> bool:
     val daemon_dir = lsp_tool_daemon_dir()
@@ -300,6 +311,16 @@ fn lsp_detect_method(msg: text) -> text:
         return "tools/list"
     if lsp_has_method(msg, "tools/call"):
         return "tools/call"
+    if lsp_has_method(msg, "resources/list"):
+        return "resources/list"
+    if lsp_has_method(msg, "resources/templates/list"):
+        return "resources/templates/list"
+    if lsp_has_method(msg, "prompts/list"):
+        return "prompts/list"
+    if lsp_has_method(msg, "roots/list"):
+        return "roots/list"
+    if lsp_has_method(msg, "logging/setLevel") or lsp_has_method(msg, "logging/setlevel"):
+        return "logging/setLevel"
     if lsp_has_method(msg, "ping"):
         return "ping"
     extract_field(msg, "method")

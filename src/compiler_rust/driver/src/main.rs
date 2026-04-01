@@ -323,7 +323,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "check",
-        app_path: "src/app/check/main.spl",
+        app_path: "",
         rust_handler: Handler::Custom(handle_check_wrapper),
         env_override: "SIMPLE_CHECK_RUST",
         needs_rust_flags: &[],
@@ -943,6 +943,7 @@ fn handle_check_impl(args: &[String]) -> i32 {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --json     Output JSON format for tooling");
+        eprintln!("  --source   Add a source root for module resolution (repeatable)");
         eprintln!("  --verbose  Show additional details");
         eprintln!("  --quiet    Only show errors, no progress");
         eprintln!();
@@ -954,18 +955,37 @@ fn handle_check_impl(args: &[String]) -> i32 {
     }
 
     // Parse options
-    let json = args.iter().any(|a| a == "--json");
-    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
-    let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
+    let mut json = false;
+    let mut verbose = false;
+    let mut quiet = false;
+    let mut source_roots = Vec::new();
+    let mut files = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--verbose" | "-v" => verbose = true,
+            "--quiet" | "-q" => quiet = true,
+            "--source" => {
+                if i + 1 >= args.len() {
+                    eprintln!("error: --source requires a directory path");
+                    return 1;
+                }
+                source_roots.push(PathBuf::from(&args[i + 1]));
+                i += 1;
+            }
+            arg if arg.starts_with('-') => {}
+            arg => files.push(PathBuf::from(arg)),
+        }
+        i += 1;
+    }
 
-    let options = CheckOptions { json, verbose, quiet };
-
-    // Collect file paths (skip "check" and flags)
-    let files: Vec<PathBuf> = args[1..]
-        .iter()
-        .filter(|a| !a.starts_with("--") && !a.starts_with("-"))
-        .map(PathBuf::from)
-        .collect();
+    let options = CheckOptions {
+        json,
+        verbose,
+        quiet,
+        source_roots,
+    };
 
     if files.is_empty() {
         eprintln!("error: no files specified");
