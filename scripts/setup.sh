@@ -56,6 +56,14 @@ done
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
+host_kernel=$(uname -s 2>/dev/null || echo unknown)
+host_runtime_os="unknown"
+case "${host_kernel}" in
+  Linux) host_runtime_os="linux" ;;
+  Darwin) host_runtime_os="darwin" ;;
+  FreeBSD) host_runtime_os="freebsd" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) host_runtime_os="windows" ;;
+esac
 
 # ===========================================================================
 # Platform detection — <arch>-<vendor>-<os>-<abi>
@@ -73,64 +81,103 @@ exe="${PLATFORM_EXE}"
 echo "Platform: ${PLATFORM}"
 
 # ===========================================================================
-# Locate release binary
+# Locate preferred runtime / release binary
 # ===========================================================================
 
 release_dir="${repo_root}/bin/release"
 
-# Locate release binary — only <triple>/simple(.exe) layout
+# Prefer the live Rust build outputs when they exist. Those binaries are rebuilt
+# alongside the current source tree, while bin/release/<triple>/simple can be a
+# stale deployed artifact. FreeBSD also has a checked-in seed at bin/freebsd/simple.
+preferred_runtime=""
+if [ "${os}" != "windows" ]; then
+  if [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/src/compiler_rust/target/release/simple" ]; then
+    preferred_runtime="${repo_root}/src/compiler_rust/target/release/simple"
+  elif [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/src/compiler_rust/target/bootstrap/simple" ]; then
+    preferred_runtime="${repo_root}/src/compiler_rust/target/bootstrap/simple"
+  elif [ "${os}" = "freebsd" ] && [ -x "${repo_root}/bin/freebsd/simple" ]; then
+    preferred_runtime="${repo_root}/bin/freebsd/simple"
+  fi
+fi
+
+# Resolve a release binary.
+# Target-specific paths are always valid. The flat bin/release/simple fallback is
+# only valid when the target runtime OS matches the current host runtime OS.
+find_release_bin() {
+  local plat="$1" fos="$2" farch="$3" fext="$4"
+  if [ -f "${release_dir}/${plat}/simple${fext}" ]; then
+    echo "${plat}/simple${fext}"; return 0
+  elif [ -f "${release_dir}/${fos}-${farch}/simple${fext}" ]; then
+    echo "${fos}-${farch}/simple${fext}"; return 0
+  elif [ "${fos}" = "${host_runtime_os}" ] && [ -f "${release_dir}/simple${fext}" ]; then
+    echo "simple${fext}"; return 0
+  fi
+  return 1
+}
+
 if [ "${os}" = "windows" ]; then
   msvc_triple="${arch}-pc-windows-msvc"
   mingw_triple="${arch}-pc-windows-gnu"
   msvc_bin=""
   mingw_bin=""
 
-  if [ -f "${release_dir}/${msvc_triple}/simple.exe" ]; then
-    msvc_bin="${msvc_triple}/simple.exe"
+  if find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
+    msvc_bin="$(find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe")"
   fi
-  if [ -f "${release_dir}/${mingw_triple}/simple.exe" ]; then
-    mingw_bin="${mingw_triple}/simple.exe"
+  if find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
+    mingw_bin="$(find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe")"
   fi
 
   if [ -z "${msvc_bin}" ] && [ -z "${mingw_bin}" ]; then
     echo "error: no release binary found for Windows" >&2
-    echo "  Expected: ${release_dir}/${msvc_triple}/simple.exe" >&2
-    echo "       or:  ${release_dir}/${mingw_triple}/simple.exe" >&2
+    echo "" >&2
+    echo "Searched:" >&2
+    echo "  ${release_dir}/${msvc_triple}/simple.exe" >&2
+    echo "  ${release_dir}/${mingw_triple}/simple.exe" >&2
+    echo "  ${release_dir}/simple.exe" >&2
     echo "" >&2
     echo "Run the bootstrap first:" >&2
-    echo "  scripts/bootstrap/bootstrap-windows.sh --deploy" >&2
+    echo "  scripts/bootstrap/bootstrap-windows.sh --msvc --deploy" >&2
+    echo "  scripts/bootstrap/bootstrap-windows.sh --mingw --deploy" >&2
     exit 1
   fi
 
-  [ -n "${msvc_bin}" ]  && echo "MSVC binary:  bin/release/${msvc_bin}"
-  [ -n "${mingw_bin}" ] && echo "MinGW binary: bin/release/${mingw_bin}"
+  if [ -n "${msvc_bin}" ]; then
+    echo "MSVC binary:  bin/release/${msvc_bin}"
+  else
+    echo "warning: no MSVC binary found (${msvc_triple})" >&2
+  fi
+  if [ -n "${mingw_bin}" ]; then
+    echo "MinGW binary: bin/release/${mingw_bin}"
+  else
+    echo "warning: no MinGW binary found (${mingw_triple})" >&2
+  fi
 else
   release_bin=""
-  if [ -f "${release_dir}/${PLATFORM}/simple" ]; then
-    release_bin="${PLATFORM}/simple"
+  if find_release_bin "${PLATFORM}" "${os}" "${arch}" "" >/dev/null 2>&1; then
+    release_bin="$(find_release_bin "${PLATFORM}" "${os}" "${arch}" "")"
   fi
 
-  if [ -z "${release_bin}" ]; then
+  if [ -z "${release_bin}" ] && [ -z "${preferred_runtime}" ]; then
     echo "error: no release binary found for ${PLATFORM}" >&2
-    echo "  Expected: ${release_dir}/${PLATFORM}/simple" >&2
+    echo "" >&2
+    echo "Searched:" >&2
+    echo "  ${release_dir}/${PLATFORM}/simple" >&2
+    echo "  ${release_dir}/${os}-${arch}/simple" >&2
+    echo "  ${release_dir}/simple" >&2
+    if [ "${os}" = "freebsd" ]; then
+      echo "  ${repo_root}/bin/freebsd/simple" >&2
+    fi
     echo "" >&2
     echo "Run the bootstrap first:" >&2
     echo "  scripts/bootstrap/bootstrap-from-scratch.sh --deploy" >&2
     exit 1
   fi
 
-  echo "Release binary: bin/release/${release_bin}"
-fi
-
-# Prefer the live Rust build outputs when they exist. Those binaries are rebuilt
-# alongside the current source tree, while bin/release/<triple>/simple can be a
-# stale deployed artifact.
-preferred_runtime=""
-if [ "${os}" != "windows" ]; then
-  if [ -x "${repo_root}/src/compiler_rust/target/release/simple" ]; then
-    preferred_runtime="${repo_root}/src/compiler_rust/target/release/simple"
-  elif [ -x "${repo_root}/src/compiler_rust/target/bootstrap/simple" ]; then
-    preferred_runtime="${repo_root}/src/compiler_rust/target/bootstrap/simple"
+  if [ -n "${release_bin}" ]; then
+    echo "Release binary: bin/release/${release_bin}"
+  else
+    echo "Preferred runtime: ${preferred_runtime}"
   fi
 fi
 

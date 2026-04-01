@@ -295,8 +295,7 @@ if (( deploy )); then
   echo "Deployed full CLI binary to ${deploy_dir}/simple.exe"
 
   # Recreate symlinks
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  "${script_dir}/../../scripts/setup.sh" || true
+  cmd.exe /c "${repo_root}\\scripts\\setup.cmd" || true
 fi
 
 echo ""

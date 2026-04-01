@@ -8,7 +8,7 @@ Usage: scripts/bootstrap/bootstrap-freebsd-seed.sh [options]
 FreeBSD seed bootstrap verifier.
 
 This flow verifies the checked-in FreeBSD seed compiler by:
-1. copying bin/freebsd/simple to bin/simple
+1. linking bin/freebsd/simple to bin/simple via scripts/setup.sh
 2. transpiling the same smoke test twice and checking deterministic output
 3. normalizing the generated C++ entry point
 4. compiling and running the smoke binary with the FreeBSD runtime objects
@@ -80,9 +80,7 @@ hash_cmd() {
 
 mkdir -p "${output_dir}"
 mkdir -p "${output_dir}/runtime"
-rm -f bin/simple
-cp bin/freebsd/simple bin/simple
-chmod +x bin/simple
+"${repo_root}/scripts/setup.sh" --triple=x86_64-unknown-freebsd-elf
 
 smoke_spl="${output_dir}/freebsd_seed_smoke.spl"
 stage1_cpp="${output_dir}/freebsd_seed_stage1.cpp"

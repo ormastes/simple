@@ -1,9 +1,10 @@
 @echo off
 REM Simple Language — Windows setup (CMD/PowerShell)
 REM
-REM Creates dual links:
-REM   bin\simple.exe → bin\release\<arch>-pc-windows-msvc\simple.exe  (MSVC, for CMD)
-REM   bin\simple     → bin\release\<arch>-pc-windows-gnu\simple.exe   (MinGW, for bash)
+REM Creates symlink-only runtime entries:
+REM   bin\simple.exe
+REM   bin\simple
+REM   bin\release\simple.exe
 REM
 REM Usage:
 REM   scripts\setup.cmd [--dry-run]
@@ -38,8 +39,11 @@ REM Locate MSVC binary
 set "MSVC_BIN="
 if exist "%RELEASE_DIR%\%MSVC_TRIPLE%\simple.exe" (
     set "MSVC_BIN=%MSVC_TRIPLE%\simple.exe"
-) else if exist "%RELEASE_DIR%\simple.exe" (
-    set "MSVC_BIN=simple.exe"
+)
+if not defined MSVC_BIN (
+    if exist "%RELEASE_DIR%\simple.exe" (
+        set "MSVC_BIN=simple.exe"
+    )
 )
 
 REM Locate MinGW binary
@@ -70,6 +74,8 @@ if "%DRY_RUN%"=="1" (
     echo [dry-run] would create:
     if defined MSVC_BIN  echo   bin\simple.exe -^> release\%MSVC_BIN%
     if defined MINGW_BIN echo   bin\simple     -^> release\%MINGW_BIN%
+    if defined MSVC_BIN  echo   bin\release\simple.exe -^> %RELEASE_DIR%\%MSVC_BIN%
+    if not defined MSVC_BIN if defined MINGW_BIN echo   bin\release\simple.exe -^> %RELEASE_DIR%\%MINGW_BIN%
     exit /b 0
 )
 
@@ -78,16 +84,11 @@ echo.
 REM === Create bin\simple.exe → MSVC binary ===
 if defined MSVC_BIN (
     if exist "%REPO_ROOT%\bin\simple.exe" del "%REPO_ROOT%\bin\simple.exe"
-    REM Try symlink, then hardlink, then copy
     mklink "%REPO_ROOT%\bin\simple.exe" "release\%MSVC_BIN%" >nul 2>&1
     if !errorlevel! neq 0 (
-        mklink /H "%REPO_ROOT%\bin\simple.exe" "%RELEASE_DIR%\%MSVC_BIN%" >nul 2>&1
-        if !errorlevel! neq 0 (
-            copy "%RELEASE_DIR%\%MSVC_BIN%" "%REPO_ROOT%\bin\simple.exe" >nul
-            echo Created: bin\simple.exe [copy] -^> release\%MSVC_BIN%
-        ) else (
-            echo Created: bin\simple.exe [hardlink] -^> release\%MSVC_BIN%
-        )
+        echo error: failed to create symlink bin\simple.exe -^> release\%MSVC_BIN% >&2
+        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
+        exit /b 1
     ) else (
         echo Created: bin\simple.exe -^> release\%MSVC_BIN%
     )
@@ -98,15 +99,33 @@ if defined MINGW_BIN (
     if exist "%REPO_ROOT%\bin\simple" del "%REPO_ROOT%\bin\simple"
     mklink "%REPO_ROOT%\bin\simple" "release\%MINGW_BIN%" >nul 2>&1
     if !errorlevel! neq 0 (
-        mklink /H "%REPO_ROOT%\bin\simple" "%RELEASE_DIR%\%MINGW_BIN%" >nul 2>&1
-        if !errorlevel! neq 0 (
-            copy "%RELEASE_DIR%\%MINGW_BIN%" "%REPO_ROOT%\bin\simple" >nul
-            echo Created: bin\simple [copy] -^> release\%MINGW_BIN%
-        ) else (
-            echo Created: bin\simple [hardlink] -^> release\%MINGW_BIN%
-        )
+        echo error: failed to create symlink bin\simple -^> release\%MINGW_BIN% >&2
+        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
+        exit /b 1
     ) else (
         echo Created: bin\simple -^> release\%MINGW_BIN%
+    )
+)
+
+REM === Create bin\release\simple.exe root link ===
+set "ROOT_RELEASE_BIN="
+if defined MSVC_BIN (
+    set "ROOT_RELEASE_BIN=%MSVC_BIN%"
+)
+if not defined ROOT_RELEASE_BIN (
+    if defined MINGW_BIN (
+        set "ROOT_RELEASE_BIN=%MINGW_BIN%"
+    )
+)
+if defined ROOT_RELEASE_BIN (
+    if exist "%REPO_ROOT%\bin\release\simple.exe" del "%REPO_ROOT%\bin\release\simple.exe"
+    mklink "%REPO_ROOT%\bin\release\simple.exe" "%RELEASE_DIR%\%ROOT_RELEASE_BIN%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo error: failed to create symlink bin\release\simple.exe >&2
+        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
+        exit /b 1
+    ) else (
+        echo Created: bin\release\simple.exe -^> %RELEASE_DIR%\%ROOT_RELEASE_BIN%
     )
 )
 
@@ -188,7 +207,9 @@ for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_s
     if exist "%REPO_ROOT%\bin\%%M.cmd" del "%REPO_ROOT%\bin\%%M.cmd"
     mklink "%REPO_ROOT%\bin\%%M.cmd" "release\%%M.cmd" >nul 2>&1
     if !errorlevel! neq 0 (
-        copy "%RELEASE_DIR%\%%M.cmd" "%REPO_ROOT%\bin\%%M.cmd" >nul
+        echo error: failed to create symlink bin\%%M.cmd -^> release\%%M.cmd >&2
+        echo Enable Developer Mode or run elevated so mklink can create symlinks. >&2
+        exit /b 1
     )
 )
 echo   Linked bin\*_mcp_server.cmd
@@ -242,9 +263,10 @@ exit /b 0
 :usage
 echo Usage: scripts\setup.cmd [--dry-run]
 echo.
-echo Creates dual links for Windows:
-echo   bin\simple.exe  -^> MSVC binary   (for CMD / PowerShell)
-echo   bin\simple      -^> MinGW binary  (for Git Bash / MSYS2)
+echo Creates symlink-only runtime entries for Windows:
+echo   bin\simple.exe
+echo   bin\simple
+echo   bin\release\simple.exe
 echo.
 echo Options:
 echo   --dry-run   Show what would be done
