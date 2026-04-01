@@ -169,14 +169,25 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-dynamic-linker")
         args.push(crt.dynamic_linker)
 
-    # Hardening flags
-    args.push("--eh-frame-hdr")
-    args.push("--build-id")
-    args.push("--hash-style=gnu")
-    args.push("-z")
-    args.push("relro")
-    args.push("-z")
-    args.push("now")
+    # Hardening flags (ELF-only — macOS ld64 doesn't recognize these)
+    if os != "macos" and os != "darwin":
+        args.push("--eh-frame-hdr")
+        args.push("--build-id")
+        args.push("--hash-style=gnu")
+        args.push("-z")
+        args.push("relro")
+        args.push("-z")
+        args.push("now")
+
+    # Dead code elimination + deduplication (per-platform)
+    if os == "macos" or os == "darwin":
+        args.push("-dead_strip")
+    else:
+        args.push("--gc-sections")
+        # ICF: mold and lld support --icf=all, GNU ld does not (ignored if unsupported)
+        val lt = linker_type.to_string()
+        if lt == "mold" or lt == "lld":
+            args.push("--icf=all")
 
     # PIE
     if config.pie:
@@ -455,6 +466,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         sb.push(" -l")
         sb.push(lib)
 
+    # Dead code elimination + deduplication (per-platform, via cc -Wl,)
+    if os_name == "Darwin":
+        sb.push(" -Wl,-dead_strip")
+    else:
+        sb.push(" -Wl,--gc-sections")
+
     # Extra flags
     for flag in config.extra_flags:
         sb.push(" ")
@@ -675,6 +692,10 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
     for lib in config.libraries:
         sb.push(" -l")
         sb.push(lib)
+
+    # NOTE: No -dead_strip / --gc-sections for shared libraries.
+    # Exported ABI symbols may not be referenced internally but must survive
+    # for consumers. Dead-stripping would remove them.
 
     # Extra flags
     for flag in config.extra_flags:

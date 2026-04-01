@@ -1,28 +1,55 @@
+# Stage 1: Build the Simple binary from Rust source (native arm64)
+FROM rust:1.85-bookworm AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build dependencies
+RUN apt-get update && apt-get install -y \
+    clang \
+    cmake \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy Rust source and Simple source
+COPY src/compiler_rust/ src/compiler_rust/
+COPY src/compiler/ src/compiler/
+COPY src/lib/ src/lib/
+COPY src/app/ src/app/
+COPY src/runtime/ src/runtime/
+COPY src/i18n/ src/i18n/
+
+# Build the Rust seed (bootstrap profile, no LLVM)
+RUN cd src/compiler_rust && \
+    cargo build --profile bootstrap -p simple-driver && \
+    cargo build --profile bootstrap -p simple-native-all --no-default-features && \
+    ls -la target/bootstrap/simple
+
+# Stage 2: Test runner image
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Minimal deps for running the Simple binary
+# Runtime deps
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libstdc++6 \
+    clang \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd -g 1001 testuser && \
     useradd -u 1001 -g 1001 -m -s /bin/bash testuser
 
-# Copy the Simple binary (Rust bootstrap — self-hosted binary segfaults, LIM-010)
-COPY src/compiler_rust/target/release/simple /usr/local/bin/simple
+# Copy the freshly built binary
+COPY --from=builder /build/src/compiler_rust/target/bootstrap/simple /usr/local/bin/simple
 RUN chmod +x /usr/local/bin/simple
 
-# Working directory
 WORKDIR /workspace
 
-# Default to non-root
 USER testuser
 
-# Verify binary works
 RUN simple --version
 
 ENTRYPOINT ["simple"]

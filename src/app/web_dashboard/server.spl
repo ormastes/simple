@@ -1,25 +1,34 @@
 @allow(unnamed_duplicate_typed_args)
 # Dashboard Web Server
 #
-# HTTP server for dashboard web interface with REST API endpoints.
-# Includes: project status, tmux terminal (read/write), WebSocket terminal, GUI viewer.
+# HTTP server for the main dashboard web interface.
 
-use core.net.tcp.{TcpListener, TcpStream}
-use core.time.{now_iso8601}
-use tooling.dashboard.collector.{collect_dashboard_data}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use tooling.dashboard.cache.{get_cached_data}
-use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends}
+use tooling.dashboard.trends.{analyze_weekly_trends}
 use tooling.dashboard.alerts.{check_alerts_with_trends}
 use std.json.builder.{escape_json}
 use app.web_dashboard.tmux_api.{handle_tmux_api}
 use app.web_dashboard.terminal_ws.{handle_terminal_ws}
 use app.web_dashboard.dashboard_html.{generate_full_dashboard_html}
-use app.ui.web.ws_handler.{extract_ws_key, is_ws_upgrade_request}
 use std.text.{to_int_or}
 use dashboard.views.status.{render_status_html, render_vcs_state_html}
 use std.tmux.{tmux_available, tmux_server_running, tmux_list_sessions}
 use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.gui.html_views.{generate_agents_html}
+
+fn parse_request_line(request_line: text) -> (text, text):
+    var method = ""
+    var path = ""
+    var idx = 0
+    for part in request_line.split(" "):
+        if idx == 0:
+            method = part
+        elif idx == 1:
+            path = part
+            break
+        idx = idx + 1
+    return (method, path)
 
 # =========================================================================
 # HTTP Server
@@ -35,45 +44,40 @@ class DashboardServer:
             auto_refresh_seconds: 30
         }
 
-    # Start the server
     fn start():
         print "Starting Dashboard Web Server on port {self.port}..."
         print "Open http://localhost:{self.port} in your browser"
-        print "Press Ctrl+C to stop\n"
+        print "Press Ctrl+C to stop"
+        print ""
 
-        match TcpListener.bind("0.0.0.0", self.port):
-            Err(e) =>
+        match TcpListener.bind("0.0.0.0:{self.port}"):
+            Err(e):
                 print "Error: Failed to bind to port {self.port}: {e}"
                 return
-            Ok(listener) =>
+            Ok(listener):
                 self.serve_loop(listener)
 
-    # Main server loop
     fn serve_loop(listener: TcpListener):
         loop:
             match listener.accept():
-                Ok(stream) =>
+                Ok(stream):
                     self.handle_connection(stream)
-                Err(e) =>
+                Err(e):
                     print "Error accepting connection: {e}"
 
-    # Handle a single connection
     fn handle_connection(stream: TcpStream):
         match stream.read_line():
-            Err(e) =>
+            Err(e):
                 print "Error reading request: {e}"
-                return
-            Ok(request_line) =>
-                val parts = request_line.split(" ")
-                if parts.len() < 2:
-                    stream.write_all(http_error(400, "Bad Request"))
-                    stream.close()
+            Ok(request_line):
+                val request = parse_request_line(request_line)
+                val method = request.0
+                val path = request.1
+                if method == "" or path == "":
+                    val _ = stream.write_all(http_error(400, "Bad Request"))
+                    val _ = stream.close()
                     return
 
-                val method = parts[0]
-                val path = parts[1]
-
-                # Read remaining headers (needed for WebSocket upgrade)
                 var headers = ""
                 var is_ws = false
                 var content_length = 0
@@ -91,83 +95,94 @@ class DashboardServer:
                         Err(_):
                             break
 
-                # Read body for POST/DELETE
                 var body = ""
                 if (method == "POST" or method == "DELETE") and content_length > 0:
                     match stream.read_bytes(content_length):
-                        Ok(data) => body = data
-                        Err(_) => pass_dn
+                        Ok(data):
+                            body = data
+                        Err(_):
+                            pass_dn
 
-                # WebSocket upgrade for terminal
                 if is_ws and path.starts_with("/ws/terminal"):
-                    val query = if path.contains("?"): path[path.index_of("?") ?? path.len():] else: ""
+                    val query = if path.contains("?"):
+                        path[path.index_of("?") ?? path.len():]
+                    else:
+                        ""
                     handle_terminal_ws(stream, headers, query)
                     return
 
-                # Route HTTP requests
                 val response = self.route_request(method, path, body)
                 match stream.write_all(response):
-                    Err(e) => print "Error writing response: {e}"
-                    Ok(_) => pass
+                    Err(e):
+                        print "Error writing response: {e}"
+                    Ok(_):
+                        pass_dn
 
-        stream.close()
+                match stream.close():
+                    Err(e):
+                        print "Close error: {e}"
+                    Ok(_):
+                        pass_dn
 
-    # Route HTTP request
     fn route_request(method: text, path: text, body: text) -> text:
-        # API routes
         if path.starts_with("/api/tmux"):
-            val (status, content_type, resp_body) = handle_tmux_api(method, path, body)
-            return http_response(status, content_type, resp_body)
+            val tmux_result = handle_tmux_api(method, path, body)
+            return http_response(tmux_result.0, tmux_result.1, tmux_result.2)
 
         if path.starts_with("/api/"):
             return self.handle_api(method, path)
 
-        # LLM Agent Dashboard
         if path == "/agents" or path.starts_with("/agents"):
             return self.serve_agents()
 
-        # Static files
         if path.starts_with("/static/"):
             return self.serve_static(path)
 
-        # Default: serve index page
         return self.serve_index()
 
-    # Handle API requests
     fn handle_api(method: text, path: text) -> text:
         if method != "GET":
             return http_error(405, "Method Not Allowed")
 
-        # Strip query string for matching
-        val clean_path = if path.contains("?"): path[0:path.index_of("?") ?? path.len()] else: path
+        val clean_path = if path.contains("?"):
+            path[0:path.index_of("?") ?? path.len()]
+        else:
+            path
 
         match clean_path:
-            "/api/status" => self.api_status()
-            "/api/features" => self.api_features()
-            "/api/todos" => self.api_todos()
-            "/api/coverage" => self.api_coverage()
-            "/api/tests" => self.api_tests()
-            "/api/trends" => self.api_trends()
-            "/api/alerts" => self.api_alerts()
-            "/api/vcs" => self.api_vcs()
-            "/api/plans" => self.api_plans()
-            _ => http_error(404, "Not Found")
+            "/api/status":
+                return self.api_status()
+            "/api/features":
+                return self.api_features()
+            "/api/todos":
+                return self.api_todos()
+            "/api/coverage":
+                return self.api_coverage()
+            "/api/tests":
+                return self.api_tests()
+            "/api/trends":
+                return self.api_trends()
+            "/api/alerts":
+                return self.api_alerts()
+            "/api/vcs":
+                return self.api_vcs()
+            "/api/plans":
+                return self.api_plans()
+            _:
+                return http_error(404, "Not Found")
 
-    # Serve index page — server-side rendered via shared dashboard.views
     fn serve_index() -> text:
-        # Render status from shared view (same logic as CLI dashboard)
         var status_html = ""
         var vcs_html = "--"
         var tmux_card_html = ""
 
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 status_html = render_status_html(data)
                 vcs_html = render_vcs_state_html(data.vcs_state)
-            Err(_) =>
+            Err(_):
                 status_html = "<div class=\"empty-state\">No dashboard data. Run: simple dashboard collect</div>"
 
-        # Tmux card (web-specific addition)
         if tmux_available():
             val running = tmux_server_running()
             val sessions = tmux_list_sessions()
@@ -178,27 +193,23 @@ class DashboardServer:
         val html = generate_full_dashboard_html(self.port, status_html, vcs_html, tmux_card_html)
         return http_response(200, "text/html", html)
 
-    # Serve LLM Agent Dashboard
     fn serve_agents() -> text:
         var store = AgentDashboardStore.new()
         store.poll()
         val html = generate_agents_html(store)
         return http_response(200, "text/html", html)
 
-    # Serve static files
     fn serve_static(path: text) -> text:
-        # For now, return 404 (static files would be added later)
         return http_error(404, "Not Found")
 
     # =========================================================================
     # API Endpoints
     # =========================================================================
 
-    # GET /api/status - Dashboard summary
     fn api_status() -> text:
         match get_cached_data():
-            Ok(data) =>
-                val json = "{\n"
+            Ok(data):
+                var json = "{\n"
                 json = "{json}  \"features_total\": {data.total_features()},\n"
                 json = "{json}  \"features_complete\": {data.completed_features()},\n"
                 json = "{json}  \"todos_total\": {data.total_todos()},\n"
@@ -209,82 +220,84 @@ class DashboardServer:
                 json = "{json}  \"timestamp\": \"{data.timestamp}\"\n"
                 json = "{json}}"
                 return http_response(200, "application/json", json)
-            Err(e) =>
+            Err(e):
                 return http_error(500, "Failed to load data: {e}")
 
-    # GET /api/features - All features
     fn api_features() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var parts: [text] = []
                 parts.push("[\n")
-                for i in 0..data.features.len():
+                var i = 0
+                while i < data.features.len():
                     val f = data.features[i]
                     parts.push("  {\n")
                     parts.push("    \"id\": {f.id},\n")
-                    parts.push("    \"category\": \"{f.category}\",\n")
-                    parts.push("    \"name\": \"{f.name}\",\n")
-                    parts.push("    \"status\": \"{f.status}\"\n")
+                    parts.push("    \"category\": \"{escape_json(f.category)}\",\n")
+                    parts.push("    \"name\": \"{escape_json(f.name)}\",\n")
+                    parts.push("    \"status\": \"{escape_json(f.status)}\"\n")
                     parts.push("  }")
                     if i < data.features.len() - 1:
                         parts.push(",")
                     parts.push("\n")
+                    i = i + 1
                 parts.push("]")
                 return http_response(200, "application/json", parts.join(""))
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/todos - All TODOs
     fn api_todos() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var parts: [text] = []
                 parts.push("[\n")
-                for i in 0..data.todos.len():
+                var i = 0
+                while i < data.todos.len():
                     val t = data.todos[i]
                     parts.push("  {\n")
                     parts.push("    \"id\": {t.id},\n")
-                    parts.push("    \"priority\": \"{t.priority}\",\n")
-                    parts.push("    \"area\": \"{t.area}\",\n")
+                    parts.push("    \"priority\": \"{escape_json(t.priority)}\",\n")
+                    parts.push("    \"area\": \"{escape_json(t.area)}\",\n")
                     parts.push("    \"description\": \"{escape_json(t.description)}\",\n")
-                    parts.push("    \"file\": \"{t.file}\"\n")
+                    parts.push("    \"file\": \"{escape_json(t.file)}\"\n")
                     parts.push("  }")
                     if i < data.todos.len() - 1:
                         parts.push(",")
                     parts.push("\n")
+                    i = i + 1
                 parts.push("]")
                 return http_response(200, "application/json", parts.join(""))
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/coverage - Coverage metrics
     fn api_coverage() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var parts: [text] = []
                 parts.push("{\n")
                 parts.push("  \"overall\": {data.overall_coverage()},\n")
                 parts.push("  \"metrics\": [\n")
-                for i in 0..data.coverage.len():
+                var i = 0
+                while i < data.coverage.len():
                     val c = data.coverage[i]
                     parts.push("    {\n")
-                    parts.push("      \"level\": \"{c.level}\",\n")
-                    parts.push("      \"crate\": \"{c.crate}\",\n")
+                    parts.push("      \"level\": \"{escape_json(c.level)}\",\n")
+                    parts.push("      \"crate\": \"{escape_json(c.crate)}\",\n")
                     parts.push("      \"percent\": {c.lines_percent}\n")
                     parts.push("    }")
                     if i < data.coverage.len() - 1:
                         parts.push(",")
                     parts.push("\n")
+                    i = i + 1
                 parts.push("  ]\n")
                 parts.push("}")
                 return http_response(200, "application/json", parts.join(""))
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/tests - SSpec test summary
     fn api_tests() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var passing = 0
                 for test in data.sspec_tests:
                     if test.success_rate() == 100.0:
@@ -295,118 +308,114 @@ class DashboardServer:
                 json = "{json}  \"passing\": {passing}\n"
                 json = "{json}}"
                 return http_response(200, "application/json", json)
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/trends - Trend analysis
     fn api_trends() -> text:
         match analyze_weekly_trends():
-            Ok(report) =>
+            Ok(report):
                 var json = "{\n"
                 json = "{json}  \"days\": {report.days},\n"
                 json = "{json}  \"coverage\": {\n"
                 json = "{json}    \"current\": {report.coverage.current},\n"
                 json = "{json}    \"change\": {report.coverage.change_percent},\n"
-                json = "{json}    \"status\": \"{report.coverage.status}\"\n"
+                json = "{json}    \"status\": \"{escape_json(report.coverage.status)}\"\n"
                 json = "{json}  },\n"
                 json = "{json}  \"features\": {\n"
                 json = "{json}    \"current\": {report.features.current},\n"
                 json = "{json}    \"change\": {report.features.change_percent},\n"
-                json = "{json}    \"status\": \"{report.features.status}\"\n"
+                json = "{json}    \"status\": \"{escape_json(report.features.status)}\"\n"
                 json = "{json}  }\n"
                 json = "{json}}"
                 return http_response(200, "application/json", json)
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/alerts - Current alerts
     fn api_alerts() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 match analyze_weekly_trends():
-                    Ok(trends) =>
+                    Ok(trends):
                         val alerts = check_alerts_with_trends(data, trends)
                         var parts: [text] = []
                         parts.push("[\n")
-                        for i in 0..alerts.len():
+                        var i = 0
+                        while i < alerts.len():
                             val a = alerts[i]
                             parts.push("  {\n")
-                            parts.push("    \"level\": \"{a.level}\",\n")
-                            parts.push("    \"metric\": \"{a.metric}\",\n")
+                            parts.push("    \"level\": \"{escape_json(a.level)}\",\n")
+                            parts.push("    \"metric\": \"{escape_json(a.metric)}\",\n")
                             parts.push("    \"message\": \"{escape_json(a.message)}\"\n")
                             parts.push("  }")
                             if i < alerts.len() - 1:
                                 parts.push(",")
                             parts.push("\n")
+                            i = i + 1
                         parts.push("]")
                         return http_response(200, "application/json", parts.join(""))
-                    Err(_) =>
+                    Err(_):
                         return http_response(200, "application/json", "[]")
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/vcs - VCS state
     fn api_vcs() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var json = "{\n"
-                json = "{json}  \"bookmark\": \"{data.vcs_state.bookmark}\",\n"
-                json = "{json}  \"commit_id\": \"{data.vcs_state.commit_id}\",\n"
+                json = "{json}  \"bookmark\": \"{escape_json(data.vcs_state.bookmark)}\",\n"
+                json = "{json}  \"commit_id\": \"{escape_json(data.vcs_state.commit_id)}\",\n"
                 json = "{json}  \"uncommitted\": {data.vcs_state.uncommitted_files},\n"
                 json = "{json}  \"is_clean\": {data.vcs_state.is_clean()}\n"
                 json = "{json}}"
                 return http_response(200, "application/json", json)
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
-    # GET /api/plans - All plans
     fn api_plans() -> text:
         match get_cached_data():
-            Ok(data) =>
+            Ok(data):
                 var parts: [text] = []
                 parts.push("[\n")
-                for i in 0..data.plans.len():
+                var i = 0
+                while i < data.plans.len():
                     val p = data.plans[i]
                     parts.push("  {\n")
                     parts.push("    \"id\": {p.id},\n")
                     parts.push("    \"title\": \"{escape_json(p.title)}\",\n")
-                    parts.push("    \"status\": \"{p.status}\",\n")
+                    parts.push("    \"status\": \"{escape_json(p.status)}\",\n")
                     parts.push("    \"progress\": {p.progress_percent()}\n")
                     parts.push("  }")
                     if i < data.plans.len() - 1:
                         parts.push(",")
                     parts.push("\n")
+                    i = i + 1
                 parts.push("]")
                 return http_response(200, "application/json", parts.join(""))
-            Err(e) =>
+            Err(e):
                 return http_error(500, e)
 
 # =========================================================================
 # HTTP Helpers
 # =========================================================================
 
-# Create HTTP response
 fn http_response(status: i32, content_type: text, body: text) -> text:
     val status_text = match status:
-        200 => "OK"
-        404 => "Not Found"
-        500 => "Internal Server Error"
-        _ => "Unknown"
+        200: "OK"
+        400: "Bad Request"
+        404: "Not Found"
+        405: "Method Not Allowed"
+        500: "Internal Server Error"
+        _: "Unknown"
 
     var response = "HTTP/1.1 {status} {status_text}\r\n"
     response = "{response}Content-Type: {content_type}\r\n"
     response = "{response}Content-Length: {body.len()}\r\n"
     response = "{response}Access-Control-Allow-Origin: *\r\n"
+    response = "{response}Connection: close\r\n"
     response = "{response}\r\n"
     response = "{response}{body}"
     return response
 
-# Create HTTP error response
 fn http_error(status: i32, message: text) -> text:
-    val body = "{\"error\": \"{message}\"}"
+    val body = "{\"error\": \"{escape_json(message)}\"}"
     return http_response(status, "application/json", body)
-
-# =========================================================================
-# Exports
-# =========================================================================
-
