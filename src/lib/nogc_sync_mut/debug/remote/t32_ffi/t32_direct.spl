@@ -1,0 +1,113 @@
+@allow(primitive_api)
+# T32 Direct/TAP/DAP Access API FFI — JTAG/SWD low-level + I2C + Lua
+
+use std.ffi.dynamic.{spl_dlsym, spl_wffi_call_i64}
+use std.ffi.dynamic_versioned.{VersionedDynLib}
+use std.debug.remote.t32_ffi.t32_types.{T32_OK, T32Error, make_t32_error}
+
+extern fn spl_str_to_cstr(s: text) -> i64
+extern fn spl_alloc_buffer(size: i64) -> i64
+extern fn spl_free_buffer(ptr: i64)
+
+var _fp_BundledAccessAlloc: i64 = 0
+var _fp_BundledAccessExecute: i64 = 0
+var _fp_BundledAccessFree: i64 = 0
+var _fp_DirectAccessRelease: i64 = 0
+var _fp_TAPAccessSetInfo: i64 = 0
+var _fp_TAPAccessShiftRaw: i64 = 0
+var _fp_TAPAccessShiftIR: i64 = 0
+var _fp_TAPAccessShiftDR: i64 = 0
+var _fp_DAPAccessScan: i64 = 0
+var _fp_DAPAccessInitSWD: i64 = 0
+var _fp_I2CAccess: i64 = 0
+var _fp_ExecuteLua: i64 = 0
+var _fp_GetWindowContent: i64 = 0
+var _fp_GetLastErrorMessage: i64 = 0
+var _fp_APILock: i64 = 0
+var _fp_APIUnlock: i64 = 0
+var _fp_GetSocketHandle: i64 = 0
+
+fn t32_direct_bind(lib: VersionedDynLib) -> [text]:
+    var missing: [text] = []
+    _fp_BundledAccessAlloc = lib.lib.sym("T32_BundledAccessAlloc")
+    _fp_BundledAccessExecute = lib.lib.sym("T32_BundledAccessExecute")
+    _fp_BundledAccessFree = lib.lib.sym("T32_BundledAccessFree")
+    _fp_DirectAccessRelease = lib.lib.sym("T32_DirectAccessRelease")
+    _fp_TAPAccessSetInfo = lib.lib.sym("T32_TAPAccessSetInfo")
+    _fp_TAPAccessShiftRaw = lib.lib.sym("T32_TAPAccessShiftRaw")
+    _fp_TAPAccessShiftIR = lib.lib.sym("T32_TAPAccessShiftIR")
+    _fp_TAPAccessShiftDR = lib.lib.sym("T32_TAPAccessShiftDR")
+    _fp_DAPAccessScan = lib.lib.sym("T32_DAPAccessScan")
+    _fp_DAPAccessInitSWD = lib.lib.sym("T32_DAPAccessInitSWD")
+    # New API (optional)
+    _fp_I2CAccess = lib.lib.sym("T32_I2CAccess")
+    _fp_ExecuteLua = lib.lib.sym("T32_ExecuteLua")
+    _fp_GetWindowContent = lib.lib.sym("T32_GetWindowContent")
+    _fp_GetLastErrorMessage = lib.lib.sym("T32_GetLastErrorMessage")
+    _fp_APILock = lib.lib.sym("T32_APILock")
+    _fp_APIUnlock = lib.lib.sym("T32_APIUnlock")
+    _fp_GetSocketHandle = lib.lib.sym("T32_GetSocketHandle")
+    # Direct/TAP are optional — don't fail on missing
+    missing
+
+fn t32_direct_function_names() -> [text]:
+    ["T32_BundledAccessAlloc", "T32_BundledAccessExecute", "T32_BundledAccessFree",
+     "T32_DirectAccessRelease", "T32_TAPAccessSetInfo",
+     "T32_TAPAccessShiftRaw", "T32_TAPAccessShiftIR", "T32_TAPAccessShiftDR",
+     "T32_DAPAccessScan", "T32_DAPAccessInitSWD",
+     "T32_I2CAccess", "T32_ExecuteLua",
+     "T32_GetWindowContent", "T32_GetLastErrorMessage",
+     "T32_APILock", "T32_APIUnlock", "T32_GetSocketHandle"]
+
+# int T32_APILock(int timeout_ms)
+fn t32_api_lock(timeout_ms: i64) -> Result<i64, T32Error>:
+    if _fp_APILock == 0: return Err(make_t32_error(-999))
+    var args: [i64] = [timeout_ms]
+    val rc = spl_wffi_call_i64(_fp_APILock, args, 1)
+    if rc == T32_OK: Ok(rc) else: Err(make_t32_error(rc))
+
+# int T32_APIUnlock(void)
+fn t32_api_unlock() -> Result<i64, T32Error>:
+    if _fp_APIUnlock == 0: return Err(make_t32_error(-999))
+    var args: [i64] = []
+    val rc = spl_wffi_call_i64(_fp_APIUnlock, args, 0)
+    if rc == T32_OK: Ok(rc) else: Err(make_t32_error(rc))
+
+# int T32_GetLastErrorMessage(char* msg, uint32_t* pCode, uint32_t* pInternal)
+fn t32_get_last_error_message() -> Result<text, T32Error>:
+    if _fp_GetLastErrorMessage == 0: return Err(make_t32_error(-999))
+    val msg_buf = spl_alloc_buffer(1024)
+    val code_buf = spl_alloc_buffer(8)
+    val int_buf = spl_alloc_buffer(8)
+    var args: [i64] = [msg_buf, code_buf, int_buf]
+    val rc = spl_wffi_call_i64(_fp_GetLastErrorMessage, args, 3)
+    extern fn spl_cstr_to_str(ptr: i64) -> text
+    extern fn spl_read_i32(ptr: i64) -> i64
+    if rc == T32_OK:
+        val msg = spl_cstr_to_str(msg_buf)
+        spl_free_buffer(msg_buf)
+        spl_free_buffer(code_buf)
+        spl_free_buffer(int_buf)
+        Ok(msg)
+    else:
+        spl_free_buffer(msg_buf)
+        spl_free_buffer(code_buf)
+        spl_free_buffer(int_buf)
+        Err(make_t32_error(rc))
+
+# int T32_GetWindowContent(const char* cmd, char* buf, uint32_t requested, uint32_t offset, uint32_t print_code)
+fn t32_get_window_content(command: text, offset: i64, print_code: i64) -> Result<text, T32Error>:
+    if _fp_GetWindowContent == 0: return Err(make_t32_error(-999))
+    val cmd = spl_str_to_cstr(command)
+    val buf_size: i64 = 8192
+    val buf = spl_alloc_buffer(buf_size)
+    var args: [i64] = [cmd, buf, buf_size, offset, print_code]
+    val rc = spl_wffi_call_i64(_fp_GetWindowContent, args, 5)
+    extern fn spl_cstr_to_str(ptr: i64) -> text
+    if rc == T32_OK:
+        val result = spl_cstr_to_str(buf)
+        spl_free_buffer(buf)
+        Ok(result)
+    else:
+        spl_free_buffer(buf)
+        Err(make_t32_error(rc))
