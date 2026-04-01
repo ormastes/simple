@@ -1180,11 +1180,12 @@ int main(int argc, char** argv) {
             cmd.arg("-Wl,-s");
             #[cfg(target_os = "windows")]
             if is_clang_cl {
-                cmd.arg("/link").arg("/DEBUG:NONE");
+                cmd.arg("/link").arg("/DEBUG:NONE").arg("/OPT:REF,ICF");
             } else if is_msvc {
-                cmd.arg("-Wl,/DEBUG:NONE");
+                cmd.arg("-Wl,/DEBUG:NONE").arg("-Wl,/OPT:REF,ICF");
             } else {
-                cmd.arg("-Wl,-s");
+                // MinGW: gc-sections + strip
+                cmd.arg("-Wl,--gc-sections").arg("-Wl,-s");
             }
         }
 

@@ -553,6 +553,8 @@ impl NativeLinker {
                 }
                 if options.strip {
                     cmd.arg("/DEBUG:NONE");
+                    // Remove unreferenced functions/data and fold identical COMDATs
+                    cmd.arg("/OPT:REF,ICF");
                 }
                 if options.shared {
                     cmd.arg("/DLL");

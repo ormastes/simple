@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-03-25 11:14:44
+**Generated:** 2026-04-01 22:05:46
 **Total Tests:** 92
 **Status:** ⚠️ 12 FAILED
 
@@ -45,87 +45,6 @@
 
 ## ❌ Failed Tests (12)
 
-### 🔴 type_conversion_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/type_conversion_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 tensor_bridge_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 comment_only_spec
-
-**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 sdn_minimal_spec
-
-**File:** `test/tmp/sdn_minimal_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 fixed_size_arrays_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_arrays_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 mat4_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
-**Category:** System
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 loss_nograd_blocks_spec
-
-**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 gpu_kernel_launch_syntax_spec
-
-**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
-**Category:** Unknown
-**Failed:** 
-**Flaky:** No (0.0% failure rate)
-
----
-
-### 🔴 ids_spec
-
-**File:** `test/unit/lib/engine/ids_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
 ### 🔴 fixed_size_edge_cases_spec
 
 **File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_edge_cases_spec.spl`
@@ -144,10 +63,91 @@
 
 ---
 
+### 🔴 loss_nograd_blocks_spec
+
+**File:** `test/feature/usage/loss_nograd_blocks_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
 ### 🔴 stub_impl_spec
 
 **File:** `test/unit/compiler/lint/stub_impl_spec.spl`
 **Category:** Unit
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 sdn_minimal_spec
+
+**File:** `test/tmp/sdn_minimal_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 ids_spec
+
+**File:** `test/unit/lib/engine/ids_spec.spl`
+**Category:** Unit
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 mat4_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/mat4_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 tensor_bridge_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/math/tensor_bridge_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 gpu_kernel_launch_syntax_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/feature/usage/gpu_basic_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (0.0% failure rate)
+
+---
+
+### 🔴 type_conversion_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/type_conversion_spec.spl`
+**Category:** System
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 comment_only_spec
+
+**File:** `home/ormastes/dev/pub/simple/rust/test/meta/comment_only_spec.spl`
+**Category:** Unknown
+**Failed:** 
+**Flaky:** No (100.0% failure rate)
+
+---
+
+### 🔴 fixed_size_arrays_spec
+
+**File:** `home/ormastes/dev/pub/simple/test/system/features/arrays/fixed_size_arrays_spec.spl`
+**Category:** System
 **Failed:** 
 **Flaky:** No (100.0% failure rate)
 
@@ -163,9 +163,9 @@
 
 ### Priority 1: Fix Failing Tests (12)
 
-1. **type_conversion_spec** - 
-2. **tensor_bridge_spec** - 
-3. **comment_only_spec** - 
-4. **sdn_minimal_spec** - 
-5. **fixed_size_arrays_spec** - 
+1. **fixed_size_edge_cases_spec** - 
+2. **gpu_kernel_launch_syntax_spec** - 
+3. **loss_nograd_blocks_spec** - 
+4. **stub_impl_spec** - 
+5. **sdn_minimal_spec** - 
 

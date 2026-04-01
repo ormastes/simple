@@ -27,24 +27,23 @@ pub fn exists(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_dir()
 }
 
-/// Walk a directory tree recursively, returning all file paths.
+/// Walk a directory tree iteratively, returning all file paths.
+/// Uses an explicit stack to avoid stack overflow on deep directory trees (Windows default stack is 1 MB).
 pub fn walk(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    walk_recursive(path.as_ref(), &mut files)?;
-    Ok(files)
-}
-
-fn walk_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    if dir.is_dir() {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                walk_recursive(&path, files)?;
-            } else {
-                files.push(path);
+    let mut stack = vec![path.as_ref().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
             }
         }
     }
-    Ok(())
+    Ok(files)
 }
