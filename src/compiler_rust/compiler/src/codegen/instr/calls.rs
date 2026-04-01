@@ -643,8 +643,13 @@ pub fn compile_call<M: Module>(
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }
             sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            ctx.module
-                .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig)
+            let result = ctx.module
+                .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig);
+            // Cache for future lookups — prevents re-declaration with different arg counts
+            if let Ok(id) = &result {
+                ctx.func_ids.insert(resolved_name.to_string(), *id);
+            }
+            result
         };
 
         match func_id {

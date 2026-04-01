@@ -66,7 +66,17 @@ pub(crate) fn compile_closure_create<M: Module>(
             let mut sig = Signature::new(call_conv);
             sig.params.push(AbiParam::new(types::I64)); // closure pointer
             sig.returns.push(AbiParam::new(types::I64));
-            match ctx.module.declare_function(&resolved, Linkage::Import, &sig) {
+            // Use cached func_id if available, otherwise declare and cache
+            let fid_result = if let Some(&existing) = ctx.func_ids.get(resolved.as_ref()) {
+                Ok(existing)
+            } else {
+                let result = ctx.module.declare_function(&resolved, Linkage::Import, &sig);
+                if let Ok(id) = &result {
+                    ctx.func_ids.insert(resolved.to_string(), *id);
+                }
+                result
+            };
+            match fid_result {
                 Ok(fid) => {
                     let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
                     let fn_addr = builder.ins().func_addr(types::I64, func_ref);
@@ -287,16 +297,16 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // when the function was already declared with a specific signature in declare_functions)
             let fid = ctx.func_ids.get(resolved.as_ref()).copied().unwrap_or_else(|| {
                 let call_conv = platform_call_conv();
+                // Try with receiver + args first, then without receiver, then fallback.
+                // Cache result to prevent re-declaration with different arg counts.
                 let mut sig = Signature::new(call_conv);
-                // receiver + args: all i64
                 for _ in 0..args.len() + 1 {
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.returns.push(AbiParam::new(types::I64));
-                ctx.module
+                let id = ctx.module
                     .declare_function(&resolved, Linkage::Import, &sig)
                     .unwrap_or_else(|_| {
-                        // If declaration fails, try with just i64 params (no receiver)
                         let mut sig2 = Signature::new(call_conv);
                         for _ in 0..args.len() {
                             sig2.params.push(AbiParam::new(types::I64));
@@ -305,7 +315,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         ctx.module
                             .declare_function(&resolved, Linkage::Import, &sig2)
                             .unwrap_or_else(|_| ctx.runtime_funcs["rt_function_not_found"])
-                    })
+                    });
+                // Cache for future lookups
+                ctx.func_ids.insert(resolved.to_string(), id);
+                id
             });
             let fref = ctx.module.declare_func_in_func(fid, builder.func);
             let mut call_args = vec![get_vreg_or_default(ctx, builder, &receiver)];

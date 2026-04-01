@@ -249,7 +249,12 @@ pub(crate) fn compile_builtin_method<M: Module>(
                         sig.params.push(AbiParam::new(types::I64));
                     }
                     sig.returns.push(AbiParam::new(types::I64));
-                    ctx.module.declare_function(&resolved, Linkage::Import, &sig)
+                    let result = ctx.module.declare_function(&resolved, Linkage::Import, &sig);
+                    // Cache for future lookups
+                    if let Ok(id) = &result {
+                        ctx.func_ids.insert(resolved.to_string(), *id);
+                    }
+                    result
                 };
                 match func_id {
                     Ok(fid) => {

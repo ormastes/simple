@@ -104,37 +104,11 @@ if [ "${target}" = "freebsd-x86_64" ] || [ "${host_os}" = "FreeBSD" ]; then
   exec "${repo_root}/scripts/bootstrap/bootstrap-freebsd-seed.sh" ${freebsd_args}
 fi
 
-# Detect arch
-arch=$(uname -m 2>/dev/null || echo x86_64)
-case "${arch}" in
-  x86_64|amd64)  arch="x86_64" ;;
-  aarch64|arm64) arch="aarch64" ;;
-  i686|i386)     arch="i686" ;;
-esac
-
-# Build target triple
-vendor="unknown"
-case "${host_os}" in
-  Linux)
-    os="linux"
-    abi="gnu"
-    ;;
-  Darwin)
-    os="darwin"
-    vendor="apple"
-    abi="macho"
-    ;;
-  FreeBSD)
-    os="freebsd"
-    abi="elf"
-    ;;
-  *)
-    os=$(echo "${host_os}" | tr '[:upper:]' '[:lower:]')
-    abi="elf"
-    ;;
-esac
-
-PLATFORM="${arch}-${vendor}-${os}-${abi}"
+# Shared platform detection
+. "${repo_root}/scripts/platform-detect.sh"
+PLATFORM="${PLATFORM_TRIPLE}"
+arch="${PLATFORM_ARCH}"
+os="${PLATFORM_OS}"
 echo "Platform: ${PLATFORM}"
 
 log_dir="${output_dir}/logs/${PLATFORM}"
@@ -342,12 +316,7 @@ echo "Full CLI binary: ${full_bin}"
 # ===========================================================================
 
 if [ "${deploy}" -eq 1 ]; then
-  # Resolve deploy directory — prefer existing legacy format (os-arch), else use triple
-  if [ -d "bin/release/${os}-${arch}" ]; then
-    deploy_dir="bin/release/${os}-${arch}"
-  else
-    deploy_dir="bin/release/${PLATFORM}"
-  fi
+  deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
   install -m755 "${full_bin}" "${deploy_dir}/simple"
   echo "Deployed full CLI binary to ${deploy_dir}/simple"

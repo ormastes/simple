@@ -857,6 +857,8 @@ int main(int argc, char** argv) {
         if !is_msvc {
             cmd.arg("-fPIC");
         }
+        // Windows: MSVC link.exe must be first in PATH to avoid MSYS2/Git coreutils collision.
+        // clang-cl finds link.exe via PATH; ensure MSVC's link.exe is found before /usr/bin/link.
 
         // macOS: Use ld_classic (Apple's older linker) which is more tolerant
         #[cfg(target_os = "macos")]
@@ -1049,7 +1051,12 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Libraries — via PlatformLinkConfig (single source of truth per OS)
+        // Libraries — via PlatformLinkConfig (single source of truth per OS).
+        // When using clang-cl (MSVC target), force MSVC linker flavor even on MSYS2.
+        #[cfg(target_os = "windows")]
+        if is_clang_cl || is_msvc {
+            std::env::set_var("SIMPLE_LINKER_FLAVOR", "msvc");
+        }
         let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
@@ -1079,6 +1086,12 @@ int main(int argc, char** argv) {
         // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
         #[cfg(not(target_os = "windows"))]
         {
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
+            cmd.arg(&stubs_o);
+        }
+        #[cfg(target_os = "windows")]
+        if !is_msvc && !is_clang_cl {
+            // MinGW/GNU: generate stubs like Linux
             let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o)?;
             cmd.arg(&stubs_o);
         }
@@ -1132,7 +1145,7 @@ int main(int argc, char** argv) {
 /// Scans the given object files / archive for undefined symbols that have no definition,
 /// then generates a small C file with weak stub functions returning 0 for each.
 /// This prevents dyld from crashing at load time on macOS.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
 fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
@@ -1252,7 +1265,8 @@ fn generate_stub_object(
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let status = std::process::Command::new("clang")
+        let empty_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        let status = std::process::Command::new(&empty_cc)
             .arg("-c")
             .arg("-o")
             .arg(&stub_o)
@@ -1270,48 +1284,95 @@ fn generate_stub_object(
         needs_stub.len()
     );
 
-    // Generate pure assembly stubs via PlatformLinkConfig + asm_helpers.
+    // On Windows (MinGW), PE/COFF does not support truly unresolved symbols.
+    // Generate a C file with stub definitions that satisfy both function calls
+    // and .refptr data relocations. Each stub is a function returning tagged nil (3).
+    #[cfg(target_os = "windows")]
+    {
+        let mut c_code = String::with_capacity(needs_stub.len() * 120);
+        c_code.push_str("/* Auto-generated stubs for bootstrap linking (Windows) */\n");
+        c_code.push_str("#include <stdint.h>\n\n");
+        for sym in &needs_stub {
+            if !plat_config.is_valid_asm_label(sym) {
+                continue;
+            }
+            // Emit as a global function returning tagged nil (3)
+            // Use asm label to set the exact symbol name (dots, etc.)
+            c_code.push_str(&format!(
+                "int64_t __stub_{id}(void) __asm__(\"{sym}\");\n\
+                 int64_t __stub_{id}(void) {{ return 3; }}\n\n",
+                id = sym.replace('.', "_").replace('$', "_"),
+                sym = sym
+            ));
+        }
+
+        let stub_c = temp_dir.join("_stubs.c");
+        std::fs::write(&stub_c, &c_code).map_err(|e| format!("write stubs: {e}"))?;
+
+        let stub_o = temp_dir.join("_stubs.o");
+        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
+        let output = std::process::Command::new(&stub_cc)
+            .arg("-c")
+            .arg("-o")
+            .arg(&stub_o)
+            .arg(&stub_c)
+            .output()
+            .map_err(|e| format!("compile stubs ({stub_cc}): {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("failed to compile stub functions ({}): {}", stub_cc, stderr));
+        }
+
+        return Ok(stub_o);
+    }
+
+    // Non-Windows: generate pure assembly stubs via PlatformLinkConfig + asm_helpers.
     // Each stub returns tagged nil (3). Strategy is per-OS (Weak/WeakDefinition/Strong).
-    let mut asm_code = String::with_capacity(needs_stub.len() * 100);
-    asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut asm_code = String::with_capacity(needs_stub.len() * 100);
+        asm_code.push_str("/* Auto-generated stubs for bootstrap linking */\n");
 
-    let host_target = simple_common::target::Target::host();
-    let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
-    let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
+        let host_target = simple_common::target::Target::host();
+        let ret_nil = simple_common::platform::asm_helpers::asm_ret_nil(&host_target);
+        let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
 
-    for sym in &needs_stub {
-        if !plat_config.is_valid_asm_label(sym) {
-            continue;
+        for sym in &needs_stub {
+            if !plat_config.is_valid_asm_label(sym) {
+                continue;
+            }
+
+            // __builtin_* symbols → trampoline to real function (macOS only)
+            if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
+                let real_fn = format!("_{}", &sym["___builtin_".len()..]);
+                asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
+                continue;
+            }
+
+            asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
         }
 
-        // __builtin_* symbols → trampoline to real function (macOS only)
-        if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
-            let real_fn = format!("_{}", &sym["___builtin_".len()..]);
-            asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
-            continue;
+        let stub_s = temp_dir.join("_stubs.s");
+        std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
+
+        let stub_o = temp_dir.join("_stubs.o");
+        let asm_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        let output = std::process::Command::new(&asm_cc)
+            .arg("-c")
+            .arg("-o")
+            .arg(&stub_o)
+            .arg(&stub_s)
+            .output()
+            .map_err(|e| format!("assemble stubs ({asm_cc}): {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("failed to assemble stub functions ({}): {}", asm_cc, stderr));
         }
 
-        asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
+        Ok(stub_o)
     }
-
-    let stub_s = temp_dir.join("_stubs.s");
-    std::fs::write(&stub_s, &asm_code).map_err(|e| format!("write stubs: {e}"))?;
-
-    let stub_o = temp_dir.join("_stubs.o");
-    let output = std::process::Command::new("clang")
-        .arg("-c")
-        .arg("-o")
-        .arg(&stub_o)
-        .arg(&stub_s)
-        .output()
-        .map_err(|e| format!("assemble stubs: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("failed to assemble stub functions: {}", stderr));
-    }
-
-    Ok(stub_o)
 }
 
 /// Strip LLVM static constructors from a static archive to prevent segfaults (LIM-010).
@@ -1387,13 +1448,46 @@ fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, Strin
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
 fn is_system_symbol(sym: &str) -> bool {
+    // On Windows, most POSIX/libc functions in the list below don't exist.
+    // Only skip truly universal C runtime symbols (malloc, free, etc.)
+    // that are guaranteed to be in msvcrt/ucrt.
+    #[cfg(target_os = "windows")]
+    {
+        let name = sym.strip_prefix('_').unwrap_or(sym);
+        return is_windows_system_name(sym) || is_windows_system_name(name);
+    }
     // Strip leading underscore (macOS C ABI prepends _; ELF/FreeBSD doesn't).
-    // Check both original and stripped form so __errno_location matches
-    // whether or not the leading _ is stripped.
-    let name = sym.strip_prefix('_').unwrap_or(sym);
-    is_known_system_name(sym) || is_known_system_name(name)
+    #[cfg(not(target_os = "windows"))]
+    {
+        let name = sym.strip_prefix('_').unwrap_or(sym);
+        is_known_system_name(sym) || is_known_system_name(name)
+    }
+}
+
+/// Windows-only system symbols — only the subset that actually exists in msvcrt/ucrt.
+#[cfg(target_os = "windows")]
+fn is_windows_system_name(name: &str) -> bool {
+    matches!(
+        name,
+        // C runtime (msvcrt/ucrt)
+        "malloc" | "calloc" | "realloc" | "free" | "aligned_alloc" |
+        "memcpy" | "memmove" | "memset" | "memcmp" | "memchr" |
+        "strlen" | "strcmp" | "strncmp" | "strcpy" | "strncpy" | "strcat" | "strdup" |
+        "strerror" | "strstr" | "strchr" | "strrchr" | "strtol" | "strtoul" | "strtod" |
+        "printf" | "fprintf" | "sprintf" | "snprintf" | "puts" | "fputs" | "fputc" |
+        "fwrite" | "fread" | "fopen" | "fclose" | "fflush" | "fseek" | "ftell" |
+        "exit" | "_exit" | "abort" | "atexit" | "getenv" | "system" |
+        "sqrt" | "sqrtf" | "sin" | "cos" | "tan" | "exp" | "log" | "pow" |
+        "fabs" | "ceil" | "floor" | "round" | "fmod" |
+        "qsort" | "bsearch" | "abs" | "labs" | "rand" | "srand" |
+        "isdigit" | "isalpha" | "isspace" | "tolower" | "toupper" |
+        "setlocale" | "time" | "clock" |
+        // MSVC-specific
+        "__security_cookie" | "__security_check_cookie" | "__GSHandlerCheck" |
+        "__acrt_iob_func" | "__stdio_common_vfprintf" | "__stdio_common_vsprintf"
+    )
 }
 
 fn is_known_system_name(name: &str) -> bool {

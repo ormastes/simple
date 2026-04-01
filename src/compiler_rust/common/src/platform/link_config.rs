@@ -52,7 +52,13 @@ impl PlatformLinkConfig {
             TargetOS::Linux => Self::linux(),
             TargetOS::MacOS => Self::macos(),
             TargetOS::FreeBSD => Self::freebsd(),
-            TargetOS::Windows => Self::windows(),
+            TargetOS::Windows => {
+                if target.linker_flavor() == crate::target::LinkerFlavor::Gnu {
+                    Self::windows_mingw()
+                } else {
+                    Self::windows()
+                }
+            }
             _ => Self::linux(), // fallback
         }
     }
@@ -108,7 +114,12 @@ impl PlatformLinkConfig {
 
     fn windows() -> Self {
         Self {
-            libraries: vec!["kernel32", "ws2_32", "bcrypt", "userenv"],
+            libraries: vec![
+                "kernel32", "ws2_32", "bcrypt", "userenv", "ntdll",
+                "advapi32", "dbghelp", "ole32", "oleaut32", "shell32",
+                "crypt32", "secur32", "ncrypt", "iphlpapi",
+                "ucrt", "msvcrt", "vcruntime",
+            ],
             library_search_paths: vec![],
             system_scan_libs: vec![],
             nm_flags: vec![],
@@ -143,6 +154,10 @@ impl PlatformLinkConfig {
                 "ncrypt",
                 "iphlpapi",
                 "user32",
+                "gdi32",
+                "dwmapi",
+                "imm32",
+                "uxtheme",
                 "winmm",
                 "shlwapi",
                 "gcc_eh",
@@ -156,7 +171,7 @@ impl PlatformLinkConfig {
             nm_flags: vec![],
             stub_strategy: StubStrategy::Weak,
             asm_label_extra_chars: vec!['.', '$'],
-            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition"],
+            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition", "-Wl,--warn-unresolved-symbols", "-Wl,--no-fatal-warnings"],
             disable_pie: false,
         }
     }

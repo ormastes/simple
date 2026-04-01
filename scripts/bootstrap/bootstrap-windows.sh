@@ -69,62 +69,24 @@ cd "${repo_root}"
 
 # ===========================================================================
 # Platform detection — <arch>-<vendor>-<os>-<abi> target triple
-#
-# Consistent with LlvmTargetTriple (src/compiler/70.backend/backend/llvm_target.spl)
-# and TargetPreset (src/compiler/70.backend/target_presets.spl):
-#   arch:   CPU architecture   (x86_64, aarch64, i686)
-#   vendor: toolchain vendor   (pc, unknown, apple)
-#   os:     operating system   (windows, linux, freebsd, darwin)
-#   abi:    ABI / object fmt   (msvc, gnu, elf, macho, eabihf)
 # ===========================================================================
 
-# Detect CPU architecture from Windows env
-detect_arch() {
-  case "${PROCESSOR_ARCHITECTURE:-}" in
-    AMD64|x64)   echo "x86_64" ;;
-    ARM64)       echo "aarch64" ;;
-    x86)         echo "i686" ;;
-    *)           echo "x86_64" ;;  # default
-  esac
-}
+FORCE_TOOLCHAIN="${force_toolchain}"
+export FORCE_TOOLCHAIN
+. "${repo_root}/scripts/platform-detect.sh"
 
-# Detect toolchain (msvc or mingw) → determines ABI
-detect_toolchain() {
-  if [[ -n "$force_toolchain" ]]; then
-    echo "$force_toolchain"
-    return
-  fi
-  # MSYSTEM env var set by MSYS2
-  if [[ "${MSYSTEM:-}" == MINGW* ]]; then
-    echo "mingw"
-  elif command -v cl.exe &>/dev/null; then
-    echo "msvc"
-  elif command -v clang-cl &>/dev/null && clang-cl --version &>/dev/null; then
-    echo "msvc"
-  elif command -v gcc &>/dev/null; then
-    echo "mingw"
-  else
-    echo "msvc"  # default
-  fi
-}
-
-arch="$(detect_arch)"
-toolchain="$(detect_toolchain)"
-vendor="pc"
-
-# ABI: msvc or gnu
-if [[ "$toolchain" == "msvc" ]]; then
-  abi="msvc"
-else
-  abi="gnu"
+PLATFORM="${PLATFORM_TRIPLE}"
+arch="${PLATFORM_ARCH}"
+toolchain="${PLATFORM_ABI}"  # msvc or gnu
+if [[ "$toolchain" == "gnu" ]]; then
+  toolchain="mingw"
 fi
 
-PLATFORM="${arch}-${vendor}-windows-${abi}"
 echo "Platform: ${PLATFORM}"
-echo "  arch:      ${arch}"
-echo "  vendor:    ${vendor}"
-echo "  os:        windows"
-echo "  abi:       ${abi}"
+echo "  arch:      ${PLATFORM_ARCH}"
+echo "  vendor:    ${PLATFORM_VENDOR}"
+echo "  os:        ${PLATFORM_OS}"
+echo "  abi:       ${PLATFORM_ABI}"
 echo "  toolchain: ${toolchain}"
 
 log_dir="${output_dir}/logs/${PLATFORM}"
@@ -144,6 +106,21 @@ run_logged() {
   set +e
   "$@" >>"${log_file}" 2>&1
   local status=$?
+  # MSYS2 can fail to execute large PE files (exit 126 "Exec format error").
+  # Retry via cmd.exe with Windows paths as a workaround.
+  if [[ "${status}" -eq 126 ]]; then
+    echo "  (retrying via cmd.exe — MSYS2 exec format workaround)"
+    local win_args=()
+    for a in "$@"; do
+      if [[ -f "$a" ]]; then
+        win_args+=("$(cygpath -w "$a")")
+      else
+        win_args+=("$a")
+      fi
+    done
+    cmd.exe //c "${win_args[@]}" >>"${log_file}" 2>&1
+    status=$?
+  fi
   set -e
 
   echo "  ${label} log: ${log_file}"
@@ -213,9 +190,11 @@ stage1_bin="${stage1_dir}/simple.exe"
 stage2_bin="${stage2_dir}/simple.exe"
 stage3_bin="${stage3_dir}/simple.exe"
 
+export RUST_LOG="${RUST_LOG:-error}"
+
 # Stage 1: Rust seed → stage1
 echo "=== Stage 1: Rust seed → stage1 ==="
-run_logged stage1-native-build env RUST_LOG="${RUST_LOG:-error}" \
+run_logged stage1-native-build \
   "${seed_bin}" native-build \
     --source src/compiler --source src/lib --source src/app \
     --entry-closure \
@@ -234,7 +213,7 @@ echo "Stage 1 complete: ${stage1_bin}"
 # Stage 2: stage1 → stage2
 echo ""
 echo "=== Stage 2: stage1 → stage2 (${backend:-default}) ==="
-run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage1_bin}" native-build \
+run_logged stage2-native-build "${stage1_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry-closure \
   --entry src/app/cli/bootstrap_main.spl \
@@ -252,7 +231,7 @@ echo "Stage 2 complete: ${stage2_bin}"
 # Stage 3: stage2 → stage3 (verify)
 echo ""
 echo "=== Stage 3: stage2 → stage3 (${backend:-default}, verify) ==="
-run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage2_bin}" native-build \
+run_logged stage3-native-build "${stage2_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry-closure \
   --entry src/app/cli/bootstrap_main.spl \
@@ -293,7 +272,7 @@ full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 full_bin="${full_dir}/simple.exe"
 
-run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage3_bin}" native-build \
+run_logged stage4-native-build "${stage3_bin}" native-build \
   --source src/compiler --source src/lib --source src/app \
   --entry-closure \
   --entry src/app/cli/main.spl \

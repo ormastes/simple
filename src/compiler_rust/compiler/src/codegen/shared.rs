@@ -106,24 +106,26 @@ pub fn declare_functions<M: Module>(
     Ok(func_ids)
 }
 
-/// Build a Cranelift signature for a MIR function
+/// Build a Cranelift signature for a MIR function.
+///
+/// Uses uniform I64 for all parameters and returns to match cross-module
+/// import convention. All Simple values are i64-tagged at the ABI level,
+/// and function body variables are declared as I64 (body.rs).
+/// `adapt_args_to_signature` handles type conversions at call sites.
 pub fn build_mir_signature(func: &MirFunction) -> Signature {
     let call_conv = platform_call_conv();
     let mut sig = Signature::new(call_conv);
 
-    // Add parameters
-    for param in &func.params {
-        let ty = type_to_cranelift(param.ty);
-        sig.params.push(AbiParam::new(ty));
+    // Uniform I64 for all parameters — matches cross-module import assumption
+    for _param in &func.params {
+        sig.params.push(AbiParam::new(types::I64));
     }
 
-    // Add return type
+    // Return type: main() must return I32 for process exit code
     if func.name == "main" {
-        // C main() must return i32 for proper exit code
         sig.returns.push(AbiParam::new(types::I32));
     } else if func.return_type != TypeId::VOID {
-        let ret_ty = type_to_cranelift(func.return_type);
-        sig.returns.push(AbiParam::new(ret_ty));
+        sig.returns.push(AbiParam::new(types::I64));
     }
 
     sig

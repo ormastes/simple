@@ -1,0 +1,109 @@
+#!/bin/sh
+# Platform detection — <arch>-<vendor>-<os>-<abi> target triple
+#
+# Source this file (do not execute directly). After sourcing, these are set:
+#   PLATFORM_ARCH     — x86_64, aarch64, i686, riscv64
+#   PLATFORM_VENDOR   — unknown, pc, apple
+#   PLATFORM_OS       — linux, darwin, freebsd, windows
+#   PLATFORM_ABI      — gnu, msvc, elf, macho
+#   PLATFORM_TRIPLE   — full <arch>-<vendor>-<os>-<abi> string
+#   PLATFORM_EXE      — "" or ".exe"
+#
+# Optional overrides (set before sourcing):
+#   FORCE_TRIPLE      — skip detection, use this triple directly
+#   FORCE_TOOLCHAIN   — "msvc" or "mingw" (Windows only)
+#
+# Consistent with LlvmTargetTriple (src/compiler/70.backend/backend/llvm_target.spl)
+# and TargetPreset (src/compiler/70.backend/target_presets.spl).
+
+if [ -n "${FORCE_TRIPLE:-}" ]; then
+  PLATFORM_TRIPLE="${FORCE_TRIPLE}"
+  PLATFORM_ARCH=$(echo "${PLATFORM_TRIPLE}" | cut -d- -f1)
+  PLATFORM_VENDOR=$(echo "${PLATFORM_TRIPLE}" | cut -d- -f2)
+  PLATFORM_OS=$(echo "${PLATFORM_TRIPLE}" | cut -d- -f3)
+  PLATFORM_ABI=$(echo "${PLATFORM_TRIPLE}" | cut -d- -f4)
+  PLATFORM_EXE=""
+  if [ "${PLATFORM_OS}" = "windows" ]; then
+    PLATFORM_EXE=".exe"
+  fi
+  return 0 2>/dev/null || true
+fi
+
+# --- Architecture -----------------------------------------------------------
+
+_pd_raw_arch=$(uname -m 2>/dev/null || echo unknown)
+case "${_pd_raw_arch}" in
+  x86_64|amd64)  PLATFORM_ARCH="x86_64" ;;
+  aarch64|arm64) PLATFORM_ARCH="aarch64" ;;
+  i686|i386)     PLATFORM_ARCH="i686" ;;
+  riscv64)       PLATFORM_ARCH="riscv64" ;;
+  *)             PLATFORM_ARCH="x86_64" ;;
+esac
+
+# On Windows (MSYS2/Git Bash), uname -m may lie; prefer PROCESSOR_ARCHITECTURE
+if [ -n "${PROCESSOR_ARCHITECTURE:-}" ]; then
+  case "${PROCESSOR_ARCHITECTURE}" in
+    AMD64|x64)   PLATFORM_ARCH="x86_64" ;;
+    ARM64)       PLATFORM_ARCH="aarch64" ;;
+    x86)         PLATFORM_ARCH="i686" ;;
+  esac
+fi
+
+# --- OS, Vendor, ABI --------------------------------------------------------
+
+PLATFORM_VENDOR="unknown"
+PLATFORM_EXE=""
+_pd_host_os=$(uname -s 2>/dev/null || echo unknown)
+
+case "${_pd_host_os}" in
+  Linux)
+    PLATFORM_OS="linux"
+    PLATFORM_ABI="gnu"
+    ;;
+  Darwin)
+    PLATFORM_OS="darwin"
+    PLATFORM_VENDOR="apple"
+    PLATFORM_ABI="macho"
+    ;;
+  FreeBSD)
+    PLATFORM_OS="freebsd"
+    PLATFORM_ABI="elf"
+    ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    PLATFORM_OS="windows"
+    PLATFORM_VENDOR="pc"
+    PLATFORM_EXE=".exe"
+    # Detect MSVC vs MinGW (overridable via FORCE_TOOLCHAIN)
+    if [ -n "${FORCE_TOOLCHAIN:-}" ]; then
+      case "${FORCE_TOOLCHAIN}" in
+        msvc)  PLATFORM_ABI="msvc" ;;
+        mingw) PLATFORM_ABI="gnu" ;;
+        *)     PLATFORM_ABI="msvc" ;;
+      esac
+    else
+      case "${MSYSTEM:-}" in
+        MINGW*) PLATFORM_ABI="gnu" ;;
+        *)
+          if command -v cl.exe >/dev/null 2>&1; then
+            PLATFORM_ABI="msvc"
+          elif command -v clang-cl >/dev/null 2>&1; then
+            PLATFORM_ABI="msvc"
+          elif command -v gcc >/dev/null 2>&1; then
+            PLATFORM_ABI="gnu"
+          else
+            PLATFORM_ABI="msvc"
+          fi
+          ;;
+      esac
+    fi
+    ;;
+  *)
+    PLATFORM_OS=$(echo "${_pd_host_os}" | tr '[:upper:]' '[:lower:]')
+    PLATFORM_ABI="elf"
+    ;;
+esac
+
+PLATFORM_TRIPLE="${PLATFORM_ARCH}-${PLATFORM_VENDOR}-${PLATFORM_OS}-${PLATFORM_ABI}"
+
+# Clean up temporary variables
+unset _pd_raw_arch _pd_host_os

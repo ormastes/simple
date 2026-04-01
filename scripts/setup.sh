@@ -61,86 +61,16 @@ repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
 # Platform detection — <arch>-<vendor>-<os>-<abi>
 # ===========================================================================
 
-detect_triple() {
-  # Architecture
-  local arch
-  case "$(uname -m 2>/dev/null || echo unknown)" in
-    x86_64|amd64)  arch="x86_64" ;;
-    aarch64|arm64) arch="aarch64" ;;
-    i686|i386)     arch="i686" ;;
-    riscv64)       arch="riscv64" ;;
-    *)             arch="x86_64" ;;
-  esac
-
-  # On Windows (MSYS2/Git Bash), uname -m may lie; prefer PROCESSOR_ARCHITECTURE
-  if [ -n "${PROCESSOR_ARCHITECTURE:-}" ]; then
-    case "${PROCESSOR_ARCHITECTURE}" in
-      AMD64|x64)   arch="x86_64" ;;
-      ARM64)       arch="aarch64" ;;
-      x86)         arch="i686" ;;
-    esac
-  fi
-
-  # OS, vendor, ABI
-  local vendor="unknown"
-  local os abi
-  local host_os
-  host_os=$(uname -s 2>/dev/null || echo unknown)
-
-  case "${host_os}" in
-    Linux)
-      os="linux"; abi="gnu"
-      ;;
-    Darwin)
-      os="darwin"; vendor="apple"; abi="macho"
-      ;;
-    FreeBSD)
-      os="freebsd"; abi="elf"
-      ;;
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-      os="windows"; vendor="pc"
-      # Detect MSVC vs MinGW
-      case "${MSYSTEM:-}" in
-        MINGW*) abi="gnu" ;;
-        *)
-          if command -v cl.exe >/dev/null 2>&1; then
-            abi="msvc"
-          elif command -v clang-cl >/dev/null 2>&1; then
-            abi="msvc"
-          elif command -v gcc >/dev/null 2>&1; then
-            abi="gnu"
-          else
-            abi="msvc"
-          fi
-          ;;
-      esac
-      ;;
-    *)
-      os=$(echo "${host_os}" | tr '[:upper:]' '[:lower:]')
-      abi="elf"
-      ;;
-  esac
-
-  echo "${arch}-${vendor}-${os}-${abi}"
-}
-
 if [ -n "${triple_override}" ]; then
-  PLATFORM="${triple_override}"
-else
-  PLATFORM="$(detect_triple)"
+  FORCE_TRIPLE="${triple_override}"
 fi
+. "${repo_root}/scripts/platform-detect.sh"
+PLATFORM="${PLATFORM_TRIPLE}"
+arch="${PLATFORM_ARCH}"
+os="${PLATFORM_OS}"
+exe="${PLATFORM_EXE}"
 
 echo "Platform: ${PLATFORM}"
-
-# Parse triple components
-arch=$(echo "${PLATFORM}" | cut -d- -f1)
-os=$(echo "${PLATFORM}" | cut -d- -f3)
-
-# Executable extension
-exe=""
-if [ "${os}" = "windows" ]; then
-  exe=".exe"
-fi
 
 # ===========================================================================
 # Locate release binary
@@ -148,76 +78,41 @@ fi
 
 release_dir="${repo_root}/bin/release"
 
-# Resolve a release binary: tries triple path, legacy path, flat path
-# Usage: find_release_bin <platform> <os> <arch> <ext>
-find_release_bin() {
-  local plat="$1" fos="$2" farch="$3" fext="$4"
-  if [ -f "${release_dir}/${plat}/simple${fext}" ]; then
-    echo "${plat}/simple${fext}"; return 0
-  elif [ -f "${release_dir}/${fos}-${farch}/simple${fext}" ]; then
-    echo "${fos}-${farch}/simple${fext}"; return 0
-  elif [ -f "${release_dir}/simple${fext}" ]; then
-    echo "simple${fext}"; return 0
-  fi
-  return 1
-}
-
-# On Windows, create two links: bin/simple → MinGW, bin/simple.exe → MSVC
-# On other platforms, create single link: bin/simple → release binary
+# Locate release binary — only <triple>/simple(.exe) layout
 if [ "${os}" = "windows" ]; then
   msvc_triple="${arch}-pc-windows-msvc"
   mingw_triple="${arch}-pc-windows-gnu"
-
   msvc_bin=""
   mingw_bin=""
 
-  # Find MSVC binary
-  if find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
-    msvc_bin="$(find_release_bin "${msvc_triple}" "${os}" "${arch}" ".exe")"
+  if [ -f "${release_dir}/${msvc_triple}/simple.exe" ]; then
+    msvc_bin="${msvc_triple}/simple.exe"
   fi
-
-  # Find MinGW binary
-  if find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe" >/dev/null 2>&1; then
-    mingw_bin="$(find_release_bin "${mingw_triple}" "${os}" "${arch}" ".exe")"
+  if [ -f "${release_dir}/${mingw_triple}/simple.exe" ]; then
+    mingw_bin="${mingw_triple}/simple.exe"
   fi
 
   if [ -z "${msvc_bin}" ] && [ -z "${mingw_bin}" ]; then
     echo "error: no release binary found for Windows" >&2
-    echo "" >&2
-    echo "Searched:" >&2
-    echo "  ${release_dir}/${msvc_triple}/simple.exe" >&2
-    echo "  ${release_dir}/${mingw_triple}/simple.exe" >&2
-    echo "  ${release_dir}/simple.exe" >&2
+    echo "  Expected: ${release_dir}/${msvc_triple}/simple.exe" >&2
+    echo "       or:  ${release_dir}/${mingw_triple}/simple.exe" >&2
     echo "" >&2
     echo "Run the bootstrap first:" >&2
-    echo "  scripts/bootstrap/bootstrap-windows.sh --msvc --deploy" >&2
-    echo "  scripts/bootstrap/bootstrap-windows.sh --mingw --deploy" >&2
+    echo "  scripts/bootstrap/bootstrap-windows.sh --deploy" >&2
     exit 1
   fi
 
-  if [ -n "${msvc_bin}" ]; then
-    echo "MSVC binary:  bin/release/${msvc_bin}"
-  else
-    echo "warning: no MSVC binary found (${msvc_triple})" >&2
-  fi
-  if [ -n "${mingw_bin}" ]; then
-    echo "MinGW binary: bin/release/${mingw_bin}"
-  else
-    echo "warning: no MinGW binary found (${mingw_triple})" >&2
-  fi
+  [ -n "${msvc_bin}" ]  && echo "MSVC binary:  bin/release/${msvc_bin}"
+  [ -n "${mingw_bin}" ] && echo "MinGW binary: bin/release/${mingw_bin}"
 else
   release_bin=""
-  if find_release_bin "${PLATFORM}" "${os}" "${arch}" "" >/dev/null 2>&1; then
-    release_bin="$(find_release_bin "${PLATFORM}" "${os}" "${arch}" "")"
+  if [ -f "${release_dir}/${PLATFORM}/simple" ]; then
+    release_bin="${PLATFORM}/simple"
   fi
 
   if [ -z "${release_bin}" ]; then
     echo "error: no release binary found for ${PLATFORM}" >&2
-    echo "" >&2
-    echo "Searched:" >&2
-    echo "  ${release_dir}/${PLATFORM}/simple" >&2
-    echo "  ${release_dir}/${os}-${arch}/simple" >&2
-    echo "  ${release_dir}/simple" >&2
+    echo "  Expected: ${release_dir}/${PLATFORM}/simple" >&2
     echo "" >&2
     echo "Run the bootstrap first:" >&2
     echo "  scripts/bootstrap/bootstrap-from-scratch.sh --deploy" >&2
@@ -312,24 +207,10 @@ else
   fi
 fi
 
-# Also create bin/release/simple → <platform>/simple symlink
-release_link_path="${release_dir}/simple${exe}"
-if [ "${os}" = "windows" ]; then
-  release_link_target="${msvc_bin:-${mingw_bin}}"
-else
-  if [ -n "${preferred_runtime}" ]; then
-    release_link_target="${preferred_runtime}"
-  else
-    release_link_target="${release_bin}"
-  fi
-fi
-if [ -L "${release_link_path}" ] || [ -f "${release_link_path}" ]; then
-  rm -f "${release_link_path}"
-fi
-mkdir -p "${release_dir}"
-ln -sf "${release_link_target}" "${release_link_path}"
-
-echo "Created: bin/release/simple${exe} → ${release_link_target}"
+# Clean up any stale bin/release/simple(.exe) flat file/symlink
+for _stale in "${release_dir}/simple" "${release_dir}/simple.exe"; do
+  [ -L "${_stale}" ] || [ -f "${_stale}" ] && rm -f "${_stale}" 2>/dev/null || true
+done
 
 # ===========================================================================
 # MCP launcher scripts in bin/release/ (targets for bin/*_mcp_server symlinks)

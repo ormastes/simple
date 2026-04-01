@@ -90,7 +90,7 @@ pub fn compile_function_body<M: Module>(
     module: &mut M,
     cranelift_func: &mut cranelift_codegen::ir::Function,
     func: &MirFunction,
-    func_ids: &std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    func_ids: &mut std::collections::BTreeMap<String, cranelift_module::FuncId>,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
     global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
@@ -150,11 +150,26 @@ pub fn compile_function_body<M: Module>(
     builder.append_block_params_for_function_params(entry_block);
     builder.switch_to_block(entry_block);
 
-    // Initialize parameter variables
-    for (i, _param) in func.params.iter().enumerate() {
-        let val = builder.block_params(entry_block)[i];
+    // Initialize parameter variables.
+    // Function signature uses uniform I64 for all params, but variables may be
+    // declared with narrower types. Convert block params to match variable types.
+    for (i, param) in func.params.iter().enumerate() {
+        let val = builder.block_params(entry_block)[i]; // Always I64 from signature
         let var = variables[&i];
-        builder.def_var(var, val);
+        let expected_ty = type_to_cranelift(param.ty);
+        let converted = if expected_ty == types::I64 {
+            val
+        } else if expected_ty.is_int() {
+            builder.ins().ireduce(expected_ty, val)
+        } else if expected_ty == types::F32 {
+            let as_i32 = builder.ins().ireduce(types::I32, val);
+            builder.ins().bitcast(types::F32, cranelift_codegen::ir::MemFlags::new(), as_i32)
+        } else if expected_ty == types::F64 {
+            builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), val)
+        } else {
+            val
+        };
+        builder.def_var(var, converted);
     }
 
     // If this is an outlined body with captures, load them from ctx (last param).
@@ -511,11 +526,13 @@ pub fn compile_function_body<M: Module>(
                             builder.ins().return_(&[]);
                         }
                     } else {
-                        // Use signature return type (main returns I32 for C ABI)
+                        // Use signature return type (main returns I32 for C ABI,
+                        // all others use I64 to match uniform signature convention)
                         let ret_ty = if func.name == "main" {
                             types::I32
                         } else {
-                            type_to_cranelift(func.return_type)
+                            // Signature uses I64 for all non-main returns
+                            types::I64
                         };
                         // Handle missing VReg (can happen in complex control flow)
                         let mut ret_val = if let Some(&rv) = vreg_values.get(v) {

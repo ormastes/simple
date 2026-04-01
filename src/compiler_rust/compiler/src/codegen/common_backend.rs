@@ -587,7 +587,7 @@ impl<M: Module> CodegenBackend<M> {
             &mut self.module,
             &mut self.ctx.func,
             func,
-            &self.func_ids,
+            &mut self.func_ids,
             &self.runtime_funcs,
             &self.global_ids,
             &self.import_map,
