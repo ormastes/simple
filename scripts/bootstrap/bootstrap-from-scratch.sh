@@ -173,23 +173,35 @@ run_logged() {
 # ===========================================================================
 
 seed_bin="src/compiler_rust/target/bootstrap/simple"
+native_all_lib="src/compiler_rust/target/bootstrap/libsimple_native_all.a"
 
-# Detect stale seed: rebuild if any Rust source is newer than the seed binary.
-# A stale seed causes hard-to-diagnose parse errors when new language features
-# (e.g., @allow annotations) are used in Simple source but the seed's parser
-# predates them.
+# Detect stale seed OR stale runtime library: rebuild if any Rust source is
+# newer than EITHER artifact.  The runtime library (libsimple_native_all.a) is
+# linked into stage2/3/4 binaries and must include the latest stub filters,
+# constructor stripping, and linker config.  Checking only the seed binary
+# misses library staleness (hardlinks can mask mtime).
 seed_stale=0
 if [ -x "${seed_bin}" ]; then
-  stale_files=$(find src/compiler_rust -name '*.rs' -newer "${seed_bin}" -not -path '*/target/*' 2>/dev/null | head -1)
+  # Check against both seed binary AND runtime library
+  check_against="${seed_bin}"
+  if [ -f "${native_all_lib}" ]; then
+    # Use whichever is OLDER as the reference — if either is stale, rebuild
+    seed_mtime=$(stat -c '%Y' "${seed_bin}" 2>/dev/null || stat -f '%m' "${seed_bin}" 2>/dev/null || echo 0)
+    lib_mtime=$(stat -c '%Y' "${native_all_lib}" 2>/dev/null || stat -f '%m' "${native_all_lib}" 2>/dev/null || echo 0)
+    if [ "${lib_mtime}" -lt "${seed_mtime}" ] 2>/dev/null; then
+      check_against="${native_all_lib}"
+    fi
+  fi
+  stale_files=$(find src/compiler_rust -name '*.rs' -newer "${check_against}" -not -path '*/target/*' 2>/dev/null | head -1)
   if [ -n "${stale_files}" ]; then
     seed_stale=1
-    echo "Seed binary is stale (Rust sources changed since last build). Rebuilding..."
+    echo "Seed/runtime stale (Rust sources changed since last build). Rebuilding..."
   fi
 fi
 
-if [ ! -x "${seed_bin}" ] || [ "${seed_stale}" -eq 1 ]; then
-  echo "Building Rust seed compiler..."
-  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver
+if [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}" -eq 1 ]; then
+  echo "Building Rust seed compiler + runtime library..."
+  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver -p simple-native-all
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
