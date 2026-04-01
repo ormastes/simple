@@ -278,10 +278,10 @@ while [ -L "\$SELF" ]; do
   case "\$SELF" in /*) ;; *) SELF="\${DIR}/\${SELF}" ;; esac
 done
 SCRIPT_DIR="\$(cd "\$(dirname "\$SELF")" && pwd)"
-REPO_ROOT="\${SCRIPT_DIR}/../.."
+REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
 # Prefer bin/simple (user-managed link) so all tools follow the same binary
-RUNTIME="\${SCRIPT_DIR}/../simple"
-if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${SCRIPT_DIR}/simple"; fi
+RUNTIME="\${REPO_ROOT}/bin/simple"
+if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
 ENTRY="\${REPO_ROOT}/${entry}"
 export SIMPLE_LIB="\${REPO_ROOT}/src"
 export SIMPLE_LOG=error
@@ -320,9 +320,9 @@ while [ -L "$SELF" ]; do
   case "$SELF" in /*) ;; *) SELF="${DIR}/${SELF}" ;; esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/../.."
-RUNTIME="${SIMPLE_RUNTIME:-${SCRIPT_DIR}/../simple}"
-if [ ! -x "$RUNTIME" ]; then RUNTIME="${SCRIPT_DIR}/simple"; fi
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/bin/simple}"
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/release/simple"; fi
 ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 DAEMON_DIR="/tmp/t32_lsp_mcp_shared"
