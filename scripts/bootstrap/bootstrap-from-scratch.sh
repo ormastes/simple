@@ -37,7 +37,7 @@ Options:
 EOF
 }
 
-backend="llvm-lib"
+backend="cranelift"
 output_dir="build/bootstrap"
 deploy=0
 target=""
@@ -197,6 +197,7 @@ fi
 can_full_bootstrap=0
 
 export SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap"
+export SIMPLE_BOOTSTRAP=1
 echo "Running bootstrap pipeline..."
 echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
 echo "  platform: ${PLATFORM}"
@@ -231,20 +232,35 @@ else
     -o "${output_dir}/stage2/${PLATFORM}/simple"
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
-  # Note: --source flags are required because the stage2 binary passes all
-  # CLI args (including binary path) through to rt_native_build, causing
-  # "native-build" to be misinterpreted as a source directory. Explicit
-  # --source flags ensure the real source dirs are always included.
+  # Note: Stage3 is optional — the stage2 binary may lack features needed for
+  # self-hosting (e.g., --entry-closure support in rt_native_build, or LLVM
+  # symbol conflicts). When stage3 fails, we fall back to the seed for stage4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf .simple/native_cache/
-  run_logged stage3-native-build env RUST_LOG="${RUST_LOG:-error}" "${output_dir}/stage2/${PLATFORM}/simple" native-build \
+
+  stage3_ok=0
+  set +e
+  env RUST_LOG="${RUST_LOG:-error}" \
+    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    "${output_dir}/stage2/${PLATFORM}/simple" native-build \
     --backend "${backend}" \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${output_dir}/stage3/${PLATFORM}/simple"
+    -o "${output_dir}/stage3/${PLATFORM}/simple" \
+    >"${log_dir}/stage3-native-build.log" 2>&1
+  stage3_status=$?
+  set -e
+
+  echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
+  if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple" ]; then
+    stage3_ok=1
+    echo "  Stage 3 succeeded"
+  else
+    echo "  warning: stage3 self-host failed (exit ${stage3_status}); using seed for stage 4"
+  fi
 fi
 
 # Locate stage outputs — check new layout first, fall back to flat
@@ -259,24 +275,28 @@ else
   exit 1
 fi
 
-if [ ! -x "${stage2}" ] || [ ! -x "${stage3}" ]; then
-  echo "error: expected bootstrap artifacts were not produced" >&2
+if [ ! -x "${stage2}" ]; then
+  echo "error: stage2 binary was not produced" >&2
   exit 1
 fi
 
-hash2=$(sha256sum "${stage2}" | awk '{print $1}')
-hash3=$(sha256sum "${stage3}" | awk '{print $1}')
-
-echo "stage2 sha256: ${hash2}"
-echo "stage3 sha256: ${hash3}"
-
-if [ "${hash2}" != "${hash3}" ]; then
-  echo "warning: stage2 and stage3 hashes differ (expected: stage2 has runtime, stage3 does not)"
-  echo "  Using stage2 (with runtime) for stage 4"
-  stage_for_build="${stage2}"
+# Decide which compiler to use for stage 4
+if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
+  hash2=$(sha256sum "${stage2}" | awk '{print $1}')
+  hash3=$(sha256sum "${stage3}" | awk '{print $1}')
+  echo "stage2 sha256: ${hash2}"
+  echo "stage3 sha256: ${hash3}"
+  if [ "${hash2}" != "${hash3}" ]; then
+    echo "warning: stage2 and stage3 hashes differ (expected when runtime is embedded)"
+    echo "  Using stage2 (with runtime) for stage 4"
+    stage_for_build="${stage2}"
+  else
+    echo "Bootstrap verification passed."
+    stage_for_build="${stage3}"
+  fi
 else
-  echo "Bootstrap verification passed."
-  stage_for_build="${stage3}"
+  echo "Stage 3 unavailable — using seed for stage 4"
+  stage_for_build="${seed_bin}"
 fi
 
 # ===========================================================================
@@ -287,7 +307,9 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 rm -rf .simple/native_cache/
-run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" "${stage_for_build}" native-build \
+run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
+  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+  "${stage_for_build}" native-build \
   --backend "${backend}" \
   --source src/compiler --source src/app --source src/lib \
   --entry-closure \
@@ -323,3 +345,16 @@ if [ "${deploy}" -eq 1 ]; then
 fi
 
 echo "Final binary: ${full_bin}"
+
+# ===========================================================================
+# Exit status — reflect self-host verification result
+# ===========================================================================
+
+if [ "${stage3_ok:-0}" -eq 0 ]; then
+  echo ""
+  echo "WARNING: Bootstrap produced a binary but self-host verification (stage 3) failed."
+  echo "  The stage2 binary cannot yet recompile itself (LIM-010: LLVM symbol conflicts)."
+  echo "  Stage 4 used the Rust seed instead of the self-hosted compiler."
+  echo "  This is a known limitation — see doc/09_report/bootstrap_crash_report_2026_04_01.md"
+  exit 2
+fi

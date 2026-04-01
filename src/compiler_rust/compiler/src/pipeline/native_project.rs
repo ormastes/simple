@@ -866,6 +866,14 @@ int main(int argc, char** argv) {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-no-pie");
 
+        // Linux/FreeBSD: allow multiple definitions so that LLVM static constructors
+        // from libsimple_native_all.a (pulled in via --whole-archive) don't conflict
+        // with any LLVM symbols already linked into the host binary.  Without this,
+        // the resulting binary aborts at startup with:
+        //   "Option 'debug-counter' registered more than once!"
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        cmd.arg("-Wl,-z,muldefs");
+
         if is_clang_cl {
             cmd.arg(&main_o);
             if let Some(ref init) = init_o {
@@ -990,11 +998,25 @@ int main(int argc, char** argv) {
         // (includes Cranelift FFI for self-hosting) over runtime-only.
         // Check config.runtime_path first (explicit CLI flag — most reliable).
         // Use --whole-archive to force linking ALL runtime members (not just referenced ones).
+        //
+        // LIM-010 fix: strip .init_array/.ctors from LLVM objects in the archive
+        // to prevent LLVM static constructors from running (they segfault because
+        // ManagedStatic depends on stubbed-out LLVM infrastructure).
         let mut runtime_linked = false;
         if let Some(ref rp) = self.config.runtime_path {
             for name in &["libsimple_native_all.a", "libsimple_runtime.a"] {
                 let lib = rp.join(name);
                 if lib.exists() {
+                    // Only strip LLVM constructors during bootstrap builds.
+                    // Normal LLVM-backend builds need the constructors to initialize
+                    // LLVM's option parser and target registration.
+                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
+                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
+                    let lib = if is_bootstrap {
+                        strip_llvm_constructors(&lib, temp_dir).unwrap_or(lib.clone())
+                    } else {
+                        lib.clone()
+                    };
                     #[cfg(target_os = "macos")]
                     {
                         cmd.arg("-Wl,-force_load").arg(&lib);
@@ -1292,6 +1314,77 @@ fn generate_stub_object(
     Ok(stub_o)
 }
 
+/// Strip LLVM static constructors from a static archive to prevent segfaults (LIM-010).
+///
+/// LLVM backend objects (e.g., M68kAsmParser.cpp) contain `_GLOBAL__sub_I_*` constructors
+/// that register CLI options via `ManagedStatic<CommandLineParser>`.  When linked with
+/// `--whole-archive` into a bootstrap binary that stubs most LLVM functions, these
+/// constructors segfault at startup.
+///
+/// Fix: extract the archive, use `objcopy --remove-section=.init_array` on LLVM objects
+/// to strip their constructors (keeps symbols for linking), then repackage.
+fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
+    // Only attempt if objcopy is available
+    if std::process::Command::new("objcopy").arg("--version").output().is_err() {
+        return Ok(lib.to_path_buf());
+    }
+
+    let extract_dir = temp_dir.join("_rt_ctor_strip");
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Extract archive members
+    let status = std::process::Command::new("ar")
+        .arg("x").arg(lib)
+        .current_dir(&extract_dir)
+        .status()
+        .map_err(|e| format!("ar x: {e}"))?;
+    if !status.success() {
+        return Ok(lib.to_path_buf());
+    }
+
+    // Strip .init_array/.ctors from ALL C++ objects (*.cpp.o) in the archive.
+    // These are all LLVM objects (2600+) — the Simple runtime is in Rust .rcgu.o files.
+    // LLVM static constructors register CLI options via ManagedStatic which
+    // segfaults when stubbed-out infrastructure is called.
+    if let Ok(entries) = std::fs::read_dir(&extract_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".cpp.o") {
+                let path = entry.path();
+                let _ = std::process::Command::new("objcopy")
+                    .arg("--remove-section=.init_array")
+                    .arg("--remove-section=.ctors")
+                    .arg("--remove-section=.fini_array")
+                    .arg("--remove-section=.dtors")
+                    .arg(&path)
+                    .status();
+            }
+        }
+    }
+
+    // Repackage into a new archive
+    let filtered = temp_dir.join("libsimple_native_all_stripped.a");
+    let objects: Vec<PathBuf> = std::fs::read_dir(&extract_dir)
+        .map_err(|e| format!("readdir: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|e| e == "o").unwrap_or(false))
+        .collect();
+    if objects.is_empty() {
+        return Ok(lib.to_path_buf());
+    }
+    let mut ar_cmd = std::process::Command::new("ar");
+    ar_cmd.arg("rcs").arg(&filtered);
+    for obj in &objects {
+        ar_cmd.arg(obj);
+    }
+    let status = ar_cmd.status().map_err(|e| format!("ar rcs: {e}"))?;
+    if !status.success() {
+        return Ok(lib.to_path_buf());
+    }
+    Ok(filtered)
+}
+
 /// Check if a mangled symbol name refers to a C standard library / system function.
 /// These must NOT be stubbed as weak — the real definitions come from system dylibs.
 #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux"))]
@@ -1304,6 +1397,12 @@ fn is_system_symbol(sym: &str) -> bool {
 }
 
 fn is_known_system_name(name: &str) -> bool {
+    // C++ std:: TLS variables (e.g., _ZSt11__once_call) — generating non-TLS stubs
+    // for these causes linker errors.  Left unresolved and handled by
+    // --unresolved-symbols=ignore-all.
+    if name.starts_with("_ZSt") || name.starts_with("_ZNSt") {
+        return true;
+    }
     matches!(
         name,
         // Memory

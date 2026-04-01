@@ -11,6 +11,7 @@ export DefinitionResult, get_definition_at
 
 use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmSpan}
 use cmm_analyzer.{CmmSymbolTable, CmmSymbol, CmmSymbolKind}
+use cmm_text_helpers.{normalize_path_sep}
 
 val _default_sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
 
@@ -212,7 +213,7 @@ fn definition_for_exprs(exprs: [CmmExpr], symbols: CmmSymbolTable, line: i64, co
 
 # Find the definition of a label in the symbol table.
 fn find_label_definition(name: text, symbols: CmmSymbolTable, uri: text) -> DefinitionResult?:
-    val syms = symbols.find_by_name(name)
+    val syms = symbols.find_by_name_ci(name)
     var i = 0
     while i < syms.len():
         match syms[i].kind:
@@ -228,7 +229,7 @@ fn find_label_definition(name: text, symbols: CmmSymbolTable, uri: text) -> Defi
 
 # Find the declaration of a macro in the symbol table.
 fn find_macro_definition(name: text, symbols: CmmSymbolTable, uri: text) -> DefinitionResult?:
-    val syms = symbols.find_by_name(name)
+    val syms = symbols.find_by_name_ci(name)
     var i = 0
     while i < syms.len():
         match syms[i].kind:
@@ -245,16 +246,18 @@ fn find_macro_definition(name: text, symbols: CmmSymbolTable, uri: text) -> Defi
 # Resolve a DO/RUN file reference to a URI.
 # Tries to construct a URI relative to the current document's directory.
 fn resolve_file_reference(file_name: text, current_uri: text) -> DefinitionResult?:
+    # Normalize separators (\ -> /) for cross-platform support
+    val norm_name = normalize_path_sep(file_name)
     # Extract directory from current URI
     val dir = extract_directory(current_uri)
     var target_uri = ""
     if dir != "":
-        target_uri = dir + "/" + file_name
+        target_uri = dir + "/" + norm_name
     else:
-        target_uri = file_name
+        target_uri = norm_name
 
-    # Add .cmm extension if not present
-    if not target_uri.ends_with(".cmm") and not target_uri.ends_with(".CMM"):
+    # Add .cmm extension if not present (case-insensitive check)
+    if not target_uri.to_lower().ends_with(".cmm"):
         target_uri = target_uri + ".cmm"
 
     DefinitionResult(
@@ -288,15 +291,16 @@ fn extract_file_name(expr: CmmExpr) -> text:
         case CmmExpr.DotPath(path): path
         case _: ""
 
-# Extract directory path from a URI (everything up to and excluding the last /).
+# Extract directory path from a URI (everything up to and excluding the last / or \).
 fn extract_directory(uri: text) -> text:
-    var last_slash = -1
+    var last_sep = -1
     var i = 0
     while i < uri.len():
-        if uri[i:i + 1] == "/":
-            last_slash = i
+        val ch = uri[i:i + 1]
+        if ch == "/" or ch == "\\":
+            last_sep = i
         i = i + 1
-    if last_slash >= 0:
-        return uri[0:last_slash]
+    if last_sep >= 0:
+        return uri[0:last_sep]
     ""
 

@@ -61,3 +61,70 @@ fn t32_get_message_line(client: Trace32Client) -> Result<text, text>:
     client.run_command("AREA.Select A000")?
     client.run_command("EVAL MESSAGE.STRing()")?
     client.eval_string()
+
+# ---------------------------------------------------------------------------
+# Dialog helpers — wait for, query, and control PRACTICE dialogs
+# ---------------------------------------------------------------------------
+
+# Wait for a PRACTICE dialog to appear by polling PRACTICE.STATE().
+# Returns Ok when state becomes "dialog", Err if script ends or times out.
+fn t32_dialog_wait(client: Trace32Client, timeout_ms: i64) -> Result<text, text>:
+    var elapsed: i64 = 0
+    val poll_interval_ms: i64 = 200
+
+    while elapsed < timeout_ms:
+        val state = t32_poll_practice_state(client)?
+        val trimmed = state.trim()
+        if trimmed == "dialog":
+            return Ok("dialog detected after {elapsed}ms")
+        if (trimmed == "0" or
+            trimmed == "idle" or
+            trimmed == "stopped"):
+            return Err("practice script ended without dialog after {elapsed}ms")
+        # state is "running" — keep polling
+        val sleep_sec = "0.{poll_interval_ms}"
+        shell("sleep {sleep_sec}")
+        elapsed = elapsed + poll_interval_ms
+
+    Err("dialog wait timed out after {timeout_ms}ms")
+
+# Query whether a dialog item exists.
+fn t32_dialog_query_exist(client: Trace32Client, label: text) -> Result<text, text>:
+    client.run_command("EVAL DIALOG.EXIST({label})")?
+    client.eval_string()
+
+# Query a dialog item's string value.
+fn t32_dialog_query_string(client: Trace32Client, label: text) -> Result<text, text>:
+    client.run_command("EVAL DIALOG.STRing({label})")?
+    client.eval_string()
+
+# Query a dialog item's boolean value.
+fn t32_dialog_query_boolean(client: Trace32Client, label: text) -> Result<text, text>:
+    client.run_command("EVAL DIALOG.BOOLEAN({label})")?
+    client.eval_string()
+
+# Set a dialog item's value.
+fn t32_dialog_set(client: Trace32Client, label: text, value: text) -> Result<text, text>:
+    client.run_command("DIALOG.Set {label} \"{value}\"")
+
+# Collect values from multiple dialog items.
+# Returns a list of "label=value" strings.
+fn t32_collect_dialog(client: Trace32Client, labels: [text]) -> Result<[text], text>:
+    var results: [text] = []
+    var i = 0
+    while i < labels.len():
+        val label = labels[i]
+        val exists = t32_dialog_query_exist(client, label)?
+        val trimmed = exists.trim().to_upper()
+        if trimmed == "TRUE()" or trimmed == "TRUE":
+            val value = t32_dialog_query_string(client, label)?
+            results.push("{label}={value.trim()}")
+        else:
+            results.push("{label}=<not found>")
+        i = i + 1
+    Ok(results)
+
+# Execute a CMM script and wait for a dialog (instead of script completion).
+fn t32_run_cmm_and_wait_dialog(client: Trace32Client, script_path: text, timeout_ms: i64) -> Result<text, text>:
+    t32_run_cmm(client, script_path)?
+    t32_dialog_wait(client, timeout_ms)

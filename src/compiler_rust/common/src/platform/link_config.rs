@@ -101,7 +101,7 @@ impl PlatformLinkConfig {
             nm_flags: vec!["-D", "-g", "-p"],
             stub_strategy: StubStrategy::StrongWithAllowMultiple,
             asm_label_extra_chars: vec!['.', '$'],
-            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition"],
+            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition", "-Wl,--unresolved-symbols=ignore-all"],
             disable_pie: true,
         }
     }

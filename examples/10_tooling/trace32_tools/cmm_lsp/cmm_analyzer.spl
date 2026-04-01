@@ -60,11 +60,33 @@ class CmmSymbolTable:
             i = i + 1
         result
 
+    # Case-insensitive find — PRACTICE is case-insensitive for labels/macros.
+    fn find_by_name_ci(name: text) -> [CmmSymbol]:
+        val lower_name = name.to_lower()
+        var result: [CmmSymbol] = []
+        var i = 0
+        while i < self.symbols.len():
+            if self.symbols[i].name.to_lower() == lower_name:
+                result.push(self.symbols[i])
+            i = i + 1
+        result
+
     fn has_label(name: text) -> bool:
         var i = 0
         while i < self.symbols.len():
             val sym = self.symbols[i]
             if sym.kind == CmmSymbolKind.LabelSym and sym.name == name:
+                return true
+            i = i + 1
+        false
+
+    # Case-insensitive label check.
+    fn has_label_ci(name: text) -> bool:
+        val lower_name = name.to_lower()
+        var i = 0
+        while i < self.symbols.len():
+            val sym = self.symbols[i]
+            if sym.kind == CmmSymbolKind.LabelSym and sym.name.to_lower() == lower_name:
                 return true
             i = i + 1
         false
@@ -107,6 +129,7 @@ class CmmSymbolTable:
 struct CmmAnalysisResult:
     diagnostics: [CmmDiagnostic]
     symbols: CmmSymbolTable
+    dialog_labels: [text]
 
 # ---------------------------------------------------------------------------
 # Module-level mutable state (workaround for pass-by-value parameters)
@@ -115,6 +138,7 @@ struct CmmAnalysisResult:
 var _syms: [CmmSymbol] = []
 var _diags: [CmmDiagnostic] = []
 var _macro_refs: [text] = []
+var _dialog_labels: [text] = []
 var _config: CmmParserConfig = default_config()
 
 fn _add_sym(sym: CmmSymbol):
@@ -133,10 +157,11 @@ fn _add_macro_ref(name: text):
     _macro_refs.push(name)
 
 fn _has_label(name: text) -> bool:
+    val lower_name = name.to_lower()
     var i = 0
     while i < _syms.len():
         val sym = _syms[i]
-        if sym.kind == CmmSymbolKind.LabelSym and sym.name == name:
+        if sym.kind == CmmSymbolKind.LabelSym and sym.name.to_lower() == lower_name:
             return true
         i = i + 1
     false
@@ -153,6 +178,7 @@ fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> 
     _syms = []
     _diags = []
     _macro_refs = []
+    _dialog_labels = []
     _config = config
 
     # Pass 1: collect labels and macro declarations
@@ -171,7 +197,7 @@ fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> 
     # Pass 5: DO target validation stub
     check_do_targets(program.statements)
 
-    # Pass 6: dialog label reference checking
+    # Pass 6: dialog label reference checking (also populates _dialog_labels)
     check_dialog_label_refs(program.statements)
 
     # Build result from module-level state
@@ -181,7 +207,7 @@ fn analyze_program_with_config(program: CmmProgram, config: CmmParserConfig) -> 
         sym_table.add(_syms[si])
         si = si + 1
 
-    CmmAnalysisResult(diagnostics: _diags, symbols: sym_table)
+    CmmAnalysisResult(diagnostics: _diags, symbols: sym_table, dialog_labels: _dialog_labels)
 
 # ---------------------------------------------------------------------------
 # Pass 1: Symbol collection
@@ -596,6 +622,11 @@ fn check_dialog_label_refs(stmts: [CmmStmt]):
     var dialog_labels: [text] = []
     var duplicate_labels: [text] = []
     _collect_dialog_labels(stmts, dialog_labels)
+    # Populate module-level _dialog_labels for CmmAnalysisResult
+    var dli = 0
+    while dli < dialog_labels.len():
+        _dialog_labels.push(dialog_labels[dli])
+        dli = dli + 1
     var seen_labels: [text] = []
     _collect_duplicate_dialog_labels(stmts, seen_labels, duplicate_labels)
     var di = 0
