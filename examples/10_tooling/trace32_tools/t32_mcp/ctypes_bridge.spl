@@ -207,13 +207,141 @@ fn t32_ctypes_get_practice_state() -> i64:
     rt_free(state_buf)
     i64(state)
 
+# --- New API detection (v2025.09+) ---
+
+var _t32_has_new_api: i64 = -1  # -1 = unknown, 0 = no, 1 = yes
+
+fn t32_ctypes_has_new_api() -> bool:
+    if _t32_has_new_api == -1:
+        val fp = _t32_fptr("T32_ExecuteCommand")
+        _t32_has_new_api = if fp != 0: 1 else: 0
+    _t32_has_new_api == 1
+
+fn t32_ctypes_get_api_revision() -> i64:
+    val fp = _t32_fptr("T32_GetApiRevision")
+    if fp == 0:
+        return 0
+    val buf = rt_alloc(8)
+    rt_memset(buf, 0, 8)
+    var args: [i64] = []
+    args.push(buf)
+    val rc = spl_wffi_call_i64(fp, args, 1)
+    if rc != 0:
+        rt_free(buf)
+        return 0
+    val rev = rt_ptr_read_i32(buf, 0)
+    rt_free(buf)
+    i64(rev)
+
+# --- New API: T32_ExecuteCommand (v2025.09+) ---
+
+fn t32_ctypes_execute_command(command: text) -> (text, i64):
+    val fp = _t32_fptr("T32_ExecuteCommand")
+    if fp == 0:
+        # Fallback to old API
+        return t32_ctypes_cmd(command)
+    val buf_size: i64 = 4096
+    val buf = rt_alloc(buf_size)
+    rt_memset(buf, 0, buf_size)
+    var args: [i64] = []
+    args.push(spl_str_ptr(command))
+    args.push(buf)
+    args.push(buf_size)
+    val rc = spl_wffi_call_i64(fp, args, 3)
+    if rc != 0:
+        rt_free(buf)
+        return ("", rc)
+    val result = rt_cstring_to_text(buf)
+    rt_free(buf)
+    (result, 0)
+
+# --- New API: T32_ExecuteFunction (v2025.09+) ---
+
+fn t32_ctypes_execute_function(expr: text) -> (text, i64):
+    val fp = _t32_fptr("T32_ExecuteFunction")
+    if fp == 0:
+        # Fallback to old EVAL path
+        return t32_ctypes_eval(expr)
+    val buf_size: i64 = 4096
+    val buf = rt_alloc(buf_size)
+    rt_memset(buf, 0, buf_size)
+    val type_buf = rt_alloc(8)
+    rt_memset(type_buf, 0, 8)
+    var args: [i64] = []
+    args.push(spl_str_ptr(expr))
+    args.push(buf)
+    args.push(buf_size)
+    args.push(type_buf)
+    val rc = spl_wffi_call_i64(fp, args, 4)
+    if rc != 0:
+        rt_free(buf)
+        rt_free(type_buf)
+        return ("", rc)
+    val result = rt_cstring_to_text(buf)
+    rt_free(buf)
+    rt_free(type_buf)
+    (result, 0)
+
+# --- New API: T32_GetLastErrorMessage (v2025.09+) ---
+
+fn t32_ctypes_get_last_error() -> text:
+    val fp = _t32_fptr("T32_GetLastErrorMessage")
+    if fp == 0:
+        return ""
+    val msg_buf = rt_alloc(1024)
+    rt_memset(msg_buf, 0, 1024)
+    val code_buf = rt_alloc(8)
+    rt_memset(code_buf, 0, 8)
+    val int_buf = rt_alloc(8)
+    rt_memset(int_buf, 0, 8)
+    var args: [i64] = []
+    args.push(msg_buf)
+    args.push(code_buf)
+    args.push(int_buf)
+    val rc = spl_wffi_call_i64(fp, args, 3)
+    if rc != 0:
+        rt_free(msg_buf)
+        rt_free(code_buf)
+        rt_free(int_buf)
+        return ""
+    val msg = rt_cstring_to_text(msg_buf)
+    rt_free(msg_buf)
+    rt_free(code_buf)
+    rt_free(int_buf)
+    msg
+
+# --- New API: T32_GetWindowContent (v2025.09+) ---
+
+fn t32_ctypes_get_window_content(command: text) -> (text, i64):
+    val fp = _t32_fptr("T32_GetWindowContent")
+    if fp == 0:
+        return ("", -1)
+    val buf_size: i64 = 8192
+    val buf = rt_alloc(buf_size)
+    rt_memset(buf, 0, buf_size)
+    var args: [i64] = []
+    args.push(spl_str_ptr(command))
+    args.push(buf)
+    args.push(buf_size)
+    args.push(0)  # offset
+    args.push(0)  # print_code
+    val rc = spl_wffi_call_i64(fp, args, 5)
+    if rc != 0:
+        rt_free(buf)
+        return ("", rc)
+    val result = rt_cstring_to_text(buf)
+    rt_free(buf)
+    (result, 0)
+
 # --- Unified adapter (matches t32_run_remote signature) ---
 
 fn t32_ctypes_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
     val upper = cmd.trim().to_upper()
-    # Route EVAL commands → ctypes_eval (extracts result)
+    # Route EVAL commands → ExecuteFunction (new) or ctypes_eval (old)
     if upper.starts_with("EVAL "):
         val expr = cmd.trim().substring(5, cmd.trim().len())
+        if t32_ctypes_has_new_api():
+            return t32_ctypes_execute_function(expr)
         return t32_ctypes_eval(expr)
     # Route PING → ctypes_ping
     if upper == "PING":
@@ -221,5 +349,8 @@ fn t32_ctypes_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         if rc == 0:
             return ("OK", 0)
         return ("", rc)
-    # Everything else → T32_Cmd
-    t32_ctypes_cmd(cmd.trim())
+    # Everything else → ExecuteCommand (new) or T32_Cmd (old)
+    if t32_ctypes_has_new_api():
+        t32_ctypes_execute_command(cmd.trim())
+    else:
+        t32_ctypes_cmd(cmd.trim())
