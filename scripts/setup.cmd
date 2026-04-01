@@ -214,6 +214,28 @@ for %%M in (simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_s
 )
 echo   Linked bin\*_mcp_server.cmd
 
+REM Codex MCP helper launchers for manual debug and startup parity
+(
+echo @echo off
+echo setlocal
+echo node "%%~dp0codex_chrome_devtools_mcp.js" %%*
+) > "%REPO_ROOT%\bin\codex_chrome_devtools_mcp.cmd"
+echo   codex_chrome_devtools_mcp.cmd
+
+(
+echo @echo off
+echo setlocal
+echo node "%%~dp0codex_stitch_mcp.js" %%*
+) > "%REPO_ROOT%\bin\codex_stitch_mcp.cmd"
+echo   codex_stitch_mcp.cmd
+
+where node >nul 2>&1
+if errorlevel 1 (
+    echo warning: node.exe not found in PATH; Codex chrome/stitch MCP launchers will not start >&2
+) else (
+    echo   Verified: node.exe found for Codex MCP launchers
+)
+
 echo.
 
 REM === Create .claude\commands\ symlinks → .claude\skills\ ===

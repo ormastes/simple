@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install platform-specific .mcp.json to project root.
+# Install platform-specific MCP configs for Claude Code and Codex CLI.
 # Usage: sh config/mcp/install.shs
 
 set -e
@@ -12,11 +12,34 @@ OS="$(uname -s)"
 case "$OS" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
         SRC="$SCRIPT_DIR/win/.mcp.json"
+        EXT=".cmd"
         ;;
     *)
         SRC="$SCRIPT_DIR/common/.mcp.json"
+        EXT=""
         ;;
 esac
 
+# --- Claude Code (.mcp.json) ---
 cp "$SRC" "$PROJECT_ROOT/.mcp.json"
 echo "Installed .mcp.json for $OS"
+
+# --- Codex CLI (global ~/.codex/config.toml) ---
+if command -v codex >/dev/null 2>&1; then
+    SERVERS="simple-mcp simple-lsp-mcp t32-mcp t32-lsp-mcp"
+    for NAME in $SERVERS; do
+        CMD="$PROJECT_ROOT/bin/${NAME}${EXT}"
+        # Convert server name to wrapper name (simple-mcp -> simple_mcp_server)
+        WRAPPER=$(echo "$NAME" | sed 's/-/_/g')_server
+        CMD="$PROJECT_ROOT/bin/${WRAPPER}${EXT}"
+        if [ -e "$CMD" ] || [ -L "$CMD" ]; then
+            codex mcp remove "$NAME" 2>/dev/null || true
+            codex mcp add "$NAME" --env SIMPLE_LOG=error --env RUST_LOG=error -- "$CMD"
+        else
+            echo "Warning: $CMD not found, skipping $NAME"
+        fi
+    done
+    echo "Installed Codex MCP servers for $OS"
+else
+    echo "Codex CLI not found, skipping Codex MCP setup"
+fi

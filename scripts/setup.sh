@@ -353,6 +353,13 @@ for mcp_name in simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_m
 done
 echo "  Linked bin/*_mcp_server → release/*"
 
+if [ -f "${repo_root}/bin/codex_chrome_devtools_mcp.js" ]; then
+  chmod +x "${repo_root}/bin/codex_chrome_devtools_mcp.js"
+fi
+if [ -f "${repo_root}/bin/codex_stitch_mcp.js" ]; then
+  chmod +x "${repo_root}/bin/codex_stitch_mcp.js"
+fi
+
 # ===========================================================================
 # Claude command symlinks (.claude/commands/ → .claude/skills/)
 # ===========================================================================
@@ -402,6 +409,12 @@ if [ -d "${codex_skills_dir}" ]; then
     link_count=$((link_count + 1))
   done
   echo "Created: ${link_count} parity links in .codex/commands/"
+fi
+
+if command -v node >/dev/null 2>&1; then
+  echo "Codex MCP launchers ready: bin/codex_chrome_devtools_mcp.js, bin/codex_stitch_mcp.js"
+else
+  echo "warning: node not found in PATH; Codex chrome/stitch MCP launchers will not start" >&2
 fi
 
 # ===========================================================================
