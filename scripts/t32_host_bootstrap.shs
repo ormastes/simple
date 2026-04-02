@@ -112,7 +112,13 @@ t32_has_remote() {
 # ─── Lifecycle management ───────────────────────────────────────────────────
 
 t32_kill_stale() {
+    # Kill T32 PowerView processes (t32marm and t32marm64 — substring match)
     pkill -f "$T32_BASE/t32marm" >/dev/null 2>&1 || true
+    # Kill xvfb-run wrappers that launched T32
+    pkill -f "xvfb-run.*t32marm" >/dev/null 2>&1 || true
+    # Kill orphaned Xvfb servers from our sessions (started by xvfb-run)
+    pkill -f "Xvfb.*t32" >/dev/null 2>&1 || true
+    # Clean up stale lock files
     rm -f /tmp/.X*-lock /tmp/.t32* 2>/dev/null || true
 }
 
@@ -194,14 +200,25 @@ t32_lifecycle_on() {
     return 1
 }
 
+_t32_kill_process_tree() {
+    # Kill a process and all its descendants (Xvfb, t32marm64 under xvfb-run).
+    local pid="$1"
+    [ -z "$pid" ] && return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    # Kill children first (depth-first), then the parent
+    local children
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    local child
+    for child in $children; do
+        _t32_kill_process_tree "$child"
+    done
+    kill -9 "$pid" 2>/dev/null || true
+}
+
 t32_lifecycle_off_quiet() {
     # Kill without printing — used internally during fallback
-    if [ -n "$T32_LIFECYCLE_CHILD_PID" ] && kill -0 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null; then
-        kill -9 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null || true
-    fi
-    if [ -n "$T32_LIFECYCLE_PID" ] && kill -0 "$T32_LIFECYCLE_PID" 2>/dev/null; then
-        kill -9 "$T32_LIFECYCLE_PID" 2>/dev/null || true
-    fi
+    _t32_kill_process_tree "$T32_LIFECYCLE_PID"
+    _t32_kill_process_tree "$T32_LIFECYCLE_CHILD_PID"
     t32_kill_stale
     T32_LIFECYCLE_PID=""
     T32_LIFECYCLE_CHILD_PID=""
@@ -210,20 +227,14 @@ t32_lifecycle_off_quiet() {
 t32_lifecycle_off() {
     # Graceful quit first, then SIGKILL fallback
     local T32REM="${T32REM:-$T32_BASE/t32rem}"
-    if [ -x "$T32REM" ]; then
+    if [ "$T32_LIFECYCLE_MODE" = "rcl" ] && [ -x "$T32REM" ]; then
         timeout 3 "$T32REM" "$T32_HOST" "port=$T32_PORT" "protocol=NETTCP" "QUIT" >/dev/null 2>&1 || true
-    fi
-    sleep 1
-
-    # Kill child if still alive
-    if [ -n "$T32_LIFECYCLE_CHILD_PID" ] && kill -0 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null; then
-        kill -9 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null || true
+        sleep 1
     fi
 
-    # Kill xvfb-run wrapper if still alive
-    if [ -n "$T32_LIFECYCLE_PID" ] && kill -0 "$T32_LIFECYCLE_PID" 2>/dev/null; then
-        kill -9 "$T32_LIFECYCLE_PID" 2>/dev/null || true
-    fi
+    # Kill the entire process tree rooted at xvfb-run (catches Xvfb + t32marm64)
+    _t32_kill_process_tree "$T32_LIFECYCLE_PID"
+    _t32_kill_process_tree "$T32_LIFECYCLE_CHILD_PID"
 
     # Clean up any remaining stale processes (including MCI server)
     t32_kill_stale
