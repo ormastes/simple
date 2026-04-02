@@ -91,12 +91,22 @@ t32_env_setup() {
 # ─── t32rem wrapper ─────────────────────────────────────────────────────────
 
 t32_remote() {
+    if [ "$T32_LIFECYCLE_MODE" = "mci" ]; then
+        echo "ERROR: t32rem is not available in MCI TCP mode (2013 binary limitation)" >&2
+        echo "The MCI server is alive on port $T32_PORT but speaks a different protocol than t32rem." >&2
+        return 3
+    fi
     local T32REM="${T32REM:-$T32_BASE/t32rem}"
     if [ ! -x "$T32REM" ]; then
         echo "ERROR: t32rem not found at $T32REM" >&2
         return 1
     fi
     "$T32REM" "$T32_HOST" "port=$T32_PORT" "protocol=NETTCP" "$@"
+}
+
+# Check whether t32rem commands are available in the current lifecycle.
+t32_has_remote() {
+    [ "$T32_LIFECYCLE_MODE" = "rcl" ]
 }
 
 # ─── Lifecycle management ───────────────────────────────────────────────────
@@ -175,7 +185,8 @@ t32_lifecycle_on() {
         if kill -0 "$T32_LIFECYCLE_PID" 2>/dev/null; then
             T32_LIFECYCLE_MODE="mci"
             echo "T32 lifecycle: started via MCI TCP (pid=$T32_LIFECYCLE_PID, port=$T32_PORT)"
-            return 0
+            echo "NOTE: t32rem commands are NOT available in MCI mode. Only TCP ping works." >&2
+            return 2   # 2 = alive but t32rem remote path is unusable
         fi
     fi
 
@@ -244,7 +255,20 @@ t32_with_lifecycle() {
     # Set up trap for cleanup on any exit
     trap 't32_lifecycle_off' EXIT INT TERM HUP
 
-    t32_lifecycle_on "$cfg" "$cmm"
+    local lifecycle_rc=0
+    t32_lifecycle_on "$cfg" "$cmm" || lifecycle_rc=$?
+
+    if [ "$lifecycle_rc" -eq 2 ]; then
+        echo "ERROR: t32_with_lifecycle requires RCL mode but only MCI is available" >&2
+        t32_lifecycle_off
+        trap - EXIT INT TERM HUP
+        return 2
+    elif [ "$lifecycle_rc" -ne 0 ]; then
+        t32_lifecycle_off
+        trap - EXIT INT TERM HUP
+        return "$lifecycle_rc"
+    fi
+
     local rc=0
     "$@" || rc=$?
 
