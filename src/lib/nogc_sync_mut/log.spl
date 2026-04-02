@@ -30,6 +30,9 @@
 #       env == "debug" or env == "trace"
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_stderr_write(s: text)
+extern fn rt_stderr_flush()
+extern fn rt_file_append_text(path: text, content: text) -> bool
 
 # Level constants
 val LOG_OFF = 0
@@ -68,11 +71,28 @@ fn _parse_log_level() -> i64:
 # Use lazy initialization instead
 var GLOBAL_LOG_LEVEL: i64 = -1  # -1 means not initialized
 var SCOPE_LEVELS = {}
+var _LOG_FILE_PATH: text = ""   # Empty = no file logging; set via SIMPLE_LOG_FILE_PATH or default
 
 # Lazy initialization helper
 fn _ensure_initialized():
     if GLOBAL_LOG_LEVEL == -1:
         GLOBAL_LOG_LEVEL = _parse_log_level()
+        val file_env = rt_env_get("SIMPLE_LOG_FILE_PATH")
+        if file_env.len() > 0:
+            _LOG_FILE_PATH = file_env
+        else:
+            val log_dir = rt_env_get("SIMPLE_LOG_DIR")
+            if log_dir.len() > 0:
+                _LOG_FILE_PATH = log_dir + "/simple_app.log"
+            elif GLOBAL_LOG_LEVEL > 0:
+                _LOG_FILE_PATH = ".simple/logs/simple_app.log"
+
+# Emit log line to stderr and optionally to file
+fn _emit(line: text):
+    rt_stderr_write(line + "\n")
+    rt_stderr_flush()
+    if _LOG_FILE_PATH.len() > 0:
+        rt_file_append_text(_LOG_FILE_PATH, line + "\n")
 
 # Compatibility: Keep LOG_LEVEL for existing code (lazy evaluated)
 fn get_log_level() -> i64:
@@ -155,32 +175,39 @@ fn is_enabled(level: i64, scope: text) -> bool:
 # ============================================================================
 
 fn fatal(scope: text, msg: text):
-    if 1 <= _parse_log_level():  # LOG_FATAL = 1; use _parse_log_level() to avoid module-var capture issue
-        print "[FATAL] [{scope}] {msg}"
+    _ensure_initialized()
+    if 1 <= GLOBAL_LOG_LEVEL:
+        _emit("[FATAL] [{scope}] {msg}")
 
 fn error(scope: text, msg: text):
-    if 2 <= _parse_log_level():  # LOG_ERROR = 2
-        print "[ERROR] [{scope}] {msg}"
+    _ensure_initialized()
+    if 2 <= GLOBAL_LOG_LEVEL:
+        _emit("[ERROR] [{scope}] {msg}")
 
 fn warn(scope: text, msg: text):
-    if 3 <= _parse_log_level():  # LOG_WARN = 3
-        print "[WARN] [{scope}] {msg}"
+    _ensure_initialized()
+    if 3 <= GLOBAL_LOG_LEVEL:
+        _emit("[WARN] [{scope}] {msg}")
 
 fn info(scope: text, msg: text):
-    if 4 <= _parse_log_level():  # LOG_INFO = 4
-        print "[INFO] [{scope}] {msg}"
+    _ensure_initialized()
+    if 4 <= GLOBAL_LOG_LEVEL:
+        _emit("[INFO] [{scope}] {msg}")
 
 fn debug(scope: text, msg: text):
-    if 5 <= _parse_log_level():  # LOG_DEBUG = 5
-        print "[DEBUG] [{scope}] {msg}"
+    _ensure_initialized()
+    if 5 <= GLOBAL_LOG_LEVEL:
+        _emit("[DEBUG] [{scope}] {msg}")
 
 fn trace(scope: text, msg: text):
-    if 6 <= _parse_log_level():  # LOG_TRACE = 6
-        print "[TRACE] [{scope}] {msg}"
+    _ensure_initialized()
+    if 6 <= GLOBAL_LOG_LEVEL:
+        _emit("[TRACE] [{scope}] {msg}")
 
 fn verbose(scope: text, msg: text):
-    if 7 <= _parse_log_level():  # LOG_VERBOSE = 7
-        print "[VERBOSE] [{scope}] {msg}"
+    _ensure_initialized()
+    if 7 <= GLOBAL_LOG_LEVEL:
+        _emit("[VERBOSE] [{scope}] {msg}")
 
 # ============================================================================
 # Convenience Functions (without scope - use "default" scope)
@@ -202,7 +229,7 @@ fn log_verbose(msg: text):
 fn log(level: i64, scope: text, msg: text):
     if level <= get_level(scope):
         var prefix = level_name(level)
-        print "[{prefix.upper()}] [{scope}] {msg}"
+        _emit("[{prefix.upper()}] [{scope}] {msg}")
 
 # ============================================================================
 # Exports
