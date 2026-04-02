@@ -4,9 +4,20 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        fontconfig \
+        libice6 \
+        libjpeg62 \
+        libsm6 \
+        libx11-6 \
+        libxext6 \
+        libxft2 \
+        libxmu6 \
+        libxpm4 \
+        libxt6 \
         netcat-openbsd \
         procps \
         usbutils \
+        xauth \
         x11-utils && \
     rm -rf /var/lib/apt/lists/*
 

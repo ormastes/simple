@@ -16,6 +16,13 @@
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.kernel.arch.riscv64.cpu.{csrw_stvec, csrs_sie, csrc_sie, SIE_SEIE, SIE_STIE, SIE_SSIE}
 use os.kernel.arch.riscv64.console.{serial_writeln}
+use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
+use os.kernel.arch.riscv64.trap_model.{Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
 
 # ============================================================================
 # PLIC Constants (QEMU virt)
@@ -227,8 +234,29 @@ fn rv64_handle_external_interrupt():
     if (irq as u64) < MAX_HANDLERS:
         val handler = g_handler_table[irq as u64]
         if handler != 0:
-            # Call the handler (cast u64 to function pointer)
-            pass_todo("call handler function pointer for IRQ")
+            serial_writeln("[INT] IRQ {irq} handler registered but indirect dispatch is not wired yet")
 
     # Complete the IRQ
     _plic_complete(g_plic_context, irq)
+
+fn rv64_dispatch_trap(ctx: Riscv64Context, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> Result<Riscv64Context, text>:
+    """Dispatch an RV64 trap frame through the kernel's policy layer."""
+    match classify_rv64_trap(ctx.scause):
+        case Rv64TrapKind.ExternalInterrupt:
+            rv64_handle_external_interrupt()
+            Ok(ctx)
+        case Rv64TrapKind.TimerInterrupt:
+            rv64_handle_timer_interrupt()
+            Ok(ctx)
+        case Rv64TrapKind.SoftwareInterrupt:
+            serial_writeln("[INT] RV64 software interrupt")
+            Ok(ctx)
+        case Rv64TrapKind.UserEcall:
+            val result = syscall_handler(rv64_syscall_args_from_context(ctx), scheduler, ipc, klog)
+            Ok(rv64_apply_syscall_result(ctx, result))
+        case Rv64TrapKind.SupervisorEcall:
+            Err("unsupported RV64 supervisor ecall trap at sepc={ctx.sepc}")
+        case Rv64TrapKind.Exception(code: code):
+            Err("fatal RV64 exception cause={code} at sepc={ctx.sepc}")
+        case Rv64TrapKind.Interrupt(code: code):
+            Err("unsupported RV64 interrupt cause={code}")

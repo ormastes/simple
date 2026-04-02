@@ -22,9 +22,12 @@
 #   restart = "always"
 #   priority = "high"
 
-use os.userlib.process.{spawn, signal}
+use os.userlib.process.{spawn_binary, signal}
 use os.userlib.security.{cap_grant}
 use os.kernel.types.syscall_types.{SignalKind}
+
+fn default_service_launcher(binary: text, priority: u8) -> Result<u64, text>:
+    spawn_binary(binary, priority)
 
 enum ServiceState:
     Stopped
@@ -62,10 +65,14 @@ class InitService:
     """
     services: [ServiceInstance]
     boot_complete: bool
+    launcher_fn: fn(text, u8) -> Result<u64, text>
 
 impl InitService:
     static fn new() -> InitService:
-        InitService(services: [], boot_complete: false)
+        InitService(services: [], boot_complete: false, launcher_fn: default_service_launcher)
+
+    static fn with_launcher(launcher_fn: fn(text, u8) -> Result<u64, text>) -> InitService:
+        InitService(services: [], boot_complete: false, launcher_fn: launcher_fn)
 
     me register(def_: ServiceDef):
         """Register a service definition."""
@@ -97,14 +104,16 @@ impl InitService:
                     val deps_ready = me check_deps(svc_deps)
                     if deps_ready:
                         self.services[i].state = ServiceState.Starting
-                        # Spawn process via userlib syscall
+                        # Launch the service by binary path rather than a
+                        # placeholder entry address.
                         val priority_val: u8 = match self.services[i].def_.priority:
                             "realtime": 0
                             "high": 1
                             "normal": 2
                             "low": 3
                             _: 2
-                        val spawn_result = spawn(0, priority_val)  # entry=0 placeholder until ELF loading
+                        val binary = self.services[i].def_.binary
+                        val spawn_result = self.launcher_fn(binary, priority_val)
                         if spawn_result.is_ok():
                             val pid = spawn_result.unwrap()
                             # Grant capabilities to the spawned process

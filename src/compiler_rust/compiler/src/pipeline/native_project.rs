@@ -3249,7 +3249,7 @@ fn compile_file_to_object(
     }
 
     // Cranelift backend (default)
-    let mut codegen = Codegen::new().map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
+    let mut codegen = Codegen::for_target(effective_target()).map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
     codegen.set_import_map(imports.import_map.clone());
     codegen.set_ambiguous_names(imports.ambiguous_names.clone());

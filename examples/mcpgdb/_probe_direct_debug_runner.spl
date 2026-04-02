@@ -1,0 +1,46 @@
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+use examples.mcpgdb.json_helpers.{extract_id, extract_nested, make_tool_error, make_tool_result, LB, RB, jp, js, find_binary, shell_bin, shell_quote, shell_sleep}
+use examples.mcpgdb.state.{MCPGDB_CURRENT_SESSION, MCPGDB_WORKSPACE, MCPGDB_SESSIONS, MCPGDB_NEXT_SESSION_ID, load_persisted_state, save_persisted_state, put_session, set_current_session}
+use examples.mcpgdb.backend_common.{choose_workspace_root, make_session, create_debugger_process}
+fn session_count_local() -> i64:
+    MCPGDB_SESSIONS.len()
+fn debug_json_message(fields: [text]) -> text:
+    LB() + fields.join(",") + RB()
+fn next_session_id_local() -> text:
+    val id = "dbg_" + str(MCPGDB_NEXT_SESSION_ID)
+    MCPGDB_NEXT_SESSION_ID = MCPGDB_NEXT_SESSION_ID + 1
+    id
+fn main():
+    val argv = rt_cli_get_args()
+    if argv.len < 2:
+        print make_tool_error("null", "missing request body path")
+        return
+    val body = rt_file_read_text(argv[1]) ?? ""
+    val id = extract_id(body)
+    load_persisted_state()
+    if body.contains("\"name\":\"workspace_status\""):
+        print make_tool_result(id, debug_json_message([
+            jp("workspace_root", js(MCPGDB_WORKSPACE.root)),
+            jp("current_session", js(MCPGDB_CURRENT_SESSION)),
+            jp("session_count", str(session_count_local()))
+        ]))
+    else:
+        var backend = extract_nested(body, "backend")
+        if backend == "":
+            backend = "gdb"
+        val workspace_root = choose_workspace_root(extract_nested(body, "workspace_root"))
+        val session_id = next_session_id_local()
+        var session = make_session(session_id, backend, workspace_root)
+        var error = ""
+        (session, error) = create_debugger_process(session)
+        if error != "":
+            print make_tool_error(id, error)
+        else:
+            put_session(session)
+            set_current_session(session_id)
+            print make_tool_result(id, debug_json_message([
+                jp("session_id", js(session.session_id)),
+                jp("backend", js(session.backend))
+            ]))
+    save_persisted_state()

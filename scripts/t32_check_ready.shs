@@ -33,6 +33,7 @@ HOST="${1:-localhost}"
 PORT="${2:-20000}"
 TRACE32_DEV_DIR="/dev/lauterbach/trace32"
 MCI_PING_SCRIPT="$(CDPATH= cd -- "$(dirname "$0")"/../config/t32 && pwd)/t32_tcp_ping.shs"
+USB_TIMEOUT="${T32_USB_CHECK_TIMEOUT:-8}"
 
 has_cmd() {
     command -v "$1" >/dev/null 2>&1
@@ -180,8 +181,12 @@ if [ ! -d "$TRACE32_DEV_DIR" ]; then
     print_lauterbach_usb_hint
 fi
 
-USB_OUTPUT="$("$T32USBCHECKER" 2>&1 || true)"
+USB_OUTPUT="$(timeout "$USB_TIMEOUT" "$T32USBCHECKER" 2>&1 || true)"
 printf '%s\n' "$USB_OUTPUT"
+if printf '%s\n' "$USB_OUTPUT" | grep -qi "Connection timed out"; then
+    echo "TRACE32 readiness failed: probe responded but USB communication stalled." >&2
+    exit 1
+fi
 if printf '%s\n' "$USB_OUTPUT" | grep -qi "no useable TRACE32 devices found"; then
     print_lauterbach_usb_hint
     echo "TRACE32 readiness failed: probe is not usable on this host." >&2
@@ -196,8 +201,10 @@ fi
 
 echo "[2/2] Checking TRACE32 Remote API..."
 check_port_conflict
-if ! timeout 5 "$T32REM" "$HOST" port="$PORT" PING >/tmp/t32_check_ready_ping.log 2>&1; then
-    cat /tmp/t32_check_ready_ping.log >&2
+PING_LOG="$(mktemp /tmp/t32_check_ready_ping.XXXXXX.log)"
+if ! timeout 5 "$T32REM" "$HOST" port="$PORT" PING >"$PING_LOG" 2>&1; then
+    cat "$PING_LOG" >&2
+    rm -f "$PING_LOG"
     if has_cmd ss && ! ss -ltnup 2>/dev/null | grep -q ":$PORT"; then
         echo "TRACE32 readiness failed: no process is listening on port $PORT. This host's GUI TRACE32 build may not expose RCL/NETASSIST reliably." >&2
     fi
@@ -211,5 +218,6 @@ if ! timeout 5 "$T32REM" "$HOST" port="$PORT" PING >/tmp/t32_check_ready_ping.lo
     echo "TRACE32 readiness failed: t32rem PING did not succeed." >&2
     exit 1
 fi
+rm -f "$PING_LOG"
 
 echo "TRACE32 readiness OK: probe visible and Remote API answered on ${HOST}:${PORT}"

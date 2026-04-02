@@ -21,7 +21,7 @@ hardware. We test the scheduling logic and state machine.
 """
 
 use std.spec.{describe, it, expect}
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage, UserLoadSegment}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.scheduler.scheduler.{Scheduler, ReadyQueue}
 
@@ -173,6 +173,34 @@ describe "Scheduler":
                     TaskPriority.High: true
                     _: false
                 expect(is_high).to_equal(true)
+
+    describe "create_user_task":
+        it "creates user tasks with user mode markers":
+            var sched = Scheduler.new()
+            val image = UserProcessImage(
+                binary_path: "/sys/services/vfs",
+                entry: 0x400000,
+                stack_top: 0x4000000000,
+                stack_size: 65536,
+                argv: ["/sys/services/vfs"],
+                envp: [],
+                segments: [UserLoadSegment(
+                    virt_addr: 0x400000,
+                    mem_size: 4,
+                    file_size: 4,
+                    flags: 5,
+                    align: 0x1000,
+                    data: [0x13.to_u8(), 0, 0, 0]
+                )]
+            )
+            val id = sched.create_user_task(image, TaskPriority.High, CapabilitySet.full())
+            expect(id.id).to_be_greater_than(0)
+            val tcb = sched.get_task(id)
+            if tcb != nil:
+                val task = tcb
+                expect(task.is_user).to_equal(true)
+                expect(task.entry_point).to_equal(0x400000)
+                expect(task.user_stack).to_equal(0x4000000000)
 
     describe "multiple tasks with different priorities":
         it "can create tasks at all priority levels":

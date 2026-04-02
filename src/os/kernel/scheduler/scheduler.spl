@@ -6,7 +6,7 @@
 # Consumes: SchedulerInputPort (interrupts, memory)
 # Produces: SchedulerOutputPort (task lifecycle, blocking)
 
-use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason}
+use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage}
 use os.kernel.types.capability_types.{CapabilitySet}
 
 # ============================================================================
@@ -31,6 +31,8 @@ struct TaskControlBlock:
     id: TaskId
     state: TaskState
     priority: TaskPriority
+    is_user: bool
+    entry_point: u64
     context: TaskContext             # Saved CPU state
     address_space: u64              # PML4 physical address
     kernel_stack: u64               # Kernel stack top
@@ -203,6 +205,8 @@ impl Scheduler:
             id: id,
             state: TaskState.Ready,
             priority: priority,
+            is_user: false,
+            entry_point: entry,
             context: ctx,
             address_space: 0,
             kernel_stack: 0,
@@ -216,6 +220,55 @@ impl Scheduler:
         self.tasks[slot] = tcb
 
         # Enqueue in the appropriate ready queue
+        val queue_idx = _priority_to_index(priority)
+        self.ready_queues[queue_idx].enqueue(id)
+
+        id
+
+    me create_user_task(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> TaskId:
+        """Create a transitional user task from a user process image.
+
+        The current scheduler still uses the generic TaskContext layout, so the
+        image entry and stack are mirrored into the existing instruction/stack
+        fields until architecture-specific runtime switching is completed.
+        """
+        val id = TaskId(id: self.next_task_id)
+        self.next_task_id = self.next_task_id + 1
+
+        val slot = self._find_empty_slot()
+        if slot < 0:
+            return TaskId(id: 0)
+
+        val ctx = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: image.stack_top, rsp: image.stack_top,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: image.entry,
+            rflags: 0x202,
+            cs: 0x23,
+            ss: 0x1B,
+            fpu_state: 0
+        )
+
+        val tcb = TaskControlBlock(
+            id: id,
+            state: TaskState.Ready,
+            priority: priority,
+            is_user: true,
+            entry_point: image.entry,
+            context: ctx,
+            address_space: 1,
+            kernel_stack: 0,
+            user_stack: image.stack_top,
+            capabilities: caps,
+            parent: Some(self.current),
+            exit_code: 0,
+            ticks_remaining: TIME_SLICE_TICKS
+        )
+
+        self.tasks[slot] = tcb
+
         val queue_idx = _priority_to_index(priority)
         self.ready_queues[queue_idx].enqueue(id)
 

@@ -90,7 +90,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `mcp` | MCP server implementation |
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
-| `t32` | TRACE32 setup, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
+| `t32` | TRACE32 setup, `scripts/t32q.shs` container lifecycle, GUI reopen flow, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
 

@@ -27,6 +27,7 @@ MODE="${2:-}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 T32_BIN="/opt/t32/bin/pc_linux64/t32marm"
+T32REM="/opt/t32/bin/pc_linux64/t32rem"
 CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
 LOG_PATH=""
 
@@ -124,6 +125,8 @@ start_mci_fallback() {
     MCI_ENTRYPOINT="$REPO_ROOT/config/t32/trace32_entrypoint.shs"
     MCI_PING="$REPO_ROOT/config/t32/t32_tcp_ping.shs"
     MCI_LOG="/tmp/t32_mci.log"
+    STABLE=0
+    ATTEMPT=0
 
     if [ ! -x "$MCI_ENTRYPOINT" ]; then
         echo "ERROR: MCI fallback entrypoint not found: $MCI_ENTRYPOINT" >&2
@@ -137,20 +140,30 @@ start_mci_fallback() {
     MCI_PID=$!
     sleep 2
 
-    if ! kill -0 "$MCI_PID" 2>/dev/null; then
-        echo "ERROR: t32mciserver exited during startup." >&2
-        if [ -f "$MCI_LOG" ]; then
-            sed -n '1,120p' "$MCI_LOG" >&2
+    while [ "$ATTEMPT" -lt 5 ]; do
+        if ! kill -0 "$MCI_PID" 2>/dev/null; then
+            echo "ERROR: t32mciserver exited during startup." >&2
+            if [ -f "$MCI_LOG" ]; then
+                sed -n '1,120p' "$MCI_LOG" >&2
+            fi
+            exit 1
         fi
-        exit 1
-    fi
 
-    if [ -x "$MCI_PING" ] && "$MCI_PING" localhost 20000 >/dev/null 2>&1; then
-        echo "TRACE32 MCI fallback pid: $MCI_PID"
-        echo "TRACE32 MCI log: $MCI_LOG"
-        echo "TRACE32 GUI RCL is unavailable on this host; MCI TCP is ready on localhost:20000."
-        exit 0
-    fi
+        if [ -x "$MCI_PING" ] && "$MCI_PING" localhost 20000 >/dev/null 2>&1; then
+            STABLE=$((STABLE + 1))
+            if [ "$STABLE" -ge 3 ]; then
+                echo "TRACE32 MCI fallback pid: $MCI_PID"
+                echo "TRACE32 MCI log: $MCI_LOG"
+                echo "TRACE32 GUI RCL is unavailable on this host; MCI TCP is ready on localhost:20000."
+                exit 0
+            fi
+        else
+            STABLE=0
+        fi
+
+        sleep 1
+        ATTEMPT=$((ATTEMPT + 1))
+    done
 
     echo "ERROR: t32mciserver did not answer on localhost:20000." >&2
     if [ -f "$MCI_LOG" ]; then
@@ -178,6 +191,18 @@ show_launch_failure_hint() {
         echo "TRACE32 launch failed: Lauterbach probe is visible but not fully usable." >&2
         return 0
     fi
+}
+
+remote_api_ready() {
+    if [ -x "$T32REM" ] && timeout 2 "$T32REM" localhost port=20000 PING >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ ! -x "$T32REM" ] && has_cmd ss && ss -ltnup 2>/dev/null | grep -q ':20000'; then
+        return 0
+    fi
+
+    return 1
 }
 
 if [ "$BOARD" = "" ] || [ "$MODE" = "" ]; then
@@ -244,6 +269,43 @@ fi
 if ! kill -0 "$PID" 2>/dev/null || [ -z "$CHILD_PID" ]; then
     echo "ERROR: TRACE32 exited during startup." >&2
     show_launch_failure_hint
+    if [ -f "$LOG_PATH" ]; then
+        echo "Recent log output:" >&2
+        sed -n '1,120p' "$LOG_PATH" >&2
+    fi
+    if [ "$FALLBACK_MCI" = "1" ]; then
+        start_mci_fallback
+    fi
+    exit 1
+fi
+
+READY=0
+ATTEMPT=0
+while [ "$ATTEMPT" -lt 8 ]; do
+    if ! kill -0 "$CHILD_PID" 2>/dev/null; then
+        echo "ERROR: TRACE32 exited before Remote API became ready." >&2
+        show_launch_failure_hint
+        if [ -f "$LOG_PATH" ]; then
+            echo "Recent log output:" >&2
+            sed -n '1,120p' "$LOG_PATH" >&2
+        fi
+        if [ "$FALLBACK_MCI" = "1" ]; then
+            start_mci_fallback
+        fi
+        exit 1
+    fi
+
+    if remote_api_ready; then
+        READY=1
+        break
+    fi
+
+    sleep 1
+    ATTEMPT=$((ATTEMPT + 1))
+done
+
+if [ "$READY" != "1" ]; then
+    echo "ERROR: TRACE32 started but Remote API did not become ready on port 20000." >&2
     if [ -f "$LOG_PATH" ]; then
         echo "Recent log output:" >&2
         sed -n '1,120p' "$LOG_PATH" >&2

@@ -485,6 +485,14 @@ impl Target {
     /// Falls back to `TargetArch::triple_str()` for unrecognized combinations.
     pub const fn triple_str(&self) -> &'static str {
         match (&self.arch, &self.os) {
+            // Baremetal / freestanding targets (TargetOS::None, non-WASM)
+            (TargetArch::X86_64, TargetOS::None) => "x86_64-unknown-none-elf",
+            (TargetArch::X86, TargetOS::None) => "i686-unknown-none-elf",
+            (TargetArch::Aarch64, TargetOS::None) => "aarch64-unknown-none",
+            (TargetArch::Arm, TargetOS::None) => "armv7a-unknown-none-eabihf",
+            (TargetArch::Riscv64, TargetOS::None) => "riscv64gc-unknown-none-elf",
+            (TargetArch::Riscv32, TargetOS::None) => "riscv32gc-unknown-none-elf",
+            // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
             (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
             (TargetArch::X86_64, TargetOS::MacOS) => "x86_64-apple-darwin",
@@ -724,5 +732,37 @@ mod tests {
             Target::new(TargetArch::Wasm32, TargetOS::None).triple_str(),
             "wasm32-unknown-unknown"
         );
+
+        // Baremetal / freestanding triples
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::None).triple_str(),
+            "x86_64-unknown-none-elf"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::None).triple_str(),
+            "aarch64-unknown-none"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Riscv64, TargetOS::None).triple_str(),
+            "riscv64gc-unknown-none-elf"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Riscv32, TargetOS::None).triple_str(),
+            "riscv32gc-unknown-none-elf"
+        );
+    }
+
+    #[test]
+    fn test_baremetal_targets() {
+        let t = Target::new(TargetArch::X86_64, TargetOS::None);
+        assert!(t.is_baremetal());
+        assert!(!t.is_host());
+
+        let t = Target::new(TargetArch::Aarch64, TargetOS::None);
+        assert!(t.is_baremetal());
+
+        // Host target is never baremetal
+        let t = Target::host();
+        assert!(!t.is_baremetal());
     }
 }

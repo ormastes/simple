@@ -7,6 +7,10 @@ T32_TCP_PING="config/t32/t32_tcp_ping.shs"
 IMAGE_NAME="${T32_CONTAINER_IMAGE:-simple-trace32-x11:latest}"
 CONTAINER_NAME="${T32_CONTAINER_NAME:-simple-trace32-x11}"
 REPO_ROOT="$(pwd)"
+HEADLESS_CONFIG="/workspace/config/t32/t32_stm_headless.t32"
+GUI_CONFIG="/workspace/config/t32/t32_stm_gui.t32"
+GUI_BIN="${T32_GUI_BIN:-/opt/t32/bin/pc_linux64/t32marm}"
+HOST_LIBXP="${T32_HOST_LIBXP:-/usr/lib/x86_64-linux-gnu/libXp.so.6}"
 
 if ! command -v "$RUNTIME" >/dev/null 2>&1; then
     echo "missing container runtime: $RUNTIME" >&2
@@ -23,6 +27,114 @@ if [ ! -f "$T32_TCP_PING" ]; then
     exit 1
 fi
 
+remove_container() {
+    "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+    local i
+    for i in $(seq 1 20); do
+        if ! "$RUNTIME" container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "container $CONTAINER_NAME is still present after removal attempt" >&2
+    exit 1
+}
+
+run_container() {
+    "$RUNTIME" run "$@"
+}
+
+common_run_args() {
+    printf '%s\n' \
+        --privileged \
+        -p 20000:20000 \
+        -v "$REPO_ROOT:/workspace" \
+        -v /opt/t32:/opt/t32:ro \
+        -v /dev/lauterbach:/dev/lauterbach \
+        -v /dev/bus/usb:/dev/bus/usb \
+        -w /workspace \
+        -e HOME=/tmp \
+        -e XAPPLRESDIR=/opt/t32
+
+    if [ -f "$HOST_LIBXP" ]; then
+        printf '%s\n' -v "${HOST_LIBXP}:/usr/lib/x86_64-linux-gnu/libXp.so.6:ro"
+    fi
+}
+
+default_xauthority() {
+    if [ -n "${XAUTHORITY:-}" ]; then
+        printf '%s\n' "$XAUTHORITY"
+        return 0
+    fi
+
+    if [ -n "${HOME:-}" ] && [ -f "${HOME}/.Xauthority" ]; then
+        printf '%s\n' "${HOME}/.Xauthority"
+    fi
+}
+
+require_x11() {
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "missing DISPLAY; set DISPLAY or use the headless up/up-d path" >&2
+        exit 1
+    fi
+
+    if [ ! -d /tmp/.X11-unix ]; then
+        echo "missing /tmp/.X11-unix; host X11 socket is not available" >&2
+        exit 1
+    fi
+}
+
+run_headless() {
+    local detach_flag="$1"
+    shift || true
+
+    remove_container
+    local -a args
+    mapfile -t args < <(common_run_args)
+    if [ "$detach_flag" = "1" ]; then
+        args=(-d "${args[@]}")
+    fi
+    args+=(--name "$CONTAINER_NAME" -e "T32_CONFIG=${HEADLESS_CONFIG}")
+    run_container "${args[@]}" "$IMAGE_NAME" "$@"
+}
+
+run_gui() {
+    local detach_flag="$1"
+    shift || true
+
+    require_x11
+    remove_container
+
+    local -a args
+    mapfile -t args < <(common_run_args)
+    if [ "$detach_flag" = "1" ]; then
+        args=(-d "${args[@]}")
+    fi
+
+    args+=(
+        --name "$CONTAINER_NAME"
+        -e "DISPLAY=${DISPLAY}"
+        -e "T32_CONFIG=${GUI_CONFIG}"
+        -v /tmp/.X11-unix:/tmp/.X11-unix
+    )
+
+    if [ ! -f "$HOST_LIBXP" ]; then
+        echo "warning: host libXp compatibility library not found at $HOST_LIBXP" >&2
+    fi
+
+    local xauth_path
+    xauth_path="$(default_xauthority || true)"
+    if [ -n "$xauth_path" ] && [ -f "$xauth_path" ]; then
+        args+=(-e "XAUTHORITY=${xauth_path}" -v "${xauth_path}:${xauth_path}:ro")
+    else
+        echo "warning: XAUTHORITY not found; GUI launch may require 'xhost +local:root' on the host" >&2
+    fi
+
+    run_container "${args[@]}" "$IMAGE_NAME" "$GUI_BIN" -c "$GUI_CONFIG" "$@"
+}
+
 cmd="${1:-up}"
 shift || true
 
@@ -31,34 +143,20 @@ case "$cmd" in
         "$RUNTIME" build -f config/t32/trace32_x11_container.Dockerfile -t "$IMAGE_NAME" config/t32/ "$@"
         ;;
     up)
-        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        "$RUNTIME" run --rm --name "$CONTAINER_NAME" \
-            --privileged \
-            -p 20000:20000 \
-            -v "$REPO_ROOT:/workspace" \
-            -v /opt/t32:/opt/t32:ro \
-            -v /dev/lauterbach:/dev/lauterbach \
-            -v /dev/bus/usb:/dev/bus/usb \
-            -w /workspace \
-            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
-            -e HOME=/tmp \
-            -e XAPPLRESDIR=/opt/t32 \
-            "$IMAGE_NAME" "$@"
+        run_headless 0 "$@"
         ;;
     up-d)
-        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        "$RUNTIME" run -d --name "$CONTAINER_NAME" \
-            --privileged \
-            -p 20000:20000 \
-            -v "$REPO_ROOT:/workspace" \
-            -v /opt/t32:/opt/t32:ro \
-            -v /dev/lauterbach:/dev/lauterbach \
-            -v /dev/bus/usb:/dev/bus/usb \
-            -w /workspace \
-            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
-            -e HOME=/tmp \
-            -e XAPPLRESDIR=/opt/t32 \
-            "$IMAGE_NAME" "$@"
+        run_headless 1 "$@"
+        ;;
+    on)
+        run_headless 1 "$@"
+        ;;
+    off)
+        remove_container
+        ;;
+    reopen|restart)
+        remove_container
+        run_headless 1 "$@"
         ;;
     wait)
         echo "waiting for t32mciserver on TCP port 20000..."
@@ -72,24 +170,28 @@ case "$cmd" in
         echo "ERROR: t32mciserver did not respond within 30s" >&2
         exit 1
         ;;
+    gui)
+        run_gui 0 "$@"
+        ;;
+    gui-d)
+        run_gui 1 "$@"
+        ;;
+    gui-on)
+        run_gui 1 "$@"
+        ;;
+    gui-reopen|gui-restart)
+        remove_container
+        run_gui 1 "$@"
+        ;;
     qt)
-        "$RUNTIME" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        "$RUNTIME" run --rm --name "$CONTAINER_NAME" \
-            --privileged \
-            -p 20000:20000 \
-            -v "$REPO_ROOT:/workspace" \
-            -v /opt/t32:/opt/t32:ro \
-            -v /dev/lauterbach:/dev/lauterbach \
-            -v /dev/bus/usb:/dev/bus/usb \
-            -w /workspace \
-            -e T32_CONFIG=/workspace/config/t32/t32_stm_headless.t32 \
-            -e HOME=/tmp \
-            -e XAPPLRESDIR=/opt/t32 \
-            "$IMAGE_NAME" \
-            /opt/t32/bin/pc_linux64/t32marm-qt -c /workspace/config/t32/t32_stm_headless.t32 "$@"
+        echo "qt is deprecated here; use gui/gui-d/gui-reopen. The local t32marm-qt binary still needs Qt4 runtime compatibility." >&2
+        exit 1
+        ;;
+    status)
+        "$RUNTIME" ps --filter "name=$CONTAINER_NAME" "$@"
         ;;
     down)
-        "$RUNTIME" rm -f "$CONTAINER_NAME" "$@" >/dev/null 2>&1 || true
+        remove_container
         ;;
     logs)
         "$RUNTIME" logs "$CONTAINER_NAME" "$@"
@@ -98,7 +200,7 @@ case "$cmd" in
         bash "$T32_TCP_PING" localhost 20000
         ;;
     *)
-        echo "usage: $0 {build|up|up-d|wait|qt|down|logs|ping}" >&2
+        echo "usage: $0 {build|up|up-d|on|off|reopen|restart|wait|gui|gui-d|gui-on|gui-reopen|gui-restart|status|down|logs|ping}" >&2
         exit 1
         ;;
 esac

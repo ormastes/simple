@@ -33,8 +33,8 @@ _multiboot_header:
 /* ==================================================================
  * 32-bit entry point
  * ================================================================== */
-.global _start
-_start:
+.global _entry32
+_entry32:
     /* Disable interrupts */
     cli
 
@@ -140,7 +140,7 @@ long_mode_entry:
     movl %esi, %edi
 
     /* Call Simple compiler entry point */
-    call spl_start
+    call _start
 
     /* Halt if it returns */
 .halt64:

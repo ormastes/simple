@@ -11,6 +11,35 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
+use os.kernel.loader.executable_source.{resolve_executable_bytes}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.arch.arch_context.{Architecture}
+
+val MAX_BINARY_PATH_LEN: u64 = 256
+
+@cfg(riscv64)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(riscv32)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv32
+
+@cfg(x86_64)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(x86)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(arm64)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(arm32)
+fn _current_exec_arch() -> Architecture:
+    Architecture.Riscv64
 
 # ============================================================================
 # Syscall Handler
@@ -36,6 +65,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_wait(args, scheduler)
         case 4:     # GetPid
             _handle_getpid(scheduler)
+        case 13:    # SpawnBinary
+            _handle_spawn_binary(args, scheduler, klog)
 
         # -- IPC -------------------------------------------------------------
         case 20:    # IpcSend
@@ -166,6 +197,71 @@ fn _handle_getpid(scheduler: Scheduler) -> SyscallResult:
     """Return the current task's ID."""
     val current = scheduler.get_current()
     SyscallResult(value: current.id.to_i64())
+
+fn _path_bytes_to_text(bytes: [u8]) -> text:
+    var chars: [text] = []
+    for b in bytes:
+        chars.push("{b as char}")
+    chars.join("")
+
+fn _copy_user_text(ptr_addr: u64, len: u64) -> Result<text, text>:
+    if ptr_addr == 0:
+        return Err("null path pointer")
+    if len == 0:
+        return Err("empty path")
+    if len > MAX_BINARY_PATH_LEN:
+        return Err("path too long")
+    unsafe:
+        val ptr = ptr_addr as *const u8
+        var bytes: [u8] = []
+        var i: u64 = 0
+        while i < len:
+            val byte_ptr = (ptr + (i as i64)) as *const u8
+            bytes.push(*byte_ptr)
+            i = i + 1
+        Ok(_path_bytes_to_text(bytes))
+
+fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog) -> SyscallResult:
+    """Spawn a task from a binary path.
+
+    Args:
+      arg0: userspace pointer to path bytes
+      arg1: path length
+      arg2: priority
+
+    The current implementation resolves known service/app paths to
+    boot-packaged ELF bytes, validates them, builds a transitional user
+    process image, and schedules a user task from that image.
+    """
+    if args.arg0 == 0 or args.arg1 == 0:
+        return SyscallResult(value: -22)
+    val path_result = _copy_user_text(args.arg0, args.arg1)
+    if path_result.is_err():
+        return SyscallResult(value: -22)
+
+    val path = path_result.unwrap()
+    val arch = _current_exec_arch()
+    val bytes_result = resolve_executable_bytes(path, arch)
+    if bytes_result.is_err():
+        var log = klog
+        log.write(3, 1, 0, "spawn_binary rejected unknown binary: {path}")
+        return SyscallResult(value: -2)
+    val image_result = build_user_process_image(path, bytes_result.unwrap(), arch)
+    if image_result.is_err():
+        var log = klog
+        log.write(3, 1, 0, "spawn_binary rejected invalid executable: {path}")
+        return SyscallResult(value: -8)
+
+    val priority = _u64_to_priority(args.arg2)
+    val caps = CapabilitySet.full()
+    var sched = scheduler
+    val task_id = sched.create_user_task(image_result.unwrap(), priority, caps)
+    if task_id.id == 0:
+        return SyscallResult(value: -12)
+
+    var log = klog
+    log.write(6, 1, task_id.id, "spawn_binary launched {path}")
+    SyscallResult(value: task_id.id.to_i64())
 
 # ============================================================================
 # IPC Syscall Handlers

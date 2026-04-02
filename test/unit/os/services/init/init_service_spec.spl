@@ -18,6 +18,15 @@ use os.services.init.init_service.{
     RestartPolicy, default_services
 }
 
+fn _launcher_ok(binary: text, priority: u8) -> Result<u64, text>:
+    if binary == "/sys/services/vfs":
+        return Ok(41)
+    if binary == "/sys/services/compositor":
+        return Ok(52)
+    Err("unknown binary")
+
+fn _launcher_err(binary: text, priority: u8) -> Result<u64, text>:
+    Err("launch failed")
 
 # ============================================================================
 # Test Group 1: InitService Initialization
@@ -31,6 +40,10 @@ describe "InitService":
 
         it "starts with boot_complete false":
             val init = InitService.new()
+            expect(init.boot_complete).to_equal(false)
+
+        it "accepts an injected launcher":
+            val init = InitService.with_launcher(_launcher_ok)
             expect(init.boot_complete).to_equal(false)
 
     # ========================================================================
@@ -256,3 +269,43 @@ describe "default_services":
     it "desktop has OnFailure restart policy":
         val defs = default_services()
         expect(defs[3].restart).to_equal(RestartPolicy.OnFailure)
+
+describe "InitService launch path":
+    it "starts a service through the binary launcher":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        expect(init.services[0].state).to_equal(ServiceState.Running(pid: 41))
+
+    it "fails a service when the launcher returns an error":
+        var init = InitService.with_launcher(_launcher_err)
+        init.register(ServiceDef(
+            name: "vfs",
+            binary: "/sys/services/vfs",
+            dependencies: [],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("vfs")
+        expect(init.services[0].state).to_equal(ServiceState.Failed(reason: "spawn failed"))
+
+    it "does not launch a service until dependencies are running":
+        var init = InitService.with_launcher(_launcher_ok)
+        init.register(ServiceDef(
+            name: "compositor",
+            binary: "/sys/services/compositor",
+            dependencies: ["vfs"],
+            capabilities: [],
+            restart: RestartPolicy.Always,
+            priority: "high"
+        ))
+        init.start_service("compositor")
+        expect(init.services[0].state).to_equal(ServiceState.Stopped)

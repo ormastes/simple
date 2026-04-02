@@ -1109,6 +1109,32 @@ The repo-managed container flow is headless and uses `t32mciserver`. It does
 not ship bundled TRACE32 GUI compatibility libraries; vendor runtime files must
 come from your local `/opt/t32` installation.
 
+Primary lifecycle wrapper:
+
+```bash
+scripts/t32q.shs build
+scripts/t32q.shs on
+scripts/t32q.shs wait
+scripts/t32q.shs ping
+scripts/t32q.shs reopen
+scripts/t32q.shs off
+```
+
+GUI container reopen path:
+
+```bash
+scripts/t32q.shs gui-on
+scripts/t32q.shs gui-reopen
+scripts/t32q.shs off
+```
+
+`gui-on` requires a real host X11 session (`DISPLAY`, `/tmp/.X11-unix`, and
+usually `XAUTHORITY`). For quick diagnostics use:
+
+```bash
+scripts/t32q.shs doctor
+```
+
 ### Install T32 MCP Servers
 
 ```bash

@@ -1,0 +1,162 @@
+# RISC-V 64 Trap Model — Pure Trap Classification and Syscall Marshalling
+#
+# Keeps the RV64 trap policy in pure Simple code so it can be unit tested
+# without depending on the architecture-specific trap vector assembly.
+
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+
+val RV64_CAUSE_INTERRUPT_BIT: u64 = 1 << 63
+val RV64_CAUSE_CODE_MASK: u64 = 0x7FFFFFFFFFFFFFFF
+val RV64_ECALL_SIZE: u64 = 4
+
+val RV64_CAUSE_S_SOFTWARE_INTERRUPT: u64 = 1
+val RV64_CAUSE_S_TIMER_INTERRUPT: u64 = 5
+val RV64_CAUSE_S_EXTERNAL_INTERRUPT: u64 = 9
+
+val RV64_CAUSE_ECALL_FROM_U: u64 = 8
+val RV64_CAUSE_ECALL_FROM_S: u64 = 9
+
+val RV64_SSTATUS_SPIE: u64 = 1 << 5
+val RV64_SSTATUS_SPP: u64 = 1 << 8
+
+enum Rv64TrapKind:
+    SoftwareInterrupt
+    TimerInterrupt
+    ExternalInterrupt
+    UserEcall
+    SupervisorEcall
+    Exception(code: u64)
+    Interrupt(code: u64)
+
+fn rv64_initial_kernel_sstatus() -> u64:
+    """Return sstatus for a fresh kernel task restored with sret."""
+    RV64_SSTATUS_SPP | RV64_SSTATUS_SPIE
+
+fn rv64_initial_user_sstatus() -> u64:
+    """Return sstatus for a fresh user task restored with sret."""
+    RV64_SSTATUS_SPIE
+
+fn create_rv64_kernel_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv64Context:
+    """Create a kernel-mode RV64 context."""
+    Riscv64Context(
+        ra: entry_point,
+        sp: stack_top,
+        gp: 0,
+        tp: 0,
+        t0: 0,
+        t1: 0,
+        t2: 0,
+        s0: 0,
+        s1: 0,
+        a0: arg,
+        a1: 0,
+        a2: 0,
+        a3: 0,
+        a4: 0,
+        a5: 0,
+        a6: 0,
+        a7: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        t3: 0,
+        t4: 0,
+        t5: 0,
+        t6: 0,
+        sepc: entry_point,
+        sstatus: rv64_initial_kernel_sstatus(),
+        scause: 0
+    )
+
+fn create_rv64_user_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv64Context:
+    """Create a user-mode RV64 context."""
+    Riscv64Context(
+        ra: entry_point,
+        sp: stack_top,
+        gp: 0,
+        tp: 0,
+        t0: 0,
+        t1: 0,
+        t2: 0,
+        s0: 0,
+        s1: 0,
+        a0: arg,
+        a1: 0,
+        a2: 0,
+        a3: 0,
+        a4: 0,
+        a5: 0,
+        a6: 0,
+        a7: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        t3: 0,
+        t4: 0,
+        t5: 0,
+        t6: 0,
+        sepc: entry_point,
+        sstatus: rv64_initial_user_sstatus(),
+        scause: 0
+    )
+
+fn rv64_is_interrupt(scause: u64) -> bool:
+    (scause & RV64_CAUSE_INTERRUPT_BIT) != 0
+
+fn rv64_trap_code(scause: u64) -> u64:
+    scause & RV64_CAUSE_CODE_MASK
+
+fn classify_rv64_trap(scause: u64) -> Rv64TrapKind:
+    val code = rv64_trap_code(scause)
+    if rv64_is_interrupt(scause):
+        match code:
+            case RV64_CAUSE_S_SOFTWARE_INTERRUPT:
+                return Rv64TrapKind.SoftwareInterrupt
+            case RV64_CAUSE_S_TIMER_INTERRUPT:
+                return Rv64TrapKind.TimerInterrupt
+            case RV64_CAUSE_S_EXTERNAL_INTERRUPT:
+                return Rv64TrapKind.ExternalInterrupt
+            case _:
+                return Rv64TrapKind.Interrupt(code: code)
+
+    match code:
+        case RV64_CAUSE_ECALL_FROM_U:
+            Rv64TrapKind.UserEcall
+        case RV64_CAUSE_ECALL_FROM_S:
+            Rv64TrapKind.SupervisorEcall
+        case _:
+            Rv64TrapKind.Exception(code: code)
+
+fn rv64_syscall_args_from_context(ctx: Riscv64Context) -> SyscallArgs:
+    """Map RV64 user syscall registers into SyscallArgs."""
+    SyscallArgs(
+        id: ctx.a7,
+        arg0: ctx.a0,
+        arg1: ctx.a1,
+        arg2: ctx.a2,
+        arg3: ctx.a3,
+        arg4: ctx.a4,
+        arg5: ctx.a5
+    )
+
+fn rv64_apply_syscall_result(ctx: Riscv64Context, result: SyscallResult) -> Riscv64Context:
+    """Return an updated context after a successful syscall dispatch."""
+    var updated = ctx
+    updated.a0 = result.value as u64
+    updated.sepc = ctx.sepc + RV64_ECALL_SIZE
+    updated

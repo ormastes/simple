@@ -68,6 +68,9 @@ Debugging, testing, and backends
 - Backend switching (interpreter, JIT, native)
 - SMF library management
 
+Additional tooling examples:
+- `mcpgdb/` - merged C/C++ debugger + clangd MCP example
+
 ### 11. [Advanced Topics](11_advanced/)
 Compiler internals and optimization
 - Optimization examples

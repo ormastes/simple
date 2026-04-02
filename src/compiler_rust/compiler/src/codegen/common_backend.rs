@@ -110,8 +110,9 @@ impl BackendSettings {
     pub fn aot_for_target(target: Target) -> Self {
         Self {
             opt_level: "speed",
-            // Enable PIC for compatibility with PIE executables and shared libraries
-            is_pic: true,
+            // Enable PIC for hosted targets (PIE executables, shared libraries).
+            // Disable PIC for baremetal/freestanding targets — no GOT, no dynamic linker.
+            is_pic: !target.is_baremetal(),
             target,
         }
     }

@@ -15,6 +15,12 @@ For the repo-managed container flow, the current preferred path is headless
 `t32mciserver` on TCP port `20000`, not the older X11/NETASSIST `t32marm`
 startup path.
 
+The primary repo wrapper for container lifecycle is:
+
+```bash
+scripts/t32q.shs
+```
+
 ## Repo-Managed Assets
 
 The repo now ships the pieces needed to start and validate the STM TRACE32
@@ -28,6 +34,7 @@ lanes once the host runtime works:
   - `config/t32/stm32wb_gdb_start.cmm`
   - `config/t32/stm32h7_gdb_start.cmm`
 - shell helpers:
+  - `scripts/t32q.shs`
   - `scripts/t32_start_stm.shs`
   - `scripts/t32_check_ready.shs`
   - `scripts/t32_enable_gdb.shs`
@@ -137,18 +144,49 @@ This is the config the repo startup helpers use by default.
 
 ## Headless Container Path
 
-The repo-managed container helper:
+Prefer the repo wrapper:
 
 ```bash
-config/t32/trace32_x11_container.shs build
-config/t32/trace32_x11_container.shs up-d
-config/t32/trace32_x11_container.shs ping
+scripts/t32q.shs build
+scripts/t32q.shs on
+scripts/t32q.shs wait
+scripts/t32q.shs ping
+scripts/t32q.shs reopen
+scripts/t32q.shs off
 ```
 
-starts `t32mciserver` from the vendor install mounted at `/opt/t32`. The repo
-does not ship TRACE32 GUI compatibility shared libraries; if you need to debug
-older `t32marm` or `t32marm-qt` frontends, treat any extra compatibility libs
-as local, non-release artifacts.
+`scripts/t32q.shs` wraps `config/t32/trace32_x11_container.shs`, kills stale
+host `t32mciserver` conflicts before `on` and `reopen`, and exposes a `doctor`
+command for quick X11/container/port diagnostics.
+
+Under the hood, the headless container starts `t32mciserver` from the vendor
+install mounted at `/opt/t32`.
+
+## GUI Container Path
+
+When you need to reopen TRACE32 in a visible container, use:
+
+```bash
+scripts/t32q.shs gui-on
+scripts/t32q.shs gui-reopen
+scripts/t32q.shs off
+```
+
+This launches `/opt/t32/bin/pc_linux64/t32marm` with
+`config/t32/t32_stm_gui.t32`.
+
+Requirements:
+
+- host `DISPLAY` must be set
+- `/tmp/.X11-unix` must be present
+- if host Xauthority is not discoverable, you may need `xhost +local:root`
+
+Limitations:
+
+- the local `t32marm-qt` binary still requires Qt4 runtime libraries and is not
+  the default path here
+- the repo still does not bundle vendor GUI compatibility libraries; vendor
+  runtime files must come from your local `/opt/t32` installation
 
 ## Start Commands
 
@@ -180,6 +218,7 @@ Check probe access and Remote API availability:
 
 ```bash
 ./scripts/t32_check_ready.shs
+scripts/t32q.shs doctor
 ```
 
 This runs:
@@ -189,6 +228,9 @@ This runs:
 
 If step 1 fails, the host USB setup is still wrong.
 If step 2 fails, PowerView is not exposing a usable Remote API session yet.
+If the headless container path works but the host PowerView path does not, keep
+using `scripts/t32q.shs` for repo-managed smoke/debug flows and treat the host
+GUI lane as a separate runtime issue.
 
 ## Enable TRACE32 GDB Back-End
 

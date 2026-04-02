@@ -28,6 +28,7 @@ Registered in the dispatch table. Each maps to `src/app/<module>/main.spl`.
 | `run` | `run/` | Build and run a program |
 | `bench` | — | Benchmark runner |
 | `clean` | — | Clean build artifacts |
+| `sim` | `sim/` | Shared RISC-V machine profiles and oracle-backed simulator surface |
 
 ### Testing
 
