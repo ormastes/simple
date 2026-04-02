@@ -58,18 +58,20 @@ fn lsp_json_is_ws(ch: text) -> bool:
 
 fn lsp_json_find_value_start(json: text, key: text) -> i64:
     val search = "\"" + key + "\""
-    var i = 0
-    while i + search.len() <= json.len():
-        if json.substring(i, i + search.len()) == search:
-            var j = i + search.len()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if json.substring(offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and lsp_json_is_ws(lsp_json_char_at(json, j)):
+            j = j + 1
+        if j < json.len() and lsp_json_char_at(json, j) == ":":
+            j = j + 1
             while j < json.len() and lsp_json_is_ws(lsp_json_char_at(json, j)):
                 j = j + 1
-            if j < json.len() and lsp_json_char_at(json, j) == ":":
-                j = j + 1
-                while j < json.len() and lsp_json_is_ws(lsp_json_char_at(json, j)):
-                    j = j + 1
-                return j
-        i = i + 1
+            return j
+        offset = offset + search.len()
     return -1
 
 fn lsp_request_json_raw_field(json: text, key: text) -> text:
@@ -135,19 +137,80 @@ fn lsp_request_json_text_field(json: text, key: text) -> text:
     raw
 
 fn lsp_request_arguments_json(body: text) -> text:
-    val params = lsp_request_json_raw_field(body, "params")
-    if params == "null":
+    val marker1 = "\"arguments\":"
+    val marker2 = "\"arguments\": "
+    var idx = body.index_of(marker1).unwrap_or(-1)
+    var start = -1
+    if idx >= 0:
+        start = idx + marker1.len()
+    else:
+        idx = body.index_of(marker2).unwrap_or(-1)
+        if idx >= 0:
+            start = idx + marker2.len()
+    if start < 0 or start >= body.len():
         return body
-    val args = lsp_request_json_raw_field(params, "arguments")
-    if args == "null" or args == "":
+    while start < body.len() and lsp_json_is_ws(lsp_json_char_at(body, start)):
+        start = start + 1
+    if start >= body.len() or lsp_json_char_at(body, start) != "{":
         return body
-    args
+    var depth = 0
+    var i = start
+    var in_str = false
+    var esc = false
+    while i < body.len():
+        val ch = lsp_json_char_at(body, i)
+        if in_str:
+            if esc:
+                esc = false
+            elif ch == "\\":
+                esc = true
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    return body.substring(start, i + 1)
+        i = i + 1
+    body
 
 fn lsp_request_id_text(body: text) -> text:
-    val id = lsp_request_json_raw_field(body, "id")
-    if id == "":
+    val marker1 = "\"id\":"
+    val marker2 = "\"id\": "
+    var idx = body.index_of(marker1).unwrap_or(-1)
+    var start = -1
+    if idx >= 0:
+        start = idx + marker1.len()
+    else:
+        idx = body.index_of(marker2).unwrap_or(-1)
+        if idx >= 0:
+            start = idx + marker2.len()
+    if start < 0 or start >= body.len():
         return "null"
-    id
+    while start < body.len() and lsp_json_is_ws(lsp_json_char_at(body, start)):
+        start = start + 1
+    if start >= body.len():
+        return "null"
+    val first = lsp_json_char_at(body, start)
+    if first == "\"":
+        val rest = body.substring(start + 1, body.len())
+        val end = rest.index_of("\"").unwrap_or(-1)
+        if end < 0:
+            return "null"
+        return "\"" + rest.substring(0, end) + "\""
+    var end2 = start
+    while end2 < body.len():
+        val ch = lsp_json_char_at(body, end2)
+        if ch == "," or ch == "}" or ch == "]" or lsp_json_is_ws(ch):
+            break
+        end2 = end2 + 1
+    if end2 <= start:
+        return "null"
+    body.substring(start, end2)
 
 fn lsp_start_server():
     lsp_debug_bootstrap()

@@ -39,6 +39,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut backend = String::new();
     let mut runtime_path: Option<PathBuf> = None;
     let mut entry_closure = false;
+    let mut target_triple: Option<String> = None;
+    let mut linker_script: Option<PathBuf> = None;
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -164,6 +166,32 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 entry_closure = true;
                 i += 1;
             }
+            "--target" => {
+                if i + 1 < args.len() {
+                    target_triple = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("error: --target requires a target triple (e.g. riscv32-unknown-none)");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--target=") => {
+                target_triple = Some(other.strip_prefix("--target=").unwrap_or("").to_string());
+                i += 1;
+            }
+            "--linker-script" => {
+                if i + 1 < args.len() {
+                    linker_script = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("error: --linker-script requires a file path");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--linker-script=") => {
+                linker_script = Some(PathBuf::from(other.strip_prefix("--linker-script=").unwrap_or("")));
+                i += 1;
+            }
             other => {
                 // Treat as source directory
                 source_dirs.push(PathBuf::from(other));
@@ -239,6 +267,20 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         }
     }
 
+    // Set target override before building (used by compile_file_to_object)
+    // Parse target triple if provided
+    let target = if let Some(ref triple) = target_triple {
+        match simple_common::target::Target::parse(triple) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("error: invalid target triple '{}': {}", triple, e);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
     let mut config = NativeBuildConfig {
         file_timeout: timeout,
         verbose,
@@ -250,6 +292,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         no_mangle,
         runtime_path,
         entry_closure,
+        target,
+        linker_script,
         ..Default::default()
     };
     if !backend.is_empty() {
@@ -263,6 +307,11 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         if normalized != "cranelift" {
             std::env::set_var("SIMPLE_BACKEND", &normalized);
         }
+    }
+
+    // Set target override for compile_file_to_object (thread-safe global)
+    if let Some(ref t) = config.target {
+        simple_compiler::pipeline::native_project::set_target_override(*t);
     }
 
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);

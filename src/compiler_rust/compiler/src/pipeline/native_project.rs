@@ -22,6 +22,23 @@ pub fn set_runtime_path_override(path: PathBuf) {
     let _ = RUNTIME_PATH_OVERRIDE.set(path);
 }
 
+/// CLI-provided cross-compilation target override.
+/// Set before building; read by `compile_file_to_object()` to select the right backend target.
+static TARGET_OVERRIDE: OnceLock<simple_common::target::Target> = OnceLock::new();
+
+/// Set the cross-compilation target override (called from CLI arg parsing).
+pub fn set_target_override(target: simple_common::target::Target) {
+    let _ = TARGET_OVERRIDE.set(target);
+}
+
+/// Get the effective compilation target (override or host).
+fn effective_target() -> simple_common::target::Target {
+    TARGET_OVERRIDE
+        .get()
+        .copied()
+        .unwrap_or_else(simple_common::target::Target::host)
+}
+
 use rayon::prelude::*;
 
 use crate::codegen::common_backend::module_prefix_from_path;
@@ -76,6 +93,10 @@ pub struct NativeBuildConfig {
     pub runtime_path: Option<PathBuf>,
     /// Discover files from the explicit entrypoint's reachable import closure.
     pub entry_closure: bool,
+    /// Cross-compilation target (e.g. "riscv32-unknown-none"). None = host.
+    pub target: Option<simple_common::target::Target>,
+    /// Linker script path for freestanding/OS targets.
+    pub linker_script: Option<PathBuf>,
 }
 
 impl Default for NativeBuildConfig {
@@ -94,6 +115,8 @@ impl Default for NativeBuildConfig {
             backend: "cranelift".to_string(),
             runtime_path: None,
             entry_closure: false,
+            target: None,
+            linker_script: None,
         }
     }
 }
@@ -579,8 +602,31 @@ impl NativeProjectBuilder {
 
     fn discover_reachable_files(&self, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
         let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.to_path_buf());
-        let resolver_root = self.effective_source_root_for(&canonical_entry);
-        let mut resolver = ModuleResolver::new(self.project_root.clone(), resolver_root);
+
+        // Build one resolver per source dir so imports can cross source boundaries.
+        // E.g. entry in --source src/os can import from --source src/lib.
+        let mut resolvers: Vec<ModuleResolver> = self
+            .source_dirs
+            .iter()
+            .map(|dir| {
+                let canonical_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+                ModuleResolver::new(self.project_root.clone(), canonical_dir)
+            })
+            .collect();
+
+        // Ensure at least the effective root for the entry file is covered.
+        if resolvers.is_empty() {
+            let resolver_root = self.effective_source_root_for(&canonical_entry);
+            resolvers.push(ModuleResolver::new(self.project_root.clone(), resolver_root));
+        }
+
+        // Canonicalize source dirs once for the filesystem fallback.
+        let canonical_source_dirs: Vec<PathBuf> = self
+            .source_dirs
+            .iter()
+            .filter_map(|d| std::fs::canonicalize(d).ok())
+            .collect();
+
         let mut queue = VecDeque::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();
         let mut files = Vec::new();
@@ -603,10 +649,133 @@ impl NativeProjectBuilder {
                 .parse()
                 .map_err(|e| format!("failed to parse {} during discovery: {}", canonical.display(), e))?;
 
-            for dep in extract_reachable_module_paths(&module, &canonical, &mut resolver) {
-                let dep_canonical = std::fs::canonicalize(&dep).unwrap_or(dep);
-                if !seen.contains(&dep_canonical) {
-                    queue.push_back(dep_canonical);
+            // Try each resolver — the first hit wins for each dependency.
+            let mut found_deps: Vec<PathBuf> = Vec::new();
+            for resolver in &mut resolvers {
+                for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
+                    let dep_canonical = std::fs::canonicalize(&dep).unwrap_or(dep);
+                    if !found_deps.iter().any(|existing| same_file_path(existing, &dep_canonical)) {
+                        found_deps.push(dep_canonical);
+                    }
+                }
+            }
+
+            // Filesystem fallback: for any `use` statement whose segments form a
+            // plausible path under one of the --source dirs, check the filesystem
+            // directly.  This catches cases the ModuleResolver misses because the
+            // first segment matches the source dir basename (e.g. `use os.kernel.X`
+            // when --source src/os means os/ lives *inside* the source root).
+            {
+                use simple_parser::ast::{
+                    AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath,
+                    MultiUse, Node, UseStmt,
+                };
+
+                fn segments_from_use(path: &ModulePath, target: Option<&ImportTarget>) -> Vec<Vec<String>> {
+                    let mut results = Vec::new();
+                    // Full path with target appended (most specific)
+                    if let Some(ImportTarget::Single(name)) | Some(ImportTarget::Aliased { name, .. }) = target {
+                        let mut segs = path.segments.clone();
+                        segs.push(name.clone());
+                        results.push(segs);
+                    }
+                    // Just the path segments
+                    results.push(path.segments.clone());
+                    results
+                }
+
+                let mut use_segment_lists: Vec<Vec<String>> = Vec::new();
+                for item in &module.items {
+                    match item {
+                        Node::UseStmt(UseStmt { path, target, .. }) => {
+                            use_segment_lists.extend(segments_from_use(path, Some(target)));
+                        }
+                        Node::CommonUseStmt(CommonUseStmt { path, target, .. }) => {
+                            use_segment_lists.extend(segments_from_use(path, Some(target)));
+                        }
+                        Node::ExportUseStmt(ExportUseStmt { path, target, .. }) => {
+                            use_segment_lists.extend(segments_from_use(path, Some(target)));
+                        }
+                        Node::MultiUse(MultiUse { imports, .. }) => {
+                            for (path, target) in imports {
+                                use_segment_lists.extend(segments_from_use(path, Some(target)));
+                            }
+                        }
+                        Node::AutoImportStmt(AutoImportStmt { path, .. }) => {
+                            use_segment_lists.extend(segments_from_use(path, None));
+                        }
+                        Node::ModDecl(ModDecl { name, body, .. }) if body.is_none() => {
+                            use_segment_lists.push(vec![name.clone()]);
+                        }
+                        _ => {}
+                    }
+                }
+
+                for segments in &use_segment_lists {
+                    if segments.is_empty() {
+                        continue;
+                    }
+                    // Try each source dir
+                    for src_dir in &canonical_source_dirs {
+                        // Strategy A: segments map directly under source dir
+                        // e.g. --source src/os, use os.kernel.boot → src/os/os/kernel/boot.spl  (unlikely)
+                        // Strategy B: first segment matches source dir basename → skip it
+                        // e.g. --source src/os, use os.kernel.boot → src/os/kernel/boot.spl
+                        let dir_name = src_dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("");
+
+                        let try_segments: Vec<&[String]> = if !segments.is_empty() && segments[0] == dir_name {
+                            // The first segment matches the dir name, so try with it stripped first
+                            vec![&segments[1..], &segments[..]]
+                        } else {
+                            vec![&segments[..]]
+                        };
+
+                        for segs in &try_segments {
+                            if segs.is_empty() {
+                                continue;
+                            }
+                            let rel_path: PathBuf = segs.iter().collect();
+                            // Try .spl file
+                            let spl_path = src_dir.join(&rel_path).with_extension("spl");
+                            if spl_path.is_file() {
+                                let dep_canonical =
+                                    std::fs::canonicalize(&spl_path).unwrap_or(spl_path);
+                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
+                                    found_deps.push(dep_canonical);
+                                }
+                                break;
+                            }
+                            // Try mod.spl inside directory
+                            let mod_path = src_dir.join(&rel_path).join("mod.spl");
+                            if mod_path.is_file() {
+                                let dep_canonical =
+                                    std::fs::canonicalize(&mod_path).unwrap_or(mod_path);
+                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
+                                    found_deps.push(dep_canonical);
+                                }
+                                break;
+                            }
+                            // Try __init__.spl inside directory
+                            let init_path = src_dir.join(&rel_path).join("__init__.spl");
+                            if init_path.is_file() {
+                                let dep_canonical =
+                                    std::fs::canonicalize(&init_path).unwrap_or(init_path);
+                                if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
+                                    found_deps.push(dep_canonical);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for dep in found_deps {
+                if !seen.contains(&dep) {
+                    queue.push_back(dep);
                 }
             }
         }
@@ -897,6 +1066,15 @@ int main(int argc, char** argv) {
     fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
+        // Freestanding / baremetal targets: use simplified link with cross-compiler.
+        // Triggered by --target flag in config or TargetOS::None env var.
+        let cross_target = effective_target();
+        let is_freestanding = self.config.target.is_some()
+            || cross_target.os == simple_common::target::TargetOS::None;
+        if is_freestanding {
+            return self.link_objects_freestanding(object_paths, temp_dir, imports);
+        }
+
         // Compile the C main stub (defines main() which calls spl_main())
         let main_o = self.compile_main_stub(temp_dir)?;
 
@@ -944,6 +1122,30 @@ int main(int argc, char** argv) {
         //   "Option 'debug-counter' registered more than once!"
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cmd.arg("-Wl,-z,muldefs");
+
+        // Cross-compilation: set target triple and use freestanding link flags
+        let cross_target = effective_target();
+        if !cross_target.is_host() {
+            let triple = match (cross_target.arch, cross_target.os) {
+                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => "riscv32-unknown-elf",
+                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::None) => "riscv64-unknown-elf",
+                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::None) => "aarch64-none-elf",
+                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::None) => "armv7-none-eabihf",
+                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::None) => "i686-unknown-elf",
+                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => "x86_64-unknown-elf",
+                _ => "", // host-like targets don't need special triple
+            };
+            if !triple.is_empty() {
+                cmd.arg(format!("--target={}", triple));
+                cmd.arg("-nostdlib");
+                cmd.arg("-ffreestanding");
+            }
+        }
+
+        // Linker script for freestanding/OS targets
+        if let Some(ref ls) = self.config.linker_script {
+            cmd.arg(format!("-T{}", ls.display()));
+        }
 
         if is_clang_cl {
             cmd.arg(&main_o);
@@ -1208,6 +1410,194 @@ int main(int argc, char** argv) {
             Err(format!("link failed: {}", stderr))
         }
     }
+
+    /// Link object files for a freestanding target (no OS, no libc).
+    ///
+    /// Uses clang as a cross-linker with -nostdlib -ffreestanding.
+    /// Skips host runtime libraries, main stub, and system libraries.
+    /// Optionally cross-compiles the baremetal C runtime if found.
+    fn link_objects_freestanding(
+        &self,
+        object_paths: &[PathBuf],
+        temp_dir: &Path,
+        _imports: &ModuleImports,
+    ) -> Result<(), String> {
+        let cross_target = effective_target();
+        let triple = match cross_target.arch {
+            simple_common::target::TargetArch::Riscv32 => "riscv32-unknown-elf",
+            simple_common::target::TargetArch::Riscv64 => "riscv64-unknown-elf",
+            simple_common::target::TargetArch::Aarch64 => "aarch64-none-elf",
+            simple_common::target::TargetArch::Arm => "armv7-none-eabihf",
+            simple_common::target::TargetArch::X86 => "i686-unknown-elf",
+            simple_common::target::TargetArch::X86_64 => "x86_64-unknown-elf",
+            _ => return Err("unsupported freestanding target architecture".to_string()),
+        };
+
+        let cc = find_c_compiler();
+
+        // RISC-V ABI flags (needed for consistent float ABI across all objects)
+        let (march, mabi) = match cross_target.arch {
+            simple_common::target::TargetArch::Riscv64 => ("-march=rv64gc", "-mabi=lp64d"),
+            simple_common::target::TargetArch::Riscv32 => ("-march=rv32gc", "-mabi=ilp32d"),
+            _ => ("", ""),
+        };
+
+        // Scan for boot/ directory next to entry file (crt0.s, stubs.c)
+        let mut boot_objects: Vec<PathBuf> = Vec::new();
+        if let Some(ref entry) = self.entry_file {
+            let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
+            if boot_dir.is_dir() {
+                if self.config.verbose {
+                    eprintln!("  Boot directory: {}", boot_dir.display());
+                }
+                // Assemble .S/.s files
+                for ext in &["S", "s"] {
+                    if let Ok(entries) = std::fs::read_dir(&boot_dir) {
+                        for de in entries.flatten() {
+                            let path = de.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+                                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                let out = temp_dir.join(format!("_boot_{}.o", stem));
+                                let mut asm_cmd = std::process::Command::new(&cc);
+                                asm_cmd.args(["-c", "-o"]).arg(&out).arg(&path)
+                                    .arg(format!("--target={}", triple));
+                                if !march.is_empty() { asm_cmd.arg(march); }
+                                if !mabi.is_empty() { asm_cmd.arg(mabi); }
+                                if let Ok(r) = asm_cmd.output() {
+                                    if r.status.success() { boot_objects.push(out); }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Compile .c files
+                if let Ok(entries) = std::fs::read_dir(&boot_dir) {
+                    for de in entries.flatten() {
+                        let path = de.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("c") {
+                            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                            let out = temp_dir.join(format!("_boot_{}.o", stem));
+                            let mut c_cmd = std::process::Command::new(&cc);
+                            c_cmd.args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
+                                .arg(&out).arg(&path)
+                                .arg(format!("--target={}", triple));
+                            if triple.contains("x86_64") { c_cmd.arg("-mno-red-zone"); }
+                            if !march.is_empty() { c_cmd.args([march, mabi, "-mcmodel=medany"]); }
+                            if let Ok(r) = c_cmd.output() {
+                                if r.status.success() { boot_objects.push(out); }
+                            }
+                        }
+                    }
+                }
+                if self.config.verbose {
+                    eprintln!("  Boot objects: {} files", boot_objects.len());
+                }
+            }
+        }
+
+        let mut cmd = std::process::Command::new(&cc);
+        cmd.arg(format!("--target={}", triple));
+        cmd.arg("-nostdlib");
+        cmd.arg("-ffreestanding");
+        cmd.arg("-static");
+        cmd.arg("-fuse-ld=lld");
+
+        // Linker script
+        if let Some(ref ls) = self.config.linker_script {
+            cmd.arg(format!("-T{}", ls.display()));
+        }
+
+        cmd.arg("-o").arg(&self.output);
+
+        // Boot objects (crt0, stubs) first — they define _start/_entry_asm
+        for boot_obj in &boot_objects {
+            cmd.arg(boot_obj);
+        }
+
+        // Add all compiled objects
+        for obj in object_paths {
+            cmd.arg(obj);
+        }
+
+        // Scan for _entry32 in boot objects (multiboot x86)
+        if !boot_objects.is_empty() {
+            let has_entry32 = boot_objects.iter().any(|obj| {
+                std::process::Command::new("nm").arg("-g").arg(obj).output().ok()
+                    .map_or(false, |out| String::from_utf8_lossy(&out.stdout).contains(" _entry32"))
+            });
+            if has_entry32 {
+                cmd.arg("-Wl,--entry=_entry32");
+            }
+        }
+
+        // Scan for mangled _start → create defsym alias
+        {
+            let has_boot = !boot_objects.is_empty();
+            for obj in object_paths {
+                if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    for line in stdout.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 3 {
+                            let sym = parts[2];
+                            if sym.ends_with("___start") && sym != "_start" {
+                                let alias = if has_boot { "spl_start" } else { "_start" };
+                                cmd.arg(format!("-Wl,--defsym={}={}", alias, sym));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Allow unresolved symbols and multiple definitions
+        cmd.arg("-Wl,-z,muldefs");
+        cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+
+        if self.config.strip {
+            cmd.arg("-Wl,-s");
+        }
+
+        if self.config.verbose {
+            eprintln!("Freestanding link command: {:?}", cmd);
+        }
+
+        let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
+
+        if output_result.status.success() {
+            // For x86 multiboot: QEMU requires ELF32. Convert if boot objects present.
+            if (triple.contains("x86_64") || triple.contains("i686"))
+                && !boot_objects.is_empty()
+            {
+                let elf64 = self.output.with_extension("elf64");
+                let _ = std::fs::rename(&self.output, &elf64);
+                let objcopy = std::process::Command::new("objcopy")
+                    .args(["-O", "elf32-i386"])
+                    .arg(&elf64).arg(&self.output)
+                    .output();
+                match objcopy {
+                    Ok(r) if r.status.success() => { let _ = std::fs::remove_file(&elf64); }
+                    _ => {
+                        let _ = std::fs::rename(&elf64, &self.output);
+                        eprintln!("WARNING: objcopy elf32 failed, keeping 64-bit ELF");
+                    }
+                }
+            }
+            if let Ok(meta) = std::fs::metadata(&self.output) {
+                eprintln!(
+                    "Linked (freestanding): {} ({} KB) via {cc} --target={}",
+                    self.output.display(),
+                    meta.len() / 1024,
+                    triple
+                );
+            }
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output_result.stderr);
+            Err(format!("link failed: {}", stderr))
+        }
+    }
 }
 
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
@@ -1347,7 +1737,11 @@ fn generate_stub_object(
     // all enum variant constructors and class methods, so some are expected to be
     // stubbed and resolved later (the runtime supplies them).
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
-    if !is_bootstrap {
+    // Freestanding targets (TargetOS::None) have extern fn symbols resolved by a
+    // separately-compiled C runtime (runtime_minimal.c), so they are expected to
+    // be unresolved at this stage.
+    let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
+    if !is_bootstrap && !is_freestanding {
         let mut simple_symbols = HashSet::new();
         for (raw, mangled_variants) in imports.all_mangled.iter() {
             simple_symbols.insert(raw.clone());
@@ -2755,7 +3149,7 @@ fn compile_file_to_object(
                 }
             }
 
-            let mut llvm = LlvmBackend::new(simple_common::target::Target::host())
+            let mut llvm = LlvmBackend::new(effective_target())
                 .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
             llvm.set_use_map(use_map.clone());

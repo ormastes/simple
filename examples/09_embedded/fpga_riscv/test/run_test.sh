@@ -3,6 +3,10 @@
 # Usage: ./run_test.sh test_add.s [expected_led_value]
 #
 # Pipeline: .s → assemble → ELF → binary → VHDL mem init → GHDL simulate → check LED
+#
+# TODO: create gen_pkg_vhd.shs to regenerate .pkg.vhd files from .c/.s sources
+#       without running the full simulation (steps 1-3 only).
+#       The .pkg.vhd files are gitignored because test_c_runtime.pkg.vhd is ~3GB.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

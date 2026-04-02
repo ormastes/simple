@@ -1,0 +1,460 @@
+@allow(unnamed_duplicate_typed_args)
+# Tiny cold-start entrypoint for low-cost MCP tools only.
+
+extern fn stdin_read_char() -> text
+extern fn rt_env_get(name: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn stderr_write(data: text) -> i64
+extern fn stderr_flush() -> i64
+
+use t32_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, extract_field_raw, extract_nested, has_method, jsonrpc_result, jsonrpc_error, make_tool_result, make_tool_error, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3}
+
+class T32HistoryItem:
+    command: text
+    result: text
+    session_id: text
+    core_id: text
+
+class T32Dialog:
+    label: text
+    widget_type: text
+    value: text
+
+var T32_HISTORY: [T32HistoryItem] = []
+var T32_FIELDS_KEYS: [text] = []
+var T32_FIELDS_VALUES: [text] = []
+var T32_DIALOGS: [T32Dialog] = []
+var T32_LAST_ERROR = ""
+var T32_DEBUG_ROOT = ""
+
+fn t32_server_name() -> text:
+    "t32_mcp_cold"
+
+fn t32_server_version() -> text:
+    "0.1.0"
+
+fn main():
+    stderr_write("[t32-mcp] cold start\n")
+    stderr_flush()
+    t32_cold_main()
+
+fn t32_debug_enabled() -> bool:
+    val raw = rt_env_get("T32_MCP_DEBUG_LOG") ?? ""
+    if raw == "":
+        return true
+    val lower = raw.to_lower()
+    not (lower == "0" or lower == "false" or lower == "off")
+
+fn t32_sanitize_segment(value: text) -> text:
+    if value == "":
+        return "workspace"
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "." or ch == "-" or ch == "_":
+            out = out + ch
+        else:
+            out = out + "_"
+        i = i + 1
+    if out == "":
+        return "workspace"
+    out
+
+fn t32_debug_root_dir() -> text:
+    if T32_DEBUG_ROOT != "":
+        return T32_DEBUG_ROOT
+    var cwd = rt_env_cwd()
+    if cwd == "":
+        cwd = rt_env_get("PWD") ?? ""
+    if cwd == "":
+        cwd = "workspace"
+    T32_DEBUG_ROOT = "/tmp/t32_mcp_debug_" + t32_sanitize_segment(cwd)
+    if t32_debug_enabled():
+        rt_process_run("/bin/sh", ["-c", "mkdir -p " + T32_DEBUG_ROOT])
+    T32_DEBUG_ROOT
+
+fn t32_debug_append(file: text, line: text):
+    if not t32_debug_enabled():
+        return
+    val path = t32_debug_root_dir() + "/" + file
+    var content = line
+    if not content.ends_with("\n"):
+        content = content + "\n"
+    rt_file_append_text(path, content)
+
+fn t32_debug_bootstrap():
+    if not t32_debug_enabled():
+        return
+    t32_debug_append("wrapper.log", "startup cwd=" + rt_env_cwd())
+    t32_debug_append("wrapper.log", "entry=examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl")
+    t32_debug_append("frontend.log", "startup")
+
+fn t32_json_bool(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn t32_count_history() -> i64:
+    var count = 0
+    for _h in T32_HISTORY:
+        count = count + 1
+    count
+
+fn t32_add_history(command: text, result: text, session_id: text, core_id: text):
+    T32_HISTORY = T32_HISTORY + [T32HistoryItem(command: command, result: result, session_id: session_id, core_id: core_id)]
+    if t32_count_history() > 200:
+        T32_HISTORY = T32_HISTORY[100..]
+
+fn t32_field_get_value(key: text) -> text:
+    var idx = 0
+    for existing in T32_FIELDS_KEYS:
+        if existing == key:
+            return T32_FIELDS_VALUES[idx]
+        idx = idx + 1
+    ""
+
+fn t32_field_set_value(key: text, value: text):
+    var idx = 0
+    for existing in T32_FIELDS_KEYS:
+        if existing == key:
+            T32_FIELDS_VALUES[idx] = value
+            return
+        idx = idx + 1
+    T32_FIELDS_KEYS = T32_FIELDS_KEYS + [key]
+    T32_FIELDS_VALUES = T32_FIELDS_VALUES + [value]
+
+fn t32_history_tail_json(count: i64) -> text:
+    var total = t32_count_history()
+    var start = 0
+    if count > 0 and total > count:
+        start = total - count
+    var parts: [text] = []
+    var idx = 0
+    for item in T32_HISTORY:
+        if idx >= start:
+            val obj = LB()
+            obj = obj + jp("command", js(item.command))
+            obj = obj + "," + jp("result", js(item.result))
+            obj = obj + "," + jp("session_id", js(item.session_id))
+            obj = obj + "," + jp("core_id", js(item.core_id))
+            obj = obj + RB()
+            parts = parts + [obj]
+        idx = idx + 1
+    SB_L() + parts.join(",") + SB_R()
+
+fn t32_dialog_find(label: text) -> i64:
+    var idx = 0
+    for dialog in T32_DIALOGS:
+        if dialog.label == label:
+            return idx
+        idx = idx + 1
+    -1
+
+fn t32_find_substring(haystack: text, needle: text) -> i64:
+    var i = 0
+    while i + needle.len() <= haystack.len():
+        if haystack.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn t32_json_string_after_key(body: text, key: text) -> text:
+    val needle = "\"" + key + "\":\""
+    val start = t32_find_substring(body, needle)
+    if start < 0:
+        return ""
+    var i = start + needle.len()
+    var out = ""
+    var escaped = false
+    while i < body.len():
+        val ch = body.substring(i, i + 1)
+        if escaped:
+            if ch == "n":
+                out = out + "\n"
+            elif ch == "r":
+                out = out + "\r"
+            elif ch == "t":
+                out = out + "\t"
+            elif ch == "\"":
+                out = out + "\""
+            elif ch == "\\":
+                out = out + "\\"
+            else:
+                out = out + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn t32_detect_tool_name(msg: text) -> text:
+    if msg.contains("\"name\":\"t32_sessions_list\"") or msg.contains("\"name\": \"t32_sessions_list\""):
+        return "t32_sessions_list"
+    if msg.contains("\"name\":\"t32_job_list\"") or msg.contains("\"name\": \"t32_job_list\""):
+        return "t32_job_list"
+    if msg.contains("\"name\":\"t32_cmm_commands\"") or msg.contains("\"name\": \"t32_cmm_commands\""):
+        return "t32_cmm_commands"
+    if msg.contains("\"name\":\"t32_field_get\"") or msg.contains("\"name\": \"t32_field_get\""):
+        return "t32_field_get"
+    if msg.contains("\"name\":\"t32_field_set\"") or msg.contains("\"name\": \"t32_field_set\""):
+        return "t32_field_set"
+    if msg.contains("\"name\":\"t32_history_tail\"") or msg.contains("\"name\": \"t32_history_tail\""):
+        return "t32_history_tail"
+    if msg.contains("\"name\":\"t32_dialog_parse\"") or msg.contains("\"name\": \"t32_dialog_parse\""):
+        return "t32_dialog_parse"
+    if msg.contains("\"name\":\"t32_dialog_get\"") or msg.contains("\"name\": \"t32_dialog_get\""):
+        return "t32_dialog_get"
+    if msg.contains("\"name\":\"t32_dialog_set\"") or msg.contains("\"name\": \"t32_dialog_set\""):
+        return "t32_dialog_set"
+    if msg.contains("\"name\":\"t32_dialog_click\"") or msg.contains("\"name\": \"t32_dialog_click\""):
+        return "t32_dialog_click"
+    if msg.contains("\"name\":\"t32_error_check\"") or msg.contains("\"name\": \"t32_error_check\""):
+        return "t32_error_check"
+    if msg.contains("\"name\":\"t32_resources_list\"") or msg.contains("\"name\": \"t32_resources_list\""):
+        return "t32_resources_list"
+    if msg.contains("\"name\":\"t32_resource_read\"") or msg.contains("\"name\": \"t32_resource_read\""):
+        return "t32_resource_read"
+    ""
+
+fn t32_dialog_parse_source(source: text) -> text:
+    var count = 0
+    for line in source.split("\n"):
+        val clean = line.trim()
+        if clean == "":
+            continue
+        val lower = clean.to_lower()
+        if not lower.starts_with("label ") and not lower.starts_with("button ") and not lower.starts_with("checkbox ") and not lower.starts_with("string "):
+            continue
+        val parts = clean.split(" ")
+        if parts.len() < 2:
+            continue
+        val label = parts[1].trim()
+        if label == "":
+            continue
+        var widget_type = "value"
+        if lower.starts_with("button "):
+            widget_type = "button"
+        elif lower.starts_with("checkbox "):
+            widget_type = "checkbox"
+        elif lower.starts_with("string "):
+            widget_type = "string"
+        val idx = t32_dialog_find(label)
+        if idx >= 0:
+            T32_DIALOGS[idx] = T32Dialog(label: label, widget_type: widget_type, value: "")
+        else:
+            T32_DIALOGS = T32_DIALOGS + [T32Dialog(label: label, widget_type: widget_type, value: "")]
+        count = count + 1
+    jo1(jp("parsed", str(count)))
+
+fn t32_dialog_json(label: text) -> text:
+    val idx = t32_dialog_find(label)
+    if idx < 0:
+        return ""
+    val d = T32_DIALOGS[idx]
+    LB() + jp("label", js(d.label)) + "," + jp("widget_type", js(d.widget_type)) + "," + jp("value", js(d.value)) + RB()
+
+fn t32_request_arguments_json(body: text) -> text:
+    val params = extract_field_raw(body, "params")
+    if params == "" or params == "null":
+        val top_args = extract_field_raw(body, "arguments")
+        if top_args == "" or top_args == "null":
+            return "{}"
+        return top_args
+    val args = extract_field_raw(params, "arguments")
+    if args == "" or args == "null":
+        val top_args = extract_field_raw(body, "arguments")
+        if top_args == "" or top_args == "null":
+            return "{}"
+        return top_args
+    args
+
+fn t32_tool_schema_simple(name: text, description: text) -> text:
+    LB() + jp("name", js(name)) + "," + jp("description", js(description)) + "," + jp("inputSchema", LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", SB_L() + SB_R()) + RB()) + RB()
+
+fn t32_make_init_response(id: text) -> text:
+    val caps = jo2(jp("tools", jo1(jp("listChanged", "true"))), jp("resources", jo2(jp("subscribe", "false"), jp("listChanged", "true"))))
+    val server = jo3(jp("name", js(t32_server_name())), jp("version", js(t32_server_version())), jp("instructions", js("Low-cost TRACE32 MCP frontend")))
+    jsonrpc_result(id, jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server)))
+
+fn t32_make_tools_list(id: text) -> text:
+    var parts: [text] = []
+    parts = parts + [t32_tool_schema_simple("t32_sessions_list", "List TRACE32 sessions")]
+    parts = parts + [t32_tool_schema_simple("t32_job_list", "List async jobs")]
+    parts = parts + [t32_tool_schema_simple("t32_cmm_commands", "Query PRACTICE command database")]
+    parts = parts + [t32_tool_schema_simple("t32_field_get", "Get field value")]
+    parts = parts + [t32_tool_schema_simple("t32_field_set", "Set field value")]
+    parts = parts + [t32_tool_schema_simple("t32_history_tail", "Get recent command history")]
+    parts = parts + [t32_tool_schema_simple("t32_dialog_parse", "Parse dialog elements from source")]
+    parts = parts + [t32_tool_schema_simple("t32_dialog_get", "Read dialog element state by label")]
+    parts = parts + [t32_tool_schema_simple("t32_dialog_set", "Set dialog element state by label")]
+    parts = parts + [t32_tool_schema_simple("t32_dialog_click", "Click dialog element by label")]
+    parts = parts + [t32_tool_schema_simple("t32_error_check", "Check TRACE32 error state")]
+    parts = parts + [t32_tool_schema_simple("t32_resources_list", "List low-cost resources")]
+    parts = parts + [t32_tool_schema_simple("t32_resource_read", "Read a low-cost resource")]
+    jsonrpc_result(id, jo1(jp("tools", SB_L() + parts.join(",") + SB_R())))
+
+fn t32_make_resources_list(id: text) -> text:
+    val resources = SB_L()
+    val sessions = LB() + jp("uri", js("t32:///sessions")) + "," + jp("name", js("sessions")) + "," + jp("mimeType", js("application/json")) + RB()
+    val history = LB() + jp("uri", js("t32:///history")) + "," + jp("name", js("history")) + "," + jp("mimeType", js("application/json")) + RB()
+    jsonrpc_result(id, jo1(jp("resources", resources + sessions + "," + history + SB_R())))
+
+fn t32_handle_resource_read(id: text, body: text) -> text:
+    var uri = ""
+    if body.contains("t32:///sessions"):
+        uri = "t32:///sessions"
+    elif body.contains("t32:///history"):
+        uri = "t32:///history"
+    if uri == "":
+        return jsonrpc_error(id, -32602, "Missing required parameter: uri")
+    if uri == "t32:///sessions":
+        val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(jo1(jp("sessions", SB_L() + SB_R())))) + RB()
+        return jsonrpc_result(id, jo1(jp("contents", SB_L() + content + SB_R())))
+    if uri == "t32:///history":
+        val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(jo1(jp("history", t32_history_tail_json(20))))) + RB()
+        return jsonrpc_result(id, jo1(jp("contents", SB_L() + content + SB_R())))
+    jsonrpc_error(id, -32002, "Resource not found: " + uri)
+
+fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
+    if tool_name == "t32_sessions_list":
+        return make_tool_result(id, jo1(jp("sessions", SB_L() + SB_R())))
+    if tool_name == "t32_job_list":
+        return make_tool_result(id, jo1(jp("jobs", SB_L() + SB_R())))
+    if tool_name == "t32_cmm_commands":
+        return make_tool_result(id, jo1(jp("commands", SB_L() + SB_R())))
+    if tool_name == "t32_field_get":
+        val key = t32_json_string_after_key(body, "field_key")
+        if key == "":
+            return make_tool_error(id, "Missing required parameter: field_key")
+        return make_tool_result(id, LB() + jp("field_key", js(key)) + "," + jp("value", js(t32_field_get_value(key))) + RB())
+    if tool_name == "t32_field_set":
+        val key = t32_json_string_after_key(body, "field_key")
+        val value = t32_json_string_after_key(body, "value")
+        stderr_write("[t32-mcp] field_set key=<" + key + "> value=<" + value + ">\n")
+        stderr_flush()
+        if key == "":
+            return make_tool_error(id, "Missing required parameter: field_key")
+        t32_field_set_value(key, value)
+        t32_add_history("field_set:" + key, value, "", "")
+        return make_tool_result(id, LB() + jp("field_key", js(key)) + "," + jp("value", js(value)) + RB())
+    if tool_name == "t32_history_tail":
+        var count = 20
+        val count_raw = extract_field(args_raw, "count")
+        if count_raw != "":
+            count = int(count_raw)
+        return make_tool_result(id, jo1(jp("history", t32_history_tail_json(count))))
+    if tool_name == "t32_dialog_parse":
+        val source = t32_json_string_after_key(body, "source")
+        if source == "":
+            return make_tool_error(id, "Missing required parameter: source")
+        val parsed = t32_dialog_parse_source(source)
+        t32_add_history("dialog_parse", parsed, "", "")
+        return make_tool_result(id, parsed)
+    if tool_name == "t32_dialog_get":
+        val label = t32_json_string_after_key(body, "label")
+        if label == "":
+            return make_tool_error(id, "Missing required parameter: label")
+        val dialog = t32_dialog_json(label)
+        if dialog == "":
+            return make_tool_error(id, "Dialog not found: " + label)
+        return make_tool_result(id, dialog)
+    if tool_name == "t32_dialog_set":
+        val label = t32_json_string_after_key(body, "label")
+        val value = t32_json_string_after_key(body, "value")
+        if label == "":
+            return make_tool_error(id, "Missing required parameter: label")
+        val idx = t32_dialog_find(label)
+        if idx < 0:
+            return make_tool_error(id, "Dialog not found: " + label)
+        var dialog = T32_DIALOGS[idx]
+        if value != "":
+            dialog.value = value
+        else:
+            dialog.value = "set"
+        T32_DIALOGS[idx] = dialog
+        t32_add_history("dialog_set:" + label, dialog.value, "", "")
+        return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("value", js(dialog.value)) + RB())
+    if tool_name == "t32_dialog_click":
+        val label = extract_field(args_raw, "label")
+        if label == "":
+            return make_tool_error(id, "Missing required parameter: label")
+        val idx = t32_dialog_find(label)
+        if idx < 0:
+            return make_tool_error(id, "Dialog not found: " + label)
+        var dialog = T32_DIALOGS[idx]
+        dialog.value = "clicked"
+        T32_DIALOGS[idx] = dialog
+        t32_add_history("dialog_click:" + label, "clicked", "", "")
+        return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("clicked", "true") + RB())
+    if tool_name == "t32_error_check":
+        return make_tool_result(id, LB() + jp("ok", t32_json_bool(T32_LAST_ERROR == "")) + "," + jp("message", js(T32_LAST_ERROR)) + RB())
+    if tool_name == "t32_resources_list":
+        return make_tool_result(id, jo1(jp("resources", SB_L() + SB_R())))
+    if tool_name == "t32_resource_read":
+        return t32_handle_resource_read(id, body)
+    make_tool_error(id, "Method not found: " + tool_name)
+
+fn t32_cold_main():
+    t32_debug_bootstrap()
+    while true:
+        var msg = read_stdin_message()
+        stderr_write("[t32-mcp] read bytes=" + str(msg.len()) + "\n")
+        stderr_flush()
+        if msg == "":
+            return
+        var method = ""
+        if has_method(msg, "initialize"):
+            method = "initialize"
+        elif has_method(msg, "tools/list"):
+            method = "tools/list"
+        elif has_method(msg, "tools/call"):
+            method = "tools/call"
+        elif has_method(msg, "resources/list"):
+            method = "resources/list"
+        elif has_method(msg, "resources/read"):
+            method = "resources/read"
+        elif has_method(msg, "shutdown"):
+            method = "shutdown"
+        elif has_method(msg, "ping"):
+            method = "ping"
+        val id = extract_field_raw(msg, "id")
+        if id == "":
+            id = "null"
+        var tool_name = ""
+        if method == "tools/call":
+            tool_name = t32_detect_tool_name(msg)
+        stderr_write("[t32-mcp] method=" + method + " id=" + id + " tool=" + tool_name + "\n")
+        stderr_flush()
+        t32_debug_append("requests.log", "method=" + method + " id=" + id + " tool=" + tool_name + " bytes=" + str(msg.len()))
+        var response = ""
+        if method == "initialize":
+            response = t32_make_init_response(id)
+        elif method == "tools/list":
+            response = t32_make_tools_list(id)
+        elif method == "tools/call":
+            response = t32_handle_low_cost_tool(id, msg, tool_name)
+        elif method == "resources/list":
+            response = t32_make_resources_list(id)
+        elif method == "resources/read":
+            response = t32_handle_resource_read(id, msg)
+        elif method == "shutdown":
+            response = jsonrpc_result(id, "null")
+        elif method == "ping":
+            response = jsonrpc_result(id, LB() + RB())
+        elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            response = ""
+        else:
+            if id != "" and id != "null":
+                response = jsonrpc_error(id, -32601, "Method not found: " + method)
+        stderr_write("[t32-mcp] response bytes=" + str(response.len()) + "\n")
+        stderr_flush()
+        if response != "":
+            t32_debug_append("wrapper.log", "method=" + method + " id=" + id + " tool=" + tool_name + " response_bytes=" + str(response.len()))
+            write_stdout_message(response)

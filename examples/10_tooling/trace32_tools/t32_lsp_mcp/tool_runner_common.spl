@@ -14,18 +14,20 @@ fn json_is_ws(ch: text) -> bool:
 
 fn json_find_value_start(json: text, key: text) -> i64:
     val search = lsp_Q() + key + lsp_Q()
-    var i = 0
-    while i + search.len() <= json.len():
-        if json.substring(i, i + search.len()) == search:
-            var j = i + search.len()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if json.substring(offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and json_is_ws(json_char_at(json, j)):
+            j = j + 1
+        if j < json.len() and json_char_at(json, j) == ":":
+            j = j + 1
             while j < json.len() and json_is_ws(json_char_at(json, j)):
                 j = j + 1
-            if j < json.len() and json_char_at(json, j) == ":":
-                j = j + 1
-                while j < json.len() and json_is_ws(json_char_at(json, j)):
-                    j = j + 1
-                return j
-        i = i + 1
+            return j
+        offset = offset + search.len()
     return -1
 
 fn request_json_raw_field(json: text, key: text) -> text:
@@ -82,6 +84,9 @@ fn request_json_raw_field(json: text, key: text) -> text:
         return "null"
     raw
 
+fn request_json_normalize(json: text) -> text:
+    lsp_unescape_json_string(json)
+
 fn request_json_text_field(json: text, key: text) -> text:
     val raw = request_json_raw_field(json, key)
     if raw == "null":
@@ -91,52 +96,52 @@ fn request_json_text_field(json: text, key: text) -> text:
     raw
 
 fn request_json_arguments(body: text) -> text:
-    val params = request_json_raw_field(body, "params")
+    val normalized_body = request_json_normalize(body)
+    val params = request_json_raw_field(normalized_body, "params")
     if params == "null":
-        return body
+        return normalized_body
     val args = request_json_raw_field(params, "arguments")
     if args == "null" or args == "":
-        return body
+        return normalized_body
     args
 
 fn request_json_id(body: text) -> text:
-    val id = request_json_raw_field(body, "id")
+    val id = request_json_raw_field(request_json_normalize(body), "id")
     if id == "":
         return "null"
     id
 
 fn request_json_string_field_fallback(json: text, key: text) -> text:
-    val marker1 = lsp_Q() + key + lsp_Q() + ":" + lsp_Q()
-    val marker2 = lsp_Q() + key + lsp_Q() + ": " + lsp_Q()
-    var start = -1
-    var i = 0
-    while i + marker1.len() <= json.len():
-        if json.substring(i, i + marker1.len()) == marker1:
-            start = i + marker1.len()
-            i = json.len()
-        else:
-            i = i + 1
-    if start < 0:
-        i = 0
-        while i + marker2.len() <= json.len():
-            if json.substring(i, i + marker2.len()) == marker2:
-                start = i + marker2.len()
-                i = json.len()
-            else:
-                i = i + 1
-    if start < 0 or start > json.len():
-        return ""
-    var i = start
-    var escaped = false
-    while i < json.len():
-        val ch = json.substring(i, i + 1)
-        if escaped:
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == lsp_Q():
-            return lsp_unescape_json_string(json.substring(start, i))
-        i = i + 1
+    val q = lsp_Q()
+    val markers = [
+        "\\\"" + key + "\\\":\\\"",
+        "\\\"" + key + "\\\": \\\"",
+        q + key + q + ":" + q,
+        q + key + q + ": " + q
+    ]
+    var mi = 0
+    while mi < markers.len():
+        val marker = markers[mi]
+        var offset = 0
+        while offset + marker.len() <= json.len():
+            if json.substring(offset, offset + marker.len()) == marker:
+                val start = offset + marker.len()
+                var end = start
+                var escaped = false
+                while end < json.len():
+                    val ch = json.substring(end, end + 1)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == q:
+                        if end == start:
+                            return ""
+                        return lsp_unescape_json_string(json.substring(start, end))
+                    end = end + 1
+                return ""
+            offset = offset + 1
+        mi = mi + 1
     ""
 
 fn arg_field(args: text, key: text) -> text:
