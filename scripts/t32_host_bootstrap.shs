@@ -112,14 +112,19 @@ t32_has_remote() {
 # ─── Lifecycle management ───────────────────────────────────────────────────
 
 t32_kill_stale() {
-    # Kill T32 PowerView processes (t32marm and t32marm64 — substring match)
+    # BROAD kill — terminates ALL T32 PowerView processes on this host.
+    # Only call this explicitly (e.g., --kill-stale flag), NOT from normal cleanup.
     pkill -f "$T32_BASE/t32marm" >/dev/null 2>&1 || true
-    # Kill xvfb-run wrappers that launched T32
     pkill -f "xvfb-run.*t32marm" >/dev/null 2>&1 || true
-    # Kill orphaned Xvfb servers from our sessions (started by xvfb-run)
-    pkill -f "Xvfb.*t32" >/dev/null 2>&1 || true
-    # Clean up stale lock files
-    rm -f /tmp/.X*-lock /tmp/.t32* 2>/dev/null || true
+    pkill -f "$T32_BASE/t32mciserver" >/dev/null 2>&1 || true
+    rm -f /tmp/.t32* 2>/dev/null || true
+}
+
+_t32_cleanup_own() {
+    # SCOPED kill — only terminates our tracked process tree.
+    # Safe to call from lifecycle_off; does not touch unrelated T32 sessions.
+    _t32_kill_process_tree "$T32_LIFECYCLE_PID"
+    _t32_kill_process_tree "$T32_LIFECYCLE_CHILD_PID"
 }
 
 t32_lifecycle_on() {
@@ -136,8 +141,8 @@ t32_lifecycle_on() {
         return 1
     fi
 
-    # Kill stale sessions
-    t32_kill_stale
+    # Only clean up our own tracked processes, not all host T32 sessions
+    _t32_cleanup_own
     sleep 0.5
 
     T32_LIFECYCLE_LOG="/tmp/t32_lifecycle_$$.log"
@@ -216,29 +221,22 @@ _t32_kill_process_tree() {
 }
 
 t32_lifecycle_off_quiet() {
-    # Kill without printing — used internally during fallback
-    _t32_kill_process_tree "$T32_LIFECYCLE_PID"
-    _t32_kill_process_tree "$T32_LIFECYCLE_CHILD_PID"
-    t32_kill_stale
+    # Scoped kill — only our tracked processes, not other host T32 sessions.
+    _t32_cleanup_own
     T32_LIFECYCLE_PID=""
     T32_LIFECYCLE_CHILD_PID=""
 }
 
 t32_lifecycle_off() {
-    # Graceful quit first, then SIGKILL fallback
+    # Graceful quit first, then SIGKILL our process tree.
     local T32REM="${T32REM:-$T32_BASE/t32rem}"
     if [ "$T32_LIFECYCLE_MODE" = "rcl" ] && [ -x "$T32REM" ]; then
         timeout 3 "$T32REM" "$T32_HOST" "port=$T32_PORT" "protocol=NETTCP" "QUIT" >/dev/null 2>&1 || true
         sleep 1
     fi
 
-    # Kill the entire process tree rooted at xvfb-run (catches Xvfb + t32marm64)
-    _t32_kill_process_tree "$T32_LIFECYCLE_PID"
-    _t32_kill_process_tree "$T32_LIFECYCLE_CHILD_PID"
-
-    # Clean up any remaining stale processes (including MCI server)
-    t32_kill_stale
-    pkill -f "$T32_BASE/t32mciserver" >/dev/null 2>&1 || true
+    # Kill only our own process tree (xvfb-run → Xvfb + t32marm64, or t32mciserver)
+    _t32_cleanup_own
 
     echo "T32 lifecycle: stopped"
     T32_LIFECYCLE_PID=""
