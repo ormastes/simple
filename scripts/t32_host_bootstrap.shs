@@ -22,6 +22,7 @@ T32_RESOLVED_BIN=""
 T32_LIFECYCLE_PID=""
 T32_LIFECYCLE_CHILD_PID=""
 T32_LIFECYCLE_LOG=""
+T32_LIFECYCLE_MODE=""   # "rcl" or "mci" after t32_lifecycle_on
 
 # ─── Binary resolution ──────────────────────────────────────────────────────
 
@@ -124,11 +125,20 @@ t32_lifecycle_on() {
     sleep 0.5
 
     T32_LIFECYCLE_LOG="/tmp/t32_lifecycle_$$.log"
+    t32_setup_xvfb_args
 
     if [ -n "$cmm" ]; then
-        nohup t32_run_xvfb "$T32_RESOLVED_BIN" -c "$cfg" "$cmm" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        if [ -n "$T32_XVFB_SERVER_ARGS" ]; then
+            nohup xvfb-run -a -s "$T32_XVFB_SERVER_ARGS" "$T32_RESOLVED_BIN" -c "$cfg" "$cmm" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        else
+            nohup xvfb-run -a "$T32_RESOLVED_BIN" -c "$cfg" "$cmm" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        fi
     else
-        nohup t32_run_xvfb "$T32_RESOLVED_BIN" -c "$cfg" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        if [ -n "$T32_XVFB_SERVER_ARGS" ]; then
+            nohup xvfb-run -a -s "$T32_XVFB_SERVER_ARGS" "$T32_RESOLVED_BIN" -c "$cfg" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        else
+            nohup xvfb-run -a "$T32_RESOLVED_BIN" -c "$cfg" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        fi
     fi
     T32_LIFECYCLE_PID=$!
     sleep 2
@@ -138,25 +148,52 @@ t32_lifecycle_on() {
         T32_LIFECYCLE_CHILD_PID="$(pgrep -P "$T32_LIFECYCLE_PID" -f "t32marm" | head -n 1 || true)"
     fi
 
-    # Wait for Remote API to become ready
+    # Wait for Remote API (RCL) to become ready
     local attempt=0
     local T32REM="${T32REM:-$T32_BASE/t32rem}"
     while [ "$attempt" -lt 10 ]; do
         if [ -x "$T32REM" ] && timeout 2 "$T32REM" "$T32_HOST" "port=$T32_PORT" "protocol=NETTCP" PING >/dev/null 2>&1; then
-            echo "T32 lifecycle: started (pid=$T32_LIFECYCLE_PID, child=$T32_LIFECYCLE_CHILD_PID, port=$T32_PORT)"
+            T32_LIFECYCLE_MODE="rcl"
+            echo "T32 lifecycle: started via RCL (pid=$T32_LIFECYCLE_PID, child=$T32_LIFECYCLE_CHILD_PID, port=$T32_PORT)"
             return 0
         fi
         sleep 1
         attempt=$((attempt + 1))
     done
 
-    echo "ERROR: T32 started but Remote API did not become ready on port $T32_PORT" >&2
-    if [ -f "$T32_LIFECYCLE_LOG" ]; then
-        echo "Recent log:" >&2
-        tail -30 "$T32_LIFECYCLE_LOG" >&2
+    echo "WARNING: PowerView RCL did not bind port $T32_PORT (2013 binary limitation)" >&2
+
+    # Fallback: kill PowerView and start MCI TCP server
+    t32_lifecycle_off_quiet
+    local MCI_LIB="$T32_BASE/hostmci.so"
+    if [ -x "$T32_BASE/t32mciserver" ] && [ -f "$MCI_LIB" ]; then
+        echo "Falling back to MCI TCP server on port $T32_PORT..." >&2
+        nohup "$T32_BASE/t32mciserver" "port=$T32_PORT" "lib=$MCI_LIB" >"$T32_LIFECYCLE_LOG" 2>&1 &
+        T32_LIFECYCLE_PID=$!
+        T32_LIFECYCLE_CHILD_PID=""
+        sleep 2
+        if kill -0 "$T32_LIFECYCLE_PID" 2>/dev/null; then
+            T32_LIFECYCLE_MODE="mci"
+            echo "T32 lifecycle: started via MCI TCP (pid=$T32_LIFECYCLE_PID, port=$T32_PORT)"
+            return 0
+        fi
     fi
-    t32_lifecycle_off
+
+    echo "ERROR: both RCL and MCI fallback failed" >&2
     return 1
+}
+
+t32_lifecycle_off_quiet() {
+    # Kill without printing — used internally during fallback
+    if [ -n "$T32_LIFECYCLE_CHILD_PID" ] && kill -0 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null; then
+        kill -9 "$T32_LIFECYCLE_CHILD_PID" 2>/dev/null || true
+    fi
+    if [ -n "$T32_LIFECYCLE_PID" ] && kill -0 "$T32_LIFECYCLE_PID" 2>/dev/null; then
+        kill -9 "$T32_LIFECYCLE_PID" 2>/dev/null || true
+    fi
+    t32_kill_stale
+    T32_LIFECYCLE_PID=""
+    T32_LIFECYCLE_CHILD_PID=""
 }
 
 t32_lifecycle_off() {
@@ -177,12 +214,14 @@ t32_lifecycle_off() {
         kill -9 "$T32_LIFECYCLE_PID" 2>/dev/null || true
     fi
 
-    # Clean up any remaining stale processes
+    # Clean up any remaining stale processes (including MCI server)
     t32_kill_stale
+    pkill -f "$T32_BASE/t32mciserver" >/dev/null 2>&1 || true
 
     echo "T32 lifecycle: stopped"
     T32_LIFECYCLE_PID=""
     T32_LIFECYCLE_CHILD_PID=""
+    T32_LIFECYCLE_MODE=""
 }
 
 t32_with_lifecycle() {

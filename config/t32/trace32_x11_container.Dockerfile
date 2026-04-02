@@ -18,7 +18,9 @@ RUN apt-get update && \
         procps \
         usbutils \
         xauth \
-        x11-utils && \
+        x11-utils \
+        xvfb \
+        xfonts-utils && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -28,6 +30,7 @@ ENV HOME=/tmp
 ENV XAPPLRESDIR=/opt/t32
 
 COPY trace32_entrypoint.shs /usr/local/bin/trace32_entrypoint.shs
-RUN chmod +x /usr/local/bin/trace32_entrypoint.shs
+COPY trace32_powerview_entrypoint.shs /usr/local/bin/trace32_powerview_entrypoint.shs
+RUN chmod +x /usr/local/bin/trace32_entrypoint.shs /usr/local/bin/trace32_powerview_entrypoint.shs
 
-CMD ["/usr/local/bin/trace32_entrypoint.shs"]
+CMD ["/usr/local/bin/trace32_powerview_entrypoint.shs"]
