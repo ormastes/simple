@@ -1,0 +1,581 @@
+# CMM AST to JSON Serialization
+#
+# Converts CmmProgram / CmmStmt / CmmExpr / CmmDialogItem to JSON text.
+# Used by the cmm_ast and cmm_dialog_ast MCP tools.
+#
+# Local JSON helpers (cmm_lsp/ does not import from t32_lsp_mcp/).
+
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral, CmmBinOp, CmmUnaryOp, CmmDialogItem, CmmSpan}
+
+export cmm_program_to_json, cmm_dialog_blocks_to_json
+export cmm_stmt_to_json, cmm_expr_to_json, cmm_span_to_json
+export cmm_multi_program_to_json
+
+# ---------------------------------------------------------------------------
+# Local JSON helpers
+# ---------------------------------------------------------------------------
+
+fn aj_esc(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if ch == "\"":
+            out = out + "\\\""
+        elif ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn aj_s(v: text) -> text:
+    "\"" + aj_esc(v) + "\""
+
+fn aj_p(key: text, value: text) -> text:
+    "\"" + key + "\":" + value
+
+fn aj_arr(items: [text]) -> text:
+    "[" + items.join(",") + "]"
+
+fn aj_obj(pairs: [text]) -> text:
+    "{" + pairs.join(",") + "}"
+
+# ---------------------------------------------------------------------------
+# CmmSpan
+# ---------------------------------------------------------------------------
+
+fn cmm_span_to_json(sp: CmmSpan) -> text:
+    aj_obj([
+        aj_p("start_line", str(sp.start_line)),
+        aj_p("start_col", str(sp.start_col)),
+        aj_p("end_line", str(sp.end_line)),
+        aj_p("end_col", str(sp.end_col))
+    ])
+
+# ---------------------------------------------------------------------------
+# CmmBinOp
+# ---------------------------------------------------------------------------
+
+fn cmm_binop_to_json(op: CmmBinOp) -> text:
+    var name = ""
+    match op:
+        case CmmBinOp.Add: name = "Add"
+        case CmmBinOp.Sub: name = "Sub"
+        case CmmBinOp.Mul: name = "Mul"
+        case CmmBinOp.Div: name = "Div"
+        case CmmBinOp.Mod: name = "Mod"
+        case CmmBinOp.Shl: name = "Shl"
+        case CmmBinOp.Shr: name = "Shr"
+        case CmmBinOp.Eq: name = "Eq"
+        case CmmBinOp.NotEq: name = "NotEq"
+        case CmmBinOp.Lt: name = "Lt"
+        case CmmBinOp.Gt: name = "Gt"
+        case CmmBinOp.LtEq: name = "LtEq"
+        case CmmBinOp.GtEq: name = "GtEq"
+        case CmmBinOp.BitAnd: name = "BitAnd"
+        case CmmBinOp.BitXor: name = "BitXor"
+        case CmmBinOp.BitOr: name = "BitOr"
+        case CmmBinOp.LogAnd: name = "LogAnd"
+        case CmmBinOp.LogXor: name = "LogXor"
+        case CmmBinOp.LogOr: name = "LogOr"
+        case CmmBinOp.RangeTo: name = "RangeTo"
+        case CmmBinOp.RangeOffset: name = "RangeOffset"
+        case CmmBinOp.RangeDots: name = "RangeDots"
+        case CmmBinOp.Concat: name = "Concat"
+    aj_s(name)
+
+# ---------------------------------------------------------------------------
+# CmmUnaryOp
+# ---------------------------------------------------------------------------
+
+fn cmm_unaryop_to_json(op: CmmUnaryOp) -> text:
+    var name = ""
+    match op:
+        case CmmUnaryOp.Neg: name = "Neg"
+        case CmmUnaryOp.BitNot: name = "BitNot"
+        case CmmUnaryOp.LogNot: name = "LogNot"
+    aj_s(name)
+
+# ---------------------------------------------------------------------------
+# CmmLiteral
+# ---------------------------------------------------------------------------
+
+fn cmm_literal_to_json(lit: CmmLiteral) -> text:
+    var kind = ""
+    var value = ""
+    match lit:
+        case CmmLiteral.HexInt(v):
+            kind = "HexInt"
+            value = v
+        case CmmLiteral.BinInt(v):
+            kind = "BinInt"
+            value = v
+        case CmmLiteral.DecInt(v):
+            kind = "DecInt"
+            value = v
+        case CmmLiteral.Float(v):
+            kind = "Float"
+            value = v
+        case CmmLiteral.PlainInt(v):
+            kind = "PlainInt"
+            value = v
+        case CmmLiteral.HexMask(v):
+            kind = "HexMask"
+            value = v
+        case CmmLiteral.BinMask(v):
+            kind = "BinMask"
+            value = v
+        case CmmLiteral.Time(v):
+            kind = "Time"
+            value = v
+        case CmmLiteral.Str(v):
+            kind = "Str"
+            value = v
+        case CmmLiteral.Char(v):
+            kind = "Char"
+            value = v
+        case CmmLiteral.BoolTrue:
+            kind = "BoolTrue"
+            value = "TRUE()"
+        case CmmLiteral.BoolFalse:
+            kind = "BoolFalse"
+            value = "FALSE()"
+    aj_obj([aj_p("type", aj_s(kind)), aj_p("value", aj_s(value))])
+
+# ---------------------------------------------------------------------------
+# CmmExpr
+# ---------------------------------------------------------------------------
+
+fn cmm_expr_to_json(expr: CmmExpr) -> text:
+    var kind = ""
+    var parts: [text] = []
+    match expr:
+        case CmmExpr.Lit(lit):
+            kind = "Literal"
+            parts.push(aj_p("literal", cmm_literal_to_json(lit)))
+        case CmmExpr.MacroRef(name):
+            kind = "MacroRef"
+            parts.push(aj_p("name", aj_s(name)))
+        case CmmExpr.MacroRecRef(name):
+            kind = "MacroRecRef"
+            parts.push(aj_p("name", aj_s(name)))
+        case CmmExpr.FunctionCall(name, args):
+            kind = "FunctionCall"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("args", cmm_exprs_to_json(args)))
+        case CmmExpr.Binary(op, lhs, rhs):
+            kind = "Binary"
+            parts.push(aj_p("op", cmm_binop_to_json(op)))
+            parts.push(aj_p("lhs", cmm_expr_to_json(lhs)))
+            parts.push(aj_p("rhs", cmm_expr_to_json(rhs)))
+        case CmmExpr.Unary(op, inner):
+            kind = "Unary"
+            parts.push(aj_p("op", cmm_unaryop_to_json(op)))
+            parts.push(aj_p("expr", cmm_expr_to_json(inner)))
+        case CmmExpr.Address(cls, inner):
+            kind = "Address"
+            parts.push(aj_p("access_class", aj_s(cls)))
+            parts.push(aj_p("expr", cmm_expr_to_json(inner)))
+        case CmmExpr.Parenthesized(inner):
+            kind = "Parenthesized"
+            parts.push(aj_p("expr", cmm_expr_to_json(inner)))
+        case CmmExpr.Braced(inner):
+            kind = "Braced"
+            parts.push(aj_p("expr", cmm_expr_to_json(inner)))
+        case CmmExpr.Ident(name):
+            kind = "Ident"
+            parts.push(aj_p("name", aj_s(name)))
+        case CmmExpr.DotPath(path):
+            kind = "DotPath"
+            parts.push(aj_p("path", aj_s(path)))
+        case CmmExpr.FileChannel(ch):
+            kind = "FileChannel"
+            parts.push(aj_p("channel", aj_s(ch)))
+        case CmmExpr.OptionFlag(flag):
+            kind = "OptionFlag"
+            parts.push(aj_p("flag", aj_s(flag)))
+        case CmmExpr.MacroExpand(prefix, inner):
+            kind = "MacroExpand"
+            parts.push(aj_p("prefix", aj_s(prefix)))
+            parts.push(aj_p("expr", cmm_expr_to_json(inner)))
+        case CmmExpr.ExprEmpty:
+            kind = "Empty"
+    var all_parts: [text] = [aj_p("type", aj_s(kind))]
+    var pi = 0
+    while pi < parts.len():
+        all_parts.push(parts[pi])
+        pi = pi + 1
+    aj_obj(all_parts)
+
+fn cmm_exprs_to_json(exprs: [CmmExpr]) -> text:
+    var items: [text] = []
+    var i = 0
+    while i < exprs.len():
+        items.push(cmm_expr_to_json(exprs[i]))
+        i = i + 1
+    aj_arr(items)
+
+# ---------------------------------------------------------------------------
+# CmmDialogItem
+# ---------------------------------------------------------------------------
+
+fn cmm_dialog_item_to_json(item: CmmDialogItem) -> text:
+    var kind = ""
+    var parts: [text] = []
+    match item:
+        case CmmDialogItem.DlgHeader(title):
+            kind = "Header"
+            parts.push(aj_p("title", aj_s(title)))
+        case CmmDialogItem.DlgPos(x, y, w):
+            kind = "Pos"
+            parts.push(aj_p("x", cmm_expr_to_json(x)))
+            parts.push(aj_p("y", cmm_expr_to_json(y)))
+            parts.push(aj_p("w", cmm_expr_to_json(w)))
+        case CmmDialogItem.DlgText(content):
+            kind = "Text"
+            parts.push(aj_p("content", aj_s(content)))
+        case CmmDialogItem.DlgEdit(name, default_val, callback):
+            kind = "Edit"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("default", aj_s(default_val)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgButton(name, btn_text, callback):
+            kind = "Button"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("text", aj_s(btn_text)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgDefButton(name, btn_text, callback):
+            kind = "DefButton"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("text", aj_s(btn_text)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgCheckbox(name, cb_text, callback):
+            kind = "Checkbox"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("text", aj_s(cb_text)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgChoosebox(name, cb_text, callback):
+            kind = "Choosebox"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("text", aj_s(cb_text)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgPulldown(name, options, callback):
+            kind = "Pulldown"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("options", aj_s(options)))
+            parts.push(aj_p("callback", aj_s(callback)))
+        case CmmDialogItem.DlgLine(label):
+            kind = "Line"
+            parts.push(aj_p("label", aj_s(label)))
+        case CmmDialogItem.DlgClose(callback):
+            kind = "Close"
+            parts.push(aj_p("callback", aj_s(callback)))
+    var all_parts: [text] = [aj_p("type", aj_s(kind))]
+    var pi = 0
+    while pi < parts.len():
+        all_parts.push(parts[pi])
+        pi = pi + 1
+    aj_obj(all_parts)
+
+fn cmm_dialog_items_to_json(items: [CmmDialogItem]) -> text:
+    var arr: [text] = []
+    var i = 0
+    while i < items.len():
+        arr.push(cmm_dialog_item_to_json(items[i]))
+        i = i + 1
+    aj_arr(arr)
+
+# ---------------------------------------------------------------------------
+# CmmStmt
+# ---------------------------------------------------------------------------
+
+fn cmm_optional_expr_to_json(expr: CmmExpr?) -> text:
+    if expr.?:
+        val e = expr ?? CmmExpr.ExprEmpty
+        cmm_expr_to_json(e)
+    else:
+        "null"
+
+fn cmm_optional_stmt_to_json(stmt: CmmStmt?) -> text:
+    if stmt.?:
+        val s = stmt ?? CmmStmt.EmptyLine(CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0))
+        cmm_stmt_to_json(s)
+    else:
+        "null"
+
+fn cmm_texts_to_json(texts: [text]) -> text:
+    var arr: [text] = []
+    var i = 0
+    while i < texts.len():
+        arr.push(aj_s(texts[i]))
+        i = i + 1
+    aj_arr(arr)
+
+fn cmm_stmt_to_json(stmt: CmmStmt) -> text:
+    var kind = ""
+    var parts: [text] = []
+    var sp = CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0)
+    match stmt:
+        case CmmStmt.Command(name, params, s):
+            kind = "Command"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("params", cmm_exprs_to_json(params)))
+            sp = s
+        case CmmStmt.DeviceCommand(device, name, params, s):
+            kind = "DeviceCommand"
+            parts.push(aj_p("device", aj_s(device)))
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("params", cmm_exprs_to_json(params)))
+            sp = s
+        case CmmStmt.MacroAssign(name, expr, s):
+            kind = "MacroAssign"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("expr", cmm_expr_to_json(expr)))
+            sp = s
+        case CmmStmt.MacroRecAssign(name, expr, s):
+            kind = "MacroRecAssign"
+            parts.push(aj_p("name", aj_s(name)))
+            parts.push(aj_p("expr", cmm_expr_to_json(expr)))
+            sp = s
+        case CmmStmt.LabelDef(name, s):
+            kind = "LabelDef"
+            parts.push(aj_p("name", aj_s(name)))
+            sp = s
+        case CmmStmt.CommentLine(text_val, s):
+            kind = "Comment"
+            parts.push(aj_p("text", aj_s(text_val)))
+            sp = s
+        case CmmStmt.IfElse(cond, then_body, else_body, s):
+            kind = "IfElse"
+            parts.push(aj_p("condition", cmm_expr_to_json(cond)))
+            parts.push(aj_p("then", cmm_stmt_to_json(then_body)))
+            parts.push(aj_p("else", cmm_optional_stmt_to_json(else_body)))
+            sp = s
+        case CmmStmt.WhileLoop(cond, body, s):
+            kind = "WhileLoop"
+            parts.push(aj_p("condition", cmm_expr_to_json(cond)))
+            parts.push(aj_p("body", cmm_stmt_to_json(body)))
+            sp = s
+        case CmmStmt.RepeatLoop(count, body, s):
+            kind = "RepeatLoop"
+            parts.push(aj_p("count", cmm_optional_expr_to_json(count)))
+            parts.push(aj_p("body", cmm_stmt_to_json(body)))
+            sp = s
+        case CmmStmt.Goto(label, s):
+            kind = "Goto"
+            parts.push(aj_p("label", aj_s(label)))
+            sp = s
+        case CmmStmt.Gosub(label, args, s):
+            kind = "Gosub"
+            parts.push(aj_p("label", aj_s(label)))
+            parts.push(aj_p("args", cmm_exprs_to_json(args)))
+            sp = s
+        case CmmStmt.ReturnStmt(values, s):
+            kind = "Return"
+            parts.push(aj_p("values", cmm_exprs_to_json(values)))
+            sp = s
+        case CmmStmt.JumpTo(label, s):
+            kind = "JumpTo"
+            parts.push(aj_p("label", aj_s(label)))
+            sp = s
+        case CmmStmt.DoCall(file_expr, args, s):
+            kind = "DoCall"
+            parts.push(aj_p("file", cmm_expr_to_json(file_expr)))
+            parts.push(aj_p("args", cmm_exprs_to_json(args)))
+            sp = s
+        case CmmStmt.Enddo(values, s):
+            kind = "Enddo"
+            parts.push(aj_p("values", cmm_exprs_to_json(values)))
+            sp = s
+        case CmmStmt.RunCall(file_expr, args, s):
+            kind = "RunCall"
+            parts.push(aj_p("file", cmm_expr_to_json(file_expr)))
+            parts.push(aj_p("args", cmm_exprs_to_json(args)))
+            sp = s
+        case CmmStmt.EndStmt(s):
+            kind = "End"
+            sp = s
+        case CmmStmt.StopStmt(s):
+            kind = "Stop"
+            sp = s
+        case CmmStmt.ContinueCmd(s):
+            kind = "Continue"
+            sp = s
+        case CmmStmt.LocalDecl(names, s):
+            kind = "LocalDecl"
+            parts.push(aj_p("names", cmm_texts_to_json(names)))
+            sp = s
+        case CmmStmt.GlobalDecl(names, s):
+            kind = "GlobalDecl"
+            parts.push(aj_p("names", cmm_texts_to_json(names)))
+            sp = s
+        case CmmStmt.PrivateDecl(names, s):
+            kind = "PrivateDecl"
+            parts.push(aj_p("names", cmm_texts_to_json(names)))
+            sp = s
+        case CmmStmt.EntryDecl(names, s):
+            kind = "EntryDecl"
+            parts.push(aj_p("names", cmm_texts_to_json(names)))
+            sp = s
+        case CmmStmt.OnEvent(event, action, s):
+            kind = "OnEvent"
+            parts.push(aj_p("event", aj_s(event)))
+            parts.push(aj_p("action", cmm_stmt_to_json(action)))
+            sp = s
+        case CmmStmt.GlobalOnEvent(event, action, s):
+            kind = "GlobalOnEvent"
+            parts.push(aj_p("event", aj_s(event)))
+            parts.push(aj_p("action", cmm_stmt_to_json(action)))
+            sp = s
+        case CmmStmt.OpenFile(channel, file_expr, mode, s):
+            kind = "OpenFile"
+            parts.push(aj_p("channel", cmm_expr_to_json(channel)))
+            parts.push(aj_p("file", cmm_expr_to_json(file_expr)))
+            parts.push(aj_p("mode", aj_s(mode)))
+            sp = s
+        case CmmStmt.CloseFile(channel, s):
+            kind = "CloseFile"
+            parts.push(aj_p("channel", cmm_expr_to_json(channel)))
+            sp = s
+        case CmmStmt.ReadFile(channel, vars, s):
+            kind = "ReadFile"
+            parts.push(aj_p("channel", cmm_expr_to_json(channel)))
+            parts.push(aj_p("vars", cmm_texts_to_json(vars)))
+            sp = s
+        case CmmStmt.WriteFile(channel, exprs, s):
+            kind = "WriteFile"
+            parts.push(aj_p("channel", cmm_expr_to_json(channel)))
+            parts.push(aj_p("exprs", cmm_exprs_to_json(exprs)))
+            sp = s
+        case CmmStmt.WriteBFile(channel, exprs, s):
+            kind = "WriteBFile"
+            parts.push(aj_p("channel", cmm_expr_to_json(channel)))
+            parts.push(aj_p("exprs", cmm_exprs_to_json(exprs)))
+            sp = s
+        case CmmStmt.AppendFile(file_expr, exprs, s):
+            kind = "AppendFile"
+            parts.push(aj_p("file", cmm_expr_to_json(file_expr)))
+            parts.push(aj_p("exprs", cmm_exprs_to_json(exprs)))
+            sp = s
+        case CmmStmt.PrintStmt(exprs, s):
+            kind = "Print"
+            parts.push(aj_p("exprs", cmm_exprs_to_json(exprs)))
+            sp = s
+        case CmmStmt.WaitStmt(expr, s):
+            kind = "Wait"
+            parts.push(aj_p("expr", cmm_expr_to_json(expr)))
+            sp = s
+        case CmmStmt.DialogBlock(modifier, items, s):
+            kind = "DialogBlock"
+            parts.push(aj_p("modifier", aj_s(modifier)))
+            parts.push(aj_p("items", cmm_dialog_items_to_json(items)))
+            sp = s
+        case CmmStmt.Block(stmts, s):
+            kind = "Block"
+            parts.push(aj_p("statements", cmm_stmts_to_json(stmts)))
+            sp = s
+        case CmmStmt.EmptyLine(s):
+            kind = "EmptyLine"
+            sp = s
+        case CmmStmt.ErrorNode(msg, s):
+            kind = "ErrorNode"
+            parts.push(aj_p("message", aj_s(msg)))
+            sp = s
+    var all_parts: [text] = [aj_p("type", aj_s(kind))]
+    var pi = 0
+    while pi < parts.len():
+        all_parts.push(parts[pi])
+        pi = pi + 1
+    all_parts.push(aj_p("span", cmm_span_to_json(sp)))
+    aj_obj(all_parts)
+
+fn cmm_stmts_to_json(stmts: [CmmStmt]) -> text:
+    var items: [text] = []
+    var i = 0
+    while i < stmts.len():
+        items.push(cmm_stmt_to_json(stmts[i]))
+        i = i + 1
+    aj_arr(items)
+
+# ---------------------------------------------------------------------------
+# CmmProgram
+# ---------------------------------------------------------------------------
+
+fn cmm_program_to_json(program: CmmProgram) -> text:
+    aj_obj([
+        aj_p("file_path", aj_s(program.file_path)),
+        aj_p("statements", cmm_stmts_to_json(program.statements)),
+        aj_p("errors", cmm_texts_to_json(program.errors)),
+        aj_p("warnings", cmm_texts_to_json(program.warnings))
+    ])
+
+# ---------------------------------------------------------------------------
+# Dialog block extraction — walks entire AST recursively
+# ---------------------------------------------------------------------------
+
+fn collect_dialog_blocks(stmts: [CmmStmt], out: [text]):
+    var i = 0
+    while i < stmts.len():
+        collect_dialog_from_stmt(stmts[i], out)
+        i = i + 1
+
+fn collect_dialog_from_stmt(stmt: CmmStmt, out: [text]):
+    match stmt:
+        case CmmStmt.DialogBlock(modifier, items, s):
+            out.push(aj_obj([
+                aj_p("type", aj_s("DialogBlock")),
+                aj_p("modifier", aj_s(modifier)),
+                aj_p("items", cmm_dialog_items_to_json(items)),
+                aj_p("span", cmm_span_to_json(s))
+            ]))
+        case CmmStmt.Block(stmts, _):
+            collect_dialog_blocks(stmts, out)
+        case CmmStmt.IfElse(_, then_body, else_body, _):
+            collect_dialog_from_stmt(then_body, out)
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0))
+                collect_dialog_from_stmt(eb, out)
+        case CmmStmt.WhileLoop(_, body, _):
+            collect_dialog_from_stmt(body, out)
+        case CmmStmt.RepeatLoop(_, body, _):
+            collect_dialog_from_stmt(body, out)
+        case CmmStmt.OnEvent(_, action, _):
+            collect_dialog_from_stmt(action, out)
+        case CmmStmt.GlobalOnEvent(_, action, _):
+            collect_dialog_from_stmt(action, out)
+        case _: ()
+
+fn cmm_dialog_blocks_to_json(program: CmmProgram) -> text:
+    var dialogs: [text] = []
+    collect_dialog_blocks(program.statements, dialogs)
+    aj_obj([
+        aj_p("file_path", aj_s(program.file_path)),
+        aj_p("dialog_count", str(dialogs.len())),
+        aj_p("dialogs", aj_arr(dialogs)),
+        aj_p("errors", cmm_texts_to_json(program.errors)),
+        aj_p("warnings", cmm_texts_to_json(program.warnings))
+    ])
+
+# ---------------------------------------------------------------------------
+# Multi-program (include resolution results)
+# ---------------------------------------------------------------------------
+
+fn cmm_multi_program_to_json(programs: [CmmProgram], file_paths: [text], resolution_errors: [text]) -> text:
+    var file_jsons: [text] = []
+    var i = 0
+    while i < programs.len():
+        file_jsons.push(cmm_program_to_json(programs[i]))
+        i = i + 1
+    aj_obj([
+        aj_p("file_count", str(programs.len())),
+        aj_p("files", aj_arr(file_jsons)),
+        aj_p("visited_paths", cmm_texts_to_json(file_paths)),
+        aj_p("resolution_errors", cmm_texts_to_json(resolution_errors))
+    ])

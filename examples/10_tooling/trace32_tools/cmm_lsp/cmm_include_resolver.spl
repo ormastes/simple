@@ -1,0 +1,264 @@
+# CMM Include Resolver — Follow DO/RUN directives with cycle detection
+#
+# Resolves static file references in DoCall and RunCall statements,
+# parses included files, and collects all ASTs into a unified result.
+# Prevents infinite recursion via visited-path tracking and max depth.
+
+use cmm_ast.{CmmProgram, CmmStmt, CmmExpr, CmmLiteral}
+use cmm_parser_runtime.{parse_cmm_source}
+
+export CmmIncludeResult, resolve_includes
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_cwd() -> text
+
+struct CmmIncludeResult:
+    programs: [CmmProgram]
+    file_paths: [text]
+    errors: [text]
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+fn resolve_includes(program: CmmProgram, base_path: text) -> CmmIncludeResult:
+    var programs: [CmmProgram] = [program]
+    var visited: [text] = []
+    var errors: [text] = []
+    val cwd = rt_env_cwd() ?? ""
+
+    # Effective base: explicit base_path takes priority, then cwd
+    val effective_base =
+        if base_path != "":
+            base_path
+        else:
+            cwd
+
+    # Always track the root program to prevent cycles back to it.
+    # If it has a file_path, normalize it. Otherwise use a sentinel.
+    if program.file_path != "":
+        visited.push(make_absolute(program.file_path, effective_base))
+    else:
+        # Source-text root: use sentinel so visited is never empty
+        visited.push("<stdin>")
+
+    resolve_recursive(program, effective_base, 0, 20, visited, programs, errors)
+
+    CmmIncludeResult(programs: programs, file_paths: visited, errors: errors)
+
+# ---------------------------------------------------------------------------
+# Recursive resolver
+# ---------------------------------------------------------------------------
+
+fn resolve_recursive(program: CmmProgram, base_path: text, depth: i64, max_depth: i64, visited: [text], programs: [CmmProgram], errors: [text]):
+    if depth >= max_depth:
+        errors.push("Max include depth (" + str(max_depth) + ") reached — stopping recursion")
+        return
+
+    val targets = extract_do_targets(program.statements)
+    var ti = 0
+    while ti < targets.len():
+        val target = targets[ti]
+        ti = ti + 1
+
+        if target == "":
+            continue
+
+        # Try to resolve the file path
+        val raw_resolved = resolve_file_path(target, base_path)
+        if raw_resolved == "":
+            errors.push("Cannot resolve include target: " + target)
+            continue
+
+        # Normalize to absolute path for consistent cycle detection
+        val resolved = make_absolute(raw_resolved, base_path)
+
+        # Cycle detection against normalized paths
+        if is_visited(visited, resolved):
+            errors.push("Skipping recursive include: " + resolved)
+            continue
+
+        visited.push(resolved)
+
+        # Read and parse the file (use raw_resolved which rt_file_exists validated)
+        val source = rt_file_read_text(raw_resolved) ?? ""
+        if source == "":
+            errors.push("Failed to read include file: " + resolved)
+            continue
+
+        var included = parse_cmm_source(source)
+        included.file_path = resolved
+        programs.push(included)
+
+        # Derive base path for nested includes
+        val nested_base = dir_of(resolved)
+        resolve_recursive(included, nested_base, depth + 1, max_depth, visited, programs, errors)
+
+# ---------------------------------------------------------------------------
+# Extract DO/RUN file targets from statements
+# ---------------------------------------------------------------------------
+
+fn extract_do_targets(stmts: [CmmStmt]) -> [text]:
+    var targets: [text] = []
+    var i = 0
+    while i < stmts.len():
+        extract_do_from_stmt(stmts[i], targets)
+        i = i + 1
+    targets
+
+fn extract_do_from_stmt(stmt: CmmStmt, targets: [text]):
+    match stmt:
+        case CmmStmt.DoCall(file_expr, _, _):
+            val name = extract_static_path(file_expr)
+            if name != "":
+                targets.push(name)
+        case CmmStmt.RunCall(file_expr, _, _):
+            val name = extract_static_path(file_expr)
+            if name != "":
+                targets.push(name)
+        case CmmStmt.Block(stmts, _):
+            var i = 0
+            while i < stmts.len():
+                extract_do_from_stmt(stmts[i], targets)
+                i = i + 1
+        case CmmStmt.IfElse(_, then_body, else_body, _):
+            extract_do_from_stmt(then_body, targets)
+            if else_body.?:
+                val eb = else_body ?? CmmStmt.EmptyLine(cmm_ast.CmmSpan(start_line: 0, start_col: 0, end_line: 0, end_col: 0))
+                extract_do_from_stmt(eb, targets)
+        case CmmStmt.WhileLoop(_, body, _):
+            extract_do_from_stmt(body, targets)
+        case CmmStmt.RepeatLoop(_, body, _):
+            extract_do_from_stmt(body, targets)
+        case CmmStmt.OnEvent(_, action, _):
+            extract_do_from_stmt(action, targets)
+        case CmmStmt.GlobalOnEvent(_, action, _):
+            extract_do_from_stmt(action, targets)
+        case _: ()
+
+fn extract_static_path(expr: CmmExpr) -> text:
+    var result = ""
+    match expr:
+        case CmmExpr.Ident(name):
+            result = name
+        case CmmExpr.DotPath(path):
+            result = path
+        case CmmExpr.Lit(lit):
+            match lit:
+                case CmmLiteral.Str(s):
+                    result = s
+                case _: ()
+        case _: ()
+    result
+
+# ---------------------------------------------------------------------------
+# File path resolution
+# ---------------------------------------------------------------------------
+
+fn resolve_file_path(target: text, base_path: text) -> text:
+    # Try absolute path first
+    if rt_file_exists(target):
+        return target
+
+    # Try with .cmm extension
+    if not target.ends_with(".cmm"):
+        val with_ext = target + ".cmm"
+        if rt_file_exists(with_ext):
+            return with_ext
+
+    # Try relative to base_path
+    if base_path != "":
+        val base_target = join_path(base_path, target)
+        if rt_file_exists(base_target):
+            return base_target
+
+        if not target.ends_with(".cmm"):
+            val base_with_ext = join_path(base_path, target + ".cmm")
+            if rt_file_exists(base_with_ext):
+                return base_with_ext
+
+    ""
+
+fn is_visited(visited: [text], path: text) -> bool:
+    val norm = normalize_slashes(path)
+    var i = 0
+    while i < visited.len():
+        if visited[i] == norm or visited[i] == path:
+            return true
+        i = i + 1
+    false
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+fn join_path(base: text, name: text) -> text:
+    if base == "":
+        return name
+    if base.ends_with("/") or base.ends_with("\\"):
+        return base + name
+    base + "/" + name
+
+fn dir_of(path: text) -> text:
+    # Find last / or \
+    var last_sep = -1
+    var i = 0
+    while i < path.len():
+        val ch = path[i:i + 1]
+        if ch == "/" or ch == "\\":
+            last_sep = i
+        i = i + 1
+    if last_sep < 0:
+        return ""
+    path.substring(0, last_sep)
+
+fn is_absolute(path: text) -> bool:
+    if path.len() == 0:
+        return false
+    # Unix absolute: starts with /
+    if path[0:1] == "/":
+        return true
+    # Windows absolute: e.g. C:\ or C:/
+    if path.len() >= 3:
+        val second = path[1:2]
+        val third = path[2:3]
+        if second == ":" and (third == "/" or third == "\\"):
+            return true
+    false
+
+fn make_absolute(path: text, base: text) -> text:
+    if path == "" or path == "<stdin>":
+        return path
+    if is_absolute(path):
+        return normalize_slashes(path)
+    val abs = join_path(base, path)
+    normalize_slashes(abs)
+
+fn normalize_slashes(path: text) -> text:
+    # Replace backslashes with forward slashes for consistent comparison
+    var out = ""
+    var i = 0
+    while i < path.len():
+        val ch = path[i:i + 1]
+        if ch == "\\":
+            out = out + "/"
+        else:
+            out = out + ch
+        i = i + 1
+    # Collapse consecutive slashes
+    var result = ""
+    var prev_slash = false
+    i = 0
+    while i < out.len():
+        val ch = out[i:i + 1]
+        if ch == "/" and prev_slash:
+            i = i + 1
+            continue
+        prev_slash = ch == "/"
+        result = result + ch
+        i = i + 1
+    # Remove trailing slash
+    if result.len() > 1 and result.ends_with("/"):
+        result = result.substring(0, result.len() - 1)
+    result

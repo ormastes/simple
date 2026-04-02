@@ -1,0 +1,183 @@
+# T32 Hardware Integration Test Helpers
+#
+# Shared utilities for T32 hardware integration tests:
+# - Environment probing (T32 availability, version)
+# - Backend selection
+# - Session management for shared test groups
+# - Power control wrappers
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_tcp_connect(host: text, port: i64) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+use std.debug.remote.protocol.trace32.{Trace32Client}
+use app.debug.remote.types.{DebugConfig}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val T32_HW_DEFAULT_HOST: text = "localhost"
+val T32_HW_DEFAULT_PORT: i64 = 20000
+val T32_HW_MIN_VERSION_OLD: i64 = 120000
+val T32_HW_MIN_VERSION_NEW: i64 = 130000
+
+# ============================================================================
+# Environment Probing
+# ============================================================================
+
+fn t32_hw_host() -> text:
+    """Get T32 host from env or default."""
+    val h = rt_env_get("T32_HW_HOST")
+    if h.len() > 0: h else: T32_HW_DEFAULT_HOST
+
+fn t32_hw_port() -> i64:
+    """Get T32 RCL port from env or default."""
+    val p = rt_env_get("T32_HW_PORT")
+    if p.len() > 0: p.to_i64() ?? T32_HW_DEFAULT_PORT
+    else: T32_HW_DEFAULT_PORT
+
+fn t32_hw_probe_available() -> bool:
+    """Check if T32 is reachable via TCP on the configured host:port."""
+    rt_tcp_connect(t32_hw_host(), t32_hw_port())
+
+fn t32_hw_t32rem_available() -> bool:
+    """Check if t32rem binary is findable."""
+    val t32_path = rt_env_get("T32_PATH")
+    if t32_path.len() > 0:
+        val candidate = "{t32_path}/bin/pc_linux64/t32rem"
+        if rt_file_exists(candidate):
+            return true
+    # Fallback: check PATH via Trace32Client.find_t32rem()
+    val found = Trace32Client.find_t32rem()
+    found.len() > 0
+
+fn t32_hw_relay_available() -> bool:
+    """Check if relay power scripts exist."""
+    val relay_on = rt_file_exists("scripts/relay_on.shs")
+    val relay_off = rt_file_exists("scripts/relay_off.shs")
+    relay_on and relay_off
+
+# ============================================================================
+# Version Detection
+# ============================================================================
+
+fn t32_hw_query_version() -> i64:
+    """Query T32 VERSION.BUILD() and return as integer. Returns 0 on failure."""
+    val config = DebugConfig(
+        host: t32_hw_host(),
+        port: t32_hw_port(),
+        program: "",
+        args: [],
+        debugger: "t32",
+        remote: true
+    )
+    val result = Trace32Client.connect(config)
+    match result:
+        Ok(client):
+            val ver = client.eval_expr("VERSION.BUILD()")
+            client.disconnect()
+            match ver:
+                Ok(v): v.trim().to_i64() ?? 0
+                Err(_): 0
+        Err(_):
+            0
+
+fn t32_hw_version_gate_old() -> bool:
+    """Check if T32 version meets OLD tool minimum."""
+    t32_hw_query_version() >= T32_HW_MIN_VERSION_OLD
+
+fn t32_hw_version_gate_new() -> bool:
+    """Check if T32 version meets NEW tool minimum."""
+    t32_hw_query_version() >= T32_HW_MIN_VERSION_NEW
+
+# ============================================================================
+# Client Helpers
+# ============================================================================
+
+fn t32_hw_connect() -> Result<Trace32Client, text>:
+    """Connect to T32 hardware using env-configured host:port."""
+    val config = DebugConfig(
+        host: t32_hw_host(),
+        port: t32_hw_port(),
+        program: "",
+        args: [],
+        debugger: "t32",
+        remote: true
+    )
+    Trace32Client.connect(config)
+
+fn t32_hw_run_cmd(client: Trace32Client, cmd: text) -> Result<text, text>:
+    """Run a PRACTICE command on the connected client."""
+    client.run_command(cmd)
+
+fn t32_hw_eval(client: Trace32Client, expr: text) -> Result<text, text>:
+    """Evaluate a T32 expression."""
+    client.eval_expr(expr)
+
+# ============================================================================
+# Backend Selection
+# ============================================================================
+
+fn t32_hw_backend_preference() -> text:
+    """Get forced backend preference from env, or empty for auto-detect."""
+    rt_env_get("T32_BACKEND_PREFERENCE")
+
+fn t32_hw_python_available() -> bool:
+    """Check if Python RCL bridge is available."""
+    val py = rt_env_get("T32_PYTHON_BINARY")
+    val python_bin = if py.len() > 0: py else: "python3"
+    # Simple existence check -- actual import check done at runtime
+    rt_file_exists("/usr/bin/{python_bin}") or rt_file_exists("/usr/local/bin/{python_bin}")
+
+fn t32_hw_ctypes_available() -> bool:
+    """Check if C API library is available for ctypes backend."""
+    val lib = rt_env_get("T32_API_LIB_PATH")
+    if lib.len() > 0:
+        return rt_file_exists(lib)
+    # Default path
+    val t32_path = rt_env_get("T32_PATH")
+    if t32_path.len() > 0:
+        return rt_file_exists("{t32_path}/bin/pc_linux64/t32api64.so")
+    rt_file_exists("/opt/t32/bin/pc_linux64/t32api64.so")
+
+# ============================================================================
+# Power Control Wrappers
+# ============================================================================
+
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+
+fn t32_hw_relay_power_on() -> bool:
+    """Power on board via relay script."""
+    rt_shell_exec("scripts/relay_on.shs")
+    rt_shell_exit_code() == 0
+
+fn t32_hw_relay_power_off() -> bool:
+    """Power off board via relay script."""
+    rt_shell_exec("scripts/relay_off.shs")
+    rt_shell_exit_code() == 0
+
+fn t32_hw_relay_power_reset() -> bool:
+    """Reset board via relay script."""
+    rt_shell_exec("scripts/relay_reset.shs")
+    rt_shell_exit_code() == 0
+
+fn t32_hw_relay_power_state() -> text:
+    """Query board power state via relay script. Returns 'on', 'off', or 'unknown'."""
+    val output = rt_shell_exec("scripts/relay_state.shs")
+    val code = rt_shell_exit_code()
+    if code != 0:
+        return "unknown"
+    val trimmed = output.trim()
+    if trimmed.contains("on"): "on"
+    elif trimmed.contains("off"): "off"
+    else: "unknown"
+
+# ============================================================================
+# Skip Helper
+# ============================================================================
+
+fn t32_hw_skip_msg(reason: text) -> text:
+    """Format a skip message for when T32 hardware is not available."""
+    "SKIP: T32 hardware test skipped -- {reason}"

@@ -48,11 +48,11 @@ impl CmmParser:
                                 val ctok = self.advance()
                                 stmts.push(CmmStmt.CommentLine(c, span(ctok.line, ctok.column)))
                             case _: ()
-        CmmProgram(statements: stmts, file_path: "", errors: self.errors)
+        CmmProgram(statements: stmts, file_path: "", errors: self.errors, warnings: self.warnings)
 
 fn parse_cmm_source(source: text) -> CmmProgram:
     val tokens = lex_cmm_source(source)
-    var parser = CmmParser(tokens: tokens, current: 0, errors: [])
+    var parser = CmmParser(tokens: tokens, current: 0, errors: [], warnings: [])
     parser.parse_program_runtime()
 
 fn parse_cmm_file(path: text) -> CmmProgram:
@@ -762,7 +762,8 @@ impl CmmParser:
             else if self.check_kind("Comment"):
                 self.advance()
             else if self.check_kind("Eof"):
-                return Err(self.make_error("Unterminated DIALOG block"))
+                self.warnings.push("Line " + str(start_tok.line) + ": unclosed DIALOG block — reached end of file")
+                return Ok(CmmStmt.DialogBlock(modifier, items, span(start_tok.line, start_tok.column)))
             else:
                 # Try to parse a dialog item
                 match self.parse_dialog_item():
@@ -772,7 +773,8 @@ impl CmmParser:
                         # Error recovery: skip to next line within dialog
                         self.skip_to_next_line()
 
-        Err(self.make_error("Unterminated DIALOG block"))
+        self.warnings.push("Line " + str(start_tok.line) + ": unclosed DIALOG block — reached end of file")
+        Ok(CmmStmt.DialogBlock(modifier, items, span(start_tok.line, start_tok.column)))
 
     # Parse a single dialog item line.
     # Recognizes HEADER, POS, TEXT, DEFBUTTON, BUTTON, EDIT, CHECKBOX,
@@ -903,7 +905,8 @@ impl CmmParser:
                 self.advance()  # consume )
                 return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
             if self.check_kind("Eof"):
-                return Err(self.make_error("Unterminated block — expected )"))
+                self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
+                return Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
             if self.check_kind("Newline"):
                 val nl_tok = self.advance()
                 stmts.push(CmmStmt.EmptyLine(span(nl_tok.line, nl_tok.column)))
@@ -912,7 +915,8 @@ impl CmmParser:
             else:
                 self.parse_block_statement_into(stmts)
 
-        Err(self.make_error("Unterminated block — expected )"))
+        self.warnings.push("Line " + str(start_tok.line) + ": unclosed block — reached end of file without closing )")
+        Ok(CmmStmt.Block(stmts, span(start_tok.line, start_tok.column)))
 
     # Parse the body following a control-flow keyword.
     # If the next non-blank token is `(`, parse a block.

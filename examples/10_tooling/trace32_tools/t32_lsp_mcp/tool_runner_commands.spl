@@ -2,7 +2,7 @@
 # Lightweight direct runner for command-db backed tools.
 
 use t32_lsp_mcp.json_helpers
-use t32_lsp_mcp.tool_runner_common.{runner_arg0_is_executable_path, debug_args, extract_word_from_lines, parse_i64}
+use t32_lsp_mcp.tool_runner_common.{runner_arg0_is_executable_path, debug_args, extract_word_from_lines, parse_i64, scan_symbols_lite, LiteSymbol, is_cmm_keyword, cmm_keyword_description, get_cmm_keywords}
 use cmm_lsp.cmm_commands.{build_command_db, get_completions}
 
 extern fn sys_get_args() -> [text]
@@ -87,12 +87,60 @@ fn handle_cmm_complete(id: text, args: text) -> text:
     var prefix = extract_word_from_lines(source.split("\n"), target_line, target_char)
     if prefix == "":
         prefix = first_word(source)
-    val matches = get_completions(build_command_db(), prefix)
-    var arr = lsp_SB_L()
-    var ci = 0
     val limit = 32
-    while ci < matches.len() and ci < limit:
-        if ci > 0:
+    var arr = lsp_SB_L()
+    var total = 0
+    # Phase 5: macro completions (highest priority)
+    if prefix.starts_with("&"):
+        val macro_prefix = prefix.substring(1).to_lower()
+        val syms = scan_symbols_lite(source)
+        var si = 0
+        while si < syms.len() and total < limit:
+            if syms[si].kind == "macro" and syms[si].name.to_lower().starts_with(macro_prefix):
+                if total > 0:
+                    arr = arr + ","
+                arr = arr + lsp_jo3(
+                    lsp_jp("label", lsp_js("&" + syms[si].name)),
+                    lsp_jp("kind", lsp_js("macro")),
+                    lsp_jp("description", lsp_js(syms[si].scope + " macro"))
+                )
+                total = total + 1
+            si = si + 1
+    # Phase 5: keyword completions
+    val prefix_lower = prefix.to_lower()
+    val kws = get_cmm_keywords()
+    var ki = 0
+    while ki < kws.len() and total < limit:
+        if kws[ki].to_lower().starts_with(prefix_lower):
+            if total > 0:
+                arr = arr + ","
+            val kw_desc = cmm_keyword_description(kws[ki].to_upper())
+            arr = arr + lsp_jo3(
+                lsp_jp("label", lsp_js(kws[ki])),
+                lsp_jp("kind", lsp_js("keyword")),
+                lsp_jp("description", lsp_js(kw_desc))
+            )
+            total = total + 1
+        ki = ki + 1
+    # Phase 5: label completions
+    val lbl_syms = scan_symbols_lite(source)
+    var lbi = 0
+    while lbi < lbl_syms.len() and total < limit:
+        if lbl_syms[lbi].kind == "label" and lbl_syms[lbi].name.to_lower().starts_with(prefix_lower):
+            if total > 0:
+                arr = arr + ","
+            arr = arr + lsp_jo3(
+                lsp_jp("label", lsp_js(lbl_syms[lbi].name)),
+                lsp_jp("kind", lsp_js("label")),
+                lsp_jp("description", lsp_js("label at line " + str(lbl_syms[lbi].line)))
+            )
+            total = total + 1
+        lbi = lbi + 1
+    # Command DB completions (lowest priority)
+    val matches = get_completions(build_command_db(), prefix)
+    var ci = 0
+    while ci < matches.len() and total < limit:
+        if total > 0:
             arr = arr + ","
         val cmd = matches[ci]
         arr = arr + lsp_jo3(
@@ -100,14 +148,10 @@ fn handle_cmm_complete(id: text, args: text) -> text:
             lsp_jp("kind", lsp_js("command")),
             lsp_jp("description", lsp_js(cmd.description))
         )
+        total = total + 1
         ci = ci + 1
     arr = arr + lsp_SB_R()
-    val result_count =
-        if matches.len() < limit:
-            matches.len()
-        else:
-            limit
-    lsp_make_tool_result(id, lsp_jo2(lsp_jp("count", str(result_count)), lsp_jp("completions", arr)))
+    lsp_make_tool_result(id, lsp_jo2(lsp_jp("count", str(total)), lsp_jp("completions", arr)))
 
 fn handle_cmm_hover(id: text, args: text) -> text:
     val source = json_string_field(args, "source")
@@ -121,6 +165,29 @@ fn handle_cmm_hover(id: text, args: text) -> text:
         word = fallback_word
     if word == "":
         return lsp_make_tool_result(id, lsp_jo1(lsp_jp("hover", lsp_js(""))))
+    # Phase 5: macro hover
+    if word.starts_with("&"):
+        val macro_name = word.substring(1)
+        val syms = scan_symbols_lite(source)
+        var si = 0
+        while si < syms.len():
+            if syms[si].kind == "macro" and syms[si].name == macro_name:
+                val hover_m = "&" + syms[si].name + " — " + syms[si].scope + " macro, declared at line " + str(syms[si].line)
+                return lsp_make_tool_result(id, lsp_jo2(lsp_jp("word", lsp_js(word)), lsp_jp("hover", lsp_js(hover_m))))
+            si = si + 1
+    # Phase 5: label hover
+    val label_syms = scan_symbols_lite(source)
+    var li2 = 0
+    while li2 < label_syms.len():
+        if label_syms[li2].kind == "label" and label_syms[li2].name == word:
+            val hover_l = word + ": — label, defined at line " + str(label_syms[li2].line)
+            return lsp_make_tool_result(id, lsp_jo2(lsp_jp("word", lsp_js(word)), lsp_jp("hover", lsp_js(hover_l))))
+        li2 = li2 + 1
+    # Phase 5: keyword hover
+    if is_cmm_keyword(word.to_upper()):
+        val kw_desc = cmm_keyword_description(word.to_upper())
+        if kw_desc != "":
+            return lsp_make_tool_result(id, lsp_jo2(lsp_jp("word", lsp_js(word)), lsp_jp("hover", lsp_js(word.to_upper() + " — " + kw_desc))))
     val hover_text = lookup_hover_text(build_command_db(), word)
     lsp_make_tool_result(id, lsp_jo2(lsp_jp("word", lsp_js(word)), lsp_jp("hover", lsp_js(hover_text))))
 

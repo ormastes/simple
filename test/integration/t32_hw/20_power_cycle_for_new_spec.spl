@@ -1,0 +1,60 @@
+# T32 Hardware -- Power Cycle for New Tools
+#
+# Exercises power cycling via relay scripts and verifies that T32
+# reconnects and can bring up the system after a full power cycle.
+# Uses a shared session (exclusive_reused) so state carries across tests.
+#
+# @session-kind: trace32_board
+# @target: arm
+# @tag: t32_hw, new_tools
+# @reuse: exclusive_reused
+
+use std.sspec.{describe, context, it, expect, before_all, after_all}
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_connect, t32_hw_run_cmd, t32_hw_eval,
+    t32_hw_host, t32_hw_port, t32_hw_version_gate_new,
+    t32_hw_relay_power_on, t32_hw_relay_power_off, t32_hw_relay_power_state
+}
+
+describe "T32 power cycle for new tools":
+    var client = nil
+
+    before_all:
+        # Ensure board is powered on and connected before cycling
+        t32_hw_relay_power_on()
+        val result = t32_hw_connect()
+        match result:
+            Ok(c): client = c
+            Err(e): expect("connect failed: {e}").to_equal("")
+
+    after_all:
+        if client != nil:
+            client.disconnect()
+
+    context "power cycle sequence":
+        it "powers board off":
+            val ok = t32_hw_relay_power_off()
+            expect(ok).to_equal(true)
+
+        it "powers board on":
+            val ok = t32_hw_relay_power_on()
+            expect(ok).to_equal(true)
+
+        it "T32 reconnects after power cycle":
+            # Reconnect after the power cycle
+            val result = t32_hw_connect()
+            match result:
+                Ok(c):
+                    client = c
+                    val state = t32_hw_eval(client, "STATE.RUN()")
+                    match state:
+                        Ok(_): expect(true).to_equal(true)
+                        Err(e): expect("eval failed: {e}").to_equal("")
+                Err(e):
+                    expect("reconnect failed: {e}").to_equal("")
+
+        it "SYStem.Up after power cycle":
+            val result = t32_hw_run_cmd(client, "SYStem.Up")
+            match result:
+                Ok(_): expect(true).to_equal(true)
+                Err(e): expect("SYStem.Up failed: {e}").to_equal("")
