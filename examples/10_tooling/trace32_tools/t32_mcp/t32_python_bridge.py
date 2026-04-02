@@ -9,6 +9,7 @@ lauterbach-trace32-rcl Python library instead of the native Lauterbach tool.
 Install: pip install lauterbach-trace32-rcl
 
 Environment variables:
+  T32_RCL_PROTOCOL — RCL transport: "NETTCP" (default, TCP) or "UDP"
   T32_RCL_PACKLEN  — RCL packet length (default: 1024)
   T32_RCL_TIMEOUT  — Connection timeout in seconds (default: 10)
 """
@@ -132,6 +133,7 @@ def main():
         )
         sys.exit(1)
 
+    protocol = os.environ.get("T32_RCL_PROTOCOL", "NETTCP").upper()
     packlen = int(os.environ.get("T32_RCL_PACKLEN", "1024"))
     timeout = int(os.environ.get("T32_RCL_TIMEOUT", "10"))
 
@@ -147,7 +149,12 @@ def main():
 
     try:
         t32.init()
-        t32.config(node=host, port=port, packlen=packlen, timeout=timeout)
+        # Use NETTCP (TCP) by default instead of UDP to avoid firewall issues
+        if protocol == "NETTCP":
+            t32.config(node=host, port=port, packlen=packlen, timeout=timeout,
+                       protocol="NETTCP")
+        else:
+            t32.config(node=host, port=port, packlen=packlen, timeout=timeout)
         if intercom:
             # INTERCOM name selects a specific TRACE32 instance
             t32.config(intercom=intercom)

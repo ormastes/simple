@@ -36,8 +36,9 @@ fn t32_server_version() -> text:
     "0.1.0"
 
 fn main():
-    stderr_write("[t32-mcp] cold start\n")
-    stderr_flush()
+    if t32_debug_enabled():
+        stderr_write("[t32-mcp] cold start\n")
+        stderr_flush()
     t32_cold_main()
 
 fn t32_debug_enabled() -> bool:
@@ -275,6 +276,60 @@ fn t32_request_arguments_json(body: text) -> text:
         return top_args
     args
 
+fn t32_request_id_text(body: text) -> text:
+    val marker1 = "\"id\":"
+    val marker2 = "\"id\": "
+    var idx = body.index_of(marker1).unwrap_or(-1)
+    var start = -1
+    if idx >= 0:
+        start = idx + marker1.len()
+    else:
+        idx = body.index_of(marker2).unwrap_or(-1)
+        if idx >= 0:
+            start = idx + marker2.len()
+    if start < 0 or start >= body.len():
+        return "null"
+    while start < body.len():
+        val ch = body.substring(start, start + 1)
+        if ch != " " and ch != "\n" and ch != "\r" and ch != "\t":
+            break
+        start = start + 1
+    if start >= body.len():
+        return "null"
+    val first = body.substring(start, start + 1)
+    if first == "\"":
+        val rest = body.substring(start + 1, body.len())
+        val end = rest.index_of("\"").unwrap_or(-1)
+        if end < 0:
+            return "null"
+        return "\"" + rest.substring(0, end) + "\""
+    val rest2 = body.substring(start, body.len())
+    var end2 = rest2.len()
+    val comma = rest2.index_of(",").unwrap_or(-1)
+    if comma >= 0 and comma < end2:
+        end2 = comma
+    val rb = rest2.index_of("}").unwrap_or(-1)
+    if rb >= 0 and rb < end2:
+        end2 = rb
+    val sb = rest2.index_of("]").unwrap_or(-1)
+    if sb >= 0 and sb < end2:
+        end2 = sb
+    val sp = rest2.index_of(" ").unwrap_or(-1)
+    if sp >= 0 and sp < end2:
+        end2 = sp
+    val nl = rest2.index_of("\n").unwrap_or(-1)
+    if nl >= 0 and nl < end2:
+        end2 = nl
+    val cr = rest2.index_of("\r").unwrap_or(-1)
+    if cr >= 0 and cr < end2:
+        end2 = cr
+    val tab = rest2.index_of("\t").unwrap_or(-1)
+    if tab >= 0 and tab < end2:
+        end2 = tab
+    if end2 <= 0:
+        return "null"
+    rest2.substring(0, end2)
+
 fn t32_tool_schema_simple(name: text, description: text) -> text:
     LB() + jp("name", js(name)) + "," + jp("description", js(description)) + "," + jp("inputSchema", LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", SB_L() + SB_R()) + RB()) + RB()
 
@@ -337,8 +392,9 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
     if tool_name == "t32_field_set":
         val key = t32_json_string_after_key(body, "field_key")
         val value = t32_json_string_after_key(body, "value")
-        stderr_write("[t32-mcp] field_set key=<" + key + "> value=<" + value + ">\n")
-        stderr_flush()
+        if t32_debug_enabled():
+            stderr_write("[t32-mcp] field_set key=<" + key + "> value=<" + value + ">\n")
+            stderr_flush()
         if key == "":
             return make_tool_error(id, "Missing required parameter: field_key")
         t32_field_set_value(key, value)
@@ -346,7 +402,7 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
         return make_tool_result(id, LB() + jp("field_key", js(key)) + "," + jp("value", js(value)) + RB())
     if tool_name == "t32_history_tail":
         var count = 20
-        val count_raw = extract_field(args_raw, "count")
+        val count_raw = extract_field(body, "count")
         if count_raw != "":
             count = int(count_raw)
         return make_tool_result(id, jo1(jp("history", t32_history_tail_json(count))))
@@ -382,7 +438,7 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
         t32_add_history("dialog_set:" + label, dialog.value, "", "")
         return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("value", js(dialog.value)) + RB())
     if tool_name == "t32_dialog_click":
-        val label = extract_field(args_raw, "label")
+        val label = extract_field(body, "label")
         if label == "":
             return make_tool_error(id, "Missing required parameter: label")
         val idx = t32_dialog_find(label)
@@ -405,8 +461,9 @@ fn t32_cold_main():
     t32_debug_bootstrap()
     while true:
         var msg = read_stdin_message()
-        stderr_write("[t32-mcp] read bytes=" + str(msg.len()) + "\n")
-        stderr_flush()
+        if t32_debug_enabled():
+            stderr_write("[t32-mcp] read bytes=" + str(msg.len()) + "\n")
+            stderr_flush()
         if msg == "":
             return
         var method = ""
@@ -424,14 +481,13 @@ fn t32_cold_main():
             method = "shutdown"
         elif has_method(msg, "ping"):
             method = "ping"
-        val id = extract_field_raw(msg, "id")
-        if id == "":
-            id = "null"
+        val id = t32_request_id_text(msg)
         var tool_name = ""
         if method == "tools/call":
             tool_name = t32_detect_tool_name(msg)
-        stderr_write("[t32-mcp] method=" + method + " id=" + id + " tool=" + tool_name + "\n")
-        stderr_flush()
+        if t32_debug_enabled():
+            stderr_write("[t32-mcp] method=" + method + " id=" + id + " tool=" + tool_name + "\n")
+            stderr_flush()
         t32_debug_append("requests.log", "method=" + method + " id=" + id + " tool=" + tool_name + " bytes=" + str(msg.len()))
         var response = ""
         if method == "initialize":
@@ -453,8 +509,9 @@ fn t32_cold_main():
         else:
             if id != "" and id != "null":
                 response = jsonrpc_error(id, -32601, "Method not found: " + method)
-        stderr_write("[t32-mcp] response bytes=" + str(response.len()) + "\n")
-        stderr_flush()
+        if t32_debug_enabled():
+            stderr_write("[t32-mcp] response bytes=" + str(response.len()) + "\n")
+            stderr_flush()
         if response != "":
             t32_debug_append("wrapper.log", "method=" + method + " id=" + id + " tool=" + tool_name + " response_bytes=" + str(response.len()))
             write_stdout_message(response)

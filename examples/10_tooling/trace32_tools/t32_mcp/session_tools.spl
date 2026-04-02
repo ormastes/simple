@@ -169,7 +169,8 @@ fn t32_query_status_bar(session: McpT32Session) -> (text, text, text):
         # Subprocess path: extra t32_run_remote calls
         var msg_out = ""
         var msg_rc: i64 = 0
-        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STRing()")
+        # MESSAGE.STRing() not available in T32 R2025.09; use MESSAGE() instead
+        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE()")
         if msg_rc == 0:
             message = msg_out.trim()
         var state_out = ""
@@ -258,7 +259,8 @@ fn t32_query_errors(session: McpT32Session) -> (text, text, text):
     else:
         var msg_out = ""
         var msg_rc: i64 = 0
-        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE.STRing()")
+        # MESSAGE.STRing() not available in T32 R2025.09; use MESSAGE() instead
+        (msg_out, msg_rc) = t32_run_remote(session, "EVAL MESSAGE()")
         if msg_rc == 0:
             message = msg_out.trim()
     (message, msg_type, MCP_T32_LAST_STDERR)
@@ -463,10 +465,14 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         return t32_ctypes_run_remote(session, cmd)
     # --- subprocess dispatch (t32rem / python_rcl) ---
     val intercom = session.intercom_name
-    var full_cmd = backend + " " + session.host + " port=" + str(session.port)
+    # Export RCL protocol so python_rcl bridge picks up NETTCP even from config file
+    var full_cmd = "T32_RCL_PROTOCOL=" + T32_RCL_PROTOCOL + " " + backend + " " + session.host + " port=" + str(session.port)
     if intercom != "":
         full_cmd = full_cmd + " INTERCOM=" + intercom
-    full_cmd = full_cmd + " " + cmd
+    # Single-quote the T32 command to prevent shell interpretation of parentheses
+    # e.g. EVAL STATE.RUN() — shell would try to execute RUN as a subshell without quoting
+    val escaped_cmd = cmd.replace("'", "'\\''")
+    full_cmd = full_cmd + " '" + escaped_cmd + "'"
     var stdout = ""
     var stderr = ""
     var rc: i64 = 0
@@ -720,7 +726,8 @@ fn handle_t32_core_list(id: text, body: text) -> text:
             (count_out, count_rc) = t32_run_remote(s, "EVAL CORE.NUMBER()")
             var core_count: i64 = 0
             if count_rc == 0:
-                val trimmed_count = count_out.trim().replace(".", "")
+                var tmp_count = count_out.trim()
+                val trimmed_count = tmp_count.replace(".", "")
                 core_count = int(trimmed_count)
             # If query failed or returned 0, fall back to at least 1 core
             if core_count < 1:
@@ -735,7 +742,8 @@ fn handle_t32_core_list(id: text, body: text) -> text:
                 (name_out, name_rc) = t32_run_remote(s, "EVAL CORE.NAME(" + str(ci) + ".)")
                 var core_name = "core" + str(ci)
                 if name_rc == 0 and name_out.trim() != "":
-                    core_name = name_out.trim().replace("\"", "")
+                    var tmp_name = name_out.trim()
+                    core_name = tmp_name.replace("\"", "")
                 if not first:
                     arr = arr + ","
                 first = false
@@ -1086,7 +1094,8 @@ fn handle_t32_error_check(id: text, body: text) -> text:
                 var ps_rc: i64 = 0
                 (ps_out, ps_rc) = t32_run_remote(session, "EVAL PRACTICE.STATE()")
                 if ps_rc == 0:
-                    val ps_trimmed = ps_out.trim().replace(".", "")
+                    var tmp_ps = ps_out.trim()
+                    val ps_trimmed = tmp_ps.replace(".", "")
                     practice_state = int(ps_trimmed)
             var r = t32_LB()
             r = r + t32_jp("message", t32_js(err_msg))
