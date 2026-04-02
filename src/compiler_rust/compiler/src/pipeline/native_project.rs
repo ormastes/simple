@@ -1508,7 +1508,7 @@ int main(int argc, char** argv) {
         // RISC-V ABI flags (needed for consistent float ABI across all objects)
         let (march, mabi) = match cross_target.arch {
             simple_common::target::TargetArch::Riscv64 => ("-march=rv64gc", "-mabi=lp64d"),
-            simple_common::target::TargetArch::Riscv32 => ("-march=rv32gc", "-mabi=ilp32d"),
+            simple_common::target::TargetArch::Riscv32 => ("-march=rv32imac", "-mabi=ilp32"),
             _ => ("", ""),
         };
 
@@ -4318,5 +4318,47 @@ mod tests {
         assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
         assert!(files.iter().any(|path| same_file_path(path, &dep_file)));
         assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("libsimple_runtime.a");
+        let native_all = temp.path().join("libsimple_native_all.a");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        std::fs::write(&native_all, b"all").unwrap();
+
+        let mut config = NativeBuildConfig::default();
+        config.runtime_path = Some(temp.path().to_path_buf());
+
+        let mut builder =
+            NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
+                .config(config);
+        builder.entry_file = Some(PathBuf::from("/project/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl"));
+
+        let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+        assert_eq!(selected, runtime);
+        assert!(!is_native_all);
+    }
+
+    #[test]
+    fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("libsimple_runtime.a");
+        let native_all = temp.path().join("libsimple_native_all.a");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        std::fs::write(&native_all, b"all").unwrap();
+
+        let mut config = NativeBuildConfig::default();
+        config.runtime_path = Some(temp.path().to_path_buf());
+
+        let mut builder =
+            NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
+                .config(config);
+        builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
+
+        let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+        assert_eq!(selected, native_all);
+        assert!(is_native_all);
     }
 }
