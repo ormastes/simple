@@ -35,7 +35,8 @@
 - [04_architecture/overview.md](04_architecture/overview.md) - Architecture
 - [04_architecture/file_class_structure.md](04_architecture/file_class_structure.md) - Codebase inventory
 - [02_requirements/feature/FEATURES_THAT_WORK.md](02_requirements/feature/FEATURES_THAT_WORK.md) - Working features
-- [07_guide/quick_reference/syntax_quick_reference.md](07_guide/quick_reference/syntax_quick_reference.md) - Syntax reference
+- [07_guide/quick_reference/syntax_quick_reference.md](07_guide/quick_reference/syntax_quick_reference.md) - Canonical public syntax reference
+- [06_spec/app/compiler/modules/grammar/keyword_reference.md](06_spec/app/compiler/modules/grammar/keyword_reference.md) - Generated grammar/status tables
 - [08_tracking/README.md](08_tracking/README.md) - Project tracking hub
 
 ---

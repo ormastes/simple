@@ -7,6 +7,28 @@ use app.io.mod (file_write, dir_create)
 use app.feature_doc.types.*
 use app.feature_doc.usage_docgen (extract_doc_filename)
 
+fn render_doc_block(block: text, skip_top_title: bool) -> text:
+    """Strip duplicated headings and metadata from a parsed doc block."""
+    val lines = block.split("\n")
+    var out: [text] = []
+    var skip_title = skip_top_title
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            if out.len() > 0 and out[-1] != "":
+                out.push("")
+            continue
+        if skip_title and trimmed.starts_with("# ") and not trimmed.starts_with("## "):
+            skip_title = false
+            continue
+        if trimmed.starts_with("## ") or trimmed.starts_with("### "):
+            continue
+        if trimmed.starts_with("**Feature") or trimmed.starts_with("**Category") or trimmed.starts_with("**Status") or trimmed.starts_with("**Keywords") or trimmed.starts_with("*Source:*"):
+            continue
+        out.push(trimmed)
+    out.join("\n").trim()
+
 # ============================================================================
 # App Doc Generation
 # ============================================================================
@@ -24,39 +46,10 @@ fn generate_app_doc(info: FeatureFileInfo, output_dir: text) -> text:
 
     # Overview from first doc block
     if info.doc_blocks.len() > 0:
-        md = md + "## Overview\n\n"
-        val first_block = info.doc_blocks[0]
-        val blines = first_block.split("\n")
-        var in_syntax = false
-        var syntax_lines = []
-
-        for bl in blines:
-            val bt = bl.trim()
-            # Skip title
-            if bt.starts_with("# ") and not bt.starts_with("## "):
-                continue
-            # Skip metadata
-            if bt.starts_with("**Feature") or bt.starts_with("**Category") or bt.starts_with("**Status") or bt.starts_with("**Keywords"):
-                continue
-            # Detect syntax/command sections for separate rendering
-            if bt.starts_with("## Syntax") or bt.starts_with("## Command") or bt.starts_with("## Usage"):
-                in_syntax = true
-                continue
-            if in_syntax and bt.starts_with("## "):
-                in_syntax = false
-            if in_syntax:
-                syntax_lines.push(bl)
-                continue
-            md = md + bl + "\n"
-
-        md = md + "\n"
-
-        # Usage section if syntax found
-        if syntax_lines.len() > 0:
-            md = md + "## Usage\n\n"
-            for sl in syntax_lines:
-                md = md + "    {sl}\n"
-            md = md + "\n"
+        val overview = render_doc_block(info.doc_blocks[0], true)
+        if overview != "":
+            md = md + "## Overview\n\n"
+            md = md + overview + "\n\n"
 
     # Behavior section from describe/context/it structure
     if info.describes.len() > 0:
@@ -68,14 +61,18 @@ fn generate_app_doc(info: FeatureFileInfo, output_dir: text) -> text:
                 md = md + "### {desc.name}\n\n"
 
             if desc.doc != "":
-                md = md + desc.doc + "\n" + "\n"
+                val desc_doc = render_doc_block(desc.doc, false)
+                if desc_doc != "":
+                    md = md + desc_doc + "\n\n"
 
             for ctx in desc.contexts:
                 if ctx.name != "":
                     md = md + "### When {ctx.name}\n\n"
 
                 if ctx.doc != "":
-                    md = md + ctx.doc + "\n" + "\n"
+                    val ctx_doc = render_doc_block(ctx.doc, false)
+                    if ctx_doc != "":
+                        md = md + ctx_doc + "\n\n"
 
                 # Its as bullet points
                 for it_block in ctx.its:
@@ -89,4 +86,3 @@ fn generate_app_doc(info: FeatureFileInfo, output_dir: text) -> text:
     dir_create(output_dir, true)
     file_write(output_path, md)
     output_path
-

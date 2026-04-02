@@ -12,6 +12,7 @@
 |------|----------|
 | Learn Simple language | [07_guide/README.md](07_guide/README.md) |
 | Syntax cheatsheet | [07_guide/quick_reference/syntax_quick_reference.md](07_guide/quick_reference/syntax_quick_reference.md) |
+| Grammar keyword/status tables | [06_spec/app/compiler/modules/grammar/keyword_reference.md](06_spec/app/compiler/modules/grammar/keyword_reference.md) |
 | Understand architecture | [04_architecture/overview.md](04_architecture/overview.md) |
 | Codebase inventory | [04_architecture/file_class_structure.md](04_architecture/file_class_structure.md) |
 | See what features work | [02_requirements/feature/FEATURES_THAT_WORK.md](02_requirements/feature/FEATURES_THAT_WORK.md) |
@@ -59,6 +60,7 @@
 |------|-----------|
 | `06_spec/feature.md` | Every test run |
 | `06_spec/pending_feature.md` | Every test run |
+| `06_spec/app/compiler/modules/grammar/*.md` | `bin/simple grammar-doc` |
 | `08_tracking/test/test_result.md` | Every test run |
 | `08_tracking/build/recent_build.md` | Every build |
 | `08_tracking/bug/bug_report.md` | `bin/simple bug-gen` |

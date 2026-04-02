@@ -1,18 +1,19 @@
 # Simple Language Syntax Specification
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
-> **Source:** `tests/specs/syntax_spec.spl`
+> **Source:** `test/feature/usage/syntax_spec.spl`
 > **Generated:** 2026-01-10 04:47:40
 >
-> To update this file, edit the source _spec.spl file and run:
+> This file is a legacy generated snapshot. Canonical public syntax guidance now lives in `doc/07_guide/`.
+> To update this file, edit the source _spec.spl file and run the current doc generator pipeline:
 > ```bash
-> python scripts/spec_gen.py --input tests/specs/syntax_spec.spl
+> bin/simple feature-doc usage
 > ```
 
 **Status:** Stable
 **Feature IDs:** #10-19
 **Keywords:** syntax, lexical, operators, execution-modes, indentation
-**Last Updated:** 2025-12-28
+**Last Updated:** 2026-04-02
 **Topics:** syntax, type-system
 **Symbols:** Token, Operator, ExecutionMode, Parser, Lexer
 **Module:** simple_parser
@@ -850,9 +851,9 @@ test "parsing_design_rationale_21":
 
 ## Source Code
 
-**View full specification:** [syntax_spec.spl](../../tests/specs/syntax_spec.spl)
+**View full specification:** [syntax_spec.spl](../../test/feature/usage/syntax_spec.spl)
 
 ---
 
 *This file was auto-generated from the executable specification.*
-*Source: `tests/specs/syntax_spec.spl`*
+*Source: `test/feature/usage/syntax_spec.spl`*

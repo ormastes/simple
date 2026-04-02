@@ -18,7 +18,7 @@ val x: i32 = 42                       # Explicit type annotation
 
 ## Constructors
 
-Simple provides **zero-boilerplate constructors**. Declare a struct and use it immediately -- no `__init__`, no `new` method required.
+Simple provides direct construction for plain data types. Use field or positional construction first, then add factory methods only when you need validation or defaults.
 
 ### Direct Construction (Primary Pattern)
 
@@ -76,11 +76,11 @@ impl Age:
     fn new(value: i64) -> Option<Age>:
         if value >= 0 and value <= 150:
             return Some(Age(value))
-        return None
+        return nil
 
 match Age.new(25):
     Some(age): print "Valid: {age.value}"
-    None: print "Invalid age"
+    nil: print "Invalid age"
 ```
 
 ### Builder Pattern
@@ -253,7 +253,7 @@ print r"raw: \d+"                     # Raw string (no interpolation)
 ```simple
 match value:
     Some(x): process(x)
-    None: handle_missing()
+    nil: handle_missing()
 
 match shape:
     Circle(r): pi * r * r
@@ -376,12 +376,8 @@ enum Color:
     Green
     Blue
 
-enum Option<T>:
-    Some(T)
-    None
-
 val opt = Some(42)
-val none = None
+val none = nil
 ```
 
 ---

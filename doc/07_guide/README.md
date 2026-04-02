@@ -110,7 +110,13 @@ User-facing guides for the Simple programming language. For specifications see `
 
 | Guide | Description |
 |-------|-------------|
-| [quick_reference/syntax_quick_reference.md](quick_reference/syntax_quick_reference.md) | Complete syntax reference |
+| [quick_reference/syntax_quick_reference.md](quick_reference/syntax_quick_reference.md) | Canonical public syntax reference |
 | [quick_reference/import_quick_reference.md](quick_reference/import_quick_reference.md) | Import patterns |
 | [quick_reference/dap_quick_reference.md](quick_reference/dap_quick_reference.md) | DAP commands |
 | [quick_reference/test_helpers_quick_reference.md](quick_reference/test_helpers_quick_reference.md) | Test helpers |
+
+## Source Of Truth
+
+- Hand-written guides in `07_guide/` describe the canonical public language surface.
+- Generated grammar/status docs live under [`../06_spec/app/compiler/modules/grammar/`](../06_spec/app/compiler/modules/grammar/).
+- Generated feature docs under `02_requirements/feature/` may include deprecated or compatibility syntax when the test itself is about parser recovery or migration.

@@ -1,6 +1,6 @@
 # Simple Language Error Handling
 
-This guide covers error handling with `Result<T, E>`, the `?` operator, and the compiler's error recovery system.
+This guide covers error handling with `Result<T, E>`, `Option<T>`, the `?` operator, and the compiler's error recovery system.
 
 ---
 
@@ -26,11 +26,10 @@ fn divide(a: i64, b: i64) -> Result<i64, text>:
 ```simple
 enum Option<T>:
     Some(T)
-    None
 
 fn find_user(id: i64) -> Option<User>:
     if id == 0:
-        return None
+        return nil
     Some(lookup(id))
 ```
 
@@ -38,7 +37,7 @@ fn find_user(id: i64) -> Option<User>:
 
 ## The ? Operator
 
-The `?` operator propagates errors up the call stack. If the value is `Err` or `None`, it returns early from the current function:
+The `?` operator propagates errors up the call stack. If the value is `Err` or `nil`, it returns early from the current function:
 
 ```simple
 fn load_config(path: text) -> Result<Config, text>:
@@ -67,7 +66,7 @@ match divide(10, 0):
 
 match find_user(42):
     Some(user): process(user)
-    None: print "User not found"
+    nil: print "User not found"
 ```
 
 ---
@@ -117,7 +116,7 @@ impl Age:
     fn new(value: i64) -> Option<Age>:
         if value >= 0 and value <= 150:
             return Some(Age(value))
-        None
+        nil
 
 struct Email:
     value: text
@@ -198,3 +197,4 @@ Simple:  fn add(a, b):
 5. **Handle errors at the appropriate level** -- propagate low, handle high
 6. **Use validated constructors** (`fn new() -> Result<T, E>`) to prevent invalid state
 7. **Prefer `??` for defaults** over matching on `Option` when you just need a fallback value
+8. **Use `nil` in user code** -- `None` may appear in parser diagnostics or compatibility notes, but it is not the canonical public syntax

@@ -2,6 +2,8 @@
 
 **Last Updated:** 2026-02-07
 
+For library modules, `use std.X` and `use lib.X` both resolve from `src/lib/`; prefer `use std.X` in new code.
+
 ## TL;DR - Common Patterns
 
 ```simple

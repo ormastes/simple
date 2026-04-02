@@ -1,10 +1,10 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-02-17
+**Last Updated:** 2026-04-02
 
-A comprehensive reference for Simple's syntax features. All features listed here are **implemented and working**.
+A concise reference for the canonical public Simple syntax. Legacy or parser-compatibility forms are called out explicitly instead of being presented as current style.
 
-**See also:** [Tier-based grammar docs](../spec/grammar/keyword_reference.md) — keywords organized by compilation tier (seed/core/full).
+**See also:** [Grammar keyword reference](../../06_spec/app/compiler/modules/grammar/keyword_reference.md) — keyword/status tables generated from the grammar registry.
 
 ---
 
@@ -36,11 +36,11 @@ A comprehensive reference for Simple's syntax features. All features listed here
 ```simple
 # Immutable (preferred)
 val name = "Alice"
-let count = 42
+val count = 42
 
 # Mutable
 var total = 0
-let mut items = []
+var items = []
 
 # Type annotations (optional in interpreter, required in compiler mode)
 val name: text = "Alice"
@@ -75,7 +75,7 @@ fn println(msg):
 ```simple
 # Simple type alias (using 'type' keyword)
 type Point2D = Point
-type StringList = [text]
+type StringList = List<text>
 type ErrorCode = i64
 
 # Generic type aliases
@@ -89,7 +89,7 @@ type Handler = fn(Event) -> ()
 
 ### Class Alias
 
-**Note:** `alias` creates an alternative **name** for an existing class -- it is NOT inheritance. Simple does not support `class Child(Parent):` syntax. See [Not Part of Simple's Design](#not-part-of-simples-design) for alternatives.
+**Note:** `alias` creates an alternative **name** for an existing class. It is not inheritance. See [Not Part of Simple's Design](#not-part-of-simples-design) for the supported alternatives.
 
 ```simple
 # Class/struct alias (using 'alias' keyword)
@@ -616,13 +616,13 @@ match person:
         print "{n} is a minor"
 ```
 
-### Let Destructuring
+### Binding Destructuring
 
 ```simple
-let (x, y) = get_point()
-let (first, second, ...rest) = items
-let [a, b, c] = triple
-let {name, age} = person
+val (x, y) = get_point()
+val (first, second, ...rest) = items
+val [a, b, c] = triple
+val {name, age} = person
 ```
 
 ---
@@ -677,8 +677,10 @@ for key, value in dict.items():
 while condition:
     process()
 
-while let Some(item) = iterator.next():
-    process(item)
+loop:
+    match iterator.next():
+        Some(item): process(item)
+        nil: break
 ```
 
 ### With Statement (Context Managers)
@@ -706,14 +708,14 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
 match value:
     Some(x):
         process(x)
-    None:
+    nil:
         ()  # Do nothing, return unit value
 
 # pass keyword - statement style (Python-like)
 match value:
     Some(x):
         process(x)
-    None:
+    nil:
         pass  # Do nothing
 
 # Both are synonyms - choose based on preference:
@@ -1181,16 +1183,15 @@ These features are **not available**:
 | **Type alias** | `type NewName = Existing` | Create alternative type names |
 | **Class alias** | `alias NewName = Existing` | Create alternative class names |
 
-See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16.md) for the full design rationale.
+See [coding_style.md](../language/coding_style.md) for the current inheritance policy and migration guidance.
 
 ---
 
 ## See Also
 
-- [doc/06_spec/syntax.md](../spec/syntax.md) - Auto-generated syntax spec
-- [doc/07_guide/fn_lambda_syntax.md](fn_lambda_syntax.md) - Detailed function/lambda guide
-- [doc/07_guide/resource_cleanup.md](resource_cleanup.md) - Resource management guide
-- [doc/07_guide/coding_style.md](coding_style.md) - Coding conventions
-- [doc/07_guide/dimension_errors_guide.md](dimension_errors_guide.md) - Dimension error reference
-- [doc/05_design/pipeline_operators_design.md](../design/pipeline_operators_design.md) - Pipeline operator design
-- [CLAUDE.md](../../CLAUDE.md) - Quick syntax reference in project instructions
+- [language/syntax.md](../language/syntax.md) - Main syntax guide
+- [language/error_handling.md](../language/error_handling.md) - `Result`, `Option`, and `?`
+- [language/coding_style.md](../language/coding_style.md) - Canonical style rules
+- [../../06_spec/app/compiler/modules/grammar/grammar_reference.md](../../06_spec/app/compiler/modules/grammar/grammar_reference.md) - Grammar registry output
+- [../import_quick_reference.md](import_quick_reference.md) - Import patterns
+- [../../05_design/pipeline_operators_design.md](../../05_design/pipeline_operators_design.md) - Pipeline operator design

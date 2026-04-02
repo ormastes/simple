@@ -39,7 +39,7 @@ val s = identity("hello")   # T inferred as text
 Expected types propagate to expressions:
 
 ```simple
-val numbers: [i32] = [1, 2, 3]       # Literals inferred as i32, not i64
+val numbers: [i32] = [1, 2, 3]       # Array element type inferred as i32 here
 val add: fn(i64, i64) -> i64 = \x, y: x + y   # Parameters inferred from type
 ```
 
@@ -177,7 +177,7 @@ fn sqrt(x: i64 where x >= 0) -> f64:
 fn set_volume(level: i64 where level >= 0 and level <= 100):
     audio.volume = level
 
-fn first<T>(arr: [T] where len(arr) > 0) -> T:
+fn first<T>(arr: List<T> where len(arr) > 0) -> T:
     arr[0]
 ```
 
@@ -207,7 +207,7 @@ fn pair<A, B>(a: A, b: B) -> (A, B):
 fn compare<T: Comparable>(a: T, b: T) -> i64:
     a.compare(b)
 
-fn sort_and_hash<T: Comparable & Hashable>(items: [T]):
+fn sort_and_hash<T: Comparable & Hashable>(items: List<T>):
     items.sort()
     for item in items:
         print item.hash()

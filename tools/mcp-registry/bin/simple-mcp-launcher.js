@@ -38,6 +38,11 @@ function findRuntime() {
   if (fs.existsSync(devBinary)) {
     return { binary: devBinary, repoRoot: projectRoot };
   }
+  // Fallback: bin/simple symlink (common dev setup)
+  const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);
+  if (fs.existsSync(devSymlink)) {
+    return { binary: devSymlink, repoRoot: projectRoot };
+  }
 
   // 3. Fall back to PATH
   return { binary: `simple${ext}`, repoRoot: process.cwd() };
