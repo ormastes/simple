@@ -335,7 +335,7 @@ t32_mcp_sanitize_segment() {
 }
 
 t32_mcp_debug_enabled() {
-  case "${T32_MCP_DEBUG_LOG:-1}" in
+  case "${T32_MCP_DEBUG_LOG:-0}" in
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
   esac
   return 0
@@ -439,7 +439,7 @@ if [ -x "${REPO_ROOT}/bin/release/t32_mcp_native" ]; then
 fi
 HOST_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
 NATIVE_REQUESTED=0
-case "${T32_MCP_USE_NATIVE:-auto}" in
+case "${T32_MCP_USE_NATIVE:-0}" in
   0|false|FALSE|no|NO|off|OFF)
     NATIVE_REQUESTED=0
     ;;
@@ -487,6 +487,7 @@ elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/release/simple" ]; then
 fi
 
 COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
+export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
 
@@ -523,38 +524,19 @@ cd "$REPO_ROOT"
 if [ "$RUNTIME_KIND" = "native" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
     t32_mcp_log_line "$WRAPPER_LOG" "request_routing=native"
-    if "$RUNTIME" "$@" 2>>"$ERROR_LOG"; then
-      exit 0
-    fi
-    status=$?
-    t32_mcp_log_line "$WRAPPER_LOG" "native_exit=$status"
+    exec "$RUNTIME" "$@" 2>>"$ERROR_LOG"
   else
-    if "$RUNTIME" "$@"; then
-      exit 0
-    fi
-    status=$?
-  fi
-  if [ -n "$NATIVE_HEALTH_CACHE" ] && [ -n "${NATIVE_SIG:-}" ]; then
-    printf 'sig=%s\nstatus=%s\n' "$NATIVE_SIG" "unhealthy" >"$NATIVE_HEALTH_CACHE"
-  fi
-  if [ -z "$RUNTIME" ]; then
-    exit "$status"
+    exec "$RUNTIME" "$@" 2>/dev/null
   fi
 fi
 
 SOURCE_ARTIFACT="$COLD_ENTRY"
 
 if [ "$DEBUG_ENABLED" = "1" ]; then
-  "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$ERROR_LOG"
-  status=$?
-  if [ "$status" -ne 0 ]; then
-    t32_mcp_log_line "$WRAPPER_LOG" "runtime_exit=$status"
-    t32_mcp_log_line "$ERROR_LOG" "error=t32_mcp exited with status $status"
-  fi
-  exit "$status"
+  exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$ERROR_LOG"
 fi
 
-exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@"
+exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>/dev/null
 T32_MCP_EOF
 chmod +x "${release_dir}/t32_mcp_server"
 echo "  t32_mcp_server"
@@ -571,9 +553,9 @@ while [ -L "$SELF" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/src/compiler_rust/target/release/simple}"
-if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/simple"; fi
+RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/bin/simple}"
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/release/simple"; fi
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/src/compiler_rust/target/release/simple"; fi
 ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 cd "$REPO_ROOT"
@@ -586,7 +568,7 @@ WRAPPER_LOG=""
 FRONTEND_LOG=""
 REQUESTS_LOG=""
 ERROR_LOG=""
-if [ "${T32_LSP_MCP_DEBUG_LOG:-1}" != "0" ]; then
+if [ "${T32_LSP_MCP_DEBUG_LOG:-0}" != "0" ]; then
   DEBUG_ENABLED=1
   DEBUG_ROOT="${T32_LSP_MCP_DEBUG_ROOT:-/tmp/t32_lsp_mcp_debug_${SUFFIX}}"
   mkdir -p "$DEBUG_ROOT"
@@ -604,7 +586,7 @@ if [ "${T32_LSP_MCP_DEBUG_LOG:-1}" != "0" ]; then
   export T32_LSP_MCP_ERROR_LOG="$ERROR_LOG"
 fi
 DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-/tmp/t32_lsp_mcp_shared_${SUFFIX}}"
-export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
+export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
 export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
@@ -622,7 +604,7 @@ fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
   RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$ERROR_LOG"
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@"
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>/dev/null
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

@@ -9,10 +9,13 @@ use app.test_daemon.session_types.{
     SESSION_KIND_OPENOCD, SESSION_KIND_TRACE32, LEASE_IDLE, LEASE_ACTIVE,
     REUSE_SHARED_WITH_RESET, REUSE_EXCLUSIVE_REUSED,
     RESET_HARD, RESET_RELOAD_BINARY,
-    session_key_to_id, session_lease_new
+    session_key_to_id, session_lease_new,
+    reuse_mode_from_name, reset_policy_from_name
 }
 use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+use std.debug.remote.protocol.trace32.{Trace32Client}
+use app.debug.remote.types.{DebugConfig}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_process_spawn_async(cmd: text, args: [text], env: {text: text}) -> i64
@@ -246,26 +249,81 @@ impl OpenocdAdapter:
 # ============================================================================
 
 val T32_DEFAULT_RCL_PORT: i64 = 20000
-val T32_STARTUP_WAIT_MS: i64 = 3000
+val T32_DEFAULT_HOST: text = "localhost"
+val T32_DEFAULT_INSTALL_DIR: text = "/opt/t32"
+val T32_DEFAULT_STARTUP_WAIT_MS: i64 = 3000
+val T32_DEFAULT_MAX_RETRIES: i64 = 15
+val T32_DEFAULT_RETRY_INTERVAL_MS: i64 = 500
+val T32_DEFAULT_RESET_SETTLE_MS: i64 = 1000
+val T32_DEFAULT_FLASH_SETTLE_MS: i64 = 1000
+
+# Configurable settings for the TRACE32 test adapter.
+# All fields have sensible defaults; override via SDN config or constructor.
+struct Trace32AdapterConfig:
+    t32_host: text
+    rcl_port: i64
+    t32_install_dir: text
+    startup_wait_ms: i64
+    max_retries: i64
+    retry_interval_ms: i64
+    reset_settle_ms: i64
+    flash_settle_ms: i64
+    practice_script: text
+    reuse_mode: i64
+    reset_policy: i64
+
+fn trace32_adapter_config_default() -> Trace32AdapterConfig:
+    Trace32AdapterConfig(
+        t32_host: T32_DEFAULT_HOST,
+        rcl_port: T32_DEFAULT_RCL_PORT,
+        t32_install_dir: T32_DEFAULT_INSTALL_DIR,
+        startup_wait_ms: T32_DEFAULT_STARTUP_WAIT_MS,
+        max_retries: T32_DEFAULT_MAX_RETRIES,
+        retry_interval_ms: T32_DEFAULT_RETRY_INTERVAL_MS,
+        reset_settle_ms: T32_DEFAULT_RESET_SETTLE_MS,
+        flash_settle_ms: T32_DEFAULT_FLASH_SETTLE_MS,
+        practice_script: "",
+        reuse_mode: REUSE_EXCLUSIVE_REUSED,
+        reset_policy: RESET_RELOAD_BINARY
+    )
+
+fn trace32_adapter_config_from_map(m: {text: text}) -> Trace32AdapterConfig:
+    """Build a Trace32AdapterConfig from a string map (SDN config section).
+    Missing keys fall back to defaults."""
+    val defaults = trace32_adapter_config_default()
+    Trace32AdapterConfig(
+        t32_host: m["t32_host"] ?? defaults.t32_host,
+        rcl_port: (m["rcl_port"] ?? "").to_i64() ?? defaults.rcl_port,
+        t32_install_dir: m["t32_install_dir"] ?? defaults.t32_install_dir,
+        startup_wait_ms: (m["startup_wait_ms"] ?? "").to_i64() ?? defaults.startup_wait_ms,
+        max_retries: (m["max_retries"] ?? "").to_i64() ?? defaults.max_retries,
+        retry_interval_ms: (m["retry_interval_ms"] ?? "").to_i64() ?? defaults.retry_interval_ms,
+        reset_settle_ms: (m["reset_settle_ms"] ?? "").to_i64() ?? defaults.reset_settle_ms,
+        flash_settle_ms: (m["flash_settle_ms"] ?? "").to_i64() ?? defaults.flash_settle_ms,
+        practice_script: m["practice_script"] ?? defaults.practice_script,
+        reuse_mode: if (m["reuse_mode"] ?? "") != "": reuse_mode_from_name(m["reuse_mode"] ?? "") else: defaults.reuse_mode,
+        reset_policy: if (m["reset_policy"] ?? "") != "": reset_policy_from_name(m["reset_policy"] ?? "") else: defaults.reset_policy
+    )
 
 class Trace32Adapter:
     base: SessionAdapter
-    rcl_port: i64
-    t32_install_dir: text
+    cfg: Trace32AdapterConfig
 
 fn trace32_adapter_new() -> Trace32Adapter:
     Trace32Adapter(
         base: session_adapter_new(SESSION_KIND_TRACE32, "trace32"),
-        rcl_port: T32_DEFAULT_RCL_PORT,
-        t32_install_dir: "/opt/t32"
+        cfg: trace32_adapter_config_default()
     )
 
-fn trace32_adapter_with_config(rcl_port: i64, install_dir: text) -> Trace32Adapter:
+fn trace32_adapter_with_config(config: Trace32AdapterConfig) -> Trace32Adapter:
     Trace32Adapter(
         base: session_adapter_new(SESSION_KIND_TRACE32, "trace32"),
-        rcl_port: rcl_port,
-        t32_install_dir: install_dir
+        cfg: config
     )
+
+fn trace32_adapter_from_map(m: {text: text}) -> Trace32Adapter:
+    """Create a Trace32Adapter from a string map (SDN config section)."""
+    trace32_adapter_with_config(trace32_adapter_config_from_map(m))
 
 impl Trace32Adapter:
     fn can_handle(meta: TestSessionMeta) -> bool:
@@ -281,28 +339,31 @@ impl Trace32Adapter:
             target: meta.target,
             artifact_hash: meta.artifact,
             env_profile: "",
-            reuse_mode: REUSE_EXCLUSIVE_REUSED,
-            reset_policy: RESET_RELOAD_BINARY
+            reuse_mode: self.cfg.reuse_mode,
+            reset_policy: self.cfg.reset_policy
         )
 
     me start(desc: SessionDescriptor) -> SessionLease:
         """
         Starts TRACE32 PowerView and connects via RCL (Remote Control Line).
-        Waits for the RCL port to become available.
+        Waits for the RCL port to become available, then optionally runs
+        a startup PRACTICE script.
         """
         var lease = session_lease_new(desc.key)
 
         val target = desc.key.target
         val config_file = desc.config["t32_config"] ?? ""
-        val practice_script = desc.config["practice_script"] ?? ""
+        val practice = desc.config["practice_script"] ?? self.cfg.practice_script
 
         # Determine TRACE32 executable based on target architecture
         val t32_exe = self.t32_executable_for_target(target)
-        val t32_path = "{self.t32_install_dir}/bin/pc_linux64/{t32_exe}"
+        val install_dir = desc.config["t32_install_dir"] ?? self.cfg.t32_install_dir
+        val t32_path = "{install_dir}/bin/pc_linux64/{t32_exe}"
 
-        val rcl_port_str = desc.config["rcl_port"] ?? "{self.rcl_port}"
+        val host = desc.config["t32_host"] ?? self.cfg.t32_host
+        val rcl_port = (desc.config["rcl_port"] ?? "").to_i64() ?? self.cfg.rcl_port
 
-        # Build args: config file, RCL port, optional PRACTICE script
+        # Build args: config file, RCL port
         var args: [text] = []
         if config_file != "":
             args.push("-c")
@@ -310,37 +371,41 @@ impl Trace32Adapter:
 
         args.push("-s")
         args.push("RCL=NETTCP")
-        args.push("PORT={rcl_port_str}")
+        args.push("PORT={rcl_port}")
 
         val env: {text: text} = {}
-        env["T32SYS"] = self.t32_install_dir
+        env["T32SYS"] = install_dir
         val pid = rt_process_spawn_async(t32_path, args, env)
 
         if pid <= 0:
             return lease
 
         # Wait for TRACE32 to initialize
-        rt_sleep_ms(T32_STARTUP_WAIT_MS)
+        rt_sleep_ms(self.cfg.startup_wait_ms)
 
-        val effective_rcl_port = rcl_port_str.to_i64() ?? self.rcl_port
-        val connected = self.wait_for_rcl_port("localhost", effective_rcl_port, 15)
+        val connected = self.wait_for_rcl_port(host, rcl_port, self.cfg.max_retries)
 
         if not connected:
             rt_process_kill(pid)
             return lease
 
         # Run startup PRACTICE script if provided
-        if practice_script != "":
-            self.run_practice_command("localhost", effective_rcl_port,
-                "DO {practice_script}")
-            rt_sleep_ms(1000)
+        if practice != "":
+            val client = self.connect_client(host, rcl_port)
+            match client:
+                Ok(c):
+                    c.do_script(practice)
+                    c.disconnect()
+                    rt_sleep_ms(self.cfg.reset_settle_ms)
+                Err(_):
+                    pass_dn
 
         val now = rt_time_now_unix_micros()
         SessionLease(
             session_id: session_key_to_id(desc.key),
             key: desc.key,
             pid: pid,
-            qmp_socket: "localhost:{effective_rcl_port}",
+            qmp_socket: "{host}:{rcl_port}",
             status: LEASE_ACTIVE,
             snapshot_name: "",
             created_at: now,
@@ -351,55 +416,72 @@ impl Trace32Adapter:
     fn health(lease: SessionLease) -> bool:
         """
         Checks TRACE32 health by verifying the process is alive
-        and the RCL port is reachable.
+        and t32rem can connect via the RCL port.
         """
         if lease.pid <= 0:
             return false
         if not rt_process_is_alive(lease.pid):
             return false
 
-        val parts = lease.qmp_socket.split(":")
-        if parts.len() < 2:
-            return false
-        val host = parts[0]
-        val port = parts[1].to_i64() ?? self.rcl_port
-        rt_tcp_connect(host, port)
+        val endpoint = self.parse_endpoint(lease.qmp_socket)
+        val client = self.connect_client(endpoint.host, endpoint.port)
+        match client:
+            Ok(c):
+                c.disconnect()
+                true
+            Err(_):
+                false
 
     me reset(lease: SessionLease, policy: i64) -> bool:
         """
-        Resets the target via TRACE32 RCL interface.
+        Resets the target via TRACE32 RCL interface using Trace32Client.
         RESET_HARD: sends SYStem.RESetTarget
         RESET_RELOAD_BINARY: resets target and reloads binary via Data.LOAD
         """
-        val parts = lease.qmp_socket.split(":")
-        if parts.len() < 2:
-            return false
-        val host = parts[0]
-        val port = parts[1].to_i64() ?? self.rcl_port
+        val endpoint = self.parse_endpoint(lease.qmp_socket)
+        val client = self.connect_client(endpoint.host, endpoint.port)
+        match client:
+            Err(_):
+                return false
+            Ok(c):
+                if policy == RESET_HARD:
+                    val r = c.run_command("SYStem.RESetTarget")
+                    c.disconnect()
+                    rt_sleep_ms(self.cfg.reset_settle_ms)
+                    match r:
+                        Ok(_): return true
+                        Err(_): return false
 
-        if policy == RESET_HARD:
-            self.run_practice_command(host, port, "SYStem.RESetTarget")
-            rt_sleep_ms(1000)
-            return true
+                if policy == RESET_RELOAD_BINARY:
+                    val reset_r = c.run_command("SYStem.RESetTarget")
+                    match reset_r:
+                        Err(_):
+                            c.disconnect()
+                            return false
+                        Ok(_):
+                            pass_dn
+                    rt_sleep_ms(self.cfg.reset_settle_ms)
 
-        if policy == RESET_RELOAD_BINARY:
-            # Reset target
-            self.run_practice_command(host, port, "SYStem.RESetTarget")
-            rt_sleep_ms(500)
+                    val binary = lease.key.artifact_hash
+                    if binary != "":
+                        val flash_r = c.run_command("Data.LOAD.Elf {binary}")
+                        rt_sleep_ms(self.cfg.flash_settle_ms)
+                        match flash_r:
+                            Err(_):
+                                c.disconnect()
+                                return false
+                            Ok(_):
+                                pass_dn
 
-            # Reload binary if specified
-            val binary = lease.key.artifact_hash
-            if binary != "":
-                self.run_practice_command(host, port,
-                    "Data.LOAD.Elf {binary}")
-                rt_sleep_ms(1000)
+                    val pc_r = c.run_command("Register.Set PC Reset")
+                    c.disconnect()
+                    rt_sleep_ms(200)
+                    match pc_r:
+                        Ok(_): return true
+                        Err(_): return false
 
-            # Set PC to entry point
-            self.run_practice_command(host, port, "Register.Set PC Reset")
-            rt_sleep_ms(200)
-            return true
-
-        false
+                c.disconnect()
+                false
 
     me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
         """
@@ -433,12 +515,15 @@ impl Trace32Adapter:
         """
         Shuts down TRACE32 cleanly via RCL QUIT command, then kills process.
         """
-        val parts = lease.qmp_socket.split(":")
-        if parts.len() >= 2:
-            val host = parts[0]
-            val port = parts[1].to_i64() ?? self.rcl_port
-            self.run_practice_command(host, port, "QUIT")
-            rt_sleep_ms(1000)
+        val endpoint = self.parse_endpoint(lease.qmp_socket)
+        val client = self.connect_client(endpoint.host, endpoint.port)
+        match client:
+            Ok(c):
+                c.run_command("QUIT")
+                c.disconnect()
+                rt_sleep_ms(self.cfg.reset_settle_ms)
+            Err(_):
+                pass_dn
 
         if lease.pid > 0:
             rt_process_kill(lease.pid)
@@ -461,13 +546,30 @@ impl Trace32Adapter:
         # Generic ARM as default (most common embedded target)
         "t32marm"
 
-    fn run_practice_command(host: text, port: i64, command: text):
+    fn connect_client(host: text, port: i64) -> Result<Trace32Client, text>:
         """
-        Sends a PRACTICE command to TRACE32 via RCL TCP interface.
-        Uses netcat (nc) for simplicity.
+        Creates a Trace32Client connected to the given host:port.
         """
-        val cmd = "echo '{command}' | nc {host} {port}"
-        rt_shell_exec(cmd)
+        val debug_config = DebugConfig(
+            host: host,
+            port: port,
+            program: "",
+            args: [],
+            debugger: "t32",
+            remote: true
+        )
+        Trace32Client.connect(debug_config)
+
+    fn parse_endpoint(socket: text) -> Trace32Endpoint:
+        """Parse a 'host:port' string into host and port."""
+        val parts = socket.split(":")
+        if parts.len() >= 2:
+            Trace32Endpoint(
+                host: parts[0],
+                port: parts[1].to_i64() ?? self.cfg.rcl_port
+            )
+        else:
+            Trace32Endpoint(host: self.cfg.t32_host, port: self.cfg.rcl_port)
 
     fn wait_for_rcl_port(host: text, port: i64, max_retries: i64) -> bool:
         """
@@ -477,6 +579,11 @@ impl Trace32Adapter:
         while attempt < max_retries:
             if rt_tcp_connect(host, port):
                 return true
-            rt_sleep_ms(500)
+            rt_sleep_ms(self.cfg.retry_interval_ms)
             attempt = attempt + 1
         false
+
+# Internal helper for parsed host:port endpoint
+struct Trace32Endpoint:
+    host: text
+    port: i64
