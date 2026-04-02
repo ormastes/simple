@@ -41,6 +41,9 @@ var T32_USE_JSON_LINES = false
 var MCP_T32_SESSIONS: [McpT32Session] = []
 var MCP_T32_CURRENT_SESSION = ""
 var MCP_T32_HISTORY: [McpT32HistoryItem] = []
+var MCP_T32_DIALOG_KEYS: [text] = []
+var MCP_T32_DIALOG_VALUES: [text] = []
+var MCP_T32_DIALOG_CURRENT_ID = ""
 var T32_SEEN_FIRST_MESSAGE = false
 var T32_TOOL_DAEMON_DIR = ""
 var T32_TOOL_DAEMON_PID = -1
@@ -285,11 +288,21 @@ fn t32_startup_make_tools_list(id: text) -> text:
     val t1_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", "[]") + RB()
     val annotations = LB() + jp("readOnlyHint", "true") + "," + jp("destructiveHint", "false") + "," + jp("idempotentHint", "true") + "," + jp("openWorldHint", "false") + RB()
     val session_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("session_id", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("session_id") + SB_R()) + RB()
+    val job_id_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("job_id", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("job_id") + SB_R()) + RB()
+    val dialog_parse_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("source", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("source") + SB_R()) + RB()
+    val dialog_get_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("label", LB() + jp("type", js("string")) + RB()) + "," + jp("type", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("label") + SB_R()) + RB()
+    val dialog_set_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("label", LB() + jp("type", js("string")) + RB()) + "," + jp("action", LB() + jp("type", js("string")) + RB()) + "," + jp("value", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("label") + SB_R()) + RB()
+    val dialog_click_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + jp("label", LB() + jp("type", js("string")) + RB()) + "," + jp("capture_area", LB() + jp("type", js("string")) + RB()) + "," + jp("mode", LB() + jp("type", js("string")) + RB()) + "," + jp("timeout_ms", LB() + jp("type", js("string")) + RB()) + RB()) + "," + jp("required", SB_L() + js("label") + SB_R()) + RB()
     val t1 = LB() + jp("name", js("t32_sessions_list")) + "," + jp("description", js("List TRACE32 sessions tracked by the startup router")) + "," + jp("inputSchema", t1_schema) + "," + jp("annotations", annotations) + RB()
     val t2 = LB() + jp("name", js("t32_resources_list")) + "," + jp("description", js("List startup-safe TRACE32 resources")) + "," + jp("inputSchema", t1_schema) + "," + jp("annotations", annotations) + RB()
     val t3 = LB() + jp("name", js("t32_session_resume")) + "," + jp("description", js("Resume/switch to an existing TRACE32 session tracked by the startup router")) + "," + jp("inputSchema", session_schema) + "," + jp("annotations", annotations) + RB()
     val t4 = LB() + jp("name", js("t32_session_close")) + "," + jp("description", js("Close a TRACE32 session tracked by the startup router")) + "," + jp("inputSchema", session_schema) + "," + jp("annotations", annotations) + RB()
-    return t32_make_json_result(id, LB() + jp("tools", SB_L() + t1 + "," + t2 + "," + t3 + "," + t4 + SB_R()) + RB())
+    val t5 = LB() + jp("name", js("t32_job_result")) + "," + jp("description", js("Get the result of a completed async job")) + "," + jp("inputSchema", job_id_schema) + "," + jp("annotations", annotations) + RB()
+    val t6 = LB() + jp("name", js("t32_dialog_parse")) + "," + jp("description", js("Parse CMM source for dialog elements, labels, and widget types")) + "," + jp("inputSchema", dialog_parse_schema) + "," + jp("annotations", annotations) + RB()
+    val t7 = LB() + jp("name", js("t32_dialog_get")) + "," + jp("description", js("Read dialog element state by label (boolean/string/value)")) + "," + jp("inputSchema", dialog_get_schema) + "," + jp("annotations", annotations) + RB()
+    val t8 = LB() + jp("name", js("t32_dialog_set")) + "," + jp("description", js("Set/disable/enable dialog element by label")) + "," + jp("inputSchema", dialog_set_schema) + "," + jp("annotations", annotations) + RB()
+    val t9 = LB() + jp("name", js("t32_dialog_click")) + "," + jp("description", js("Check dialog element exists then execute button handler")) + "," + jp("inputSchema", dialog_click_schema) + "," + jp("annotations", annotations) + RB()
+    return t32_make_json_result(id, LB() + jp("tools", SB_L() + t1 + "," + t2 + "," + t3 + "," + t4 + "," + t5 + "," + t6 + "," + t7 + "," + t8 + "," + t9 + SB_R()) + RB())
 
 fn t32_startup_handle_sessions_list(id: text) -> text:
     var arr = SB_L()
@@ -345,6 +358,261 @@ fn t32_startup_handle_session_close(id: text, body: text) -> text:
         MCP_T32_CURRENT_SESSION = ""
     return t32_make_tool_result(id, LB() + jp("closed", js(session_id)) + "," + jp("status", js("ok")) + RB())
 
+fn t32_startup_dialog_state_key(dialog_id: text, label: text) -> text:
+    return dialog_id + ":" + label
+
+fn t32_startup_dialog_count() -> i64:
+    var count: i64 = 0
+    for _key in MCP_T32_DIALOG_KEYS:
+        count = count + 1
+    return count
+
+fn t32_startup_dialog_state_has(dialog_id: text, label: text) -> bool:
+    val lookup = t32_startup_dialog_state_key(dialog_id, label)
+    var i = 0
+    while i < MCP_T32_DIALOG_KEYS.len():
+        if MCP_T32_DIALOG_KEYS[i] == lookup:
+            return true
+        i = i + 1
+    return false
+
+fn t32_startup_dialog_state_get(dialog_id: text, label: text) -> text:
+    val lookup = t32_startup_dialog_state_key(dialog_id, label)
+    var i = 0
+    while i < MCP_T32_DIALOG_KEYS.len():
+        if MCP_T32_DIALOG_KEYS[i] == lookup:
+            return MCP_T32_DIALOG_VALUES[i]
+        i = i + 1
+    return ""
+
+fn t32_startup_dialog_state_set(dialog_id: text, label: text, value: text):
+    val lookup = t32_startup_dialog_state_key(dialog_id, label)
+    var i = 0
+    while i < MCP_T32_DIALOG_KEYS.len():
+        if MCP_T32_DIALOG_KEYS[i] == lookup:
+            MCP_T32_DIALOG_VALUES[i] = value
+            return
+        i = i + 1
+    MCP_T32_DIALOG_KEYS.push(lookup)
+    MCP_T32_DIALOG_VALUES.push(value)
+
+fn t32_startup_validate_dialog_label(label: text) -> bool:
+    if label == "":
+        return false
+    var i = 0
+    while i < label.len():
+        val ch = label.substring(i, i + 1)
+        if ch == " " or ch == ";" or ch == "|" or ch == "&" or ch == ">" or ch == "<" or ch == "`" or ch == "$" or ch == "(" or ch == ")" or ch == "\"" or ch == "'" or ch == "/" or ch == "\\":
+            return false
+        i = i + 1
+    return true
+
+fn t32_startup_find_char(value: text, needle: text) -> i64:
+    var i = 0
+    while i < value.len():
+        if value.substring(i, i + 1) == needle:
+            return i
+        i = i + 1
+    return -1
+
+fn t32_startup_extract_json_string(body: text, key: text) -> text:
+    val marker = "\"" + key + "\":"
+    if not body.contains(marker):
+        return ""
+    val parts = body.split(marker)
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1].trim()
+    if rest == "" or not rest.starts_with("\""):
+        return ""
+    var out = ""
+    var i = 1
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == "\"":
+            return out
+        if ch == "\\":
+            if i + 1 >= rest.len():
+                return out
+            val next = rest.substring(i + 1, i + 2)
+            if next == "n":
+                out = out + "\n"
+            elif next == "r":
+                out = out + "\r"
+            elif next == "t":
+                out = out + "\t"
+            elif next == "\"":
+                out = out + "\""
+            elif next == "\\":
+                out = out + "\\"
+            else:
+                out = out + next
+            i = i + 2
+            continue
+        out = out + ch
+        i = i + 1
+    return out
+
+fn t32_startup_extract_dialog_labels(source: text) -> [text]:
+    var labels: [text] = []
+    val lines = source.split("\n")
+    var in_dialog = false
+    var auto_button: i64 = 0
+    var auto_defbutton: i64 = 0
+    var auto_edit: i64 = 0
+    var auto_checkbox: i64 = 0
+    var auto_choosebox: i64 = 0
+    var auto_pulldown: i64 = 0
+    var auto_text: i64 = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with(";"):
+            continue
+        val upper = trimmed.to_upper()
+        if upper.starts_with("DIALOG"):
+            in_dialog = true
+            continue
+        if trimmed == "(":
+            continue
+        if trimmed == ")":
+            in_dialog = false
+            continue
+        if not in_dialog:
+            continue
+        val colon = t32_startup_find_char(trimmed, ":")
+        var declared_label = ""
+        var rest = trimmed
+        if colon > 0:
+            declared_label = trimmed.substring(0, colon).trim()
+            rest = trimmed.substring(colon + 1, trimmed.len()).trim()
+        val rest_upper = rest.to_upper()
+        var label = declared_label
+        if rest_upper.starts_with("DEFBUTTON"):
+            if label == "":
+                label = "dialog_defbutton_" + str(auto_defbutton)
+                auto_defbutton = auto_defbutton + 1
+        elif rest_upper.starts_with("BUTTON"):
+            if label == "":
+                label = "dialog_button_" + str(auto_button)
+                auto_button = auto_button + 1
+        elif rest_upper.starts_with("EDIT"):
+            if label == "":
+                label = "dialog_edit_" + str(auto_edit)
+                auto_edit = auto_edit + 1
+        elif rest_upper.starts_with("CHECKBOX"):
+            if label == "":
+                label = "dialog_checkbox_" + str(auto_checkbox)
+                auto_checkbox = auto_checkbox + 1
+        elif rest_upper.starts_with("CHOOSEBOX"):
+            if label == "":
+                label = "dialog_choosebox_" + str(auto_choosebox)
+                auto_choosebox = auto_choosebox + 1
+        elif rest_upper.starts_with("PULLDOWN"):
+            if label == "":
+                label = "dialog_pulldown_" + str(auto_pulldown)
+                auto_pulldown = auto_pulldown + 1
+        elif rest_upper.starts_with("HEADER") or rest_upper.starts_with("TEXT") or rest_upper.starts_with("LINE") or rest_upper.starts_with("CLOSE") or rest_upper.starts_with("POS"):
+            if label == "":
+                label = "dialog_text_" + str(auto_text)
+                auto_text = auto_text + 1
+        if label != "":
+            labels.push(label)
+    return labels
+
+fn t32_startup_json_quote_list(values: [text]) -> text:
+    var parts: [text] = []
+    for value in values:
+        parts.push(js(value))
+    return parts.join(",")
+
+fn t32_startup_handle_job_result(id: text, body: text) -> text:
+    val job_id = t32_startup_extract_simple_string(body, "job_id")
+    if job_id == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: job_id")
+    return t32_make_tool_error(id, -32602, "Job result not available: " + job_id)
+
+fn t32_startup_handle_dialog_parse(id: text, body: text) -> text:
+    val source = t32_startup_extract_json_string(body, "source")
+    if source == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: source")
+    val dialog_id = "dialog_" + str(t32_startup_dialog_count() + 1)
+    MCP_T32_DIALOG_CURRENT_ID = dialog_id
+    val labels = t32_startup_extract_dialog_labels(source)
+    for label in labels:
+        t32_startup_dialog_state_set(dialog_id, label, "")
+    val payload = LB() + jp("dialog_id", js(dialog_id)) + "," + jp("count", str(labels.len())) + "," + jp("labels", SB_L() + t32_startup_json_quote_list(labels) + SB_R()) + RB()
+    return t32_make_tool_result(id, payload)
+
+fn t32_startup_handle_dialog_get(id: text, body: text) -> text:
+    val label = t32_startup_extract_simple_string(body, "label")
+    if label == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
+    if not t32_startup_validate_dialog_label(label):
+        return t32_make_tool_error(id, -32602, "Invalid label: contains disallowed characters")
+    var dialog_id = t32_startup_extract_simple_string(body, "dialog_id")
+    if dialog_id == "":
+        dialog_id = MCP_T32_DIALOG_CURRENT_ID
+    if dialog_id == "":
+        return t32_make_tool_error(id, -32602, "T4101: No active dialog in current session.")
+    if not t32_startup_dialog_state_has(dialog_id, label):
+        return t32_make_tool_error(id, -32602, "T4100: Dialog element '" + label + "' not found.")
+    val requested_type = t32_startup_extract_simple_string(body, "type")
+    var query_type = requested_type
+    if query_type == "":
+        query_type = "string"
+    val value = t32_startup_dialog_state_get(dialog_id, label)
+    val payload = LB() + jp("dialog_id", js(dialog_id)) + "," + jp("label", js(label)) + "," + jp("type", js(query_type)) + "," + jp("value", js(value)) + RB()
+    return t32_make_tool_result(id, payload)
+
+fn t32_startup_handle_dialog_set(id: text, body: text) -> text:
+    val label = t32_startup_extract_simple_string(body, "label")
+    if label == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
+    if not t32_startup_validate_dialog_label(label):
+        return t32_make_tool_error(id, -32602, "Invalid label: contains disallowed characters")
+    var dialog_id = t32_startup_extract_simple_string(body, "dialog_id")
+    if dialog_id == "":
+        dialog_id = MCP_T32_DIALOG_CURRENT_ID
+    if dialog_id == "":
+        return t32_make_tool_error(id, -32602, "T4101: No active dialog in current session.")
+    if not t32_startup_dialog_state_has(dialog_id, label):
+        return t32_make_tool_error(id, -32602, "T4100: Dialog element '" + label + "' not found.")
+    var value = t32_startup_extract_simple_string(body, "value")
+    var action = t32_startup_extract_simple_string(body, "action")
+    if action == "":
+        action = "set"
+    action = action.to_lower()
+    if action != "set" and action != "select" and action != "deselect" and action != "disable" and action != "enable":
+        return t32_make_tool_error(id, -32602, "T4102: Invalid dialog action '" + action + "'. Valid actions: set, select, deselect, disable, enable")
+    if value == "":
+        if action == "disable":
+            value = "disabled"
+        elif action == "enable":
+            value = "enabled"
+        elif action == "deselect":
+            value = "false"
+        else:
+            value = "true"
+    t32_startup_dialog_state_set(dialog_id, label, value)
+    val payload = LB() + jp("dialog_id", js(dialog_id)) + "," + jp("label", js(label)) + "," + jp("action", js(action)) + "," + jp("value", js(value)) + "," + jp("status", js("ok")) + RB()
+    return t32_make_tool_result(id, payload)
+
+fn t32_startup_handle_dialog_click(id: text, body: text) -> text:
+    val label = t32_startup_extract_simple_string(body, "label")
+    if label == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
+    if not t32_startup_validate_dialog_label(label):
+        return t32_make_tool_error(id, -32602, "Invalid label: contains disallowed characters")
+    var dialog_id = t32_startup_extract_simple_string(body, "dialog_id")
+    if dialog_id == "":
+        dialog_id = MCP_T32_DIALOG_CURRENT_ID
+    if dialog_id == "":
+        return t32_make_tool_error(id, -32602, "T4101: No active dialog in current session.")
+    if not t32_startup_dialog_state_has(dialog_id, label):
+        return t32_make_tool_error(id, -32602, "T4100: Dialog element '" + label + "' not found.")
+    val payload = LB() + jp("dialog_id", js(dialog_id)) + "," + jp("label", js(label)) + "," + jp("clicked", "true") + RB()
+    return t32_make_tool_result(id, payload)
+
 fn t32_startup_handle_resource_read(id: text, body: text) -> text:
     val uri = t32_startup_extract_simple_string(body, "uri")
     if uri == "":
@@ -398,6 +666,16 @@ fn t32_startup_dispatch_tool(id: text, body: text) -> text:
         return t32_startup_handle_session_resume(id, body)
     if tool_name == "t32_session_close":
         return t32_startup_handle_session_close(id, body)
+    if tool_name == "t32_job_result":
+        return t32_startup_handle_job_result(id, body)
+    if tool_name == "t32_dialog_parse":
+        return t32_startup_handle_dialog_parse(id, body)
+    if tool_name == "t32_dialog_get":
+        return t32_startup_handle_dialog_get(id, body)
+    if tool_name == "t32_dialog_set":
+        return t32_startup_handle_dialog_set(id, body)
+    if tool_name == "t32_dialog_click":
+        return t32_startup_handle_dialog_click(id, body)
     return t32_make_tool_error(id, -32602, "Source-hosted startup router only supports t32_sessions_list; use native or compiled worker for: " + tool_name)
 
 fn t32_sanitize_path_segment(value: text) -> text:
@@ -594,7 +872,7 @@ fn main():
             response = t32_startup_make_tools_list(id)
         elif method == "tools/call":
             val tool_name = t32_startup_extract_field(msg, "name")
-            if tool_name == "t32_sessions_list" or tool_name == "t32_resources_list" or tool_name == "t32_session_resume" or tool_name == "t32_session_close":
+            if tool_name == "t32_sessions_list" or tool_name == "t32_resources_list" or tool_name == "t32_session_resume" or tool_name == "t32_session_close" or tool_name == "t32_job_result" or tool_name == "t32_dialog_parse" or tool_name == "t32_dialog_get" or tool_name == "t32_dialog_set" or tool_name == "t32_dialog_click":
                 response = t32_startup_dispatch_tool(id, msg)
             else:
                 response = t32_dispatch_via_daemon(id, method, msg)
