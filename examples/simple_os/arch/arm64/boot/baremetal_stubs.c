@@ -194,14 +194,19 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    void *p = malloc((size_t)DECODE_INT(sz));
+    /* sz is raw (untagged) per the Rust runtime ABI. */
+    size_t bytes = (size_t)sz;
+    if (bytes == 0 || bytes > 0x1000000) return NIL_VALUE;
+    void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     return ENCODE_PTR(p);
 }
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
+    /* sz is raw (untagged) per the Rust runtime ABI. */
+    size_t bytes = (size_t)sz;
+    if (bytes == 0 || bytes > 0x1000000) return NIL_VALUE;
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);

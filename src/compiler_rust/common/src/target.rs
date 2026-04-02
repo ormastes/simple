@@ -301,8 +301,10 @@ pub enum TargetOS {
     MacOS = 3,
     /// FreeBSD
     FreeBSD = 4,
+    /// SimpleOS (custom OS built with Simple language)
+    SimpleOS = 5,
     /// Bare metal (no OS)
-    None = 5,
+    None = 6,
 }
 
 impl TargetOS {
@@ -345,6 +347,7 @@ impl TargetOS {
             TargetOS::Windows => "windows",
             TargetOS::MacOS => "macos",
             TargetOS::FreeBSD => "freebsd",
+            TargetOS::SimpleOS => "simpleos",
             TargetOS::None => "none",
         }
     }
@@ -471,6 +474,7 @@ impl Target {
                 "windows" | "win" | "msvc" => TargetOS::Windows,
                 "macos" | "darwin" | "apple" => TargetOS::MacOS,
                 "freebsd" => TargetOS::FreeBSD,
+                "simpleos" | "simple-os" | "simple_os" => TargetOS::SimpleOS,
                 "none" | "bare" | "unknown" | "wasi" => TargetOS::None,
                 _ => TargetOS::Any,
             })
