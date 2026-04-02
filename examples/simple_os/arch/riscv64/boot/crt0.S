@@ -28,6 +28,12 @@ _start:
     j       .Lbss_loop
 .Lbss_done:
 
+    /* Set sscratch to kernel stack top for trap vector U-mode protocol.
+     * sscratch holds the kernel sp when running in U-mode, and is 0
+     * when running in S-mode (to detect reentrant traps). */
+    la      t0, _stack_top
+    csrw    sscratch, t0
+
     /* Call Simple entry point */
     call    spl_start
 

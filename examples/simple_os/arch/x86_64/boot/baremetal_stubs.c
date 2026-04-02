@@ -185,7 +185,6 @@ void *malloc(size_t sz)
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
-        /* Halt to prevent infinite loop */
         for(;;) outb(0xF4, 0);
     }
     void *p = &_heap[_heap_off];
@@ -215,7 +214,9 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    void *p = malloc((size_t)DECODE_INT(sz));
+    size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
+    void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     return ENCODE_PTR(p);
 }
@@ -223,6 +224,7 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
     size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);
@@ -326,20 +328,18 @@ char *strcat(char *dst, const char *src)
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
-    int64_t len = DECODE_INT(len_val);
-    if (len < 0) len = 0;
+    /* Parameters are raw (untagged) per the Rust runtime ABI.
+       len_val is the raw byte count, data is a raw pointer. */
+    int64_t len = len_val;
+    if (len <= 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
-    if (IS_HEAP(data)) {
-        __builtin_memcpy(s->data, DECODE_PTR(data), (size_t)len);
-    } else if (data != 0) {
-        /* data might be a raw pointer passed as integer */
-        const char *src = (const char *)(uintptr_t)data;
-        __builtin_memcpy(s->data, src, (size_t)len);
-    }
+    /* data is a raw pointer cast to i64 */
+    const char *src = (const char *)(uintptr_t)data;
+    if (src) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
 }
@@ -503,11 +503,19 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
 
 void rt_print_str(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return;
-    for (uint32_t i = 0; i < s->len; i++) {
-        serial_putchar(s->data[i]);
+    if (IS_HEAP(str)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+            return;
+        }
+    }
+    /* Fallback: try as raw pointer */
+    if (str != 0) {
+        RuntimeString *s = (RuntimeString *)(uintptr_t)str;
+        if (s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        }
     }
 }
 
@@ -520,25 +528,19 @@ void rt_println_str(RuntimeValue str)
 
 void rt_print_value(RuntimeValue val)
 {
-    if (IS_INT(val)) {
+    if (val == 0 || IS_NIL(val)) {
+        serial_puts("nil");
+    } else if (IS_INT(val)) {
         serial_put_dec(DECODE_INT(val));
     } else if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
-        if (h && h->type == HEAP_STRING) {
-            rt_print_str(val);
-        } else {
-            serial_puts("<object@");
-            serial_put_hex((uint64_t)(uintptr_t)h);
-            serial_putchar('>');
-        }
-    } else if (IS_NIL(val)) {
-        serial_puts("nil");
-    } else if (IS_FLOAT(val)) {
-        serial_puts("<float>");
+        if (h && h->type == HEAP_STRING) rt_print_str(val);
+        else { serial_puts("<object>"); }
     } else {
-        serial_puts("<unknown:");
-        serial_put_hex((uint64_t)val);
-        serial_putchar('>');
+        /* Try as raw pointer */
+        RuntimeString *s = (RuntimeString *)(uintptr_t)val;
+        if (s->hdr.type == HEAP_STRING && s->len < 0x100000) rt_print_str(val);
+        else serial_put_dec(val);
     }
 }
 

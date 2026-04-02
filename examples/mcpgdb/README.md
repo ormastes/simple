@@ -39,4 +39,4 @@ Optional environment variables:
 For OpenOCD or TRACE32 GDB backends, create the session with `openocd_gdb` or `t32_gdb`, then use `debug_connect_remote`.
 
 Runtime note: the canonical runtime path is now `src/app/mcpgdb/main.spl`. That entrypoint successfully serves `initialize`, `tools/list`, and a representative `tools/call` in this workspace. The `examples/mcpgdb/main.spl` path remains the discoverable example source, but it still inherits the example watchdog and is no longer the recommended way to run the server.
-Runtime note: the cached `.smf` runner path still returns an empty response in this workspace, so the repo-local wrapper currently falls back to slower source execution for heavy tool calls.
+Runtime note: the repo-local wrapper now caches compiled `.smf` runner artifacts by default. If runner compilation fails, execution returns a non-zero exit, or a runner returns malformed output, the wrapper still falls back to source execution for that request.

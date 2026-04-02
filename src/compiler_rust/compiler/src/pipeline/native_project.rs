@@ -1573,6 +1573,8 @@ int main(int argc, char** argv) {
         cmd.arg("-nostdlib");
         cmd.arg("-ffreestanding");
         cmd.arg("-static");
+        cmd.arg("-fno-pic");
+        cmd.arg("-fno-pie");
         cmd.arg("-fuse-ld=lld");
 
         // Linker script
@@ -1639,7 +1641,8 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
-            // For x86 multiboot: QEMU requires ELF32. Convert if boot objects present.
+            // For x86 multiboot: QEMU requires ELF32.
+            // Safe only when linked with -fno-pic (no GOT to corrupt).
             if (triple.contains("x86_64") || triple.contains("i686"))
                 && !boot_objects.is_empty()
             {

@@ -60,9 +60,9 @@ _entry32:
      * PD[0..1023] -> 2 MiB identity pages
      * ------------------------------------------------------------------ */
 
-    /* Zero the page-table area (3 pages = 12 KiB) */
+    /* Zero the page-table area (PML4 4K + PDPT 4K + PD 8K = 16 KiB) */
     movl $boot_pml4, %edi
-    movl $3072, %ecx          /* 12288 / 4 = 3072 dwords */
+    movl $4096, %ecx          /* 16384 / 4 = 4096 dwords */
     xorl %eax, %eax
     rep stosl
 
@@ -188,4 +188,4 @@ boot_pml4:
 boot_pdpt:
     .space 4096
 boot_pd:
-    .space 4096
+    .space 8192    /* 1024 entries * 8 bytes = 8 KiB for 2 GiB identity map */
