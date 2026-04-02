@@ -117,11 +117,7 @@ if [ ${#TEST_ELFS[@]} -eq 0 ]; then
     usage
 fi
 
-# ─── t32rem wrapper ─────────────────────────────────────────────────────────
-
-t32rem_cmd() {
-    "$T32REM" "$HOST" "port=$PORT" "protocol=NETTCP" "$@"
-}
+# t32_remote() is provided by t32_host_bootstrap.shs with MCI mode guard.
 
 # ─── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -161,26 +157,36 @@ run_test() {
     echo "--- [$TOTAL] $name ---"
 
     # Set up semihost AREA
-    t32rem_cmd "AREA.Create T32TEST" >/dev/null 2>&1 || true
-    t32rem_cmd "AREA.Select T32TEST" >/dev/null 2>&1 || true
-    t32rem_cmd "AREA.CLEAR T32TEST" >/dev/null 2>&1 || true
-    t32rem_cmd "SYStem.Option SemiHost ON" >/dev/null 2>&1 || true
+    t32_remote "AREA.Create T32TEST" >/dev/null 2>&1 || true
+    t32_remote "AREA.Select T32TEST" >/dev/null 2>&1 || true
+    t32_remote "AREA.CLEAR T32TEST" >/dev/null 2>&1 || true
+    t32_remote "SYStem.Option SemiHost ON" >/dev/null 2>&1 || true
 
     # Load and run
-    if ! t32rem_cmd "Data.LOAD.Elf $elf" >/dev/null 2>&1; then
+    if ! t32_remote "Data.LOAD.Elf $elf" >/dev/null 2>&1; then
         echo "  FAIL: could not load ELF"
         FAILED=$((FAILED + 1))
         RESULTS+=("FAIL  $name (load error)")
         return
     fi
 
-    t32rem_cmd "Go" >/dev/null 2>&1 || true
+    if ! t32_remote "Go" >/dev/null 2>&1; then
+        echo "  FAIL: Go command failed"
+        FAILED=$((FAILED + 1))
+        RESULTS+=("FAIL  $name (Go failed)")
+        return
+    fi
     sleep "$TIMEOUT"
-    t32rem_cmd "Break" >/dev/null 2>&1 || true
+    t32_remote "Break" >/dev/null 2>&1 || true
 
     # Read AREA output
     local area_output
-    area_output="$(t32rem_cmd "WinPrint.AREA T32TEST" 2>/dev/null || true)"
+    area_output="$(t32_remote "WinPrint.AREA T32TEST" 2>&1)" || {
+        echo "  FAIL: WinPrint.AREA failed"
+        FAILED=$((FAILED + 1))
+        RESULTS+=("FAIL  $name (read failed)")
+        return
+    }
 
     # Check for test markers
     if printf '%s\n' "$area_output" | grep -qi "PASS\|simple-stm-smoke"; then

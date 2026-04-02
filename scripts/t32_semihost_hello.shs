@@ -71,9 +71,7 @@ require_cmd() {
     fi
 }
 
-t32_remote() {
-    "$T32REM" "$HOST" "port=$PORT" "protocol=NETTCP" "$1"
-}
+# t32_remote() is provided by t32_host_bootstrap.shs — do not shadow it here.
 
 stop_port_conflicts() {
     if [ -x "$REPO_ROOT/scripts/t32q.shs" ]; then
@@ -147,17 +145,29 @@ elif [ "$LIFECYCLE_RC" -ne 0 ]; then
     exit 1
 fi
 
+# Optional setup — failure here is non-fatal (e.g. SCREEN.OFF may not be supported)
 t32_remote "SCREEN.OFF" >/dev/null 2>&1 || true
 t32_remote "AREA.Create MCP_OUT" >/dev/null 2>&1 || true
 t32_remote "AREA.Select MCP_OUT" >/dev/null 2>&1 || true
 t32_remote "AREA.CLEAR MCP_OUT" >/dev/null 2>&1 || true
 t32_remote "SYStem.Option SemiHost ON" >/dev/null 2>&1 || true
-t32_remote "Data.LOAD.Elf $ELF_PATH" >/dev/null
-t32_remote "Go" >/dev/null
+
+# Critical commands — must succeed or abort
+if ! t32_remote "Data.LOAD.Elf $ELF_PATH" >/dev/null 2>&1; then
+    echo "TRACE32 semihost hello-world FAILED: Data.LOAD.Elf failed" >&2
+    exit 1
+fi
+if ! t32_remote "Go" >/dev/null 2>&1; then
+    echo "TRACE32 semihost hello-world FAILED: Go command failed" >&2
+    exit 1
+fi
 sleep 1
 t32_remote "Break" >/dev/null 2>&1 || true
 
-AREA_OUTPUT="$(t32_remote "WinPrint.AREA MCP_OUT" || true)"
+AREA_OUTPUT="$(t32_remote "WinPrint.AREA MCP_OUT" 2>&1)" || {
+    echo "TRACE32 semihost hello-world FAILED: WinPrint.AREA command failed" >&2
+    exit 1
+}
 printf '%s\n' "$AREA_OUTPUT"
 
 if printf '%s\n' "$AREA_OUTPUT" | grep -q "$EXPECTED_MARKER"; then
