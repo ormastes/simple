@@ -2,10 +2,11 @@
 
 Merged C/C++ debug MCP example for this repo.
 
-The shipped shape is now a cold frontend in `main.spl` plus family-specific subprocess runners:
-- `main.spl` handles framing, `initialize`, `ping`, `shutdown`, and `tools/list`
-- `tools/call` dispatches to `debug_runner.spl` or `clangd_runner.spl`
-- session and workspace metadata are persisted in `state.spl` under `/tmp`
+The shipped shape is now split between the example tree and the runtime wrapper:
+- `examples/mcpgdb/` contains the example source, schemas, and tests
+- `src/app/mcpgdb/main.spl` is the real runnable cold frontend
+- `src/app/mcpgdb/debug_runner.spl` and `src/app/mcpgdb/clangd_runner.spl` are the heavy subprocess runners
+- session and workspace metadata are persisted under `/tmp`
 
 It provides:
 - persistent multi-session debugger control for `gdb`, `lldb`, `openocd_gdb`, and `t32_gdb`
@@ -18,7 +19,7 @@ It provides:
 ## Run
 
 ```bash
-bin/simple run examples/mcpgdb/main.spl
+bin/simple src/app/mcpgdb/main.spl
 ```
 
 Optional environment variables:
@@ -37,4 +38,5 @@ Optional environment variables:
 
 For OpenOCD or TRACE32 GDB backends, create the session with `openocd_gdb` or `t32_gdb`, then use `debug_connect_remote`.
 
-Current runtime note: `initialize` now succeeds under the repo watchdog, but the first heavy `tools/call` path can still exceed the 4GB/10s example watchdog while the runner path is compiled in this workspace. The public tool names are unchanged; the remaining work is runtime tuning of the heavy runner compile path.
+Runtime note: the canonical runtime path is now `src/app/mcpgdb/main.spl`. That entrypoint successfully serves `initialize`, `tools/list`, and a representative `tools/call` in this workspace. The `examples/mcpgdb/main.spl` path remains the discoverable example source, but it still inherits the example watchdog and is no longer the recommended way to run the server.
+Runtime note: the cached `.smf` runner path still returns an empty response in this workspace, so the repo-local wrapper currently falls back to slower source execution for heavy tool calls.

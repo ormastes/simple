@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+T32REM="${T32REM:-/opt/t32/bin/pc_linux64/t32rem}"
+HOST="${T32_HOST:-localhost}"
+PORT="${T32_PORT:-20000}"
+BOARD="stm32wb"
+BUILD_ONLY=0
+KEEP_TMP=0
+
+ASM_PATH="$REPO_ROOT/test/fixtures/baremetal/stm_semihost_smoke.s"
+LD_PATH="$REPO_ROOT/test/fixtures/baremetal/stm_semihost_smoke.ld"
+EXPECTED_MARKER="simple-stm-smoke"
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: scripts/t32_semihost_hello.shs [--board stm32wb|stm32h7] [--build-only] [--keep-tmp]
+
+Build the shared STM semihost smoke ELF, launch TRACE32 for the selected board,
+load the ELF, run it briefly, halt, and verify the semihost AREA output.
+EOF
+    exit 2
+}
+
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --board)
+            BOARD="${2:-}"
+            shift 2
+            ;;
+        --build-only)
+            BUILD_ONLY=1
+            shift
+            ;;
+        --keep-tmp)
+            KEEP_TMP=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+case "$BOARD" in
+    stm32wb) CPU="cortex-m4" ;;
+    stm32h7) CPU="cortex-m7" ;;
+    *)
+        echo "unsupported board: $BOARD" >&2
+        exit 1
+        ;;
+esac
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "missing required command: $1" >&2
+        exit 1
+    fi
+}
+
+t32_remote() {
+    "$T32REM" "$HOST" "port=$PORT" "$1"
+}
+
+stop_port_conflicts() {
+    if [ -x "$REPO_ROOT/scripts/t32q.shs" ]; then
+        "$REPO_ROOT/scripts/t32q.shs" off >/dev/null 2>&1 || true
+    fi
+    pkill -f '/opt/t32/bin/pc_linux64/t32mciserver' >/dev/null 2>&1 || true
+}
+
+TMPDIR="$(mktemp -d /tmp/t32_semihost_hello.XXXXXX)"
+cleanup() {
+    if [ "$KEEP_TMP" != "1" ]; then
+        rm -rf "$TMPDIR"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+ELF_PATH="$TMPDIR/stm_semihost_smoke_${BOARD}.elf"
+
+require_cmd clang
+require_cmd ld.lld
+
+if [ ! -f "$ASM_PATH" ] || [ ! -f "$LD_PATH" ]; then
+    echo "missing shared STM semihost smoke fixture" >&2
+    exit 1
+fi
+
+clang \
+    --target=armv7m-none-eabi \
+    -mcpu="$CPU" \
+    -mthumb \
+    -nostdlib \
+    -fuse-ld=lld \
+    -Wl,-T,"$LD_PATH" \
+    -Wl,-e,_start \
+    -Wl,--gc-sections \
+    -o "$ELF_PATH" \
+    "$ASM_PATH"
+
+echo "built ELF: $ELF_PATH"
+
+if [ "$BUILD_ONLY" = "1" ]; then
+    exit 0
+fi
+
+if [ ! -x "$T32REM" ]; then
+    echo "missing t32rem: $T32REM" >&2
+    exit 1
+fi
+
+stop_port_conflicts
+"$REPO_ROOT/scripts/t32_start_stm.shs" --kill-stale "$BOARD" native
+"$REPO_ROOT/scripts/t32_check_ready.shs"
+
+t32_remote "SCREEN.OFF" >/dev/null 2>&1 || true
+t32_remote "AREA.Create MCP_OUT" >/dev/null 2>&1 || true
+t32_remote "AREA.Select MCP_OUT" >/dev/null 2>&1 || true
+t32_remote "AREA.CLEAR MCP_OUT" >/dev/null 2>&1 || true
+t32_remote "SYStem.Option SemiHost ON" >/dev/null 2>&1 || true
+t32_remote "Data.LOAD.Elf $ELF_PATH" >/dev/null
+t32_remote "Go" >/dev/null
+sleep 1
+t32_remote "Break" >/dev/null 2>&1 || true
+
+AREA_OUTPUT="$(t32_remote "WinPrint.AREA MCP_OUT" || true)"
+printf '%s\n' "$AREA_OUTPUT"
+
+if printf '%s\n' "$AREA_OUTPUT" | grep -q "$EXPECTED_MARKER"; then
+    echo "TRACE32 semihost hello-world OK"
+    exit 0
+fi
+
+echo "TRACE32 semihost hello-world failed: expected marker '$EXPECTED_MARKER' not found" >&2
+exit 1

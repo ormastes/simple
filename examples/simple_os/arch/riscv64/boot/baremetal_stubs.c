@@ -1,5 +1,5 @@
 /*
- * baremetal_stubs.c -- RISC-V 64 baremetal runtime stubs (COMPLETE)
+ * baremetal_stubs.c -- RISC-V 64-bit baremetal runtime stubs (COMPLETE)
  *
  * Provides the FULL Simple runtime support needed for SimpleOS to boot
  * in QEMU with serial output.
@@ -12,7 +12,7 @@
  *   5. Print functions
  *   6. Memory primitives
  *   7. Framebuffer helpers
- *   8. MMIO accessors
+ *   8. MMIO accessors (real implementations)
  *   9. Array / comparison operations
  *  10. _start entry point
  *  11. ~200 no-op runtime stubs
@@ -22,58 +22,41 @@
 #include <stdint.h>
 
 /* ================================================================
- * 1. Serial I/O -- 16550 UART at MMIO 0x10000000 (QEMU virt)
+ * 1. Serial I/O -- 16550 UART at MMIO 0x10000000 (QEMU virt machine)
  * ================================================================ */
 
-#define UART_BASE  0x10000000ULL
+#define UART_BASE       0x10000000UL
 
-/* 16550 register offsets */
-#define UART_THR   0x00  /* Transmit Holding Register */
-#define UART_RBR   0x00  /* Receive Buffer Register */
-#define UART_IER   0x01  /* Interrupt Enable Register */
-#define UART_FCR   0x02  /* FIFO Control Register */
-#define UART_LCR   0x03  /* Line Control Register */
-#define UART_MCR   0x04  /* Modem Control Register */
-#define UART_LSR   0x05  /* Line Status Register */
-#define UART_DLL   0x00  /* Divisor Latch Low (DLAB=1) */
-#define UART_DLH   0x01  /* Divisor Latch High (DLAB=1) */
+#define UART_THR        (*(volatile uint8_t *)(UART_BASE + 0))  /* Transmit Holding Register */
+#define UART_RBR        (*(volatile uint8_t *)(UART_BASE + 0))  /* Receive Buffer Register */
+#define UART_IER        (*(volatile uint8_t *)(UART_BASE + 1))  /* Interrupt Enable Register */
+#define UART_FCR        (*(volatile uint8_t *)(UART_BASE + 2))  /* FIFO Control Register */
+#define UART_LCR        (*(volatile uint8_t *)(UART_BASE + 3))  /* Line Control Register */
+#define UART_MCR        (*(volatile uint8_t *)(UART_BASE + 4))  /* Modem Control Register */
+#define UART_LSR        (*(volatile uint8_t *)(UART_BASE + 5))  /* Line Status Register */
 
-/* LSR bits */
-#define UART_LSR_THRE  0x20  /* Transmit Holding Register Empty */
-#define UART_LSR_DR    0x01  /* Data Ready */
-
-static inline void uart_write(uint64_t offset, uint8_t val) {
-    *(volatile uint8_t *)(uintptr_t)(UART_BASE + offset) = val;
-}
-
-static inline uint8_t uart_read(uint64_t offset) {
-    return *(volatile uint8_t *)(uintptr_t)(UART_BASE + offset);
-}
+#define UART_LSR_THRE   0x20  /* Transmit Holding Register Empty */
+#define UART_LSR_DR     0x01  /* Data Ready */
+#define UART_LCR_DLAB   0x80  /* Divisor Latch Access Bit */
 
 static int g_serial_inited = 0;
 
-static void _serial_init(void) {
+static void _uart_init(void) {
     if (g_serial_inited) return;
-    /* Disable interrupts */
-    uart_write(UART_IER, 0x00);
-    /* Enable DLAB to set baud rate */
-    uart_write(UART_LCR, 0x80);
-    /* Set divisor to 1 (115200 baud at 1.8432 MHz) */
-    uart_write(UART_DLL, 0x01);
-    uart_write(UART_DLH, 0x00);
-    /* 8 bits, no parity, 1 stop bit, DLAB off */
-    uart_write(UART_LCR, 0x03);
-    /* Enable FIFO, clear, 14-byte threshold */
-    uart_write(UART_FCR, 0xC7);
-    /* RTS/DSR set */
-    uart_write(UART_MCR, 0x0B);
+    *(volatile uint8_t *)(UART_BASE + 1) = 0x00;  /* Disable all interrupts */
+    *(volatile uint8_t *)(UART_BASE + 3) = 0x80;  /* Enable DLAB */
+    *(volatile uint8_t *)(UART_BASE + 0) = 0x01;  /* Divisor low byte (115200 baud) */
+    *(volatile uint8_t *)(UART_BASE + 1) = 0x00;  /* Divisor high byte */
+    *(volatile uint8_t *)(UART_BASE + 3) = 0x03;  /* 8 bits, no parity, 1 stop bit (8N1) */
+    *(volatile uint8_t *)(UART_BASE + 2) = 0x07;  /* Enable FIFO, clear, 1-byte threshold */
+    *(volatile uint8_t *)(UART_BASE + 4) = 0x00;  /* No modem control */
     g_serial_inited = 1;
 }
 
 static void serial_putchar(char c) {
-    _serial_init();
-    while (!(uart_read(UART_LSR) & UART_LSR_THRE)) {}
-    uart_write(UART_THR, (uint8_t)c);
+    _uart_init();
+    while (!(UART_LSR & UART_LSR_THRE)) {}
+    UART_THR = (uint8_t)c;
 }
 
 static void serial_puts(const char *s) {
@@ -326,9 +309,11 @@ void rt_println_value(RuntimeValue val) {
     serial_putchar('\n');
 }
 
+/* Legacy print interface -- called by Simple's `print` statement */
 void rt_print(RuntimeValue val) { rt_print_value(val); }
 void rt_println(RuntimeValue val) { rt_println_value(val); }
 
+/* serial_println -- callable from Simple via extern fn */
 void serial_println(const char *s) {
     if (s) serial_puts(s);
     serial_putchar('\r');
@@ -420,32 +405,37 @@ void rt_fb_fill_rect(int64_t fb_addr, int64_t pitch,
 }
 
 /* ================================================================
- * 8. MMIO accessors
+ * 8. MMIO accessors (real implementations for RISC-V)
  * ================================================================ */
 
-void rt_mmio_write_u8(uint64_t addr, uint64_t val) {
-    *(volatile uint8_t *)(uintptr_t)addr = (uint8_t)val;
+RuntimeValue rt_mmio_read_u8(RuntimeValue addr) {
+    return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr));
 }
-uint64_t rt_mmio_read_u8(uint64_t addr) {
-    return *(volatile uint8_t *)(uintptr_t)addr;
+RuntimeValue rt_mmio_read_u16(RuntimeValue addr) {
+    return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr));
 }
-void rt_mmio_write_u16(uint64_t addr, uint64_t val) {
-    *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)val;
+RuntimeValue rt_mmio_read_u32(RuntimeValue addr) {
+    return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr));
 }
-uint64_t rt_mmio_read_u16(uint64_t addr) {
-    return *(volatile uint16_t *)(uintptr_t)addr;
+RuntimeValue rt_mmio_read_u64(RuntimeValue addr) {
+    return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr));
 }
-void rt_mmio_write_u32(uint64_t addr, uint64_t val) {
-    *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)val;
+
+RuntimeValue rt_mmio_write_u8(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val);
+    return 0;
 }
-uint64_t rt_mmio_read_u32(uint64_t addr) {
-    return *(volatile uint32_t *)(uintptr_t)addr;
+RuntimeValue rt_mmio_write_u16(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val);
+    return 0;
 }
-void rt_mmio_write_u64(uint64_t addr, uint64_t val) {
-    *(volatile uint64_t *)(uintptr_t)addr = val;
+RuntimeValue rt_mmio_write_u32(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val);
+    return 0;
 }
-uint64_t rt_mmio_read_u64(uint64_t addr) {
-    return *(volatile uint64_t *)(uintptr_t)addr;
+RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) {
+    *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val);
+    return 0;
 }
 
 /* ================================================================
@@ -468,7 +458,7 @@ void rt_array_push(RuntimeValue arr, RuntimeValue value) {
     if (!IS_HEAP(arr)) return;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (a->header.type != HEAP_TYPE_ARRAY) return;
-    if (a->len >= a->cap) return;
+    if (a->len >= a->cap) return; /* bump allocator can't resize in-place */
     a->data[a->len++] = value;
 }
 
@@ -503,6 +493,7 @@ RuntimeValue rt_len(RuntimeValue obj) {
     return ENCODE_INT(0);
 }
 
+/* Integer <-> String conversion */
 RuntimeValue rt_int_to_string(RuntimeValue val) {
     int64_t n = DECODE_INT(val);
     char buf[32];
@@ -512,6 +503,7 @@ RuntimeValue rt_int_to_string(RuntimeValue val) {
     if (n == 0) { buf[i++] = '0'; }
     else { while (n > 0) { buf[i++] = '0' + (int)(n % 10); n /= 10; } }
     if (neg) buf[i++] = '-';
+    /* reverse */
     char rev[32];
     int j = 0;
     while (i > 0) rev[j++] = buf[--i];
@@ -543,11 +535,23 @@ RuntimeValue rt_eq(RuntimeValue a, RuntimeValue b) {
     }
     return ENCODE_INT(a == b ? 1 : 0);
 }
-RuntimeValue rt_ne(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(rt_eq(a, b)) ? 0 : 1); }
-RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) < DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) > DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_le(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) <= DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) >= DECODE_INT(b) ? 1 : 0); }
+
+RuntimeValue rt_ne(RuntimeValue a, RuntimeValue b) {
+    return ENCODE_INT(DECODE_INT(rt_eq(a, b)) ? 0 : 1);
+}
+
+RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b) {
+    return ENCODE_INT(DECODE_INT(a) < DECODE_INT(b) ? 1 : 0);
+}
+RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b) {
+    return ENCODE_INT(DECODE_INT(a) > DECODE_INT(b) ? 1 : 0);
+}
+RuntimeValue rt_le(RuntimeValue a, RuntimeValue b) {
+    return ENCODE_INT(DECODE_INT(a) <= DECODE_INT(b) ? 1 : 0);
+}
+RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b) {
+    return ENCODE_INT(DECODE_INT(a) >= DECODE_INT(b) ? 1 : 0);
+}
 
 /* Arithmetic */
 RuntimeValue rt_add(RuntimeValue a, RuntimeValue b) {
@@ -616,17 +620,10 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a
  * 10. _start entry point
  * ================================================================ */
 
-/* SBI ecall for shutdown */
-static void sbi_shutdown(void) {
-    register unsigned long a7 __asm__("a7") = 0x08; /* SBI_SHUTDOWN */
-    register unsigned long a0 __asm__("a0") = 0;
-    __asm__ volatile("ecall" : "+r"(a0) : "r"(a7));
-}
-
 void _start(void) {
-    _serial_init();
+    _uart_init();
     serial_puts("SimpleOS riscv64 boot\r\n");
-    serial_puts("[BOOT] 16550 UART initialized\r\n");
+    serial_puts("[BOOT] UART at 0x10000000\r\n");
 
     extern void spl_start(void) __attribute__((weak));
     if (spl_start) {
@@ -637,12 +634,19 @@ void _start(void) {
     }
 
     serial_puts("[BOOT] riscv64 boot complete\r\n");
-    sbi_shutdown();
+
+    /* SBI shutdown (legacy extension): a7 = 8 (SBI_SHUTDOWN) */
+    register long a7 __asm__("a7") = 8;
+    __asm__ volatile("ecall" : : "r"(a7));
+    /* If SBI shutdown not available, spin */
     for (;;) __asm__ volatile("wfi");
 }
 
 /* ================================================================
  * 11. No-op runtime stubs (~200 functions)
+ *
+ * These satisfy unresolved symbols from the Simple compiler's
+ * generated code. They return 0/NIL_VALUE and do nothing.
  * ================================================================ */
 
 #define STUB0(name) RuntimeValue name(void) { return 0; }
@@ -974,37 +978,47 @@ STUB1(rt_char_to_string)
 STUB0(rt_cpu_id)
 STUB0(rt_arch_name)
 STUB0(rt_page_size)
+
+/* RISC-V has no port I/O -- provide stubs for compatibility */
+VSTUB2(rt_port_out_u8)
+STUB1(rt_port_in_u8)
+VSTUB2(rt_port_out_u16)
+STUB1(rt_port_in_u16)
+VSTUB2(rt_port_out_u32)
+STUB1(rt_port_in_u32)
+
+/* RISC-V CSR access stubs */
 VSTUB0(rt_cli)
 VSTUB0(rt_sti)
 VSTUB0(rt_hlt)
+STUB1(rt_cr_read)
+VSTUB2(rt_cr_write)
+STUB0(rt_rdtsc)
+VSTUB1(rt_invlpg)
+VSTUB1(rt_lidt)
+VSTUB1(rt_lgdt)
+VSTUB1(rt_ltr)
 STUB0(rt_flags)
-
-/* --- RISC-V specific CSR access --- */
-STUB1(rt_csrr)
-VSTUB2(rt_csrw)
-VSTUB2(rt_csrs)
-VSTUB2(rt_csrc)
-STUB0(rt_mhartid)
-STUB0(rt_mstatus)
-STUB0(rt_mtvec)
-VSTUB1(rt_set_mtvec)
-STUB0(rt_stvec)
-VSTUB1(rt_set_stvec)
-STUB0(rt_satp)
-VSTUB1(rt_set_satp)
-VSTUB0(rt_sfence_vma)
-STUB0(rt_rdtime)
-STUB0(rt_rdcycle)
-STUB0(rt_rdinstret)
+VSTUB0(rt_enable_sse)
+VSTUB0(rt_enable_avx)
 
 /* --- Interrupt / exception stubs --- */
 VSTUB1(rt_register_isr)
 VSTUB2(rt_register_irq)
+VSTUB0(rt_pic_init)
+VSTUB0(rt_pic_eoi)
+VSTUB1(rt_pic_eoi_irq)
+VSTUB0(rt_apic_init)
+VSTUB0(rt_apic_eoi)
+VSTUB0(rt_ioapic_init)
+
+/* --- RISC-V PLIC stubs (platform-level interrupt controller) --- */
 VSTUB0(rt_plic_init)
-STUB1(rt_plic_claim)
-VSTUB1(rt_plic_complete)
 VSTUB2(rt_plic_set_priority)
-VSTUB2(rt_plic_enable)
+VSTUB1(rt_plic_enable)
+VSTUB1(rt_plic_disable)
+STUB0(rt_plic_claim)
+VSTUB1(rt_plic_complete)
 
 /* --- Paging / virtual memory --- */
 STUB0(rt_page_alloc)
@@ -1017,13 +1031,18 @@ VSTUB0(rt_tlb_flush_all)
 VSTUB1(rt_tlb_flush_page)
 
 /* --- Timer --- */
-VSTUB0(rt_timer_init)
-STUB0(rt_timer_ticks)
-VSTUB1(rt_timer_set_freq)
-VSTUB1(rt_clint_set_timer)
-STUB0(rt_clint_get_time)
+VSTUB0(rt_pit_init)
+VSTUB1(rt_pit_set_freq)
+STUB0(rt_pit_ticks)
+VSTUB0(rt_hpet_init)
+STUB0(rt_hpet_ticks)
+VSTUB0(rt_tsc_init)
 
-/* --- Keyboard / input --- */
+/* --- RISC-V timer (mtime/mtimecmp) --- */
+STUB0(rt_riscv_mtime)
+VSTUB1(rt_riscv_mtimecmp_set)
+
+/* --- Keyboard / PS2 --- */
 STUB0(rt_kbd_read)
 STUB0(rt_kbd_poll)
 VSTUB0(rt_kbd_init)
@@ -1041,9 +1060,27 @@ STUB1(rt_virtio_probe)
 STUB2(rt_virtio_read)
 STUB3(rt_virtio_write)
 
-/* --- Power management (via SBI) --- */
-VSTUB0(rt_sbi_shutdown)
-VSTUB0(rt_sbi_reboot)
-STUB0(rt_sbi_get_spec_version)
-STUB1(rt_sbi_hart_start)
-STUB0(rt_sbi_hart_stop)
+/* --- Power management --- */
+VSTUB0(rt_acpi_init)
+VSTUB0(rt_acpi_shutdown)
+VSTUB0(rt_acpi_reboot)
+STUB0(rt_acpi_get_pm_timer)
+
+/* --- BDD / test framework stubs --- */
+VSTUB1(rt_bdd_describe_start)
+VSTUB1(rt_bdd_describe_end)
+VSTUB2(rt_bdd_it_start)
+VSTUB1(rt_bdd_it_end)
+STUB1(rt_expect)
+STUB2(rt_expect_eq)
+STUB2(rt_expect_ne)
+
+/* --- Hash / debug / misc --- */
+STUB1(rt_hash)
+VSTUB1(rt_debug_print)
+
+/* --- Regex FFI stubs --- */
+STUB2(ffi_regex_is_match)
+STUB2(ffi_regex_find)
+STUB2(ffi_regex_find_all)
+STUB2(ffi_regex_replace)

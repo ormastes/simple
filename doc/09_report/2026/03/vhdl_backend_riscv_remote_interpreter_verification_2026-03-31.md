@@ -15,6 +15,19 @@ This scope is verified for the implemented slice:
 
 The original plan remains only partially complete overall. The mailbox-backed simulated remote interpreter lane and the Simple-defined RV32 hardware flow are still open.
 
+## Current blocker note
+
+This report remains valid for the verified VHDL/GHDL slice it covers. It is not the current runtime blocker report for the larger RISC-V program.
+
+Current blocker documentation now lives in:
+
+- `doc/01_research/local/rv64_user_mode_exec.md`
+- `doc/01_research/domain/rv64_user_mode_exec.md`
+- `doc/02_requirements/feature/rv64_user_mode_exec.md`
+- `doc/03_plan/rv64_user_mode_exec.md`
+
+Those documents describe the active blocker for true RV64 user-mode execution and its downstream dependency chain to Linux, repo-native simulation, RTL/VHDL end-state work, and GUI OS bring-up.
+
 ## Files Verified
 
 - [vhdl_backend.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/vhdl_backend.spl)

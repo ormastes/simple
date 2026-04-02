@@ -27,6 +27,10 @@ Impact on the repo plan:
 - a scheduler-only `is_user` flag is insufficient
 - the restored RV64 context must carry correct `sstatus` and `sepc`
 - the real trap vector must restore a frame and exit with `sret`, not a generic function return
+- the first stable runtime contract should treat the trap frame, not the generic scheduler context, as the architectural source of truth for post-trap resume
+- the implementation needs an explicit handoff boundary between:
+  - architecture-owned trap-frame save/restore
+  - kernel-owned trap classification and syscall dispatch
 
 ### 2. RV64 syscall ABI should follow the RISC-V calling convention shape already modeled in the repo
 
@@ -35,11 +39,13 @@ The psABI confirms the standard integer calling convention:
 - syscall/call arguments live in `a0` through `a5`
 - the call ID lives in `a7`
 - the return value comes back in `a0`
+- this same register shape is the cleanest contract for the trap-frame adapter and the first proof binary
 
 Impact on the repo plan:
 - the current pure trap model shape is correct as the stable contract
 - the real trap vector and dispatcher must preserve exactly that register mapping
 - unknown syscall numbers and unsupported trap causes should fail explicitly rather than degrade silently
+- the first proof binary only needs to exercise one output syscall and `Exit`; Linux ABI breadth is not required here
 
 ### 3. Linux boot depends on machine and handoff correctness, not just code generation
 
@@ -48,11 +54,14 @@ The Linux RISC-V boot documentation confirms the key downstream constraints:
 - the kernel expects a valid hardware description handoff, typically a DTB
 - the kernel image placement and alignment rules matter
 - the boot contract includes memory map assumptions and firmware/loader responsibilities
+- the conventional Linux handoff also uses `a0` for hart ID and `a1` for the DTB pointer
+- for later Linux work, the current `simple-rv64` machine profile must evolve into a machine contract that can also describe DTB, memory layout, and boot handoff details
 
 Impact on the repo plan:
 - RV64 Linux boot should remain downstream of the current blocker
 - a repo-native simulator will need a stable board/machine contract, not just a CPU execution loop
 - the same machine profile used for baremetal OS work should become the basis for Linux boot later
+- the blocker docs should name Linux and simulator work as explicit downstream dependencies, not silent future ideas
 
 ### 4. The current blocker should stay narrower than Linux or simulator completion
 
@@ -78,6 +87,7 @@ Only after that are the following worth treating as implementation milestones:
 - static RV64 ELF exec only
 - `spawn_binary(path, priority)` remains the only public launch ABI
 - one minimal userspace proof binary is sufficient for the first end-to-end runtime milestone
+- `_rv64_trap_vector` should be implemented as the narrowest viable trap entry that handles user `ecall`, timer interrupt, and external interrupt before any broader exception subsystem refactor
 
 ### Deferred but explicitly linked downstream milestones
 

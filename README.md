@@ -1135,6 +1135,14 @@ usually `XAUTHORITY`). For quick diagnostics use:
 scripts/t32q.shs doctor
 ```
 
+Hello-world firmware smoke:
+
+```bash
+scripts/t32_semihost_hello.shs --board stm32wb
+scripts/t32_semihost_hello.shs --board stm32h7
+scripts/t32_semihost_hello.shs --board stm32wb --build-only
+```
+
 ### Install T32 MCP Servers
 
 ```bash

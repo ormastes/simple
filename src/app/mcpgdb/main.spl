@@ -1,13 +1,20 @@
 @allow(unnamed_duplicate_typed_args)
-# mcpgdb MCP — merged C/C++ debugger and clangd example
+# mcpgdb MCP production wrapper — cold frontend with repo-local heavy runners
 
+extern fn rt_env_cwd() -> text
 extern fn rt_env_get(name: text) -> text
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 use examples.mcpgdb.json_helpers.{read_stdin_message, write_stdout_message, extract_id, extract_field, has_method, jsonrpc_result, jsonrpc_error, LB, RB, shell_bin, shell_quote}
 use examples.mcpgdb.protocol.{make_init_response, make_tools_list}
+
+val DEBUG_RUNNER_SOURCE = "src/app/mcpgdb/debug_runner.spl"
+val DEBUG_STATE_RUNNER_SOURCE = "src/app/mcpgdb/debug_state_runner.spl"
+val CLANGD_RUNNER_SOURCE = "src/app/mcpgdb/clangd_runner.spl"
 
 fn main():
     while true:
@@ -71,10 +78,57 @@ fn temp_request_path() -> text:
 fn body_has_tool(body: text, name: text) -> bool:
     body.contains("\"name\":\"" + name + "\"") or body.contains("\"name\": \"" + name + "\"")
 
-fn runner_for_body(body: text) -> text:
+fn runner_source_for_body(body: text) -> text:
+    if body_has_tool(body, "workspace_open") or body_has_tool(body, "workspace_status") or body_has_tool(body, "debug_session_list") or body_has_tool(body, "debug_session_select"):
+        return DEBUG_STATE_RUNNER_SOURCE
     if body_has_tool(body, "clangd_open") or body_has_tool(body, "clangd_definition") or body_has_tool(body, "clangd_references") or body_has_tool(body, "clangd_hover") or body_has_tool(body, "clangd_completion") or body_has_tool(body, "clangd_type_definition") or body_has_tool(body, "clangd_symbols") or body_has_tool(body, "clangd_diagnostics"):
-        return "src/app/mcpgdb/clangd_runner.spl"
-    "src/app/mcpgdb/debug_runner.spl"
+        return CLANGD_RUNNER_SOURCE
+    DEBUG_RUNNER_SOURCE
+
+fn sanitize_segment(value: text) -> text:
+    if value == "":
+        return "_"
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "." or ch == "-" or ch == "_":
+            out = out + ch
+        else:
+            out = out + "_"
+        i = i + 1
+    if out == "":
+        return "_"
+    out
+
+fn runner_cache_dir() -> text:
+    "/tmp/mcpgdb_compiled_" + sanitize_segment(rt_env_cwd())
+
+fn runner_artifact_path(source: text) -> text:
+    var base = source.replace("/", "_")
+    base = base.replace(".spl", ".smf")
+    runner_cache_dir() + "/" + base
+
+fn ensure_runner_artifact(source: text) -> text:
+    val enable_cache = rt_env_get("MCPGDB_ENABLE_SMF_CACHE") ?? ""
+    if not (enable_cache == "1" or enable_cache.to_lower() == "true" or enable_cache.to_lower() == "yes"):
+        return ""
+    val artifact = runner_artifact_path(source)
+    if rt_file_exists(artifact):
+        return artifact
+    rt_dir_create(runner_cache_dir(), true)
+    val (_stdout, _stderr, code) = rt_process_run(simple_binary(), ["compile", source, "-o", artifact])
+    if code != 0:
+        return ""
+    artifact
+
+fn run_compiled_runner(artifact: text, request_path: text) -> (text, text, i64):
+    val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(artifact)
+    rt_process_run(shell_bin(), ["-c", cmd])
+
+fn run_source_runner(source: text, request_path: text) -> (text, text, i64):
+    val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(source)
+    rt_process_run(shell_bin(), ["-c", cmd])
 
 fn run_tool_runner(id: text, body: text) -> text:
     val request_path = temp_request_path()
@@ -82,9 +136,15 @@ fn run_tool_runner(id: text, body: text) -> text:
         return jsonrpc_error(id, -32603, "failed to allocate temp request file")
     if not rt_file_write_text(request_path, body):
         return jsonrpc_error(id, -32603, "failed to write temp request file")
-    val runner = runner_for_body(body)
-    val cmd = "MCPGDB_REQUEST_PATH=" + shell_quote(request_path) + " " + shell_quote(simple_binary()) + " " + shell_quote(runner)
-    val (stdout, stderr, code) = rt_process_run(shell_bin(), ["-c", cmd])
+    val source = runner_source_for_body(body)
+    var stdout = ""
+    var stderr = ""
+    var code = 0
+    val artifact = ensure_runner_artifact(source)
+    if artifact != "":
+        (stdout, stderr, code) = run_compiled_runner(artifact, request_path)
+    if artifact == "" or code != 0 or stdout.trim() == "":
+        (stdout, stderr, code) = run_source_runner(source, request_path)
     rt_file_delete(request_path)
     if code != 0:
         var message = stderr.trim()
@@ -97,3 +157,5 @@ fn run_tool_runner(id: text, body: text) -> text:
     if response == "":
         return jsonrpc_error(id, -32603, "tool runner returned empty response")
     response
+
+main()

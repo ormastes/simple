@@ -35,6 +35,8 @@ lanes once the host runtime works:
   - `config/t32/stm32h7_gdb_start.cmm`
 - shell helpers:
   - `scripts/t32q.shs`
+  - `scripts/t32_semihost_hello.shs`
+  - `scripts/t32_rcl_doctor.shs`
   - `scripts/t32_start_stm.shs`
   - `scripts/t32_check_ready.shs`
   - `scripts/t32_enable_gdb.shs`
@@ -46,6 +48,7 @@ lanes once the host runtime works:
 - readiness specs:
   - `test/integration/debug/hardware/t32_native_spec.spl`
   - `test/integration/debug/hardware/t32_gdb_bridge_spec.spl`
+  - `test/integration/debug/hardware/t32_semihost_hello_spec.spl`
 
 ## Verified Local Symptoms
 
@@ -162,6 +165,30 @@ command for quick X11/container/port diagnostics.
 Under the hood, the headless container starts `t32mciserver` from the vendor
 install mounted at `/opt/t32`.
 
+## Hello-World Smoke Flow
+
+The repo now ships a concrete firmware-load smoke runner:
+
+```bash
+scripts/t32_semihost_hello.shs --board stm32wb
+scripts/t32_semihost_hello.shs --board stm32h7
+```
+
+What it does:
+
+1. builds the shared fixture `test/fixtures/baremetal/stm_semihost_smoke.s`
+2. launches TRACE32 for the selected board via `scripts/t32_start_stm.shs`
+3. checks live TRACE32 readiness via `scripts/t32_check_ready.shs`
+4. loads the generated ELF with `Data.LOAD.Elf`
+5. runs briefly, halts, and reads `MCP_OUT` via `WinPrint.AREA`
+6. verifies the semihost marker `simple-stm-smoke`
+
+For local compiler-only verification without touching TRACE32:
+
+```bash
+scripts/t32_semihost_hello.shs --board stm32wb --build-only
+```
+
 ## GUI Container Path
 
 When you need to reopen TRACE32 in a visible container, use:
@@ -187,6 +214,18 @@ Limitations:
   the default path here
 - the repo still does not bundle vendor GUI compatibility libraries; vendor
   runtime files must come from your local `/opt/t32` installation
+
+To isolate old PowerView/RCL failure from raw probe failure, run:
+
+```bash
+scripts/t32_rcl_doctor.shs
+```
+
+This separately checks:
+
+1. `t32usbchecker` probe communication
+2. `t32marm -c config/t32/t32_rcl_only.t32` under `xvfb-run`
+3. whether port `20000` or `t32rem PING` ever becomes available
 
 ## Start Commands
 
@@ -270,6 +309,7 @@ Once the session is live, rerun:
 ```bash
 ./src/compiler_rust/target/debug/simple test test/integration/debug/hardware/t32_native_spec.spl --leak=off
 ./src/compiler_rust/target/debug/simple test test/integration/debug/hardware/t32_gdb_bridge_spec.spl --leak=off
+./src/compiler_rust/target/debug/simple test test/integration/debug/hardware/t32_semihost_hello_spec.spl --leak=off
 ./src/compiler_rust/target/debug/simple test test/integration/debug/hardware/hardware_check_spec.spl --leak=off
 ```
 

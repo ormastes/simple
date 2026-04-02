@@ -1,254 +1,387 @@
 /*
- * baremetal_stubs.c -- ARM64 (AArch64) baremetal runtime stubs (COMPLETE)
+ * SimpleOS ARM64 (AArch64) Baremetal Runtime Stubs
  *
- * Provides the FULL Simple runtime support needed for SimpleOS to boot
- * in QEMU with serial output.
+ * Provides a complete freestanding runtime for the Simple language compiler
+ * targeting ARM64 bare-metal (QEMU virt machine, PL011 UART).
  *
  * Sections:
- *   1. Serial I/O (PL011 UART at MMIO 0x09000000)
- *   2. RuntimeValue tagging system
- *   3. Heap allocator (16MB bump)
- *   4. String operations
- *   5. Print functions
- *   6. Memory primitives
- *   7. Framebuffer helpers
- *   8. MMIO accessors
- *   9. Array / comparison operations
- *  10. _start entry point
- *  11. ~200 no-op runtime stubs
+ *   1. Includes and types
+ *   2. Serial I/O (PL011 UART at 0x09000000)
+ *   3. RuntimeValue tagging
+ *   4. Heap allocator (bump, 16 MB)
+ *   5. Memory functions
+ *   6. String operations
+ *   7. Print functions
+ *   8. Framebuffer copy
+ *   9. _start (PL011 init, call spl_start, wfe loop)
+ *  10. No-op stubs (~200 runtime functions)
+ *  11. Real ARM64 MMIO overrides
  */
 
-#include <stddef.h>
+/* ===================================================================
+ * 1. Includes and types
+ * =================================================================== */
+
 #include <stdint.h>
+#include <stddef.h>
 
-/* ================================================================
- * 1. Serial I/O -- PL011 UART at 0x09000000 (QEMU virt machine)
- * ================================================================ */
+typedef int64_t RuntimeValue;
 
-#define PL011_BASE  0x09000000ULL
+/* ===================================================================
+ * 2. Serial I/O — PL011 UART at MMIO 0x09000000 (QEMU virt)
+ * =================================================================== */
+
+#define PL011_BASE   0x09000000ULL
 
 /* PL011 register offsets */
-#define PL011_DR    0x000  /* Data register */
-#define PL011_FR    0x018  /* Flag register */
-#define PL011_IBRD  0x024  /* Integer baud rate */
-#define PL011_FBRD  0x028  /* Fractional baud rate */
-#define PL011_LCRH  0x02C  /* Line control */
-#define PL011_CR    0x030  /* Control register */
-#define PL011_IMSC  0x038  /* Interrupt mask */
+#define PL011_DR     0x000   /* Data Register */
+#define PL011_FR     0x018   /* Flag Register */
+#define PL011_IBRD   0x024   /* Integer Baud Rate Divisor */
+#define PL011_FBRD   0x028   /* Fractional Baud Rate Divisor */
+#define PL011_LCRH   0x02C   /* Line Control Register */
+#define PL011_CR     0x030   /* Control Register */
+#define PL011_IMSC   0x038   /* Interrupt Mask Set/Clear */
+#define PL011_ICR    0x044   /* Interrupt Clear Register */
 
-/* Flag register bits */
+/* Flag Register bits */
 #define PL011_FR_TXFF  (1 << 5)  /* Transmit FIFO full */
 #define PL011_FR_RXFE  (1 << 4)  /* Receive FIFO empty */
+#define PL011_FR_BUSY  (1 << 3)  /* UART busy */
 
-static inline void mmio_write32(uint64_t addr, uint32_t val) {
-    *(volatile uint32_t *)(uintptr_t)addr = val;
+static inline volatile uint32_t *pl011_reg(uint32_t offset)
+{
+    return (volatile uint32_t *)(PL011_BASE + offset);
 }
 
-static inline uint32_t mmio_read32(uint64_t addr) {
-    return *(volatile uint32_t *)(uintptr_t)addr;
+static void serial_putchar(char c)
+{
+    /* Wait until transmit FIFO is not full */
+    while (*pl011_reg(PL011_FR) & PL011_FR_TXFF) {}
+    *pl011_reg(PL011_DR) = (uint32_t)(unsigned char)c;
 }
 
-static int g_serial_inited = 0;
-
-static void _serial_init(void) {
-    if (g_serial_inited) return;
-    /* Disable UART */
-    mmio_write32(PL011_BASE + PL011_CR, 0);
-    /* Set baud rate (115200 @ 24MHz clock: IBRD=13, FBRD=1) */
-    mmio_write32(PL011_BASE + PL011_IBRD, 13);
-    mmio_write32(PL011_BASE + PL011_FBRD, 1);
-    /* 8N1, enable FIFOs */
-    mmio_write32(PL011_BASE + PL011_LCRH, (3 << 5) | (1 << 4));
-    /* Disable all interrupts */
-    mmio_write32(PL011_BASE + PL011_IMSC, 0);
-    /* Enable UART, TX, RX */
-    mmio_write32(PL011_BASE + PL011_CR, (1 << 0) | (1 << 8) | (1 << 9));
-    g_serial_inited = 1;
-}
-
-static void serial_putchar(char c) {
-    _serial_init();
-    while (mmio_read32(PL011_BASE + PL011_FR) & PL011_FR_TXFF) {}
-    mmio_write32(PL011_BASE + PL011_DR, (uint32_t)(unsigned char)c);
-}
-
-static void serial_puts(const char *s) {
+static void serial_puts(const char *s)
+{
     while (*s) {
         if (*s == '\n') serial_putchar('\r');
         serial_putchar(*s++);
     }
 }
 
-/* ================================================================
- * 2. RuntimeValue tagging system
- * ================================================================ */
-
-typedef int64_t RuntimeValue;
-
-#define TAG_MASK     0x7ULL
-#define TAG_INT      0x0ULL
-#define TAG_HEAP     0x1ULL
-#define TAG_SPECIAL  0x3ULL
-
-#define ENCODE_INT(v)   ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)   ((int64_t)((uint64_t)(v) >> 3))
-#define ENCODE_PTR(p)   ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)   ((void*)((uint64_t)(v) & ~TAG_MASK))
-#define IS_INT(v)       (((uint64_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)      (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_SPECIAL(v)   (((uint64_t)(v) & TAG_MASK) == TAG_SPECIAL)
-
-#define NIL_VALUE       ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE      ((RuntimeValue)(0x8ULL | TAG_SPECIAL))
-#define FALSE_VALUE     ((RuntimeValue)(0x10ULL | TAG_SPECIAL))
-
-typedef struct { uint32_t type; uint32_t size; } HeapHeader;
-typedef struct { HeapHeader header; uint32_t len; char data[]; } RuntimeString;
-typedef struct { HeapHeader header; uint32_t len; uint32_t cap; RuntimeValue data[]; } RuntimeArray;
-
-#define HEAP_TYPE_STRING  1
-#define HEAP_TYPE_ARRAY   2
-#define HEAP_TYPE_OBJECT  3
-
-/* ================================================================
- * 3. Heap allocator -- 16MB bump allocator, 16-byte aligned
- * ================================================================ */
-
-static char _heap[16 * 1024 * 1024]; /* 16 MB */
-static size_t _heap_offset = 0;
-
-void *malloc(size_t size) {
-    size = (size + 15) & ~(size_t)15;
-    if (_heap_offset + size > sizeof(_heap)) return 0;
-    void *ptr = &_heap[_heap_offset];
-    _heap_offset += size;
-    return ptr;
+static void serial_put_hex(uint64_t v)
+{
+    static const char hex[] = "0123456789abcdef";
+    serial_puts("0x");
+    int started = 0;
+    for (int i = 60; i >= 0; i -= 4) {
+        int nibble = (v >> i) & 0xF;
+        if (nibble || started || i == 0) {
+            serial_putchar(hex[nibble]);
+            started = 1;
+        }
+    }
 }
 
-void free(void *ptr) {
-    (void)ptr; /* bump allocator -- no reclaim */
+static void serial_put_dec(int64_t v)
+{
+    if (v < 0) {
+        serial_putchar('-');
+        /* Handle INT64_MIN carefully */
+        if (v == (-9223372036854775807LL - 1)) {
+            serial_puts("9223372036854775808");
+            return;
+        }
+        v = -v;
+    }
+    char buf[21];
+    int pos = 0;
+    uint64_t uv = (uint64_t)v;
+    do {
+        buf[pos++] = '0' + (char)(uv % 10);
+        uv /= 10;
+    } while (uv > 0);
+    while (pos > 0) {
+        serial_putchar(buf[--pos]);
+    }
 }
 
-void *realloc(void *ptr, size_t new_size) {
-    void *new_ptr = malloc(new_size);
-    if (ptr && new_ptr) __builtin_memcpy(new_ptr, ptr, new_size);
-    return new_ptr;
+/* ===================================================================
+ * 3. RuntimeValue tagging
+ * =================================================================== */
+
+#define TAG_MASK    0x7ULL
+#define TAG_INT     0x0ULL
+#define TAG_HEAP    0x1ULL
+#define TAG_FLOAT   0x2ULL
+#define TAG_SPECIAL 0x3ULL
+
+#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
+
+#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
+
+#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
+#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define IS_FLOAT(v)    (((uint64_t)(v) & TAG_MASK) == TAG_FLOAT)
+#define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
+
+#define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
+#define TRUE_VALUE     ENCODE_INT(1)
+#define FALSE_VALUE    ENCODE_INT(0)
+
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+} HeapHeader;
+
+typedef struct {
+    HeapHeader hdr;
+    uint32_t   len;
+    char       data[];
+} RuntimeString;
+
+typedef struct {
+    HeapHeader   hdr;
+    uint32_t     len;
+    uint32_t     cap;
+    RuntimeValue items[];
+} RuntimeArray;
+
+#define HEAP_STRING 1
+#define HEAP_ARRAY  2
+#define HEAP_MAP    3
+#define HEAP_OBJECT 4
+
+/* ===================================================================
+ * 4. Heap allocator — bump allocator, 16 MB
+ * =================================================================== */
+
+static char   _heap[16 * 1024 * 1024] __attribute__((aligned(16)));
+static size_t _heap_off = 0;
+
+void *malloc(size_t sz)
+{
+    sz = (sz + 15) & ~(size_t)15;
+    if (_heap_off + sz > sizeof(_heap)) {
+        serial_puts("[PANIC] heap exhausted\r\n");
+        return (void *)0;
+    }
+    void *p = &_heap[_heap_off];
+    _heap_off += sz;
+    return p;
 }
 
-void *calloc(size_t n, size_t size) {
-    size_t total = n * size;
-    void *ptr = malloc(total);
-    if (ptr) __builtin_memset(ptr, 0, total);
-    return ptr;
+void free(void *p)
+{
+    (void)p; /* bump allocator: no-op */
 }
 
-RuntimeValue rt_alloc(RuntimeValue size) {
-    return ENCODE_PTR(malloc((size_t)DECODE_INT(size)));
+void *realloc(void *p, size_t sz)
+{
+    void *n = malloc(sz);
+    if (p && n) __builtin_memcpy(n, p, sz);
+    return n;
 }
 
-/* ================================================================
- * 4. String operations
- * ================================================================ */
+void *calloc(size_t n, size_t sz)
+{
+    size_t total = n * sz;
+    void *p = malloc(total);
+    if (p) __builtin_memset(p, 0, total);
+    return p;
+}
 
-RuntimeValue rt_string_new(RuntimeValue data_ptr, RuntimeValue len_val) {
+RuntimeValue rt_alloc(RuntimeValue sz)
+{
+    void *p = malloc((size_t)DECODE_INT(sz));
+    if (!p) return NIL_VALUE;
+    return ENCODE_PTR(p);
+}
+
+RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
+{
+    size_t bytes = (size_t)DECODE_INT(sz);
+    void *p = malloc(bytes);
+    if (!p) return NIL_VALUE;
+    __builtin_memset(p, 0, bytes);
+    return ENCODE_PTR(p);
+}
+
+RuntimeValue rt_dealloc(RuntimeValue ptr)
+{
+    (void)ptr;
+    return NIL_VALUE;
+}
+
+/* ===================================================================
+ * 5. Memory functions — freestanding replacements
+ * =================================================================== */
+
+void *memcpy(void *dst, const void *src, size_t n)
+{
+    uint8_t       *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
+void *memset(void *dst, int c, size_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    for (size_t i = 0; i < n; i++) d[i] = (uint8_t)c;
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, size_t n)
+{
+    uint8_t       *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    if (d < s) {
+        for (size_t i = 0; i < n; i++) d[i] = s[i];
+    } else if (d > s) {
+        for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
+    }
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, size_t n)
+{
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+    for (size_t i = 0; i < n; i++) {
+        if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
+    }
+    return 0;
+}
+
+size_t strlen(const char *s)
+{
+    size_t len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+char *strcpy(char *dst, const char *src)
+{
+    char *d = dst;
+    while ((*d++ = *src++)) {}
+    return dst;
+}
+
+char *strncpy(char *dst, const char *src, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n && src[i]; i++) dst[i] = src[i];
+    for (; i < n; i++) dst[i] = '\0';
+    return dst;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+int strncmp(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+        if (!a[i]) break;
+    }
+    return 0;
+}
+
+char *strcat(char *dst, const char *src)
+{
+    char *d = dst + strlen(dst);
+    while ((*d++ = *src++)) {}
+    return dst;
+}
+
+/* ===================================================================
+ * 6. String operations
+ * =================================================================== */
+
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
+{
     int64_t len = DECODE_INT(len_val);
     if (len < 0) len = 0;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
-    s->header.type = HEAP_TYPE_STRING;
-    s->header.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
-    if (IS_HEAP(data_ptr)) {
-        __builtin_memcpy(s->data, DECODE_PTR(data_ptr), (size_t)len);
-    } else if (data_ptr) {
-        __builtin_memcpy(s->data, (const void *)(uintptr_t)data_ptr, (size_t)len);
+    if (IS_HEAP(data)) {
+        __builtin_memcpy(s->data, DECODE_PTR(data), (size_t)len);
+    } else if (data != 0) {
+        /* data might be a raw pointer passed as integer */
+        const char *src = (const char *)(uintptr_t)data;
+        __builtin_memcpy(s->data, src, (size_t)len);
     }
-    s->data[len] = 0;
+    s->data[len] = '\0';
     return ENCODE_PTR(s);
 }
 
-RuntimeValue rt_string_from_cstr(const char *cstr) {
+RuntimeValue rt_string_from_cstr(const char *cstr)
+{
     if (!cstr) return NIL_VALUE;
-    size_t len = 0;
-    while (cstr[len]) len++;
+    size_t len = strlen(cstr);
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
     if (!s) return NIL_VALUE;
-    s->header.type = HEAP_TYPE_STRING;
-    s->header.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = (uint32_t)len;
     __builtin_memcpy(s->data, cstr, len);
-    s->data[len] = 0;
+    s->data[len] = '\0';
     return ENCODE_PTR(s);
 }
 
-RuntimeValue rt_string_len(RuntimeValue str) {
+RuntimeValue rt_string_len(RuntimeValue str)
+{
     if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (s->header.type != HEAP_TYPE_STRING) return ENCODE_INT(0);
+    if (!s) return ENCODE_INT(0);
     return ENCODE_INT(s->len);
 }
 
-RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx_val) {
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
+{
     if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t idx = DECODE_INT(idx_val);
-    if (idx < 0 || idx >= (int64_t)s->len) return ENCODE_INT(0);
-    return ENCODE_INT((uint8_t)s->data[idx]);
+    int64_t i = DECODE_INT(idx);
+    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
+    return ENCODE_INT((int64_t)(unsigned char)s->data[i]);
 }
 
-RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b) {
-    uint32_t la = 0, lb = 0;
-    const char *da = "", *db = "";
-    if (IS_HEAP(a)) {
-        RuntimeString *sa = (RuntimeString *)DECODE_PTR(a);
-        if (sa->header.type == HEAP_TYPE_STRING) { la = sa->len; da = sa->data; }
-    }
-    if (IS_HEAP(b)) {
-        RuntimeString *sb = (RuntimeString *)DECODE_PTR(b);
-        if (sb->header.type == HEAP_TYPE_STRING) { lb = sb->len; db = sb->data; }
-    }
-    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + la + lb + 1);
+RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
+{
+    if (!IS_HEAP(a) && !IS_HEAP(b)) return NIL_VALUE;
+
+    RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : (RuntimeString *)0;
+    RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : (RuntimeString *)0;
+
+    uint32_t la = sa ? sa->len : 0;
+    uint32_t lb = sb ? sb->len : 0;
+    uint32_t total = la + lb;
+
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + total + 1);
     if (!r) return NIL_VALUE;
-    r->header.type = HEAP_TYPE_STRING;
-    r->header.size = (uint32_t)(sizeof(RuntimeString) + la + lb + 1);
-    r->len = la + lb;
-    __builtin_memcpy(r->data, da, la);
-    __builtin_memcpy(r->data + la, db, lb);
-    r->data[la + lb] = 0;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + total + 1);
+    r->len = total;
+    if (sa) __builtin_memcpy(r->data, sa->data, la);
+    if (sb) __builtin_memcpy(r->data + la, sb->data, lb);
+    r->data[total] = '\0';
     return ENCODE_PTR(r);
 }
 
-RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start_val, RuntimeValue end_val) {
-    if (!IS_HEAP(str)) return NIL_VALUE;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t start = DECODE_INT(start_val);
-    int64_t end = DECODE_INT(end_val);
-    if (start < 0) start = 0;
-    if (end > (int64_t)s->len) end = s->len;
-    if (start >= end) {
-        RuntimeString *empty = (RuntimeString *)malloc(sizeof(RuntimeString) + 1);
-        if (!empty) return NIL_VALUE;
-        empty->header.type = HEAP_TYPE_STRING;
-        empty->header.size = (uint32_t)(sizeof(RuntimeString) + 1);
-        empty->len = 0;
-        empty->data[0] = 0;
-        return ENCODE_PTR(empty);
-    }
-    int64_t len = end - start;
-    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
-    if (!r) return NIL_VALUE;
-    r->header.type = HEAP_TYPE_STRING;
-    r->header.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
-    r->len = (uint32_t)len;
-    __builtin_memcpy(r->data, s->data + start, (size_t)len);
-    r->data[len] = 0;
-    return ENCODE_PTR(r);
-}
-
-RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b) {
+RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
+{
     if (!IS_HEAP(a) || !IS_HEAP(b)) return ENCODE_INT(a == b ? 1 : 0);
     RuntimeString *sa = (RuntimeString *)DECODE_PTR(a);
     RuntimeString *sb = (RuntimeString *)DECODE_PTR(b);
+    if (!sa || !sb) return ENCODE_INT(0);
     if (sa->len != sb->len) return ENCODE_INT(0);
     for (uint32_t i = 0; i < sa->len; i++) {
         if (sa->data[i] != sb->data[i]) return ENCODE_INT(0);
@@ -256,783 +389,814 @@ RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b) {
     return ENCODE_INT(1);
 }
 
-RuntimeValue rt_string_find(RuntimeValue str, RuntimeValue needle) {
-    if (!IS_HEAP(str) || !IS_HEAP(needle)) return ENCODE_INT(-1);
+RuntimeValue rt_string_data(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    RuntimeString *n = (RuntimeString *)DECODE_PTR(needle);
-    if (n->len == 0) return ENCODE_INT(0);
-    if (n->len > s->len) return ENCODE_INT(-1);
-    for (uint32_t i = 0; i <= s->len - n->len; i++) {
-        int found = 1;
-        for (uint32_t j = 0; j < n->len; j++) {
-            if (s->data[i + j] != n->data[j]) { found = 0; break; }
-        }
-        if (found) return ENCODE_INT(i);
-    }
-    return ENCODE_INT(-1);
+    if (!s) return 0;
+    return (RuntimeValue)(uintptr_t)s->data;
 }
 
-/* ================================================================
- * 5. Print functions
- * ================================================================ */
+RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue end)
+{
+    if (!IS_HEAP(str)) return NIL_VALUE;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s) return NIL_VALUE;
+    int64_t a = DECODE_INT(start);
+    int64_t b = DECODE_INT(end);
+    if (a < 0) a = 0;
+    if (b > (int64_t)s->len) b = (int64_t)s->len;
+    if (a >= b) {
+        RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + 1);
+        if (!r) return NIL_VALUE;
+        r->hdr.type = HEAP_STRING;
+        r->hdr.size = (uint32_t)(sizeof(RuntimeString) + 1);
+        r->len = 0;
+        r->data[0] = '\0';
+        return ENCODE_PTR(r);
+    }
+    uint32_t len = (uint32_t)(b - a);
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+    if (!r) return NIL_VALUE;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    r->len = len;
+    __builtin_memcpy(r->data, s->data + a, len);
+    r->data[len] = '\0';
+    return ENCODE_PTR(r);
+}
 
-void rt_print_str(RuntimeValue str) {
+RuntimeValue rt_len(RuntimeValue v)
+{
+    if (IS_INT(v)) return ENCODE_INT(0);
+    if (!IS_HEAP(v)) return ENCODE_INT(0);
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (!h) return ENCODE_INT(0);
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        return ENCODE_INT(s->len);
+    }
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        return ENCODE_INT(a->len);
+    }
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
+{
+    if (!IS_HEAP(v)) return NIL_VALUE;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (!h) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx);
+    if (h->type == HEAP_STRING) {
+        return rt_string_char_at(v, idx);
+    }
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+        return a->items[i];
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
+{
+    if (!IS_HEAP(v)) return NIL_VALUE;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (!h) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx);
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+        a->items[i] = val;
+        return val;
+    }
+    return NIL_VALUE;
+}
+
+/* ===================================================================
+ * 7. Print functions
+ * =================================================================== */
+
+void rt_print_str(RuntimeValue str)
+{
     if (!IS_HEAP(str)) return;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (s->header.type != HEAP_TYPE_STRING) return;
-    for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+    if (!s) return;
+    for (uint32_t i = 0; i < s->len; i++) {
+        serial_putchar(s->data[i]);
+    }
 }
 
-void rt_println_str(RuntimeValue str) {
+void rt_println_str(RuntimeValue str)
+{
     rt_print_str(str);
     serial_putchar('\r');
     serial_putchar('\n');
 }
 
-void rt_print_value(RuntimeValue val) {
+void rt_print_value(RuntimeValue val)
+{
     if (IS_INT(val)) {
-        int64_t n = DECODE_INT(val);
-        char buf[32];
-        int i = 0;
-        int neg = 0;
-        if (n < 0) { neg = 1; n = -n; }
-        if (n == 0) { buf[i++] = '0'; }
-        else { while (n > 0) { buf[i++] = '0' + (int)(n % 10); n /= 10; } }
-        if (neg) buf[i++] = '-';
-        while (i > 0) serial_putchar(buf[--i]);
+        serial_put_dec(DECODE_INT(val));
     } else if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
-        if (h->type == HEAP_TYPE_STRING) {
+        if (h && h->type == HEAP_STRING) {
             rt_print_str(val);
         } else {
-            serial_puts("<object>");
+            serial_puts("<object@");
+            serial_put_hex((uint64_t)(uintptr_t)h);
+            serial_putchar('>');
         }
-    } else if (val == NIL_VALUE) {
+    } else if (IS_NIL(val)) {
         serial_puts("nil");
-    } else if (val == TRUE_VALUE) {
-        serial_puts("true");
-    } else if (val == FALSE_VALUE) {
-        serial_puts("false");
+    } else if (IS_FLOAT(val)) {
+        serial_puts("<float>");
+    } else {
+        serial_puts("<unknown:");
+        serial_put_hex((uint64_t)val);
+        serial_putchar('>');
     }
 }
 
-void rt_println_value(RuntimeValue val) {
+void rt_println_value(RuntimeValue val)
+{
     rt_print_value(val);
     serial_putchar('\r');
     serial_putchar('\n');
 }
 
-void rt_print(RuntimeValue val) { rt_print_value(val); }
-void rt_println(RuntimeValue val) { rt_println_value(val); }
+void rt_print_int(RuntimeValue val)
+{
+    serial_put_dec(DECODE_INT(val));
+}
 
-void serial_println(const char *s) {
-    if (s) serial_puts(s);
+void rt_println_int(RuntimeValue val)
+{
+    serial_put_dec(DECODE_INT(val));
     serial_putchar('\r');
     serial_putchar('\n');
 }
 
-/* ================================================================
- * 6. Memory primitives
- * ================================================================ */
-
-void *memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    for (size_t i = 0; i < n; i++) d[i] = s[i];
-    return dst;
+void rt_print_char(RuntimeValue val)
+{
+    serial_putchar((char)DECODE_INT(val));
 }
 
-void *memset(void *s, int c, size_t n) {
-    unsigned char *p = (unsigned char *)s;
-    for (size_t i = 0; i < n; i++) p[i] = (unsigned char)c;
-    return s;
+void rt_print_hex(RuntimeValue val)
+{
+    serial_put_hex((uint64_t)DECODE_INT(val));
 }
 
-void *memmove(void *dst, const void *src, size_t n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    if (d < s) {
-        for (size_t i = 0; i < n; i++) d[i] = s[i];
-    } else {
-        for (size_t i = n; i > 0; i--) d[i - 1] = s[i - 1];
-    }
-    return dst;
+void rt_print_bool(RuntimeValue val)
+{
+    if (DECODE_INT(val)) serial_puts("true");
+    else serial_puts("false");
 }
 
-int memcmp(const void *s1, const void *s2, size_t n) {
-    const unsigned char *a = (const unsigned char *)s1;
-    const unsigned char *b = (const unsigned char *)s2;
-    for (size_t i = 0; i < n; i++) {
-        if (a[i] != b[i]) return (int)a[i] - (int)b[i];
-    }
-    return 0;
+void rt_println_bool(RuntimeValue val)
+{
+    rt_print_bool(val);
+    serial_putchar('\r');
+    serial_putchar('\n');
 }
 
-size_t strlen(const char *s) {
-    size_t len = 0;
-    while (s[len]) len++;
-    return len;
-}
+/* ===================================================================
+ * 8. Framebuffer copy
+ * =================================================================== */
 
-int strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-
-char *strcpy(char *dst, const char *src) {
-    char *d = dst;
-    while ((*d++ = *src++)) {}
-    return dst;
-}
-
-char *strncpy(char *dst, const char *src, size_t n) {
-    size_t i;
-    for (i = 0; i < n && src[i]; i++) dst[i] = src[i];
-    for (; i < n; i++) dst[i] = 0;
-    return dst;
-}
-
-/* ================================================================
- * 7. Framebuffer helpers
- * ================================================================ */
-
-void rt_framebuffer_copy(int64_t dst_addr, int64_t *src, int64_t count) {
-    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)DECODE_INT(dst_addr);
+void rt_framebuffer_copy(RuntimeValue dst, RuntimeValue src, RuntimeValue count)
+{
+    if (!IS_HEAP(dst) || !IS_HEAP(src)) return;
+    uint8_t *d = (uint8_t *)DECODE_PTR(dst);
+    const uint8_t *s = (const uint8_t *)DECODE_PTR(src);
     int64_t n = DECODE_INT(count);
-    for (int64_t i = 0; i < n; i++) dst[i] = (uint32_t)DECODE_INT(src[i]);
+    if (n <= 0) return;
+    for (int64_t i = 0; i < n; i++) d[i] = s[i];
 }
 
-void rt_fb_fill_rect(int64_t fb_addr, int64_t pitch,
-                     int64_t x, int64_t y, int64_t w, int64_t h,
-                     int64_t color) {
-    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)fb_addr;
-    uint32_t c = (uint32_t)color;
-    int64_t stride = pitch / 4;
-    for (int64_t row = y; row < y + h; row++) {
-        for (int64_t col = x; col < x + w; col++) {
-            fb[row * stride + col] = c;
-        }
-    }
+void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue val)
+{
+    if (!IS_HEAP(addr)) return;
+    uint8_t *base = (uint8_t *)DECODE_PTR(addr);
+    int64_t off = DECODE_INT(offset);
+    int64_t v = DECODE_INT(val);
+    base[off] = (uint8_t)v;
 }
 
-/* ================================================================
- * 8. MMIO accessors
- * ================================================================ */
+/* ===================================================================
+ * 9. _start — PL011 init, spl_start, wfe loop
+ * =================================================================== */
 
-void rt_mmio_write_u8(uint64_t addr, uint64_t val) {
-    *(volatile uint8_t *)(uintptr_t)addr = (uint8_t)val;
-}
-uint64_t rt_mmio_read_u8(uint64_t addr) {
-    return *(volatile uint8_t *)(uintptr_t)addr;
-}
-void rt_mmio_write_u16(uint64_t addr, uint64_t val) {
-    *(volatile uint16_t *)(uintptr_t)addr = (uint16_t)val;
-}
-uint64_t rt_mmio_read_u16(uint64_t addr) {
-    return *(volatile uint16_t *)(uintptr_t)addr;
-}
-void rt_mmio_write_u32(uint64_t addr, uint64_t val) {
-    *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)val;
-}
-uint64_t rt_mmio_read_u32(uint64_t addr) {
-    return *(volatile uint32_t *)(uintptr_t)addr;
-}
-void rt_mmio_write_u64(uint64_t addr, uint64_t val) {
-    *(volatile uint64_t *)(uintptr_t)addr = val;
-}
-uint64_t rt_mmio_read_u64(uint64_t addr) {
-    return *(volatile uint64_t *)(uintptr_t)addr;
-}
+static void _pl011_init(void)
+{
+    /* Disable UART */
+    *pl011_reg(PL011_CR) = 0;
 
-/* ================================================================
- * 9. Array / comparison / conversion operations
- * ================================================================ */
+    /* Clear all interrupts */
+    *pl011_reg(PL011_ICR) = 0x7FF;
 
-RuntimeValue rt_array_new(RuntimeValue cap_val) {
-    int64_t cap = DECODE_INT(cap_val);
-    if (cap < 4) cap = 4;
-    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
-    if (!a) return NIL_VALUE;
-    a->header.type = HEAP_TYPE_ARRAY;
-    a->header.size = (uint32_t)(sizeof(RuntimeArray) + cap * sizeof(RuntimeValue));
-    a->len = 0;
-    a->cap = (uint32_t)cap;
-    return ENCODE_PTR(a);
+    /* Set baud rate: assuming 24 MHz clock, 115200 baud
+     * IBRD = 24000000 / (16 * 115200) = 13
+     * FBRD = frac(0.0208...) * 64 + 0.5 = 1 */
+    *pl011_reg(PL011_IBRD) = 13;
+    *pl011_reg(PL011_FBRD) = 1;
+
+    /* 8 bits, FIFO enabled, no parity, 1 stop bit */
+    *pl011_reg(PL011_LCRH) = (3 << 5) | (1 << 4);  /* WLEN=11 (8 bits), FEN=1 */
+
+    /* Mask all interrupts */
+    *pl011_reg(PL011_IMSC) = 0;
+
+    /* Enable UART, TX, RX */
+    *pl011_reg(PL011_CR) = (1 << 0) | (1 << 8) | (1 << 9);  /* UARTEN | TXE | RXE */
 }
 
-void rt_array_push(RuntimeValue arr, RuntimeValue value) {
-    if (!IS_HEAP(arr)) return;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (a->header.type != HEAP_TYPE_ARRAY) return;
-    if (a->len >= a->cap) return;
-    a->data[a->len++] = value;
-}
+extern void spl_start(void) __attribute__((weak));
 
-RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx_val) {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    int64_t idx = DECODE_INT(idx_val);
-    if (idx < 0 || idx >= (int64_t)a->len) return NIL_VALUE;
-    return a->data[idx];
-}
+void _start(void)
+{
+    _pl011_init();
 
-RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx_val, RuntimeValue value) {
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    int64_t idx = DECODE_INT(idx_val);
-    if (idx < 0 || idx >= (int64_t)a->len) return NIL_VALUE;
-    a->data[idx] = value;
-    return value;
-}
+    serial_puts("SimpleOS ARM64 boot\r\n");
+    serial_puts("[BOOT] PL011 UART at 0x09000000\r\n");
+    serial_puts("[BOOT] Heap: 16 MB bump allocator\r\n");
+    serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
-RuntimeValue rt_array_len(RuntimeValue arr) {
-    if (!IS_HEAP(arr)) return ENCODE_INT(0);
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    return ENCODE_INT(a->len);
-}
-
-RuntimeValue rt_len(RuntimeValue obj) {
-    if (!IS_HEAP(obj)) return ENCODE_INT(0);
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(obj);
-    if (h->type == HEAP_TYPE_STRING) return rt_string_len(obj);
-    if (h->type == HEAP_TYPE_ARRAY) return rt_array_len(obj);
-    return ENCODE_INT(0);
-}
-
-RuntimeValue rt_int_to_string(RuntimeValue val) {
-    int64_t n = DECODE_INT(val);
-    char buf[32];
-    int i = 0;
-    int neg = 0;
-    if (n < 0) { neg = 1; n = -n; }
-    if (n == 0) { buf[i++] = '0'; }
-    else { while (n > 0) { buf[i++] = '0' + (int)(n % 10); n /= 10; } }
-    if (neg) buf[i++] = '-';
-    char rev[32];
-    int j = 0;
-    while (i > 0) rev[j++] = buf[--i];
-    rev[j] = 0;
-    return rt_string_from_cstr(rev);
-}
-
-RuntimeValue rt_value_to_string(RuntimeValue val) {
-    if (IS_INT(val)) return rt_int_to_string(val);
-    if (IS_HEAP(val)) {
-        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
-        if (h->type == HEAP_TYPE_STRING) return val;
-        return rt_string_from_cstr("<object>");
-    }
-    if (val == NIL_VALUE) return rt_string_from_cstr("nil");
-    if (val == TRUE_VALUE) return rt_string_from_cstr("true");
-    if (val == FALSE_VALUE) return rt_string_from_cstr("false");
-    return rt_string_from_cstr("<unknown>");
-}
-
-/* Comparison operations */
-RuntimeValue rt_eq(RuntimeValue a, RuntimeValue b) {
-    if (IS_INT(a) && IS_INT(b)) return ENCODE_INT(a == b ? 1 : 0);
-    if (IS_HEAP(a) && IS_HEAP(b)) {
-        HeapHeader *ha = (HeapHeader *)DECODE_PTR(a);
-        HeapHeader *hb = (HeapHeader *)DECODE_PTR(b);
-        if (ha->type == HEAP_TYPE_STRING && hb->type == HEAP_TYPE_STRING)
-            return rt_string_eq(a, b);
-    }
-    return ENCODE_INT(a == b ? 1 : 0);
-}
-RuntimeValue rt_ne(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(rt_eq(a, b)) ? 0 : 1); }
-RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) < DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) > DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_le(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) <= DECODE_INT(b) ? 1 : 0); }
-RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) >= DECODE_INT(b) ? 1 : 0); }
-
-/* Arithmetic */
-RuntimeValue rt_add(RuntimeValue a, RuntimeValue b) {
-    if (IS_INT(a) && IS_INT(b)) return ENCODE_INT(DECODE_INT(a) + DECODE_INT(b));
-    if (IS_HEAP(a) && IS_HEAP(b)) return rt_string_concat(a, b);
-    return ENCODE_INT(0);
-}
-RuntimeValue rt_sub(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) - DECODE_INT(b)); }
-RuntimeValue rt_mul(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) * DECODE_INT(b)); }
-RuntimeValue rt_div(RuntimeValue a, RuntimeValue b) {
-    int64_t bv = DECODE_INT(b);
-    if (bv == 0) return ENCODE_INT(0);
-    return ENCODE_INT(DECODE_INT(a) / bv);
-}
-RuntimeValue rt_mod(RuntimeValue a, RuntimeValue b) {
-    int64_t bv = DECODE_INT(b);
-    if (bv == 0) return ENCODE_INT(0);
-    return ENCODE_INT(DECODE_INT(a) % bv);
-}
-RuntimeValue rt_neg(RuntimeValue a) { return ENCODE_INT(-DECODE_INT(a)); }
-
-/* Bitwise */
-RuntimeValue rt_bit_and(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) & DECODE_INT(b)); }
-RuntimeValue rt_bit_or(RuntimeValue a, RuntimeValue b)  { return ENCODE_INT(DECODE_INT(a) | DECODE_INT(b)); }
-RuntimeValue rt_bit_xor(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) ^ DECODE_INT(b)); }
-RuntimeValue rt_bit_not(RuntimeValue a) { return ENCODE_INT(~DECODE_INT(a)); }
-RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) << DECODE_INT(b)); }
-RuntimeValue rt_shr(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) >> DECODE_INT(b)); }
-
-/* Boolean */
-RuntimeValue rt_not(RuntimeValue a) { return ENCODE_INT(DECODE_INT(a) ? 0 : 1); }
-RuntimeValue rt_and(RuntimeValue a, RuntimeValue b) { return ENCODE_INT((DECODE_INT(a) && DECODE_INT(b)) ? 1 : 0); }
-RuntimeValue rt_or(RuntimeValue a, RuntimeValue b)  { return ENCODE_INT((DECODE_INT(a) || DECODE_INT(b)) ? 1 : 0); }
-
-/* Type checks */
-RuntimeValue rt_type_of(RuntimeValue v) {
-    if (IS_INT(v)) return rt_string_from_cstr("int");
-    if (IS_HEAP(v)) {
-        HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-        if (h->type == HEAP_TYPE_STRING) return rt_string_from_cstr("string");
-        if (h->type == HEAP_TYPE_ARRAY) return rt_string_from_cstr("array");
-        return rt_string_from_cstr("object");
-    }
-    if (v == NIL_VALUE) return rt_string_from_cstr("nil");
-    if (v == TRUE_VALUE || v == FALSE_VALUE) return rt_string_from_cstr("bool");
-    return rt_string_from_cstr("unknown");
-}
-
-RuntimeValue rt_is_nil(RuntimeValue v) { return ENCODE_INT(v == NIL_VALUE ? 1 : 0); }
-RuntimeValue rt_is_int(RuntimeValue v) { return ENCODE_INT(IS_INT(v) ? 1 : 0); }
-RuntimeValue rt_is_string(RuntimeValue v) {
-    if (!IS_HEAP(v)) return ENCODE_INT(0);
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    return ENCODE_INT(h->type == HEAP_TYPE_STRING ? 1 : 0);
-}
-RuntimeValue rt_is_array(RuntimeValue v) {
-    if (!IS_HEAP(v)) return ENCODE_INT(0);
-    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    return ENCODE_INT(h->type == HEAP_TYPE_ARRAY ? 1 : 0);
-}
-
-RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a == b ? 1 : 0); }
-RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a != b ? 1 : 0); }
-
-/* ================================================================
- * 10. _start entry point
- * ================================================================ */
-
-void _start(void) {
-    _serial_init();
-    serial_puts("SimpleOS arm64 boot\r\n");
-    serial_puts("[BOOT] PL011 UART initialized\r\n");
-
-    extern void spl_start(void) __attribute__((weak));
     if (spl_start) {
-        serial_puts("[BOOT] Calling spl_start...\r\n");
+        serial_puts("[BOOT] Calling spl_start()...\r\n");
         spl_start();
+        serial_puts("[BOOT] spl_start() returned\r\n");
     } else {
-        serial_puts("[BOOT] No spl_start found\r\n");
+        serial_puts("[BOOT] No spl_start() found (weak symbol)\r\n");
     }
 
-    serial_puts("[BOOT] arm64 boot complete\r\n");
+    serial_puts("[BOOT] ARM64 boot complete\r\n");
 
-    /* PSCI SYSTEM_OFF or wfe loop */
-    /* Try PSCI SYSTEM_OFF (function ID 0x84000008) via HVC */
-    register uint64_t x0 __asm__("x0") = 0x84000008;
-    __asm__ volatile("hvc #0" : : "r"(x0));
-    /* If PSCI not available, spin */
-    for (;;) __asm__ volatile("wfe");
+    /* Halt: wait-for-event loop */
+    for (;;) {
+        __asm__ volatile("wfe");
+    }
 }
 
-/* ================================================================
- * 11. No-op runtime stubs (~200 functions)
- * ================================================================ */
+/* ===================================================================
+ * 10. No-op stubs — macro-generated runtime function stubs
+ *
+ * These provide link-time symbols for all runtime functions that the
+ * Simple compiler may reference.  On bare metal most of them are no-ops.
+ * =================================================================== */
 
-#define STUB0(name) RuntimeValue name(void) { return 0; }
-#define STUB1(name) RuntimeValue name(RuntimeValue a) { (void)a; return 0; }
-#define STUB2(name) RuntimeValue name(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return 0; }
-#define STUB3(name) RuntimeValue name(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return 0; }
-#define STUB4(name) RuntimeValue name(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a; (void)b; (void)c; (void)d; return 0; }
-#define STUB5(name) RuntimeValue name(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
-#define STUB6(name) RuntimeValue name(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e, RuntimeValue f) { (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return 0; }
-#define VSTUB0(name) void name(void) {}
-#define VSTUB1(name) void name(RuntimeValue a) { (void)a; }
-#define VSTUB2(name) void name(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
-#define VSTUB3(name) void name(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; }
-#define VSTUB4(name) void name(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a; (void)b; (void)c; (void)d; }
+#define S0(n) RuntimeValue n(void) { return 0; }
+#define S1(n) RuntimeValue n(RuntimeValue a) { (void)a; return 0; }
+#define S2(n) RuntimeValue n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return 0; }
+#define S3(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return 0; }
+#define S4(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a; (void)b; (void)c; (void)d; return 0; }
+#define S5(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
 
-/* --- Error / panic / abort --- */
-VSTUB1(rt_panic)
-VSTUB1(rt_abort)
-VSTUB2(rt_assert)
-VSTUB1(rt_unreachable)
-VSTUB0(rt_exit)
-VSTUB1(rt_exit_code)
+/* void-return stub macros */
+#define V0(n) void n(void) {}
+#define V1(n) void n(RuntimeValue a) { (void)a; }
+#define V2(n) void n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
 
-/* --- GC / memory management --- */
-VSTUB0(rt_gc_init)
-VSTUB0(rt_gc_collect)
-VSTUB0(rt_gc_disable)
-VSTUB0(rt_gc_enable)
-STUB0(rt_gc_stats)
-VSTUB1(rt_gc_add_root)
-VSTUB1(rt_gc_remove_root)
-STUB1(rt_gc_is_managed)
-STUB0(rt_gc_heap_size)
-VSTUB1(rt_free)
-STUB2(rt_realloc)
-STUB1(rt_alloc_zeroed)
-STUB2(rt_alloc_array)
+/* --- Arithmetic / comparison --- */
+S2(rt_add)
+S2(rt_sub)
+S2(rt_mul)
+S2(rt_div)
+S2(rt_mod)
+S2(rt_pow)
+S2(rt_eq)
+S2(rt_ne)
+S2(rt_lt)
+S2(rt_gt)
+S2(rt_le)
+S2(rt_ge)
+S2(rt_and)
+S2(rt_or)
+S1(rt_not)
+S2(rt_shl)
+S2(rt_shr)
+S2(rt_bitand)
+S2(rt_bitor)
+S2(rt_bitxor)
+S1(rt_bitnot)
+S1(rt_neg)
 
-/* --- Object / class system --- */
-STUB1(rt_class_of)
-STUB2(rt_instance_of)
-STUB2(rt_cast)
-STUB1(rt_object_hash)
-STUB1(rt_object_to_string)
-STUB2(rt_object_eq)
-STUB1(rt_clone)
-STUB1(rt_freeze)
-STUB1(rt_is_frozen)
+/* --- Type introspection / conversion --- */
+S1(rt_type_of)
+S1(rt_is_nil)
+S1(rt_is_int)
+S1(rt_is_float)
+S1(rt_is_string)
+S1(rt_is_bool)
+S1(rt_is_array)
+S1(rt_is_map)
+S1(rt_is_object)
+S1(rt_to_int)
+S1(rt_to_float)
+S1(rt_to_string)
+S1(rt_to_bool)
+S1(rt_clone)
+S1(rt_freeze)
+S1(rt_is_frozen)
 
-/* --- Dynamic dispatch / reflection --- */
-STUB2(rt_get_field)
-STUB3(rt_set_field)
-STUB2(rt_has_field)
-STUB2(rt_call_method)
-STUB3(rt_call_method_1)
-STUB4(rt_call_method_2)
-STUB5(rt_call_method_3)
-STUB2(rt_respond_to)
-STUB1(rt_methods)
-STUB1(rt_fields)
+/* --- String extras --- */
+S2(rt_string_contains)
+S2(rt_string_starts_with)
+S2(rt_string_ends_with)
+S2(rt_string_index_of)
+S2(rt_string_last_index_of)
+S2(rt_string_substr)
+S2(rt_string_split)
+S1(rt_string_trim)
+S1(rt_string_trim_start)
+S1(rt_string_trim_end)
+S1(rt_string_to_upper)
+S1(rt_string_to_lower)
+S2(rt_string_replace)
+S3(rt_string_replace_all)
+S2(rt_string_repeat)
+S2(rt_string_pad_start)
+S2(rt_string_pad_end)
+S1(rt_string_reverse)
+S1(rt_string_chars)
+S1(rt_string_bytes)
+S1(rt_string_is_empty)
+S2(rt_string_compare)
+S2(rt_string_format)
 
-/* --- String extended ops --- */
-STUB2(rt_string_contains)
-STUB2(rt_string_starts_with)
-STUB2(rt_string_ends_with)
-STUB2(rt_string_split)
-STUB2(rt_string_replace)
-STUB3(rt_string_replace_all)
-STUB1(rt_string_to_upper)
-STUB1(rt_string_to_lower)
-STUB1(rt_string_trim)
-STUB1(rt_string_trim_start)
-STUB1(rt_string_trim_end)
-STUB1(rt_string_reverse)
-STUB1(rt_string_chars)
-STUB1(rt_string_bytes)
-STUB2(rt_string_repeat)
-STUB2(rt_string_pad_left)
-STUB2(rt_string_pad_right)
-STUB1(rt_string_is_empty)
-STUB2(rt_string_compare)
-STUB1(rt_string_hash)
-STUB1(rt_string_to_int)
-STUB1(rt_string_to_float)
-STUB2(rt_string_format)
-STUB2(rt_string_join)
+/* --- Array --- */
+S1(rt_array_new)
+S2(rt_array_push)
+S1(rt_array_pop)
+S2(rt_array_get)
+S3(rt_array_set)
+S1(rt_array_len)
+S3(rt_array_slice)
+S2(rt_array_contains)
+S2(rt_array_index_of)
+S2(rt_array_last_index_of)
+S2(rt_array_remove)
+S3(rt_array_insert)
+S1(rt_array_reverse)
+S1(rt_array_sort)
+S2(rt_array_sort_by)
+S2(rt_array_map)
+S2(rt_array_filter)
+S3(rt_array_reduce)
+S2(rt_array_for_each)
+S2(rt_array_find)
+S2(rt_array_find_index)
+S2(rt_array_every)
+S2(rt_array_some)
+S2(rt_array_join)
+S2(rt_array_concat)
+S1(rt_array_clear)
+S1(rt_array_flatten)
+S2(rt_array_fill)
+S1(rt_array_clone)
+S2(rt_array_zip)
+S1(rt_array_uniq)
+S1(rt_array_compact)
 
-/* --- Array extended ops --- */
-STUB2(rt_array_pop)
-STUB3(rt_array_insert)
-STUB2(rt_array_remove)
-STUB2(rt_array_contains)
-STUB2(rt_array_index_of)
-STUB1(rt_array_reverse)
-STUB1(rt_array_sort)
-STUB2(rt_array_sort_by)
-STUB2(rt_array_map)
-STUB2(rt_array_filter)
-STUB3(rt_array_reduce)
-STUB2(rt_array_each)
-STUB2(rt_array_flat_map)
-STUB3(rt_array_slice)
-STUB3(rt_array_fill)
-STUB1(rt_array_clear)
-STUB1(rt_array_clone)
-STUB2(rt_array_concat)
-STUB2(rt_array_zip)
-STUB2(rt_array_any)
-STUB2(rt_array_all)
-STUB2(rt_array_find_val)
-STUB1(rt_array_min)
-STUB1(rt_array_max)
-STUB1(rt_array_sum)
-STUB1(rt_array_first)
-STUB1(rt_array_last)
-STUB1(rt_array_unique)
-STUB2(rt_array_join)
-STUB2(rt_array_count)
-STUB2(rt_array_group_by)
+/* --- Map / Dictionary --- */
+S0(rt_map_new)
+S3(rt_map_set)
+S2(rt_map_get)
+S2(rt_map_has)
+S2(rt_map_remove)
+S1(rt_map_keys)
+S1(rt_map_values)
+S1(rt_map_entries)
+S1(rt_map_len)
+S1(rt_map_clear)
+S1(rt_map_clone)
+S2(rt_map_merge)
+S2(rt_map_for_each)
 
-/* --- Map / dict --- */
-STUB0(rt_map_new)
-STUB3(rt_map_set)
-STUB2(rt_map_get)
-STUB2(rt_map_has)
-STUB2(rt_map_remove)
-STUB1(rt_map_keys)
-STUB1(rt_map_values)
-STUB1(rt_map_entries)
-STUB1(rt_map_len)
-STUB1(rt_map_clear)
-STUB2(rt_map_merge)
-STUB1(rt_map_clone)
-STUB2(rt_map_each)
+/* --- File I/O --- */
+S1(rt_file_read)
+S2(rt_file_write)
+S1(rt_file_exists)
+S1(rt_file_delete)
+S2(rt_file_append)
+S1(rt_file_size)
+S2(rt_file_copy)
+S2(rt_file_move)
+S2(rt_file_rename)
+S1(rt_file_is_dir)
+S1(rt_file_is_file)
+S1(rt_file_read_bytes)
+S2(rt_file_write_bytes)
+S1(rt_file_stat)
+S1(rt_file_realpath)
 
-/* --- Set --- */
-STUB0(rt_set_new)
-STUB2(rt_set_add)
-STUB2(rt_set_has)
-STUB2(rt_set_remove)
-STUB1(rt_set_len)
-STUB2(rt_set_union)
-STUB2(rt_set_intersect)
-STUB2(rt_set_diff)
+/* --- Directory I/O --- */
+S1(rt_dir_list)
+S1(rt_dir_create)
+S1(rt_dir_create_all)
+S1(rt_dir_exists)
+S1(rt_dir_remove)
+S1(rt_dir_remove_all)
+S0(rt_dir_cwd)
+S1(rt_dir_chdir)
+S0(rt_dir_home)
+S0(rt_dir_temp)
 
-/* --- I/O / filesystem --- */
-STUB1(rt_file_read_text)
-STUB2(rt_file_write_text)
-STUB2(rt_file_append_text)
-STUB1(rt_file_exists)
-STUB1(rt_file_delete)
-STUB1(rt_dir_create)
-STUB1(rt_dir_list)
-STUB1(rt_file_size)
-STUB1(rt_file_read_bytes)
-STUB2(rt_file_write_bytes)
-STUB0(rt_stdin_read_line)
-STUB1(rt_stdin_read_bytes)
-
-/* --- Process / system --- */
-STUB1(rt_system)
-STUB1(rt_exec)
-STUB2(rt_exec_with_args)
-STUB0(rt_env_vars)
-STUB1(rt_env_get)
-STUB2(rt_env_set)
-STUB0(rt_pid)
-STUB0(rt_timestamp)
-STUB0(rt_timestamp_ms)
-STUB0(rt_clock_ns)
-STUB1(rt_sleep_ms)
+/* --- Process --- */
+S2(rt_process_run)
+S3(rt_process_run_timeout)
+S1(rt_process_spawn)
+S1(rt_process_kill)
+S1(rt_process_wait)
+S0(rt_process_pid)
+S1(rt_cli_get_args)
+S0(rt_cli_args)
+S0(rt_exit_code)
+S1(rt_exit)
+S1(rt_env_get)
+S2(rt_env_set)
+S0(rt_env_all)
 
 /* --- Math --- */
-STUB1(rt_abs)
-STUB2(rt_min)
-STUB2(rt_max)
-STUB2(rt_pow)
-STUB1(rt_sqrt)
-STUB1(rt_floor)
-STUB1(rt_ceil)
-STUB1(rt_round)
-STUB1(rt_log)
-STUB1(rt_log2)
-STUB1(rt_log10)
-STUB1(rt_sin)
-STUB1(rt_cos)
-STUB1(rt_tan)
-STUB1(rt_asin)
-STUB1(rt_acos)
-STUB1(rt_atan)
-STUB2(rt_atan2)
-STUB0(rt_random)
-STUB2(rt_random_range)
-STUB1(rt_random_seed)
+S1(rt_math_sqrt)
+S1(rt_math_sin)
+S1(rt_math_cos)
+S1(rt_math_tan)
+S1(rt_math_asin)
+S1(rt_math_acos)
+S1(rt_math_atan)
+S2(rt_math_atan2)
+S1(rt_math_abs)
+S1(rt_math_floor)
+S1(rt_math_ceil)
+S1(rt_math_round)
+S1(rt_math_log)
+S1(rt_math_log2)
+S1(rt_math_log10)
+S1(rt_math_exp)
+S2(rt_math_min)
+S2(rt_math_max)
+S2(rt_math_pow)
+S0(rt_math_random)
+S0(rt_math_pi)
+S0(rt_math_e)
+S0(rt_math_inf)
+S0(rt_math_nan)
+S1(rt_math_is_nan)
+S1(rt_math_is_inf)
 
-/* --- Networking --- */
-STUB2(rt_tcp_connect)
-STUB1(rt_tcp_listen)
-STUB1(rt_tcp_accept)
-STUB2(rt_tcp_send)
-STUB2(rt_tcp_recv)
-STUB1(rt_tcp_close)
-STUB2(rt_udp_bind)
-STUB3(rt_udp_send)
-STUB2(rt_udp_recv)
-STUB2(rt_http_get)
-STUB3(rt_http_post)
-STUB1(rt_dns_resolve)
+/* --- Port I/O (no-op on ARM64 — x86 only) --- */
+S2(rt_port_outb)
+S2(rt_port_outw)
+S2(rt_port_outl)
+S1(rt_port_inb)
+S1(rt_port_inw)
+S1(rt_port_inl)
+S0(rt_port_io_wait)
 
-/* --- Threading / concurrency --- */
-STUB1(rt_thread_spawn)
-STUB1(rt_thread_join)
-STUB0(rt_thread_id)
-STUB1(rt_thread_sleep)
-STUB0(rt_mutex_new)
-STUB1(rt_mutex_lock)
-STUB1(rt_mutex_unlock)
-STUB0(rt_channel_new)
-STUB2(rt_channel_send)
-STUB1(rt_channel_recv)
-STUB0(rt_atomic_new)
-STUB1(rt_atomic_load)
-STUB2(rt_atomic_store)
-STUB2(rt_atomic_add)
-STUB3(rt_atomic_cas)
+/* --- MMIO (stubs — overridden in section 11) --- */
+S1(rt_mmio_read_u8)
+S1(rt_mmio_read_u16)
+S1(rt_mmio_read_u32)
+S1(rt_mmio_read_u64)
+S2(rt_mmio_write_u8)
+S2(rt_mmio_write_u16)
+S2(rt_mmio_write_u32)
+S2(rt_mmio_write_u64)
 
-/* --- Closure / function --- */
-STUB2(rt_closure_new)
-STUB1(rt_closure_call)
-STUB2(rt_closure_call_1)
-STUB3(rt_closure_call_2)
-STUB2(rt_closure_bind)
-STUB1(rt_closure_arity)
+/* --- CPU control --- */
+S0(rt_hlt)
+S0(rt_sti)
+S0(rt_cli)
+S1(rt_lgdt)
+S1(rt_lidt)
+S1(rt_ltr)
+S1(rt_invlpg)
+S0(rt_read_cr0)
+S1(rt_write_cr0)
+S1(rt_read_cr2)
+S1(rt_read_cr3)
+S1(rt_write_cr3)
+S0(rt_read_cr4)
+S1(rt_write_cr4)
+S1(rt_read_msr)
+S2(rt_write_msr)
+S0(rt_cpuid)
+S0(rt_rdtsc)
 
-/* --- Trait / interface --- */
-STUB2(rt_trait_impl)
-STUB2(rt_trait_check)
-STUB2(rt_dyn_dispatch)
-STUB3(rt_dyn_dispatch_1)
-STUB4(rt_dyn_dispatch_2)
-STUB1(rt_vtable_lookup)
+/* --- ARM64-specific CPU --- */
+S0(rt_wfe)
+S0(rt_wfi)
+S0(rt_sev)
+S0(rt_isb)
+S0(rt_dsb)
+S0(rt_dmb)
+S1(rt_read_sysreg)
+S2(rt_write_sysreg)
 
-/* --- Error / Result / Option --- */
-STUB1(rt_result_ok)
-STUB1(rt_result_err)
-STUB1(rt_result_is_ok)
-STUB1(rt_result_is_err)
-STUB1(rt_result_unwrap)
-STUB1(rt_result_unwrap_err)
-STUB2(rt_result_unwrap_or)
-STUB1(rt_option_some)
-STUB0(rt_option_none)
-STUB1(rt_option_is_some)
-STUB1(rt_option_is_none)
-STUB1(rt_option_unwrap)
-STUB2(rt_option_unwrap_or)
+/* --- Interrupts --- */
+S0(rt_enable_interrupts)
+S0(rt_disable_interrupts)
+S2(rt_register_isr)
+S1(rt_send_eoi)
+S0(rt_get_interrupt_flag)
 
-/* --- Iterator protocol --- */
-STUB1(rt_iter_new)
-STUB1(rt_iter_next)
-STUB1(rt_iter_has_next)
-STUB1(rt_iter_collect)
-STUB2(rt_iter_map)
-STUB2(rt_iter_filter)
-STUB3(rt_iter_fold)
-STUB2(rt_iter_take)
-STUB2(rt_iter_skip)
-STUB2(rt_iter_chain)
-STUB1(rt_iter_enumerate)
-STUB2(rt_iter_zip)
+/* --- Timer / Clock --- */
+S1(rt_time_now_ms)
+S0(rt_time_now_nanos)
+S0(rt_time_monotonic)
+S1(rt_sleep_ms)
+S1(rt_timer_create)
+S1(rt_timer_cancel)
 
-/* --- Range --- */
-STUB2(rt_range_new)
-STUB3(rt_range_new_step)
-STUB1(rt_range_iter)
-STUB1(rt_range_len)
-STUB2(rt_range_contains)
+/* --- Network --- */
+S2(rt_net_connect)
+S1(rt_net_listen)
+S2(rt_net_send)
+S1(rt_net_recv)
+S1(rt_net_close)
+S2(rt_net_bind)
+S1(rt_net_accept)
+S2(rt_net_set_timeout)
+S1(rt_net_get_addr)
 
-/* --- Regex --- */
-STUB1(rt_regex_new)
-STUB2(rt_regex_match)
-STUB2(rt_regex_find_all)
-STUB3(rt_regex_replace)
-STUB2(rt_regex_split)
+/* --- HTTP --- */
+S2(rt_http_get)
+S3(rt_http_post)
+S3(rt_http_put)
+S3(rt_http_patch)
+S2(rt_http_delete)
+S2(rt_http_request)
+S3(rt_http_request_full)
+S2(rt_http_set_header)
 
 /* --- JSON --- */
-STUB1(rt_json_parse)
-STUB1(rt_json_stringify)
-STUB2(rt_json_get)
-STUB3(rt_json_set)
+S1(rt_json_parse)
+S1(rt_json_stringify)
+S2(rt_json_get)
+S3(rt_json_set)
+S1(rt_json_keys)
+S1(rt_json_values)
+S1(rt_json_is_object)
+S1(rt_json_is_array)
 
-/* --- Formatting / debug --- */
-STUB1(rt_debug_repr)
-STUB2(rt_format)
-STUB1(rt_inspect)
-STUB1(rt_type_name)
-STUB1(rt_size_of)
-STUB1(rt_address_of)
+/* --- Regex --- */
+S2(ffi_regex_is_match)
+S2(ffi_regex_find)
+S2(ffi_regex_find_all)
+S2(ffi_regex_replace)
+S3(ffi_regex_replace_all)
+S1(ffi_regex_compile)
 
-/* --- Weak references / ref counting --- */
-STUB1(rt_weak_ref)
-STUB1(rt_weak_deref)
-STUB1(rt_rc_new)
-STUB1(rt_rc_clone)
-STUB1(rt_rc_strong_count)
+/* --- Test / BDD --- */
+S1(rt_bdd_describe_start)
+S1(rt_bdd_describe_end)
+S2(rt_bdd_it_start)
+S1(rt_bdd_it_end)
+S1(rt_expect)
+S2(rt_expect_eq)
+S2(rt_expect_ne)
+S2(rt_expect_gt)
+S2(rt_expect_lt)
+S1(rt_expect_nil)
+S1(rt_expect_not_nil)
+S1(rt_expect_true)
+S1(rt_expect_false)
+S2(rt_expect_contains)
+S2(rt_expect_throws)
+S0(rt_bdd_suite_start)
+S0(rt_bdd_suite_end)
+S0(rt_bdd_report)
 
-/* --- Async / await --- */
-STUB1(rt_async_spawn)
-STUB1(rt_await)
-STUB0(rt_async_yield)
-STUB1(rt_future_poll)
-STUB2(rt_future_then)
-STUB0(rt_event_loop_run)
-STUB0(rt_event_loop_stop)
+/* --- Misc / Debug --- */
+S1(rt_hash)
+S2(rt_hash_combine)
+S1(rt_debug_print)
+S1(rt_debug_dump)
+S0(rt_debug_break)
+S1(rt_panic)
+S1(rt_assert)
+S2(rt_assert_eq)
+S2(rt_assert_ne)
+S1(rt_abort)
+S0(rt_gc_collect)
+S0(rt_gc_disable)
+S0(rt_gc_enable)
+S0(rt_gc_stats)
+S1(rt_typeof)
 
-/* --- Casting / conversion --- */
-STUB1(rt_to_int)
-STUB1(rt_to_float)
-STUB1(rt_to_string)
-STUB1(rt_to_bool)
-STUB1(rt_to_bytes)
-STUB1(rt_parse_int)
-STUB1(rt_parse_float)
-STUB2(rt_int_to_bytes)
-STUB2(rt_bytes_to_int)
-STUB1(rt_char_to_string)
+/* --- Threading (no-ops on bare metal) --- */
+S1(rt_thread_create)
+S1(rt_thread_join)
+S0(rt_thread_yield)
+S0(rt_thread_current)
+S1(rt_thread_sleep)
+S0(rt_mutex_new)
+S1(rt_mutex_lock)
+S1(rt_mutex_unlock)
+S1(rt_mutex_try_lock)
+S0(rt_condvar_new)
+S1(rt_condvar_wait)
+S1(rt_condvar_notify)
+S1(rt_condvar_notify_all)
 
-/* --- Platform / arch-specific baremetal --- */
-STUB0(rt_cpu_id)
-STUB0(rt_arch_name)
-STUB0(rt_page_size)
-VSTUB0(rt_cli)
-VSTUB0(rt_sti)
-VSTUB0(rt_hlt)
-STUB0(rt_flags)
-STUB0(rt_rdtsc)
+/* --- Channels (no-ops on bare metal) --- */
+S0(rt_channel_new)
+S2(rt_channel_send)
+S1(rt_channel_recv)
+S1(rt_channel_try_recv)
+S1(rt_channel_close)
 
-/* --- ARM64-specific system registers --- */
-STUB0(rt_mrs_mpidr)
-STUB0(rt_mrs_midr)
-STUB0(rt_mrs_cntfrq)
-STUB0(rt_mrs_cntpct)
-VSTUB1(rt_msr_vbar)
-VSTUB1(rt_msr_ttbr0)
-VSTUB1(rt_msr_ttbr1)
-VSTUB1(rt_msr_tcr)
-VSTUB1(rt_msr_mair)
-VSTUB1(rt_msr_sctlr)
-VSTUB0(rt_isb)
-VSTUB0(rt_dsb)
-VSTUB0(rt_dmb)
-VSTUB0(rt_tlbi_all)
-VSTUB0(rt_ic_ialluis)
+/* --- Async (no-ops on bare metal) --- */
+S1(rt_async_spawn)
+S1(rt_async_await)
+S0(rt_async_yield)
+S2(rt_async_select)
 
-/* --- Interrupt / exception stubs --- */
-VSTUB1(rt_register_isr)
-VSTUB2(rt_register_irq)
-VSTUB0(rt_gic_init)
-VSTUB0(rt_gic_eoi)
-VSTUB1(rt_gic_enable_irq)
-VSTUB1(rt_gic_disable_irq)
+/* --- Encoding --- */
+S1(rt_base64_encode)
+S1(rt_base64_decode)
+S1(rt_hex_encode)
+S1(rt_hex_decode)
+S1(rt_utf8_encode)
+S1(rt_utf8_decode)
+S1(rt_url_encode)
+S1(rt_url_decode)
 
-/* --- Paging / virtual memory --- */
-STUB0(rt_page_alloc)
-VSTUB1(rt_page_free)
-VSTUB3(rt_page_map)
-VSTUB1(rt_page_unmap)
-STUB1(rt_virt_to_phys)
-STUB0(rt_kernel_page_table)
-VSTUB0(rt_tlb_flush_all)
-VSTUB1(rt_tlb_flush_page)
+/* --- Crypto (no-ops on bare metal) --- */
+S1(rt_sha256)
+S1(rt_sha512)
+S1(rt_md5)
+S2(rt_hmac_sha256)
+S1(rt_random_bytes)
 
-/* --- Timer --- */
-VSTUB0(rt_timer_init)
-STUB0(rt_timer_ticks)
-VSTUB1(rt_timer_set_freq)
+/* --- Object / Struct --- */
+S1(rt_object_new)
+S2(rt_object_get)
+S3(rt_object_set)
+S2(rt_object_has)
+S2(rt_object_delete)
+S1(rt_object_keys)
+S1(rt_object_values)
+S1(rt_object_freeze)
+S1(rt_object_clone)
 
-/* --- Keyboard / input --- */
-STUB0(rt_kbd_read)
-STUB0(rt_kbd_poll)
-VSTUB0(rt_kbd_init)
+/* --- Error handling --- */
+S1(rt_error_new)
+S1(rt_error_message)
+S1(rt_error_code)
+S1(rt_error_stack)
+S2(rt_result_ok)
+S2(rt_result_err)
+S1(rt_result_is_ok)
+S1(rt_result_is_err)
+S1(rt_result_unwrap)
+S2(rt_result_unwrap_or)
 
-/* --- Disk / block device --- */
-STUB3(rt_disk_read)
-STUB3(rt_disk_write)
-STUB0(rt_disk_size)
-VSTUB0(rt_disk_init)
-STUB1(rt_disk_identify)
+/* --- Weak references & closures --- */
+S1(rt_weak_ref)
+S1(rt_weak_deref)
+S1(rt_closure_new)
+S2(rt_closure_call)
+S1(rt_closure_bind)
 
-/* --- Virtio --- */
-VSTUB0(rt_virtio_init)
-STUB1(rt_virtio_probe)
-STUB2(rt_virtio_read)
-STUB3(rt_virtio_write)
+/* ===================================================================
+ * 11. Real ARM64 MMIO and CPU overrides
+ *
+ * These provide actual hardware access for ARM64-specific operations.
+ * Port I/O stubs remain no-ops since ARM64 has no port I/O.
+ * =================================================================== */
 
-/* --- Power management --- */
-VSTUB0(rt_psci_shutdown)
-VSTUB0(rt_psci_reboot)
-STUB0(rt_psci_version)
+/* --- MMIO: real ARM64 implementations --- */
+
+RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
+{
+    return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr));
+}
+
+RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
+{
+    return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr));
+}
+
+RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
+{
+    return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr));
+}
+
+RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
+{
+    return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr));
+}
+
+RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
+{
+    *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
+{
+    *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
+{
+    *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val);
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
+{
+    *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val);
+    return NIL_VALUE;
+}
+
+/* --- CPU: real ARM64 barrier and WFE/WFI implementations --- */
+
+RuntimeValue rt_wfe_real(void)
+{
+    __asm__ volatile("wfe");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_wfi_real(void)
+{
+    __asm__ volatile("wfi");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_sev_real(void)
+{
+    __asm__ volatile("sev");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_isb_real(void)
+{
+    __asm__ volatile("isb");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_dsb_real(void)
+{
+    __asm__ volatile("dsb sy");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_dmb_real(void)
+{
+    __asm__ volatile("dmb sy");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_enable_interrupts_real(void)
+{
+    __asm__ volatile("msr daifclr, #0xF");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_disable_interrupts_real(void)
+{
+    __asm__ volatile("msr daifset, #0xF");
+    return NIL_VALUE;
+}
+
+/* Expose as the primary symbols via alias */
+RuntimeValue rt_mmio_read_u8(RuntimeValue)
+    __attribute__((alias("rt_mmio_read_u8_real")));
+RuntimeValue rt_mmio_read_u16(RuntimeValue)
+    __attribute__((alias("rt_mmio_read_u16_real")));
+RuntimeValue rt_mmio_read_u32(RuntimeValue)
+    __attribute__((alias("rt_mmio_read_u32_real")));
+RuntimeValue rt_mmio_read_u64(RuntimeValue)
+    __attribute__((alias("rt_mmio_read_u64_real")));
+RuntimeValue rt_mmio_write_u8(RuntimeValue, RuntimeValue)
+    __attribute__((alias("rt_mmio_write_u8_real")));
+RuntimeValue rt_mmio_write_u16(RuntimeValue, RuntimeValue)
+    __attribute__((alias("rt_mmio_write_u16_real")));
+RuntimeValue rt_mmio_write_u32(RuntimeValue, RuntimeValue)
+    __attribute__((alias("rt_mmio_write_u32_real")));
+RuntimeValue rt_mmio_write_u64(RuntimeValue, RuntimeValue)
+    __attribute__((alias("rt_mmio_write_u64_real")));
+RuntimeValue rt_wfe(void)
+    __attribute__((alias("rt_wfe_real")));
+RuntimeValue rt_wfi(void)
+    __attribute__((alias("rt_wfi_real")));
+RuntimeValue rt_sev(void)
+    __attribute__((alias("rt_sev_real")));
+RuntimeValue rt_isb(void)
+    __attribute__((alias("rt_isb_real")));
+RuntimeValue rt_dsb(void)
+    __attribute__((alias("rt_dsb_real")));
+RuntimeValue rt_dmb(void)
+    __attribute__((alias("rt_dmb_real")));
+RuntimeValue rt_enable_interrupts(void)
+    __attribute__((alias("rt_enable_interrupts_real")));
+RuntimeValue rt_disable_interrupts(void)
+    __attribute__((alias("rt_disable_interrupts_real")));
+
+/* End of ARM64 baremetal_stubs.c */

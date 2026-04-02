@@ -13,6 +13,17 @@ Align the repo narrative around one RV32 proof matrix:
 - GHDL proves remote RV32 payload execution.
 - `examples/mllvm_qemu_rtl` proves timing and RTL simulation, but not OS boot yet.
 
+## Current blocker note
+
+The active RISC-V runtime blocker is no longer this RV32 proof-matrix slice. Current userspace/runtime truth now lives in:
+
+- [Local research](../01_research/local/rv64_user_mode_exec.md)
+- [Domain research](../01_research/domain/rv64_user_mode_exec.md)
+- [Feature requirements](../02_requirements/feature/rv64_user_mode_exec.md)
+- [Main plan](./rv64_user_mode_exec.md)
+
+This RV32 document remains accurate for backend-proof labeling, but it should not be read as the source of truth for current RV64 userspace execution progress.
+
 ## Workstreams
 
 ### W1: QEMU boot proof
@@ -42,4 +53,3 @@ Align the repo narrative around one RV32 proof matrix:
 - Overstating the hybrid/RTL lane as an OS boot proof would make the documentation false.
 - Treating the GHDL remote lane as a boot lane would blur the existing remote execution contract.
 - Leaving the artifact name implicit would make future test claims hard to verify.
-

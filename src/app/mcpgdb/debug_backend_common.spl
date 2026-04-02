@@ -1,0 +1,170 @@
+@allow(unnamed_duplicate_typed_args)
+# mcpgdb MCP — debugger-only backend helpers
+
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_cwd() -> text
+
+use app.mcpgdb.json_helpers.{shell_bin, shell_quote, shell_sleep, find_binary, LB, RB, jp, js}
+use app.mcpgdb.state.{DebugSession}
+
+fn cwd_path() -> text:
+    val cwd = rt_env_cwd()
+    if cwd != "":
+        return cwd
+    "."
+
+fn choose_workspace_root(root: text) -> text:
+    if root != "":
+        return root
+    cwd_path()
+
+fn gdb_binary() -> text:
+    find_binary("GDB_BINARY", ["gdb", "gdb-multiarch"])
+
+fn lldb_binary() -> text:
+    find_binary("LLDB_BINARY", ["lldb"])
+
+fn ps_is_alive(pid: text) -> bool:
+    if pid == "":
+        return false
+    val (_stdout, _stderr, code) = rt_process_run(shell_bin(), ["-c", "ps -p " + shell_quote(pid) + " >/dev/null 2>&1"])
+    code == 0
+
+fn session_prompt(session_id: text) -> text:
+    "[mcpgdb:" + session_id + "] "
+
+fn debugger_launch_command(session: DebugSession) -> text:
+    if session.backend == "lldb":
+        val lldb = lldb_binary()
+        if lldb == "":
+            return ""
+        return shell_quote(lldb) + " --no-lldbinit"
+    val gdb = gdb_binary()
+    if gdb == "":
+        return ""
+    shell_quote(gdb) + " --quiet --nx"
+
+fn init_debugger_session(session: DebugSession) -> DebugSession:
+    var updated = session
+    val prompt = session_prompt(session.session_id)
+    updated.prompt = prompt
+    if session.backend == "lldb":
+        val _r = run_session_command(updated, "settings set prompt " + prompt, true)
+        val _r2 = run_session_command(updated, "settings set auto-confirm true", true)
+        return updated
+    val _r3 = run_session_command(updated, "set pagination off", true)
+    val _r4 = run_session_command(updated, "set confirm off", true)
+    val _r5 = run_session_command(updated, "set prompt " + prompt, true)
+    updated
+
+fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
+    var updated = session
+    rt_dir_create(updated.session_dir, true)
+    val launch = debugger_launch_command(updated)
+    if launch == "":
+        return (updated, "required debugger binary not found for backend " + updated.backend)
+    val cmd = "rm -f " + shell_quote(updated.input_path) + " " + shell_quote(updated.output_path) + " " + shell_quote(updated.error_path)
+        + " ; mkfifo " + shell_quote(updated.input_path)
+        + " ; : > " + shell_quote(updated.output_path)
+        + " ; : > " + shell_quote(updated.error_path)
+        + " ; nohup " + launch + " < " + shell_quote(updated.input_path)
+        + " > " + shell_quote(updated.output_path)
+        + " 2> " + shell_quote(updated.error_path)
+        + " < /dev/null & echo $!"
+    val (stdout, stderr, code) = rt_process_run(shell_bin(), ["-c", cmd])
+    if code != 0:
+        return (updated, "failed to launch debugger: " + stderr.trim())
+    updated.process_pid = stdout.trim()
+    if updated.process_pid == "":
+        return (updated, "failed to capture debugger pid")
+    shell_sleep("0.10")
+    if not ps_is_alive(updated.process_pid):
+        return (updated, "debugger process exited immediately")
+    updated = init_debugger_session(updated)
+    updated.state = "ready"
+    (updated, "")
+
+fn send_fifo_line(fifo_path: text, line: text) -> text:
+    val (stdout, stderr, code) =
+        rt_process_run(shell_bin(), ["-c", "printf '%s\\n' " + shell_quote(line) + " > " + shell_quote(fifo_path)])
+    if code != 0:
+        if stderr.trim() != "":
+            return stderr.trim()
+        return stdout.trim()
+    ""
+
+fn read_output_delta(path: text, offset: i64) -> text:
+    val current = rt_file_size(path)
+    if current <= offset:
+        return ""
+    rt_file_read_text_at(path, offset, current - offset) ?? ""
+
+fn strip_prompt(output: text, prompt: text) -> text:
+    var result = output
+    if result.contains(prompt):
+        val idx_opt = result.last_index_of(prompt)
+        match idx_opt:
+            Some(idx):
+                result = result.substring(0, idx)
+            nil: pass
+    result.trim()
+
+fn run_session_command(session: DebugSession, command: text, allow_timeout: bool) -> text:
+    if session.process_pid == "" or not ps_is_alive(session.process_pid):
+        return LB() + jp("status", js("error")) + "," + jp("message", js("session process is not alive")) + RB()
+    val before = rt_file_size(session.output_path)
+    val err_text = send_fifo_line(session.input_path, command)
+    if err_text != "":
+        return LB() + jp("status", js("error")) + "," + jp("message", js(err_text)) + RB()
+    var attempt = 0
+    var chunk = ""
+    while attempt < 30:
+        shell_sleep("0.05")
+        chunk = read_output_delta(session.output_path, before)
+        if chunk != "" and (session.prompt == "" or chunk.contains(session.prompt)):
+            break
+        attempt = attempt + 1
+    if chunk == "" and not allow_timeout:
+        val stderr_text = rt_file_read_text(session.error_path) ?? ""
+        return LB() + jp("status", js("error")) + "," + jp("message", js("no backend response")) + "," + jp("stderr", js(stderr_text.trim())) + RB()
+    val clean = strip_prompt(chunk, session.prompt)
+    var result = LB()
+    result = result + jp("status", js("ok"))
+    result = result + "," + jp("command", js(command))
+    result = result + "," + jp("output", js(clean))
+    result = result + RB()
+    result
+
+fn build_session_dir(session_id: text) -> text:
+    "/tmp/mcpgdb_" + session_id
+
+fn make_session(session_id: text, backend: text, workspace_root: text) -> DebugSession:
+    val session_dir = build_session_dir(session_id)
+    DebugSession(
+        session_id: session_id,
+        backend: backend,
+        state: "starting",
+        workspace_root: workspace_root,
+        process_pid: "",
+        input_path: session_dir + "/stdin.fifo",
+        output_path: session_dir + "/stdout.log",
+        error_path: session_dir + "/stderr.log",
+        session_dir: session_dir,
+        prompt: "",
+        remote_host: "",
+        remote_port: "",
+        current_thread: "",
+        current_frame: "",
+        bootstrap_monitor: ""
+    )
+
+fn stop_session_process(session: DebugSession):
+    if session.process_pid != "":
+        rt_process_run(shell_bin(), ["-c", "kill " + shell_quote(session.process_pid) + " >/dev/null 2>&1 || true"])
+    rt_dir_remove_all(session.session_dir)

@@ -17,12 +17,14 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
 use os.kernel.arch.riscv64.cpu.{csrw_stvec, csrs_sie, csrc_sie, SIE_SEIE, SIE_STIE, SIE_SSIE}
 use os.kernel.arch.riscv64.console.{serial_writeln}
 use os.kernel.arch.riscv64.timer.{rv64_handle_timer_interrupt}
+use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
 use os.kernel.arch.riscv64.trap_model.{Rv64TrapKind, classify_rv64_trap, rv64_syscall_args_from_context, rv64_apply_syscall_result}
 use os.kernel.arch.arch_context.{Riscv64Context}
 use os.kernel.ipc.syscall.{syscall_handler}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.syscall_types.{KLogEntry}
 
 # ============================================================================
 # PLIC Constants (QEMU virt)
@@ -127,6 +129,8 @@ fn _plic_complete(context: u64, irq: u32):
 
 # Current hart's PLIC S-mode context
 var g_plic_context: u64 = 0
+var g_trap_runtime_installed: bool = false
+var g_trap_runtime: Rv64TrapRuntime = Rv64TrapRuntime.new(Scheduler.new(), IpcManager.new(), KernelLog.new(64))
 
 # Trap handler table (up to 64 entries for simplicity)
 val MAX_HANDLERS: u64 = 64
@@ -137,6 +141,14 @@ var g_handler_table: [u64; 64] = [0; 64]
 # ============================================================================
 
 extern fn _rv64_trap_vector()
+
+fn _log_trap_failure(message: text):
+    """Report a trap failure through the early serial path and kernel log."""
+    serial_writeln("[TRAP] {message}")
+    if g_trap_runtime_installed:
+        var klog = g_trap_runtime.klog
+        klog.write(3, 0, 0, message)
+        g_trap_runtime.klog = klog
 
 # ============================================================================
 # Rv64Interrupt
@@ -175,6 +187,22 @@ impl Rv64Interrupt:
 
         serial_writeln("[INT] PLIC context={g_plic_context}, threshold=0")
         serial_writeln("[INT] stvec set, SIE enabled (external+timer+software)")
+
+    fn install_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+        """Install runtime-owned objects for trap dispatch.
+
+        This keeps the eventual trap vector narrow: save a frame, call the
+        installed dispatcher, restore the returned frame.
+        """
+        rv64_install_trap_runtime(scheduler, ipc, klog)
+
+    fn install_runtime_bundle(runtime: Rv64TrapRuntime):
+        """Install a precomposed runtime bundle for trap dispatch."""
+        rv64_install_runtime_bundle(runtime)
+
+    fn runtime_installed() -> bool:
+        """Report whether the trap dispatcher has runtime objects installed."""
+        rv64_runtime_installed()
 
     fn enable_irq(irq: u32):
         """Enable a specific external IRQ line on the PLIC."""
@@ -260,3 +288,57 @@ fn rv64_dispatch_trap(ctx: Riscv64Context, scheduler: Scheduler, ipc: IpcManager
             Err("fatal RV64 exception cause={code} at sepc={ctx.sepc}")
         case Rv64TrapKind.Interrupt(code: code):
             Err("unsupported RV64 interrupt cause={code}")
+
+fn rv64_install_trap_runtime(scheduler: Scheduler, ipc: IpcManager, klog: KernelLog):
+    """Install the kernel runtime objects used by the RV64 trap bridge.
+
+    This keeps the eventual `_rv64_trap_vector` handoff narrow: architecture
+    code only needs to save a trap frame and call the installed dispatcher.
+    """
+    g_trap_runtime = Rv64TrapRuntime.new(scheduler, ipc, klog)
+    g_trap_runtime_installed = true
+
+fn rv64_install_runtime_bundle(runtime: Rv64TrapRuntime):
+    """Install a precomposed runtime bundle for RV64 trap dispatch."""
+    g_trap_runtime = runtime
+    g_trap_runtime_installed = true
+
+fn rv64_runtime_installed() -> bool:
+    """Report whether the RV64 trap bridge has runtime objects installed."""
+    g_trap_runtime_installed
+
+fn rv64_read_trap_log(min_level: u8, offset: u64, max_count: u64) -> [KLogEntry]:
+    """Read entries from the installed trap runtime log buffer."""
+    g_trap_runtime.klog.read(min_level, offset, max_count)
+
+fn rv64_dispatch_installed_trap(ctx: Riscv64Context) -> Result<Riscv64Context, text>:
+    """Dispatch a trap frame through the installed kernel runtime objects."""
+    if not g_trap_runtime_installed:
+        val message = "rv64 trap runtime is not installed"
+        _log_trap_failure(message)
+        return Err(message)
+
+    val result = rv64_dispatch_trap(ctx, g_trap_runtime.scheduler, g_trap_runtime.ipc, g_trap_runtime.klog)
+    if result.is_err():
+        _log_trap_failure(result.err().unwrap())
+    result
+
+fn rv64_dispatch_trap_frame_ptr(ctx_addr: u64) -> i64:
+    """Dispatch an installed RV64 trap using an in-place trap-frame pointer.
+
+    This is the narrow ABI intended for the eventual `_rv64_trap_vector`
+    assembly handoff: save a `Riscv64Context`, pass its address here,
+    resume from the updated frame on success.
+    """
+    if ctx_addr == 0:
+        _log_trap_failure("rv64 trap frame pointer is null")
+        return -1
+
+    unsafe:
+        val ctx_ptr = ctx_addr as *mut Riscv64Context
+        val current = *ctx_ptr
+        val result = rv64_dispatch_installed_trap(current)
+        if result.is_err():
+            return -1
+        *ctx_ptr = result.unwrap()
+        0

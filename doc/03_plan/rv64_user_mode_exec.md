@@ -21,14 +21,19 @@ This plan also records the dependency chain to Linux boot, repo-native simulatio
 ### W1: RV64 trap entry and return
 
 - Replace the placeholder `_rv64_trap_vector` path with a real trap entry that saves an RV64 trap frame, invokes the Simple-level dispatcher, and returns with `sret`.
+- The trap frame is the architectural runtime boundary for this slice; generic scheduler context storage remains secondary until broader refactoring is justified.
 - Ensure `SPP`, `SPIE`, and `sepc` are restored according to user-vs-kernel task type.
 - Treat unsupported trap causes as explicit fatal paths with deterministic logging.
+- Keep the boundary explicit:
+  - architecture code owns trap-frame save/restore and `sret`
+  - generic kernel code owns trap classification and syscall dispatch
 
 ### W2: RV64 syscall runtime path
 
 - Keep the current syscall ABI shape already modeled in the repo: `a7` for ID, `a0`-`a5` for args, `a0` for result.
 - Wire the trap frame to `syscall_handler(...)`.
 - Advance `sepc` after handled user `ecall`.
+- Limit the first trap-entry implementation to user `ecall`, timer interrupt, and external interrupt so the proof boundary stays narrow.
 
 ### W3: Scheduler and user-task handoff
 
@@ -41,6 +46,8 @@ This plan also records the dependency chain to Linux boot, repo-native simulatio
 - Keep the current path namespace under `/sys/services/*` or `/sys/apps/*`.
 - Replace the inert staged executable proof with one minimal RV64 static ELF that performs output, optional `GetPid`, and `Exit`.
 - Keep the executable source transitional if necessary, but hold the public path contract stable.
+- The proof binary exists only to prove launch, user-mode entry, syscall, return, and exit; it is not a service-framework or desktop proof.
+- Do not expand this binary into a desktop or Linux payload in the same slice.
 
 ### W5: Downstream staging, not execution
 

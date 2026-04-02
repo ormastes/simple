@@ -1,0 +1,82 @@
+use std.spec
+use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt, rv64_install_trap_runtime, rv64_runtime_installed, rv64_read_trap_log, rv64_dispatch_installed_trap, rv64_dispatch_trap_frame_ptr}
+use os.kernel.arch.riscv64.trap_runtime.{Rv64TrapRuntime}
+use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context, RV64_CAUSE_ECALL_FROM_U}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+
+describe "rv64 interrupt runtime bridge":
+    it "reports missing runtime until installed":
+        expect(rv64_runtime_installed()).to_equal(false)
+
+    it "dispatches a user ecall through installed runtime objects":
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
+        expect(rv64_runtime_installed()).to_equal(true)
+
+        var ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        ctx.a7 = 4      # GetPid
+        ctx.scause = RV64_CAUSE_ECALL_FROM_U
+
+        val result = rv64_dispatch_installed_trap(ctx)
+        expect(result.is_err()).to_equal(false)
+
+        val updated = result.unwrap()
+        expect(updated.a0).to_equal(0)
+        expect(updated.sepc).to_equal(0x400004)
+
+    it "rejects unsupported supervisor ecalls":
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(16))
+
+        var ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        ctx.a7 = 4
+        ctx.scause = 9
+
+        val result = rv64_dispatch_installed_trap(ctx)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_contain("unsupported RV64 supervisor ecall")
+
+    it "allows the interrupt HAL to own runtime installation":
+        Rv64Interrupt.install_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        expect(Rv64Interrupt.runtime_installed()).to_equal(true)
+
+    it "accepts a precomposed trap runtime bundle":
+        val runtime = Rv64TrapRuntime.new(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+        Rv64Interrupt.install_runtime_bundle(runtime)
+        expect(Rv64Interrupt.runtime_installed()).to_equal(true)
+
+    it "records trap failures in the installed kernel log":
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+
+        var ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        ctx.a7 = 4
+        ctx.scause = 9
+
+        val result = rv64_dispatch_installed_trap(ctx)
+        expect(result.is_err()).to_equal(true)
+
+        val entries = rv64_read_trap_log(0, 0, 4)
+        expect(entries.len()).to_be_greater_than(0)
+        expect(entries[entries.len() - 1].message).to_contain("unsupported RV64 supervisor ecall")
+
+    it "updates a trap frame in place through the pointer bridge":
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+
+        var ctx = create_rv64_user_context(0x400000, 0x410000, 0)
+        ctx.a7 = 4
+        ctx.scause = RV64_CAUSE_ECALL_FROM_U
+
+        val rc = rv64_dispatch_trap_frame_ptr(&ctx as u64)
+        expect(rc).to_equal(0)
+        expect(ctx.a0).to_equal(0)
+        expect(ctx.sepc).to_equal(0x400004)
+
+    it "rejects a null trap frame pointer":
+        rv64_install_trap_runtime(Scheduler.new(), IpcManager.new(), KernelLog.new(8))
+
+        val rc = rv64_dispatch_trap_frame_ptr(0)
+        expect(rc).to_equal(-1)
+
+        val entries = rv64_read_trap_log(0, 0, 4)
+        expect(entries.len()).to_be_greater_than(0)
+        expect(entries[entries.len() - 1].message).to_contain("trap frame pointer is null")

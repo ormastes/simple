@@ -21,6 +21,14 @@
   - the RV32 hardware example is still handwritten RTL rather than Simple-defined hardware
   - `tb_remote.vhd` image-loading and real transport wiring remain incomplete
 
+**Blocking milestone note (2026-04-02):**
+- the current runtime blocker for the broader RISC-V program is true RV64 user-mode exec, documented separately in:
+  - `doc/01_research/local/rv64_user_mode_exec.md`
+  - `doc/01_research/domain/rv64_user_mode_exec.md`
+  - `doc/02_requirements/feature/rv64_user_mode_exec.md`
+  - `doc/03_plan/rv64_user_mode_exec.md`
+- this VHDL/remote-interpreter plan should now be read as a downstream program document, not the current blocker plan
+
 ---
 
 ## Executive Summary

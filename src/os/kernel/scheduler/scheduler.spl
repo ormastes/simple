@@ -8,6 +8,8 @@
 
 use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, TaskContext, BlockReason, UserProcessImage}
 use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context}
 
 # ============================================================================
 # Configuration
@@ -34,6 +36,7 @@ struct TaskControlBlock:
     is_user: bool
     entry_point: u64
     context: TaskContext             # Saved CPU state
+    user_context: Riscv64Context?    # RV64 user-mode handoff state
     address_space: u64              # PML4 physical address
     kernel_stack: u64               # Kernel stack top
     user_stack: u64                 # User stack top
@@ -208,6 +211,7 @@ impl Scheduler:
             is_user: false,
             entry_point: entry,
             context: ctx,
+            user_context: nil,
             address_space: 0,
             kernel_stack: 0,
             user_stack: 0,
@@ -228,9 +232,8 @@ impl Scheduler:
     me create_user_task(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> TaskId:
         """Create a transitional user task from a user process image.
 
-        The current scheduler still uses the generic TaskContext layout, so the
-        image entry and stack are mirrored into the existing instruction/stack
-        fields until architecture-specific runtime switching is completed.
+        The scheduler keeps the legacy TaskContext slot for compatibility, but
+        the RV64 user-mode handoff is represented explicitly in user_context.
         """
         val id = TaskId(id: self.next_task_id)
         self.next_task_id = self.next_task_id + 1
@@ -239,9 +242,10 @@ impl Scheduler:
         if slot < 0:
             return TaskId(id: 0)
 
-        val ctx = TaskContext(
+        val user_ctx = create_rv64_user_context(image.entry, image.stack_top, 0)
+        val legacy_ctx = TaskContext(
             rax: 0, rbx: 0, rcx: 0, rdx: 0,
-            rsi: 0, rdi: 0, rbp: image.stack_top, rsp: image.stack_top,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
             r8: 0, r9: 0, r10: 0, r11: 0,
             r12: 0, r13: 0, r14: 0, r15: 0,
             rip: image.entry,
@@ -257,7 +261,8 @@ impl Scheduler:
             priority: priority,
             is_user: true,
             entry_point: image.entry,
-            context: ctx,
+            context: legacy_ctx,
+            user_context: Some(user_ctx),
             address_space: 1,
             kernel_stack: 0,
             user_stack: image.stack_top,
