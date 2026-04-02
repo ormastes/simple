@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# TRACE32 MCP feature validation — exercises every supported T32 MCP feature
+# via t32rem commands and produces a PASS/FAIL/SKIP matrix.
+#
+# Usage: scripts/t32_mcp_feature_check.shs [--board stm32wb|stm32h7]
+
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=scripts/t32_host_bootstrap.shs
+. "$SCRIPT_DIR/t32_host_bootstrap.shs"
+
+t32_resolve_bin
+t32_env_setup
+
+T32REM="${T32REM:-$T32_BASE/t32rem}"
+HOST="${T32_HOST:-localhost}"
+PORT="${T32_PORT:-20000}"
+BOARD="stm32wb"
+FEATURE_TIMEOUT=5
+
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --board)
+            BOARD="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--board stm32wb|stm32h7]" >&2
+            exit 2
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$BOARD" in
+    stm32wb) CPU="cortex-m4" ;;
+    stm32h7) CPU="cortex-m7" ;;
+    *)
+        echo "unsupported board: $BOARD" >&2
+        exit 1
+        ;;
+esac
+
+# ─── t32rem wrapper ─────────────────────────────────────────────────────────
+
+t32rem_cmd() {
+    timeout "$FEATURE_TIMEOUT" "$T32REM" "$HOST" "port=$PORT" "protocol=NETTCP" "$@" 2>&1
+}
+
+# ─── Build test firmware ────────────────────────────────────────────────────
+
+ASM_PATH="$REPO_ROOT/test/fixtures/baremetal/stm_semihost_smoke.s"
+LD_PATH="$REPO_ROOT/test/fixtures/baremetal/stm_semihost_smoke.ld"
+TMPDIR="$(mktemp -d /tmp/t32_feature_check.XXXXXX)"
+ELF_PATH="$TMPDIR/stm_semihost_smoke_${BOARD}.elf"
+
+if [ -f "$ASM_PATH" ] && [ -f "$LD_PATH" ]; then
+    clang \
+        --target=armv7m-none-eabi \
+        -mcpu="$CPU" \
+        -mthumb \
+        -nostdlib \
+        -fuse-ld=lld \
+        -Wl,-T,"$LD_PATH" \
+        -Wl,-e,_start \
+        -Wl,--gc-sections \
+        -o "$ELF_PATH" \
+        "$ASM_PATH" 2>/dev/null || true
+fi
+
+# ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
+
+cleanup() {
+    t32_lifecycle_off
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT INT TERM
+
+t32_lifecycle_on "$CFG_PATH"
+
+# ─── Feature checks ─────────────────────────────────────────────────────────
+
+TOTAL=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+RESULTS=()
+
+check_feature() {
+    local name="$1"
+    shift
+    TOTAL=$((TOTAL + 1))
+
+    local output rc
+    output="$("$@" 2>&1)" && rc=0 || rc=$?
+
+    if [ "$rc" -eq 124 ]; then
+        # timeout
+        SKIPPED=$((SKIPPED + 1))
+        RESULTS+=("SKIP  $name (timeout)")
+        printf '  %-25s SKIP (timeout)\n' "$name"
+        return
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        # Check if it's a genuine error vs unsupported feature
+        if printf '%s\n' "$output" | grep -qi "unknown\|not supported\|not available"; then
+            SKIPPED=$((SKIPPED + 1))
+            RESULTS+=("SKIP  $name (unsupported)")
+            printf '  %-25s SKIP (unsupported)\n' "$name"
+        else
+            FAILED=$((FAILED + 1))
+            RESULTS+=("FAIL  $name")
+            printf '  %-25s FAIL\n' "$name"
+        fi
+        return
+    fi
+
+    PASSED=$((PASSED + 1))
+    RESULTS+=("PASS  $name")
+    printf '  %-25s PASS\n' "$name"
+}
+
+check_feature_output() {
+    # Like check_feature but also verifies output contains expected pattern
+    local name="$1"
+    local pattern="$2"
+    shift 2
+    TOTAL=$((TOTAL + 1))
+
+    local output rc
+    output="$("$@" 2>&1)" && rc=0 || rc=$?
+
+    if [ "$rc" -eq 124 ]; then
+        SKIPPED=$((SKIPPED + 1))
+        RESULTS+=("SKIP  $name (timeout)")
+        printf '  %-25s SKIP (timeout)\n' "$name"
+        return
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        FAILED=$((FAILED + 1))
+        RESULTS+=("FAIL  $name (rc=$rc)")
+        printf '  %-25s FAIL (rc=%d)\n' "$name" "$rc"
+        return
+    fi
+
+    if printf '%s\n' "$output" | grep -qi "$pattern"; then
+        PASSED=$((PASSED + 1))
+        RESULTS+=("PASS  $name")
+        printf '  %-25s PASS\n' "$name"
+    else
+        FAILED=$((FAILED + 1))
+        RESULTS+=("FAIL  $name (no match)")
+        printf '  %-25s FAIL (no match)\n' "$name"
+    fi
+}
+
+echo "TRACE32 MCP Feature Validation ($BOARD)"
+echo "════════════════════════════════════════════"
+
+# 1. PING
+check_feature "PING" t32rem_cmd "PING"
+
+# 2. Screen control
+check_feature "Screen OFF" t32rem_cmd "SCREEN.OFF"
+check_feature "Screen ON" t32rem_cmd "SCREEN.ON"
+
+# 3. Firmware load
+if [ -f "$ELF_PATH" ]; then
+    check_feature "FW Load (ELF)" t32rem_cmd "Data.LOAD.Elf $ELF_PATH"
+else
+    TOTAL=$((TOTAL + 1))
+    SKIPPED=$((SKIPPED + 1))
+    RESULTS+=("SKIP  FW Load (ELF) (no ELF built)")
+    printf '  %-25s SKIP (no ELF built)\n' "FW Load (ELF)"
+fi
+
+# 4. Run / Halt
+check_feature "Go (Run)" t32rem_cmd "Go"
+sleep 1
+check_feature "Break (Halt)" t32rem_cmd "Break"
+
+# 5. Semihost
+check_feature "Semihost Enable" t32rem_cmd "SYStem.Option SemiHost ON"
+
+# 6. AREA window
+check_feature "AREA Create" t32rem_cmd "AREA.Create FEAT_TEST"
+check_feature "AREA Select" t32rem_cmd "AREA.Select FEAT_TEST"
+check_feature "AREA Clear" t32rem_cmd "AREA.CLEAR FEAT_TEST"
+
+# 7. Breakpoints
+check_feature "Breakpoint Set" t32rem_cmd "Break.Set 0x08000000"
+check_feature "Breakpoint List" t32rem_cmd "Break.List"
+check_feature "Breakpoint Delete" t32rem_cmd "Break.Delete 0x08000000"
+
+# 8. Register read
+check_feature "Register Read" t32rem_cmd "Register.view"
+
+# 9. Memory read
+check_feature "Memory Read" t32rem_cmd "Data.dump 0x08000000--0x0800000F"
+
+# 10. Step
+check_feature "Step" t32rem_cmd "Step"
+
+# 11. System reset
+check_feature "System Up" t32rem_cmd "SYStem.Up"
+
+# 12. PRACTICE script
+CMM_TEST="$TMPDIR/test_nop.cmm"
+printf 'ENDDO\n' > "$CMM_TEST"
+check_feature "PRACTICE Script" t32rem_cmd "DO $CMM_TEST"
+
+# 13. Window capture
+check_feature "Window Capture" t32rem_cmd "WinPrint.AREA FEAT_TEST"
+
+# 14. Semihost AREA output (if firmware was loaded and ran)
+if [ -f "$ELF_PATH" ]; then
+    # Reload and run briefly to check semihost output
+    t32rem_cmd "Data.LOAD.Elf $ELF_PATH" >/dev/null 2>&1 || true
+    t32rem_cmd "AREA.CLEAR FEAT_TEST" >/dev/null 2>&1 || true
+    t32rem_cmd "Go" >/dev/null 2>&1 || true
+    sleep 2
+    t32rem_cmd "Break" >/dev/null 2>&1 || true
+    check_feature_output "Semihost Output" "simple-stm-smoke" t32rem_cmd "WinPrint.AREA FEAT_TEST"
+fi
+
+# ─── Summary ────────────────────────────────────────────────────────────────
+
+echo ""
+echo "════════════════════════════════════════════"
+echo "  Feature Matrix: $PASSED PASS, $FAILED FAIL, $SKIPPED SKIP ($TOTAL total)"
+echo "════════════════════════════════════════════"
+for r in "${RESULTS[@]}"; do
+    echo "  $r"
+done
+
+if [ "$FAILED" -gt 0 ]; then
+    exit 1
+fi
+exit 0

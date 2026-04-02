@@ -4,7 +4,13 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
-T32REM="${T32REM:-/opt/t32/bin/pc_linux64/t32rem}"
+# shellcheck source=scripts/t32_host_bootstrap.shs
+. "$SCRIPT_DIR/t32_host_bootstrap.shs"
+
+t32_resolve_bin
+t32_env_setup
+
+T32REM="${T32REM:-$T32_BASE/t32rem}"
 HOST="${T32_HOST:-localhost}"
 PORT="${T32_PORT:-20000}"
 BOARD="stm32wb"
@@ -66,13 +72,14 @@ require_cmd() {
 }
 
 t32_remote() {
-    "$T32REM" "$HOST" "port=$PORT" "$1"
+    "$T32REM" "$HOST" "port=$PORT" "protocol=NETTCP" "$1"
 }
 
 stop_port_conflicts() {
     if [ -x "$REPO_ROOT/scripts/t32q.shs" ]; then
         "$REPO_ROOT/scripts/t32q.shs" off >/dev/null 2>&1 || true
     fi
+    t32_kill_stale
     pkill -f '/opt/t32/bin/pc_linux64/t32mciserver' >/dev/null 2>&1 || true
 }
 
@@ -118,8 +125,16 @@ if [ ! -x "$T32REM" ]; then
 fi
 
 stop_port_conflicts
-"$REPO_ROOT/scripts/t32_start_stm.shs" --kill-stale "$BOARD" native
-"$REPO_ROOT/scripts/t32_check_ready.shs"
+
+# Lifecycle: start T32 and ensure cleanup on any exit
+CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
+case "$BOARD" in
+    stm32wb) CMM_PATH="$REPO_ROOT/config/t32/${BOARD}_native_start.cmm" ;;
+    stm32h7) CMM_PATH="$REPO_ROOT/config/t32/${BOARD}_native_start.cmm" ;;
+esac
+
+t32_lifecycle_on "$CFG_PATH" "$CMM_PATH"
+trap 't32_lifecycle_off; cleanup' EXIT INT TERM
 
 t32_remote "SCREEN.OFF" >/dev/null 2>&1 || true
 t32_remote "AREA.Create MCP_OUT" >/dev/null 2>&1 || true

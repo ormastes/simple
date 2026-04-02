@@ -6,6 +6,28 @@
 use app.io.mod (file_write, dir_create)
 use app.feature_doc.types.*
 
+fn render_doc_block(block: text, skip_top_title: bool) -> text:
+    """Strip duplicated headings and metadata from a parsed doc block."""
+    val lines = block.split("\n")
+    var out: [text] = []
+    var skip_title = skip_top_title
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            if out.len() > 0 and out[-1] != "":
+                out.push("")
+            continue
+        if skip_title and trimmed.starts_with("# ") and not trimmed.starts_with("## "):
+            skip_title = false
+            continue
+        if trimmed.starts_with("## ") or trimmed.starts_with("### "):
+            continue
+        if trimmed.starts_with("**Feature") or trimmed.starts_with("**Category") or trimmed.starts_with("**Status") or trimmed.starts_with("**Keywords") or trimmed.starts_with("**Difficulty") or trimmed.starts_with("*Source:*"):
+            continue
+        out.push(trimmed)
+    out.join("\n").trim()
+
 # ============================================================================
 # Usage Doc Generation
 # ============================================================================
@@ -35,31 +57,19 @@ fn generate_usage_doc(info: FeatureFileInfo, output_dir: text) -> text:
 
     # Overview from first doc block
     if info.doc_blocks.len() > 0:
-        md_parts.push("## Overview\n\n")
-        val first_block = info.doc_blocks[0]
-        # Skip the title line if it starts with #
-        val blines = first_block.split("\n")
-        var skip_title = true
-        for bl in blines:
-            val bt = bl.trim()
-            if skip_title and bt.starts_with("# ") and not bt.starts_with("## "):
-                skip_title = false
-                continue
-            # Also skip metadata lines
-            if bt.starts_with("**Feature") or bt.starts_with("**Category") or bt.starts_with("**Status") or bt.starts_with("**Keywords") or bt.starts_with("**Difficulty"):
-                continue
-            if bt == "":
-                md_parts.push("\n")
-            else:
-                md_parts.push(bl + "\n")
-        md_parts.push("\n")
+        val overview = render_doc_block(info.doc_blocks[0], true)
+        if overview != "":
+            md_parts.push("## Overview\n\n")
+            md_parts.push(overview + "\n\n")
 
     # Describe blocks -> Feature sections
     for desc in info.describes:
         md_parts.push("## Feature: {desc.name}\n\n")
 
         if desc.doc != "":
-            md_parts.push(desc.doc + "\n" + "\n")
+            val desc_doc = render_doc_block(desc.doc, false)
+            if desc_doc != "":
+                md_parts.push(desc_doc + "\n\n")
 
         # Context blocks -> Scenario sections
         for ctx in desc.contexts:
@@ -69,7 +79,9 @@ fn generate_usage_doc(info: FeatureFileInfo, output_dir: text) -> text:
                 md_parts.push("### Scenario: General\n\n")
 
             if ctx.doc != "":
-                md_parts.push(ctx.doc + "\n" + "\n")
+                val ctx_doc = render_doc_block(ctx.doc, false)
+                if ctx_doc != "":
+                    md_parts.push(ctx_doc + "\n\n")
 
             # Examples table
             if ctx.its.len() > 0:
@@ -116,4 +128,3 @@ fn extract_doc_filename(file_path: text) -> text:
     if filename.ends_with(".spl"):
         return filename[:-4]
     filename
-

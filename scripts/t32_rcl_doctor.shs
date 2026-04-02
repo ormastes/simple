@@ -4,9 +4,16 @@ set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
-T32_BIN="${T32_BIN:-/opt/t32/bin/pc_linux64/t32marm}"
-T32USBCHECKER="${T32USBCHECKER:-/opt/t32/bin/pc_linux64/t32usbchecker}"
-T32REM="${T32REM:-/opt/t32/bin/pc_linux64/t32rem}"
+# shellcheck source=scripts/t32_host_bootstrap.shs
+. "$SCRIPT_DIR/t32_host_bootstrap.shs"
+
+t32_resolve_bin
+t32_bootstrap_fonts
+t32_env_setup
+
+T32_BIN="$T32_RESOLVED_BIN"
+T32USBCHECKER="${T32USBCHECKER:-$T32_BASE/t32usbchecker}"
+T32REM="${T32REM:-$T32_BASE/t32rem}"
 RCL_ONLY_CFG="${RCL_ONLY_CFG:-$REPO_ROOT/config/t32/t32_rcl_only.t32}"
 PORT="${T32_PORT:-20000}"
 USB_TIMEOUT="${T32_USB_CHECK_TIMEOUT:-8}"
@@ -18,7 +25,7 @@ Usage: scripts/t32_rcl_doctor.shs
 
 Diagnose TRACE32 host PowerView readiness by separating:
 1. raw Lauterbach probe USB communication
-2. PowerView RCL/NETASSIST listener startup without probe access
+2. PowerView RCL/NETTCP listener startup without probe access
 EOF
     exit 2
 }
@@ -76,12 +83,14 @@ fi
 
 cleanup_powerview
 LOG_PATH="/tmp/t32_rcl_doctor.log"
-nohup xvfb-run -a "$T32_BIN" -c "$RCL_ONLY_CFG" >"$LOG_PATH" 2>&1 &
+XVFB_EXTRA="$(t32_xvfb_args)"
+# shellcheck disable=SC2086
+nohup xvfb-run -a $XVFB_EXTRA "$T32_BIN" -c "$RCL_ONLY_CFG" >"$LOG_PATH" 2>&1 &
 PID=$!
 sleep "$RCL_TIMEOUT"
 print_port_state
 
-if [ -x "$T32REM" ] && timeout 2 "$T32REM" localhost "port=$PORT" PING >/dev/null 2>&1; then
+if [ -x "$T32REM" ] && timeout 2 "$T32REM" localhost "port=$PORT" "protocol=NETTCP" PING >/dev/null 2>&1; then
     echo "rcl_ping=ok"
 else
     echo "rcl_ping=failed"

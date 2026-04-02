@@ -1,7 +1,11 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Start a repo-managed TRACE32 STM session for native or GDB-backed flows.
 
 set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/t32_host_bootstrap.shs
+. "$SCRIPT_DIR/t32_host_bootstrap.shs"
 
 KILL_STALE=0
 FALLBACK_MCI=0
@@ -24,10 +28,14 @@ done
 
 BOARD="${1:-}"
 MODE="${2:-}"
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
-T32_BIN="/opt/t32/bin/pc_linux64/t32marm"
-T32REM="/opt/t32/bin/pc_linux64/t32rem"
+
+t32_resolve_bin
+t32_bootstrap_fonts
+t32_env_setup
+
+T32_BIN="$T32_RESOLVED_BIN"
+T32REM="${T32REM:-$T32_BASE/t32rem}"
 CFG_PATH="$REPO_ROOT/config/t32_stm_linux_hidden.t32"
 LOG_PATH=""
 
@@ -194,7 +202,7 @@ show_launch_failure_hint() {
 }
 
 remote_api_ready() {
-    if [ -x "$T32REM" ] && timeout 2 "$T32REM" localhost port=20000 PING >/dev/null 2>&1; then
+    if [ -x "$T32REM" ] && timeout 2 "$T32REM" localhost "port=20000" "protocol=NETTCP" PING >/dev/null 2>&1; then
         return 0
     fi
 
@@ -257,7 +265,9 @@ echo "  script: $CMM_PATH"
 LOG_PATH="/tmp/t32_${BOARD}_${MODE}.log"
 
 cd "$REPO_ROOT"
-nohup xvfb-run -a "$T32_BIN" -c "$CFG_PATH" "$CMM_PATH" >"$LOG_PATH" 2>&1 &
+XVFB_EXTRA="$(t32_xvfb_args)"
+# shellcheck disable=SC2086
+nohup xvfb-run -a $XVFB_EXTRA "$T32_BIN" -c "$CFG_PATH" "$CMM_PATH" >"$LOG_PATH" 2>&1 &
 PID=$!
 sleep 2
 CHILD_PID=""

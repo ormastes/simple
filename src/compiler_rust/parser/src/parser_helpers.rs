@@ -721,6 +721,7 @@ impl<'a> Parser<'a> {
             TokenKind::In => "in".to_string(),
             TokenKind::Is => "is".to_string(),
             TokenKind::Requires => "requires".to_string(),
+            TokenKind::Exists => "exists".to_string(),
             TokenKind::By => "by".to_string(),
             TokenKind::If => "if".to_string(),
             TokenKind::Else => "else".to_string(),
