@@ -7,34 +7,29 @@
 #
 # Boots directly in M-mode with -bios none (no OpenSBI firmware).
 
-use os.kernel.arch.riscv32.console.{Rv32Console, uart_init, uart_writeln}
-use os.kernel.arch.riscv32.boot.{Rv32Boot}
-use os.kernel.boot.ports.{BootOutputPort}
+use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
 
-fn kernel_main(boot_info: BootOutputPort):
-    """Minimal kernel main for RISC-V 32 — prints boot info summary."""
-    uart_writeln("[KERNEL] kernel_main entered")
-    uart_writeln("[KERNEL] memory regions: {boot_info.memory_map.len()}")
-    uart_writeln("[KERNEL] serial base: 0x{boot_info.serial_base}")
-    uart_writeln("[KERNEL] kernel_main complete")
+# Direct UART output — bypasses all string allocation
+fn uart_putc(ch: u8):
+    # Wait until TX empty (LSR bit 5)
+    while (mmio_read8(0x10000005) & 0x20) == 0:
+        pass_do_nothing
+    mmio_write8(0x10000000, ch as u64)
+
+fn uart_puts(msg: text):
+    var i = 0
+    while i < msg.len():
+        val ch = msg.char_at(i)
+        uart_putc(ch as u8)
+        i = i + 1
+
+fn kernel_main():
+    pass_do_nothing
 
 fn _start():
-    """RISC-V 32 entry point — M-mode direct boot (no OpenSBI).
-
-    Initializes 16550 UART via real MMIO register writes,
-    constructs BootOutputPort from QEMU virt memory map,
-    then calls kernel_main() for PMM/scheduler init.
-    """
-    # Real UART init: configures 16550 at 0x10000000 via MMIO
-    uart_init()
-    uart_writeln("SimpleOS RISC-V 32 boot")
-    uart_writeln("[BOOT] UART initialized via MMIO")
-
-    # Real memory map: RAM at 0x80000000, kernel + usable regions
-    val boot_info = Rv32Boot.build_boot_output()
-    uart_writeln("[BOOT] Memory map parsed")
-
-    # Call real kernel main — runs PMM bitmap init, scheduler ReadyQueue creation
-    kernel_main(boot_info)
-
-    uart_writeln("[BOOT] RISC-V 32 boot complete")
+    """RISC-V 32 entry point — M-mode direct boot (no OpenSBI)."""
+    # Write 'S' directly to UART to verify basic MMIO works
+    uart_putc(0x53)   # 'S'
+    uart_putc(0x0A)   # newline
+    uart_puts("SimpleOS RV32 boot OK")
+    uart_putc(0x0A)

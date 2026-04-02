@@ -21,22 +21,14 @@
 .code32
 .align 4
 
-#define MB_MAGIC     0x1BADB002
-#define MB_FLAGS     0x00000007   /* page-align | meminfo | video */
-#define MB_CHECKSUM  (-(MB_MAGIC + MB_FLAGS))
+.set MB_MAGIC, 0x1BADB002
+.set MB_FLAGS, 0x00000003
 
 .global _multiboot_header
 _multiboot_header:
     .long MB_MAGIC
     .long MB_FLAGS
-    .long MB_CHECKSUM
-    /* address fields (unused, bit 16 clear) */
-    .long 0, 0, 0, 0, 0
-    /* video mode: linear fb, 1024x768x32 */
-    .long 0          /* mode_type = linear */
-    .long 1024       /* width  */
-    .long 768        /* height */
-    .long 32         /* depth  */
+    .long 0xE4524FFB          /* checksum: -(magic + flags) & 0xFFFFFFFF */
 
 /* ==================================================================
  * 32-bit entry point

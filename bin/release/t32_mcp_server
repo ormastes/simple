@@ -40,6 +40,55 @@ t32_mcp_log_line() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$t32_mcp_log_file"
 }
 
+t32_mcp_native_health_cache_path() {
+  t32_mcp_health_cwd="$(pwd)"
+  t32_mcp_health_segment="$(t32_mcp_sanitize_segment "$t32_mcp_health_cwd")"
+  if [ -z "$t32_mcp_health_segment" ]; then
+    t32_mcp_health_segment="workspace"
+  fi
+  printf '%s' "/tmp/t32_mcp_native_health_${t32_mcp_health_segment}.state"
+}
+
+t32_mcp_native_signature() {
+  t32_mcp_native_bin="$1"
+  if stat -c '%Y:%s' "$t32_mcp_native_bin" >/dev/null 2>&1; then
+    stat -c '%Y:%s' "$t32_mcp_native_bin"
+  else
+    stat -f '%m:%z' "$t32_mcp_native_bin"
+  fi
+}
+
+t32_mcp_native_health_cached() {
+  t32_mcp_cache_file="$1"
+  t32_mcp_expected_sig="$2"
+  if [ ! -f "$t32_mcp_cache_file" ]; then
+    return 1
+  fi
+  t32_mcp_cached_sig="$(sed -n 's/^sig=//p' "$t32_mcp_cache_file" | head -n 1)"
+  t32_mcp_cached_status="$(sed -n 's/^status=//p' "$t32_mcp_cache_file" | head -n 1)"
+  if [ "$t32_mcp_cached_sig" = "$t32_mcp_expected_sig" ] && [ -n "$t32_mcp_cached_status" ]; then
+    printf '%s' "$t32_mcp_cached_status"
+    return 0
+  fi
+  return 1
+}
+
+t32_mcp_native_health_probe() {
+  t32_mcp_native_bin="$1"
+  "$t32_mcp_native_bin" --version >/dev/null 2>&1 &
+  t32_mcp_probe_pid=$!
+  (
+    sleep 2
+    kill "$t32_mcp_probe_pid" >/dev/null 2>&1 || true
+  ) &
+  t32_mcp_killer_pid=$!
+  wait "$t32_mcp_probe_pid"
+  t32_mcp_probe_status=$?
+  kill "$t32_mcp_killer_pid" >/dev/null 2>&1 || true
+  wait "$t32_mcp_killer_pid" >/dev/null 2>&1 || true
+  return "$t32_mcp_probe_status"
+}
+
 DEBUG_ENABLED=0
 DEBUG_ROOT=""
 WRAPPER_LOG=""
@@ -65,42 +114,64 @@ if t32_mcp_debug_enabled; then
 fi
 
 PREFERRED_BINARY=""
-if [ -n "bin/release/t32_mcp_native" ]; then
+if [ -x "${REPO_ROOT}/bin/release/t32_mcp_native" ]; then
   PREFERRED_BINARY="${REPO_ROOT}/bin/release/t32_mcp_native"
 fi
 HOST_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
-PREFER_NATIVE=0
-if [ "${T32_MCP_USE_NATIVE:-0}" = "1" ]; then
-  PREFER_NATIVE=1
-elif [ "$HOST_KERNEL" = "FreeBSD" ]; then
-  PREFER_NATIVE=1
-fi
+NATIVE_REQUESTED=0
+case "${T32_MCP_USE_NATIVE:-auto}" in
+  0|false|FALSE|no|NO|off|OFF)
+    NATIVE_REQUESTED=0
+    ;;
+  *)
+    if [ -n "$PREFERRED_BINARY" ] || [ "$HOST_KERNEL" = "FreeBSD" ]; then
+      NATIVE_REQUESTED=1
+    fi
+    ;;
+esac
 
+NATIVE_HEALTH_CACHE=""
+NATIVE_HEALTH_STATUS="unknown"
 RUNTIME=""
 RUNTIME_KIND=""
-if [ "$PREFER_NATIVE" = "1" ] && [ -n "$PREFERRED_BINARY" ] && [ -x "$PREFERRED_BINARY" ]; then
-  RUNTIME="$PREFERRED_BINARY"
-  RUNTIME_KIND="native"
-elif [ -x "${REPO_ROOT}/src/compiler_rust/target/release/simple" ]; then
+if [ "$NATIVE_REQUESTED" = "1" ] && [ -n "$PREFERRED_BINARY" ]; then
+  NATIVE_HEALTH_CACHE="$(t32_mcp_native_health_cache_path)"
+  NATIVE_SIG="$(t32_mcp_native_signature "$PREFERRED_BINARY")"
+  NATIVE_HEALTH_STATUS="$(t32_mcp_native_health_cached "$NATIVE_HEALTH_CACHE" "$NATIVE_SIG" || true)"
+  if [ -z "$NATIVE_HEALTH_STATUS" ]; then
+    if t32_mcp_native_health_probe "$PREFERRED_BINARY"; then
+      NATIVE_HEALTH_STATUS="healthy"
+    else
+      NATIVE_HEALTH_STATUS="unhealthy"
+    fi
+    printf 'sig=%s\nstatus=%s\n' "$NATIVE_SIG" "$NATIVE_HEALTH_STATUS" >"$NATIVE_HEALTH_CACHE"
+  fi
+  if [ "$NATIVE_HEALTH_STATUS" = "healthy" ]; then
+    RUNTIME="$PREFERRED_BINARY"
+    RUNTIME_KIND="native"
+  fi
+fi
+
+if [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/src/compiler_rust/target/release/simple" ]; then
   RUNTIME="${REPO_ROOT}/src/compiler_rust/target/release/simple"
   RUNTIME_KIND="source-release"
-elif [ -x "${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple" ]; then
+elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple" ]; then
   RUNTIME="${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"
   RUNTIME_KIND="source-bootstrap"
-elif [ -x "${REPO_ROOT}/bin/simple" ]; then
+elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/simple" ]; then
   RUNTIME="${REPO_ROOT}/bin/simple"
   RUNTIME_KIND="bin-simple"
-elif [ -x "${REPO_ROOT}/bin/release/simple" ]; then
+elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/release/simple" ]; then
   RUNTIME="${REPO_ROOT}/bin/release/simple"
   RUNTIME_KIND="bin-release-simple"
 fi
 
-ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl"
 export SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
 
-if [ -z "$RUNTIME" ]; then
+if [ -z "$PREFERRED_BINARY" ] && [ -z "$RUNTIME" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
     t32_mcp_log_line "$WRAPPER_LOG" "runtime_choice=missing"
     t32_mcp_log_line "$ERROR_LOG" "error=no runtime found for t32_mcp"
@@ -112,20 +183,46 @@ fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
   t32_mcp_log_line "$WRAPPER_LOG" "cwd=$(pwd)"
   t32_mcp_log_line "$WRAPPER_LOG" "repo_root=$REPO_ROOT"
+  if [ "$NATIVE_REQUESTED" = "1" ] && [ -n "$PREFERRED_BINARY" ]; then
+    t32_mcp_log_line "$WRAPPER_LOG" "native_preferred=1"
+    t32_mcp_log_line "$WRAPPER_LOG" "native_binary=$PREFERRED_BINARY"
+    t32_mcp_log_line "$WRAPPER_LOG" "native_health_cache=$NATIVE_HEALTH_CACHE"
+    t32_mcp_log_line "$WRAPPER_LOG" "native_health=$NATIVE_HEALTH_STATUS"
+  else
+    t32_mcp_log_line "$WRAPPER_LOG" "native_preferred=0"
+  fi
   t32_mcp_log_line "$WRAPPER_LOG" "runtime_choice=$RUNTIME_KIND"
   t32_mcp_log_line "$WRAPPER_LOG" "runtime=$RUNTIME"
   t32_mcp_log_line "$WRAPPER_LOG" "entrypoint=$ENTRY"
   t32_mcp_log_line "$WRAPPER_LOG" "daemon_dir=none"
-  if [ "$RUNTIME_KIND" = "native" ]; then
-    t32_mcp_log_line "$WRAPPER_LOG" "request_routing=native"
-  else
-    t32_mcp_log_line "$WRAPPER_LOG" "request_routing=source-hosted"
-  fi
+  t32_mcp_log_line "$WRAPPER_LOG" "request_routing=$RUNTIME_KIND"
   export T32_MCP_DEBUG=1
   export T32_MCP_DEBUG_FILE="$FRONTEND_LOG"
 fi
 
 cd "$REPO_ROOT"
+if [ "$RUNTIME_KIND" = "native" ]; then
+  if [ "$DEBUG_ENABLED" = "1" ]; then
+    t32_mcp_log_line "$WRAPPER_LOG" "request_routing=native"
+    if "$RUNTIME" "$@" 2>>"$ERROR_LOG"; then
+      exit 0
+    fi
+    status=$?
+    t32_mcp_log_line "$WRAPPER_LOG" "native_exit=$status"
+  else
+    if "$RUNTIME" "$@"; then
+      exit 0
+    fi
+    status=$?
+  fi
+  if [ -n "$NATIVE_HEALTH_CACHE" ] && [ -n "${NATIVE_SIG:-}" ]; then
+    printf 'sig=%s\nstatus=%s\n' "$NATIVE_SIG" "unhealthy" >"$NATIVE_HEALTH_CACHE"
+  fi
+  if [ -z "$RUNTIME" ]; then
+    exit "$status"
+  fi
+fi
+
 if [ "$DEBUG_ENABLED" = "1" ]; then
   "$RUNTIME" "$ENTRY" "$@" 2>>"$ERROR_LOG"
   status=$?
