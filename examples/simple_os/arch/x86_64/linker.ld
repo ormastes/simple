@@ -2,7 +2,7 @@
  * x86_64 Bare-Metal Linker Script
  *
  * Target: x86_64 processors (QEMU, physical hardware)
- * Bootloader: Multiboot2 (GRUB2 compatible)
+ * Bootloader: Multiboot1 compatible (QEMU -kernel)
  *
  * Memory Layout:
  *   0x00100000 - Kernel load address (1MB mark)
@@ -10,12 +10,12 @@
  *   Identity-mapped first 1GB via page tables
  *
  * Sections:
- *   .multiboot - Multiboot2 header (must be in first 8KB)
- *   .text      - Code and read-only data
- *   .rodata    - Read-only data (GDT, etc.)
- *   .data      - Initialized data
- *   .bss       - Uninitialized data (page tables, stack)
- *   .heap      - Dynamic memory allocation
+ *   .text.entry - Multiboot1 header + _start (must be in first 8KB)
+ *   .text       - Code and read-only data
+ *   .rodata     - Read-only data (GDT, etc.)
+ *   .data       - Initialized data
+ *   .bss        - Uninitialized data (page tables, stack)
+ *   .heap       - Dynamic memory allocation
  */
 
 ENTRY(_start)
@@ -25,15 +25,11 @@ SECTIONS
     /* Kernel starts at 1MB (standard for multiboot) */
     . = 0x100000;
 
-    /* Multiboot header must be in first 8KB */
-    .multiboot ALIGN(8) :
-    {
-        KEEP(*(.multiboot))
-    }
-
-    /* Code section */
+    /* Code section — .text.entry first for Multiboot header */
     .text ALIGN(4K) :
     {
+        KEEP(*(.text.entry))
+        KEEP(*(.multiboot))
         *(.text)
         *(.text.*)
     }

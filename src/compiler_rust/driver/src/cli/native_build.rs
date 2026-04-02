@@ -17,6 +17,7 @@
 //!   --cache-dir <dir>   Cache directory for incremental builds
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
+//!   --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
 
@@ -38,6 +39,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut no_mangle = false;
     let mut backend = String::new();
     let mut runtime_path: Option<PathBuf> = None;
+    let mut runtime_bundle = String::from("auto");
     let mut entry_closure = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
@@ -162,6 +164,19 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 runtime_path = Some(PathBuf::from(other.strip_prefix("--runtime-path=").unwrap_or("")));
                 i += 1;
             }
+            "--runtime-bundle" => {
+                if i + 1 < args.len() {
+                    runtime_bundle = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("error: --runtime-bundle requires a value (auto, runtime, all)");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--runtime-bundle=") => {
+                runtime_bundle = other.strip_prefix("--runtime-bundle=").unwrap_or("auto").to_string();
+                i += 1;
+            }
             "--entry-closure" => {
                 entry_closure = true;
                 i += 1;
@@ -249,6 +264,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         if let Some(ref rp) = runtime_path {
             eprintln!("  Runtime path: {}", rp.display());
         }
+        eprintln!("  Runtime bundle: {}", runtime_bundle);
         eprintln!("  Entry closure: {}", entry_closure);
     }
 
@@ -291,6 +307,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         cache_dir,
         no_mangle,
         runtime_path,
+        runtime_bundle,
         entry_closure,
         target,
         linker_script,
@@ -379,6 +396,7 @@ fn print_help() {
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
     println!("  --backend <name>    Compilation backend (cranelift, llvm)");
+    println!("  --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
     println!();

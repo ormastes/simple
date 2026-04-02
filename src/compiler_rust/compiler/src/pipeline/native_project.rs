@@ -91,6 +91,8 @@ pub struct NativeBuildConfig {
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
+    /// Runtime bundle selection: "auto", "runtime", or "all".
+    pub runtime_bundle: String,
     /// Discover files from the explicit entrypoint's reachable import closure.
     pub entry_closure: bool,
     /// Cross-compilation target (e.g. "riscv32-unknown-none"). None = host.
@@ -114,6 +116,7 @@ impl Default for NativeBuildConfig {
             no_mangle: false,
             backend: "cranelift".to_string(),
             runtime_path: None,
+            runtime_bundle: "auto".to_string(),
             entry_closure: false,
             target: None,
             linker_script: None,
@@ -254,6 +257,107 @@ impl NativeProjectBuilder {
             .first()
             .and_then(|dir| std::fs::canonicalize(dir).ok())
             .unwrap_or_else(|| self.source_root.clone())
+    }
+
+    fn runtime_bundle_prefers_runtime_only(&self) -> bool {
+        match self.config.runtime_bundle.as_str() {
+            "runtime" => return true,
+            "all" => return false,
+            _ => {}
+        }
+        if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").as_deref() == Ok("runtime") {
+            return true;
+        }
+        if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").as_deref() == Ok("all") {
+            return false;
+        }
+        let compiler_like = |path: &Path| {
+            let p = path.to_string_lossy().replace('\\', "/");
+            p.contains("/src/compiler/")
+                || p.ends_with("/src/compiler")
+                || p.contains("/src/app/cli/")
+                || p.ends_with("/src/app/cli")
+        };
+        if self.entry_file.as_ref().is_some_and(|p| compiler_like(p)) {
+            return false;
+        }
+        if self.source_dirs.iter().any(|p| compiler_like(p)) {
+            return false;
+        }
+        true
+    }
+
+    fn selected_runtime_library(&self, temp_dir: &Path) -> Option<(PathBuf, bool)> {
+        let prefer_runtime_only = self.runtime_bundle_prefers_runtime_only();
+        let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
+
+        let mut push_runtime_candidates = |dir: &Path| {
+            let runtime = dir.join("libsimple_runtime.a");
+            let native_all = dir.join("libsimple_native_all.a");
+            if prefer_runtime_only {
+                if runtime.exists() {
+                    candidates.push((runtime, false));
+                }
+                if native_all.exists() {
+                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
+                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
+                    let lib = if is_bootstrap {
+                        strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
+                    } else {
+                        native_all.clone()
+                    };
+                    candidates.push((lib, true));
+                }
+            } else {
+                if native_all.exists() {
+                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
+                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
+                    let lib = if is_bootstrap {
+                        strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
+                    } else {
+                        native_all.clone()
+                    };
+                    candidates.push((lib, true));
+                }
+                if runtime.exists() {
+                    candidates.push((runtime, false));
+                }
+            }
+        };
+
+        if let Some(ref rp) = self.config.runtime_path {
+            push_runtime_candidates(rp);
+        } else {
+            if let Some(runtime) = find_runtime_library() {
+                if prefer_runtime_only {
+                    candidates.push((runtime, false));
+                }
+            }
+            if let Some(native_all) = find_native_all_library() {
+                let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
+                    || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
+                let lib = if is_bootstrap {
+                    strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
+                } else {
+                    native_all.clone()
+                };
+                if prefer_runtime_only {
+                    if !candidates.iter().any(|(p, _)| p == &lib) {
+                        candidates.push((lib, true));
+                    }
+                } else {
+                    candidates.insert(0, (lib, true));
+                }
+            }
+            if !prefer_runtime_only {
+                if let Some(runtime) = find_runtime_library() {
+                    if !candidates.iter().any(|(p, _)| p == &runtime) {
+                        candidates.push((runtime, false));
+                    }
+                }
+            }
+        }
+        candidates.into_iter().next()
     }
 
     /// Build the project.
@@ -1087,12 +1191,8 @@ int main(int argc, char** argv) {
         // libc initialization, and library paths automatically.
         // When libsimple_native_all.a is present (always contains LLVM C++ objects),
         // use clang++ to ensure proper C++ runtime initialization ordering.
-        let has_native_all = self
-            .config
-            .runtime_path
-            .as_ref()
-            .map_or(false, |rp| rp.join("libsimple_native_all.a").exists())
-            || find_native_all_library().is_some();
+        let selected_runtime = self.selected_runtime_library(temp_dir);
+        let has_native_all = selected_runtime.as_ref().map_or(false, |(_, is_native_all)| *is_native_all);
         let cc = if has_native_all {
             find_cxx_compiler()
         } else {
@@ -1275,50 +1375,20 @@ int main(int argc, char** argv) {
         // LIM-010 fix: strip .init_array/.ctors from LLVM objects in the archive
         // to prevent LLVM static constructors from running (they segfault because
         // ManagedStatic depends on stubbed-out LLVM infrastructure).
-        let mut runtime_linked = false;
-        if let Some(ref rp) = self.config.runtime_path {
-            for name in &["libsimple_native_all.a", "libsimple_runtime.a"] {
-                let lib = rp.join(name);
-                if lib.exists() {
-                    // Only strip LLVM constructors during bootstrap builds.
-                    // Normal LLVM-backend builds need the constructors to initialize
-                    // LLVM's option parser and target registration.
-                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
-                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
-                    let lib = if is_bootstrap {
-                        strip_llvm_constructors(&lib, temp_dir).unwrap_or(lib.clone())
-                    } else {
-                        lib.clone()
-                    };
-                    #[cfg(target_os = "macos")]
-                    {
-                        cmd.arg("-Wl,-force_load").arg(&lib);
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        cmd.arg("-Wl,--whole-archive");
-                        cmd.arg(&lib);
-                        cmd.arg("-Wl,--no-whole-archive");
-                    }
-                    runtime_linked = true;
-                    break;
-                }
-            }
-        }
-        if !runtime_linked {
-            if let Some(native_all) = find_native_all_library() {
+        if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
+            if *is_native_all {
                 #[cfg(target_os = "macos")]
                 {
-                    cmd.arg("-Wl,-force_load").arg(&native_all);
+                    cmd.arg("-Wl,-force_load").arg(runtime_lib);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
                     cmd.arg("-Wl,--whole-archive");
-                    cmd.arg(&native_all);
+                    cmd.arg(runtime_lib);
                     cmd.arg("-Wl,--no-whole-archive");
                 }
-            } else if let Some(runtime) = find_runtime_library() {
-                cmd.arg(&runtime);
+            } else {
+                cmd.arg(runtime_lib);
             }
         }
 
@@ -1357,13 +1427,13 @@ int main(int argc, char** argv) {
         // Strategy is per-OS via PlatformLinkConfig (Weak, WeakDefinition, StrongWithAllowMultiple).
         #[cfg(not(target_os = "windows"))]
         {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &imports)?;
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, selected_runtime.as_ref().map(|(p, _)| p.as_path()), &imports)?;
             cmd.arg(&stubs_o);
         }
         #[cfg(target_os = "windows")]
         if !is_msvc && !is_clang_cl {
             // MinGW/GNU: generate stubs like Linux
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &imports)?;
+            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, selected_runtime.as_ref().map(|(p, _)| p.as_path()), &imports)?;
             cmd.arg(&stubs_o);
         }
         for flag in &link_config.unresolved_symbol_flags {
@@ -1610,6 +1680,7 @@ fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
     main_o: &std::path::Path,
+    selected_runtime_lib: Option<&std::path::Path>,
     imports: &ModuleImports,
 ) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
@@ -1655,7 +1726,9 @@ fn generate_stub_object(
     // Also scan the runtime library for defined AND undefined symbols.
     // Undefined symbols in the runtime lib (e.g., MSVC __security_cookie from
     // ring/lzma-sys C code) need stubs when linking with MinGW.
-    let runtime_lib = find_native_all_library().or_else(find_runtime_library);
+    let runtime_lib = selected_runtime_lib
+        .map(|p| p.to_path_buf())
+        .or_else(|| find_native_all_library().or_else(find_runtime_library));
     if let Some(ref rt_path) = runtime_lib {
         let output = std::process::Command::new("nm")
             .arg("-g")

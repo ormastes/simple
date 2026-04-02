@@ -1,0 +1,89 @@
+# SimpleOS GUI Kernel Main -- Framebuffer Desktop
+#
+# Minimal GUI kernel entry that:
+# 1. Prints boot messages via serial
+# 2. Queries multiboot info for framebuffer address
+# 3. Fills screen with a solid color to prove framebuffer works
+# 4. (Future: compositor, desktop shell, app launcher)
+#
+# Build:
+#   bin/simple native-build --entry examples/simple_os/arch/x86_64/gui_entry.spl \
+#     --target x86_64-unknown-none -o build/os/simpleos_gui_x86_64.elf \
+#     --linker-script examples/simple_os/arch/x86_64/linker.ld \
+#     --entry-closure --source src/os --source src/lib
+
+use os.kernel.boot.ports.{BootOutputPort}
+
+# Multiboot framebuffer info accessors (from baremetal_stubs.c)
+extern fn rt_multiboot_fb_addr() -> i64
+extern fn rt_multiboot_fb_pitch() -> i64
+extern fn rt_multiboot_fb_width() -> i64
+extern fn rt_multiboot_fb_height() -> i64
+extern fn rt_multiboot_fb_bpp() -> i64
+extern fn rt_multiboot_magic() -> i64
+extern fn rt_multiboot_has_fb() -> i64
+
+# Framebuffer fill (from baremetal_stubs.c)
+extern fn rt_fb_fill_rect(fb_addr: i64, pitch: i64, x: i64, y: i64, w: i64, h: i64, color: i64)
+
+# Serial output
+extern fn serial_println(msg: text)
+
+# VGA fallback address (mode 13h or 0xA0000 region)
+val VGA_FB_ADDR: i64 = 0xA0000
+val VGA_WIDTH: i64 = 320
+val VGA_HEIGHT: i64 = 200
+
+# Desktop blue color (ARGB: 0xFF336699)
+val DESKTOP_BLUE: i64 = 0xFF336699
+
+fn gui_kernel_main(boot_info: BootOutputPort):
+    """GUI kernel main -- init framebuffer and fill screen.
+
+    Called from gui_entry.spl after arch-specific boot completes.
+    Queries multiboot info for linear framebuffer. If available,
+    fills the screen blue. Otherwise falls back to VGA at 0xA0000.
+    """
+    serial_println("[GUI] Starting desktop...")
+
+    # Check multiboot magic
+    val magic = rt_multiboot_magic()
+    serial_println("[GUI] Multiboot magic: {magic}")
+
+    # Check for framebuffer info from multiboot
+    val has_fb = rt_multiboot_has_fb()
+
+    if has_fb == 1:
+        # Use multiboot-provided linear framebuffer
+        val fb_addr = rt_multiboot_fb_addr()
+        val fb_pitch = rt_multiboot_fb_pitch()
+        val fb_width = rt_multiboot_fb_width()
+        val fb_height = rt_multiboot_fb_height()
+        val fb_bpp = rt_multiboot_fb_bpp()
+
+        serial_println("[GUI] Framebuffer: {fb_width}x{fb_height}x{fb_bpp} at 0x{fb_addr}")
+        serial_println("[GUI] Pitch: {fb_pitch} bytes/row")
+
+        # Fill entire screen with desktop blue
+        rt_fb_fill_rect(fb_addr, fb_pitch, 0, 0, fb_width, fb_height, DESKTOP_BLUE)
+        serial_println("[GUI] Screen filled with desktop blue")
+
+    else:
+        # No multiboot framebuffer -- try VGA fallback at 0xA0000
+        serial_println("[GUI] No multiboot framebuffer, using VGA fallback at 0xA0000")
+        serial_println("[GUI] VGA mode: {VGA_WIDTH}x{VGA_HEIGHT}")
+
+        # VGA mode 13h uses 1 byte per pixel, pitch = width
+        # We fill with a single-byte blue value (index or raw)
+        val vga_pitch = VGA_WIDTH
+        rt_fb_fill_rect(VGA_FB_ADDR, vga_pitch, 0, 0, VGA_WIDTH, VGA_HEIGHT, 0x01)
+        serial_println("[GUI] VGA screen filled (blue index)")
+
+    serial_println("[GUI] Desktop ready")
+
+    # TODO: Initialize compositor
+    # TODO: Create desktop shell (taskbar, wallpaper)
+    # TODO: Launch initial apps (terminal, file manager)
+    # TODO: Enter event loop (keyboard, mouse, timer)
+
+    serial_println("[GUI] Halting (no event loop yet)")

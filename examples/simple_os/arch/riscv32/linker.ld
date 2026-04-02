@@ -1,8 +1,8 @@
-/* RISC-V 32 Linker Script — QEMU virt machine
+/* RISC-V 32 Linker Script — QEMU virt machine (M-mode, no OpenSBI)
  *
- * Kernel loaded at 0x80400000 by OpenSBI (4MB into RAM).
+ * Kernel loaded at 0x80000000 — direct M-mode boot with -bios none.
  * RAM: 0x80000000 .. 0x87FFFFFF (128MB total).
- * OpenSBI occupies 0x80000000 .. 0x803FFFFF.
+ * No OpenSBI firmware; kernel starts at RAM base.
  *
  * Output format: ELF32 little-endian RISC-V.
  */
@@ -12,7 +12,7 @@ OUTPUT_FORMAT("elf32-littleriscv")
 ENTRY(_start)
 
 MEMORY {
-    RAM (rwx) : ORIGIN = 0x80400000, LENGTH = 124M
+    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 128M
 }
 
 SECTIONS {

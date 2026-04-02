@@ -137,19 +137,53 @@ fn lsp_request_json_text_field(json: text, key: text) -> text:
     raw
 
 fn lsp_request_arguments_json(body: text) -> text:
-    val params = lsp_request_json_raw_field(body, "params")
-    if params == "null" or params == "":
-        return body
-    val args = lsp_request_json_raw_field(params, "arguments")
+    val args = extract_nested_raw(body, "arguments")
     if args == "null" or args == "":
         return body
     args
 
 fn lsp_request_id_text(body: text) -> text:
-    val id = lsp_request_json_raw_field(body, "id")
-    if id == "" or id == "null":
-        return "null"
-    id
+    val candidates = [
+        "\"id\": ",
+        "\"id\":",
+        "\\\"id\\\": ",
+        "\\\"id\\\":"
+    ]
+    var ci = 0
+    while ci < candidates.len():
+        val marker = candidates[ci]
+        var idx = body.index_of(marker).unwrap_or(-1)
+        if idx >= 0:
+            var start = idx + marker.len()
+            while start < body.len() and lsp_json_is_ws(lsp_json_char_at(body, start)):
+                start = start + 1
+            if start >= body.len():
+                return "null"
+            val first = lsp_json_char_at(body, start)
+            if first == "\"":
+                var end = start + 1
+                var escaped = false
+                while end < body.len():
+                    val ch = lsp_json_char_at(body, end)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == "\"":
+                        return body.substring(start, end + 1)
+                    end = end + 1
+                return "null"
+            var end2 = start
+            while end2 < body.len():
+                val ch = lsp_json_char_at(body, end2)
+                if ch == "," or ch == "}" or ch == "]" or lsp_json_is_ws(ch):
+                    break
+                end2 = end2 + 1
+            if end2 <= start:
+                return "null"
+            return body.substring(start, end2)
+        ci = ci + 1
+    "null"
 
 fn lsp_start_server():
     lsp_debug_bootstrap()

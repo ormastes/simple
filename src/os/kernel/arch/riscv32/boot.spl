@@ -1,11 +1,11 @@
-# RISC-V 32 Boot — OpenSBI S-Mode Boot Layer
+# RISC-V 32 Boot — M-Mode Direct Boot Layer (no OpenSBI)
 #
 # Parses boot-time info for the QEMU riscv32 virt machine.
-# Unlike x86_64 (which uses the Limine boot protocol), RISC-V boots
-# via OpenSBI into S-mode. The boot state is:
+# Boots directly in M-mode with -bios none (no OpenSBI firmware).
+# The boot state is:
 #   - a0 = hart ID
 #   - a1 = DTB (device tree blob) physical address
-#   - sp is undefined, satp = 0 (MMU off)
+#   - sp is undefined, mstatus MIE=0 (interrupts disabled)
 #
 # For the initial implementation, we hardcode the QEMU virt memory map
 # rather than parsing the DTB (device tree support is a future enhancement).
@@ -17,7 +17,7 @@
 #   0x10000000 .. 0x10000FFF — UART (16550)
 #   0x80000000 .. 0x87FFFFFF — RAM (128MB)
 #
-# Kernel is loaded at 0x80400000 by OpenSBI (4MB into RAM).
+# Kernel is loaded at 0x80000000 (RAM base, no firmware offset).
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
 use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
@@ -30,7 +30,7 @@ use os.kernel.arch.riscv32.console.{uart_writeln}
 
 val QEMU_RAM_BASE: u64 = 0x80000000
 val QEMU_RAM_SIZE: u64 = 0x08000000         # 128 MB
-val QEMU_KERNEL_LOAD: u64 = 0x80400000      # OpenSBI loads kernel here
+val QEMU_KERNEL_LOAD: u64 = 0x80000000      # M-mode direct boot at RAM base
 val QEMU_UART_BASE: u64 = 0x10000000
 val QEMU_PLIC_BASE: u64 = 0x0C000000
 val QEMU_CLINT_BASE: u64 = 0x02000000
@@ -65,21 +65,13 @@ fn _build_memory_map() -> [BootMemoryRegion]:
     """Build memory map from hardcoded QEMU virt layout.
 
     RAM region: 0x80000000 .. 0x87FFFFFF (128MB)
-    We split it into:
-      - Kernel region: 0x80000000 .. 0x80400000 (OpenSBI + firmware area)
-      - Kernel image: 0x80400000 .. 0x80800000 (kernel load area)
-      - Usable RAM: 0x80800000 .. 0x87FFFFFF (remaining ~120MB)
+    M-mode direct boot (no OpenSBI), kernel at RAM base:
+      - Kernel image: 0x80000000 .. 0x80400000 (kernel load area, 4MB)
+      - Usable RAM: 0x80400000 .. 0x87FFFFFF (remaining 124MB)
     """
     var regions: [BootMemoryRegion] = []
 
-    # OpenSBI firmware area (first 4MB)
-    regions.push(BootMemoryRegion(
-        base: PhysAddr(addr: QEMU_RAM_BASE),
-        size: QEMU_KERNEL_LOAD - QEMU_RAM_BASE,
-        kind: MemoryRegionKind.Reserved
-    ))
-
-    # Kernel image region
+    # Kernel image region (at RAM base, no firmware offset)
     regions.push(BootMemoryRegion(
         base: PhysAddr(addr: QEMU_KERNEL_LOAD),
         size: ESTIMATED_KERNEL_SIZE,
@@ -95,8 +87,7 @@ fn _build_memory_map() -> [BootMemoryRegion]:
         kind: MemoryRegionKind.Usable
     ))
 
-    uart_writeln("[BOOT-RV32] Memory map: 3 regions")
-    uart_writeln("[BOOT-RV32]   reserved: 0x{QEMU_RAM_BASE}..0x{QEMU_KERNEL_LOAD}")
+    uart_writeln("[BOOT-RV32] Memory map: 2 regions (M-mode, no firmware)")
     uart_writeln("[BOOT-RV32]   kernel:   0x{QEMU_KERNEL_LOAD}..0x{usable_start}")
     uart_writeln("[BOOT-RV32]   usable:   0x{usable_start}..0x{QEMU_RAM_BASE + QEMU_RAM_SIZE}")
 
@@ -138,7 +129,7 @@ fn _build_boot_output() -> BootOutputPort:
 
 impl Rv32Boot:
     fn save_boot_params(hart_id: u32, dtb_addr: u32):
-        """Save boot parameters from OpenSBI (a0=hart_id, a1=dtb_addr)."""
+        """Save boot parameters (a0=hart_id, a1=dtb_addr)."""
         g_hart_id = hart_id
         g_dtb_addr = dtb_addr
         uart_writeln("[BOOT-RV32] hart_id={hart_id}, dtb=0x{dtb_addr}")
@@ -156,5 +147,5 @@ impl Rv32Boot:
         g_dtb_addr
 
     fn kernel_load_addr() -> u64:
-        """Return the kernel load address (0x80400000 for QEMU virt rv32)."""
+        """Return the kernel load address (0x80000000 for QEMU virt rv32 M-mode)."""
         QEMU_KERNEL_LOAD
