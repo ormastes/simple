@@ -6,21 +6,117 @@
 
 use t32_lsp_mcp.json_helpers
 
-fn arg_field(args: text, key: text) -> text:
-    val value = lsp_extract_field(args, key)
-    if value != "":
-        return value
-    val wrapped = lsp_extract_field_raw(args, "arguments")
-    if wrapped != "null":
-        val wrapped_value = lsp_extract_field(wrapped, key)
-        if wrapped_value != "":
-            return wrapped_value
-    val nested = lsp_extract_field_raw(args, key)
-    if nested == "null":
+fn arg_char_at(s: text, i: i64) -> text:
+    return s.substring(i, i + 1)
+
+fn arg_is_ws(ch: text) -> bool:
+    return ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn arg_find_json_value_start(json: text, key: text) -> i64:
+    val search = "\"" + key + "\""
+    var i = 0
+    while i + search.len() <= json.len():
+        if json.substring(i).starts_with(search):
+            var j = i + search.len()
+            while j < json.len() and arg_is_ws(arg_char_at(json, j)):
+                j = j + 1
+            if j < json.len() and arg_char_at(json, j) == ":":
+                j = j + 1
+                while j < json.len() and arg_is_ws(arg_char_at(json, j)):
+                    j = j + 1
+                return j
+        i = i + 1
+    return -1
+
+fn arg_extract_string(json: text, key: text) -> text:
+    val start = arg_find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
         return ""
-    if nested.starts_with(lsp_Q()) and nested.ends_with(lsp_Q()) and nested.len() >= 2:
-        return lsp_unescape_json_string(nested.substring(1, nested.len() - 1))
-    nested
+    if arg_char_at(json, start) != "\"":
+        return ""
+    var i = start + 1
+    var escaped = false
+    while i < json.len():
+        val ch = arg_char_at(json, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return lsp_unescape_json_string(json.substring(start + 1, i))
+        i = i + 1
+    return ""
+
+fn arg_extract_object_raw(json: text, key: text) -> text:
+    val start = arg_find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = arg_char_at(json, start)
+    if first != "{" and first != "[":
+        return ""
+    var depth = 0
+    var i = start
+    var in_str = false
+    var escaped = false
+    while i < json.len():
+        val ch = arg_char_at(json, i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{" or ch == "[":
+                depth = depth + 1
+            elif ch == "}" or ch == "]":
+                depth = depth - 1
+                if depth == 0:
+                    return json.substring(start, i + 1)
+        i = i + 1
+    return ""
+
+fn arg_field(args: text, key: text) -> text:
+    val marker1 = "\"" + key + "\":"
+    val marker2 = "\"" + key + "\": "
+    var marker = ""
+    if args.contains(marker1):
+        marker = marker1
+    elif args.contains(marker2):
+        marker = marker2
+    else:
+        return ""
+    val parts = args.split(marker)
+    if parts.len() < 2:
+        return ""
+    var rest = parts[1].trim()
+    if rest == "":
+        return ""
+    if rest.starts_with("\""):
+        var i = 1
+        var escaped = false
+        while i < rest.len():
+            val ch = rest.substring(i, i + 1)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return lsp_unescape_json_string(rest.substring(1, i))
+            i = i + 1
+        return ""
+    var end = 0
+    while end < rest.len():
+        val ch = rest.substring(end, end + 1)
+        if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            break
+        end = end + 1
+    if end <= 0:
+        return ""
+    return rest.substring(0, end)
 
 fn runner_arg0_is_executable_path(arg0: text) -> bool:
     arg0.contains("/") or arg0.contains("\\") or arg0.ends_with(".exe") or arg0.ends_with("t32_lsp_mcp_tool_runner")

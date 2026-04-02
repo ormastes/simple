@@ -24,12 +24,17 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_env_get(name: text) -> text
 extern fn rt_env_cwd() -> text
 
-val LSP_SERVER_NAME = "simple-mcp-t32-lsp"
-val LSP_SERVER_VERSION = "0.1.2"
-val LSP_NL = "\n"
-
 # Protocol auto-detection
 var LSP_USE_JSON_LINES = false
+
+fn lsp_server_name() -> text:
+    return "simple-mcp-t32-lsp"
+
+fn lsp_server_version() -> text:
+    return "0.1.2"
+
+fn lsp_nl() -> text:
+    return "\n"
 
 # Caches
 var LSP_TOOLS_CACHE = ""
@@ -86,11 +91,72 @@ fn lsp_start_server():
 
 # --- Tool dispatcher ---
 
+fn lsp_char_at(s: text, i: i64) -> text:
+    return s.substring(i, i + 1)
+
+fn lsp_extract_arguments_object(body: text) -> text:
+    val marker = "\"arguments\":"
+    val marker_sp = "\"arguments\": "
+    var rest = ""
+    if body.contains(marker):
+        val parts = body.split(marker)
+        if parts.len() >= 2:
+            rest = parts[1]
+    elif body.contains(marker_sp):
+        val parts = body.split(marker_sp)
+        if parts.len() >= 2:
+            rest = parts[1]
+    if rest == "":
+        return ""
+    var start = 0
+    while start < rest.len():
+        val ch = lsp_char_at(rest, start)
+        if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            start = start + 1
+        else:
+            break
+    if start >= rest.len() or lsp_char_at(rest, start) != "{":
+        return ""
+    var depth = 0
+    var i = start
+    var in_str = false
+    var escaped = false
+    while i < rest.len():
+        val ch = lsp_char_at(rest, i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{":
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 0:
+                    return rest.substring(start, i + 1)
+        i = i + 1
+    return ""
+
 fn lsp_dispatch_tool(id: text, body: text) -> text:
     val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return jsonrpc_error(id, -32602, "Missing tool name in tools/call request")
-    val args_raw = body
+    var args_raw = extract_field_raw(body, "arguments")
+    if args_raw == "null":
+        val nested_args = lsp_extract_arguments_object(body)
+        if nested_args != "":
+            args_raw = nested_args
+        else:
+            val params_raw = extract_field_raw(body, "params")
+            if params_raw != "null":
+                args_raw = params_raw
+            else:
+                args_raw = body
     if tool_name == "cmm_parse":
         return lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
     val daemon_response = lsp_dispatch_tool_via_daemon(id, tool_name, body)
@@ -99,7 +165,7 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
     return lsp_run_tool_direct(id, tool_name, args_raw)
 
 fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
-    lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
+    return lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
 
 fn lsp_run_tool_direct_with_path(id: text, tool_name: text, args_raw: text, runner: text) -> text:
     val args_path = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id) + ".args.json"
@@ -143,7 +209,7 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
     val response_path = base + ".response.json"
     if not rt_file_write_text(args_path, args_raw):
         return jsonrpc_error(id, -32002, "Failed to write tool arguments")
-    val request_body = id + LSP_NL + tool_name + LSP_NL + args_path + LSP_NL + response_path + LSP_NL
+    val request_body = id + lsp_nl() + tool_name + lsp_nl() + args_path + lsp_nl() + response_path + lsp_nl()
     if not rt_file_write_text(req_path, request_body):
         rt_file_delete(args_path)
         return jsonrpc_error(id, -32002, "Failed to enqueue tool request")

@@ -4,6 +4,7 @@
 #          core_list, core_select, cmd_run, cmm_run, eval
 
 use t32_cli.error_codes.{T4010, T4013, T4070, T4071, T4082, T4200, t32_err_not_found, t32_err_no_session_mcp, t32_err_missing_param, t32_err_backend_not_found, t32_err_cmd_failed, t32_err_connection_failed}
+use t32_mcp.state
 use t32_mcp.tool_common.{t32_mcp_session_ids}
 use t32_mcp.window_tools.{t32_get_window_catalog, t32_parse_catalog_entry}
 use t32_mcp.snapshot_store.{t32_snapshot_store, t32_capture_with_diff}
@@ -13,6 +14,48 @@ use t32_mcp.snapshot_store.{t32_snapshot_store, t32_capture_with_diff}
 var MCP_T32_BACKEND_TYPE = ""    # "ctypes" | "t32rem" | "python_rcl" | ""
 var MCP_T32_BACKEND_CMD = ""     # Cached command path/prefix
 var MCP_T32_LAST_STDERR = ""     # Last subprocess stderr (preserved for error reporting)
+
+# Native MCP currently avoids the ctypes bridge because its FFI helpers pull in
+# unresolved low-level pointer symbols during entry-closure linking. Keep the
+# server functional through t32rem / python-rcl backends instead of emitting a
+# stub-heavy native binary that crashes before startup.
+fn t32_ctypes_load() -> bool:
+    return false
+
+fn t32_ctypes_eval(expr: text) -> (text, i64):
+    return ("", -1)
+
+fn t32_ctypes_get_message() -> (text, i64):
+    return ("", -1)
+
+fn t32_ctypes_available() -> bool:
+    return false
+
+fn t32_ctypes_init(host: text, port: i64) -> i64:
+    return -1
+
+fn t32_ctypes_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    return ("", -1)
+
+fn t32_ctypes_get_practice_state() -> i64:
+    return -1
+
+fn t32_parse_i64(s: text) -> i64:
+    if s == "":
+        return 0
+    var i = 0
+    var sign = 1
+    if s.starts_with("-"):
+        sign = -1
+        i = 1
+    var value = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            break
+        value = value * 10 + (ch.to_int() - "0".to_int())
+        i = i + 1
+    return value * sign
 
 fn t32_find_python_rcl_bridge() -> text:
     val python_bin = T32_PYTHON_BINARY
@@ -628,11 +671,11 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         port = T32_DEFAULT_PORT
     else:
         var pi = 0
-        for _i in range(0, 10):
+        while pi < 10:
             if pi >= port_str.len():
                 break
             val ch = port_str.substring(pi, pi + 1)
-            var digit = int(ch)
+            var digit = t32_parse_i64(ch)
             port = port * 10 + digit
             pi = pi + 1
     val session_id = "t32_" + str(MCP_T32_NEXT_SESSION_ID)
@@ -720,7 +763,7 @@ fn handle_t32_core_list(id: text, body: text) -> text:
             var core_count: i64 = 0
             if count_rc == 0:
                 val trimmed_count = count_out.trim().replace(".", "")
-                core_count = int(trimmed_count)
+                core_count = t32_parse_i64(trimmed_count)
             # If query failed or returned 0, fall back to at least 1 core
             if core_count < 1:
                 core_count = 1
@@ -946,7 +989,7 @@ fn handle_t32_cmm_run(id: text, body: text) -> text:
     val timeout_str = t32_extract_field(body, "timeout")
     var timeout_ms: i64 = 30000
     if timeout_str != "":
-        timeout_ms = int(timeout_str)
+        timeout_ms = t32_parse_i64(timeout_str)
         if timeout_ms < 1000:
             timeout_ms = 30000
     val capture_area_str = t32_extract_field(body, "capture_area")
@@ -1086,7 +1129,7 @@ fn handle_t32_error_check(id: text, body: text) -> text:
                 (ps_out, ps_rc) = t32_run_remote(session, "EVAL PRACTICE.STATE()")
                 if ps_rc == 0:
                     val ps_trimmed = ps_out.trim().replace(".", "")
-                    practice_state = int(ps_trimmed)
+                    practice_state = t32_parse_i64(ps_trimmed)
             var r = t32_LB()
             r = r + t32_jp("message", t32_js(err_msg))
             r = r + "," + t32_jp("type", t32_js(err_type))

@@ -1,0 +1,191 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP — Startup-safe router for the source-hosted server
+#
+# Handles only cold-safe requests directly so initialize/tools/list can answer
+# without importing the full TRACE32 handler tree.
+
+use t32_mcp.startup_protocol.{t32_make_json_result, t32_make_tool_result, t32_make_tool_error, t32_make_error, LB, RB, SB_L, SB_R, jp, js}
+use t32_mcp.state
+
+fn t32_startup_extract_simple_string(body: text, key: text) -> text:
+    val marker = "\"" + key + "\":"
+    if not body.contains(marker):
+        return ""
+    val parts = body.split(marker)
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1].trim()
+    if rest == "" or not rest.starts_with("\""):
+        return ""
+    val quote_parts = rest.split("\"")
+    if quote_parts.len() < 2:
+        return ""
+    return quote_parts[1]
+
+fn t32_startup_make_resources_list(id: text) -> text:
+    var r1 = LB()
+    r1 = r1 + jp("uri", js("t32:///sessions"))
+    r1 = r1 + "," + jp("name", js("T32 Session Manifest"))
+    r1 = r1 + "," + jp("description", js("List of TRACE32 sessions in MCP state"))
+    r1 = r1 + "," + jp("mimeType", js("application/json"))
+    r1 = r1 + RB()
+    var r2 = LB()
+    r2 = r2 + jp("uri", js("t32:///history"))
+    r2 = r2 + "," + jp("name", js("T32 Command History"))
+    r2 = r2 + "," + jp("description", js("Recent TRACE32 command history"))
+    r2 = r2 + "," + jp("mimeType", js("application/json"))
+    r2 = r2 + RB()
+    return t32_make_json_result(id, LB() + jp("resources", SB_L() + r1 + "," + r2 + SB_R()) + RB())
+
+fn t32_startup_make_tools_list(id: text) -> text:
+    var t1_schema = LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", "[]") + RB()
+    var t1_annotations = LB() + jp("readOnlyHint", "true") + "," + jp("destructiveHint", "false") + "," + jp("idempotentHint", "true") + "," + jp("openWorldHint", "false") + RB()
+    var t1 = LB()
+    t1 = t1 + jp("name", js("t32_sessions_list"))
+    t1 = t1 + "," + jp("description", js("List TRACE32 sessions tracked by the startup router"))
+    t1 = t1 + "," + jp("inputSchema", t1_schema)
+    t1 = t1 + "," + jp("annotations", t1_annotations)
+    t1 = t1 + RB()
+
+    var t2_schema = LB()
+    t2_schema = t2_schema + jp("type", js("object"))
+    t2_schema = t2_schema + "," + jp("properties", LB() + RB())
+    t2_schema = t2_schema + "," + jp("required", "[]")
+    t2_schema = t2_schema + RB()
+    var t2_annotations = LB() + jp("readOnlyHint", "true") + "," + jp("destructiveHint", "false") + "," + jp("idempotentHint", "true") + "," + jp("openWorldHint", "false") + RB()
+    var t2 = LB()
+    t2 = t2 + jp("name", js("t32_resources_list"))
+    t2 = t2 + "," + jp("description", js("List startup-safe TRACE32 resources"))
+    t2 = t2 + "," + jp("inputSchema", t2_schema)
+    t2 = t2 + "," + jp("annotations", t2_annotations)
+    t2 = t2 + RB()
+
+    var t3_schema = LB()
+    t3_schema = t3_schema + jp("type", js("object"))
+    t3_schema = t3_schema + "," + jp("properties", LB() + jp("session_id", LB() + jp("type", js("string")) + RB()) + RB())
+    t3_schema = t3_schema + "," + jp("required", SB_L() + js("session_id") + SB_R())
+    t3_schema = t3_schema + RB()
+    var t3 = LB()
+    t3 = t3 + jp("name", js("t32_session_resume"))
+    t3 = t3 + "," + jp("description", js("Resume/switch to an existing TRACE32 session tracked by the startup router"))
+    t3 = t3 + "," + jp("inputSchema", t3_schema)
+    t3 = t3 + "," + jp("annotations", t1_annotations)
+    t3 = t3 + RB()
+
+    var t4 = LB()
+    t4 = t4 + jp("name", js("t32_session_close"))
+    t4 = t4 + "," + jp("description", js("Close a TRACE32 session tracked by the startup router"))
+    t4 = t4 + "," + jp("inputSchema", t3_schema)
+    t4 = t4 + "," + jp("annotations", t1_annotations)
+    t4 = t4 + RB()
+
+    return t32_make_json_result(id, LB() + jp("tools", SB_L() + t1 + "," + t2 + "," + t3 + "," + t4 + SB_R()) + RB())
+
+fn t32_startup_handle_sessions_list(id: text) -> text:
+    var arr = SB_L()
+    var first = true
+    for s in MCP_T32_SESSIONS:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = LB()
+        obj = obj + jp("id", js(s.id))
+        obj = obj + "," + jp("host", js(s.host))
+        obj = obj + "," + jp("port", str(s.port))
+        obj = obj + "," + jp("intercom_name", js(s.intercom_name))
+        obj = obj + "," + jp("architecture", js(s.architecture))
+        obj = obj + "," + jp("connected", js(str(s.connected)))
+        var core_count: i64 = 0
+        for _c in s.cores:
+            core_count = core_count + 1
+        obj = obj + "," + jp("core_count", str(core_count))
+        obj = obj + RB()
+        arr = arr + obj
+    arr = arr + SB_R()
+    return t32_make_tool_result(id, arr)
+
+fn t32_startup_handle_session_resume(id: text, body: text) -> text:
+    val session_id = t32_startup_extract_simple_string(body, "session_id")
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: session_id")
+    var found = false
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+    if not found:
+        return t32_make_tool_error(id, -32602, "Session not found: " + session_id)
+    MCP_T32_CURRENT_SESSION = session_id
+    return t32_make_tool_result(id, LB() + jp("current_session", js(session_id)) + "," + jp("status", js("ok")) + RB())
+
+fn t32_startup_handle_session_close(id: text, body: text) -> text:
+    val session_id = t32_startup_extract_simple_string(body, "session_id")
+    if session_id == "":
+        return t32_make_tool_error(id, -32602, "Missing required parameter: session_id")
+    var found = false
+    var kept: [McpT32Session] = []
+    for s in MCP_T32_SESSIONS:
+        if s.id == session_id:
+            found = true
+        else:
+            kept.push(s)
+    if not found:
+        return t32_make_tool_error(id, -32602, "Session not found: " + session_id)
+    MCP_T32_SESSIONS = kept
+    if MCP_T32_CURRENT_SESSION == session_id:
+        MCP_T32_CURRENT_SESSION = ""
+    return t32_make_tool_result(id, LB() + jp("closed", js(session_id)) + "," + jp("status", js("ok")) + RB())
+
+fn t32_startup_handle_resource_read(id: text, body: text) -> text:
+    val uri = t32_startup_extract_simple_string(body, "uri")
+    if uri == "":
+        return t32_make_error(id, -32602, "Missing required parameter: uri")
+    if uri == "t32:///sessions":
+        var arr = SB_L()
+        var first = true
+        for s in MCP_T32_SESSIONS:
+            if not first:
+                arr = arr + ","
+            first = false
+            var obj = LB()
+            obj = obj + jp("id", js(s.id))
+            obj = obj + "," + jp("host", js(s.host))
+            obj = obj + "," + jp("port", str(s.port))
+            obj = obj + "," + jp("architecture", js(s.architecture))
+            obj = obj + "," + jp("connected", js(str(s.connected)))
+            obj = obj + RB()
+            arr = arr + obj
+        arr = arr + SB_R()
+        val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(arr)) + RB()
+        return t32_make_json_result(id, LB() + jp("contents", SB_L() + content + SB_R()) + RB())
+    if uri == "t32:///history":
+        var arr = SB_L()
+        var first = true
+        for h in MCP_T32_HISTORY:
+            if not first:
+                arr = arr + ","
+            first = false
+            var obj = LB()
+            obj = obj + jp("command", js(h.command))
+            obj = obj + "," + jp("result", js(h.result))
+            obj = obj + "," + jp("session_id", js(h.session_id))
+            obj = obj + "," + jp("core_id", js(h.core_id))
+            obj = obj + RB()
+            arr = arr + obj
+        arr = arr + SB_R()
+        val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(arr)) + RB()
+        return t32_make_json_result(id, LB() + jp("contents", SB_L() + content + SB_R()) + RB())
+    return t32_make_error(id, -32602, "Unknown resource: " + uri)
+
+fn t32_startup_dispatch_tool(id: text, body: text) -> text:
+    val tool_name = t32_startup_extract_simple_string(body, "name")
+    if tool_name == "":
+        return t32_make_error(id, -32602, "Missing tool name in tools/call request")
+    if tool_name == "t32_sessions_list":
+        return t32_startup_handle_sessions_list(id)
+    if tool_name == "t32_resources_list":
+        return t32_startup_make_resources_list(id)
+    if tool_name == "t32_session_resume":
+        return t32_startup_handle_session_resume(id, body)
+    if tool_name == "t32_session_close":
+        return t32_startup_handle_session_close(id, body)
+    return t32_make_tool_error(id, -32602, "Source-hosted startup router only supports t32_sessions_list; use native or compiled worker for: " + tool_name)

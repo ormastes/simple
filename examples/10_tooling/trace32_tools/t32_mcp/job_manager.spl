@@ -3,7 +3,7 @@
 # Internal async job system for long-running T32 operations.
 # Tracks jobs with state machine transitions, cleanup, and JSON serialization.
 
-extern fn rt_time_ms() -> i64
+extern fn rt_time_now_unix_micros() -> i64
 
 use t32_mcp.json_helpers.{t32_Q, t32_js, t32_jp, t32_jo1, t32_jo2, t32_jo3, t32_jo4, t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_escape_json}
 use t32_mcp.protocol.{t32_stderr}
@@ -32,6 +32,9 @@ var T32_JOBS: [T32Job] = []
 var T32_NEXT_JOB_ID: i64 = 1
 val T32_MAX_JOBS: i64 = 16
 val T32_JOB_RETENTION_MS: i64 = 300000  # 5 minutes
+
+fn t32_job_now_ms() -> i64:
+    return rt_time_now_unix_micros() / 1000
 
 # --- Terminal status check ---
 
@@ -119,7 +122,7 @@ fn t32_job_create(tool_name: text, session_id: text, core_id: text, command: tex
         t32_job_cleanup()
         # If still at limit after cleanup, return a sentinel failed job
         if t32_job_count_active() >= T32_MAX_JOBS:
-            val now = rt_time_ms()
+            val now = t32_job_now_ms()
             return T32Job(
                 job_id: "job_0",
                 tool_name: tool_name,
@@ -136,7 +139,7 @@ fn t32_job_create(tool_name: text, session_id: text, core_id: text, command: tex
                 _command: command,
                 _area_name: ""
             )
-    val now = rt_time_ms()
+    val now = t32_job_now_ms()
     val jid = "job_" + str(T32_NEXT_JOB_ID)
     T32_NEXT_JOB_ID = T32_NEXT_JOB_ID + 1
     val job = T32Job(
@@ -203,7 +206,7 @@ fn t32_job_cancel(job_id: text) -> bool:
             # Check if in cancellable state
             if t32_is_terminal_status(job.status):
                 return false
-            val now = rt_time_ms()
+            val now = t32_job_now_ms()
             val updated = T32Job(
                 job_id: job.job_id,
                 tool_name: job.tool_name,
@@ -235,7 +238,7 @@ fn t32_job_update_status(job_id: text, new_status: text, summary: text) -> bool:
             if not t32_is_valid_transition(job.status, new_status):
                 t32_stderr("job_manager: invalid transition " + job.status + " -> " + new_status + " for " + job_id)
                 return false
-            val now = rt_time_ms()
+            val now = t32_job_now_ms()
             val updated = T32Job(
                 job_id: job.job_id,
                 tool_name: job.tool_name,
@@ -263,7 +266,7 @@ fn t32_job_set_result(job_id: text, result: text):
     var idx: i64 = 0
     for job in T32_JOBS:
         if job.job_id == job_id:
-            val now = rt_time_ms()
+            val now = t32_job_now_ms()
             val updated = T32Job(
                 job_id: job.job_id,
                 tool_name: job.tool_name,
@@ -291,7 +294,7 @@ fn t32_job_set_error(job_id: text, error: text):
     var idx: i64 = 0
     for job in T32_JOBS:
         if job.job_id == job_id:
-            val now = rt_time_ms()
+            val now = t32_job_now_ms()
             val updated = T32Job(
                 job_id: job.job_id,
                 tool_name: job.tool_name,
@@ -316,7 +319,7 @@ fn t32_job_set_error(job_id: text, error: text):
 # --- Cleanup: remove terminal jobs older than retention period ---
 
 fn t32_job_cleanup():
-    val now = rt_time_ms()
+    val now = t32_job_now_ms()
     var kept: [T32Job] = []
     var removed: i64 = 0
     for job in T32_JOBS:

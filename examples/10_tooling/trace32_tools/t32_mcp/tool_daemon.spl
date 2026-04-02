@@ -1,0 +1,138 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 MCP — Persistent heavy-tool daemon
+#
+# Loads the full TRACE32 tool tree once and processes file-backed requests from
+# the lightweight front-end. This preserves session state in one process while
+# keeping MCP startup small.
+
+use t32_mcp.startup_protocol.{t32_make_json_result}
+use t32_mcp.startup_router.{t32_startup_make_tools_list}
+use t32_mcp.tool_router_light.{t32_dispatch_tool_light, t32_make_resources_list_light, t32_handle_resource_read_light}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_env_cwd() -> text
+
+fn daemon_arg0_is_script(arg0: text) -> bool:
+    return arg0.ends_with(".spl") or arg0.ends_with("tool_daemon") or arg0.ends_with("tool_daemon.spl")
+
+fn t32_mkdir_p(path: text) -> bool:
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("/bin/mkdir", ["-p", path])
+    return code == 0
+
+fn main():
+    val raw_args = sys_get_args()
+    var args = raw_args
+    if args.len() >= 2 and not args[0].ends_with(".spl") and args[1].ends_with(".spl"):
+        args = args[2:args.len()]
+    elif args.len() >= 1 and daemon_arg0_is_script(args[0]):
+        args = args[1:args.len()]
+
+    val root = if args.len() >= 1: args[0] else: t32_default_daemon_root()
+    if not t32_mkdir_p(root):
+        return
+    rt_file_write_text(root + "/ready", "ready")
+
+    while true:
+        val entries = rt_dir_list(root) ?? []
+        var handled = false
+        var i = 0
+        while i < entries.len():
+            val name = entries[i]
+            if name.ends_with(".req"):
+                handled = true
+                t32_daemon_handle_request(root, root + "/" + name)
+            i = i + 1
+        if not handled:
+            rt_process_run(t32_shell_bin_path(), ["-c", "sleep 0.05"])
+
+fn t32_daemon_handle_request(root: text, req_path: text):
+    val raw = rt_file_read_text(req_path) ?? ""
+    val lines = raw.split("\n")
+    if lines.len() < 4:
+        rt_file_delete(req_path)
+        return
+    val method = lines[0]
+    val id = lines[1]
+    val body_path = lines[2]
+    val response_path = lines[3]
+    val body = rt_file_read_text(body_path) ?? ""
+    val response = t32_daemon_dispatch(method, id, body)
+    rt_file_write_text(response_path, response)
+    rt_file_delete(req_path)
+
+fn t32_daemon_dispatch(method: text, id: text, body: text) -> text:
+    if method == "tools/list":
+        return t32_startup_make_tools_list(id)
+    if method == "tools/call":
+        return t32_dispatch_tool_light(id, body)
+    if method == "resources/list":
+        return t32_make_resources_list_light(id)
+    if method == "resources/read":
+        return t32_handle_resource_read_light(id, body)
+    if method == "prompts/list":
+        return t32_make_json_result(id, "{\"prompts\":[]}")
+    if method == "roots/list":
+        return t32_make_json_result(id, "{\"roots\":[]}")
+    if method == "resources/templates/list":
+        return t32_make_json_result(id, "{\"resourceTemplates\":[]}")
+    return ""
+
+fn t32_default_daemon_root() -> text:
+    val env_root = rt_env_get("T32_MCP_TOOL_DAEMON_DIR") ?? ""
+    if env_root != "":
+        return env_root
+    val cwd = rt_env_cwd()
+    var suffix = "workspace"
+    if cwd != "":
+        suffix = t32_sanitize_path_segment(cwd)
+    return "/tmp/t32_mcp_shared_" + suffix
+
+fn t32_shell_bin_path() -> text:
+    val env_shell = rt_env_get("T32_MCP_SHELL_BIN") ?? ""
+    if env_shell != "":
+        return env_shell
+    if rt_file_exists("/usr/bin/sh"):
+        return "/usr/bin/sh"
+    return "/bin/sh"
+
+fn t32_shell_quote(value: text) -> text:
+    if value == "":
+        return "''"
+    var parts: [text] = []
+    parts.push("'")
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "'":
+            parts.push("'\\''")
+        else:
+            parts.push(ch)
+        i = i + 1
+    parts.push("'")
+    return parts.join("")
+
+fn t32_sanitize_path_segment(value: text) -> text:
+    if value == "":
+        return "empty"
+    var parts: [text] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
+            parts.push(ch)
+        else:
+            parts.push("_")
+        i = i + 1
+    val sanitized = parts.join("")
+    if sanitized == "":
+        return "empty"
+    return sanitized

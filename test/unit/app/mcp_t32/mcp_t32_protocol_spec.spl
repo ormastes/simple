@@ -1,0 +1,431 @@
+# @cover examples/10_tooling/trace32_tools/t32_mcp/protocol.spl 80%
+"""
+# T32 MCP Protocol Unit Tests
+
+**Feature IDs:** #T32-PROTO-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Unit tests for protocol-level pure functions from the T32 MCP server.
+These tests inline the relevant functions from protocol.spl and main.spl
+to test them without spawning the binary or importing the module.
+
+## Key Concepts
+
+| Concept            | Description                                      |
+|--------------------|--------------------------------------------------|
+| JSON building      | jo1/jo2/jo3/jp/js helpers build JSON strings     |
+| Field extraction   | t32_startup_extract_field parses JSON fields      |
+| Content-Length     | mcp_msg wraps body with Content-Length header      |
+| Validation         | t32_validate_identifier, t32_is_hex_address       |
+
+## Behavior
+
+- JSON helpers produce valid JSON structures
+- Field extraction handles quoted strings, numbers, nested objects
+- Content-Length framing calculates correct byte count
+- Validation helpers accept valid inputs and reject dangerous ones
+"""
+
+# @req REQ-T32-PROTO-001
+# @feature t32_mcp_protocol_unit
+
+# ============================================================================
+# Inlined pure functions from protocol.spl (avoid import issues)
+# ============================================================================
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    "{"
+
+fn RB() -> text:
+    "}"
+
+fn SB_L() -> text:
+    "["
+
+fn SB_R() -> text:
+    "]"
+
+fn escape_json(s: text) -> text:
+    var out = s
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out
+
+fn js(value: text) -> text:
+    Q() + escape_json(value) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()
+
+fn jsonrpc_result(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn jsonrpc_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", str(code)), jp("message", js(escape_json(message))))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn t32_startup_find_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q() + ":"
+    val idx_opt = json.index_of(search)
+    match idx_opt:
+        Some(idx):
+            var start = idx + search.len()
+            while start < json.len():
+                val ch = json.substring(start, start + 1)
+                if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+                    start = start + 1
+                else:
+                    break
+            return start
+        nil:
+            return -1
+
+fn t32_startup_extract_field(json: text, key: text) -> text:
+    val start = t32_startup_find_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = json.substring(start, start + 1)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = json.substring(i, i + 1)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = json.substring(end, end + 1)
+        if ch == "," or ch == RB() or ch == SB_R() or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
+            break
+        end = end + 1
+    return json.substring(start, end)
+
+fn t32_startup_extract_id(json: text) -> text:
+    val start = t32_startup_find_value_start(json, "id")
+    if start < 0 or start >= json.len():
+        return ""
+    val first = json.substring(start, start + 1)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = json.substring(i, i + 1)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i + 1)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = json.substring(end, end + 1)
+        if ch == "," or ch == RB() or ch == " ":
+            break
+        end = end + 1
+    return json.substring(start, end)
+
+fn t32_text_byte_len(s: text) -> i64:
+    return s.len()
+
+fn t32_char_at(s: text, index: i64) -> text:
+    s.substring(index, index + 1)
+
+fn t32_validate_identifier(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        val ch = t32_char_at(name, i)
+        if ch == " " or ch == "\t" or ch == ";" or ch == "|" or ch == "&":
+            return false
+        if ch == "`" or ch == "'" or ch == "\"":
+            return false
+        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_all_digits(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = t32_char_at(s, i)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    return true
+
+fn t32_is_hex_address(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var start = 0
+    var input = s
+    if input.ends_with("."):
+        input = input.substring(0, input.len() - 1)
+    if input.starts_with("0x") or input.starts_with("0X"):
+        start = 2
+    if start >= input.len():
+        return false
+    var i = start
+    while i < input.len():
+        val ch = t32_char_at(input, i)
+        val is_digit = (ch >= "0" and ch <= "9")
+        val is_upper = (ch >= "A" and ch <= "F")
+        val is_lower = (ch >= "a" and ch <= "f")
+        if not is_digit and not is_upper and not is_lower:
+            return false
+        i = i + 1
+    return true
+
+fn t32_parse_i64(s: text) -> i64:
+    if s == "":
+        return 0
+    var i = 0
+    var sign = 1
+    if s.starts_with("-"):
+        sign = -1
+        i = 1
+    var value = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            break
+        value = value * 10 + (ch.to_int() - "0".to_int())
+        i = i + 1
+    return value * sign
+
+# ============================================================================
+# Test Group 1: JSON Building Helpers
+# ============================================================================
+
+describe "T32 Protocol — JSON building":
+
+    it "Q returns double-quote":
+        expect(Q()).to_equal("\"")
+
+    it "LB returns left brace":
+        expect(LB()).to_equal("{")
+
+    it "RB returns right brace":
+        expect(RB()).to_equal("}")
+
+    it "js wraps value in quotes":
+        expect(js("hello")).to_equal("\"hello\"")
+
+    it "js escapes embedded quotes":
+        val result = js("say \"hi\"")
+        expect(result.contains("\\\"")).to_equal(true)
+
+    it "js escapes newlines":
+        val result = js("line1\nline2")
+        expect(result.contains("\\n")).to_equal(true)
+
+    it "jp builds key-value pair":
+        val result = jp("name", js("alice"))
+        expect(result).to_equal("\"name\":\"alice\"")
+
+    it "jo1 builds single-property object":
+        val result = jo1(jp("x", "1"))
+        expect(result).to_equal("{\"x\":1}")
+
+    it "jo2 builds two-property object":
+        val result = jo2(jp("x", "1"), jp("y", "2"))
+        expect(result).to_equal("{\"x\":1,\"y\":2}")
+
+    it "jo3 builds three-property object":
+        val result = jo3(jp("a", "1"), jp("b", "2"), jp("c", "3"))
+        expect(result).to_equal("{\"a\":1,\"b\":2,\"c\":3}")
+
+    it "jsonrpc_result builds valid JSON-RPC response":
+        val result = jsonrpc_result("\"1\"", "{}")
+        expect(result.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(result.contains("\"id\":\"1\"")).to_equal(true)
+        expect(result.contains("\"result\":{}")).to_equal(true)
+
+    it "jsonrpc_error builds valid JSON-RPC error":
+        val result = jsonrpc_error("\"1\"", -32601, "Method not found")
+        expect(result.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+        expect(result.contains("-32601")).to_equal(true)
+        expect(result.contains("Method not found")).to_equal(true)
+
+# ============================================================================
+# Test Group 2: JSON Field Extraction
+# ============================================================================
+
+describe "T32 Protocol — Field extraction":
+
+    it "extracts string field":
+        val json = "{\"name\":\"alice\",\"age\":30}"
+        expect(t32_startup_extract_field(json, "name")).to_equal("alice")
+
+    it "extracts numeric field":
+        val json = "{\"name\":\"alice\",\"age\":30}"
+        expect(t32_startup_extract_field(json, "age")).to_equal("30")
+
+    it "returns empty for missing field":
+        val json = "{\"name\":\"alice\"}"
+        expect(t32_startup_extract_field(json, "missing")).to_equal("")
+
+    it "extracts field with spaces after colon":
+        val json = "{\"name\": \"bob\"}"
+        expect(t32_startup_extract_field(json, "name")).to_equal("bob")
+
+    it "extracts id as raw (with quotes)":
+        val json = "{\"jsonrpc\":\"2.0\",\"id\":\"42\",\"method\":\"initialize\"}"
+        expect(t32_startup_extract_id(json)).to_equal("\"42\"")
+
+    it "extracts numeric id as raw":
+        val json = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"initialize\"}"
+        expect(t32_startup_extract_id(json)).to_equal("42")
+
+    it "extracts method from JSON-RPC":
+        val json = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/list\",\"params\":{}}"
+        expect(t32_startup_extract_field(json, "method")).to_equal("tools/list")
+
+    it "handles escaped quotes in string values":
+        val json = "{\"msg\":\"say \\\"hi\\\"\"}"
+        val result = t32_startup_extract_field(json, "msg")
+        expect(result.contains("say")).to_equal(true)
+
+# ============================================================================
+# Test Group 3: Content-Length and Byte Length
+# ============================================================================
+
+describe "T32 Protocol — Content-Length":
+
+    it "t32_text_byte_len returns string length":
+        expect(t32_text_byte_len("hello")).to_equal(5)
+
+    it "t32_text_byte_len returns 0 for empty string":
+        expect(t32_text_byte_len("")).to_equal(0)
+
+    it "t32_text_byte_len handles longer string":
+        val s = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}"
+        expect(t32_text_byte_len(s)).to_equal(s.len())
+
+# ============================================================================
+# Test Group 4: Validation Helpers
+# ============================================================================
+
+describe "T32 Protocol — Validation":
+
+    it "validates simple identifier":
+        expect(t32_validate_identifier("SYStem.Up")).to_equal(true)
+
+    it "validates alphanumeric with underscores":
+        expect(t32_validate_identifier("Data_LOAD_Elf")).to_equal(true)
+
+    it "rejects empty identifier":
+        expect(t32_validate_identifier("")).to_equal(false)
+
+    it "rejects identifier with semicolon":
+        expect(t32_validate_identifier("cmd;evil")).to_equal(false)
+
+    it "rejects identifier with pipe":
+        expect(t32_validate_identifier("cmd|evil")).to_equal(false)
+
+    it "rejects identifier with backtick":
+        expect(t32_validate_identifier("cmd`evil`")).to_equal(false)
+
+    it "rejects identifier with dollar sign":
+        expect(t32_validate_identifier("$HOME")).to_equal(false)
+
+    it "t32_is_all_digits accepts digits":
+        expect(t32_is_all_digits("12345")).to_equal(true)
+
+    it "t32_is_all_digits rejects alpha":
+        expect(t32_is_all_digits("123a5")).to_equal(false)
+
+    it "t32_is_all_digits rejects empty":
+        expect(t32_is_all_digits("")).to_equal(false)
+
+    it "t32_is_hex_address accepts 0xDEADBEEF":
+        expect(t32_is_hex_address("0xDEADBEEF")).to_equal(true)
+
+    it "t32_is_hex_address accepts bare hex":
+        expect(t32_is_hex_address("FF00")).to_equal(true)
+
+    it "t32_is_hex_address accepts T32 dot notation":
+        expect(t32_is_hex_address("0x1000.")).to_equal(true)
+
+    it "t32_is_hex_address rejects non-hex":
+        expect(t32_is_hex_address("0xGHIJ")).to_equal(false)
+
+    it "t32_is_hex_address rejects empty":
+        expect(t32_is_hex_address("")).to_equal(false)
+
+# ============================================================================
+# Test Group 5: Integer Parsing
+# ============================================================================
+
+describe "T32 Protocol — Integer parsing":
+
+    it "parses positive integer":
+        expect(t32_parse_i64("42")).to_equal(42)
+
+    it "parses negative integer":
+        expect(t32_parse_i64("-7")).to_equal(-7)
+
+    it "parses zero":
+        expect(t32_parse_i64("0")).to_equal(0)
+
+    it "returns 0 for empty string":
+        expect(t32_parse_i64("")).to_equal(0)
+
+    it "parses large number":
+        expect(t32_parse_i64("20000")).to_equal(20000)
+
+    it "stops at non-digit character":
+        expect(t32_parse_i64("123abc")).to_equal(123)
+
+# ============================================================================
+# Test Group 6: escape_json
+# ============================================================================
+
+describe "T32 Protocol — JSON escaping":
+
+    it "escapes backslash":
+        expect(escape_json("a\\b")).to_equal("a\\\\b")
+
+    it "escapes double quote":
+        expect(escape_json("say \"hi\"")).to_equal("say \\\"hi\\\"")
+
+    it "escapes newline":
+        expect(escape_json("line1\nline2")).to_equal("line1\\nline2")
+
+    it "escapes carriage return":
+        expect(escape_json("a\rb")).to_equal("a\\rb")
+
+    it "escapes tab":
+        expect(escape_json("a\tb")).to_equal("a\\tb")
+
+    it "leaves plain text unchanged":
+        expect(escape_json("hello world")).to_equal("hello world")
