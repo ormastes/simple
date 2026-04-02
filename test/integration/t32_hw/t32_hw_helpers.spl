@@ -19,8 +19,19 @@ use app.debug.remote.types.{DebugConfig}
 
 val T32_HW_DEFAULT_HOST: text = "localhost"
 val T32_HW_DEFAULT_PORT: i64 = 20000
-val T32_HW_MIN_VERSION_OLD: i64 = 120000
-val T32_HW_MIN_VERSION_NEW: i64 = 130000
+val T32_HW_MIN_VERSION_OLD: i64 = 42000
+val T32_HW_MIN_VERSION_NEW: i64 = 80000
+
+# Feature version thresholds (build numbers)
+# Commands available in all versions (>= 42000):
+#   VERSION.BUILD, VERSION.SOFTWARE, VERSION.DATE, CPU, STATE.RUN,
+#   SYStem.Mode, SYStem.Up, SYStem.Down, SYStem.RESetTarget,
+#   DEBUGMODE, Register, Step, Break, Go, PRINT
+val T32_HW_VER_AREA: i64 = 70000
+val T32_HW_VER_PRACTICE_STATE: i64 = 70000
+val T32_HW_VER_VERSION_ENV: i64 = 70000
+val T32_HW_VER_DIALOG: i64 = 70000
+val T32_HW_VER_SOFTWARE_BUILD: i64 = 70000
 
 # ============================================================================
 # Environment Probing
@@ -38,7 +49,14 @@ fn t32_hw_port() -> i64:
     else: T32_HW_DEFAULT_PORT
 
 fn t32_hw_probe_available() -> bool:
-    """Check if T32 is reachable via TCP on the configured host:port."""
+    """Check if T32 is reachable. Tries C API PING first, then TCP fallback."""
+    # Try C API (UDP-based) first — works on old and new T32
+    val capi = t32_hw_capi_test_binary()
+    if capi.len() > 0:
+        val output = t32_hw_capi_cmd("PRINT VERSION.BUILD()")
+        if output.len() > 0:
+            return true
+    # TCP fallback for newer T32 with NETTCP RCL
     rt_tcp_connect(t32_hw_host(), t32_hw_port())
 
 fn t32_hw_t32rem_available() -> bool:
@@ -90,6 +108,70 @@ fn t32_hw_version_gate_old() -> bool:
 fn t32_hw_version_gate_new() -> bool:
     """Check if T32 version meets NEW tool minimum."""
     t32_hw_query_version() >= T32_HW_MIN_VERSION_NEW
+
+# ============================================================================
+# Feature Detection (version-aware)
+# ============================================================================
+
+fn t32_hw_has_area() -> bool:
+    """AREA.Create/Select/View — requires newer T32."""
+    t32_hw_query_version() >= T32_HW_VER_AREA
+
+fn t32_hw_has_practice_state() -> bool:
+    """PRACTICE.STATE() — requires newer T32."""
+    t32_hw_query_version() >= T32_HW_VER_PRACTICE_STATE
+
+fn t32_hw_has_version_env() -> bool:
+    """VERSION.ENvironment() — requires newer T32."""
+    t32_hw_query_version() >= T32_HW_VER_VERSION_ENV
+
+fn t32_hw_has_dialog() -> bool:
+    """DIALOG.* commands — requires newer T32."""
+    t32_hw_query_version() >= T32_HW_VER_DIALOG
+
+fn t32_hw_has_software_build() -> bool:
+    """SOFTWARE.BUILD() — required by Python RCL API."""
+    t32_hw_query_version() >= T32_HW_VER_SOFTWARE_BUILD
+
+fn t32_hw_capi_test_binary() -> text:
+    """Path to the compiled C API test binary. Empty if not built."""
+    val path = "/tmp/t32test"
+    if rt_file_exists(path): path else: ""
+
+fn t32_hw_build_capi_test() -> bool:
+    """Build the C API test binary from T32 demo source. Returns true on success."""
+    val t32_path = rt_env_get("T32_PATH")
+    val t32_root = if t32_path.len() > 0: t32_path else: "/opt/t32"
+    val src_dir = "{t32_root}/demo/api/capi"
+    if not rt_file_exists("{src_dir}/src/hremote.c"):
+        return false
+    val cmd = "gcc -I {src_dir}/src -o /tmp/t32test {src_dir}/test/t32apicmd.c {src_dir}/src/hremote.c {src_dir}/src/hlinknet.c -lm 2>/dev/null"
+    rt_shell_exec(cmd)
+    rt_shell_exit_code() == 0
+
+fn t32_hw_capi_cmd(cmd: text) -> text:
+    """Run a command via the C API test binary. Returns output or empty on failure."""
+    val binary = t32_hw_capi_test_binary()
+    if binary.len() == 0:
+        return ""
+    val host = t32_hw_host()
+    val port = t32_hw_port()
+    val full_cmd = "{binary} node={host} port={port} \"{cmd}\""
+    val output = rt_shell_exec(full_cmd)
+    val code = rt_shell_exit_code()
+    if code != 0:
+        return ""
+    output.trim()
+
+fn t32_hw_capi_eval(expr: text) -> text:
+    """Evaluate an expression via C API PRINT command. Returns the printed value."""
+    val output = t32_hw_capi_cmd("PRINT {expr}")
+    # C API output format: " miscellaneous message: <value>"
+    if output.contains("message:"):
+        val parts = output.split("message:")
+        if parts.len() >= 2:
+            return parts[1].trim()
+    output
 
 # ============================================================================
 # Client Helpers

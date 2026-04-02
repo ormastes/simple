@@ -97,9 +97,14 @@ async function main() {
     const ext = os.platform() === 'win32' ? '.exe' : '';
     const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
     if (entries.length > 0) {
-      const binary = path.join(nativeDir, entries[0], 'bin', `simple${ext}`);
+      const binDir = path.join(nativeDir, entries[0], 'bin');
+      const binary = path.join(binDir, `simple${ext}`);
       if (fs.existsSync(binary) && os.platform() !== 'win32') {
         fs.chmodSync(binary, 0o755);
+      }
+      const t32Wrapper = path.join(binDir, `t32_mcp_server${ext === '.exe' ? '.cmd' : ''}`);
+      if (fs.existsSync(t32Wrapper) && os.platform() !== 'win32') {
+        fs.chmodSync(t32Wrapper, 0o755);
       }
     }
 
