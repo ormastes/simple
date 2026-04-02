@@ -2,13 +2,16 @@
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-/// Initialize structured logging with env-based filtering.
+/// Initialize structured logging with env-based filtering (stderr only).
 pub fn init() {
     let env_filter = EnvFilter::try_from_env("SIMPLE_LOG")
         .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let fmt_layer = fmt::layer().with_target(true).with_line_number(true);
+    let fmt_layer = fmt::layer()
+        .with_target(true)
+        .with_line_number(true)
+        .with_writer(std::io::stderr);
     tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 }
 
@@ -35,14 +38,14 @@ pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std
             .unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
-    let stdout = std::io::stdout.with_max_level(tracing::Level::INFO);
+    let stderr = std::io::stderr.with_max_level(tracing::Level::INFO);
     let file = non_blocking.with_max_level(tracing::Level::TRACE);
 
     let fmt_layer = fmt::layer()
         .with_target(true)
         .with_line_number(true)
         .with_thread_ids(true)
-        .with_writer(stdout.and(file));
+        .with_writer(stderr.and(file));
 
     tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 
