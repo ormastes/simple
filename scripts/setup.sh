@@ -490,7 +490,7 @@ COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold
 export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
-export SIMPLE_TEST_MEMORY_LIMIT_MB=0
+export SIMPLE_TEST_MEMORY_LIMIT_MB=100
 
 if [ -z "$RUNTIME" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
@@ -593,7 +593,7 @@ export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/t
 export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
 export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
-export SIMPLE_TEST_MEMORY_LIMIT_MB=0
+export SIMPLE_TEST_MEMORY_LIMIT_MB=100
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"

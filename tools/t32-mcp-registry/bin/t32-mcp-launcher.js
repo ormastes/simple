@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Launcher for TRACE32 MCP Server.
-// Finds the Simple runtime from the downloaded bootstrap package
-// and runs the T32 MCP server entry point.
+// Prefer the generated wrapper so the registry package matches the repo's
+// supported runtime-selection and cold-start path.
 
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-const T32_ROOT_REL = 'examples/10_tooling/trace32_tools';
-const ENTRY_REL = T32_ROOT_REL + '/t32_mcp/main.spl';
+function getWrapperPath(repoRoot) {
+  const ext = os.platform() === 'win32' ? '.cmd' : '';
+  return path.join(repoRoot, 'bin', `t32_mcp_server${ext}`);
+}
 
 function findRuntime() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
@@ -53,18 +55,30 @@ function findRuntime() {
 }
 
 const { binary, repoRoot } = findRuntime();
-const entryPath = path.join(repoRoot, ENTRY_REL);
+const wrapperPath = getWrapperPath(repoRoot);
 
-const child = spawn(binary, [entryPath, ...process.argv.slice(2)], {
-  stdio: 'inherit',
-  env: {
-    ...process.env,
-    SIMPLE_LIB: path.join(repoRoot, T32_ROOT_REL),
-    SIMPLE_BINARY: binary,
-    SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
-    RUST_LOG: process.env.RUST_LOG || 'error'
-  }
-});
+const env = {
+  ...process.env,
+  SIMPLE_BINARY: binary,
+  SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
+  RUST_LOG: process.env.RUST_LOG || 'error'
+};
+
+// The repo wrapper selects the stable frontend and sets the correct runtime
+// environment. Fall back to direct runtime execution only if the wrapper is
+// missing from the package layout.
+const child = fs.existsSync(wrapperPath)
+  ? spawn(wrapperPath, process.argv.slice(2), { stdio: 'inherit', env })
+  : spawn(binary, [
+      path.join(repoRoot, 'examples', '10_tooling', 'trace32_tools', 't32_mcp', 'frontend_cold.spl'),
+      ...process.argv.slice(2)
+    ], {
+      stdio: 'inherit',
+      env: {
+        ...env,
+        SIMPLE_LIB: process.env.SIMPLE_LIB || path.join(repoRoot, 'src')
+      }
+    });
 
 child.on('error', (err) => {
   if (err.code === 'ENOENT') {
