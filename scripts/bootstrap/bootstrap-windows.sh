@@ -139,18 +139,23 @@ run_logged() {
 # ===========================================================================
 
 if [[ "$toolchain" == "msvc" ]]; then
-  for cc_candidate in clang-cl clang; do
-    if command -v "$cc_candidate" &>/dev/null && "$cc_candidate" --version &>/dev/null 2>&1; then
-      export CC="$cc_candidate"
-      break
-    fi
-  done
-  for cxx_candidate in clang++ g++; do
-    if command -v "$cxx_candidate" &>/dev/null && "$cxx_candidate" --version &>/dev/null 2>&1; then
-      export CXX="$cxx_candidate"
-      break
-    fi
-  done
+  if [[ -z "${CC:-}" ]]; then
+    for cc_candidate in clang-cl clang; do
+      if command -v "$cc_candidate" &>/dev/null && "$cc_candidate" --version &>/dev/null 2>&1; then
+        export CC="$cc_candidate"
+        break
+      fi
+    done
+  fi
+  if [[ -z "${CXX:-}" ]]; then
+    for cxx_candidate in clang++ g++; do
+      # Must actually run (MSYS2 clang++ may fail with missing libLLVM.dll)
+      if "$cxx_candidate" --version &>/dev/null 2>&1; then
+        export CXX="$cxx_candidate"
+        break
+      fi
+    done
+  fi
   echo "MSVC mode: CC=${CC:-auto} CXX=${CXX:-auto}"
 else
   export CC="${CC:-gcc}"
@@ -192,6 +197,17 @@ stage3_bin="${stage3_dir}/simple.exe"
 
 export RUST_LOG="${RUST_LOG:-error}"
 export SIMPLE_BOOTSTRAP=1
+
+# Force MSVC linker flavor when using MSVC toolchain in MSYS2 environment.
+# Without this, the Rust runtime detects MSYSTEM and uses GNU linker flavor,
+# which fails to link MSVC-compiled objects from simple_native_all.lib.
+if [[ "$toolchain" == "msvc" ]]; then
+  export SIMPLE_LINKER_FLAVOR=msvc
+  # Prefer lld-link for MSVC targets
+  if command -v lld-link &>/dev/null; then
+    export SIMPLE_LINKER="${SIMPLE_LINKER:-lld-link}"
+  fi
+fi
 
 # Stage 1: Rust seed → stage1
 echo "=== Stage 1: Rust seed → stage1 ==="
