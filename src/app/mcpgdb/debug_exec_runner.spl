@@ -1,0 +1,128 @@
+@allow(unnamed_duplicate_typed_args)
+# mcpgdb execution runner — narrow path for raw backend command execution
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_read_text(path: text) -> text
+
+use app.mcpgdb.json_helpers.{make_tool_error, make_tool_result, LB, RB, jp, js}
+use app.mcpgdb.state.{DebugSession, MCPGDB_CURRENT_SESSION, MCPGDB_SESSIONS, save_persisted_state}
+use app.mcpgdb.state_loader.{load_persisted_state_safe}
+use app.mcpgdb.debug_backend_common.{create_debugger_process, run_session_command}
+use app.mcpgdb.debug_rules.{evaluate_command_rule, decision_json}
+
+fn debug_json_message(fields: [text]) -> text:
+    LB() + fields.join(",") + RB()
+
+fn scan_string_value(json: text, key: text) -> text:
+    val pattern1 = "\"" + key + "\":\""
+    val parts1 = json.split(pattern1)
+    if parts1.len() >= 2:
+        return parts1[1].split("\"")[0]
+    val pattern2 = "\"" + key + "\": \""
+    val parts2 = json.split(pattern2)
+    if parts2.len() >= 2:
+        return parts2[1].split("\"")[0]
+    ""
+
+fn local_extract_id(json: text) -> text:
+    val id = scan_string_value(json, "id")
+    if id == "":
+        return "null"
+    "\"" + id + "\""
+
+fn bool_arg(body: text, key: text) -> bool:
+    val value = scan_string_value(body, key).to_lower()
+    value == "true" or value == "1" or value == "yes"
+
+fn put_session_local(session: DebugSession):
+    var kept: [DebugSession] = []
+    var replaced = false
+    for existing in MCPGDB_SESSIONS:
+        if existing.session_id == session.session_id:
+            kept = kept + [session]
+            replaced = true
+        else:
+            kept = kept + [existing]
+    if not replaced:
+        kept = kept + [session]
+    MCPGDB_SESSIONS = kept
+
+fn find_session_index_local(session_id: text) -> i64:
+    var target = session_id
+    if target == "":
+        target = MCPGDB_CURRENT_SESSION
+    if target == "":
+        return -1
+    var idx = 0
+    for session in MCPGDB_SESSIONS:
+        if session.session_id == target:
+            return idx
+        idx = idx + 1
+    -1
+
+fn ensure_session_started(session: DebugSession) -> (DebugSession, text):
+    if session.process_pid != "":
+        return (session, "")
+    var updated = session
+    var error = ""
+    (updated, error) = create_debugger_process(updated)
+    if error != "":
+        return (updated, error)
+    put_session_local(updated)
+    (updated, "")
+
+fn session_command_or_error(session_id: text, command: text, dangerous: bool) -> text:
+    val idx = find_session_index_local(session_id)
+    if idx >= 0:
+        val session = MCPGDB_SESSIONS[idx]
+        val decision = evaluate_command_rule(session.backend, command, dangerous, false)
+        if not decision.allowed:
+            return debug_json_message([
+                jp("status", js("denied")),
+                jp("decision", decision_json(decision))
+            ])
+        var active = session
+        var start_error = ""
+        (active, start_error) = ensure_session_started(session)
+        if start_error != "":
+            return debug_json_message([
+                jp("status", js("error")),
+                jp("message", js(start_error))
+            ])
+        val output = run_session_command(active, command, false)
+        put_session_local(active)
+        return debug_json_message([
+            jp("session_id", js(active.session_id)),
+            jp("backend", js(active.backend)),
+            jp("decision", decision_json(decision)),
+            jp("response", output)
+        ])
+    debug_json_message([
+        jp("status", js("error")),
+        jp("message", js("session not found"))
+    ])
+
+fn handle_debug_command_run(id: text, body: text) -> text:
+    val command = scan_string_value(body, "command")
+    if command == "":
+        return make_tool_error(id, "missing command")
+    val dangerous = bool_arg(body, "dangerous")
+    val session_id = scan_string_value(body, "session_id")
+    make_tool_result(id, session_command_or_error(session_id, command, dangerous))
+
+fn main():
+    val path = rt_env_get("MCPGDB_REQUEST_PATH") ?? ""
+    if path == "":
+        print make_tool_error("null", "missing request path")
+        return
+    val body = rt_file_read_text(path) ?? ""
+    if body == "":
+        print make_tool_error("null", "empty request body")
+        return
+    val id = local_extract_id(body)
+    load_persisted_state_safe()
+    var response = make_tool_error(id, "Unknown debug exec tool")
+    if body.contains("\"name\":\"debug_command_run\"") or body.contains("\"name\": \"debug_command_run\""):
+        response = handle_debug_command_run(id, body)
+    save_persisted_state()
+    print response

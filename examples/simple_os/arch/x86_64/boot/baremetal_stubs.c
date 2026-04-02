@@ -177,7 +177,7 @@ typedef struct {
  * 4. Heap allocator — bump allocator, 16 MB
  * =================================================================== */
 
-static char   _heap[16 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
@@ -185,7 +185,8 @@ void *malloc(size_t sz)
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
-        return (void *)0;
+        /* Halt to prevent infinite loop */
+        for(;;) outb(0xF4, 0);
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
@@ -635,7 +636,7 @@ void _start(void)
 
     serial_puts("SimpleOS x86_64 boot\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
-    serial_puts("[BOOT] Heap: 16 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
     if (spl_start) {
@@ -864,39 +865,8 @@ S0(rt_math_nan)
 S1(rt_math_is_nan)
 S1(rt_math_is_inf)
 
-/* --- MMIO (stubs — overridden in section 11) --- */
-S1(rt_mmio_read_u8)
-S1(rt_mmio_read_u16)
-S1(rt_mmio_read_u32)
-S1(rt_mmio_read_u64)
-S2(rt_mmio_write_u8)
-S2(rt_mmio_write_u16)
-S2(rt_mmio_write_u32)
-S2(rt_mmio_write_u64)
-
-/* --- CPU control (stubs — some overridden in section 11) --- */
-S0(rt_hlt)
-S0(rt_sti)
-S0(rt_cli)
-S1(rt_lgdt)
-S1(rt_lidt)
-S1(rt_ltr)
-S1(rt_invlpg)
-S0(rt_read_cr0)
-S1(rt_write_cr0)
-S1(rt_read_cr2)
-S1(rt_read_cr3)
-S1(rt_write_cr3)
-S0(rt_read_cr4)
-S1(rt_write_cr4)
-S1(rt_read_msr)
-S2(rt_write_msr)
-S0(rt_cpuid)
-S0(rt_rdtsc)
-
-/* --- Interrupts --- */
-S0(rt_enable_interrupts)
-S0(rt_disable_interrupts)
+/* MMIO, CPU control, and interrupt stubs are provided as real
+   implementations in Section 11 below — not generated via S* macros. */
 S2(rt_register_isr)
 S1(rt_send_eoi)
 S0(rt_get_interrupt_flag)

@@ -5,7 +5,6 @@ extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_cwd() -> text
@@ -39,6 +38,11 @@ fn ps_is_alive(pid: text) -> bool:
 fn session_prompt(session_id: text) -> text:
     "[mcpgdb:" + session_id + "] "
 
+fn initial_backend_prompt(session: DebugSession) -> text:
+    if session.backend == "lldb":
+        return "(lldb) "
+    "(gdb) "
+
 fn debugger_launch_command(session: DebugSession) -> text:
     if session.backend == "lldb":
         val lldb = lldb_binary()
@@ -53,14 +57,16 @@ fn debugger_launch_command(session: DebugSession) -> text:
 fn init_debugger_session(session: DebugSession) -> DebugSession:
     var updated = session
     val prompt = session_prompt(session.session_id)
-    updated.prompt = prompt
+    updated.prompt = initial_backend_prompt(session)
     if session.backend == "lldb":
         val _r = run_session_command(updated, "settings set prompt " + prompt, true)
         val _r2 = run_session_command(updated, "settings set auto-confirm true", true)
+        updated.prompt = prompt
         return updated
     val _r3 = run_session_command(updated, "set pagination off", true)
     val _r4 = run_session_command(updated, "set confirm off", true)
     val _r5 = run_session_command(updated, "set prompt " + prompt, true)
+    updated.prompt = prompt
     updated
 
 fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
@@ -69,14 +75,15 @@ fn create_debugger_process(session: DebugSession) -> (DebugSession, text):
     val launch = debugger_launch_command(updated)
     if launch == "":
         return (updated, "required debugger binary not found for backend " + updated.backend)
+    val inner = "exec 3<>" + shell_quote(updated.input_path) + " ; exec " + launch + " <&3"
     val cmd = "rm -f " + shell_quote(updated.input_path) + " " + shell_quote(updated.output_path) + " " + shell_quote(updated.error_path)
         + " ; mkfifo " + shell_quote(updated.input_path)
         + " ; : > " + shell_quote(updated.output_path)
         + " ; : > " + shell_quote(updated.error_path)
-        + " ; nohup " + launch + " < " + shell_quote(updated.input_path)
-        + " > " + shell_quote(updated.output_path)
+        + " ; nohup " + shell_quote(shell_bin()) + " -lc " + shell_quote(inner)
+        + " < /dev/null > " + shell_quote(updated.output_path)
         + " 2> " + shell_quote(updated.error_path)
-        + " < /dev/null & echo $!"
+        + " & echo $!"
     val (stdout, stderr, code) = rt_process_run(shell_bin(), ["-c", cmd])
     if code != 0:
         return (updated, "failed to launch debugger: " + stderr.trim())
@@ -100,10 +107,10 @@ fn send_fifo_line(fifo_path: text, line: text) -> text:
     ""
 
 fn read_output_delta(path: text, offset: i64) -> text:
-    val current = rt_file_size(path)
-    if current <= offset:
+    val all = rt_file_read_text(path) ?? ""
+    if all.len() <= offset:
         return ""
-    rt_file_read_text_at(path, offset, current - offset) ?? ""
+    all.substring(offset, all.len())
 
 fn strip_prompt(output: text, prompt: text) -> text:
     var result = output
