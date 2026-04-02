@@ -82,18 +82,22 @@ pub fn start_watchdog(timeout_secs: u64) {
         .spawn(move || {
             while !stop_clone.load(Ordering::Relaxed) {
                 if Instant::now() >= deadline {
-                    eprintln!("[watchdog] wall-clock timeout ({timeout_secs}s) exceeded");
+                    let msg = format!("[watchdog] wall-clock timeout ({}s) exceeded", timeout_secs);
+                    eprintln!("{}", msg);
+                    write_watchdog_crash_log(&msg);
                     TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
                     return;
                 }
-                // Check memory every 500ms (every 5th iteration).
+                // Check memory every iteration (100ms).
                 let rss = read_rss_bytes();
                 if mem_limit > 0 && rss > mem_limit {
-                    eprintln!(
+                    let msg = format!(
                         "[watchdog] RSS {}MB exceeds limit {}MB — triggering timeout",
                         rss / (1024 * 1024),
                         mem_limit / (1024 * 1024),
                     );
+                    eprintln!("{}", msg);
+                    write_watchdog_crash_log(&msg);
                     TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -107,6 +111,32 @@ pub fn start_watchdog(timeout_secs: u64) {
             stop_flag,
             thread: Some(handle),
         });
+    }
+}
+
+/// Write watchdog crash info to a log file (best-effort).
+fn write_watchdog_crash_log(msg: &str) {
+    use std::io::Write;
+    let pid = std::process::id();
+    let crash_dir = std::env::var("SIMPLE_LOG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let local = std::path::PathBuf::from(".simple/logs");
+            if local.exists() || std::fs::create_dir_all(&local).is_ok() {
+                local
+            } else {
+                std::env::temp_dir().join("simple_logs")
+            }
+        });
+    let _ = std::fs::create_dir_all(&crash_dir);
+    let path = crash_dir.join(format!("crash_{}.log", pid));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "=== WATCHDOG CRASH ===");
+        let _ = writeln!(f, "PID: {}", pid);
+        let _ = writeln!(f, "OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+        let _ = writeln!(f, "{}", msg);
+        let _ = writeln!(f, "======================\n");
+        eprintln!("[watchdog] crash report: {}", path.display());
     }
 }
 

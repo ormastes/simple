@@ -5,6 +5,7 @@
 
 use std.fs.{file_exists, file_read_text, dir_list, file_size}
 use std.env.{home_dir}
+use app.io.mod.{is_dir}
 use app.llm_dashboard.data.jsonl_parser.{JsonlParser, DashboardEvent, parse_line}
 
 # =========================================================================
@@ -18,9 +19,12 @@ class WatchedFile:
     parser: JsonlParser
 
     static fn new(path: text, session_id: text) -> WatchedFile:
+        return WatchedFile.new_with_offset(path, session_id, 0)
+
+    static fn new_with_offset(path: text, session_id: text, start_offset: i64) -> WatchedFile:
         return WatchedFile(
             path: path,
-            last_offset: 0,
+            last_offset: start_offset,
             session_id: session_id,
             parser: JsonlParser.new(session_id)
         )
@@ -64,13 +68,18 @@ impl JsonlWatcher:
         val project_dirs = dir_list(self.claude_dir)
         for proj_dir in project_dirs:
             val proj_path = "{self.claude_dir}/{proj_dir}"
+            if not is_dir(proj_path):
+                continue
             val files = dir_list(proj_path)
             for fname in files:
                 if fname.ends_with(".jsonl"):
                     val full_path = "{proj_path}/{fname}"
                     if not self._is_watched(full_path):
                         val session_id = derive_session_id(proj_dir, fname)
-                        self.watched_files.push(WatchedFile.new(full_path, session_id))
+                        # New files should tail from EOF so touching or discovering
+                        # an existing large transcript does not replay the backlog.
+                        val start_offset = file_size(full_path)
+                        self.watched_files.push(WatchedFile.new_with_offset(full_path, session_id, start_offset))
 
     me poll() -> [DashboardEvent]:
         """Poll all watched files for new content. Returns new events."""
@@ -118,7 +127,12 @@ fn poll_file(wf: WatchedFile) -> [DashboardEvent]:
         return []
 
     val current_size = file_size(wf.path)
-    if current_size <= wf.last_offset:
+    if current_size < wf.last_offset:
+        # File was truncated or rotated. Reset so the replacement file can be
+        # read from the start instead of leaving the watcher stuck forever.
+        wf.last_offset = 0
+        wf.parser = JsonlParser.new(wf.session_id)
+    elif current_size == wf.last_offset:
         return []
 
     # Read entire file and skip to offset

@@ -11,6 +11,7 @@ class Trace32Client:
     host: text
     port: i32
     t32rem_path: text
+    backend: text
     connected: bool
     program: text
     bp_counter: i32
@@ -26,6 +27,7 @@ impl Trace32Client:
             host: config.host,
             port: config.port,
             t32rem_path: t32rem,
+            backend: "remote_cmd",
             connected: false,
             program: config.program,
             bp_counter: 0
@@ -42,6 +44,11 @@ impl Trace32Client:
 
     # Find t32rem binary
     static fn find_t32rem() -> text:
+        val repo_wrapper = "scripts/t32_remote_cmd.shs"
+        val wrapper_check = shell("test -x '{repo_wrapper}' && echo yes")
+        if wrapper_check.stdout.trim() == "yes":
+            return repo_wrapper
+
         # Check T32_PATH env var first
         val env_check = shell("echo $T32_PATH")
         val t32_path = env_check.stdout.trim()
@@ -56,6 +63,11 @@ impl Trace32Client:
         if which.exit_code == 0:
             return which.stdout.trim()
 
+        val bundled = "/opt/t32/bin/pc_linux64/t32rem"
+        val bundled_check = shell("test -x '{bundled}' && echo yes")
+        if bundled_check.stdout.trim() == "yes":
+            return bundled
+
         ""
 
     # Execute a t32rem command and return raw output
@@ -64,6 +76,11 @@ impl Trace32Client:
         val result = shell(full_cmd)
         if result.exit_code != 0:
             return Err("t32rem error: {result.stderr}")
+        val stdout_trimmed = result.stdout.trim()
+        val stderr_trimmed = result.stderr.trim()
+        val error_text = if stderr_trimmed != "": stderr_trimmed else: stdout_trimmed
+        if Trace32Parser.looks_like_error(error_text):
+            return Err(error_text)
         Ok(result.stdout.trim())
 
     # --- Execution Control ---
@@ -332,6 +349,16 @@ class Trace32Parser:
             return "stopped"
 
         "unknown"
+
+    static fn looks_like_error(raw: text) -> bool:
+        val lower = Trace32Parser.to_lower_ascii(raw.trim())
+        if lower == "":
+            return false
+        Trace32Parser.text_contains(lower, "error initializing trace32") or
+        Trace32Parser.text_contains(lower, "error accessing trace32") or
+        Trace32Parser.text_contains(lower, "error no device") or
+        Trace32Parser.text_contains(lower, "unknown command") or
+        Trace32Parser.text_contains(lower, "connection refused")
 
     # Parse variable list output into [VarInfo]
     # Format: "name  type  value" (whitespace-separated columns)

@@ -12,6 +12,7 @@ class Trace32Client:
     host: text
     port: i32
     t32rem_path: text
+    backend: text
     connected: bool
     program: text
     bp_counter: i32
@@ -27,6 +28,7 @@ impl Trace32Client:
             host: config.host,
             port: config.port,
             t32rem_path: t32rem,
+            backend: "remote_cmd",
             connected: false,
             program: config.program,
             bp_counter: 0
@@ -43,6 +45,11 @@ impl Trace32Client:
 
     # Find t32rem binary
     static fn find_t32rem() -> text:
+        val repo_wrapper = "scripts/t32_remote_cmd.shs"
+        val wrapper_check = shell("test -x " + Trace32Client.shell_quote(repo_wrapper) + " && echo yes")
+        if wrapper_check.stdout.trim() == "yes":
+            return repo_wrapper
+
         # Allow a repo-managed wrapper script or alternate client binary.
         val explicit = shell("printenv SIMPLE_T32REM_BIN 2>/dev/null")
         val explicit_path = explicit.stdout.trim()
@@ -150,6 +157,11 @@ impl Trace32Client:
         val result = shell(full_cmd)
         if result.exit_code != 0:
             return Err("t32rem error: {result.stderr}")
+        val stdout_trimmed = result.stdout.trim()
+        val stderr_trimmed = result.stderr.trim()
+        val error_text = if stderr_trimmed != "": stderr_trimmed else: stdout_trimmed
+        if Trace32Parser.looks_like_error(error_text):
+            return Err(error_text)
         Ok(result.stdout.trim())
 
     # --- Execution Control ---
@@ -349,6 +361,38 @@ impl Trace32Client:
 # Parser for Trace32 output formats
 # Converts t32rem text output into typed data structures
 class Trace32Parser:
+
+    static fn to_lower_ascii(s: text) -> text:
+        var result = ""
+        var i = 0
+        while i < s.len():
+            val ch = s[i:i + 1]
+            if ch >= "A" and ch <= "Z":
+                result = result + ch.to_lower()
+            else:
+                result = result + ch
+            i = i + 1
+        result
+
+    static fn text_contains(hay: text, needle: text) -> bool:
+        if needle.len() > hay.len():
+            return false
+        var i = 0
+        while i <= hay.len() - needle.len():
+            if hay[i:i + needle.len()] == needle:
+                return true
+            i = i + 1
+        false
+
+    static fn looks_like_error(raw: text) -> bool:
+        val lower = Trace32Parser.to_lower_ascii(raw.trim())
+        if lower == "":
+            return false
+        Trace32Parser.text_contains(lower, "error initializing trace32") or
+        Trace32Parser.text_contains(lower, "error accessing trace32") or
+        Trace32Parser.text_contains(lower, "error no device") or
+        Trace32Parser.text_contains(lower, "unknown command") or
+        Trace32Parser.text_contains(lower, "connection refused")
 
     # Parse variable list output into [VarInfo]
     # Format: "name  type  value" (whitespace-separated columns)

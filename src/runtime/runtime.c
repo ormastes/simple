@@ -1340,6 +1340,33 @@ int64_t __simple_intrinsic_memset(void* dst, int64_t val, int64_t n) {
  * ================================================================ */
 
 void spl_panic(const char* msg) {
-    fprintf(stderr, "PANIC: %s\n", msg ? msg : "unknown error");
+    const char* safe_msg = msg ? msg : "unknown error";
+    fprintf(stderr, "PANIC: %s\n", safe_msg);
+
+    /* Write crash log to file (best-effort, all platforms with stdio) */
+    {
+        char crash_path[512];
+        const char* log_dir = getenv("SIMPLE_LOG_DIR");
+#if defined(_WIN32)
+        const char* tmp = log_dir ? log_dir : (getenv("TEMP") ? getenv("TEMP") : ".");
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+        const char* tmp = log_dir ? log_dir : "/tmp";
+#else
+        /* Baremetal / unknown: try current dir */
+        const char* tmp = log_dir ? log_dir : ".";
+#endif
+        snprintf(crash_path, sizeof(crash_path), "%s/simple_crash_%d.log",
+                 tmp, (int)getpid());
+        FILE* f = fopen(crash_path, "a");
+        if (f) {
+            fprintf(f, "=== SIMPLE C RUNTIME CRASH ===\n");
+            fprintf(f, "PID: %d\n", (int)getpid());
+            fprintf(f, "Message: %s\n", safe_msg);
+            fprintf(f, "==============================\n\n");
+            fclose(f);
+            fprintf(stderr, "[crash] report written to %s\n", crash_path);
+        }
+    }
+
     exit(1);
 }

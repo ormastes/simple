@@ -11,16 +11,19 @@ use std::path::PathBuf;
 use std::fs;
 use walkdir::WalkDir;
 
-/// Initialize logging system based on build mode
+/// Initialize logging system.
 ///
-/// In debug mode: Enables dual logging (stdout + file) with optional log directory
-/// In release mode: Simple stdout-only logging
+/// Enables dual logging (stdout + file) by default for all build modes.
+/// Log directory: `SIMPLE_LOG_DIR` env var, or `.simple/logs/` (local project).
+/// Set `SIMPLE_LOG_FILE=0` to disable file logging.
 pub fn init_logging(metrics: &mut StartupMetrics) {
     let log_start = std::time::Instant::now();
 
-    // Enable dual logging (stdout + file) in debug mode only for diagnostics
-    #[cfg(debug_assertions)]
-    {
+    let file_disabled = std::env::var("SIMPLE_LOG_FILE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+
+    if !file_disabled {
         let log_dir = std::env::var("SIMPLE_LOG_DIR").ok().map(PathBuf::from);
         let log_filter = std::env::var("SIMPLE_LOG")
             .ok()
@@ -33,11 +36,9 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
 
         // Cleanup old logs (keep 7 days) - non-fatal if it fails
         let _ = crate::log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7);
+    } else {
+        crate::log::init();
     }
-
-    // In release mode, use simple stdout-only logging
-    #[cfg(not(debug_assertions))]
-    crate::log::init();
 
     metrics.record(crate::StartupPhase::LoggingInit, log_start.elapsed());
 }
@@ -49,11 +50,11 @@ pub fn init_interpreter_handlers(metrics: &mut StartupMetrics) {
     metrics.record(crate::StartupPhase::HandlerInit, handler_start.elapsed());
 }
 
-/// Install panic hook for detailed crash diagnostics (debug mode only)
+/// Install panic hook for detailed crash diagnostics (all build modes).
+/// Writes crash report to stderr, tracing log, AND a dedicated crash file.
 pub fn init_panic_hook(metrics: &mut StartupMetrics) {
     let panic_start = std::time::Instant::now();
 
-    #[cfg(debug_assertions)]
     std::panic::set_hook(Box::new(|panic_info| {
         use std::backtrace::Backtrace;
         use std::io::Write;
@@ -73,6 +74,9 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
             "unknown panic".to_string()
         };
 
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let pid = std::process::id();
+
         // Log to file via tracing
         tracing::error!(
             message = %message,
@@ -81,26 +85,63 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
             "PANIC"
         );
 
-        // Also print to stderr for immediate visibility
+        // Print to stderr for immediate visibility
         let mut stderr = std::io::stderr();
         let _ = writeln!(stderr, "\n=== PANIC ===");
+        let _ = writeln!(stderr, "Time: {}", timestamp);
+        let _ = writeln!(stderr, "PID: {}", pid);
         let _ = writeln!(stderr, "Message: {}", message);
         let _ = writeln!(stderr, "Location: {}", location);
         let _ = writeln!(stderr, "\nBacktrace:\n{}", backtrace);
         let _ = writeln!(stderr, "=============\n");
         let _ = stderr.flush();
+
+        // Write crash log file (best-effort)
+        write_crash_log(&timestamp, pid, &message, &location, &format!("{}", backtrace));
     }));
 
     metrics.record(crate::StartupPhase::PanicHookInit, panic_start.elapsed());
 }
 
-/// Install signal handlers for graceful interrupt (Ctrl-C) - debug mode only
+/// Write a crash log file to `.simple/logs/` or system temp directory.
+fn write_crash_log(timestamp: &str, pid: u32, message: &str, location: &str, backtrace: &str) {
+    use std::io::Write;
+
+    let crash_dir = std::env::var("SIMPLE_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let local = PathBuf::from(".simple/logs");
+            if local.exists() || fs::create_dir_all(&local).is_ok() {
+                local
+            } else {
+                std::env::temp_dir().join("simple_logs")
+            }
+        });
+    let _ = fs::create_dir_all(&crash_dir);
+
+    let crash_file = crash_dir.join(format!("crash_{}.log", pid));
+    let mut f = match fs::OpenOptions::new().create(true).append(true).open(&crash_file) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    let _ = writeln!(f, "=== SIMPLE CRASH REPORT ===");
+    let _ = writeln!(f, "Time: {}", timestamp);
+    let _ = writeln!(f, "PID: {}", pid);
+    let _ = writeln!(f, "Version: {}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(f, "OS: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let _ = writeln!(f, "Message: {}", message);
+    let _ = writeln!(f, "Location: {}", location);
+    let _ = writeln!(f, "\nBacktrace:\n{}", backtrace);
+    let _ = writeln!(f, "===========================\n");
+
+    eprintln!("[crash] report written to {}", crash_file.display());
+}
+
+/// Install signal handlers for graceful interrupt (Ctrl-C) - all build modes.
 pub fn init_signal_handlers(metrics: &mut StartupMetrics) {
     let signal_start = std::time::Instant::now();
-
-    #[cfg(debug_assertions)]
     simple_compiler::interpreter::init_signal_handlers();
-
     metrics.record(crate::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 }
 
