@@ -52,29 +52,51 @@ The following flows were verified successfully through `bin/simple src/app/mcpgd
 - `bin/simple test examples/mcpgdb/test/unit`
 - `bin/simple test doc/06_spec/app/compiler/feature/mcpgdb_spec.spl`
 
+## What Was Fixed (2026-04-02, cleanup pass)
+
+### Process cleanup hardened
+
+- `stop_session_process()` now uses 3-stage shutdown: graceful `quit` via FIFO → `pkill -P` for child tree → SIGTERM → SIGKILL fallback with `ps_is_alive` verification
+- Both copies hardened: `debug_backend_common.spl` and `backend_common.spl`
+- Duplicate `stop_session_process_local()` in `debug_session_runner.spl` removed; now imports from `debug_backend_common`
+
+### MCP wrapper exit cleanup
+
+- `main.spl` calls `cleanup_all_sessions()` on EOF exit, killing all active debug sessions and clangd
+- Signal handler integration added (best-effort, forward-compatible with SFFI when implemented)
+- Temp request file leak fixed on write failure path
+
+### clangd shutdown protocol
+
+- `stop_clangd_workspace()` now sends LSP `shutdown` + `exit` before killing the process
+- Same SIGTERM → SIGKILL escalation with child tree handling
+
+### Stale session cleanup
+
+- `cleanup_stale_sessions()` added to `debug_backend_common.spl`
+- Called on runner startup after `load_persisted_state_safe()` — removes sessions whose processes are already dead
+
+### Live smoke tests added
+
+- `examples/mcpgdb/test/unit/cleanup_spec.spl` covers:
+  - Session close proves gdb child process exits (before/after pgrep comparison)
+  - Two concurrent sessions maintain state isolation
+  - clangd tool path responds through runner
+
 ## What Remains
-
-### Process cleanup
-
-The biggest remaining runtime problem is debugger process cleanup.
-
-- Repeated runs have left many orphaned `gdb --interpreter=mi3 -nx` processes under `PPID 1`.
-- Session shutdown and abnormal-exit cleanup need to be hardened so `mcpgdb` does not leak debugger children.
-- A follow-up pass should verify cleanup for:
-  - normal `debug_session_close`
-  - MCP wrapper exit
-  - failed runner execution
-  - overwritten or stale session state in `/tmp/mcpgdb_dbg_*`
 
 ### Broader heavy-path validation
 
-The currently verified live flow covers session creation, listing, and one backend read-only command. The following still need explicit live smokes:
+The following still need explicit live smokes:
 
-- clangd tool path
 - structured debug tools beyond `debug_command_run`
-- multi-session concurrent flows
 - remote backend flows for `openocd_gdb` and `t32_gdb`
-- session close / restart / disconnect flows
+- session restart / disconnect flows
+
+### Compiled artifact lifecycle
+
+- Cached `.smf` artifacts in `/tmp/mcpgdb_compiled_*/` have no TTL or cleanup
+- Consider adding a cache invalidation pass on startup or a max-age check
 
 ### Example/runtime alignment cleanup
 

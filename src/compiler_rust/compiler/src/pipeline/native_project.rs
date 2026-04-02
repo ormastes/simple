@@ -1174,7 +1174,8 @@ int main(int argc, char** argv) {
         // Triggered by --target flag in config or TargetOS::None env var.
         let cross_target = effective_target();
         let is_freestanding = self.config.target.is_some()
-            || cross_target.os == simple_common::target::TargetOS::None;
+            || cross_target.os == simple_common::target::TargetOS::None
+            || cross_target.os == simple_common::target::TargetOS::SimpleOS;
         if is_freestanding {
             return self.link_objects_freestanding(object_paths, temp_dir, imports);
         }
@@ -1233,6 +1234,13 @@ int main(int argc, char** argv) {
                 (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::None) => "armv7-none-eabihf",
                 (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::None) => "i686-unknown-elf",
                 (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => "x86_64-unknown-elf",
+                // SimpleOS targets use ELF format like baremetal
+                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::SimpleOS) => "x86_64-unknown-elf",
+                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::SimpleOS) => "aarch64-none-elf",
+                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::SimpleOS) => "riscv64-unknown-elf",
+                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::SimpleOS) => "riscv32-unknown-elf",
+                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::SimpleOS) => "i686-unknown-elf",
+                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::SimpleOS) => "armv7-none-eabihf",
                 _ => "", // host-like targets don't need special triple
             };
             if !triple.is_empty() {

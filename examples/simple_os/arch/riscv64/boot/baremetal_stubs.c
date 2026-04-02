@@ -130,7 +130,12 @@ void *calloc(size_t n, size_t size) {
 }
 
 RuntimeValue rt_alloc(RuntimeValue size) {
-    return ENCODE_PTR(malloc((size_t)DECODE_INT(size)));
+    /* size is raw (untagged) per the Rust runtime ABI. */
+    size_t bytes = (size_t)size;
+    if (bytes == 0 || bytes > 0x1000000) return NIL_VALUE;
+    void *p = malloc(bytes);
+    if (!p) return NIL_VALUE;
+    return ENCODE_PTR(p);
 }
 
 /* ================================================================
@@ -138,18 +143,18 @@ RuntimeValue rt_alloc(RuntimeValue size) {
  * ================================================================ */
 
 RuntimeValue rt_string_new(RuntimeValue data_ptr, RuntimeValue len_val) {
-    int64_t len = DECODE_INT(len_val);
-    if (len < 0) len = 0;
+    /* Parameters are raw (untagged) per the Rust runtime ABI.
+       len_val is the raw byte count, data_ptr is a raw pointer. */
+    int64_t len = len_val;
+    if (len <= 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->header.type = HEAP_TYPE_STRING;
     s->header.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
     s->len = (uint32_t)len;
-    if (IS_HEAP(data_ptr)) {
-        __builtin_memcpy(s->data, DECODE_PTR(data_ptr), (size_t)len);
-    } else if (data_ptr) {
-        __builtin_memcpy(s->data, (const void *)(uintptr_t)data_ptr, (size_t)len);
-    }
+    /* data_ptr is a raw pointer cast to i64 */
+    const char *src = (const char *)(uintptr_t)data_ptr;
+    if (src) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = 0;
     return ENCODE_PTR(s);
 }

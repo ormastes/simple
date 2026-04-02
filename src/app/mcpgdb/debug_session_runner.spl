@@ -9,7 +9,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 use app.mcpgdb.json_helpers.{extract_id, extract_nested, make_tool_error, make_tool_result, LB, RB, jp, js}
 use app.mcpgdb.state.{DebugSession, MCPGDB_SESSIONS, save_persisted_state, next_session_id, set_current_session, current_or_named_session, remove_session, session_count}
 use app.mcpgdb.state_loader.{load_persisted_state_safe}
-use app.mcpgdb.debug_backend_common.{choose_workspace_root, make_session}
+use app.mcpgdb.debug_backend_common.{choose_workspace_root, make_session, stop_session_process, cleanup_stale_sessions}
 
 fn session_json_message(fields: [text]) -> text:
     LB() + fields.join(",") + RB()
@@ -45,15 +45,10 @@ fn handle_debug_session_create(id: text, body: text) -> text:
         jp("workspace_root", js(session.workspace_root))
     ]))
 
-fn stop_session_process_local(session: DebugSession):
-    if session.process_pid != "":
-        val (_stdout, _stderr, _code) = rt_process_run("bash", ["-lc", "kill " + session.process_pid + " >/dev/null 2>&1 || true"])
-    rt_dir_remove_all(session.session_dir)
-
 fn handle_debug_session_close(id: text, body: text) -> text:
     val session_id = extract_nested(body, "session_id")
     if val session = current_or_named_session(session_id):
-        stop_session_process_local(session)
+        stop_session_process(session)
         remove_session(session.session_id)
         return make_tool_result(id, session_json_message([
             jp("closed", js(session.session_id)),
@@ -72,6 +67,7 @@ fn main():
         return
     val id = extract_id(body)
     load_persisted_state_safe()
+    cleanup_stale_sessions()
     var response = make_tool_error(id, "Unknown debug session tool")
     if body.contains("\"name\":\"debug_session_create\"") or body.contains("\"name\": \"debug_session_create\""):
         response = handle_debug_session_create(id, body)

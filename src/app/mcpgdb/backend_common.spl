@@ -169,9 +169,29 @@ fn make_session(session_id: text, backend: text, workspace_root: text) -> DebugS
         bootstrap_monitor: ""
     )
 
+fn kill_process_children(pid: text):
+    val (_s, _e, _c) = rt_process_run(shell_bin(), ["-c",
+        "pkill -TERM -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+    shell_sleep("0.10")
+    val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+        "pkill -9 -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+
+fn kill_pid_escalating(pid: text):
+    val (_s1, _e1, _c1) = rt_process_run(shell_bin(), ["-c",
+        "kill " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+    shell_sleep("0.30")
+    if ps_is_alive(pid):
+        val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+            "kill -9 " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+        shell_sleep("0.10")
+
 fn stop_session_process(session: DebugSession):
     if session.process_pid != "":
-        rt_process_run(shell_bin(), ["-c", "kill " + shell_quote(session.process_pid) + " >/dev/null 2>&1 || true"])
+        if ps_is_alive(session.process_pid):
+            val _err = send_fifo_line(session.input_path, "quit")
+            shell_sleep("0.20")
+        kill_process_children(session.process_pid)
+        kill_pid_escalating(session.process_pid)
     rt_dir_remove_all(session.session_dir)
 
 fn detect_compile_commands_dir(root: text) -> text:
@@ -234,7 +254,15 @@ fn start_clangd_workspace(root: text, compile_dir: text) -> text:
 
 fn stop_clangd_workspace():
     if MCPGDB_WORKSPACE.clangd_pid != "":
-        rt_process_run(shell_bin(), ["-c", "kill " + shell_quote(MCPGDB_WORKSPACE.clangd_pid) + " >/dev/null 2>&1 || true"])
+        val shutdown_body = LB() + jp("jsonrpc", js("2.0")) + "," + jp("id", "999") + "," + jp("method", js("shutdown")) + "," + jp("params", jo0()) + RB()
+        val _err = send_clangd_message(shutdown_body)
+        shell_sleep("0.10")
+        val exit_body = LB() + jp("jsonrpc", js("2.0")) + "," + jp("method", js("exit")) + "," + jp("params", jo0()) + RB()
+        val _err2 = send_clangd_message(exit_body)
+        shell_sleep("0.20")
+        if ps_is_alive(MCPGDB_WORKSPACE.clangd_pid):
+            kill_process_children(MCPGDB_WORKSPACE.clangd_pid)
+            kill_pid_escalating(MCPGDB_WORKSPACE.clangd_pid)
     if MCPGDB_WORKSPACE.clangd_dir != "":
         rt_dir_remove_all(MCPGDB_WORKSPACE.clangd_dir)
     MCPGDB_WORKSPACE = WorkspaceState(

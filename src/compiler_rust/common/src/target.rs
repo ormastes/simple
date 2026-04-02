@@ -467,18 +467,42 @@ impl Target {
             None
         };
 
-        let os = parts
-            .get(1)
-            .map(|s| match s.to_lowercase().as_str() {
+        // Join all parts after the arch for OS detection.
+        // This handles both short forms (x86_64-simpleos) and standard triples
+        // (x86_64-unknown-simpleos, x86_64-unknown-linux-gnu).
+        let os_parts = if parts.len() > 1 { &parts[1..] } else { &[] as &[&str] };
+        let os_joined = os_parts.iter().map(|p| p.to_lowercase()).collect::<Vec<_>>().join("-");
+
+        let os = if os_parts.is_empty() {
+            TargetOS::host()
+        } else if os_joined.contains("simpleos") || os_joined.contains("simple-os") || os_joined.contains("simple_os")
+            || (os_parts.first().map(|s| s.to_lowercase()) == Some("simple".to_string()))
+        {
+            TargetOS::SimpleOS
+        } else {
+            match os_parts[0].to_lowercase().as_str() {
                 "linux" | "gnu" => TargetOS::Linux,
                 "windows" | "win" | "msvc" => TargetOS::Windows,
                 "macos" | "darwin" | "apple" => TargetOS::MacOS,
                 "freebsd" => TargetOS::FreeBSD,
-                "simpleos" | "simple-os" | "simple_os" => TargetOS::SimpleOS,
-                "none" | "bare" | "unknown" | "wasi" => TargetOS::None,
+                "none" | "bare" | "wasi" => TargetOS::None,
+                "unknown" | "pc" => {
+                    // Standard triple: arch-vendor-os or arch-vendor-os-env
+                    // Check remaining parts for OS identification
+                    let rest = os_parts[1..].iter().map(|p| p.to_lowercase()).collect::<Vec<_>>().join("-");
+                    match rest.as_str() {
+                        s if s.starts_with("linux") => TargetOS::Linux,
+                        s if s.starts_with("windows") => TargetOS::Windows,
+                        s if s.starts_with("darwin") => TargetOS::MacOS,
+                        s if s.starts_with("freebsd") => TargetOS::FreeBSD,
+                        s if s.starts_with("simpleos") => TargetOS::SimpleOS,
+                        s if s.starts_with("none") => TargetOS::None,
+                        _ => TargetOS::None,
+                    }
+                }
                 _ => TargetOS::Any,
-            })
-            .unwrap_or(TargetOS::host());
+            }
+        };
 
         Ok(Self { arch, os, wasm_runtime })
     }
@@ -496,6 +520,13 @@ impl Target {
             (TargetArch::Arm, TargetOS::None) => "armv7a-unknown-none-eabihf",
             (TargetArch::Riscv64, TargetOS::None) => "riscv64gc-unknown-none-elf",
             (TargetArch::Riscv32, TargetOS::None) => "riscv32gc-unknown-none-elf",
+            // SimpleOS targets (custom OS, ELF format)
+            (TargetArch::X86_64, TargetOS::SimpleOS) => "x86_64-unknown-simpleos",
+            (TargetArch::Aarch64, TargetOS::SimpleOS) => "aarch64-unknown-simpleos",
+            (TargetArch::Riscv64, TargetOS::SimpleOS) => "riscv64gc-unknown-simpleos",
+            (TargetArch::Riscv32, TargetOS::SimpleOS) => "riscv32imac-unknown-simpleos",
+            (TargetArch::X86, TargetOS::SimpleOS) => "i686-unknown-simpleos",
+            (TargetArch::Arm, TargetOS::SimpleOS) => "armv7-unknown-simpleos-eabihf",
             // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
             (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
@@ -512,9 +543,9 @@ impl Target {
         }
     }
 
-    /// Check if this is a baremetal target (no OS).
+    /// Check if this is a baremetal target (no OS or SimpleOS which uses baremetal compilation).
     pub const fn is_baremetal(&self) -> bool {
-        matches!(self.os, TargetOS::None) && self.wasm_runtime.is_none()
+        matches!(self.os, TargetOS::None | TargetOS::SimpleOS) && self.wasm_runtime.is_none()
     }
 
     /// Check if this is a WASM target.
@@ -768,5 +799,76 @@ mod tests {
         // Host target is never baremetal
         let t = Target::host();
         assert!(!t.is_baremetal());
+    }
+
+    #[test]
+    fn test_simpleos_targets() {
+        // SimpleOS should be treated as baremetal
+        let t = Target::new(TargetArch::X86_64, TargetOS::SimpleOS);
+        assert!(t.is_baremetal());
+        assert!(!t.is_host());
+
+        let t = Target::new(TargetArch::Aarch64, TargetOS::SimpleOS);
+        assert!(t.is_baremetal());
+
+        let t = Target::new(TargetArch::Riscv64, TargetOS::SimpleOS);
+        assert!(t.is_baremetal());
+    }
+
+    #[test]
+    fn test_parse_simpleos_target() {
+        // Short form
+        let target = Target::parse("x86_64-simpleos").unwrap();
+        assert_eq!(target.arch, TargetArch::X86_64);
+        assert_eq!(target.os, TargetOS::SimpleOS);
+
+        // Hyphenated form
+        let target = Target::parse("aarch64-simple-os").unwrap();
+        assert_eq!(target.arch, TargetArch::Aarch64);
+        assert_eq!(target.os, TargetOS::SimpleOS);
+
+        // "simple" alone
+        let target = Target::parse("riscv32-simple").unwrap();
+        assert_eq!(target.arch, TargetArch::Riscv32);
+        assert_eq!(target.os, TargetOS::SimpleOS);
+
+        // Full triple form (as used with --target)
+        let target = Target::parse("x86_64-unknown-simpleos").unwrap();
+        assert_eq!(target.arch, TargetArch::X86_64);
+        assert_eq!(target.os, TargetOS::SimpleOS);
+    }
+
+    #[test]
+    fn test_simpleos_triple_str() {
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::SimpleOS).triple_str(),
+            "x86_64-unknown-simpleos"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::SimpleOS).triple_str(),
+            "aarch64-unknown-simpleos"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Riscv64, TargetOS::SimpleOS).triple_str(),
+            "riscv64gc-unknown-simpleos"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Riscv32, TargetOS::SimpleOS).triple_str(),
+            "riscv32imac-unknown-simpleos"
+        );
+        assert_eq!(
+            Target::new(TargetArch::X86, TargetOS::SimpleOS).triple_str(),
+            "i686-unknown-simpleos"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Arm, TargetOS::SimpleOS).triple_str(),
+            "armv7-unknown-simpleos-eabihf"
+        );
+    }
+
+    #[test]
+    fn test_simpleos_display() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::SimpleOS);
+        assert_eq!(format!("{}", target), "x86_64-simpleos");
     }
 }

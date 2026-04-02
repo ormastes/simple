@@ -1,10 +1,12 @@
-# SimpleOS GUI Kernel Main -- Framebuffer Desktop
+# SimpleOS GUI Kernel Main -- Full Desktop with Compositor
 #
-# Minimal GUI kernel entry that:
-# 1. Prints boot messages via serial
-# 2. Queries multiboot info for framebuffer address
-# 3. Fills screen with a solid color to prove framebuffer works
-# 4. (Future: compositor, desktop shell, app launcher)
+# GUI kernel entry that:
+# 1. Prints boot status via serial
+# 2. Creates FramebufferDriver from boot info
+# 3. Initializes PS/2 keyboard and mouse drivers
+# 4. Creates Compositor with framebuffer + input devices
+# 5. Creates DesktopShell with taskbar, app launcher
+# 6. Enters the desktop shell event loop
 #
 # Build:
 #   bin/simple native-build --entry examples/simple_os/arch/x86_64/gui_entry.spl \
@@ -12,78 +14,68 @@
 #     --linker-script examples/simple_os/arch/x86_64/linker.ld \
 #     --entry-closure --source src/os --source src/lib
 
-use os.kernel.boot.ports.{BootOutputPort}
-
-# Multiboot framebuffer info accessors (from baremetal_stubs.c)
-extern fn rt_multiboot_fb_addr() -> i64
-extern fn rt_multiboot_fb_pitch() -> i64
-extern fn rt_multiboot_fb_width() -> i64
-extern fn rt_multiboot_fb_height() -> i64
-extern fn rt_multiboot_fb_bpp() -> i64
-extern fn rt_multiboot_magic() -> i64
-extern fn rt_multiboot_has_fb() -> i64
-
-# Framebuffer fill (from baremetal_stubs.c)
-extern fn rt_fb_fill_rect(fb_addr: i64, pitch: i64, x: i64, y: i64, w: i64, h: i64, color: i64)
+use os.kernel.boot.ports.{BootOutputPort, FramebufferInfo}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
+use os.drivers.input.ps2_mouse.{Ps2Mouse}
+use os.compositor.compositor.{Compositor}
+use os.desktop.shell.{DesktopShell}
 
 # Serial output
 extern fn serial_println(msg: text)
 
-# VGA fallback address (mode 13h or 0xA0000 region)
-val VGA_FB_ADDR: i64 = 0xA0000
-val VGA_WIDTH: i64 = 320
-val VGA_HEIGHT: i64 = 200
-
-# Desktop blue color (ARGB: 0xFF336699)
-val DESKTOP_BLUE: i64 = 0xFF336699
-
 fn gui_kernel_main(boot_info: BootOutputPort):
-    """GUI kernel main -- init framebuffer and fill screen.
+    """GUI kernel main -- initialize full desktop environment.
 
     Called from gui_entry.spl after arch-specific boot completes.
-    Queries multiboot info for linear framebuffer. If available,
-    fills the screen blue. Otherwise falls back to VGA at 0xA0000.
+    Sets up framebuffer, input devices, compositor, and desktop shell,
+    then enters the event loop.
     """
-    serial_println("[GUI] Starting desktop...")
+    serial_println("[GUI] Starting desktop environment...")
 
-    # Check multiboot magic
-    val magic = rt_multiboot_magic()
-    serial_println("[GUI] Multiboot magic: {magic}")
-
-    # Check for framebuffer info from multiboot
-    val has_fb = rt_multiboot_has_fb()
-
-    if has_fb == 1:
-        # Use multiboot-provided linear framebuffer
-        val fb_addr = rt_multiboot_fb_addr()
-        val fb_pitch = rt_multiboot_fb_pitch()
-        val fb_width = rt_multiboot_fb_width()
-        val fb_height = rt_multiboot_fb_height()
-        val fb_bpp = rt_multiboot_fb_bpp()
-
-        serial_println("[GUI] Framebuffer: {fb_width}x{fb_height}x{fb_bpp} at 0x{fb_addr}")
-        serial_println("[GUI] Pitch: {fb_pitch} bytes/row")
-
-        # Fill entire screen with desktop blue
-        rt_fb_fill_rect(fb_addr, fb_pitch, 0, 0, fb_width, fb_height, DESKTOP_BLUE)
-        serial_println("[GUI] Screen filled with desktop blue")
-
+    # --- Step 1: Framebuffer ---
+    serial_println("[GUI] Initializing framebuffer...")
+    val fb_info_opt = boot_info.framebuffer
+    if val fb_info = fb_info_opt:
+        serial_println("[GUI] Framebuffer: {fb_info.width}x{fb_info.height} at 0x{fb_info.addr.addr}")
     else:
-        # No multiboot framebuffer -- try VGA fallback at 0xA0000
-        serial_println("[GUI] No multiboot framebuffer, using VGA fallback at 0xA0000")
-        serial_println("[GUI] VGA mode: {VGA_WIDTH}x{VGA_HEIGHT}")
+        serial_println("[GUI] ERROR: No framebuffer from bootloader, cannot start GUI")
+        return
 
-        # VGA mode 13h uses 1 byte per pixel, pitch = width
-        # We fill with a single-byte blue value (index or raw)
-        val vga_pitch = VGA_WIDTH
-        rt_fb_fill_rect(VGA_FB_ADDR, vga_pitch, 0, 0, VGA_WIDTH, VGA_HEIGHT, 0x01)
-        serial_println("[GUI] VGA screen filled (blue index)")
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    serial_println("[GUI] FramebufferDriver created ({fb.width}x{fb.height})")
 
-    serial_println("[GUI] Desktop ready")
+    # --- Step 2: Input devices ---
+    serial_println("[GUI] Initializing PS/2 keyboard...")
+    var keyboard = Ps2Keyboard.new()
+    keyboard.init()
+    serial_println("[GUI] PS/2 keyboard initialized")
 
-    # TODO: Initialize compositor
-    # TODO: Create desktop shell (taskbar, wallpaper)
-    # TODO: Launch initial apps (terminal, file manager)
-    # TODO: Enter event loop (keyboard, mouse, timer)
+    serial_println("[GUI] Initializing PS/2 mouse...")
+    var mouse = Ps2Mouse.create(fb.width.to_i64(), fb.height.to_i64())
+    mouse.init()
+    serial_println("[GUI] PS/2 mouse initialized")
 
-    serial_println("[GUI] Halting (no event loop yet)")
+    # --- Step 3: Compositor ---
+    serial_println("[GUI] Creating compositor...")
+    var compositor = Compositor.new(fb, keyboard, mouse)
+    serial_println("[GUI] Compositor created (screen: {compositor.screen_width}x{compositor.screen_height})")
+
+    # --- Step 4: Desktop Shell ---
+    serial_println("[GUI] Creating desktop shell...")
+    var shell = DesktopShell.new(compositor)
+    shell.init()
+    serial_println("[GUI] Desktop shell initialized (taskbar, app launcher)")
+
+    # Launch a default terminal window
+    serial_println("[GUI] Launching default terminal...")
+    shell.launch_app("Terminal")
+
+    # --- Step 5: Event loop ---
+    serial_println("[GUI] Entering desktop event loop")
+    serial_println("[GUI] Keyboard shortcuts: Alt+Tab=cycle, Alt+F4=close, Alt+F5=minimize")
+    serial_println("[GUI] Mouse: click title bar to drag, click close button to close")
+    shell.run()
+
+    # If we ever exit the loop
+    serial_println("[GUI] Desktop shell exited")

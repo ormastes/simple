@@ -134,6 +134,7 @@ impl LlvmBackend {
             TargetOS::MacOS => "apple-darwin",
             TargetOS::Windows => "pc-windows-msvc",
             TargetOS::FreeBSD => "unknown-freebsd",
+            TargetOS::SimpleOS => "unknown-simpleos",
             TargetOS::Any | TargetOS::None => "unknown-unknown",
         };
 

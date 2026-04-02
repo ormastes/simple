@@ -10,7 +10,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_cwd() -> text
 
 use app.mcpgdb.json_helpers.{shell_bin, shell_quote, shell_sleep, find_binary, LB, RB, jp, js}
-use app.mcpgdb.state.{DebugSession}
+use app.mcpgdb.state.{DebugSession, MCPGDB_SESSIONS}
 
 fn cwd_path() -> text:
     val cwd = rt_env_cwd()
@@ -171,7 +171,40 @@ fn make_session(session_id: text, backend: text, workspace_root: text) -> DebugS
         bootstrap_monitor: ""
     )
 
+fn graceful_quit_debugger(session: DebugSession):
+    if session.process_pid == "" or not ps_is_alive(session.process_pid):
+        return
+    val _err = send_fifo_line(session.input_path, "quit")
+    shell_sleep("0.20")
+
+fn kill_process_children(pid: text):
+    val (_s, _e, _c) = rt_process_run(shell_bin(), ["-c",
+        "pkill -TERM -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+    shell_sleep("0.10")
+    val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+        "pkill -9 -P " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+
+fn kill_pid_escalating(pid: text):
+    val (_s1, _e1, _c1) = rt_process_run(shell_bin(), ["-c",
+        "kill " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+    shell_sleep("0.30")
+    if ps_is_alive(pid):
+        val (_s2, _e2, _c2) = rt_process_run(shell_bin(), ["-c",
+            "kill -9 " + shell_quote(pid) + " >/dev/null 2>&1 || true"])
+        shell_sleep("0.10")
+
 fn stop_session_process(session: DebugSession):
     if session.process_pid != "":
-        rt_process_run(shell_bin(), ["-c", "kill " + shell_quote(session.process_pid) + " >/dev/null 2>&1 || true"])
+        graceful_quit_debugger(session)
+        kill_process_children(session.process_pid)
+        kill_pid_escalating(session.process_pid)
     rt_dir_remove_all(session.session_dir)
+
+fn cleanup_stale_sessions():
+    var kept: [DebugSession] = []
+    for session in MCPGDB_SESSIONS:
+        if session.process_pid != "" and not ps_is_alive(session.process_pid):
+            rt_dir_remove_all(session.session_dir)
+        else:
+            kept = kept + [session]
+    MCPGDB_SESSIONS = kept

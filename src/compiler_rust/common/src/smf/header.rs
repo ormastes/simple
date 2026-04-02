@@ -215,6 +215,7 @@ pub enum Platform {
     MacOS = 3,
     FreeBSD = 4,
     None = 5,
+    SimpleOS = 6,
 }
 
 impl Platform {
@@ -226,6 +227,7 @@ impl Platform {
             3 => Some(Platform::MacOS),
             4 => Some(Platform::FreeBSD),
             5 => Some(Platform::None),
+            6 => Some(Platform::SimpleOS),
             _ => None,
         }
     }
@@ -237,6 +239,7 @@ impl Platform {
             TargetOS::Windows => Platform::Windows,
             TargetOS::MacOS => Platform::MacOS,
             TargetOS::FreeBSD => Platform::FreeBSD,
+            TargetOS::SimpleOS => Platform::SimpleOS,
             TargetOS::None => Platform::None,
         }
     }
@@ -248,6 +251,7 @@ impl Platform {
             Platform::Windows => TargetOS::Windows,
             Platform::MacOS => TargetOS::MacOS,
             Platform::FreeBSD => TargetOS::FreeBSD,
+            Platform::SimpleOS => TargetOS::SimpleOS,
             Platform::None => TargetOS::None,
         }
     }
