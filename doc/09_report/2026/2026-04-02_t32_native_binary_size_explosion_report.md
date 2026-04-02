@@ -20,6 +20,7 @@ This report covers:
 - the compiler-side fix
 - before/after evidence
 - the remaining runtime issues after the size fix
+- the current wrapper status after the native default flip
 
 ## Root Cause
 
@@ -90,6 +91,7 @@ src/compiler_rust/target/release/simple native-build \
 Result:
 
 - `/tmp/t32_mcp_cold_native_auto`: about `16.7 MB`
+- current checked-in `bin/release/t32_mcp_native`: about `17 MB`
 
 Section sizes:
 
@@ -182,6 +184,8 @@ After that fix, the same small native binary now answers `initialize` correctly:
 - native binary size explosion
 - repeated accidental linkage of LLVM-heavy runtime into non-compiler apps
 - small native `t32_mcp` binary no longer crashes on the `initialize` probe
+- public `t32_mcp` wrapper now prefers native by default and the low-cost probe succeeds
+- forced source fallback now also preserves request ids on the tested low-cost probe
 
 ### Not fully fixed
 
@@ -191,16 +195,18 @@ MCP flows.
 Current observed behavior on a multi-call low-cost probe:
 
 - `initialize`: works
-- `tools/list`: returns an empty tool list
-- some `tools/call` requests still come back as:
-  - `Method not found: `
-  - or parameter extraction errors
+- `tools/list`: works
+- `t32_job_list`: works
+- `t32_cmm_commands`: works
+- `resources/read t32:///sessions`: works
 
 So the current state is:
 
 - size problem: fixed
 - native startup crash on first request: fixed
-- full low-cost MCP functionality in the small native path: still incomplete
+- wrapper-level low-cost probe: succeeds through the public wrapper
+- tested low-cost MCP functionality in the small native path: working
+- tested source fallback low-cost behavior: working
 
 ## Why This Kept Happening
 
@@ -224,14 +230,14 @@ In other words, the repetition was systemic:
 
 1. Keep `runtime_bundle=auto` as the default behavior.
 2. Use `runtime_bundle=all` only for compiler/self-hosting binaries.
-3. Finish the remaining low-cost request parsing in
+3. Extend verification beyond the currently tested low-cost request set in
    [frontend_cold.spl](/home/ormastes/dev/pub/simple/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl)
-   so `tools/list` and low-cost `tools/call` behave correctly in the small native path.
+   so additional low-cost tools are covered in both native and source fallback paths.
 4. Add one end-to-end native smoke test for a non-compiler app that asserts:
    - binary size stays below a reasonable threshold
-   - `initialize` succeeds
-5. Do not switch production wrappers to prefer the native artifact by default
-   until the remaining low-cost MCP behavior is correct.
+   - representative MCP startup and low-cost request handling succeed
+5. Keep native as the default wrapper path because it remains the smaller and
+   more reliable execution mode.
 
 ## Verification Performed
 
@@ -254,4 +260,3 @@ Runtime verification:
 
 - before frontend scanner fix: small native binary crashed in `t32_request_id_text`
 - after frontend scanner fix: small native binary answers `initialize`
-

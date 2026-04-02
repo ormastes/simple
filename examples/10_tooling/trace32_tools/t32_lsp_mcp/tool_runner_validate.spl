@@ -3,120 +3,15 @@
 
 use t32_lsp_mcp.json_helpers
 use t32_lsp_mcp.debug_log.{lsp_debug_append, lsp_debug_enabled}
-use t32_lsp_mcp.tool_runner_common.{runner_arg0_is_executable_path, debug_args, check_gui_keywords, check_has_command}
+use t32_lsp_mcp.tool_runner_common.{runner_arg0_is_executable_path, debug_args, check_gui_keywords, check_has_command, request_json_source}
 use cmm_lsp.cmm_parser_runtime.{parse_cmm_source}
 
 extern fn sys_get_args() -> [text]
 extern fn sys_exit(code: i64)
 extern fn rt_file_read_text(path: text) -> text
 
-fn validate_json_char_at(s: text, i: i64) -> text:
-    s.substring(i, i + 1)
-
-fn validate_json_is_ws(ch: text) -> bool:
-    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
-
-fn validate_json_find_value_start(json: text, key: text) -> i64:
-    val search = "\"" + key + "\""
-    var offset = 0
-    while offset + search.len() <= json.len():
-        if json.substring(offset, offset + search.len()) != search:
-            offset = offset + 1
-            continue
-        var j = offset + search.len()
-        while j < json.len() and validate_json_is_ws(validate_json_char_at(json, j)):
-            j = j + 1
-        if j < json.len() and validate_json_char_at(json, j) == ":":
-            j = j + 1
-            while j < json.len() and validate_json_is_ws(validate_json_char_at(json, j)):
-                j = j + 1
-            return j
-        offset = offset + search.len()
-    return -1
-
-fn validate_json_raw_field(json: text, key: text) -> text:
-    val start = validate_json_find_value_start(json, key)
-    if start < 0 or start >= json.len():
-        return "null"
-    val first = validate_json_char_at(json, start)
-    if first == "\"":
-        var i = start + 1
-        var escaped = false
-        while i < json.len():
-            val ch = validate_json_char_at(json, i)
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return json.substring(start, i + 1)
-            i = i + 1
-        return "null"
-    if first == "{" or first == "[":
-        var depth = 0
-        var i2 = start
-        var in_str = false
-        var esc = false
-        while i2 < json.len():
-            val ch = validate_json_char_at(json, i2)
-            if in_str:
-                if esc:
-                    esc = false
-                elif ch == "\\":
-                    esc = true
-                elif ch == "\"":
-                    in_str = false
-            else:
-                if ch == "\"":
-                    in_str = true
-                elif ch == "{" or ch == "[":
-                    depth = depth + 1
-                elif ch == "}" or ch == "]":
-                    depth = depth - 1
-                    if depth == 0:
-                        return json.substring(start, i2 + 1)
-            i2 = i2 + 1
-        return "null"
-    var end = start
-    while end < json.len():
-        val ch = validate_json_char_at(json, end)
-        if ch == "," or ch == "}" or ch == "]" or validate_json_is_ws(ch):
-            break
-        end = end + 1
-    val raw = json.substring(start, end)
-    if raw == "":
-        return "null"
-    raw
-
-fn validate_json_text_field(json: text, key: text) -> text:
-    val raw = validate_json_raw_field(json, key)
-    if raw == "null":
-        return ""
-    if raw.starts_with("\"") and raw.ends_with("\"") and raw.len() >= 2:
-        return lsp_unescape_json_string(raw.substring(1, raw.len() - 1))
-    raw
-
-fn validate_source_arg(args: text) -> text:
-    val marker = "\"source\": \""
-    var idx = args.index_of(marker).unwrap_or(-1)
-    if idx >= 0:
-        val start = idx + marker.len()
-        val rest = args.substring(start, args.len())
-        val end = rest.index_of("\"").unwrap_or(-1)
-        if end >= 0:
-            return lsp_unescape_json_string(rest.substring(0, end))
-    val marker2 = "\"source\":\""
-    idx = args.index_of(marker2).unwrap_or(-1)
-    if idx >= 0:
-        val start2 = idx + marker2.len()
-        val rest2 = args.substring(start2, args.len())
-        val end2 = rest2.index_of("\"").unwrap_or(-1)
-        if end2 >= 0:
-            return lsp_unescape_json_string(rest2.substring(0, end2))
-    ""
-
 fn handle_cmm_validate_cli(id: text, args: text) -> text:
-    val source = validate_source_arg(args)
+    val source = request_json_source(args)
     if lsp_debug_enabled():
         lsp_debug_append("requests.log", "validate id=" + id + " args=" + args + " source_len=" + str(source.len()))
     if source == "":

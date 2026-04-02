@@ -20,10 +20,6 @@ class T32Dialog:
     widget_type: text
     value: text
 
-var T32_HISTORY: [T32HistoryItem] = []
-var T32_FIELDS_KEYS: [text] = []
-var T32_FIELDS_VALUES: [text] = []
-var T32_DIALOGS: [T32Dialog] = []
 var T32_LAST_ERROR = ""
 var T32_DEBUG_ROOT = ""
 
@@ -82,17 +78,24 @@ fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
     var offset = 0
     while offset + search.len() <= json.len():
-        if json.substring(offset, offset + search.len()) != search:
+        var matches = true
+        var j = 0
+        while j < search.len():
+            if json.substring(offset + j, offset + j + 1) != search.substring(j, j + 1):
+                matches = false
+                break
+            j = j + 1
+        if not matches:
             offset = offset + 1
             continue
-        var j = offset + search.len()
-        while j < json.len() and _is_ws(_char_at(json, j)):
-            j = j + 1
-        if j < json.len() and _char_at(json, j) == ":":
-            j = j + 1
-            while j < json.len() and _is_ws(_char_at(json, j)):
-                j = j + 1
-            return j
+        var value_start = offset + search.len()
+        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            value_start = value_start + 1
+        if value_start < json.len() and _char_at(json, value_start) == ":":
+            value_start = value_start + 1
+            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+                value_start = value_start + 1
+            return value_start
         offset = offset + search.len()
     return -1
 
@@ -174,7 +177,7 @@ fn extract_field_raw(json: text, key: text) -> text:
     val raw = json.substring(start, end)
     if raw == "":
         return "null"
-    raw
+    return raw
 
 fn extract_nested(json: text, key: text) -> text:
     val params = extract_field_raw(json, "params")
@@ -326,6 +329,11 @@ fn t32_debug_append(file: text, line: text):
         content = content + "\n"
     rt_file_append_text(path, content)
 
+fn t32_debug_preview(value: text, limit: i64) -> text:
+    if value.len() <= limit:
+        return value
+    value.substring(0, limit) + "..."
+
 fn t32_debug_bootstrap():
     if not t32_debug_enabled():
         return
@@ -340,67 +348,168 @@ fn t32_json_bool(value: bool) -> text:
 
 fn t32_count_history() -> i64:
     var count = 0
-    for _h in T32_HISTORY:
-        count = count + 1
+    for line in t32_state_read_store("history").split("\n"):
+        if line != "":
+            count = count + 1
     count
 
+fn t32_state_escape(value: text) -> text:
+    var out = value
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\t", "\\t")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out
+
+fn t32_state_unescape(value: text) -> text:
+    var out = ""
+    var i = 0
+    var escaped = false
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if escaped:
+            if ch == "t":
+                out = out + "\t"
+            elif ch == "n":
+                out = out + "\n"
+            elif ch == "r":
+                out = out + "\r"
+            elif ch == "\\":
+                out = out + "\\"
+            else:
+                out = out + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn t32_first_separator(line: text) -> i64:
+    var i = 0
+    while i < line.len():
+        if line.substring(i, i + 1) == "\t":
+            return i
+        i = i + 1
+    -1
+
+fn t32_second_separator(line: text, after: i64) -> i64:
+    var i = after + 1
+    while i < line.len():
+        if line.substring(i, i + 1) == "\t":
+            return i
+        i = i + 1
+    -1
+
+fn t32_state_root() -> text:
+    val configured = rt_env_get("T32_MCP_STATE_ROOT") ?? ""
+    if configured != "":
+        return configured
+    "/tmp/t32_mcp_native_state"
+
+fn t32_state_path(name: text) -> text:
+    t32_state_root() + "/" + name + ".txt"
+
+fn t32_state_ensure_root():
+    _ = rt_process_run("sh", ["-lc", "mkdir -p \"$1\"", "sh", t32_state_root()])
+
+fn t32_state_read_store(name: text) -> text:
+    t32_state_ensure_root()
+    val path = t32_state_path(name)
+    val result = rt_process_run("sh", ["-lc", "cat \"$1\" 2>/dev/null || true", "sh", path])
+    result[0]
+
+fn t32_state_write_store(name: text, content: text):
+    t32_state_ensure_root()
+    val path = t32_state_path(name)
+    _ = rt_process_run("sh", ["-lc", "printf '%s' \"$1\" > \"$2\"", "sh", content, path])
+
+fn t32_state_append_store(name: text, content: text):
+    t32_state_ensure_root()
+    _ = rt_file_append_text(t32_state_path(name), content + "\n")
+
+fn t32_state_last_line(name: text, key: text) -> text:
+    var last = ""
+    val encoded_key = t32_state_escape(key)
+    for line in t32_state_read_store(name).split("\n"):
+        if line == "":
+            continue
+        val sep = t32_first_separator(line)
+        if sep >= 0 and line.substring(0, sep) == encoded_key:
+            last = line
+    last
+
+fn t32_state_tail_lines(name: text, count: i64) -> text:
+    t32_state_read_store(name)
+
 fn t32_add_history(command: text, result: text, session_id: text, core_id: text):
-    T32_HISTORY = T32_HISTORY + [T32HistoryItem(command: command, result: result, session_id: session_id, core_id: core_id)]
-    if t32_count_history() > 200:
-        T32_HISTORY = T32_HISTORY[100..]
+    val encoded = t32_state_escape(command) + "\t" + t32_state_escape(result) + "\t" + t32_state_escape(session_id) + "\t" + t32_state_escape(core_id)
+    t32_state_append_store("history", encoded)
+    _ = rt_process_run("sh", ["-lc", "tmp=\"$1.tmp\"; tail -n 200 \"$1\" > \"$tmp\" 2>/dev/null || true; mv \"$tmp\" \"$1\"", "sh", t32_state_path("history")])
 
 fn t32_field_get_value(key: text) -> text:
-    var idx = 0
-    for existing in T32_FIELDS_KEYS:
-        if existing == key:
-            return T32_FIELDS_VALUES[idx]
-        idx = idx + 1
+    val line = t32_state_last_line("fields", key)
+    if line != "":
+        val sep = t32_first_separator(line)
+        if sep >= 0:
+            return t32_state_unescape(line.substring(sep + 1, line.len()))
     ""
 
 fn t32_field_set_value(key: text, value: text):
-    var idx = 0
-    for existing in T32_FIELDS_KEYS:
-        if existing == key:
-            T32_FIELDS_VALUES[idx] = value
-            return
-        idx = idx + 1
-    T32_FIELDS_KEYS = T32_FIELDS_KEYS + [key]
-    T32_FIELDS_VALUES = T32_FIELDS_VALUES + [value]
+    t32_state_append_store("fields", t32_state_escape(key) + "\t" + t32_state_escape(value))
 
 fn t32_history_tail_json(count: i64) -> text:
     var total = t32_count_history()
     var start = 0
     if count > 0 and total > count:
         start = total - count
-    var parts: [text] = []
+    var out = SB_L()
+    var first = true
     var idx = 0
-    for item in T32_HISTORY:
+    for line in t32_state_tail_lines("history", count).split("\n"):
+        if line == "":
+            continue
+        val sep1 = t32_first_separator(line)
+        val sep2 = t32_second_separator(line, sep1)
+        val sep3 = t32_second_separator(line, sep2)
+        if sep1 < 0 or sep2 < 0 or sep3 < 0:
+            continue
         if idx >= start:
             val obj = LB()
-            obj = obj + jp("command", js(item.command))
-            obj = obj + "," + jp("result", js(item.result))
-            obj = obj + "," + jp("session_id", js(item.session_id))
-            obj = obj + "," + jp("core_id", js(item.core_id))
+            obj = obj + jp("command", js(t32_state_unescape(line.substring(0, sep1))))
+            obj = obj + "," + jp("result", js(t32_state_unescape(line.substring(sep1 + 1, sep2))))
+            obj = obj + "," + jp("session_id", js(t32_state_unescape(line.substring(sep2 + 1, sep3))))
+            obj = obj + "," + jp("core_id", js(t32_state_unescape(line.substring(sep3 + 1, line.len()))))
             obj = obj + RB()
-            parts = parts + [obj]
+            if not first:
+                out = out + ","
+            out = out + obj
+            first = false
         idx = idx + 1
-    SB_L() + parts.join(",") + SB_R()
+    out + SB_R()
 
 fn t32_dialog_find(label: text) -> i64:
-    var idx = 0
-    for dialog in T32_DIALOGS:
-        if dialog.label == label:
-            return idx
-        idx = idx + 1
-    -1
+    if t32_state_last_line("dialogs", label) == "":
+        return -1
+    0
 
 fn t32_find_substring(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
     var i = 0
     while i + needle.len() <= haystack.len():
-        if haystack.substring(i, haystack.len()).starts_with(needle):
+        var matches = true
+        var j = 0
+        while j < needle.len():
+            if haystack.substring(i + j, i + j + 1) != needle.substring(j, j + 1):
+                matches = false
+                break
+            j = j + 1
+        if matches:
             return i
         i = i + 1
-    -1
+    return -1
 
 fn t32_index_of_text(body: text, needle: text) -> i64:
     val found = body.index_of(needle)
@@ -510,56 +619,82 @@ fn t32_take_json_scalar_prefix(body: text) -> text:
     return body.substring(0, i)
 
 fn t32_request_string_field(body: text, key: text) -> text:
-    val compact = "\"" + key + "\":\""
-    val compact_idx = t32_index_of_text(body, compact)
-    if compact_idx >= 0:
-        return t32_take_json_string_prefix(body.substring(compact_idx + compact.len(), body.len()))
-    val spaced = "\"" + key + "\": \""
-    val spaced_idx = t32_index_of_text(body, spaced)
-    if spaced_idx >= 0:
-        return t32_take_json_string_prefix(body.substring(spaced_idx + spaced.len(), body.len()))
-    return ""
+    return t32_json_string_after_key(body, key)
 
 fn t32_request_raw_field(body: text, key: text) -> text:
     val object_compact = "\"" + key + "\":{"
-    val object_idx = t32_index_of_text(body, object_compact)
+    val object_idx = t32_find_substring(body, object_compact)
     if object_idx >= 0:
         return "{" + t32_take_json_balanced_prefix(body.substring(object_idx + object_compact.len(), body.len()), "{", "}")
     val array_compact = "\"" + key + "\":["
-    val array_idx = t32_index_of_text(body, array_compact)
+    val array_idx = t32_find_substring(body, array_compact)
     if array_idx >= 0:
         return "[" + t32_take_json_balanced_prefix(body.substring(array_idx + array_compact.len(), body.len()), "[", "]")
-    val string_value = t32_request_string_field(body, key)
+    val string_value = t32_json_string_after_key(body, key)
     if string_value != "":
         return "\"" + string_value + "\""
     val compact = "\"" + key + "\":"
-    val compact_idx = t32_index_of_text(body, compact)
+    val compact_idx = t32_find_substring(body, compact)
     if compact_idx >= 0:
         return t32_take_json_scalar_prefix(body.substring(compact_idx + compact.len(), body.len()))
     return "null"
 
 fn t32_detect_tool_name(msg: text) -> text:
+    if msg.contains("\"name\":\"t32_sessions_list\"") or msg.contains("\"name\": \"t32_sessions_list\""):
+        return "t32_sessions_list"
+    if msg.contains("\"name\":\"t32_job_list\"") or msg.contains("\"name\": \"t32_job_list\""):
+        return "t32_job_list"
+    if msg.contains("\"name\":\"t32_cmm_commands\"") or msg.contains("\"name\": \"t32_cmm_commands\""):
+        return "t32_cmm_commands"
+    if msg.contains("\"name\":\"t32_field_get\"") or msg.contains("\"name\": \"t32_field_get\""):
+        return "t32_field_get"
+    if msg.contains("\"name\":\"t32_field_set\"") or msg.contains("\"name\": \"t32_field_set\""):
+        return "t32_field_set"
+    if msg.contains("\"name\":\"t32_history_tail\"") or msg.contains("\"name\": \"t32_history_tail\""):
+        return "t32_history_tail"
+    if msg.contains("\"name\":\"t32_dialog_parse\"") or msg.contains("\"name\": \"t32_dialog_parse\""):
+        return "t32_dialog_parse"
+    if msg.contains("\"name\":\"t32_dialog_get\"") or msg.contains("\"name\": \"t32_dialog_get\""):
+        return "t32_dialog_get"
+    if msg.contains("\"name\":\"t32_dialog_set\"") or msg.contains("\"name\": \"t32_dialog_set\""):
+        return "t32_dialog_set"
+    if msg.contains("\"name\":\"t32_dialog_click\"") or msg.contains("\"name\": \"t32_dialog_click\""):
+        return "t32_dialog_click"
+    if msg.contains("\"name\":\"t32_error_check\"") or msg.contains("\"name\": \"t32_error_check\""):
+        return "t32_error_check"
+    if msg.contains("\"name\":\"t32_resources_list\"") or msg.contains("\"name\": \"t32_resources_list\""):
+        return "t32_resources_list"
+    if msg.contains("\"name\":\"t32_resource_read\"") or msg.contains("\"name\": \"t32_resource_read\""):
+        return "t32_resource_read"
     val top_name = t32_request_string_field(msg, "name")
     if top_name != "":
         return top_name
     val params = t32_request_raw_field(msg, "params")
     if params != "" and params != "null":
-        val nested_name = t32_request_string_field(params, "name")
+        val nested_name = t32_json_string_after_key(params, "name")
         if nested_name != "":
             return nested_name
     return ""
 
 fn t32_request_method(msg: text) -> text:
-    val compact = "\"method\":\""
-    val compact_idx = t32_index_of_text(msg, compact)
-    if t32_debug_enabled():
-        stderr_write("[t32-mcp] method idx=" + str(compact_idx) + "\n")
-        if compact_idx >= 0:
-            var suffix = msg.substring(compact_idx + compact.len(), msg.len())
-            if suffix.len() > 40:
-                suffix = suffix.substring(0, 40)
-            stderr_write("[t32-mcp] method suffix=" + suffix + "\n")
-        stderr_flush()
+    if msg.contains("\"method\":\"initialize\"") or msg.contains("\"method\": \"initialize\""):
+        return "initialize"
+    if msg.contains("\"method\":\"tools/list\"") or msg.contains("\"method\": \"tools/list\""):
+        return "tools/list"
+    if msg.contains("\"method\":\"tools/call\"") or msg.contains("\"method\": \"tools/call\""):
+        return "tools/call"
+    if msg.contains("\"method\":\"resources/list\"") or msg.contains("\"method\": \"resources/list\""):
+        return "resources/list"
+    if msg.contains("\"method\":\"resources/read\"") or msg.contains("\"method\": \"resources/read\""):
+        return "resources/read"
+    if msg.contains("\"method\":\"shutdown\"") or msg.contains("\"method\": \"shutdown\""):
+        return "shutdown"
+    if msg.contains("\"method\":\"ping\"") or msg.contains("\"method\": \"ping\""):
+        return "ping"
+    if msg.contains("\"method\":\"notifications/cancelled\""):
+        return "notifications/cancelled"
+    if msg.contains("\"method\":\"notifications/roots/list_changed\""):
+        return "notifications/roots/list_changed"
     return t32_request_string_field(msg, "method")
 
 fn t32_dialog_parse_source(source: text) -> text:
@@ -584,20 +719,24 @@ fn t32_dialog_parse_source(source: text) -> text:
             widget_type = "checkbox"
         elif lower.starts_with("string "):
             widget_type = "string"
-        val idx = t32_dialog_find(label)
-        if idx >= 0:
-            T32_DIALOGS[idx] = T32Dialog(label: label, widget_type: widget_type, value: "")
-        else:
-            T32_DIALOGS = T32_DIALOGS + [T32Dialog(label: label, widget_type: widget_type, value: "")]
+        val encoded = t32_state_escape(label) + "\t" + t32_state_escape(widget_type) + "\t" + t32_state_escape("")
+        t32_state_append_store("dialogs", encoded)
         count = count + 1
     jo1(jp("parsed", str(count)))
 
 fn t32_dialog_json(label: text) -> text:
-    val idx = t32_dialog_find(label)
-    if idx < 0:
+    val line = t32_state_last_line("dialogs", label)
+    if line == "":
         return ""
-    val d = T32_DIALOGS[idx]
-    LB() + jp("label", js(d.label)) + "," + jp("widget_type", js(d.widget_type)) + "," + jp("value", js(d.value)) + RB()
+    val sep1 = t32_first_separator(line)
+    val sep2 = t32_second_separator(line, sep1)
+    if sep1 < 0 or sep2 < 0:
+        return ""
+    LB()
+        + jp("label", js(t32_state_unescape(line.substring(0, sep1))))
+        + "," + jp("widget_type", js(t32_state_unescape(line.substring(sep1 + 1, sep2))))
+        + "," + jp("value", js(t32_state_unescape(line.substring(sep2 + 1, line.len()))))
+        + RB()
 
 fn t32_request_arguments_json(body: text) -> text:
     val params = t32_request_raw_field(body, "params")
@@ -612,10 +751,41 @@ fn t32_request_arguments_json(body: text) -> text:
         if top_args == "" or top_args == "null":
             return "{}"
         return top_args
-    args
+    return args
 
 fn t32_request_id_text(body: text) -> text:
-    return t32_request_raw_field(body, "id")
+    val pieces = body.split("\"id\":")
+    if pieces.len() < 2:
+        return "null"
+    val rest = pieces[1]
+    var start = 0
+    while start < rest.len() and _is_ws(_char_at(rest, start)):
+        start = start + 1
+    if start >= rest.len():
+        return "null"
+    val first = _char_at(rest, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < rest.len():
+            val ch = _char_at(rest, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return rest.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    var end = start
+    while end < rest.len():
+        val ch = _char_at(rest, end)
+        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    if end <= start:
+        return "null"
+    return rest.substring(start, end)
 
 fn t32_tool_schema_simple(name: text, description: text) -> text:
     LB() + jp("name", js(name)) + "," + jp("description", js(description)) + "," + jp("inputSchema", LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", SB_L() + SB_R()) + RB()) + RB()
@@ -652,12 +822,12 @@ fn t32_make_resources_list(id: text) -> text:
 fn t32_handle_resource_read(id: text, body: text) -> text:
     var uri = t32_request_string_field(body, "uri")
     if uri == "":
-        uri = t32_request_string_field(body, "uri")
-    if uri == "":
         if body.contains("t32:///sessions"):
             uri = "t32:///sessions"
         elif body.contains("t32:///history"):
             uri = "t32:///history"
+        elif body.contains("t32://status/last_error"):
+            uri = "t32://status/last_error"
     if uri == "":
         return jsonrpc_error(id, -32602, "Missing required parameter: uri")
     if uri == "t32:///sessions":
@@ -666,9 +836,13 @@ fn t32_handle_resource_read(id: text, body: text) -> text:
     if uri == "t32:///history":
         val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(jo1(jp("history", t32_history_tail_json(20))))) + RB()
         return jsonrpc_result(id, jo1(jp("contents", SB_L() + content + SB_R())))
+    if uri == "t32://status/last_error":
+        val content = LB() + jp("uri", js(uri)) + "," + jp("mimeType", js("application/json")) + "," + jp("text", js(jo1(jp("last_error", js(T32_LAST_ERROR))))) + RB()
+        return jsonrpc_result(id, jo1(jp("contents", SB_L() + content + SB_R())))
     jsonrpc_error(id, -32002, "Resource not found: " + uri)
 
 fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
+    val args = t32_request_arguments_json(body)
     if tool_name == "t32_sessions_list":
         return make_tool_result(id, jo1(jp("sessions", SB_L() + SB_R())))
     if tool_name == "t32_job_list":
@@ -676,13 +850,13 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
     if tool_name == "t32_cmm_commands":
         return make_tool_result(id, jo1(jp("commands", SB_L() + SB_R())))
     if tool_name == "t32_field_get":
-        val key = t32_json_string_after_key(body, "field_key")
+        val key = t32_json_string_after_key(args, "field_key")
         if key == "":
             return make_tool_error(id, "Missing required parameter: field_key")
         return make_tool_result(id, LB() + jp("field_key", js(key)) + "," + jp("value", js(t32_field_get_value(key))) + RB())
     if tool_name == "t32_field_set":
-        val key = t32_json_string_after_key(body, "field_key")
-        val value = t32_json_string_after_key(body, "value")
+        val key = t32_json_string_after_key(args, "field_key")
+        val value = t32_json_string_after_key(args, "value")
         if t32_debug_enabled():
             stderr_write("[t32-mcp] field_set key=<" + key + "> value=<" + value + ">\n")
             stderr_flush()
@@ -693,19 +867,19 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
         return make_tool_result(id, LB() + jp("field_key", js(key)) + "," + jp("value", js(value)) + RB())
     if tool_name == "t32_history_tail":
         var count = 20
-        val count_raw = t32_request_raw_field(body, "count")
+        val count_raw = t32_request_raw_field(args, "count")
         if count_raw != "":
             count = int(count_raw)
         return make_tool_result(id, jo1(jp("history", t32_history_tail_json(count))))
     if tool_name == "t32_dialog_parse":
-        val source = t32_json_string_after_key(body, "source")
+        val source = t32_json_string_after_key(args, "source")
         if source == "":
             return make_tool_error(id, "Missing required parameter: source")
         val parsed = t32_dialog_parse_source(source)
         t32_add_history("dialog_parse", parsed, "", "")
         return make_tool_result(id, parsed)
     if tool_name == "t32_dialog_get":
-        val label = t32_json_string_after_key(body, "label")
+        val label = t32_json_string_after_key(args, "label")
         if label == "":
             return make_tool_error(id, "Missing required parameter: label")
         val dialog = t32_dialog_json(label)
@@ -713,31 +887,33 @@ fn t32_handle_low_cost_tool(id: text, body: text, tool_name: text) -> text:
             return make_tool_error(id, "Dialog not found: " + label)
         return make_tool_result(id, dialog)
     if tool_name == "t32_dialog_set":
-        val label = t32_json_string_after_key(body, "label")
-        val value = t32_json_string_after_key(body, "value")
+        val label = t32_json_string_after_key(args, "label")
+        val value = t32_json_string_after_key(args, "value")
         if label == "":
             return make_tool_error(id, "Missing required parameter: label")
-        val idx = t32_dialog_find(label)
-        if idx < 0:
+        val current_line = t32_state_last_line("dialogs", label)
+        if current_line == "":
             return make_tool_error(id, "Dialog not found: " + label)
-        var dialog = T32_DIALOGS[idx]
-        if value != "":
-            dialog.value = value
-        else:
-            dialog.value = "set"
-        T32_DIALOGS[idx] = dialog
-        t32_add_history("dialog_set:" + label, dialog.value, "", "")
-        return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("value", js(dialog.value)) + RB())
+        var dialog_value = value
+        if dialog_value == "":
+            dialog_value = "set"
+        val sep1 = t32_first_separator(current_line)
+        val sep2 = t32_second_separator(current_line, sep1)
+        val widget_type = t32_state_unescape(current_line.substring(sep1 + 1, sep2))
+        t32_state_append_store("dialogs", t32_state_escape(label) + "\t" + t32_state_escape(widget_type) + "\t" + t32_state_escape(dialog_value))
+        t32_add_history("dialog_set:" + label, dialog_value, "", "")
+        return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("value", js(dialog_value)) + RB())
     if tool_name == "t32_dialog_click":
-        val label = t32_request_string_field(body, "label")
+        val label = t32_request_string_field(args, "label")
         if label == "":
             return make_tool_error(id, "Missing required parameter: label")
-        val idx = t32_dialog_find(label)
-        if idx < 0:
+        val current_line = t32_state_last_line("dialogs", label)
+        if current_line == "":
             return make_tool_error(id, "Dialog not found: " + label)
-        var dialog = T32_DIALOGS[idx]
-        dialog.value = "clicked"
-        T32_DIALOGS[idx] = dialog
+        val sep1 = t32_first_separator(current_line)
+        val sep2 = t32_second_separator(current_line, sep1)
+        val widget_type = t32_state_unescape(current_line.substring(sep1 + 1, sep2))
+        t32_state_append_store("dialogs", t32_state_escape(label) + "\t" + t32_state_escape(widget_type) + "\t" + t32_state_escape("clicked"))
         t32_add_history("dialog_click:" + label, "clicked", "", "")
         return make_tool_result(id, LB() + jp("label", js(label)) + "," + jp("clicked", "true") + RB())
     if tool_name == "t32_error_check":
@@ -765,7 +941,7 @@ fn t32_cold_main():
         if t32_debug_enabled():
             stderr_write("[t32-mcp] method=" + method + " id=" + id + " tool=" + tool_name + "\n")
             stderr_flush()
-        t32_debug_append("requests.log", "method=" + method + " id=" + id + " tool=" + tool_name + " bytes=" + str(msg.len()))
+        t32_debug_append("requests.log", "method=" + method + " id=" + id + " tool=" + tool_name + " bytes=" + str(msg.len()) + " preview=" + t32_debug_preview(msg, 160))
         var response = ""
         if method == "initialize":
             response = t32_make_init_response(id)

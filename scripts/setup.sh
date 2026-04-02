@@ -486,12 +486,11 @@ elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/release/simple" ]; then
   RUNTIME_KIND="bin-release-simple"
 fi
 
-ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl"
-export SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
+COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
 
-if [ -z "$PREFERRED_BINARY" ] && [ -z "$RUNTIME" ]; then
+if [ -z "$RUNTIME" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
     t32_mcp_log_line "$WRAPPER_LOG" "runtime_choice=missing"
     t32_mcp_log_line "$ERROR_LOG" "error=no runtime found for t32_mcp"
@@ -513,7 +512,7 @@ if [ "$DEBUG_ENABLED" = "1" ]; then
   fi
   t32_mcp_log_line "$WRAPPER_LOG" "runtime_choice=$RUNTIME_KIND"
   t32_mcp_log_line "$WRAPPER_LOG" "runtime=$RUNTIME"
-  t32_mcp_log_line "$WRAPPER_LOG" "entrypoint=$ENTRY"
+  t32_mcp_log_line "$WRAPPER_LOG" "cold_entrypoint=$COLD_ENTRY"
   t32_mcp_log_line "$WRAPPER_LOG" "daemon_dir=none"
   t32_mcp_log_line "$WRAPPER_LOG" "request_routing=$RUNTIME_KIND"
   export T32_MCP_DEBUG=1
@@ -543,8 +542,10 @@ if [ "$RUNTIME_KIND" = "native" ]; then
   fi
 fi
 
+SOURCE_ARTIFACT="$COLD_ENTRY"
+
 if [ "$DEBUG_ENABLED" = "1" ]; then
-  "$RUNTIME" "$ENTRY" "$@" 2>>"$ERROR_LOG"
+  "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$ERROR_LOG"
   status=$?
   if [ "$status" -ne 0 ]; then
     t32_mcp_log_line "$WRAPPER_LOG" "runtime_exit=$status"
@@ -553,7 +554,7 @@ if [ "$DEBUG_ENABLED" = "1" ]; then
   exit "$status"
 fi
 
-exec "$RUNTIME" "$ENTRY" "$@"
+exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@"
 T32_MCP_EOF
 chmod +x "${release_dir}/t32_mcp_server"
 echo "  t32_mcp_server"
