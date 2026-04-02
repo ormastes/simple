@@ -6,21 +6,164 @@
 
 use t32_lsp_mcp.json_helpers
 
-fn arg_field(args: text, key: text) -> text:
-    val value = lsp_extract_field(args, key)
-    if value != "":
-        return value
-    val wrapped = lsp_extract_field_raw(args, "arguments")
-    if wrapped != "null":
-        val wrapped_value = lsp_extract_field(wrapped, key)
-        if wrapped_value != "":
-            return wrapped_value
-    val nested = lsp_extract_field_raw(args, key)
-    if nested == "null":
+fn json_char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn json_is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn json_find_value_start(json: text, key: text) -> i64:
+    val search = lsp_Q() + key + lsp_Q()
+    var i = 0
+    while i + search.len() <= json.len():
+        if json.substring(i, i + search.len()) == search:
+            var j = i + search.len()
+            while j < json.len() and json_is_ws(json_char_at(json, j)):
+                j = j + 1
+            if j < json.len() and json_char_at(json, j) == ":":
+                j = j + 1
+                while j < json.len() and json_is_ws(json_char_at(json, j)):
+                    j = j + 1
+                return j
+        i = i + 1
+    return -1
+
+fn request_json_raw_field(json: text, key: text) -> text:
+    val start = json_find_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = json_char_at(json, start)
+    if first == lsp_Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = json_char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == lsp_Q():
+                return json.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    if first == lsp_LB() or first == lsp_SB_L():
+        var depth = 0
+        var i2 = start
+        var in_str = false
+        var esc = false
+        while i2 < json.len():
+            val ch = json_char_at(json, i2)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == lsp_Q():
+                    in_str = false
+            else:
+                if ch == lsp_Q():
+                    in_str = true
+                elif ch == lsp_LB() or ch == lsp_SB_L():
+                    depth = depth + 1
+                elif ch == lsp_RB() or ch == lsp_SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = json_char_at(json, end)
+        if ch == "," or ch == lsp_RB() or ch == lsp_SB_R() or json_is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    raw
+
+fn request_json_text_field(json: text, key: text) -> text:
+    val raw = request_json_raw_field(json, key)
+    if raw == "null":
         return ""
-    if nested.starts_with(lsp_Q()) and nested.ends_with(lsp_Q()) and nested.len() >= 2:
-        return lsp_unescape_json_string(nested.substring(1, nested.len() - 1))
-    nested
+    if raw.starts_with(lsp_Q()) and raw.ends_with(lsp_Q()) and raw.len() >= 2:
+        return lsp_unescape_json_string(raw.substring(1, raw.len() - 1))
+    raw
+
+fn request_json_arguments(body: text) -> text:
+    val params = request_json_raw_field(body, "params")
+    if params == "null":
+        return body
+    val args = request_json_raw_field(params, "arguments")
+    if args == "null" or args == "":
+        return body
+    args
+
+fn request_json_id(body: text) -> text:
+    val id = request_json_raw_field(body, "id")
+    if id == "":
+        return "null"
+    id
+
+fn request_json_string_field_fallback(json: text, key: text) -> text:
+    val marker1 = lsp_Q() + key + lsp_Q() + ":" + lsp_Q()
+    val marker2 = lsp_Q() + key + lsp_Q() + ": " + lsp_Q()
+    var start = -1
+    var i = 0
+    while i + marker1.len() <= json.len():
+        if json.substring(i, i + marker1.len()) == marker1:
+            start = i + marker1.len()
+            i = json.len()
+        else:
+            i = i + 1
+    if start < 0:
+        i = 0
+        while i + marker2.len() <= json.len():
+            if json.substring(i, i + marker2.len()) == marker2:
+                start = i + marker2.len()
+                i = json.len()
+            else:
+                i = i + 1
+    if start < 0 or start > json.len():
+        return ""
+    var i = start
+    var escaped = false
+    while i < json.len():
+        val ch = json.substring(i, i + 1)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == lsp_Q():
+            return lsp_unescape_json_string(json.substring(start, i))
+        i = i + 1
+    ""
+
+fn arg_field(args: text, key: text) -> text:
+    val direct = lsp_extract_field(args, key)
+    if direct != "":
+        return direct
+    val direct_raw = lsp_extract_field_raw(args, key)
+    if direct_raw != "null":
+        if direct_raw.starts_with(lsp_Q()) and direct_raw.ends_with(lsp_Q()) and direct_raw.len() >= 2:
+            return lsp_unescape_json_string(direct_raw.substring(1, direct_raw.len() - 1))
+        return direct_raw
+    val normalized = request_json_arguments(args)
+    if normalized != args:
+        val nested = lsp_extract_field(normalized, key)
+        if nested != "":
+            return nested
+        val nested_raw = lsp_extract_field_raw(normalized, key)
+        if nested_raw != "null":
+            if nested_raw.starts_with(lsp_Q()) and nested_raw.ends_with(lsp_Q()) and nested_raw.len() >= 2:
+                return lsp_unescape_json_string(nested_raw.substring(1, nested_raw.len() - 1))
+            return nested_raw
+    val fallback = request_json_string_field_fallback(args, key)
+    if fallback != "":
+        return fallback
+    if normalized != args:
+        return request_json_string_field_fallback(normalized, key)
+    ""
 
 fn runner_arg0_is_executable_path(arg0: text) -> bool:
     arg0.contains("/") or arg0.contains("\\") or arg0.ends_with(".exe") or arg0.ends_with("t32_lsp_mcp_tool_runner")

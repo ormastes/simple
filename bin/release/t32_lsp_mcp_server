@@ -9,21 +9,55 @@ while [ -L "$SELF" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/bin/simple}"
+RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/src/compiler_rust/target/release/simple}"
+if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/simple"; fi
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/release/simple"; fi
 ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
-DAEMON_DIR="/tmp/t32_lsp_mcp_shared"
 cd "$REPO_ROOT"
+CWD="$(pwd)"
+SUFFIX="$(printf '%s' "$CWD" | sed 's#^/*##; s#[^A-Za-z0-9._-]#_#g')"
+if [ -z "$SUFFIX" ]; then SUFFIX="workspace"; fi
+DEBUG_ENABLED=0
+DEBUG_ROOT=""
+WRAPPER_LOG=""
+FRONTEND_LOG=""
+REQUESTS_LOG=""
+ERROR_LOG=""
+if [ "${T32_LSP_MCP_DEBUG_LOG:-1}" != "0" ]; then
+  DEBUG_ENABLED=1
+  DEBUG_ROOT="${T32_LSP_MCP_DEBUG_ROOT:-/tmp/t32_lsp_mcp_debug_${SUFFIX}}"
+  mkdir -p "$DEBUG_ROOT"
+  WRAPPER_LOG="${DEBUG_ROOT}/wrapper.log"
+  FRONTEND_LOG="${DEBUG_ROOT}/frontend.log"
+  REQUESTS_LOG="${DEBUG_ROOT}/requests.log"
+  ERROR_LOG="${DEBUG_ROOT}/errors.log"
+  : > "$WRAPPER_LOG"
+  : > "$FRONTEND_LOG"
+  : > "$REQUESTS_LOG"
+  : > "$ERROR_LOG"
+  printf '%s runtime=%s entry=%s cwd=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$RUNTIME" "$ENTRY" "$CWD" >>"$WRAPPER_LOG"
+  export T32_LSP_MCP_DEBUG_FILE="$FRONTEND_LOG"
+  export T32_LSP_MCP_REQUEST_LOG="$REQUESTS_LOG"
+  export T32_LSP_MCP_ERROR_LOG="$ERROR_LOG"
+fi
+DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-/tmp/t32_lsp_mcp_shared_${SUFFIX}}"
 export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
 export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
-export T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-$DAEMON_DIR}"
+export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"
-  nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
+  if [ "$DEBUG_ENABLED" = "1" ]; then
+    nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$ERROR_LOG" 2>&1 </dev/null &
+  else
+    nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
+  fi
+fi
+if [ "$DEBUG_ENABLED" = "1" ]; then
+  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$ERROR_LOG"
 fi
 RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@"

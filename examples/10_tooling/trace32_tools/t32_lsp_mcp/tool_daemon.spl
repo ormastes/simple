@@ -5,11 +5,13 @@
 # requests from the lightweight MCP front-end.
 
 use t32_lsp_mcp.tools.{handle_cmm_parse, handle_cmm_diagnostics, handle_cmm_complete, handle_cmm_hover, handle_cmm_symbols, handle_cmm_validate_cli}
+use t32_lsp_mcp.debug_log.{lsp_debug_append, lsp_debug_bootstrap, lsp_debug_root}
 
 extern fn sys_get_args() -> [text]
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
@@ -27,6 +29,8 @@ fn main():
         args = args[1:args.len()]
 
     val root = if args.len() >= 1: args[0] else: lsp_default_daemon_root()
+    lsp_debug_bootstrap()
+    lsp_debug_append("daemon.log", "daemon start root=" + root + " debug_root=" + lsp_debug_root())
     rt_process_run(lsp_shell_bin_path(), ["-c", "mkdir -p " + lsp_shell_quote(root)])
     rt_file_write_text(root + "/ready", "ready")
 
@@ -98,6 +102,7 @@ fn daemon_handle_request(root: text, req_path: text):
     val raw = rt_file_read_text(req_path) ?? ""
     val lines = raw.split("\n")
     if lines.len() < 4:
+        lsp_debug_append("errors.log", "bad request file=" + req_path)
         rt_file_delete(req_path)
         return
 
@@ -106,8 +111,10 @@ fn daemon_handle_request(root: text, req_path: text):
     val args_path = lines[2]
     val response_path = lines[3]
     val args_raw = rt_file_read_text(args_path) ?? "null"
+    lsp_debug_append("requests.log", "tool=" + tool_name + " id=" + id + " args=" + args_path)
     val response = daemon_dispatch_tool(id, tool_name, args_raw)
     rt_file_write_text(response_path, response)
+    lsp_debug_append("daemon.log", "handled tool=" + tool_name + " id=" + id + " bytes=" + str(response.len()))
     rt_file_delete(req_path)
 
 fn daemon_dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
@@ -123,4 +130,5 @@ fn daemon_dispatch_tool(id: text, tool_name: text, args_raw: text) -> text:
         return handle_cmm_symbols(id, args_raw)
     if tool_name == "cmm_validate_cli":
         return handle_cmm_validate_cli(id, args_raw)
+    lsp_debug_append("errors.log", "unknown tool=" + tool_name + " id=" + id)
     ""

@@ -11,13 +11,15 @@
 #   - protocol.spl     — Protocol I/O, initialize, tools list, schemas
 #   - tools.spl        — Tool handler implementations
 
-use t32_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, extract_field_raw, extract_id, extract_nested, extract_nested_raw, escape_json, jsonrpc_result, jsonrpc_error, has_method}
+use t32_lsp_mcp.debug_log.{lsp_debug_append, lsp_debug_enabled, lsp_debug_root, lsp_debug_bootstrap}
+use t32_lsp_mcp.json_helpers.{read_stdin_message, write_stdout_message, LB, RB, Q, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, extract_field_raw, extract_nested, extract_nested_raw, escape_json, jsonrpc_result, jsonrpc_error, has_method}
 use t32_lsp_mcp.protocol
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
@@ -44,16 +46,125 @@ var LSP_TOOL_DAEMON_ERROR = ""
 fn main():
     lsp_start_server()
 
+fn lsp_log_message(file: text, message: text):
+    if lsp_debug_enabled():
+        lsp_debug_append(file, message)
+
+fn lsp_json_char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn lsp_json_is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn lsp_json_find_value_start(json: text, key: text) -> i64:
+    val search = "\"" + key + "\""
+    var i = 0
+    while i + search.len() <= json.len():
+        if json.substring(i, i + search.len()) == search:
+            var j = i + search.len()
+            while j < json.len() and lsp_json_is_ws(lsp_json_char_at(json, j)):
+                j = j + 1
+            if j < json.len() and lsp_json_char_at(json, j) == ":":
+                j = j + 1
+                while j < json.len() and lsp_json_is_ws(lsp_json_char_at(json, j)):
+                    j = j + 1
+                return j
+        i = i + 1
+    return -1
+
+fn lsp_request_json_raw_field(json: text, key: text) -> text:
+    val start = lsp_json_find_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = lsp_json_char_at(json, start)
+    if first == "\"":
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = lsp_json_char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return json.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    if first == "{" or first == "[":
+        var depth = 0
+        var i2 = start
+        var in_str = false
+        var esc = false
+        while i2 < json.len():
+            val ch = lsp_json_char_at(json, i2)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == "\"":
+                    in_str = false
+            else:
+                if ch == "\"":
+                    in_str = true
+                elif ch == "{" or ch == "[":
+                    depth = depth + 1
+                elif ch == "}" or ch == "]":
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = lsp_json_char_at(json, end)
+        if ch == "," or ch == "}" or ch == "]" or lsp_json_is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    raw
+
+fn lsp_request_json_text_field(json: text, key: text) -> text:
+    val raw = lsp_request_json_raw_field(json, key)
+    if raw == "null":
+        return ""
+    if raw.starts_with("\"") and raw.ends_with("\"") and raw.len() >= 2:
+        return raw.substring(1, raw.len() - 1)
+    raw
+
+fn lsp_request_arguments_json(body: text) -> text:
+    val params = lsp_request_json_raw_field(body, "params")
+    if params == "null":
+        return body
+    val args = lsp_request_json_raw_field(params, "arguments")
+    if args == "null" or args == "":
+        return body
+    args
+
+fn lsp_request_id_text(body: text) -> text:
+    val id = lsp_request_json_raw_field(body, "id")
+    if id == "":
+        return "null"
+    id
+
 fn lsp_start_server():
+    lsp_debug_bootstrap()
+    lsp_log_message("wrapper.log", "startup root=" + lsp_debug_root())
+    lsp_log_message("frontend.log", "frontend start")
     lsp_start_tool_daemon()
     while true:
         var msg = read_stdin_message()
         if msg == "":
+            lsp_log_message("errors.log", "stdin closed before request")
             return
         else:
             var method = lsp_detect_method(msg)
-            var id = extract_id(msg)
+            var id = lsp_request_id_text(msg)
             var response = ""
+            lsp_log_message("requests.log", "method=" + method + " id=" + id)
+            lsp_log_message("frontend.log", "recv method=" + method + " id=" + id + " bytes=" + str(msg.len()))
             if method == "initialize":
                 response = lsp_make_init_response(id)
             elif method == "initialized" or method == "notifications/initialized":
@@ -82,6 +193,7 @@ fn lsp_start_server():
                 if id != "" and id != "null":
                     response = jsonrpc_error(id, -32601, "Method not found: " + method)
             if response != "":
+                lsp_log_message("frontend.log", "send method=" + method + " id=" + id + " bytes=" + str(response.len()))
                 write_stdout_message(response)
 
 # --- Tool dispatcher ---
@@ -90,7 +202,7 @@ fn lsp_dispatch_tool(id: text, body: text) -> text:
     val tool_name = lsp_detect_tool_name(body)
     if tool_name == "":
         return jsonrpc_error(id, -32602, "Missing tool name in tools/call request")
-    val args_raw = body
+    val args_raw = lsp_request_arguments_json(body)
     if tool_name == "cmm_parse":
         return lsp_run_tool_direct_with_path(id, tool_name, args_raw, lsp_tool_runner_path_for_tool(tool_name))
     val daemon_response = lsp_dispatch_tool_via_daemon(id, tool_name, body)
@@ -104,6 +216,7 @@ fn lsp_run_tool_direct(id: text, tool_name: text, args_raw: text) -> text:
 fn lsp_run_tool_direct_with_path(id: text, tool_name: text, args_raw: text, runner: text) -> text:
     val args_path = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id) + ".args.json"
     if not rt_file_write_text(args_path, args_raw):
+        lsp_log_message("errors.log", "failed write args tool=" + tool_name + " id=" + id)
         return jsonrpc_error(id, -32002, "Failed to write tool arguments")
     val runner_bin = lsp_tool_runner_bin_path()
     val timeout_bin = lsp_timeout_bin_path()
@@ -136,12 +249,13 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
     val ready_path = lsp_tool_daemon_dir() + "/ready"
     if not rt_file_exists(ready_path):
         return ""
-    val args_raw = body
+    val args_raw = lsp_request_arguments_json(body)
     val base = lsp_tool_daemon_dir() + "/" + lsp_next_tool_request_key(id)
     val args_path = base + ".args.json"
     val req_path = base + ".req"
     val response_path = base + ".response.json"
     if not rt_file_write_text(args_path, args_raw):
+        lsp_log_message("errors.log", "failed write daemon args tool=" + tool_name + " id=" + id)
         return jsonrpc_error(id, -32002, "Failed to write tool arguments")
     val request_body = id + LSP_NL + tool_name + LSP_NL + args_path + LSP_NL + response_path + LSP_NL
     if not rt_file_write_text(req_path, request_body):
@@ -153,6 +267,7 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
     rt_file_delete(response_path)
     if response == "":
         LSP_TOOL_DAEMON_PID = -1
+        lsp_log_message("errors.log", "daemon timeout tool=" + tool_name + " id=" + id)
         return ""
     response
 
@@ -160,12 +275,15 @@ fn lsp_dispatch_tool_via_daemon(id: text, tool_name: text, body: text) -> text:
 fn lsp_start_tool_daemon() -> bool:
     val daemon_dir = lsp_tool_daemon_dir()
     LSP_TOOL_DAEMON_ERROR = ""
+    lsp_log_message("wrapper.log", "ensure daemon dir=" + daemon_dir)
     rt_process_run(lsp_shell_bin_path(), ["-c", "mkdir -p " + lsp_shell_quote(daemon_dir)])
     if lsp_tool_daemon_is_alive(daemon_dir):
         if lsp_wait_for_daemon_ready(daemon_dir, 1500):
             LSP_TOOL_DAEMON_PID = 1
+            lsp_log_message("daemon.log", "reuse daemon dir=" + daemon_dir)
             return true
         LSP_TOOL_DAEMON_ERROR = "CMM tool daemon is running but never became ready" + lsp_tool_daemon_log_hint()
+        lsp_log_message("errors.log", LSP_TOOL_DAEMON_ERROR)
         return false
     if rt_file_exists(daemon_dir + "/ready") or LSP_TOOL_DAEMON_PID > 0:
         lsp_reset_tool_daemon_state(daemon_dir)
@@ -173,14 +291,18 @@ fn lsp_start_tool_daemon() -> bool:
     val daemon_entry = lsp_tool_daemon_path()
     val daemon_log = daemon_dir + "/daemon.log"
     val launch_cmd = "nohup " + lsp_shell_quote(runtime) + " " + lsp_shell_quote(daemon_entry) + " " + lsp_shell_quote(daemon_dir) + " >" + lsp_shell_quote(daemon_log) + " 2>&1 < /dev/null &"
+    lsp_log_message("wrapper.log", "launch daemon runtime=" + runtime + " entry=" + daemon_entry + " dir=" + daemon_dir)
     val (stdout, stderr, code) = rt_process_run(lsp_shell_bin_path(), ["-c", launch_cmd])
     if code != 0:
         LSP_TOOL_DAEMON_ERROR = "Failed to launch CMM tool daemon: " + lsp_trim_error_text(stderr, stdout)
+        lsp_log_message("errors.log", LSP_TOOL_DAEMON_ERROR)
         return false
     LSP_TOOL_DAEMON_PID = 1
     if lsp_wait_for_daemon_ready(daemon_dir, 3000):
+        lsp_log_message("daemon.log", "daemon ready dir=" + daemon_dir)
         return true
     LSP_TOOL_DAEMON_ERROR = "CMM tool daemon failed to become ready" + lsp_tool_daemon_log_hint()
+    lsp_log_message("errors.log", LSP_TOOL_DAEMON_ERROR)
     false
 
 fn lsp_shell_quote(value: text) -> text:

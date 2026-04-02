@@ -8,7 +8,7 @@
 # and extern fn declarations.
 
 extern fn stdin_read_char() -> text
-extern fn rt_read_stdin_line() -> text
+extern fn rt_file_append_text(path: text, content: text) -> bool
 
 # --- JSON building helpers ---
 
@@ -66,7 +66,7 @@ fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
     var i = 0
     while i + search.len() <= json.len():
-        if json.substring(i).starts_with(search):
+        if json.substring(i, i + search.len()) == search:
             var j = i + search.len()
             while j < json.len() and _is_ws(_char_at(json, j)):
                 j = j + 1
@@ -240,7 +240,14 @@ fn has_method(msg: text, name: text) -> bool:
 var _USE_JSON_LINES = false
 
 fn _read_line() -> text:
-    return rt_read_stdin_line()
+    var line = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            return line
+        line = line + ch
+        if ch == "\n":
+            return line
 
 fn _read_chars(count: i64) -> text:
     var result = ""
@@ -289,11 +296,20 @@ fn read_stdin_message() -> text:
 fn write_stdout_message(body: text):
     val nl = "\n"
     if _USE_JSON_LINES:
-        print_raw(body + nl)
+        val payload = body + nl
+        if rt_file_append_text("/proc/self/fd/1", payload):
+            return
+        if rt_file_append_text("/dev/stdout", payload):
+            return
+        rt_file_append_text("/dev/fd/1", payload)
     else:
         var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
-        print_raw(header)
-        print_raw(body)
+        val payload = header + body
+        if rt_file_append_text("/proc/self/fd/1", payload):
+            return
+        if rt_file_append_text("/dev/stdout", payload):
+            return
+        rt_file_append_text("/dev/fd/1", payload)
 
 # Legacy aliases used by the direct tool runners and tests.
 fn lsp_Q() -> text: Q()

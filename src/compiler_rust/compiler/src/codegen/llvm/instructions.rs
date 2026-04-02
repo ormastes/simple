@@ -138,7 +138,7 @@ impl LlvmBackend {
                     BinOp::ShiftLeft => builder
                         .build_left_shift(l, r, "shl")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_left_shift", &e))?,
-                    BinOp::ShiftRight => builder
+                    BinOp::ShiftRight | BinOp::Compose => builder
                         .build_right_shift(l, r, false, "shr")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_right_shift", &e))?,
                     BinOp::Pow => {

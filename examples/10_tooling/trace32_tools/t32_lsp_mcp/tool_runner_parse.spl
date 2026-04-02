@@ -5,6 +5,7 @@
 # parser requests do not hang during module initialization.
 
 use t32_lsp_mcp.json_helpers
+use t32_lsp_mcp.debug_log.{lsp_debug_append, lsp_debug_enabled}
 use t32_lsp_mcp.tool_runner_common.{arg_field, runner_arg0_is_executable_path, debug_args}
 use cmm_lsp.cmm_parser_runtime.{parse_cmm_source}
 
@@ -13,8 +14,47 @@ extern fn sys_exit(code: i64)
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 
+fn parse_source_arg(args: text) -> text:
+    val direct = arg_field(args, "source")
+    if direct != "":
+        return direct
+    val marker1 = "\"source\":\""
+    val marker2 = "\"source\": \""
+    var start = -1
+    var i = 0
+    while i + marker1.len() <= args.len():
+        if args.substring(i, i + marker1.len()) == marker1:
+            start = i + marker1.len()
+            i = args.len()
+        else:
+            i = i + 1
+    if start < 0:
+        i = 0
+        while i + marker2.len() <= args.len():
+            if args.substring(i, i + marker2.len()) == marker2:
+                start = i + marker2.len()
+                i = args.len()
+            else:
+                i = i + 1
+    if start < 0:
+        return ""
+    i = start
+    var escaped = false
+    while i < args.len():
+        val ch = args.substring(i, i + 1)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return lsp_unescape_json_string(args.substring(start, i))
+        i = i + 1
+    ""
+
 fn handle_cmm_parse(id: text, args: text) -> text:
-    val source = arg_field(args, "source")
+    val source = parse_source_arg(args)
+    if lsp_debug_enabled():
+        lsp_debug_append("requests.log", "parse id=" + id + " args=" + args + " source_len=" + str(source.len()))
     if source == "":
         return lsp_make_tool_error(id, -32602, "Missing required parameter: source")
     val program = parse_cmm_source(source)
@@ -54,4 +94,6 @@ fn main():
     val id = args[0]
     val args_path = args[2]
     val args_raw = rt_file_read_text(args_path) ?? "null"
+    if lsp_debug_enabled():
+        lsp_debug_append("requests.log", "parse runner id=" + id + " raw=" + args_raw)
     print_raw(handle_cmm_parse(id, args_raw))

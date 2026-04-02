@@ -1,0 +1,82 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP - Temp directory debug logging helpers
+
+extern fn rt_env_get(name: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+var LSP_DEBUG_ROOT_CACHE = ""
+
+fn lsp_debug_enabled() -> bool:
+    val raw = (rt_env_get("T32_LSP_MCP_DEBUG_LOG") ?? "").trim()
+    raw != "0"
+
+fn lsp_debug_root() -> text:
+    if LSP_DEBUG_ROOT_CACHE != "":
+        return LSP_DEBUG_ROOT_CACHE
+    val cwd = rt_env_cwd()
+    var seed = cwd
+    if seed == "":
+        seed = "workspace"
+    LSP_DEBUG_ROOT_CACHE = "/tmp/t32_lsp_mcp_debug_" + lsp_debug_sanitize_segment(seed)
+    LSP_DEBUG_ROOT_CACHE
+
+fn lsp_debug_sanitize_segment(value: text) -> text:
+    if value == "":
+        return "empty"
+    var parts: [text] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
+            parts.push(ch)
+        else:
+            parts.push("_")
+        i = i + 1
+    val sanitized = parts.join("")
+    if sanitized == "":
+        return "empty"
+    sanitized
+
+fn lsp_debug_shell_bin_path() -> text:
+    if rt_file_exists("/bin/sh"):
+        return "/bin/sh"
+    if rt_file_exists("/usr/bin/sh"):
+        return "/usr/bin/sh"
+    "sh"
+
+fn lsp_debug_shell_quote(value: text) -> text:
+    if value == "":
+        return "''"
+    var parts: [text] = []
+    parts.push("'")
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "'":
+            parts.push("'\\''")
+        else:
+            parts.push(ch)
+        i = i + 1
+    parts.push("'")
+    parts.join("")
+
+fn lsp_debug_bootstrap():
+    if not lsp_debug_enabled():
+        return
+    val root = lsp_debug_root()
+    rt_process_run(lsp_debug_shell_bin_path(), ["-c", "mkdir -p " + lsp_debug_shell_quote(root)])
+
+fn lsp_debug_file(name: text) -> text:
+    lsp_debug_root() + "/" + name
+
+fn lsp_debug_append(name: text, message: text):
+    if not lsp_debug_enabled():
+        return
+    lsp_debug_bootstrap()
+    val path = lsp_debug_file(name)
+    if not rt_file_append_text(path, message + "\n"):
+        rt_file_write_text(path, message + "\n")
