@@ -22,20 +22,63 @@
 #   - action_tools.spl    — Action/field/history/resource handlers + dispatcher
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(name: text) -> text
-extern fn rt_env_cwd() -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_time_now_unix_micros() -> i64
 extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
 
-use t32_mcp.startup_protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_startup_extract_field, t32_startup_extract_id}
-use t32_mcp.state
-use t32_mcp.startup_router.{t32_startup_dispatch_tool, t32_startup_make_resources_list, t32_startup_make_tools_list, t32_startup_handle_resource_read}
+use t32_mcp.json_helpers.{t32_extract_field, t32_extract_id, t32_extract_nested, t32_LB, t32_RB}
+use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list}
+use t32_mcp.session_list_tools.{handle_t32_sessions_list}
+
+# Protocol auto-detection
+var T32_USE_JSON_LINES = false
+
+# Caches
+var T32_TOOLS_CACHE = ""
+var T32_INIT_CACHE = ""
+
+# --- Module state for T32 sessions ---
+
+class McpT32Session:
+    id: text
+    host: text
+    port: i64
+    intercom_name: text
+    architecture: text
+    connected: bool
+    cores: [McpT32Core]
+
+class McpT32Core:
+    core_id: text
+    label: text
+    instance_binding: text
+
+class McpT32HistoryItem:
+    command: text
+    result: text
+    session_id: text
+    core_id: text
+
+var MCP_T32_SESSIONS: [McpT32Session] = []
+var MCP_T32_CURRENT_SESSION = ""
+var MCP_T32_CURRENT_CORE = ""
+var MCP_T32_HISTORY: [McpT32HistoryItem] = []
+var MCP_T32_AREA_READY = false
+var MCP_T32_AREA_NAME = ""
+var T32_SEEN_FIRST_MESSAGE = false
+
+# --- Default connection config ---
+var T32_DEFAULT_PORT: i64 = 20000
+var T32_DEFAULT_HOST = "localhost"
+var T32_RCL_PORT: i64 = 20000
+var T32_RCL_HOST = "localhost"
+var T32_BACKEND_PREFERENCE = ""
+var T32_PYTHON_BINARY = "python3"
+var T32_API_LIB_PATH = ""
+var T32_PYTHON_BRIDGE_PATH = ""
 
 fn t32_startup_diag(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
@@ -74,31 +117,6 @@ fn t32_value_after_prefix(line: text, prefix: text) -> text:
         return ""
     return line.substring(prefix.len()).trim()
 
-fn t32_parse_i64(s: text) -> i64:
-    if s == "":
-        return 0
-    var i = 0
-    var sign = 1
-    if s.starts_with("-"):
-        sign = -1
-        i = 1
-    var value = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch < "0" or ch > "9":
-            break
-        value = value * 10 + (ch.to_int() - "0".to_int())
-        i = i + 1
-    return value * sign
-
-fn t32_make_resource_templates_list(id: text) -> text:
-    return t32_make_json_result(id, "{\"resourceTemplates\":[]}")
-
-var T32_TOOL_DAEMON_DIR = ""
-var T32_TOOL_DAEMON_PID = -1
-var T32_TOOL_DAEMON_SEQ = 0
-var T32_TOOL_DAEMON_ERROR = ""
-
 fn t32_apply_config_file(config_path: text):
     if not rt_file_exists(config_path):
         t32_startup_diag("startup warning: config file not found: " + config_path)
@@ -111,12 +129,12 @@ fn t32_apply_config_file(config_path: text):
         val trimmed = line.trim()
         if trimmed.starts_with("default_port:"):
             val port_str = t32_value_after_prefix(trimmed, "default_port:")
-            T32_DEFAULT_PORT = t32_parse_i64(port_str)
+            T32_DEFAULT_PORT = int(port_str)
         if trimmed.starts_with("default_host:"):
             T32_DEFAULT_HOST = t32_value_after_prefix(trimmed, "default_host:")
         if trimmed.starts_with("rcl_port:"):
             val port_str = t32_value_after_prefix(trimmed, "rcl_port:")
-            T32_RCL_PORT = t32_parse_i64(port_str)
+            T32_RCL_PORT = int(port_str)
         if trimmed.starts_with("rcl_host:"):
             T32_RCL_HOST = t32_value_after_prefix(trimmed, "rcl_host:")
         if trimmed.starts_with("backend_preference:"):
@@ -135,13 +153,13 @@ fn t32_load_default_config(config_path: text):
     # Environment variables override defaults/config file.
     val env_port = rt_env_get("T32_DEFAULT_PORT") ?? ""
     if env_port != "":
-        T32_DEFAULT_PORT = t32_parse_i64(env_port)
+        T32_DEFAULT_PORT = int(env_port)
     val env_host = rt_env_get("T32_DEFAULT_HOST") ?? ""
     if env_host != "":
         T32_DEFAULT_HOST = env_host
     val env_rcl_port = rt_env_get("T32_RCL_PORT") ?? ""
     if env_rcl_port != "":
-        T32_RCL_PORT = t32_parse_i64(env_rcl_port)
+        T32_RCL_PORT = int(env_rcl_port)
     val env_rcl_host = rt_env_get("T32_RCL_HOST") ?? ""
     if env_rcl_host != "":
         T32_RCL_HOST = env_rcl_host
@@ -162,192 +180,6 @@ fn t32_load_default_config(config_path: text):
     if T32_DEFAULT_PORT == 0:
         T32_DEFAULT_PORT = T32_RCL_PORT
 
-fn t32_shell_quote(value: text) -> text:
-    if value == "":
-        return "''"
-    var parts: [text] = []
-    parts.push("'")
-    var i = 0
-    while i < value.len():
-        val ch = value.substring(i, i + 1)
-        if ch == "'":
-            parts.push("'\\''")
-        else:
-            parts.push(ch)
-        i = i + 1
-    parts.push("'")
-    return parts.join("")
-
-fn t32_sanitize_path_segment(value: text) -> text:
-    if value == "":
-        return "empty"
-    var parts: [text] = []
-    var i = 0
-    while i < value.len():
-        val ch = value.substring(i, i + 1)
-        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
-            parts.push(ch)
-        else:
-            parts.push("_")
-        i = i + 1
-    val sanitized = parts.join("")
-    if sanitized == "":
-        return "empty"
-    return sanitized
-
-fn t32_shell_bin_path() -> text:
-    val env_shell = rt_env_get("T32_MCP_SHELL_BIN") ?? ""
-    if env_shell != "":
-        return env_shell
-    if rt_file_exists("/usr/bin/sh"):
-        return "/usr/bin/sh"
-    return "/bin/sh"
-
-fn t32_tool_runtime_path() -> text:
-    val env_runtime = rt_env_get("SIMPLE_RUNTIME") ?? ""
-    if env_runtime != "":
-        return env_runtime
-    if rt_file_exists("src/compiler_rust/target/release/simple"):
-        return "src/compiler_rust/target/release/simple"
-    if rt_file_exists("bin/simple"):
-        return "bin/simple"
-    if rt_file_exists("bin/release/simple"):
-        return "bin/release/simple"
-    if rt_file_exists("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
-    if rt_file_exists("bin/release/simple.exe"):
-        return "bin/release/simple.exe"
-    return "bin/release/simple"
-
-fn t32_tool_daemon_path() -> text:
-    val env_daemon = rt_env_get("T32_MCP_TOOL_DAEMON") ?? ""
-    if env_daemon != "":
-        return env_daemon
-    return "examples/10_tooling/trace32_tools/t32_mcp/tool_daemon.spl"
-
-fn t32_tool_daemon_dir() -> text:
-    if T32_TOOL_DAEMON_DIR != "":
-        return T32_TOOL_DAEMON_DIR
-    val env_dir = rt_env_get("T32_MCP_TOOL_DAEMON_DIR") ?? ""
-    if env_dir != "":
-        T32_TOOL_DAEMON_DIR = env_dir
-        return T32_TOOL_DAEMON_DIR
-    val cwd = rt_env_cwd()
-    var suffix = "workspace"
-    if cwd != "":
-        suffix = t32_sanitize_path_segment(cwd)
-    T32_TOOL_DAEMON_DIR = "/tmp/t32_mcp_shared_" + suffix
-    return T32_TOOL_DAEMON_DIR
-
-fn t32_next_tool_request_key(id: text) -> text:
-    T32_TOOL_DAEMON_SEQ = T32_TOOL_DAEMON_SEQ + 1
-    return "req_" + str(T32_TOOL_DAEMON_SEQ) + "_" + t32_sanitize_path_segment(id) + "_" + str(rt_time_now_unix_micros())
-
-fn t32_tool_daemon_is_alive(daemon_dir: text) -> bool:
-    val match_text = t32_tool_daemon_path() + " " + daemon_dir
-    val cmd = "ps -ef | grep -F -- " + t32_shell_quote(match_text) + " | grep -Fv grep >/dev/null 2>&1"
-    val (_stdout, _stderr, code) = rt_process_run(t32_shell_bin_path(), ["-c", cmd])
-    return code == 0
-
-fn t32_mkdir_p(path: text) -> bool:
-    var stdout = ""
-    var stderr = ""
-    var code: i64 = 0
-    (stdout, stderr, code) = rt_process_run("/bin/mkdir", ["-p", path])
-    return code == 0
-
-fn t32_wait_for_daemon_ready(daemon_dir: text, timeout_ms: i64) -> bool:
-    val started = rt_time_now_unix_micros()
-    val ready_path = daemon_dir + "/ready"
-    while true:
-        if rt_file_exists(ready_path) and t32_tool_daemon_is_alive(daemon_dir):
-            return true
-        val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
-        if elapsed_ms >= timeout_ms:
-            return false
-        rt_process_run(t32_shell_bin_path(), ["-c", "sleep 0.05"])
-
-fn t32_reset_tool_daemon_state(daemon_dir: text):
-    val entries = rt_dir_list(daemon_dir) ?? []
-    var i = 0
-    while i < entries.len():
-        val name = entries[i]
-        if name == "ready" or name.ends_with(".req") or name.ends_with(".body.json") or name.ends_with(".response.json"):
-            rt_file_delete(daemon_dir + "/" + name)
-        i = i + 1
-    T32_TOOL_DAEMON_PID = -1
-
-fn t32_start_tool_daemon() -> bool:
-    val daemon_dir = t32_tool_daemon_dir()
-    T32_TOOL_DAEMON_ERROR = ""
-    if not t32_mkdir_p(daemon_dir):
-        T32_TOOL_DAEMON_ERROR = "Failed to create T32 tool daemon dir: " + daemon_dir
-        return false
-    if t32_tool_daemon_is_alive(daemon_dir):
-        if t32_wait_for_daemon_ready(daemon_dir, 1500):
-            T32_TOOL_DAEMON_PID = 1
-            return true
-        T32_TOOL_DAEMON_ERROR = "T32 tool daemon is running but never became ready"
-        return false
-    if rt_file_exists(daemon_dir + "/ready") or T32_TOOL_DAEMON_PID > 0:
-        t32_reset_tool_daemon_state(daemon_dir)
-    val runtime = t32_tool_runtime_path()
-    val daemon_entry = t32_tool_daemon_path()
-    val daemon_log = daemon_dir + "/daemon.log"
-    val launch_cmd = "nohup " + t32_shell_quote(runtime) + " " + t32_shell_quote(daemon_entry) + " " + t32_shell_quote(daemon_dir) + " >" + t32_shell_quote(daemon_log) + " 2>&1 < /dev/null &"
-    val (stdout, stderr, code) = rt_process_run(t32_shell_bin_path(), ["-c", launch_cmd])
-    if code != 0:
-        T32_TOOL_DAEMON_ERROR = "Failed to launch T32 tool daemon: " + t32_trim_error_text(stderr, stdout)
-        return false
-    T32_TOOL_DAEMON_PID = 1
-    if t32_wait_for_daemon_ready(daemon_dir, 5000):
-        return true
-    T32_TOOL_DAEMON_ERROR = "T32 tool daemon failed to become ready"
-    return false
-
-fn t32_wait_for_tool_response(path: text, timeout_ms: i64) -> text:
-    val started = rt_time_now_unix_micros()
-    while true:
-        if rt_file_exists(path):
-            return (rt_file_read_text(path) ?? "").trim()
-        val elapsed_ms = (rt_time_now_unix_micros() - started) / 1000
-        if elapsed_ms >= timeout_ms:
-            return ""
-        rt_process_run(t32_shell_bin_path(), ["-c", "sleep 0.05"])
-
-fn t32_trim_error_text(stderr: text, stdout: text) -> text:
-    var raw = stderr.trim()
-    if raw == "":
-        raw = stdout.trim()
-    if raw == "":
-        return "unknown error"
-    if raw.len() > 240:
-        return raw[0:240]
-    return raw
-
-fn t32_dispatch_via_daemon(id: text, method: text, body: text) -> text:
-    if not t32_start_tool_daemon():
-        return ""
-    val daemon_dir = t32_tool_daemon_dir()
-    val base = daemon_dir + "/" + t32_next_tool_request_key(id)
-    val body_path = base + ".body.json"
-    val req_path = base + ".req"
-    val response_path = base + ".response.json"
-    if not rt_file_write_text(body_path, body):
-        return ""
-    val request_body = method + t32_nl() + id + t32_nl() + body_path + t32_nl() + response_path + t32_nl()
-    if not rt_file_write_text(req_path, request_body):
-        rt_file_delete(body_path)
-        return ""
-    val response = t32_wait_for_tool_response(response_path, 60000)
-    rt_file_delete(req_path)
-    rt_file_delete(body_path)
-    rt_file_delete(response_path)
-    if response == "":
-        T32_TOOL_DAEMON_PID = -1
-        return ""
-    return response
-
 # --- Entry point ---
 
 fn main():
@@ -365,8 +197,8 @@ fn t32_start_server():
             return
         else:
             T32_SEEN_FIRST_MESSAGE = true
-            var method = t32_startup_extract_field(msg, "method")
-            var id = t32_startup_extract_id(msg)
+            var method = t32_extract_field(msg, "method")
+            var id = t32_extract_id(msg)
             var response = ""
             t32_debug_trace("parsed method=<" + method + "> id=<" + id + ">")
             if method == "initialize":
@@ -377,23 +209,19 @@ fn t32_start_server():
             elif method == "shutdown":
                 response = t32_make_json_result(id, "null")
             elif method == "tools/list":
-                response = t32_dispatch_via_daemon(id, method, msg)
-                if response == "":
-                    response = t32_startup_make_tools_list(id)
+                response = t32_make_tools_list(id)
             elif method == "tools/call":
-                response = t32_dispatch_via_daemon(id, method, msg)
-                if response == "":
-                    response = t32_startup_dispatch_tool(id, msg)
+                val tool_name = t32_extract_nested(msg, "name")
+                if tool_name == "t32_sessions_list":
+                    response = handle_t32_sessions_list(id, msg)
+                else:
+                    response = t32_dispatch_tool(id, msg)
             elif method == "resources/list":
-                response = t32_dispatch_via_daemon(id, method, msg)
-                if response == "":
-                    response = t32_startup_make_resources_list(id)
+                response = t32_make_resources_list(id)
             elif method == "resources/templates/list":
                 response = t32_make_resource_templates_list(id)
             elif method == "resources/read":
-                response = t32_dispatch_via_daemon(id, method, msg)
-                if response == "":
-                    response = t32_startup_handle_resource_read(id, msg)
+                response = t32_handle_resource_read(id, msg)
             elif method == "prompts/list":
                 response = t32_make_json_result(id, "{\"prompts\":[]}")
             elif method == "roots/list":
@@ -401,7 +229,7 @@ fn t32_start_server():
             elif method == "logging/setLevel" or method == "logging/setlevel":
                 response = t32_make_json_result(id, "null")
             elif method == "ping":
-                response = t32_make_json_result(id, "{}")
+                response = t32_make_json_result(id, t32_LB() + t32_RB())
             elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
                 response = ""
             else:

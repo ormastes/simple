@@ -2,9 +2,15 @@
 # T32 MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
-# JSON helpers are fully inlined here to keep the startup path inside the
-# local t32_mcp package. Delegating through t32_lsp_mcp adds avoidable module
-# resolution work before the first initialize response is written.
+# JSON helpers delegated to t32_lsp_mcp/json_helpers.spl (canonical source).
+# Transport implemented here via stdin_read_char and direct fd-backed stdout sinks.
+# This avoids loading the entire src/lib/ module tree (8GB+ RSS).
+
+use t32_lsp_mcp.json_helpers.{
+    Q, LB, RB, SB_L, SB_R,
+    escape_json, js, jp, jo1, jo2, jo3, jo4,
+    jsonrpc_result, jsonrpc_error
+}
 
 extern fn stdin_read_char() -> text
 extern fn rt_read_stdin_line() -> text
@@ -13,195 +19,6 @@ extern fn stderr_flush() -> i64
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_append_text(path: text, content: text) -> bool
-
-use t32_mcp.state
-
-fn t32_nl() -> text:
-    return "\n"
-
-fn t32_server_name() -> text:
-    return "simple-mcp-t32"
-
-fn t32_server_version() -> text:
-    return "0.1.2"
-
-fn t32_strip_last(s: text) -> text:
-    if s.len() <= 1:
-        return ""
-    return s.substring(0, s.len() - 1)
-
-# --- JSON building helpers (inlined, zero imports) ---
-
-fn Q() -> text:
-    "\""
-
-fn LB() -> text:
-    "{"
-
-fn RB() -> text:
-    "}"
-
-fn SB_L() -> text:
-    "["
-
-fn SB_R() -> text:
-    "]"
-
-fn escape_json(s: text) -> text:
-    var out = s
-    out = out.replace("\\", "\\\\")
-    out = out.replace("\"", "\\\"")
-    out = out.replace("\n", "\\n")
-    out = out.replace("\r", "\\r")
-    out = out.replace("\t", "\\t")
-    out
-
-fn js(value: text) -> text:
-    Q() + escape_json(value) + Q()
-
-fn jp(key: text, value: text) -> text:
-    Q() + key + Q() + ":" + value
-
-fn jo1(p1: text) -> text:
-    LB() + p1 + RB()
-
-fn jo2(p1: text, p2: text) -> text:
-    LB() + p1 + "," + p2 + RB()
-
-fn jo3(p1: text, p2: text, p3: text) -> text:
-    LB() + p1 + "," + p2 + "," + p3 + RB()
-
-fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
-    LB() + p1 + "," + p2 + "," + p3 + "," + p4 + RB()
-
-fn jsonrpc_result(id: text, result: text) -> text:
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn jsonrpc_error(id: text, code: i64, message: text) -> text:
-    val err = jo2(jp("code", str(code)), jp("message", js(escape_json(message))))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
-
-# --- Startup JSON field extraction ---
-
-fn t32_startup_find_value_start(json: text, key: text) -> i64:
-    val search = "\"" + key + "\":"
-    val idx_opt = json.index_of(search)
-    match idx_opt:
-        Some(idx):
-            var start = idx + search.len()
-            while start < json.len():
-                val ch = json.substring(start, start + 1)
-                if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
-                    start = start + 1
-                else:
-                    break
-            return start
-        nil:
-            return -1
-
-fn t32_startup_extract_field(json: text, key: text) -> text:
-    val marker = "\"" + key + "\":"
-    if not json.contains(marker):
-        return ""
-    val parts = json.split(marker)
-    if parts.len() < 2:
-        return ""
-    var rest = parts[1].trim()
-    if rest == "":
-        return ""
-    if rest.starts_with("\""):
-        val quote_parts = rest.split("\"")
-        if quote_parts.len() < 2:
-            return ""
-        return quote_parts[1]
-    var end = 0
-    while end < rest.len():
-        val ch = rest.substring(end, end + 1)
-        if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
-            break
-        end = end + 1
-    return rest.substring(0, end)
-
-fn t32_startup_extract_field_raw(json: text, key: text) -> text:
-    val marker = "\"" + key + "\":"
-    if not json.contains(marker):
-        return "null"
-    val parts = json.split(marker)
-    if parts.len() < 2:
-        return "null"
-    var rest = parts[1].trim()
-    if rest == "":
-        return "null"
-    val first = rest.substring(0, 1)
-    if first == "\"":
-        val quote_parts = rest.split("\"")
-        if quote_parts.len() < 2:
-            return "null"
-        return "\"" + quote_parts[1] + "\""
-    if first == "{" or first == "[":
-        var depth = 0
-        var i = 0
-        var in_str = false
-        var escaped = false
-        while i < rest.len():
-            val ch = rest.substring(i, i + 1)
-            if in_str:
-                if escaped:
-                    escaped = false
-                elif ch == "\\":
-                    escaped = true
-                elif ch == "\"":
-                    in_str = false
-            else:
-                if ch == "\"":
-                    in_str = true
-                elif ch == "{" or ch == "[":
-                    depth = depth + 1
-                elif ch == "}" or ch == "]":
-                    depth = depth - 1
-                    if depth == 0:
-                        return rest.substring(0, i + 1)
-            i = i + 1
-        return "null"
-    var end = 0
-    while end < rest.len():
-        val ch = rest.substring(end, end + 1)
-        if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
-            break
-        end = end + 1
-    if end <= 0:
-        return "null"
-    return rest.substring(0, end)
-
-fn t32_startup_extract_id(json: text) -> text:
-    return t32_startup_extract_field_raw(json, "id")
-
-fn t32_startup_extract_nested(json: text, key: text) -> text:
-    val marker = "\"params\":"
-    if not json.contains(marker):
-        return ""
-    val parts = json.split(marker)
-    if parts.len() < 2:
-        return ""
-    var rest = parts[1].trim()
-    if rest == "" or not rest.starts_with("{"):
-        return ""
-    var depth = 0
-    var end = -1
-    var i = 0
-    while i < rest.len():
-        val ch = rest.substring(i, i + 1)
-        if ch == "{":
-            depth = depth + 1
-        elif ch == "}":
-            depth = depth - 1
-            if depth == 0:
-                end = i + 1
-                break
-        i = i + 1
-    if end <= 0:
-        return ""
-    return t32_startup_extract_field(rest.substring(0, end), key)
 
 fn t32_stderr(message: text):
     stderr_write("[t32-mcp] " + message + "\n")
@@ -222,49 +39,26 @@ fn t32_protocol_trace(message: text):
 # --- Protocol I/O (inlined, zero imports) ---
 
 fn t32_mcp_read_line() -> text:
-    var line = ""
-    while true:
-        val ch = stdin_read_char()
-        if ch == "":
-            return line
-        line = line + ch
-        if ch == "\n":
-            t32_protocol_debug("read_line via stdin_read_char val=<" + line + ">")
-            return line
+    val line = rt_read_stdin_line()
+    t32_protocol_debug("read_line via rt_read_stdin_line len=" + str(line.len()) + " val=<" + line + ">")
+    line
 
 fn t32_mcp_read_chars(count: i64) -> text:
     var result = ""
     var i = 0
     while i < count:
         val ch = stdin_read_char()
-        if ch == "":
+        if ch.len() == 0:
             break
         result = result + ch
         i = i + 1
     result
 
-fn t32_parse_i64(s: text) -> i64:
-    if s == "":
-        return 0
-    var i = 0
-    var sign = 1
-    if s.starts_with("-"):
-        sign = -1
-        i = 1
-    var value = 0
-    while i < s.len():
-        val ch = s.substring(i, i + 1)
-        if ch < "0" or ch > "9":
-            break
-        value = value * 10 + (ch.to_int() - "0".to_int())
-        i = i + 1
-    return value * sign
-
 fn t32_read_stdin_message() -> text:
     var content_length = 0
     while true:
         var line = t32_mcp_read_line()
-        if line == "":
+        if line.len() == 0:
             if content_length > 0:
                 break
             return ""
@@ -273,11 +67,11 @@ fn t32_read_stdin_message() -> text:
                 break
             continue
         if line.ends_with("\r\n"):
-            line = t32_strip_last(t32_strip_last(line))
+            line = strip_last(strip_last(line))
         elif line.ends_with("\n"):
-            line = t32_strip_last(line)
+            line = strip_last(line)
         elif line.ends_with("\r"):
-            line = t32_strip_last(line)
+            line = strip_last(line)
         t32_protocol_debug("line starts literal={?} " + str(line.starts_with("{")) + " helper={?} " + str(line.starts_with(LB())) + " line=<" + line + ">")
         if line.starts_with(LB()):
             T32_USE_JSON_LINES = true
@@ -285,22 +79,29 @@ fn t32_read_stdin_message() -> text:
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
-            content_length = t32_parse_i64(len_str)
+            content_length = int(len_str)
     if content_length <= 0:
         return ""
     t32_mcp_read_chars(content_length)
 
 fn t32_write_stdout_message(body: text):
     t32_protocol_trace("write_stdout_message body_bytes=" + str(body.len()))
+    var payload = body
     if T32_USE_JSON_LINES:
         t32_protocol_trace("write_stdout_message mode=json-lines")
-        print_raw(body + t32_nl())
+        payload = body + t32_nl()
+    else:
+        val byte_count = t32_text_byte_len(body)
+        val header = "Content-Length: " + str(byte_count) + "\r" + t32_nl() + "\r" + t32_nl()
+        t32_protocol_trace("write_stdout_message mode=framed")
+        payload = header + body
+    # Keep the native closure tiny by using fd-backed stdout sinks that work on
+    # Linux and FreeBSD without pulling in the heavier std.mcp transport layer.
+    if rt_file_append_text("/proc/self/fd/1", payload):
         return
-    val byte_count = t32_text_byte_len(body)
-    val header = "Content-Length: " + str(byte_count) + "\r" + t32_nl() + "\r" + t32_nl()
-    t32_protocol_trace("write_stdout_message mode=framed")
-    print_raw(header)
-    print_raw(body)
+    if rt_file_append_text("/dev/stdout", payload):
+        return
+    rt_file_append_text("/dev/fd/1", payload)
 
 # --- JSON-RPC helpers (inlined) ---
 
@@ -492,8 +293,6 @@ fn t32_is_ascii_digits(s: text) -> bool:
 # --- Initialize response ---
 
 fn t32_make_init_response(id: text) -> text:
-    if T32_INIT_CACHE != "":
-        return jsonrpc_result(id, T32_INIT_CACHE)
     var tools_cap = jo1(jp("listChanged", "true"))
     t32_protocol_debug("tools_cap len=" + str(tools_cap.len()))
     var resources_cap = jo2(jp("subscribe", "false"), jp("listChanged", "true"))
@@ -514,15 +313,12 @@ fn t32_make_init_response(id: text) -> text:
         jp("capabilities", caps),
         jp("serverInfo", server_info)
     )
-    T32_INIT_CACHE = result
     t32_protocol_debug("init payload len=" + str(result.len()))
     jsonrpc_result(id, result)
 
 # --- Tools list (35 T32 tools) ---
 
 fn t32_make_tools_list(id: text) -> text:
-    if T32_TOOLS_CACHE != "":
-        return jsonrpc_result(id, T32_TOOLS_CACHE)
     var tool_parts: [text] = []
 
     # Session tools (9)
@@ -579,7 +375,6 @@ fn t32_make_tools_list(id: text) -> text:
 
     val tools = SB_L() + tool_parts.join(",") + SB_R()
     val result = jo1(jp("tools", tools))
-    T32_TOOLS_CACHE = result
     t32_protocol_debug("tools payload len=" + str(result.len()))
     jsonrpc_result(id, result)
 
