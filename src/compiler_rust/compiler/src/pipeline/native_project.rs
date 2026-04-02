@@ -1505,8 +1505,11 @@ int main(int argc, char** argv) {
 
         let cc = find_c_compiler();
 
-        // RISC-V ABI flags (needed for consistent float ABI across all objects)
+        // RISC-V ABI flags — match the codegen backend's float ABI.
+        // LLVM uses soft-float by default; Cranelift uses double-float.
+        let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let (march, mabi) = match cross_target.arch {
+            simple_common::target::TargetArch::Riscv64 if use_llvm => ("-march=rv64imac", "-mabi=lp64"),
             simple_common::target::TargetArch::Riscv64 => ("-march=rv64gc", "-mabi=lp64d"),
             simple_common::target::TargetArch::Riscv32 => ("-march=rv32imac", "-mabi=ilp32"),
             _ => ("", ""),

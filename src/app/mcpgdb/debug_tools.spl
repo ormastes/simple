@@ -95,6 +95,17 @@ fn handle_debug_session_close(id: text, body: text) -> text:
         ]))
     make_tool_error(id, "session not found")
 
+fn ensure_session_started(session: DebugSession) -> (DebugSession, text):
+    if session.process_pid != "":
+        return (session, "")
+    var updated = session
+    var error = ""
+    (updated, error) = create_debugger_process(updated)
+    if error != "":
+        return (updated, error)
+    put_session(updated)
+    (updated, "")
+
 fn session_command_or_error(session_id: text, command: text, allow_topology: bool, dangerous: bool) -> text:
     if val session = current_or_named_session(session_id):
         val decision = evaluate_command_rule(session.backend, command, dangerous, allow_topology)
@@ -103,11 +114,19 @@ fn session_command_or_error(session_id: text, command: text, allow_topology: boo
                 jp("status", js("denied")),
                 jp("decision", decision_json(decision))
             ])
-        val output = run_session_command(session, command, false)
-        put_session(session)
+        var active = session
+        var start_error = ""
+        (active, start_error) = ensure_session_started(session)
+        if start_error != "":
+            return debug_json_message([
+                jp("status", js("error")),
+                jp("message", js(start_error))
+            ])
+        val output = run_session_command(active, command, false)
+        put_session(active)
         return debug_json_message([
-            jp("session_id", js(session.session_id)),
-            jp("backend", js(session.backend)),
+            jp("session_id", js(active.session_id)),
+            jp("backend", js(active.backend)),
             jp("decision", decision_json(decision)),
             jp("response", output)
         ])

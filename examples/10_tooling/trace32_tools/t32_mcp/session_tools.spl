@@ -452,6 +452,10 @@ fn t32_append_status_bar_json(r: text, session: McpT32Session) -> text:
     t32_append_errors_json(result, session)
 
 fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
+    # Route through proxy core via INTERCOM.EXECUTE when configured
+    var effective_cmd = cmd
+    if session.proxy_core != "":
+        effective_cmd = "INTERCOM.EXECUTE " + session.proxy_core + " " + cmd
     val backend = t32_find_backend()
     if backend == "":
         return (t32_err_backend_not_found(), -1)
@@ -462,7 +466,7 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
             if init_rc != 0:
                 return ("ctypes init failed (rc=" + str(init_rc) + ")", init_rc)
         MCP_T32_LAST_STDERR = ""
-        return t32_ctypes_run_remote(session, cmd)
+        return t32_ctypes_run_remote(session, effective_cmd)
     # --- subprocess dispatch (t32rem / python_rcl) ---
     val intercom = session.intercom_name
     # Export RCL protocol so python_rcl bridge picks up NETTCP even from config file
@@ -471,7 +475,7 @@ fn t32_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         full_cmd = full_cmd + " INTERCOM=" + intercom
     # Single-quote the T32 command to prevent shell interpretation of parentheses
     # e.g. EVAL STATE.RUN() — shell would try to execute RUN as a subshell without quoting
-    val escaped_cmd = cmd.replace("'", "'\\''")
+    val escaped_cmd = effective_cmd.replace("'", "'\\''")
     full_cmd = full_cmd + " '" + escaped_cmd + "'"
     var stdout = ""
     var stderr = ""
@@ -627,6 +631,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     val port_str = t32_extract_field(body, "port")
     val name = t32_extract_field(body, "name")
     val arch = t32_extract_field(body, "architecture")
+    val proxy_core = t32_extract_field(body, "proxy_core")
     # Use defaults when host/port not provided
     if host == "":
         host = T32_DEFAULT_HOST
@@ -655,6 +660,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         host: host,
         port: port,
         intercom_name: intercom_name,
+        proxy_core: proxy_core,
         architecture: architecture,
         connected: false,
         cores: []
@@ -693,6 +699,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         host: host,
         port: port,
         intercom_name: intercom_name,
+        proxy_core: proxy_core,
         architecture: architecture,
         connected: connected,
         cores: []
@@ -705,6 +712,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     r = r + "," + t32_jp("host", t32_js(host))
     r = r + "," + t32_jp("port", str(port))
     r = r + "," + t32_jp("intercom_name", t32_js(intercom_name))
+    r = r + "," + t32_jp("proxy_core", t32_js(proxy_core))
     r = r + "," + t32_jp("architecture", t32_js(architecture))
     r = r + "," + t32_jp("connected", "true")
     r = r + "," + t32_jp("backend", t32_js(t32_get_backend_type()))

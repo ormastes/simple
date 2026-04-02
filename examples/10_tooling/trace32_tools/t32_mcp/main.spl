@@ -35,6 +35,7 @@ use t32_mcp.json_helpers.{t32_extract_field, t32_extract_id, t32_extract_nested,
 use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list}
 use t32_mcp.session_list_tools.{handle_t32_sessions_list}
 use t32_mcp.job_manager.{t32_job_list, t32_job_get, t32_job_cancel, t32_job_to_json}
+use t32_mcp.dialog_tools.{handle_t32_dialog_parse, handle_t32_dialog_get, handle_t32_dialog_set, handle_t32_dialog_click}
 
 # Protocol auto-detection
 var T32_USE_JSON_LINES = false
@@ -50,6 +51,7 @@ class McpT32Session:
     host: text
     port: i64
     intercom_name: text
+    proxy_core: text
     architecture: text
     connected: bool
     cores: [McpT32Core]
@@ -65,26 +67,10 @@ class McpT32HistoryItem:
     session_id: text
     core_id: text
 
-class McpT32Dialog:
-    session_id: text
-    label: text
-    declared_label: text
-    generated_label: bool
-    widget_type: text
-    queryable: bool
-    clickable: bool
-    settable: bool
-    query_type: text
-    runtime_access: text
-    supported_actions: text
-    value: text
-    callback: text
-
 var MCP_T32_SESSIONS: [McpT32Session] = []
 var MCP_T32_CURRENT_SESSION = ""
 var MCP_T32_CURRENT_CORE = ""
 var MCP_T32_HISTORY: [McpT32HistoryItem] = []
-var MCP_T32_DIALOGS: [McpT32Dialog] = []
 var MCP_T32_FIELD_STATE_KEYS: [text] = []
 var MCP_T32_FIELD_STATE_VALUES: [text] = []
 var MCP_T32_AREA_READY = false
@@ -233,113 +219,6 @@ fn t32_add_history(command: text, result: text, session_id: text, core_id: text)
     MCP_T32_HISTORY = MCP_T32_HISTORY + [entry]
     if t32_history_count() > 500:
         MCP_T32_HISTORY = MCP_T32_HISTORY[250..]
-
-fn t32_dialog_supported_actions_json(widget_type: text) -> text:
-    var actions: [text] = []
-    if widget_type == "checkbox" or widget_type == "choice":
-        actions = ["set", "select", "deselect", "disable", "enable"]
-    elif widget_type == "edit" or widget_type == "string":
-        actions = ["set", "disable", "enable"]
-    elif widget_type == "button":
-        actions = ["click"]
-    elif widget_type == "defbutton":
-        actions = ["click"]
-    elif widget_type == "view":
-        actions = ["click"]
-    else:
-        actions = ["set"]
-    var arr = t32_LB()
-    var first = true
-    for a in actions:
-        if not first:
-            arr = arr + ","
-        first = false
-        arr = arr + t32_js(a)
-    arr = arr + t32_RB()
-    arr
-
-fn t32_dialog_query_type(widget_type: text) -> text:
-    if widget_type == "checkbox":
-        return "boolean"
-    if widget_type == "choice":
-        return "value"
-    if widget_type == "edit" or widget_type == "string":
-        return "string"
-    ""
-
-fn t32_dialog_runtime_access(generated_label: bool) -> text:
-    if generated_label:
-        return "parse_only"
-    "label"
-
-fn t32_dialog_bool_string(value: bool) -> text:
-    if value:
-        return "true"
-    "false"
-
-fn t32_dialog_widget_type(keyword: text) -> text:
-    val lower = keyword.to_lower()
-    if lower == "ok" or lower == "yesno" or lower == "button":
-        return "button"
-    if lower == "defbutton":
-        return "defbutton"
-    if lower == "check" or lower == "checkbox":
-        return "checkbox"
-    if lower == "choosebox" or lower == "pulldown":
-        return "choice"
-    if lower == "string" or lower == "edit":
-        return "string"
-    if lower == "file" or lower == "dir":
-        return "string"
-    if lower == "view":
-        return "view"
-    "value"
-
-fn t32_dialog_clear(session_id: text):
-    var kept: [McpT32Dialog] = []
-    for dialog in MCP_T32_DIALOGS:
-        if dialog.session_id != session_id:
-            kept = kept + [dialog]
-    MCP_T32_DIALOGS = kept
-
-fn t32_dialog_find_index(session_id: text, label: text) -> i64:
-    var idx: i64 = 0
-    for dialog in MCP_T32_DIALOGS:
-        if dialog.session_id == session_id and dialog.label == label:
-            return idx
-        idx = idx + 1
-    -1
-
-fn t32_dialog_find_any(label: text) -> McpT32Dialog:
-    var current_id = MCP_T32_CURRENT_SESSION
-    var idx = t32_dialog_find_index(current_id, label)
-    if idx >= 0:
-        return MCP_T32_DIALOGS[idx]
-    for dialog in MCP_T32_DIALOGS:
-        if dialog.label == label:
-            return dialog
-    McpT32Dialog(
-        session_id: "",
-        label: "",
-        declared_label: "",
-        generated_label: true,
-        widget_type: "",
-        queryable: false,
-        clickable: false,
-        settable: false,
-        query_type: "",
-        runtime_access: "parse_only",
-        supported_actions: t32_SB_L() + t32_SB_R(),
-        value: "",
-        callback: ""
-    )
-
-fn t32_dialog_store(dialog: McpT32Dialog):
-    val idx = t32_dialog_find_index(dialog.session_id, dialog.label)
-    if idx >= 0:
-        MCP_T32_DIALOGS[idx] = dialog
-        return
-    MCP_T32_DIALOGS = MCP_T32_DIALOGS + [dialog]
 
 fn t32_value_after_prefix(line: text, prefix: text) -> text:
     if line.len() <= prefix.len():
@@ -652,257 +531,6 @@ fn t32_handle_error_check(id: text, body: text) -> text:
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 
-fn t32_dialog_is_label_safe(label: text) -> bool:
-    if label == "":
-        return false
-    var i = 0
-    while i < label.len():
-        val ch = label.substring(i, i + 1)
-        if ch == " " or ch == "\t" or ch == ";" or ch == "|" or ch == "&":
-            return false
-        if ch == "`" or ch == "'" or ch == "\"":
-            return false
-        if ch == "$" or ch == "(" or ch == ")" or ch == "<" or ch == ">":
-            return false
-        i = i + 1
-    true
-
-fn t32_dialog_trim_token(token: text) -> text:
-    var out = token.trim()
-    if out.starts_with("\"") and out.ends_with("\"") and out.len() >= 2:
-        out = out.substring(1, out.len() - 1)
-    out
-
-fn t32_dialog_first_token(text_value: text) -> text:
-    var i = 0
-    while i < text_value.len():
-        val ch = text_value.substring(i, i + 1)
-        if ch == " " or ch == "\t" or ch == "," or ch == "(" or ch == ")" or ch == ":":
-            break
-        i = i + 1
-    t32_dialog_trim_token(text_value.substring(0, i))
-
-fn t32_dialog_extract_label(rest: text) -> text:
-    var token = t32_dialog_first_token(rest)
-    if token.starts_with("label="):
-        token = token.substring(6, token.len())
-    if token.starts_with("label:"):
-        token = token.substring(6, token.len())
-    t32_dialog_trim_token(token)
-
-fn t32_dialog_element_json(dialog: McpT32Dialog) -> text:
-    var r = t32_LB()
-    r = r + t32_jp("label", t32_js(dialog.label))
-    r = r + "," + t32_jp("declared_label", t32_js(dialog.declared_label))
-    r = r + "," + t32_jp("generated_label", t32_json_bool(dialog.generated_label))
-    r = r + "," + t32_jp("widget_type", t32_js(dialog.widget_type))
-    r = r + "," + t32_jp("queryable", t32_json_bool(dialog.queryable))
-    r = r + "," + t32_jp("clickable", t32_json_bool(dialog.clickable))
-    r = r + "," + t32_jp("settable", t32_json_bool(dialog.settable))
-    r = r + "," + t32_jp("query_type", t32_js(dialog.query_type))
-    r = r + "," + t32_jp("supported_actions", dialog.supported_actions)
-    r = r + "," + t32_jp("runtime_access", t32_js(dialog.runtime_access))
-    r = r + "," + t32_jp("value", t32_js(dialog.value))
-    r = r + "," + t32_jp("callback", t32_js(dialog.callback))
-    r = r + t32_RB()
-    r
-
-fn t32_dialog_resolve_widget_meta(keyword: text, generated_label: bool) -> (text, bool, bool, bool, text, text):
-    val widget_type = t32_dialog_widget_type(keyword)
-    var queryable = false
-    var clickable = false
-    var settable = false
-    if widget_type == "checkbox" or widget_type == "choice" or widget_type == "string":
-        queryable = true
-        settable = true
-    if widget_type == "button" or widget_type == "defbutton" or widget_type == "view":
-        clickable = true
-    if widget_type == "value":
-        queryable = true
-    var query_type = t32_dialog_query_type(widget_type)
-    var runtime_access = t32_dialog_runtime_access(generated_label)
-    (widget_type, queryable, clickable, settable, query_type, runtime_access)
-
-fn t32_dialog_parse_line(session_id: text, line: text, index: i64) -> McpT32Dialog:
-    val trimmed = line.trim()
-    var tmp_after = trimmed.substring(7, trimmed.len())
-    val after = tmp_after.trim()
-    val keyword = t32_dialog_first_token(after)
-    var tmp_after_kw = after.substring(keyword.len(), after.len())
-    var declared_label = t32_dialog_extract_label(tmp_after_kw.trim())
-    if declared_label != "" and not t32_dialog_is_label_safe(declared_label):
-        declared_label = ""
-    var generated_label = false
-    var label = declared_label
-    if label == "":
-        generated_label = true
-        label = "dialog_" + str(index + 1)
-    val meta = t32_dialog_resolve_widget_meta(keyword, generated_label)
-    var widget_type = ""
-    var queryable = false
-    var clickable = false
-    var settable = false
-    var query_type = ""
-    var runtime_access = ""
-    (widget_type, queryable, clickable, settable, query_type, runtime_access) = meta
-    var callback = ""
-    if clickable:
-        callback = "DIALOG.EXECUTE " + label
-    var value = ""
-    if widget_type == "checkbox":
-        value = "false"
-    elif widget_type == "choice" or widget_type == "string" or widget_type == "value":
-        value = ""
-    var supported_actions = t32_dialog_supported_actions_json(widget_type)
-    McpT32Dialog(
-        session_id: session_id,
-        label: label,
-        declared_label: declared_label,
-        generated_label: generated_label,
-        widget_type: widget_type,
-        queryable: queryable,
-        clickable: clickable,
-        settable: settable,
-        query_type: query_type,
-        runtime_access: runtime_access,
-        supported_actions: supported_actions,
-        value: value,
-        callback: callback
-    )
-
-fn t32_dialog_parse_source(session_id: text, source: text) -> [McpT32Dialog]:
-    var parsed: [McpT32Dialog] = []
-    var index: i64 = 0
-    val lines = source.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "":
-            index = index + 1
-            continue
-        val lower = trimmed.to_lower()
-        if not lower.starts_with("dialog."):
-            index = index + 1
-            continue
-        val dialog = t32_dialog_parse_line(session_id, trimmed, index)
-        parsed = parsed + [dialog]
-        index = index + 1
-    parsed
-
-fn t32_handle_dialog_parse(id: text, body: text) -> text:
-    val source = t32_extract_field(body, "source")
-    if source == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: source")
-    var cmm_source = source
-    if not source.contains("\n") and not source.contains(";"):
-        val file_content = rt_file_read_text(source) ?? ""
-        if file_content != "":
-            cmm_source = file_content
-    val session_id = MCP_T32_CURRENT_SESSION
-    t32_dialog_clear(session_id)
-    val parsed = t32_dialog_parse_source(session_id, cmm_source)
-    for dialog in parsed:
-        t32_dialog_store(dialog)
-    var rows = t32_SB_L()
-    var first = true
-    for dialog in parsed:
-        if not first:
-            rows = rows + ","
-        first = false
-        rows = rows + t32_dialog_element_json(dialog)
-    rows = rows + t32_SB_R()
-    var r = t32_LB()
-    r = r + t32_jp("count", str(parsed.len()))
-    r = r + "," + t32_jp("dialogs", rows)
-    r = r + t32_RB()
-    t32_add_history("dialog_parse", source, session_id, MCP_T32_CURRENT_CORE)
-    t32_make_tool_result(id, r)
-
-fn t32_handle_dialog_get(id: text, body: text) -> text:
-    val label = t32_extract_field(body, "label")
-    val query_type = t32_extract_field(body, "type")
-    if label == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
-    val dialog = t32_dialog_find_any(label)
-    if dialog.label == "":
-        return t32_make_tool_error(id, -32602, "Dialog element not found: " + label)
-    if not dialog.queryable:
-        return t32_make_tool_error(id, -32602, "Dialog element is not queryable: " + label)
-    if dialog.runtime_access != "label":
-        return t32_make_tool_error(id, -32602, "Dialog element uses a generated label and cannot be queried at runtime: " + label)
-    if query_type != "" and query_type != dialog.query_type:
-        return t32_make_tool_error(id, -32602, "Dialog element expects type " + dialog.query_type + ", not " + query_type)
-    var r = t32_LB()
-    r = r + t32_jp("label", t32_js(dialog.label))
-    r = r + "," + t32_jp("declared_label", t32_js(dialog.declared_label))
-    r = r + "," + t32_jp("generated_label", t32_json_bool(dialog.generated_label))
-    r = r + "," + t32_jp("widget_type", t32_js(dialog.widget_type))
-    r = r + "," + t32_jp("query_type", t32_js(dialog.query_type))
-    r = r + "," + t32_jp("value", t32_js(dialog.value))
-    r = r + "," + t32_jp("queryable", t32_json_bool(dialog.queryable))
-    r = r + "," + t32_jp("settable", t32_json_bool(dialog.settable))
-    r = r + "," + t32_jp("clickable", t32_json_bool(dialog.clickable))
-    r = r + "," + t32_jp("runtime_access", t32_js(dialog.runtime_access))
-    r = r + t32_RB()
-    t32_make_tool_result(id, r)
-
-fn t32_handle_dialog_set(id: text, body: text) -> text:
-    val label = t32_extract_field(body, "label")
-    var action = t32_extract_field(body, "action")
-    val value = t32_extract_field(body, "value")
-    if label == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
-    if action == "":
-        action = "set"
-    val dialog = t32_dialog_find_any(label)
-    if dialog.label == "":
-        return t32_make_tool_error(id, -32602, "Dialog element not found: " + label)
-    if not dialog.settable:
-        return t32_make_tool_error(id, -32602, "Dialog element is not settable: " + label)
-    if dialog.runtime_access != "label":
-        return t32_make_tool_error(id, -32602, "Dialog element uses a generated label and cannot be set at runtime: " + label)
-    var new_value = value
-    if action == "disable":
-        new_value = "false"
-    elif action == "enable":
-        new_value = "true"
-    elif action == "deselect":
-        new_value = "false"
-    elif action == "select":
-        new_value = "true"
-    if new_value == "" and action == "set":
-        new_value = "true"
-    var updated = dialog
-    updated.value = new_value
-    t32_dialog_store(updated)
-    t32_add_history("dialog_set:" + label + ":" + action, new_value, MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE)
-    var r = t32_LB()
-    r = r + t32_jp("label", t32_js(label))
-    r = r + "," + t32_jp("action", t32_js(action))
-    r = r + "," + t32_jp("value", t32_js(new_value))
-    r = r + "," + t32_jp("status", t32_js("ok"))
-    r = r + t32_RB()
-    t32_make_tool_result(id, r)
-
-fn t32_handle_dialog_click(id: text, body: text) -> text:
-    val label = t32_extract_field(body, "label")
-    if label == "":
-        return t32_make_tool_error(id, -32602, "Missing required parameter: label")
-    val dialog = t32_dialog_find_any(label)
-    if dialog.label == "":
-        return t32_make_tool_error(id, -32602, "Dialog element not found: " + label)
-    if not dialog.clickable:
-        return t32_make_tool_error(id, -32602, "Dialog element is not clickable: " + label)
-    var updated = dialog
-    updated.value = "clicked"
-    t32_dialog_store(updated)
-    t32_add_history("dialog_click:" + label, "clicked", MCP_T32_CURRENT_SESSION, MCP_T32_CURRENT_CORE)
-    var r = t32_LB()
-    r = r + t32_jp("label", t32_js(label))
-    r = r + "," + t32_jp("execution_kind", t32_js("label"))
-    r = r + "," + t32_jp("status", t32_js("ok"))
-    r = r + t32_RB()
-    t32_make_tool_result(id, r)
-
 # --- Entry point ---
 
 fn main():
@@ -1011,13 +639,13 @@ fn t32_dispatch_low_cost_tool(id: text, body: text, tool_name: text) -> text:
     if tool_name == "t32_history_tail":
         return t32_handle_history_tail(id, args_raw)
     if tool_name == "t32_dialog_parse":
-        return t32_handle_dialog_parse(id, args_raw)
+        return handle_t32_dialog_parse(id, args_raw)
     if tool_name == "t32_dialog_get":
-        return t32_handle_dialog_get(id, args_raw)
+        return handle_t32_dialog_get(id, args_raw)
     if tool_name == "t32_dialog_set":
-        return t32_handle_dialog_set(id, args_raw)
+        return handle_t32_dialog_set(id, args_raw)
     if tool_name == "t32_dialog_click":
-        return t32_handle_dialog_click(id, args_raw)
+        return handle_t32_dialog_click(id, args_raw)
     if tool_name == "t32_error_check":
         return t32_handle_error_check(id, args_raw)
     t32_debug_error("unknown low-cost tool: " + tool_name)
