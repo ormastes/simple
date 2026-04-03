@@ -74,6 +74,7 @@ pub mod value_bridge;
 pub mod verification_checker;
 pub mod weaving;
 pub mod watchdog;
+pub mod memory_guard;
 pub mod web_compiler;
 
 #[cfg(test)]

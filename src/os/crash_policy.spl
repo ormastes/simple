@@ -111,6 +111,77 @@ fn default_supervisor_policy(app_class: AppClass) -> SupervisorPolicy:
                 quarantine_on_limit: false
             )
 
+# ============================================================================
+# Crash Record — structured crash metadata
+# ============================================================================
+
+class CrashRecord:
+    """Structured crash metadata for a single crash event."""
+    timestamp: text
+    pid: i64
+    reason: text
+    domain: text
+    exit_code: i64
+    message: text
+    source_location: text
+    restart_attempt: i64
+
+    fn is_fatal() -> bool:
+        """Returns true if crash should not be retried."""
+        self.reason == "trap" or self.reason == "abort" or self.reason == "invariant_violation"
+
+    fn summary() -> text:
+        """One-line summary for logging."""
+        self.reason + " (pid=" + str(self.pid) + ", exit=" + str(self.exit_code) + ", attempt=" + str(self.restart_attempt) + ")"
+
+class CrashLog:
+    """Accumulates crash records for a supervised component."""
+    component_id: text
+    records: [CrashRecord]
+    max_records: i64
+
+    static fn create(component_id: text) -> CrashLog:
+        CrashLog(component_id: component_id, records: [], max_records: 100)
+
+    me add(record: CrashRecord):
+        """Add a crash record, trimming oldest if over limit."""
+        self.records = self.records + [record]
+        if self.records.len() > self.max_records:
+            self.records = self.records[self.records.len() - self.max_records..]
+
+    fn count() -> i64:
+        self.records.len()
+
+    fn last() -> CrashRecord?:
+        if self.records.len() == 0:
+            return nil
+        Some(self.records[self.records.len() - 1])
+
+    fn recent(n: i64) -> [CrashRecord]:
+        """Get the N most recent crash records."""
+        if n >= self.records.len():
+            return self.records
+        self.records[self.records.len() - n..]
+
+    fn has_fatal() -> bool:
+        """Check if any crash record is fatal (should not retry)."""
+        for r in self.records:
+            if r.is_fatal():
+                return true
+        false
+
+fn make_crash_record(reason: text, domain: text, exit_code: i64, message: text) -> CrashRecord:
+    CrashRecord(
+        timestamp: "",
+        pid: 0,
+        reason: reason,
+        domain: domain,
+        exit_code: exit_code,
+        message: message,
+        source_location: "",
+        restart_attempt: 0
+    )
+
 fn default_invariant_violation_disposition(app_class: AppClass) -> AppExitDisposition:
     match app_class:
         case AppClass.UserApp:

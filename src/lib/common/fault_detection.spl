@@ -75,9 +75,86 @@ enum FaultKind:
     """Type of fault detected."""
     StackOverflow(depth: i64, limit: i64)
     Timeout
+    SignalFault(signal_number: i64, signal_name: text)
+    MemoryExceeded(used_mb: i64, limit_mb: i64)
+    InterruptRequested
+
+# ============================================================================
+# Signal Fault Detection
+# ============================================================================
+
+var signal_fault_number: i64 = 0
+var signal_fault_name: text = ""
+var signal_fault_detected: bool = false
+
+fn set_signal_fault(signal_number: i64, signal_name: text):
+    """Record a signal fault (called from Rust signal handler)."""
+    signal_fault_number = signal_number
+    signal_fault_name = signal_name
+    signal_fault_detected = true
+
+fn is_signal_fault() -> bool:
+    signal_fault_detected
+
+fn clear_signal_fault():
+    signal_fault_detected = false
+    signal_fault_number = 0
+    signal_fault_name = ""
+
+# ============================================================================
+# Memory Limit Detection
+# ============================================================================
+
+var memory_exceeded: bool = false
+var memory_used_mb: i64 = 0
+var memory_limit_mb: i64 = 0
+
+fn set_memory_exceeded(used_mb: i64, limit_mb: i64):
+    """Record memory limit exceeded (called from watchdog)."""
+    memory_exceeded = true
+    memory_used_mb = used_mb
+    memory_limit_mb = limit_mb
+
+fn is_memory_exceeded() -> bool:
+    memory_exceeded
+
+fn clear_memory_exceeded():
+    memory_exceeded = false
+    memory_used_mb = 0
+    memory_limit_mb = 0
+
+# ============================================================================
+# Interrupt Detection
+# ============================================================================
+
+var interrupt_requested: bool = false
+
+fn set_interrupt_requested():
+    """Record interrupt request (SIGINT/Ctrl-C)."""
+    interrupt_requested = true
+
+fn is_interrupt_requested() -> bool:
+    interrupt_requested
+
+fn clear_interrupt():
+    interrupt_requested = false
+
+# ============================================================================
+# Combined Check (priority: signal > memory > timeout > stack overflow > interrupt)
+# ============================================================================
 
 fn check_faults() -> FaultKind?:
-    """Check for any active fault condition."""
+    """Check for any active fault condition, highest priority first."""
+    if signal_fault_detected:
+        return Some(FaultKind.SignalFault(
+            signal_number: signal_fault_number,
+            signal_name: signal_fault_name
+        ))
+    if memory_exceeded:
+        return Some(FaultKind.MemoryExceeded(
+            used_mb: memory_used_mb,
+            limit_mb: memory_limit_mb
+        ))
     if timeout_exceeded:
         return Some(FaultKind.Timeout)
     if stack_overflow_detection_enabled and recursion_depth > max_recursion_depth:
@@ -85,7 +162,17 @@ fn check_faults() -> FaultKind?:
             depth: recursion_depth,
             limit: max_recursion_depth
         ))
+    if interrupt_requested:
+        return Some(FaultKind.InterruptRequested)
     nil
+
+fn reset_faults():
+    """Reset ALL fault state (for testing)."""
+    reset_recursion_depth()
+    reset_timeout()
+    clear_signal_fault()
+    clear_memory_exceeded()
+    clear_interrupt()
 
 # ============================================================================
 # High-Level API (used by tests and user code)
@@ -121,6 +208,9 @@ fn reset_defaults():
     reset_recursion_depth()
     timeout_secs = 0
     reset_timeout()
+    clear_signal_fault()
+    clear_memory_exceeded()
+    clear_interrupt()
     execution_limit = 10000000
 
 # ============================================================================

@@ -11,12 +11,12 @@
 # DownEvent: notification sent to monitor when monitored process exits.
 # LinkExitEvent: notification sent when a linked process exits.
 #
-# Runtime FFI stubs: actual inter-process signaling requires runtime support.
-# These stubs provide the data types and API contract for compiled mode.
-#
 # Usage:
-#   val ref = monitor(worker_pid)
-#   link(partner_pid)
+#   val ref = monitor_from(my_pid, worker_pid)
+#   link_pids(my_pid, partner_pid)
+#   # ... later, after worker exits ...
+#   notify_exit(worker_pid, EXIT_CRASHED)
+#   val events = poll_down_events(my_pid)
 
 # Exit reason constants
 val EXIT_NORMAL = "normal"      # clean exit
@@ -35,36 +35,223 @@ struct LinkExitEvent:
     pid: i64     # pid of the process that exited
     reason: text # exit reason
 
-# Monitor a process. Returns a monitor reference id.
-# When the monitored process exits, a DownEvent is delivered to the caller's mailbox.
-# Stub: returns 0 (actual runtime process management required for real dispatch).
+# ============================================================================
+# Monitor/Link Registry (in-process)
+# ============================================================================
+
+var _next_monitor_ref: i64 = 1
+
+# Parallel arrays for monitors: monitor_ref -> (watcher_pid, target_pid)
+var _monitor_refs: [i64] = []
+var _monitor_watchers: [i64] = []
+var _monitor_targets: [i64] = []
+
+# Parallel arrays for links: bidirectional pairs
+var _link_pid_a: [i64] = []
+var _link_pid_b: [i64] = []
+
+# Pending events (accumulated, polled by receiver)
+var _pending_down_events: [DownEvent] = []
+var _pending_down_pids: [i64] = []       # which pid receives each DownEvent
+var _pending_link_events: [LinkExitEvent] = []
+var _pending_link_pids: [i64] = []       # which pid receives each LinkExitEvent
+
+# ============================================================================
+# Monitor API
+# ============================================================================
+
 fn monitor(pid: i64) -> i64:
-    0
+    """Monitor a process from the implicit caller (watcher_pid=0).
+    Use monitor_from() to specify the watcher explicitly."""
+    monitor_from(0, pid)
 
-# Demonitor — cancel an active monitor.
-# Stub: no-op until runtime process management is available.
+fn monitor_from(watcher_pid: i64, target_pid: i64) -> i64:
+    """Monitor target_pid from watcher_pid. Returns a unique monitor reference.
+    When target exits, a DownEvent is delivered and polled with poll_down_events(watcher_pid)."""
+    val ref = _next_monitor_ref
+    _next_monitor_ref = _next_monitor_ref + 1
+    _monitor_refs = _monitor_refs + [ref]
+    _monitor_watchers = _monitor_watchers + [watcher_pid]
+    _monitor_targets = _monitor_targets + [target_pid]
+    ref
+
 fn demonitor(monitor_ref: i64):
-    pass_do_nothing
+    """Cancel an active monitor by reference."""
+    var new_refs: [i64] = []
+    var new_watchers: [i64] = []
+    var new_targets: [i64] = []
+    var i = 0
+    for ref in _monitor_refs:
+        if ref != monitor_ref:
+            new_refs = new_refs + [ref]
+            new_watchers = new_watchers + [_monitor_watchers[i]]
+            new_targets = new_targets + [_monitor_targets[i]]
+        i = i + 1
+    _monitor_refs = new_refs
+    _monitor_watchers = new_watchers
+    _monitor_targets = new_targets
 
-# Link to another process (bidirectional).
-# If either process exits abnormally, the other receives a LinkExitEvent.
-# Stub: no-op until runtime process management is available.
+# ============================================================================
+# Link API
+# ============================================================================
+
 fn link(pid: i64):
-    pass_do_nothing
+    """Link implicit caller (pid=0) to target pid.
+    Use link_pids() to specify both sides explicitly."""
+    link_pids(0, pid)
 
-# Unlink from a process.
+fn link_pids(pid_a: i64, pid_b: i64):
+    """Create bidirectional link between pid_a and pid_b.
+    If either exits, the other receives a LinkExitEvent via poll_link_events()."""
+    var i = 0
+    for a in _link_pid_a:
+        if (a == pid_a and _link_pid_b[i] == pid_b) or (a == pid_b and _link_pid_b[i] == pid_a):
+            return   # already linked
+        i = i + 1
+    _link_pid_a = _link_pid_a + [pid_a]
+    _link_pid_b = _link_pid_b + [pid_b]
+
 fn unlink(pid: i64):
-    pass_do_nothing
+    """Unlink implicit caller (pid=0) from target pid.
+    Use unlink_pids() to specify both sides explicitly."""
+    unlink_pids(0, pid)
 
-# Create a DownEvent with the given fields.
+fn unlink_pids(pid_a: i64, pid_b: i64):
+    """Remove bidirectional link between pid_a and pid_b."""
+    var new_a: [i64] = []
+    var new_b: [i64] = []
+    var i = 0
+    for a in _link_pid_a:
+        val b = _link_pid_b[i]
+        val is_match = (a == pid_a and b == pid_b) or (a == pid_b and b == pid_a)
+        if not is_match:
+            new_a = new_a + [a]
+            new_b = new_b + [b]
+        i = i + 1
+    _link_pid_a = new_a
+    _link_pid_b = new_b
+
+# ============================================================================
+# Process Exit Notification
+# ============================================================================
+
+fn notify_exit(pid: i64, reason: text):
+    """Notify all monitors and links that a process has exited.
+    Called by supervisor or runtime when a child process terminates."""
+    # Deliver DownEvents to monitors watching this pid
+    var remaining_refs: [i64] = []
+    var remaining_watchers: [i64] = []
+    var remaining_targets: [i64] = []
+    var i = 0
+    for ref in _monitor_refs:
+        val target = _monitor_targets[i]
+        val watcher = _monitor_watchers[i]
+        if target == pid:
+            val evt = DownEvent(monitor_ref: ref, pid: pid, reason: reason)
+            _pending_down_events = _pending_down_events + [evt]
+            _pending_down_pids = _pending_down_pids + [watcher]
+        else:
+            remaining_refs = remaining_refs + [ref]
+            remaining_watchers = remaining_watchers + [watcher]
+            remaining_targets = remaining_targets + [target]
+        i = i + 1
+    _monitor_refs = remaining_refs
+    _monitor_watchers = remaining_watchers
+    _monitor_targets = remaining_targets
+
+    # Deliver LinkExitEvents to linked partners
+    var remaining_a: [i64] = []
+    var remaining_b: [i64] = []
+    var j = 0
+    for a in _link_pid_a:
+        val b = _link_pid_b[j]
+        if a == pid:
+            val evt = LinkExitEvent(pid: pid, reason: reason)
+            _pending_link_events = _pending_link_events + [evt]
+            _pending_link_pids = _pending_link_pids + [b]
+        elif b == pid:
+            val evt = LinkExitEvent(pid: pid, reason: reason)
+            _pending_link_events = _pending_link_events + [evt]
+            _pending_link_pids = _pending_link_pids + [a]
+        else:
+            remaining_a = remaining_a + [a]
+            remaining_b = remaining_b + [b]
+        j = j + 1
+    _link_pid_a = remaining_a
+    _link_pid_b = remaining_b
+
+# ============================================================================
+# Event Polling
+# ============================================================================
+
+fn poll_down_events(watcher_pid: i64) -> [DownEvent]:
+    """Poll for pending DownEvents addressed to this watcher."""
+    var result: [DownEvent] = []
+    var remaining_events: [DownEvent] = []
+    var remaining_pids: [i64] = []
+    var i = 0
+    for evt in _pending_down_events:
+        if _pending_down_pids[i] == watcher_pid:
+            result = result + [evt]
+        else:
+            remaining_events = remaining_events + [evt]
+            remaining_pids = remaining_pids + [_pending_down_pids[i]]
+        i = i + 1
+    _pending_down_events = remaining_events
+    _pending_down_pids = remaining_pids
+    result
+
+fn poll_link_events(pid: i64) -> [LinkExitEvent]:
+    """Poll for pending LinkExitEvents addressed to this pid."""
+    var result: [LinkExitEvent] = []
+    var remaining_events: [LinkExitEvent] = []
+    var remaining_pids: [i64] = []
+    var i = 0
+    for evt in _pending_link_events:
+        if _pending_link_pids[i] == pid:
+            result = result + [evt]
+        else:
+            remaining_events = remaining_events + [evt]
+            remaining_pids = remaining_pids + [_pending_link_pids[i]]
+        i = i + 1
+    _pending_link_events = remaining_events
+    _pending_link_pids = remaining_pids
+    result
+
+# ============================================================================
+# Introspection & Reset
+# ============================================================================
+
+fn monitor_count() -> i64:
+    """Number of active monitors."""
+    _monitor_refs.len()
+
+fn link_count() -> i64:
+    """Number of active links."""
+    _link_pid_a.len()
+
+fn reset_monitor_state():
+    """Reset all monitor/link state (for testing)."""
+    _next_monitor_ref = 1
+    _monitor_refs = []
+    _monitor_watchers = []
+    _monitor_targets = []
+    _link_pid_a = []
+    _link_pid_b = []
+    _pending_down_events = []
+    _pending_down_pids = []
+    _pending_link_events = []
+    _pending_link_pids = []
+
+# ============================================================================
+# Convenience Constructors
+# ============================================================================
+
 fn down_event(monitor_ref: i64, pid: i64, reason: text) -> DownEvent:
     DownEvent(monitor_ref: monitor_ref, pid: pid, reason: reason)
 
-# Create a LinkExitEvent with the given fields.
 fn link_exit_event(pid: i64, reason: text) -> LinkExitEvent:
     LinkExitEvent(pid: pid, reason: reason)
 
-# Check if a DownEvent represents a normal (clean) exit.
 fn down_is_normal(evt: DownEvent) -> bool:
     evt.reason == EXIT_NORMAL
-

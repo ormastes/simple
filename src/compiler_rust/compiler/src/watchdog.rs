@@ -23,7 +23,7 @@ static WATCHDOG: Mutex<Option<WatchdogHandle>> = Mutex::new(None);
 /// Defaults to 0 (disabled). Overridable via `SIMPLE_MEMORY_LIMIT_MB`
 /// (or legacy `SIMPLE_TEST_MEMORY_LIMIT_MB`).
 /// Each binary/wrapper should set its own limit as needed.
-fn memory_limit_bytes() -> u64 {
+pub fn memory_limit_bytes() -> u64 {
     std::env::var("SIMPLE_MEMORY_LIMIT_MB")
         .or_else(|_| std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB"))
         .ok()
@@ -35,7 +35,7 @@ fn memory_limit_bytes() -> u64 {
 
 /// Read current RSS from /proc/self/statm (Linux only). Returns 0 on failure.
 #[cfg(target_os = "linux")]
-fn read_rss_bytes() -> u64 {
+pub fn read_rss_bytes() -> u64 {
     std::fs::read_to_string("/proc/self/statm")
         .ok()
         .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
@@ -44,7 +44,7 @@ fn read_rss_bytes() -> u64 {
 }
 
 #[cfg(target_os = "macos")]
-fn read_rss_bytes() -> u64 {
+pub fn read_rss_bytes() -> u64 {
     // Use `ps` to read RSS on macOS (returns KB)
     let pid = std::process::id();
     std::process::Command::new("ps")
@@ -57,7 +57,7 @@ fn read_rss_bytes() -> u64 {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read_rss_bytes() -> u64 {
+pub fn read_rss_bytes() -> u64 {
     0
 }
 
