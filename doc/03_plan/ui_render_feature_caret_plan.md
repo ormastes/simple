@@ -1,7 +1,7 @@
 # UI Render Feature Caret Plan
 
 **Date:** 2026-04-03
-**Status:** Proposed
+**Status:** In Progress
 **Research:** `doc/01_research/local/ui_render_feature_caret.md`,
 `doc/01_research/domain/ui_render_feature_caret.md`
 
@@ -20,7 +20,7 @@ feature caret that can be deployed through layers.
 4. Default verification asset selection
 5. Architecture and user guides
 
-## Phase 1: Shared UI command
+## Phase 1: Shared UI command -- Complete
 
 ### Scope
 
@@ -34,7 +34,7 @@ feature caret that can be deployed through layers.
 - `simple ui render examples/ui/widget_matrix.ui.sdn` works in Docker/headless
 - output supports at least `text` and `html`
 
-## Phase 2: Config layering
+## Phase 2: Config layering -- Complete
 
 ### Scope
 
@@ -59,7 +59,7 @@ Introduce one typed render config with fields such as:
 - help text reflects actual config knobs
 - backend override and output override are documented and tested
 
-## Phase 3: Feature-caret deployment through layers
+## Phase 3: Feature-caret deployment through layers -- In Progress
 
 ### Scope
 
@@ -79,7 +79,7 @@ Recommended implementation ownership under `src/app/ui/`.
 - backend code is adapter-only
 - no backend directly owns shared render semantics
 
-## Phase 4: GUI-like app adapters
+## Phase 4: GUI-like app adapters -- Complete
 
 ### Scope
 
@@ -96,7 +96,7 @@ using the shared render/config contract.
 - app-local `--render` implementations are removed or reduced to delegating
   shims
 
-## Phase 5: Verification and docs
+## Phase 5: Verification and docs -- In Progress
 
 ### Scope
 
