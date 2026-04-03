@@ -202,7 +202,12 @@ impl Lowerer {
                 // Extract name from pattern, handling Pattern::Typed wrapper
                 let name = extract_pattern_name(&l.pattern);
                 if let Some(n) = name {
+                    // Resolve type: check l.ty first, then Pattern::Typed wrapper.
+                    // The parser stores type annotations in Pattern::Typed (l.ty is None)
+                    // when parsing `var name: Type = value`.
                     let ty = if let Some(ref t) = l.ty {
+                        self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else {
                         TypeId::ANY
@@ -807,6 +812,17 @@ fn extract_pattern_name(pattern: &simple_parser::Pattern) -> Option<String> {
         Pattern::Identifier(n) => Some(n.clone()),
         Pattern::MutIdentifier(n) => Some(n.clone()),
         Pattern::Typed { pattern: inner, .. } => extract_pattern_name(inner),
+        _ => None,
+    }
+}
+
+/// Extract the type annotation from a Pattern::Typed wrapper, if present.
+/// The parser stores `var name: Type = value` as Pattern::Typed { ty, .. }
+/// with LetStmt.ty = None, so this function retrieves the type from the pattern.
+fn extract_pattern_type(pattern: &simple_parser::Pattern) -> Option<simple_parser::ast::Type> {
+    use simple_parser::Pattern;
+    match pattern {
+        Pattern::Typed { ty, .. } => Some(ty.clone()),
         _ => None,
     }
 }
