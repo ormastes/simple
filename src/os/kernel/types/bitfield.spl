@@ -1,0 +1,164 @@
+# Bitfield Utilities — manual bit manipulation for hardware registers
+#
+# Until the Simple compiler supports `bitfield` declarations natively,
+# kernel code uses these helper functions for type-safe bit access.
+#
+# Pattern:
+#   val pte = pte_set_present(pte_set_writable(0, true), true)
+#   val is_present = pte_get_present(pte)
+
+# ===========================================================================
+# Generic bit operations
+# ===========================================================================
+
+fn bits_get(value: u64, offset: u64, width: u64) -> u64:
+    """Extract a bit field from a value.
+
+    Returns (value >> offset) & mask where mask = (1 << width) - 1.
+    """
+    val mask: u64 = (1 << width) - 1
+    (value >> offset) & mask
+
+fn bits_set(value: u64, offset: u64, width: u64, field_val: u64) -> u64:
+    """Set a bit field in a value.
+
+    Returns (value & ~(mask << offset)) | ((field_val & mask) << offset).
+    """
+    val mask: u64 = (1 << width) - 1
+    (value & ~(mask << offset)) | ((field_val & mask) << offset)
+
+fn bit_get(value: u64, bit: u64) -> bool:
+    """Test a single bit."""
+    (value >> bit) & 1 != 0
+
+fn bit_set(value: u64, bit: u64) -> u64:
+    """Set a single bit to 1."""
+    value | (1 << bit)
+
+fn bit_clear(value: u64, bit: u64) -> u64:
+    """Clear a single bit to 0."""
+    value & ~(1 << bit)
+
+# ===========================================================================
+# x86_64 Page Table Entry (PTE) bitfield accessors
+# ===========================================================================
+#
+# Bit layout of a 4-level x86_64 PTE (64 bits):
+#   [0]     Present (P)
+#   [1]     Read/Write (RW)
+#   [2]     User/Supervisor (US)
+#   [3]     Write-Through (PWT)
+#   [4]     Cache Disable (PCD)
+#   [5]     Accessed (A)
+#   [6]     Dirty (D)
+#   [7]     Page Size / PAT (PS)
+#   [8]     Global (G)
+#   [11:9]  Available
+#   [51:12] Physical address (40 bits, 4K-aligned)
+#   [62:52] Available
+#   [63]    No Execute (NX)
+
+val PTE_PRESENT: u64 = 0
+val PTE_WRITABLE: u64 = 1
+val PTE_USER: u64 = 2
+val PTE_WRITE_THROUGH: u64 = 3
+val PTE_CACHE_DISABLE: u64 = 4
+val PTE_ACCESSED: u64 = 5
+val PTE_DIRTY: u64 = 6
+val PTE_HUGE_PAGE: u64 = 7
+val PTE_GLOBAL: u64 = 8
+val PTE_NO_EXECUTE: u64 = 63
+
+fn pte_get_present(pte: u64) -> bool:
+    bit_get(pte, PTE_PRESENT)
+
+fn pte_set_present(pte: u64, v: bool) -> u64:
+    if v: bit_set(pte, PTE_PRESENT)
+    else: bit_clear(pte, PTE_PRESENT)
+
+fn pte_get_writable(pte: u64) -> bool:
+    bit_get(pte, PTE_WRITABLE)
+
+fn pte_set_writable(pte: u64, v: bool) -> u64:
+    if v: bit_set(pte, PTE_WRITABLE)
+    else: bit_clear(pte, PTE_WRITABLE)
+
+fn pte_get_user(pte: u64) -> bool:
+    bit_get(pte, PTE_USER)
+
+fn pte_set_user(pte: u64, v: bool) -> u64:
+    if v: bit_set(pte, PTE_USER)
+    else: bit_clear(pte, PTE_USER)
+
+fn pte_get_no_execute(pte: u64) -> bool:
+    bit_get(pte, PTE_NO_EXECUTE)
+
+fn pte_set_no_execute(pte: u64, v: bool) -> u64:
+    if v: bit_set(pte, PTE_NO_EXECUTE)
+    else: bit_clear(pte, PTE_NO_EXECUTE)
+
+fn pte_get_phys_addr(pte: u64) -> u64:
+    """Extract the physical address (bits 51:12)."""
+    pte & 0x000FFFFFFFFFF000
+
+fn pte_set_phys_addr(pte: u64, addr: u64) -> u64:
+    """Set the physical address (must be 4K-aligned)."""
+    (pte & ~0x000FFFFFFFFFF000) | (addr & 0x000FFFFFFFFFF000)
+
+fn pte_make(phys_addr: u64, present: bool, writable: bool, user: bool, no_execute: bool) -> u64:
+    """Create a PTE with common flags."""
+    var pte: u64 = pte_set_phys_addr(0, phys_addr)
+    if present: pte = bit_set(pte, PTE_PRESENT)
+    if writable: pte = bit_set(pte, PTE_WRITABLE)
+    if user: pte = bit_set(pte, PTE_USER)
+    if no_execute: pte = bit_set(pte, PTE_NO_EXECUTE)
+    pte
+
+# ===========================================================================
+# Capability Token bitfield accessors
+# ===========================================================================
+#
+# Capability token layout (64 bits):
+#   [7:0]   Kind (CapabilityKind enum value)
+#   [23:8]  Generation counter (for revocation)
+#   [55:24] Owner task ID
+#   [63:56] Flags (reserved)
+
+fn cap_get_kind(token: u64) -> u64:
+    bits_get(token, 0, 8)
+
+fn cap_get_generation(token: u64) -> u64:
+    bits_get(token, 8, 16)
+
+fn cap_get_owner(token: u64) -> u64:
+    bits_get(token, 24, 32)
+
+fn cap_make(kind: u64, generation: u64, owner: u64) -> u64:
+    """Create a capability token."""
+    var token: u64 = 0
+    token = bits_set(token, 0, 8, kind)
+    token = bits_set(token, 8, 16, generation)
+    token = bits_set(token, 24, 32, owner)
+    token
+
+# ===========================================================================
+# PCI Configuration Space bitfield accessors
+# ===========================================================================
+#
+# PCI config address register (port 0xCF8):
+#   [1:0]   Always 0
+#   [7:2]   Register offset (6 bits)
+#   [10:8]  Function (3 bits)
+#   [15:11] Device (5 bits)
+#   [23:16] Bus (8 bits)
+#   [30:24] Reserved
+#   [31]    Enable
+
+fn pci_config_addr(bus: u64, dev: u64, func: u64, offset: u64) -> u64:
+    """Build PCI configuration space address register value."""
+    var addr: u64 = bit_set(0, 31)  # Enable bit
+    addr = bits_set(addr, 16, 8, bus)
+    addr = bits_set(addr, 11, 5, dev)
+    addr = bits_set(addr, 8, 3, func)
+    addr = bits_set(addr, 2, 6, offset >> 2)
+    addr
