@@ -695,6 +695,21 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
 }
 
 /* ===================================================================
+ * 8b. Native comparison — Cranelift emits calls to these for == and !=.
+ *     Receives raw i64 values (Cranelift ABI), returns 1 or 0.
+ * =================================================================== */
+
+RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
+{
+    return (a == b) ? 1 : 0;
+}
+
+RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
+{
+    return (a != b) ? 1 : 0;
+}
+
+/* ===================================================================
  * 9. _start — serial init, spl_start, isa-debug-exit
  * =================================================================== */
 
