@@ -173,6 +173,29 @@ typedef struct {
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
 
+/* Forward declaration — full definition in the Map section */
+typedef struct {
+    HeapHeader    hdr;
+    uint32_t      len;
+    uint32_t      cap;
+    RuntimeValue *keys;
+    RuntimeValue *values;
+} RuntimeMap;
+
+/* Forward declarations for functions used before definition */
+RuntimeValue rt_map_clone(RuntimeValue map);
+RuntimeValue rt_map_new(void);
+RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
+RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
+RuntimeValue rt_array_new(RuntimeValue cap_val);
+RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
+RuntimeValue rt_string_from_cstr(const char *cstr);
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
+RuntimeValue rt_value_to_string(RuntimeValue val);
+void rt_print_value(RuntimeValue val);
+
 /* ===================================================================
  * 4. Heap allocator — bump allocator, 16 MB
  * =================================================================== */
@@ -530,14 +553,18 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
     if (h->type == HEAP_STRING) {
         return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
+        int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
+    }
+    if (h->type == HEAP_MAP) {
+        /* Map indexing: key is the idx argument */
+        return rt_map_get(v, idx);
     }
     return NIL_VALUE;
 }
@@ -547,11 +574,16 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
     if (h->type == HEAP_ARRAY) {
+        int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         a->items[i] = val;
+        return val;
+    }
+    if (h->type == HEAP_MAP) {
+        /* Map indexing: key is the idx argument */
+        rt_map_set(v, idx, val);
         return val;
     }
     return NIL_VALUE;
@@ -1214,19 +1246,216 @@ RuntimeValue rt_is_frozen(RuntimeValue val)
     return 0; /* always mutable on bare metal */
 }
 
-/* --- String extras --- */
-S2(rt_string_contains)
-S2(rt_string_starts_with)
-S2(rt_string_ends_with)
-S2(rt_string_index_of)
-S2(rt_string_last_index_of)
-S2(rt_string_substr)
-S2(rt_string_split)
-S1(rt_string_trim)
-S1(rt_string_trim_start)
-S1(rt_string_trim_end)
-S1(rt_string_to_upper)
-S1(rt_string_to_lower)
+/* --- String extras ---
+ *
+ * Implement commonly-needed string operations for VFS routing and
+ * general OS string handling.  Less-used ops remain as stubs.
+ */
+
+/* Helper: get RuntimeString pointer, or NULL */
+static RuntimeString *decode_string(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return (RuntimeString *)0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(v);
+    if (!s || s->hdr.type != HEAP_STRING) return (RuntimeString *)0;
+    return s;
+}
+
+RuntimeValue rt_string_contains(RuntimeValue str, RuntimeValue needle)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *n = decode_string(needle);
+    if (!s || !n) return 0;
+    if (n->len == 0) return 1;
+    if (n->len > s->len) return 0;
+    for (uint32_t i = 0; i <= s->len - n->len; i++) {
+        uint32_t j;
+        for (j = 0; j < n->len; j++) {
+            if (s->data[i + j] != n->data[j]) break;
+        }
+        if (j == n->len) return 1;
+    }
+    return 0;
+}
+
+RuntimeValue rt_string_starts_with(RuntimeValue str, RuntimeValue prefix)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *p = decode_string(prefix);
+    if (!s || !p) return 0;
+    if (p->len > s->len) return 0;
+    for (uint32_t i = 0; i < p->len; i++) {
+        if (s->data[i] != p->data[i]) return 0;
+    }
+    return 1;
+}
+
+RuntimeValue rt_string_ends_with(RuntimeValue str, RuntimeValue suffix)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *x = decode_string(suffix);
+    if (!s || !x) return 0;
+    if (x->len > s->len) return 0;
+    uint32_t off = s->len - x->len;
+    for (uint32_t i = 0; i < x->len; i++) {
+        if (s->data[off + i] != x->data[i]) return 0;
+    }
+    return 1;
+}
+
+RuntimeValue rt_string_index_of(RuntimeValue str, RuntimeValue needle)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *n = decode_string(needle);
+    if (!s || !n || n->len == 0) return ENCODE_INT(-1);
+    if (n->len > s->len) return ENCODE_INT(-1);
+    for (uint32_t i = 0; i <= s->len - n->len; i++) {
+        uint32_t j;
+        for (j = 0; j < n->len; j++) {
+            if (s->data[i + j] != n->data[j]) break;
+        }
+        if (j == n->len) return ENCODE_INT((int64_t)i);
+    }
+    return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_string_last_index_of(RuntimeValue str, RuntimeValue needle)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *n = decode_string(needle);
+    if (!s || !n || n->len == 0) return ENCODE_INT(-1);
+    if (n->len > s->len) return ENCODE_INT(-1);
+    for (int64_t i = (int64_t)(s->len - n->len); i >= 0; i--) {
+        uint32_t j;
+        for (j = 0; j < n->len; j++) {
+            if (s->data[i + j] != n->data[j]) break;
+        }
+        if (j == n->len) return ENCODE_INT(i);
+    }
+    return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start)
+{
+    /* substr(str, start) -- returns from start to end */
+    RuntimeString *s = decode_string(str);
+    if (!s) return NIL_VALUE;
+    int64_t a = DECODE_INT(start);
+    if (a < 0) a = 0;
+    if ((uint32_t)a >= s->len) {
+        return rt_string_from_cstr("");
+    }
+    return rt_string_slice(str, start, ENCODE_INT(s->len));
+}
+
+/* rt_string_split: split by delimiter, return array of strings */
+RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *d = decode_string(delim);
+    RuntimeValue arr = rt_array_new(ENCODE_INT(4));
+    if (!s || s->len == 0) return arr;
+    if (!d || d->len == 0) {
+        /* Split into individual characters */
+        for (uint32_t i = 0; i < s->len; i++) {
+            RuntimeValue ch = rt_string_new(
+                (RuntimeValue)(uintptr_t)&s->data[i], 1);
+            arr = rt_array_push(arr, ch);
+        }
+        return arr;
+    }
+    uint32_t start = 0;
+    for (uint32_t i = 0; i <= s->len - d->len; ) {
+        uint32_t j;
+        for (j = 0; j < d->len; j++) {
+            if (s->data[i + j] != d->data[j]) break;
+        }
+        if (j == d->len) {
+            /* Found delimiter at i */
+            RuntimeValue part = rt_string_slice(str,
+                ENCODE_INT(start), ENCODE_INT(i));
+            arr = rt_array_push(arr, part);
+            i += d->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    /* Remainder */
+    RuntimeValue rest = rt_string_slice(str,
+        ENCODE_INT(start), ENCODE_INT(s->len));
+    arr = rt_array_push(arr, rest);
+    return arr;
+}
+
+static int is_whitespace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+RuntimeValue rt_string_trim(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s || s->len == 0) return str;
+    uint32_t start = 0;
+    while (start < s->len && is_whitespace(s->data[start])) start++;
+    uint32_t end = s->len;
+    while (end > start && is_whitespace(s->data[end - 1])) end--;
+    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(end));
+}
+
+RuntimeValue rt_string_trim_start(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s || s->len == 0) return str;
+    uint32_t start = 0;
+    while (start < s->len && is_whitespace(s->data[start])) start++;
+    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+}
+
+RuntimeValue rt_string_trim_end(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s || s->len == 0) return str;
+    uint32_t end = s->len;
+    while (end > 0 && is_whitespace(s->data[end - 1])) end--;
+    return rt_string_slice(str, ENCODE_INT(0), ENCODE_INT(end));
+}
+
+RuntimeValue rt_string_to_upper(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
+    r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        r->data[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+    }
+    r->data[s->len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_to_lower(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
+    r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        r->data[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    r->data[s->len] = '\0';
+    return ENCODE_PTR(r);
+}
+
 S2(rt_string_replace)
 S3(rt_string_replace_all)
 S2(rt_string_repeat)
@@ -1235,8 +1464,32 @@ S2(rt_string_pad_end)
 S1(rt_string_reverse)
 S1(rt_string_chars)
 S1(rt_string_bytes)
-S1(rt_string_is_empty)
-S2(rt_string_compare)
+
+RuntimeValue rt_string_is_empty(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s) return 1; /* nil/non-string is "empty" */
+    return s->len == 0 ? 1 : 0;
+}
+
+RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b)
+{
+    RuntimeString *sa = decode_string(a);
+    RuntimeString *sb = decode_string(b);
+    if (!sa && !sb) return ENCODE_INT(0);
+    if (!sa) return ENCODE_INT(-1);
+    if (!sb) return ENCODE_INT(1);
+    uint32_t min_len = sa->len < sb->len ? sa->len : sb->len;
+    for (uint32_t i = 0; i < min_len; i++) {
+        if (sa->data[i] != sb->data[i])
+            return ENCODE_INT((int64_t)(unsigned char)sa->data[i]
+                            - (int64_t)(unsigned char)sb->data[i]);
+    }
+    if (sa->len < sb->len) return ENCODE_INT(-1);
+    if (sa->len > sb->len) return ENCODE_INT(1);
+    return ENCODE_INT(0);
+}
+
 S2(rt_string_format)
 
 /* --- Array --- */
@@ -1332,11 +1585,77 @@ RuntimeValue rt_array_len(RuntimeValue arr)
     if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
     return ENCODE_INT(a->len);
 }
-S3(rt_array_slice)
-S2(rt_array_contains)
-S2(rt_array_index_of)
-S2(rt_array_last_index_of)
-S2(rt_array_remove)
+/* rt_array_slice(arr, start, end) — return sub-array */
+RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t s = DECODE_INT(start);
+    int64_t e = DECODE_INT(end);
+    if (s < 0) s = 0;
+    if (e > (int64_t)a->len) e = (int64_t)a->len;
+    if (s >= e) return rt_array_new(ENCODE_INT(1));
+    RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
+    for (int64_t i = s; i < e; i++) {
+        result = rt_array_push(result, a->items[i]);
+    }
+    return result;
+}
+
+/* rt_array_contains(arr, val) — linear scan for match */
+RuntimeValue rt_array_contains(RuntimeValue arr, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    for (uint32_t i = 0; i < a->len; i++) {
+        if (rt_native_eq(a->items[i], val)) return 1;
+    }
+    return 0;
+}
+
+/* rt_array_index_of(arr, val) — return first index or -1 */
+RuntimeValue rt_array_index_of(RuntimeValue arr, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(-1);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    for (uint32_t i = 0; i < a->len; i++) {
+        if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i);
+    }
+    return ENCODE_INT(-1);
+}
+
+/* rt_array_last_index_of(arr, val) */
+RuntimeValue rt_array_last_index_of(RuntimeValue arr, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(-1);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    for (int64_t i = (int64_t)a->len - 1; i >= 0; i--) {
+        if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i);
+    }
+    return ENCODE_INT(-1);
+}
+
+/* rt_array_remove(arr, idx) — remove at index, shift down */
+RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    RuntimeValue removed = a->items[i];
+    for (uint32_t j = (uint32_t)i; j + 1 < a->len; j++) {
+        a->items[j] = a->items[j + 1];
+    }
+    a->len--;
+    a->items[a->len] = NIL_VALUE;
+    return removed;
+}
+
 S3(rt_array_insert)
 S1(rt_array_reverse)
 S1(rt_array_sort)
@@ -1349,12 +1668,62 @@ S2(rt_array_find)
 S2(rt_array_find_index)
 S2(rt_array_every)
 S2(rt_array_some)
-S2(rt_array_join)
-S2(rt_array_concat)
-S1(rt_array_clear)
+
+/* rt_array_join(arr, sep) — join string array with separator */
+RuntimeValue rt_array_join(RuntimeValue arr, RuntimeValue sep)
+{
+    if (!IS_HEAP(arr)) return rt_string_from_cstr("");
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0)
+        return rt_string_from_cstr("");
+    RuntimeValue result = rt_value_to_string(a->items[0]);
+    for (uint32_t i = 1; i < a->len; i++) {
+        if (IS_HEAP(sep)) result = rt_string_concat(result, sep);
+        result = rt_string_concat(result, rt_value_to_string(a->items[i]));
+    }
+    return result;
+}
+
+/* rt_array_concat(arr_a, arr_b) */
+RuntimeValue rt_array_concat(RuntimeValue arr_a, RuntimeValue arr_b)
+{
+    RuntimeArray *a = IS_HEAP(arr_a) ? (RuntimeArray *)DECODE_PTR(arr_a) : (RuntimeArray *)0;
+    RuntimeArray *b = IS_HEAP(arr_b) ? (RuntimeArray *)DECODE_PTR(arr_b) : (RuntimeArray *)0;
+    uint32_t la = (a && a->hdr.type == HEAP_ARRAY) ? a->len : 0;
+    uint32_t lb = (b && b->hdr.type == HEAP_ARRAY) ? b->len : 0;
+    RuntimeValue result = rt_array_new(ENCODE_INT(la + lb > 0 ? la + lb : 1));
+    for (uint32_t i = 0; i < la; i++) result = rt_array_push(result, a->items[i]);
+    for (uint32_t i = 0; i < lb; i++) result = rt_array_push(result, b->items[i]);
+    return result;
+}
+
+/* rt_array_clear(arr) */
+RuntimeValue rt_array_clear(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return arr;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return arr;
+    for (uint32_t i = 0; i < a->len; i++) a->items[i] = NIL_VALUE;
+    a->len = 0;
+    return arr;
+}
+
 S1(rt_array_flatten)
 S2(rt_array_fill)
-S1(rt_array_clone)
+
+/* rt_array_clone(arr) — shallow copy */
+RuntimeValue rt_array_clone(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
+    for (uint32_t i = 0; i < a->len; i++) {
+        result = rt_array_push(result, a->items[i]);
+    }
+    return result;
+}
+
 S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
@@ -1365,18 +1734,9 @@ S1(rt_array_compact)
  * Keys are RuntimeValues compared via rt_native_eq (works for ints
  * and strings).  Suitable for small maps (VFS mount table, IPC
  * service registry) on bare metal.
+ *
+ * RuntimeMap typedef is in section 3 (forward-declared for rt_len).
  */
-
-typedef struct {
-    HeapHeader    hdr;
-    uint32_t      len;
-    uint32_t      cap;
-    RuntimeValue *keys;
-    RuntimeValue *values;
-} RuntimeMap;
-
-/* Forward declaration — defined in section 8b */
-RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 
 static RuntimeMap *decode_map(RuntimeValue v)
 {

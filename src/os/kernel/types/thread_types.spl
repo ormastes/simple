@@ -1,63 +1,57 @@
 # Thread Types — L4-style execution context separate from address space
 #
-# In L4 microkernel design, a Thread is an execution context that runs
-# within an address space (VmSpace). Multiple threads can share the
-# same address space (lightweight threads) or each have their own
-# (traditional processes).
+# Thread is an execution context within a VmSpace. Multiple threads can
+# share the same VmSpace. Thread owns: saved registers, kernel stack,
+# scheduling state. Does NOT own: page tables, capabilities, file descriptors.
 #
-# Thread objects own: saved CPU registers, kernel stack, scheduling state.
-# They do NOT own: page tables, capabilities, file descriptors.
+# All fields use primitive types (u64, u32, u8, bool) for baremetal ABI safety.
 
-use os.kernel.types.task_types.{TaskPriority, TaskState}
+# Thread states (matching existing TaskState enum values)
+val THREAD_STATE_READY: u8 = 0
+val THREAD_STATE_RUNNING: u8 = 1
+val THREAD_STATE_BLOCKED: u8 = 2
+val THREAD_STATE_ZOMBIE: u8 = 3
 
-# Thread ID — unique per-thread, not per-process
-struct ThreadId:
-    id: u64
+# Block reasons
+val BLOCK_ENDPOINT_RECV: u8 = 0
+val BLOCK_ENDPOINT_SEND: u8 = 1
+val BLOCK_NOTIFICATION: u8 = 2
+val BLOCK_SLEEP: u8 = 3
+val BLOCK_PAGE_FAULT: u8 = 4
 
-# Thread CPU context — architecture-neutral representation
-# Architecture-specific save/restore lives in arch/*/context.spl
-struct ThreadContext:
-    # General-purpose register save area (architecture-specific count)
-    regs: [u64; 32]
-    # Instruction pointer / program counter
-    pc: u64
-    # Stack pointer
-    sp: u64
-    # Flags / status register
-    flags: u64
-    # FPU/SIMD state pointer (nil if not used)
-    fpu_state: u64?
+# Priority levels (matching existing TaskPriority)
+val PRIORITY_REALTIME: u8 = 0
+val PRIORITY_HIGH: u8 = 1
+val PRIORITY_NORMAL: u8 = 2
+val PRIORITY_LOW: u8 = 3
+val PRIORITY_IDLE: u8 = 4
 
-# Thread Control Block
+# Thread Control Block — all primitive fields
 struct Thread:
-    id: ThreadId
-    # The VmSpace this thread executes in
+    id: u64
     vmspace_id: u64
-    # Scheduling
-    state: TaskState
-    priority: TaskPriority
+    state: u8
+    priority: u8
     time_slice_remaining: u64
-    # Context
-    context: ThreadContext
+    # Saved CPU context
+    pc: u64
+    sp: u64
+    flags: u64
+    # General-purpose registers stored in a separate array
+    # (architecture manages the actual save/restore)
+    context_ptr: u64
+    # Stacks
     kernel_stack_base: u64
     kernel_stack_size: u64
     # Blocking
-    blocked_on: BlockTarget?
-    # Fault handler — endpoint to deliver exceptions to (L4 style)
-    fault_handler: u64?
+    block_reason: u8
+    block_target_id: u64
+    # Fault handler endpoint (0 = none)
+    fault_handler_endpoint: u64
 
-# What a thread can be blocked on
-enum BlockTarget:
-    EndpointRecv(endpoint_id: u64)
-    EndpointSend(endpoint_id: u64)
-    NotificationWait(notification_id: u64)
-    Sleep(wake_at_ticks: u64)
-    PageFault(fault_addr: u64)
-
-# Thread creation parameters
 struct ThreadCreateParams:
     vmspace_id: u64
     entry_point: u64
     stack_pointer: u64
-    priority: TaskPriority
-    fault_handler: u64?
+    priority: u8
+    fault_handler_endpoint: u64

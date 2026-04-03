@@ -1,69 +1,38 @@
 # Endpoint Types — L4-style capability-based IPC endpoints
 #
-# Endpoints replace string-named ports. An endpoint is a capability-protected
-# IPC channel. Threads send/recv through endpoints. The kernel never inspects
-# message payloads — it only validates capabilities and routes messages.
-#
-# Design: seL4-inspired capability-based endpoints with async notifications.
+# All fields use primitive types for baremetal ABI safety.
 
-# Endpoint ID — kernel-assigned, used in capability tokens
-struct EndpointId:
+# IPC result codes
+val IPC_OK: u64 = 0
+val IPC_WOULD_BLOCK: u64 = 1
+val IPC_INVALID_ENDPOINT: u64 = 2
+val IPC_PERMISSION_DENIED: u64 = 3
+val IPC_BUFFER_TOO_SMALL: u64 = 4
+val IPC_TIMEOUT: u64 = 5
+
+# Wait result types
+val WAIT_ENDPOINT: u64 = 0
+val WAIT_NOTIFICATION: u64 = 1
+val WAIT_TIMEOUT: u64 = 2
+
+struct Endpoint:
     id: u64
+    # Badge — opaque value stamped on messages (identifies client to server)
+    badge: u64
+    # Buffer physical page for zero-copy IPC
+    buffer_phys: u64
+    buffer_size: u64
 
-# Message buffer — shared memory region for zero-copy IPC
-struct MessageBuffer:
-    # Physical page(s) backing the buffer
-    phys_base: u64
-    # Size in bytes (typically 4096 for single-page messages)
-    size: u64
-    # Current message length (set by sender, read by receiver)
-    msg_len: u64
-
-# IPC message header — placed at start of message buffer
 struct IpcHeader:
-    # Method identifier (application-defined)
     method: u32
-    # Number of capability tokens being transferred
     cap_count: u16
-    # Flags
     flags: u16
-    # Payload length (bytes after header)
     payload_len: u32
 
-# IPC endpoint — kernel object for message passing
-struct Endpoint:
-    id: EndpointId
-    # Queue of waiting senders (thread IDs)
-    send_waiters: [u64]
-    # Queue of waiting receivers (thread IDs)
-    recv_waiters: [u64]
-    # Message buffer (shared between sender and receiver)
-    buffer: MessageBuffer?
-    # Badge — opaque value stamped on messages sent through this endpoint
-    # Used by servers to identify clients without inspecting payloads
-    badge: u64
-
-# Endpoint creation parameters
 struct EndpointCreateParams:
-    # Initial badge value (0 = no badge)
     badge: u64
 
-# IPC operation result
-enum IpcResult:
-    Ok(msg_len: u64)
-    WouldBlock
-    InvalidEndpoint
-    PermissionDenied
-    BufferTooSmall(needed: u64)
-    Timeout
-
-# IPC wait set — wait on multiple endpoints + notifications
-struct WaitSet:
-    endpoint_ids: [u64]
-    notification_ids: [u64]
-
-# Wait result — which object became ready
-enum WaitResult:
-    EndpointReady(endpoint_id: u64)
-    NotificationReady(notification_id: u64, bits: u64)
-    Timeout
+struct WaitResult:
+    result_type: u64    # WAIT_ENDPOINT, WAIT_NOTIFICATION, WAIT_TIMEOUT
+    object_id: u64      # which endpoint or notification became ready
+    bits: u64           # notification bits (only for WAIT_NOTIFICATION)

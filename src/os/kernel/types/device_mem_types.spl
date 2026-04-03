@@ -1,68 +1,47 @@
 # Device Memory Types — Exokernel-style device resource grants
 #
-# The kernel exposes raw device resources to user-space drivers via
-# capability-protected grants. A DeviceGrant bundles everything a
-# driver needs: BAR mappings, IRQ object, DMA window, optional IOMMU domain.
-#
-# Design principle: kernel provides PROTECTION, drivers provide MANAGEMENT.
-# The kernel never implements "disk", "network", or "GPU" policy.
+# All fields use primitive types for baremetal ABI safety.
+# The kernel exposes raw device resources to user-space drivers.
 
-use os.kernel.types.capability_types.{CapabilityToken}
+# DMA direction constants
+val DMA_TO_DEVICE: u8 = 0
+val DMA_FROM_DEVICE: u8 = 1
+val DMA_BIDIRECTIONAL: u8 = 2
 
-# PCI Bus/Device/Function identifier
 struct PciBdf:
     bus: u8
     device: u8
     function: u8
 
-# PCI BAR (Base Address Register) mapping
 struct PciBar:
-    index: u8        # BAR number (0-5)
-    phys_addr: u64   # physical address
-    size: u64        # region size in bytes
-    is_mmio: bool    # true = MMIO, false = I/O port
-    is_prefetchable: bool
-    # Capability token granting access to this BAR
-    cap: CapabilityToken
-
-# IRQ object — kernel-managed interrupt routing
-struct IrqObject:
-    # IRQ number (legacy) or MSI/MSI-X vector
-    vector: u32
-    # Notification to signal when IRQ fires
-    notification_id: u64
-    # Notification bit to set
-    notification_bit: u64
-    # Capability token
-    cap: CapabilityToken
-
-# DMA window — pinned physical memory for device DMA
-struct DmaWindow:
-    # Physical address visible to the device
-    device_addr: u64
-    # Physical address in host memory
-    host_addr: u64
-    # Size in bytes
+    index: u8
+    phys_addr: u64
     size: u64
-    # Direction
-    direction: DmaDirection
-    # Capability token
-    cap: CapabilityToken
+    is_mmio: bool
+    is_prefetchable: bool
+    cap_token: u64   # capability token ID
 
-enum DmaDirection:
-    ToDevice
-    FromDevice
-    Bidirectional
+struct IrqObject:
+    vector: u32
+    notification_id: u64
+    notification_bit: u64
+    cap_token: u64
 
-# IOMMU domain — device isolation boundary
+struct DmaWindow:
+    device_addr: u64
+    host_addr: u64
+    size: u64
+    direction: u8
+    cap_token: u64
+
 struct IommuDomain:
     domain_id: u32
-    # Capability token for managing this domain
-    cap: CapabilityToken
+    cap_token: u64
 
-# PCI Function — complete device identity
 struct PciFunction:
-    bdf: PciBdf
+    bdf_bus: u8
+    bdf_device: u8
+    bdf_function: u8
     vendor_id: u16
     device_id: u16
     class_code: u8
@@ -71,24 +50,29 @@ struct PciFunction:
     revision: u8
 
 # Device Grant — everything a user-space driver needs
-#
-# Pattern:
-#   fn driver_main(grant: DeviceGrant):
-#       val regs = mmio_map(grant.bars[0])
-#       while true:
-#           match wait_any([grant.irq, control_port]):
-#               Event.Irq(_): handle_irq(regs)
-#               Event.Msg(msg): handle_control(msg)
+# Kernel grants this to a driver capsule via capability transfer.
 struct DeviceGrant:
-    # PCI identity
-    pci: PciFunction
-    # BAR mappings (up to 6)
-    bars: [PciBar]
-    # IRQ object (legacy or MSI-X vector 0)
-    irq: IrqObject
-    # DMA window for bulk transfers
-    dma_window: DmaWindow?
-    # IOMMU domain for device isolation
-    iommu_domain: IommuDomain?
-    # Additional MSI-X vectors (beyond the primary IRQ)
-    msix_vectors: [IrqObject]
+    pci_vendor: u16
+    pci_device: u16
+    pci_bus: u8
+    pci_dev: u8
+    pci_func: u8
+    pci_class: u8
+    pci_subclass: u8
+    # BAR 0 mapping (primary — most drivers only need BAR0)
+    bar0_phys: u64
+    bar0_size: u64
+    bar0_cap: u64
+    # IRQ
+    irq_vector: u32
+    irq_notification_id: u64
+    irq_notification_bit: u64
+    irq_cap: u64
+    # DMA (0 if not applicable)
+    dma_device_addr: u64
+    dma_host_addr: u64
+    dma_size: u64
+    dma_cap: u64
+    # IOMMU (0 if not applicable)
+    iommu_domain_id: u32
+    iommu_cap: u64
