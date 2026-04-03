@@ -162,7 +162,7 @@ pub(super) fn eval_call_expr(
                     if let Some(func) = functions.get(field).cloned() {
                         return Ok(Some(Value::Function {
                             name: field.clone(),
-                            def: Box::new(func.clone()),
+                            def: Arc::new(func.clone()),
                             captured_env: Arc::new(Env::new()),
                         }));
                     }
@@ -300,7 +300,7 @@ pub(super) fn eval_call_expr(
                             // Return as a function value for call
                             return Ok(Some(Value::Function {
                                 name: method.name.clone(),
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(Env::new()),
                             }));
                         }
@@ -313,7 +313,7 @@ pub(super) fn eval_call_expr(
                                 }
                                 return Ok(Some(Value::Function {
                                     name: method.name.clone(),
-                                    def: Box::new(method.clone()),
+                                    def: Arc::new(method.clone()),
                                     captured_env: Arc::new(Env::new()),
                                 }));
                             }
@@ -406,7 +406,7 @@ pub(super) fn eval_call_expr(
                             if let Some(method) = enum_def.methods.iter().find(|m| m.name == *field) {
                                 Ok(Value::Function {
                                     name: method.name.clone(),
-                                    def: Box::new(method.clone()),
+                                    def: Arc::new(method.clone()),
                                     captured_env: Arc::new(Env::new()),
                                 })
                             } else {

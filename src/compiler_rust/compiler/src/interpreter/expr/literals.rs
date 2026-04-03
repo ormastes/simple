@@ -244,7 +244,7 @@ pub(super) fn eval_literal_expr(
             if let Some(func) = functions.get(name).cloned() {
                 return Ok(Some(Value::Function {
                     name: name.clone(),
-                    def: Box::new(func.clone()),
+                    def: Arc::new(func.clone()),
                     captured_env: Arc::new(Env::new()), // Top-level functions don't capture
                 }));
             }

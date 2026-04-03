@@ -1,7 +1,7 @@
 # Research: Interpreter Memory Explosion in MCP Servers
 
 **Date:** 2026-04-03
-**Status:** BUG-1/2/4/6/7 Fixed, BUG-3/5 Open (low priority — under 100MB now)
+**Status:** ALL BUGS FIXED (BUG-1/2/3/4/5/6/7)
 **Severity:** Critical — T32 MCP servers OOM-killed at 100MB watchdog limit
 
 ## Fix Results — All Stages
@@ -22,7 +22,15 @@
 | CMM daemon (narrow lib) | 8,923 | **76** | **-99.1%** |
 | `use std.io.{print}` | 7,270 | **21** | **-99.7%** |
 
-**ALL T32 MCP servers now fit under the 100MB watchdog limit. Zero crash logs.**
+### Stage 3: Arc<FunctionDef> + Sibling Preload Cap (BUG-5 + BUG-3)
+| Workload | Before (MB) | After (MB) | Reduction |
+|----------|------------|-----------|-----------|
+| Baseline (`--version`) | 14 | 14 | same |
+| T32 LSP MCP main.spl | 132 | **27** | **-80%** |
+| CMM daemon (narrow lib) | 8,923 | **57** | **-99.4%** |
+| `use std.io.{print}` | 7,270 | **21** | **-99.7%** |
+
+**ALL T32 MCP servers fit under 100MB watchdog. Zero crash logs. 112,384 tests passed.**
 
 ## Problem Statement
 
@@ -210,7 +218,7 @@ and asserts they load successfully. Any regression fails the build.
 | BUG-1 (Arc<Env> captured_env) | -50-90% RSS | Medium | P0 | **DONE** |
 | BUG-7 (cascade merge defeat Arc) | -75% RSS after BUG-1 | Low | P0 | **DONE** |
 | BUG-4 (cascade env growth) | Fixed by BUG-1+7 | None | N/A | **DONE** |
-| BUG-5 (Arc<FunctionDef>) | -15-30% RSS | Medium | P2 | Open |
-| BUG-3 (sibling preload cap) | Prevents edge cases | Medium | P2 | Open |
+| BUG-5 (Arc<FunctionDef>) | -25% RSS after BUG-1 | Medium | P1 | **DONE** |
+| BUG-3 (sibling preload cap) | Prevents edge cases | Low | P1 | **DONE** |
 
-**Verification:** 112,206 tests passed, 0 failed. All MCP servers under 100MB watchdog.
+**Verification:** 112,384 tests passed, 0 failed. All MCP servers under 100MB watchdog.

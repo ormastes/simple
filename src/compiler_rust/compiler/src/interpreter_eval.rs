@@ -283,7 +283,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // For top-level functions, captured_env is empty (they don't capture anything)
                     let func_value = Value::Function {
                         name: f.name.clone(),
-                        def: Box::new(f.clone()),
+                        def: Arc::new(f.clone()),
                         captured_env: Arc::new(Env::new()),
                     };
 
@@ -398,7 +398,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -516,7 +516,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -570,7 +570,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 mangled.clone(),
                                 Value::Function {
                                     name: mangled,
-                                    def: Box::new(method.clone()),
+                                    def: Arc::new(method.clone()),
                                     captured_env: Arc::new(Env::new()),
                                 },
                             );
@@ -895,7 +895,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             name.clone(),
                             Value::Function {
                                 name: name.clone(),
-                                def: Box::new(functions.get(&name).unwrap().clone()),
+                                def: Arc::new(functions.get(&name).unwrap().clone()),
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -1128,7 +1128,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Also add to module dict for module.func() calls
                                 let func_value = Value::Function {
                                     name: f.name.clone(),
-                                    def: Box::new(f.clone()),
+                                    def: Arc::new(f.clone()),
                                     captured_env: Arc::new(Env::new()),
                                 };
                                 module_dict.insert(f.name.clone(), func_value);

@@ -95,7 +95,7 @@ pub(super) fn register_definitions(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -143,7 +143,7 @@ pub(super) fn register_definitions(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -183,7 +183,7 @@ pub(super) fn register_definitions(
                                 mangled.clone(),
                                 Value::Function {
                                     name: mangled,
-                                    def: Box::new(method.clone()),
+                                    def: Arc::new(method.clone()),
                                     captured_env: Arc::new(HashMap::new()),
                                 },
                             );
@@ -232,7 +232,7 @@ pub(super) fn register_definitions(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -560,13 +560,18 @@ pub(super) fn export_functions(
     env: &mut Env,
 ) {
     // First pass: Add all module functions to env with empty captured_env
+    // We pre-build shared Arc<FunctionDef> per function so both passes share the same allocation.
     trace!(functions = local_functions.len(), "First pass: adding functions to env");
-    for (name, f) in local_functions {
+    let shared_defs: HashMap<String, Arc<simple_parser::ast::FunctionDef>> = local_functions
+        .iter()
+        .map(|(name, f)| (name.clone(), Arc::new(f.clone())))
+        .collect();
+    for (name, shared_def) in &shared_defs {
         env.insert(
             name.clone(),
             Value::Function {
                 name: name.clone(),
-                def: Box::new(f.clone()),
+                def: shared_def.clone(),
                 captured_env: Arc::new(Env::new()),
             },
         );
@@ -581,10 +586,10 @@ pub(super) fn export_functions(
     );
     let shared_env = Arc::new(filtered_env.clone());
     let mut exported_count = 0;
-    for (name, f) in local_functions {
+    for (name, shared_def) in &shared_defs {
         let func_with_env = Value::Function {
             name: name.clone(),
-            def: Box::new(f.clone()),
+            def: shared_def.clone(),
             captured_env: shared_env.clone(),
         };
         // Always add to env (for internal module use)

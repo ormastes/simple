@@ -516,7 +516,7 @@ pub(super) fn exec_block_closure(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
-                        def: Box::new(f.clone()),
+                        def: Arc::new(f.clone()),
                         captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );
@@ -543,7 +543,7 @@ pub(super) fn exec_block_closure(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -634,7 +634,7 @@ pub(super) fn exec_block_closure(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -661,7 +661,7 @@ pub(super) fn exec_block_closure(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -745,7 +745,7 @@ pub(super) fn exec_block_closure(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1099,7 +1099,7 @@ fn exec_block_closure_mut(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1126,7 +1126,7 @@ fn exec_block_closure_mut(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1210,7 +1210,7 @@ fn exec_block_closure_mut(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Box::new(method.clone()),
+                                def: Arc::new(method.clone()),
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1251,7 +1251,7 @@ fn exec_block_closure_mut(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
-                        def: Box::new(f.clone()),
+                        def: Arc::new(f.clone()),
                         captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );

@@ -77,6 +77,14 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
         return true;
     }
 
+    // Skip files larger than 50KB — unlikely to be simple re-export modules
+    const MAX_SIBLING_CHECK_BYTES: u64 = 50 * 1024;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_SIBLING_CHECK_BYTES {
+            return false;
+        }
+    }
+
     let Ok(source) = fs::read_to_string(path) else {
         return false;
     };
@@ -553,6 +561,21 @@ pub fn load_and_merge_module(
                                 _ => a.cmp(b),
                             }
                         });
+                        // Cap sibling preload count to prevent unbounded memory growth (BUG-3)
+                        let max_siblings = std::env::var("SIMPLE_SIBLING_PRELOAD_LIMIT")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(20);
+                        if sibling_files.len() > max_siblings {
+                            loader_trace!(
+                                "sibling-cap",
+                                "skipping preload for {} — {} siblings exceeds cap {}",
+                                module_path.display(),
+                                sibling_files.len(),
+                                max_siblings
+                            );
+                            sibling_files.truncate(max_siblings);
+                        }
                         for sibling_path in &sibling_files {
                             // Early termination: if all requested names are already found, skip remaining siblings
                             if let Some(names) = requested_names.as_ref() {

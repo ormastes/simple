@@ -143,7 +143,7 @@ pub(super) fn eval_collection_expr(
                 } else if let Some(func) = functions.get(variant).cloned() {
                     Ok(Value::Function {
                         name: variant.clone(),
-                        def: Box::new(func.clone()),
+                        def: Arc::new(func.clone()),
                         captured_env: Arc::new(Env::new()),
                     })
                 } else if classes.contains_key(variant) {

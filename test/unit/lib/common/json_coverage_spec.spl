@@ -30,7 +30,9 @@ use lib.json.serializer.{json_serialize, json_format, json_pretty, json_stringif
 use lib.json.builder.{JsonBuilder, JsonArrayBuilder, escape_json}
 use lib.common.types.{Count}
 use lib.json.object_ops.{json_object_get, json_object_set, json_object_has, json_object_remove, json_object_keys, json_object_values, json_object_entries, json_object_size, json_object_empty, json_object_merge}
+use lib.json.object_ops.{json_object_map_values, json_object_filter, json_object_find, json_object_without, json_object_pick, json_from_entries}
 use lib.json.array_ops.{json_array_get, json_array_set, json_array_append, json_array_prepend, json_array_insert, json_array_remove, json_array_length, json_array_empty, json_array_first, json_array_last, json_array_slice, json_array_concat, json_array_reverse, json_array_contains, json_array_index_of, json_array_flatten, json_array_unique}
+use lib.json.array_ops.{json_array_map, json_array_filter, json_array_find, json_array_every, json_array_some, json_array_reduce, json_array_sort_by, json_array_group_by}
 use lib.json.path_ops.{json_path_parse, json_path_get, json_path_set, json_path_has, json_path_delete}
 use lib.json.validation.{json_validate_schema, json_deep_equals, json_deep_clone}
 use lib.json.utilities.{json_merge_deep, json_diff, json_patch, json_flatten_object, json_unflatten_object}
@@ -632,6 +634,52 @@ describe "JSON Object Operations":
             expect(json_object_empty(json_object({}))).to_equal(true)
             expect(json_object_empty(json_object({"a": json_number(1)}))).to_equal(false)
 
+    context "higher-order operations":
+        it "maps object values":
+            val obj = json_object({"a": json_number(1), "b": json_number(2)})
+            val mapped = json_object_map_values(obj, \v: json_number(json_to_number(v) * 10))
+            expect(json_to_number(json_object_get(mapped, "a"))).to_equal(10)
+            expect(json_to_number(json_object_get(mapped, "b"))).to_equal(20)
+
+        it "map values returns empty object for non-object":
+            val mapped = json_object_map_values(json_number(1), \v: v)
+            expect(json_object_size(mapped)).to_equal(0)
+
+        it "filters object entries":
+            val obj = json_object({"a": json_number(1), "b": json_number(2)})
+            val filtered = json_object_filter(obj, \k, v: json_to_number(v) > 1)
+            expect(json_object_has(filtered, "a")).to_equal(false)
+            expect(json_object_has(filtered, "b")).to_equal(true)
+
+        it "finds matching object entry":
+            val obj = json_object({"a": json_number(1), "b": json_number(2)})
+            val found = json_object_find(obj, \k, v: json_to_number(v) == 2)
+            expect(found.0).to_equal("b")
+            expect(json_to_number(found.1)).to_equal(2)
+
+        it "returns nil when object find misses":
+            val obj = json_object({"a": json_number(1)})
+            expect(json_object_find(obj, \k, v: json_to_number(v) == 9)).to_be_nil()
+
+        it "removes requested keys with without":
+            val obj = json_object({"a": json_number(1), "b": json_number(2), "c": json_number(3)})
+            val result = json_object_without(obj, ["b", "x"])
+            expect(json_object_has(result, "a")).to_equal(true)
+            expect(json_object_has(result, "b")).to_equal(false)
+            expect(json_object_has(result, "c")).to_equal(true)
+
+        it "picks only requested existing keys":
+            val obj = json_object({"a": json_number(1), "b": json_number(2)})
+            val result = json_object_pick(obj, ["b", "missing"])
+            expect(json_object_size(result)).to_equal(1)
+            expect(json_to_number(json_object_get(result, "b"))).to_equal(2)
+
+        it "builds object from entries":
+            val result = json_from_entries([("a", json_number(1)), ("b", json_string("x"))])
+            expect(json_object_size(result)).to_equal(2)
+            expect(json_to_number(json_object_get(result, "a"))).to_equal(1)
+            expect(json_to_string(json_object_get(result, "b"))).to_equal("x")
+
 
 # ============================================================================
 # JSON Array Operations
@@ -689,6 +737,27 @@ describe "JSON Array Operations":
             val arr = json_array([json_number(1), json_number(2), json_number(3)])
             val updated = json_array_remove(arr, 1)
             expect(json_array_length(updated)).to_equal(2)
+
+        it "inserts element in middle":
+            val arr = json_array([json_number(1), json_number(3)])
+            val updated = json_array_insert(arr, 1, json_number(2))
+            expect(json_array_length(updated)).to_equal(3)
+            expect(json_to_number(json_array_get(updated, 1))).to_equal(2)
+
+        it "inserts element at array end":
+            val arr = json_array([json_number(1)])
+            val updated = json_array_insert(arr, 1, json_number(2))
+            expect(json_array_length(updated)).to_equal(2)
+            expect(json_to_number(json_array_last(updated))).to_equal(2)
+
+        it "insert returns original on invalid index":
+            val arr = json_array([json_number(1)])
+            val updated = json_array_insert(arr, -1, json_number(2))
+            expect(json_array_length(updated)).to_equal(1)
+
+        it "remove returns empty array for non-array":
+            val updated = json_array_remove(json_number(1), 0)
+            expect(json_array_length(updated)).to_equal(0)
 
     context "properties":
         it "gets length":
@@ -757,6 +826,77 @@ describe "JSON Array Operations":
             val unique = json_array_unique(arr)
             # unique of non-duplicated array should have same length
             expect(json_array_length(unique)).to_equal(2)
+
+        it "last returns nil for empty array":
+            expect(json_array_last(json_array([]))).to_be_nil()
+
+        it "slice clamps negative start and oversized end":
+            val arr = json_array([json_number(1), json_number(2), json_number(3)])
+            val sliced = json_array_slice(arr, -2, 9)
+            expect(json_array_length(sliced)).to_equal(3)
+
+        it "slice returns empty when start is after end":
+            val arr = json_array([json_number(1), json_number(2), json_number(3)])
+            val sliced = json_array_slice(arr, 2, 1)
+            expect(json_array_length(sliced)).to_equal(0)
+
+        it "concat returns empty array when both inputs are non-arrays":
+            val combined = json_array_concat(json_number(1), json_string("x"))
+            expect(json_array_length(combined)).to_equal(0)
+
+    context "higher-order operations":
+        it "maps array values":
+            val arr = json_array([json_number(1), json_number(2)])
+            val mapped = json_array_map(arr, \v: json_number(json_to_number(v) * 2))
+            expect(json_to_number(json_array_get(mapped, 0))).to_equal(2)
+            expect(json_to_number(json_array_get(mapped, 1))).to_equal(4)
+
+        it "filters array values":
+            val arr = json_array([json_number(1), json_number(2), json_number(3)])
+            val filtered = json_array_filter(arr, \v: json_to_number(v) >= 2)
+            expect(json_array_length(filtered)).to_equal(2)
+
+        it "finds array value":
+            val arr = json_array([json_number(1), json_number(2), json_number(3)])
+            val found = json_array_find(arr, \v: json_to_number(v) == 2)
+            expect(json_to_number(found)).to_equal(2)
+
+        it "returns nil when array find misses":
+            val arr = json_array([json_number(1)])
+            expect(json_array_find(arr, \v: json_to_number(v) == 9)).to_be_nil()
+
+        it "every returns false when predicate fails":
+            val arr = json_array([json_number(1), json_number(2)])
+            expect(json_array_every(arr, \v: json_to_number(v) > 1)).to_equal(false)
+
+        it "some returns true when predicate matches":
+            val arr = json_array([json_number(1), json_number(2)])
+            expect(json_array_some(arr, \v: json_to_number(v) == 2)).to_equal(true)
+
+        it "reduce accumulates array":
+            val arr = json_array([json_number(1), json_number(2), json_number(3)])
+            val reduced = json_array_reduce(arr, json_number(0), \acc, v: json_number(json_to_number(acc) + json_to_number(v)))
+            expect(json_to_number(reduced)).to_equal(6)
+
+        it "sorts array by numeric key":
+            val arr = json_array([
+                json_object({"age": json_number(30)}),
+                json_object({"age": json_number(10)}),
+                json_object({"age": json_number(20)})
+            ])
+            val sorted = json_array_sort_by(arr, \v: json_to_number(json_object_get(v, "age")))
+            expect(json_to_number(json_object_get(json_array_get(sorted, 0), "age"))).to_equal(10)
+            expect(json_to_number(json_object_get(json_array_get(sorted, 2), "age"))).to_equal(30)
+
+        it "groups array values by key":
+            val arr = json_array([
+                json_object({"kind": json_string("a")}),
+                json_object({"kind": json_string("b")}),
+                json_object({"kind": json_string("a")})
+            ])
+            val grouped = json_array_group_by(arr, \v: json_to_string(json_object_get(v, "kind")))
+            expect(json_array_length(json_object_get(grouped, "a"))).to_equal(2)
+            expect(json_array_length(json_object_get(grouped, "b"))).to_equal(1)
 
 
 # ============================================================================

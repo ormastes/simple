@@ -310,7 +310,7 @@ pub(crate) fn exec_node(
                 f.name.clone(),
                 Value::Function {
                     name: f.name.clone(),
-                    def: Box::new(f.clone()),
+                    def: Arc::new(f.clone()),
                     captured_env: Arc::new(env.clone()), // Capture current scope
                 },
             );
@@ -375,7 +375,7 @@ pub(crate) fn exec_node(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Box::new(method.clone()),
+                            def: Arc::new(method.clone()),
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );
@@ -402,7 +402,7 @@ pub(crate) fn exec_node(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Box::new(method.clone()),
+                            def: Arc::new(method.clone()),
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );
@@ -429,7 +429,7 @@ pub(crate) fn exec_node(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Box::new(method.clone()),
+                            def: Arc::new(method.clone()),
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );

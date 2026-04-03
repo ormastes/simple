@@ -32,7 +32,7 @@ pub fn merge_module_definitions(
                 // Add to exports dict
                 let func_value = Value::Function {
                     name: f.name.clone(),
-                    def: Box::new(f.clone()),
+                    def: Arc::new(f.clone()),
                     captured_env: Arc::new(Env::new()),
                 };
                 exports.insert(f.name.clone(), func_value);

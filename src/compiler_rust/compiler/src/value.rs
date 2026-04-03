@@ -529,7 +529,7 @@ pub enum Value {
     /// Includes captured environment for closure semantics
     Function {
         name: String,
-        def: Box<FunctionDef>,
+        def: Arc<FunctionDef>,
         captured_env: Arc<Env>,
     },
     Object {
