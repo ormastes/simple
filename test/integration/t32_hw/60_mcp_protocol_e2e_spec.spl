@@ -1,0 +1,635 @@
+# T32 MCP Protocol — End-to-End JSON-RPC Message Tests
+#
+# Validates JSON-RPC message construction and response structure
+# for the T32 MCP server protocol layer. Tests the full message
+# format without requiring a live T32 connection: builds request
+# strings, validates their structure, and checks response templates.
+#
+# @session-kind: none
+# @tag: t32_hw, mcp_protocol
+# @reuse: fresh_per_test
+
+use std.sspec.{describe, context, it, expect}
+
+# ============================================================================
+# JSON Helpers (inline, no external dependency)
+# ============================================================================
+
+fn Q() -> text: "\""
+fn LB() -> text: "{"
+fn RB() -> text: "}"
+fn SB_L() -> text: "["
+fn SB_R() -> text: "]"
+
+fn js(s: text) -> text:
+    Q() + s + Q()
+
+fn jp(k: text, v: text) -> text:
+    Q() + k + Q() + ":" + v
+
+fn jo1(a: text) -> text:
+    LB() + a + RB()
+
+fn jo2(a: text, b: text) -> text:
+    LB() + a + "," + b + RB()
+
+fn jo3(a: text, b: text, c: text) -> text:
+    LB() + a + "," + b + "," + c + RB()
+
+fn jo4(a: text, b: text, c: text, d: text) -> text:
+    LB() + a + "," + b + "," + c + "," + d + RB()
+
+# ============================================================================
+# JSON-RPC Request Builders
+# ============================================================================
+
+fn jsonrpc_request(id: i64, method: text, params: text) -> text:
+    """Build a JSON-RPC 2.0 request with optional params."""
+    if params != "":
+        return jo4(
+            jp("jsonrpc", js("2.0")),
+            jp("id", str(id)),
+            jp("method", js(method)),
+            jp("params", params)
+        )
+    jo3(
+        jp("jsonrpc", js("2.0")),
+        jp("id", str(id)),
+        jp("method", js(method))
+    )
+
+fn tools_call_request(id: i64, tool_name: text, args: text) -> text:
+    """Build a tools/call JSON-RPC request."""
+    val params = jo2(jp("name", js(tool_name)), jp("arguments", args))
+    jsonrpc_request(id, "tools/call", params)
+
+fn initialize_request(id: i64) -> text:
+    """Build an initialize JSON-RPC request."""
+    val caps = jo1(jp("roots", jo1(jp("listChanged", "true"))))
+    val client_info = jo2(jp("name", js("test-client")), jp("version", js("1.0.0")))
+    val params = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("clientInfo", client_info)
+    )
+    jsonrpc_request(id, "initialize", params)
+
+fn tools_list_request(id: i64) -> text:
+    """Build a tools/list JSON-RPC request."""
+    jsonrpc_request(id, "tools/list", "")
+
+fn notification(method: text) -> text:
+    """Build a JSON-RPC notification (no id)."""
+    jo2(jp("jsonrpc", js("2.0")), jp("method", js(method)))
+
+# ============================================================================
+# JSON-RPC Response Builders (mock responses for validation)
+# ============================================================================
+
+fn jsonrpc_result_response(id: i64, result: text) -> text:
+    """Build a JSON-RPC 2.0 result response."""
+    jo3(
+        jp("jsonrpc", js("2.0")),
+        jp("id", str(id)),
+        jp("result", result)
+    )
+
+fn jsonrpc_error_response(id: i64, code: i64, message: text) -> text:
+    """Build a JSON-RPC 2.0 error response."""
+    val error_obj = jo2(jp("code", str(code)), jp("message", js(message)))
+    jo3(
+        jp("jsonrpc", js("2.0")),
+        jp("id", str(id)),
+        jp("error", error_obj)
+    )
+
+fn tool_result_content(text_value: text) -> text:
+    """Build MCP tool result content array with a single text item."""
+    val item = jo2(jp("type", js("text")), jp("text", js(text_value)))
+    jo1(jp("content", SB_L() + item + SB_R()))
+
+# ============================================================================
+# Full Tool Name Registry (all 36 tools from tool_router.spl)
+# ============================================================================
+
+val FULL_TOOLS: [text] = [
+    "t32_sessions_list",
+    "t32_session_open",
+    "t32_session_resume",
+    "t32_session_close",
+    "t32_core_list",
+    "t32_core_select",
+    "t32_cmd_run",
+    "t32_cmm_run",
+    "t32_eval",
+    "t32_window_list",
+    "t32_window_open",
+    "t32_window_capture",
+    "t32_window_describe",
+    "t32_screenshot",
+    "t32_action_invoke",
+    "t32_field_get",
+    "t32_field_set",
+    "t32_history_tail",
+    "t32_resources_list",
+    "t32_resource_read",
+    "t32_setup_headless",
+    "t32_area_read",
+    "t32_cmm_commands",
+    "t32_session_info",
+    "t32_action_list",
+    "t32_status_snapshot",
+    "t32_cmm_validate",
+    "t32_job_list",
+    "t32_job_get",
+    "t32_job_cancel",
+    "t32_job_result",
+    "t32_dialog_parse",
+    "t32_dialog_get",
+    "t32_dialog_set",
+    "t32_dialog_click",
+    "t32_error_check"
+]
+
+# ============================================================================
+# Validation Helpers
+# ============================================================================
+
+fn is_valid_identifier(name: text) -> bool:
+    """Check if a tool name is a valid identifier (alphanumeric + underscore)."""
+    if name.len() == 0:
+        return false
+    var i = 0
+    while i < name.len():
+        val ch = name.substring(i, i + 1)
+        val valid = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not valid:
+            return false
+        i = i + 1
+    true
+
+fn has_duplicates(names: [text]) -> bool:
+    """Check if a list has any duplicate entries."""
+    var i = 0
+    while i < names.len():
+        var j = i + 1
+        while j < names.len():
+            if names[i] == names[j]:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "MCP Protocol -- JSON-RPC Message Construction":
+    context "initialize":
+        it "builds valid initialize request":
+            val req = initialize_request(1)
+            expect(req).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(req).to_contain("\"method\":\"initialize\"")
+            expect(req).to_contain("\"id\":1")
+
+        it "initialize request has correct method":
+            val req = initialize_request(1)
+            expect(req).to_contain("\"method\":\"initialize\"")
+
+        it "initialize request has jsonrpc 2.0":
+            val req = initialize_request(1)
+            expect(req).to_start_with("{")
+            expect(req).to_contain("\"jsonrpc\":\"2.0\"")
+
+        it "initialize request includes protocol version":
+            val req = initialize_request(1)
+            expect(req).to_contain("\"protocolVersion\":\"2025-06-18\"")
+
+        it "initialize request includes client info":
+            val req = initialize_request(1)
+            expect(req).to_contain("\"clientInfo\":")
+            expect(req).to_contain("\"name\":\"test-client\"")
+            expect(req).to_contain("\"version\":\"1.0.0\"")
+
+    context "tools/list":
+        it "builds valid tools/list request":
+            val req = tools_list_request(2)
+            expect(req).to_contain("\"method\":\"tools/list\"")
+            expect(req).to_contain("\"id\":2")
+            expect(req).to_contain("\"jsonrpc\":\"2.0\"")
+
+        it "tools/list request has no params when empty":
+            val req = tools_list_request(2)
+            # Should have 3 fields: jsonrpc, id, method -- no params
+            val has_params = req.contains("\"params\"")
+            expect(has_params).to_equal(false)
+
+    context "notifications":
+        it "builds initialized notification":
+            val notif = notification("notifications/initialized")
+            expect(notif).to_contain("\"method\":\"notifications/initialized\"")
+            expect(notif).to_contain("\"jsonrpc\":\"2.0\"")
+
+        it "notification has no id field":
+            val notif = notification("notifications/initialized")
+            val has_id = notif.contains("\"id\"")
+            expect(has_id).to_equal(false)
+
+    context "tools/call message building":
+        it "builds t32_sessions_list call":
+            val req = tools_call_request(10, "t32_sessions_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"method\":\"tools/call\"")
+            expect(req).to_contain("\"name\":\"t32_sessions_list\"")
+
+        it "builds t32_session_open call with host and port":
+            val args = jo2(jp("host", js("localhost")), jp("port", js("20000")))
+            val req = tools_call_request(11, "t32_session_open", args)
+            expect(req).to_contain("\"name\":\"t32_session_open\"")
+            expect(req).to_contain("\"host\":\"localhost\"")
+            expect(req).to_contain("\"port\":\"20000\"")
+
+        it "builds t32_session_resume call with session_id":
+            val args = jo1(jp("session_id", js("t32_1")))
+            val req = tools_call_request(12, "t32_session_resume", args)
+            expect(req).to_contain("\"name\":\"t32_session_resume\"")
+            expect(req).to_contain("\"session_id\":\"t32_1\"")
+
+        it "builds t32_session_close call with session_id":
+            val args = jo1(jp("session_id", js("t32_1")))
+            val req = tools_call_request(13, "t32_session_close", args)
+            expect(req).to_contain("\"name\":\"t32_session_close\"")
+
+        it "builds t32_cmd_run call with command arg":
+            val args = jo1(jp("command", js("Break.Set main")))
+            val req = tools_call_request(14, "t32_cmd_run", args)
+            expect(req).to_contain("\"name\":\"t32_cmd_run\"")
+            expect(req).to_contain("\"command\":\"Break.Set main\"")
+
+        it "builds t32_eval call with expression arg":
+            val args = jo1(jp("expression", js("Register(PC)")))
+            val req = tools_call_request(15, "t32_eval", args)
+            expect(req).to_contain("\"name\":\"t32_eval\"")
+            expect(req).to_contain("\"expression\":\"Register(PC)\"")
+
+        it "builds t32_cmm_run call with script arg":
+            val args = jo1(jp("script", js("scripts/init.cmm")))
+            val req = tools_call_request(16, "t32_cmm_run", args)
+            expect(req).to_contain("\"name\":\"t32_cmm_run\"")
+            expect(req).to_contain("\"script\":\"scripts/init.cmm\"")
+
+        it "builds t32_window_list call":
+            val req = tools_call_request(17, "t32_window_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_window_list\"")
+            expect(req).to_contain("\"method\":\"tools/call\"")
+
+        it "builds t32_window_capture call with window arg":
+            val args = jo1(jp("window", js("register")))
+            val req = tools_call_request(18, "t32_window_capture", args)
+            expect(req).to_contain("\"name\":\"t32_window_capture\"")
+            expect(req).to_contain("\"window\":\"register\"")
+
+        it "builds t32_window_open call with window arg":
+            val args = jo1(jp("window", js("register")))
+            val req = tools_call_request(19, "t32_window_open", args)
+            expect(req).to_contain("\"name\":\"t32_window_open\"")
+
+        it "builds t32_window_describe call with window arg":
+            val args = jo1(jp("window", js("register")))
+            val req = tools_call_request(20, "t32_window_describe", args)
+            expect(req).to_contain("\"name\":\"t32_window_describe\"")
+
+        it "builds t32_field_get call with field_key":
+            val args = jo1(jp("field_key", js("pc")))
+            val req = tools_call_request(21, "t32_field_get", args)
+            expect(req).to_contain("\"name\":\"t32_field_get\"")
+            expect(req).to_contain("\"field_key\":\"pc\"")
+
+        it "builds t32_field_set call with field_key and value":
+            val args = jo2(jp("field_key", js("pc")), jp("value", js("0x1000")))
+            val req = tools_call_request(22, "t32_field_set", args)
+            expect(req).to_contain("\"name\":\"t32_field_set\"")
+            expect(req).to_contain("\"field_key\":\"pc\"")
+            expect(req).to_contain("\"value\":\"0x1000\"")
+
+        it "builds t32_history_tail call":
+            val req = tools_call_request(23, "t32_history_tail", jo1(jp("count", js("10"))))
+            expect(req).to_contain("\"name\":\"t32_history_tail\"")
+
+        it "builds t32_setup_headless call":
+            val req = tools_call_request(24, "t32_setup_headless", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_setup_headless\"")
+
+        it "builds t32_area_read call":
+            val req = tools_call_request(25, "t32_area_read", jo1(jp("area", js("A000"))))
+            expect(req).to_contain("\"name\":\"t32_area_read\"")
+
+        it "builds t32_cmm_commands call with search":
+            val args = jo1(jp("search", js("Break")))
+            val req = tools_call_request(26, "t32_cmm_commands", args)
+            expect(req).to_contain("\"name\":\"t32_cmm_commands\"")
+            expect(req).to_contain("\"search\":\"Break\"")
+
+        it "builds t32_session_info call":
+            val req = tools_call_request(27, "t32_session_info", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_session_info\"")
+
+        it "builds t32_status_snapshot call":
+            val req = tools_call_request(28, "t32_status_snapshot", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_status_snapshot\"")
+
+        it "builds t32_cmm_validate call with source":
+            val args = jo1(jp("source", js("DIALOG.YESNO msg")))
+            val req = tools_call_request(29, "t32_cmm_validate", args)
+            expect(req).to_contain("\"name\":\"t32_cmm_validate\"")
+            expect(req).to_contain("\"source\":\"DIALOG.YESNO msg\"")
+
+        it "builds t32_dialog_parse call":
+            val args = jo1(jp("source", js("DIALOG.OK hello")))
+            val req = tools_call_request(30, "t32_dialog_parse", args)
+            expect(req).to_contain("\"name\":\"t32_dialog_parse\"")
+
+        it "builds t32_dialog_get call":
+            val req = tools_call_request(31, "t32_dialog_get", jo1(jp("dialog_id", js("dlg1"))))
+            expect(req).to_contain("\"name\":\"t32_dialog_get\"")
+
+        it "builds t32_dialog_set call":
+            val args = jo2(jp("dialog_id", js("dlg1")), jp("value", js("ok")))
+            val req = tools_call_request(32, "t32_dialog_set", args)
+            expect(req).to_contain("\"name\":\"t32_dialog_set\"")
+
+        it "builds t32_dialog_click call":
+            val args = jo1(jp("button", js("OK")))
+            val req = tools_call_request(33, "t32_dialog_click", args)
+            expect(req).to_contain("\"name\":\"t32_dialog_click\"")
+
+        it "builds t32_error_check call":
+            val req = tools_call_request(34, "t32_error_check", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_error_check\"")
+
+        it "builds t32_job_list call":
+            val req = tools_call_request(35, "t32_job_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_job_list\"")
+
+        it "builds t32_job_get call with job_id":
+            val args = jo1(jp("job_id", js("job_abc")))
+            val req = tools_call_request(36, "t32_job_get", args)
+            expect(req).to_contain("\"name\":\"t32_job_get\"")
+            expect(req).to_contain("\"job_id\":\"job_abc\"")
+
+        it "builds t32_job_cancel call with job_id":
+            val args = jo1(jp("job_id", js("job_abc")))
+            val req = tools_call_request(37, "t32_job_cancel", args)
+            expect(req).to_contain("\"name\":\"t32_job_cancel\"")
+
+        it "builds t32_job_result call with job_id":
+            val args = jo1(jp("job_id", js("job_abc")))
+            val req = tools_call_request(38, "t32_job_result", args)
+            expect(req).to_contain("\"name\":\"t32_job_result\"")
+
+        it "builds t32_screenshot call with window arg":
+            val args = jo1(jp("window", js("register")))
+            val req = tools_call_request(39, "t32_screenshot", args)
+            expect(req).to_contain("\"name\":\"t32_screenshot\"")
+
+        it "builds t32_core_list call":
+            val req = tools_call_request(40, "t32_core_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_core_list\"")
+
+        it "builds t32_core_select call with core_id":
+            val args = jo1(jp("core_id", js("core0")))
+            val req = tools_call_request(41, "t32_core_select", args)
+            expect(req).to_contain("\"name\":\"t32_core_select\"")
+            expect(req).to_contain("\"core_id\":\"core0\"")
+
+        it "builds t32_action_invoke call with action_key":
+            val args = jo2(jp("action_key", js("set_break")), jp("args", js("main")))
+            val req = tools_call_request(42, "t32_action_invoke", args)
+            expect(req).to_contain("\"name\":\"t32_action_invoke\"")
+            expect(req).to_contain("\"action_key\":\"set_break\"")
+
+        it "builds t32_action_list call":
+            val req = tools_call_request(43, "t32_action_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_action_list\"")
+
+        it "builds t32_resources_list call":
+            val req = tools_call_request(44, "t32_resources_list", jo1(jp("dummy", js("x"))))
+            expect(req).to_contain("\"name\":\"t32_resources_list\"")
+
+        it "builds t32_resource_read call with uri":
+            val args = jo1(jp("uri", js("t32:///sessions")))
+            val req = tools_call_request(45, "t32_resource_read", args)
+            expect(req).to_contain("\"name\":\"t32_resource_read\"")
+            expect(req).to_contain("\"uri\":\"t32:///sessions\"")
+
+describe "MCP Protocol -- Response Validation":
+    context "JSON-RPC response structure":
+        it "result response has jsonrpc field":
+            val resp = jsonrpc_result_response(1, js("ok"))
+            expect(resp).to_contain("\"jsonrpc\":\"2.0\"")
+
+        it "result response has id field":
+            val resp = jsonrpc_result_response(42, js("ok"))
+            expect(resp).to_contain("\"id\":42")
+
+        it "result response has result field":
+            val resp = jsonrpc_result_response(1, js("hello"))
+            expect(resp).to_contain("\"result\":\"hello\"")
+
+        it "result response is valid JSON object":
+            val resp = jsonrpc_result_response(1, js("ok"))
+            expect(resp).to_start_with("{")
+            expect(resp).to_end_with("}")
+
+        it "error response has error object":
+            val resp = jsonrpc_error_response(1, -32600, "Invalid Request")
+            expect(resp).to_contain("\"error\":")
+
+        it "error response has code and message":
+            val resp = jsonrpc_error_response(1, -32601, "Method not found")
+            expect(resp).to_contain("\"code\":-32601")
+            expect(resp).to_contain("\"message\":\"Method not found\"")
+
+        it "error response has jsonrpc and id":
+            val resp = jsonrpc_error_response(5, -32602, "Invalid params")
+            expect(resp).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(resp).to_contain("\"id\":5")
+
+    context "tool result structure":
+        it "tool result has content array":
+            val result = tool_result_content("session opened")
+            expect(result).to_contain("\"content\":[")
+
+        it "content item has type text":
+            val result = tool_result_content("session opened")
+            expect(result).to_contain("\"type\":\"text\"")
+
+        it "content item has text field":
+            val result = tool_result_content("session opened")
+            expect(result).to_contain("\"text\":\"session opened\"")
+
+        it "tool result wrapped in response has all fields":
+            val content = tool_result_content("done")
+            val resp = jsonrpc_result_response(99, content)
+            expect(resp).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(resp).to_contain("\"id\":99")
+            expect(resp).to_contain("\"result\":")
+            expect(resp).to_contain("\"content\":[")
+            expect(resp).to_contain("\"type\":\"text\"")
+
+    context "standard JSON-RPC error codes":
+        it "parse error uses code -32700":
+            val resp = jsonrpc_error_response(1, -32700, "Parse error")
+            expect(resp).to_contain("\"code\":-32700")
+
+        it "invalid request uses code -32600":
+            val resp = jsonrpc_error_response(1, -32600, "Invalid Request")
+            expect(resp).to_contain("\"code\":-32600")
+
+        it "method not found uses code -32601":
+            val resp = jsonrpc_error_response(1, -32601, "Method not found")
+            expect(resp).to_contain("\"code\":-32601")
+
+        it "invalid params uses code -32602":
+            val resp = jsonrpc_error_response(1, -32602, "Invalid params")
+            expect(resp).to_contain("\"code\":-32602")
+
+describe "MCP Protocol -- Request Structure Integrity":
+    context "request JSON structure":
+        it "request starts with open brace":
+            val req = jsonrpc_request(1, "test", "")
+            expect(req).to_start_with("{")
+
+        it "request ends with close brace":
+            val req = jsonrpc_request(1, "test", "")
+            expect(req).to_end_with("}")
+
+        it "request with params includes params field":
+            val req = jsonrpc_request(1, "test", jo1(jp("key", js("val"))))
+            expect(req).to_contain("\"params\":")
+
+        it "request without params omits params field":
+            val req = jsonrpc_request(1, "test", "")
+            val has_params = req.contains("\"params\"")
+            expect(has_params).to_equal(false)
+
+        it "tools/call request nests name inside params":
+            val req = tools_call_request(1, "t32_eval", jo1(jp("expression", js("1+1"))))
+            expect(req).to_contain("\"params\":")
+            expect(req).to_contain("\"name\":\"t32_eval\"")
+            expect(req).to_contain("\"arguments\":")
+
+        it "request id increments correctly":
+            val r1 = jsonrpc_request(100, "a", "")
+            val r2 = jsonrpc_request(101, "b", "")
+            expect(r1).to_contain("\"id\":100")
+            expect(r2).to_contain("\"id\":101")
+
+    context "Content-Length framing":
+        it "message can be framed with Content-Length header":
+            val body = jsonrpc_request(1, "initialize", "")
+            val framed = "Content-Length: " + str(body.len()) + "\r\n\r\n" + body
+            expect(framed).to_start_with("Content-Length: ")
+            expect(framed).to_contain("\r\n\r\n")
+            expect(framed).to_end_with("}")
+
+        it "Content-Length value matches body length":
+            val body = jsonrpc_request(1, "test", "")
+            val length_str = str(body.len())
+            val framed = "Content-Length: " + length_str + "\r\n\r\n" + body
+            # Extract the header portion
+            expect(framed).to_contain("Content-Length: " + length_str)
+
+describe "MCP Protocol -- All 36 Tool Names":
+    it "all tool names are valid identifiers":
+        var all_valid = true
+        for name in FULL_TOOLS:
+            if not is_valid_identifier(name):
+                all_valid = false
+        expect(all_valid).to_equal(true)
+
+    it "no duplicate tool names":
+        val has_dups = has_duplicates(FULL_TOOLS)
+        expect(has_dups).to_equal(false)
+
+    it "tool count is 36":
+        expect(FULL_TOOLS.len()).to_equal(36)
+
+    it "all tools start with t32_ prefix":
+        var all_prefixed = true
+        for name in FULL_TOOLS:
+            if not name.starts_with("t32_"):
+                all_prefixed = false
+        expect(all_prefixed).to_equal(true)
+
+    it "session tools are present":
+        var found_list = false
+        var found_open = false
+        var found_close = false
+        var found_resume = false
+        for name in FULL_TOOLS:
+            if name == "t32_sessions_list": found_list = true
+            if name == "t32_session_open": found_open = true
+            if name == "t32_session_close": found_close = true
+            if name == "t32_session_resume": found_resume = true
+        expect(found_list).to_equal(true)
+        expect(found_open).to_equal(true)
+        expect(found_close).to_equal(true)
+        expect(found_resume).to_equal(true)
+
+    it "window tools are present":
+        var found_list = false
+        var found_open = false
+        var found_capture = false
+        var found_describe = false
+        for name in FULL_TOOLS:
+            if name == "t32_window_list": found_list = true
+            if name == "t32_window_open": found_open = true
+            if name == "t32_window_capture": found_capture = true
+            if name == "t32_window_describe": found_describe = true
+        expect(found_list).to_equal(true)
+        expect(found_open).to_equal(true)
+        expect(found_capture).to_equal(true)
+        expect(found_describe).to_equal(true)
+
+    it "dialog tools are present":
+        var found_parse = false
+        var found_get = false
+        var found_set = false
+        var found_click = false
+        for name in FULL_TOOLS:
+            if name == "t32_dialog_parse": found_parse = true
+            if name == "t32_dialog_get": found_get = true
+            if name == "t32_dialog_set": found_set = true
+            if name == "t32_dialog_click": found_click = true
+        expect(found_parse).to_equal(true)
+        expect(found_get).to_equal(true)
+        expect(found_set).to_equal(true)
+        expect(found_click).to_equal(true)
+
+    it "job tools are present":
+        var found_list = false
+        var found_get = false
+        var found_cancel = false
+        var found_result = false
+        for name in FULL_TOOLS:
+            if name == "t32_job_list": found_list = true
+            if name == "t32_job_get": found_get = true
+            if name == "t32_job_cancel": found_cancel = true
+            if name == "t32_job_result": found_result = true
+        expect(found_list).to_equal(true)
+        expect(found_get).to_equal(true)
+        expect(found_cancel).to_equal(true)
+        expect(found_result).to_equal(true)
+
+    it "each tool can build a valid tools/call request":
+        var all_valid = true
+        var idx: i64 = 100
+        for name in FULL_TOOLS:
+            val req = tools_call_request(idx, name, jo1(jp("dummy", js("x"))))
+            val has_method = req.contains("\"method\":\"tools/call\"")
+            val has_name = req.contains("\"name\":\"" + name + "\"")
+            val has_jsonrpc = req.contains("\"jsonrpc\":\"2.0\"")
+            if not has_method or not has_name or not has_jsonrpc:
+                all_valid = false
+            idx = idx + 1
+        expect(all_valid).to_equal(true)

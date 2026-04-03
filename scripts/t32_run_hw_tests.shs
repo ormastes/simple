@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# T32 Hardware Integration Test Runner
+#
+# Usage:
+#   scripts/t32_run_hw_tests.shs                    # Run all tests
+#   scripts/t32_run_hw_tests.shs --backend ctypes   # Specific backend
+#   scripts/t32_run_hw_tests.shs --preflight-only   # Just check environment
+#   scripts/t32_run_hw_tests.shs --quick             # Core tests only
+#
+# Environment:
+#   T32_HW_HOST=localhost       T32 PowerView host
+#   T32_HW_PORT=20000          T32 RCL port
+#   T32_BACKEND_PREFERENCE=    ctypes|t32rem|python_rcl (empty=auto)
+#   T32_RCL_PROTOCOL=NETTCP    NETTCP or UDP
+#   T32REM=/opt/t32/bin/pc_linux64/t32rem  t32rem path
+#   T32_API_LIB=/opt/t32/bin/pc_linux64/t32api64.so  ctypes lib
+
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+HW_TEST_DIR="$REPO_ROOT/test/integration/t32_hw"
+SIMPLE="$REPO_ROOT/bin/simple"
+
+HOST="${T32_HW_HOST:-localhost}"
+PORT="${T32_HW_PORT:-20000}"
+BACKEND=""
+PREFLIGHT_ONLY=0
+QUICK=0
+
+# ─── Colors ────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+usage() {
+    sed -n '2,12p' "$0" | sed 's/^# \?//' >&2
+    exit 2
+}
+
+while [ "${1:-}" != "" ]; do
+    case "$1" in
+        --backend)    BACKEND="${2:-}"; shift 2 ;;
+        --preflight-only) PREFLIGHT_ONLY=1; shift ;;
+        --quick)      QUICK=1; shift ;;
+        -h|--help)    usage ;;
+        *)            echo "unknown option: $1" >&2; usage ;;
+    esac
+done
+
+# ─── Step 1: Environment check ────────────────────────────────────────────
+printf "${CYAN}[1/4] Checking environment${NC} (host=%s port=%s)\n" "$HOST" "$PORT"
+
+if [ ! -x "$SIMPLE" ]; then
+    printf "${RED}ERROR: bin/simple not found. Run scripts/setup.sh first.${NC}\n" >&2
+    exit 1
+fi
+
+# ─── Step 2: Probe T32 availability ───────────────────────────────────────
+printf "${CYAN}[2/4] Probing T32 on %s:%s${NC}\n" "$HOST" "$PORT"
+
+if command -v bash >/dev/null 2>&1; then
+    if ! bash -c "echo >/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+        printf "${RED}FAIL: Cannot connect to %s:%s — is PowerView running?${NC}\n" "$HOST" "$PORT" >&2
+        exit 1
+    fi
+    printf "${GREEN}  TCP connect OK${NC}\n"
+else
+    printf "${YELLOW}  SKIP: /dev/tcp probe unavailable, continuing${NC}\n"
+fi
+
+# ─── Step 3: Detect backends ──────────────────────────────────────────────
+printf "${CYAN}[3/4] Detecting backends${NC}\n"
+BACKENDS_FOUND=""
+
+if [ -n "${T32REM:-}" ] && [ -x "${T32REM}" ]; then
+    BACKENDS_FOUND="$BACKENDS_FOUND t32rem"
+    printf "  t32rem:     ${GREEN}%s${NC}\n" "$T32REM"
+elif command -v t32rem >/dev/null 2>&1; then
+    BACKENDS_FOUND="$BACKENDS_FOUND t32rem"
+    printf "  t32rem:     ${GREEN}$(command -v t32rem)${NC}\n"
+else
+    printf "  t32rem:     ${YELLOW}not found${NC}\n"
+fi
+
+if [ -n "${T32_API_LIB:-}" ] && [ -f "${T32_API_LIB}" ]; then
+    BACKENDS_FOUND="$BACKENDS_FOUND ctypes"
+    printf "  ctypes:     ${GREEN}%s${NC}\n" "$T32_API_LIB"
+else
+    printf "  ctypes:     ${YELLOW}T32_API_LIB not set${NC}\n"
+fi
+
+if command -v python3 >/dev/null 2>&1 && python3 -c "import lauterbach.trace32" 2>/dev/null; then
+    BACKENDS_FOUND="$BACKENDS_FOUND python_rcl"
+    printf "  python_rcl: ${GREEN}available${NC}\n"
+else
+    printf "  python_rcl: ${YELLOW}not found${NC}\n"
+fi
+
+if [ -z "$BACKENDS_FOUND" ]; then
+    printf "${RED}ERROR: No T32 backends found${NC}\n" >&2
+    exit 1
+fi
+
+# ─── Step 4: Run tests ────────────────────────────────────────────────────
+printf "${CYAN}[4/4] Running tests${NC}\n"
+TOTAL=0; PASSED=0; FAILED=0; SKIPPED=0
+
+run_spec() {
+    local spec="$1"
+    local name
+    name="$(basename "$spec" _spec.spl)"
+    TOTAL=$((TOTAL + 1))
+    printf "  %-40s " "$name"
+    if "$SIMPLE" test "$spec" >/dev/null 2>&1; then
+        printf "${GREEN}PASS${NC}\n"
+        PASSED=$((PASSED + 1))
+    else
+        RC=$?
+        if [ "$RC" -eq 2 ]; then
+            printf "${YELLOW}SKIP${NC}\n"
+            SKIPPED=$((SKIPPED + 1))
+        else
+            printf "${RED}FAIL${NC}\n"
+            FAILED=$((FAILED + 1))
+        fi
+    fi
+}
+
+# Always run preflight
+run_spec "$HW_TEST_DIR/00_preflight_spec.spl"
+[ "$PREFLIGHT_ONLY" = "1" ] && { printf "\nPreflight complete.\n"; exit 0; }
+
+# Backend-specific tests
+if [ -n "$BACKEND" ]; then
+    BSPEC="$HW_TEST_DIR/backends/${BACKEND}_spec.spl"
+    if [ -f "$BSPEC" ]; then
+        run_spec "$BSPEC"
+    else
+        printf "${RED}Backend spec not found: %s${NC}\n" "$BSPEC" >&2
+        exit 1
+    fi
+fi
+
+# Numbered test specs
+if [ "$QUICK" = "1" ]; then
+    PATTERNS="02_t32_open_close 13_cmd_run 15_eval 50_session_close"
+    for p in $PATTERNS; do
+        spec="$HW_TEST_DIR/${p}_spec.spl"
+        [ -f "$spec" ] && run_spec "$spec"
+    done
+else
+    for spec in "$HW_TEST_DIR"/[0-9]*_spec.spl; do
+        [ -f "$spec" ] || continue
+        run_spec "$spec"
+    done
+fi
+
+# MCP protocol e2e (if present)
+MCP_E2E="$REPO_ROOT/test/system/t32_mcp_lifecycle_spec.spl"
+if [ -f "$MCP_E2E" ] && [ "$QUICK" = "0" ]; then
+    printf "\n  ${CYAN}MCP Protocol E2E${NC}\n"
+    run_spec "$MCP_E2E"
+fi
+
+# ─── Summary ──────────────────────────────────────────────────────────────
+printf "\n${CYAN}════════════════════════════════════════════${NC}\n"
+if [ "$FAILED" -gt 0 ]; then
+    printf "  ${RED}%d passed, %d failed, %d skipped, %d total${NC}\n" "$PASSED" "$FAILED" "$SKIPPED" "$TOTAL"
+else
+    printf "  ${GREEN}%d passed${NC}, %d skipped, %d total\n" "$PASSED" "$SKIPPED" "$TOTAL"
+fi
+printf "${CYAN}════════════════════════════════════════════${NC}\n"
+
+[ "$FAILED" -gt 0 ] && exit 1
+exit 0

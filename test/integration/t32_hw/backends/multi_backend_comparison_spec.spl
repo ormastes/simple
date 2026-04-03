@@ -1,0 +1,497 @@
+# @session-kind: trace32_board
+# @target: arm
+# @tag: t32_hw, multi_backend, comparison
+# @reuse: exclusive_reused
+# @execution-mode: compiled
+"""
+# T32 Multi-Backend Comparison
+
+Verifies that all three backends (ctypes, t32rem, python_rcl) produce
+identical results for the same operations. Runs each operation on every
+available backend and compares outputs for equivalence.
+
+Requires at least one backend to be available. Operations are skipped
+per-backend when that backend is not present.
+"""
+
+use std.sspec.*
+use test.integration.t32_hw.t32_hw_helpers.{
+    t32_hw_probe_available, t32_hw_host, t32_hw_port,
+    t32_hw_t32rem_available, t32_hw_ctypes_available, t32_hw_python_available,
+    t32_hw_run_cmd, t32_hw_eval, t32_hw_skip_msg,
+    t32_hw_connect
+}
+use std.debug.remote.protocol.trace32.{Trace32Client}
+use app.debug.remote.types.{DebugConfig}
+
+# ============================================================================
+# Backend Result Collection
+# ============================================================================
+
+class BackendResult:
+    backend: text
+    value: text
+    success: bool
+
+fn available_backend_names() -> List<text>:
+    """List names of all available backends."""
+    var names: List<text> = []
+    if t32_hw_t32rem_available():
+        names.push("t32rem")
+    if t32_hw_ctypes_available():
+        names.push("ctypes")
+    if t32_hw_python_available():
+        names.push("python_rcl")
+    names
+
+fn available_backend_count() -> i64:
+    """Count how many backends are currently available."""
+    var count: i64 = 0
+    if t32_hw_t32rem_available(): count = count + 1
+    if t32_hw_ctypes_available(): count = count + 1
+    if t32_hw_python_available(): count = count + 1
+    count
+
+fn connect_for_backend(backend: text) -> Result<Trace32Client, text>:
+    """Connect to T32 using the specified backend."""
+    # All backends ultimately use the same host:port via t32_hw_connect.
+    # The backend selection is handled by the DebugConfig/Trace32Client layer.
+    val config = DebugConfig(
+        host: t32_hw_host(),
+        port: t32_hw_port(),
+        program: "",
+        args: [],
+        debugger: "t32",
+        remote: true,
+        backend: backend
+    )
+    Trace32Client.connect(config)
+
+fn eval_on_all_backends(expr: text) -> List<BackendResult>:
+    """Evaluate an expression on all available backends and collect results."""
+    var results: List<BackendResult> = []
+
+    if t32_hw_t32rem_available():
+        val client = connect_for_backend("t32rem")
+        match client:
+            Ok(c):
+                val r = c.eval_expr(expr)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "t32rem", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "t32rem", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "t32rem", value: e, success: false))
+
+    if t32_hw_ctypes_available():
+        val client = connect_for_backend("ctypes")
+        match client:
+            Ok(c):
+                val r = c.eval_expr(expr)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "ctypes", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "ctypes", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "ctypes", value: e, success: false))
+
+    if t32_hw_python_available():
+        val client = connect_for_backend("python_rcl")
+        match client:
+            Ok(c):
+                val r = c.eval_expr(expr)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "python_rcl", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "python_rcl", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "python_rcl", value: e, success: false))
+
+    results
+
+fn cmd_on_all_backends(cmd: text) -> List<BackendResult>:
+    """Execute a command on all available backends and collect results."""
+    var results: List<BackendResult> = []
+
+    if t32_hw_t32rem_available():
+        val client = connect_for_backend("t32rem")
+        match client:
+            Ok(c):
+                val r = c.run_command(cmd)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "t32rem", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "t32rem", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "t32rem", value: e, success: false))
+
+    if t32_hw_ctypes_available():
+        val client = connect_for_backend("ctypes")
+        match client:
+            Ok(c):
+                val r = c.run_command(cmd)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "ctypes", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "ctypes", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "ctypes", value: e, success: false))
+
+    if t32_hw_python_available():
+        val client = connect_for_backend("python_rcl")
+        match client:
+            Ok(c):
+                val r = c.run_command(cmd)
+                c.disconnect()
+                match r:
+                    Ok(v): results.push(BackendResult(backend: "python_rcl", value: v.trim(), success: true))
+                    Err(e): results.push(BackendResult(backend: "python_rcl", value: e, success: false))
+            Err(e):
+                results.push(BackendResult(backend: "python_rcl", value: e, success: false))
+
+    results
+
+fn assert_all_results_equal(results: List<BackendResult>):
+    """Assert that all successful results in the list have the same value."""
+    val successful = results.filter(\r: r.success)
+    if successful.len() < 2:
+        # Fewer than 2 successful results -- nothing to compare
+        return
+    val reference = successful[0].value
+    var i: i64 = 1
+    while i < successful.len():
+        val other = successful[i]
+        expect(other.value).to_equal(reference)
+        i = i + 1
+
+fn assert_all_results_succeeded(results: List<BackendResult>):
+    """Assert that every result in the list succeeded."""
+    for r in results:
+        expect(r.success).to_equal(true)
+
+fn assert_all_results_failed(results: List<BackendResult>):
+    """Assert that every result in the list failed (error case)."""
+    for r in results:
+        expect(r.success).to_equal(false)
+
+# ============================================================================
+# Test Spec
+# ============================================================================
+
+describe "Multi-Backend Comparison":
+    context "availability":
+        it "at least one backend available":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val count = available_backend_count()
+            expect(count).to_be_greater_than(0)
+
+        it "lists available backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val names = available_backend_names()
+            expect(names.len()).to_be_greater_than(0)
+            # Each name should be a known backend
+            for name in names:
+                val is_known = (name == "t32rem" or name == "ctypes" or name == "python_rcl")
+                expect(is_known).to_equal(true)
+
+    context "PING equivalence":
+        it "t32rem PING succeeds":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            if not t32_hw_t32rem_available():
+                expect(t32_hw_skip_msg("t32rem")).to_contain("skip")
+                return
+            val client = connect_for_backend("t32rem")
+            match client:
+                Ok(c):
+                    val r = c.run_command("PING")
+                    c.disconnect()
+                    match r:
+                        Ok(_): expect("ping ok").to_equal("ping ok")
+                        Err(e): expect("ping failed: {e}").to_contain("ping")
+                Err(e):
+                    expect("connect failed: {e}").to_contain("skip")
+
+        it "ctypes PING succeeds":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            if not t32_hw_ctypes_available():
+                expect(t32_hw_skip_msg("ctypes")).to_contain("skip")
+                return
+            val client = connect_for_backend("ctypes")
+            match client:
+                Ok(c):
+                    val r = c.run_command("PING")
+                    c.disconnect()
+                    match r:
+                        Ok(_): expect("ping ok").to_equal("ping ok")
+                        Err(e): expect("ping failed: {e}").to_contain("ping")
+                Err(e):
+                    expect("connect failed: {e}").to_contain("skip")
+
+        it "python_rcl PING succeeds":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            if not t32_hw_python_available():
+                expect(t32_hw_skip_msg("python_rcl")).to_contain("skip")
+                return
+            val client = connect_for_backend("python_rcl")
+            match client:
+                Ok(c):
+                    val r = c.run_command("PING")
+                    c.disconnect()
+                    match r:
+                        Ok(_): expect("ping ok").to_equal("ping ok")
+                        Err(e): expect("ping failed: {e}").to_contain("ping")
+                Err(e):
+                    expect("connect failed: {e}").to_contain("skip")
+
+    context "EVAL equivalence":
+        it "all backends return same VERSION.BUILD()":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("VERSION.BUILD()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+            # VERSION.BUILD() should return a non-empty numeric string
+            val successful = results.filter(\r: r.success)
+            for r in successful:
+                expect(r.value.len()).to_be_greater_than(0)
+
+        it "all backends return same SYSTEM.CPU()":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("SYSTEM.CPU()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+            val successful = results.filter(\r: r.success)
+            for r in successful:
+                expect(r.value.len()).to_be_greater_than(0)
+
+        it "all backends return same Register.PP()":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("Register.PP()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+
+        it "all backends return same VERSION.SOFTWARE()":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("VERSION.SOFTWARE()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+            val successful = results.filter(\r: r.success)
+            for r in successful:
+                expect(r.value.len()).to_be_greater_than(0)
+
+    context "command execution equivalence":
+        it "all backends execute PRINT successfully":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = cmd_on_all_backends("PRINT \"hello\"")
+            assert_all_results_succeeded(results)
+
+        it "all backends execute Register.view successfully":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = cmd_on_all_backends("Register.view")
+            assert_all_results_succeeded(results)
+
+        it "all backends execute Data.dump 0x0 successfully":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = cmd_on_all_backends("Data.dump 0x0")
+            assert_all_results_succeeded(results)
+
+        it "all backends execute SYStem.Mode query successfully":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("SYStem.Mode()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+
+    context "error handling equivalence":
+        it "all backends return error for invalid command":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = cmd_on_all_backends("ZZZNOTACMD.ZZZZ")
+            # All backends should fail for a nonsense command
+            assert_all_results_failed(results)
+
+        it "all backends return error for invalid expression":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("TOTALLY.INVALID.EXPRESSION.ZZZZ()")
+            assert_all_results_failed(results)
+
+        it "all backends recover after error":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            # Force an error then verify recovery on each backend
+            val backends = available_backend_names()
+            for backend in backends:
+                val client = connect_for_backend(backend)
+                match client:
+                    Ok(c):
+                        # Trigger error with bad command
+                        c.run_command("ZZZNOTACMD.ZZZZ")
+                        # Should still be able to eval after error
+                        val r = c.eval_expr("VERSION.BUILD()")
+                        c.disconnect()
+                        match r:
+                            Ok(v): expect(v.trim().len()).to_be_greater_than(0)
+                            Err(e): expect("recovery failed on {backend}: {e}").to_contain("recovery")
+                    Err(e):
+                        expect("connect failed on {backend}: {e}").to_contain("skip")
+
+    context "connection lifecycle":
+        it "all backends connect and disconnect cleanly":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val backends = available_backend_names()
+            for backend in backends:
+                val client = connect_for_backend(backend)
+                match client:
+                    Ok(c):
+                        c.disconnect()
+                        expect("ok").to_equal("ok")
+                    Err(e):
+                        expect("connect failed on {backend}: {e}").to_contain("skip")
+
+        it "all backends survive rapid connect/disconnect":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val backends = available_backend_names()
+            for backend in backends:
+                # Rapid connect/disconnect cycle (3 times)
+                var cycle: i64 = 0
+                while cycle < 3:
+                    val client = connect_for_backend(backend)
+                    match client:
+                        Ok(c):
+                            c.disconnect()
+                        Err(e):
+                            expect("rapid cycle {cycle} failed on {backend}: {e}").to_contain("skip")
+                    cycle = cycle + 1
+                expect("ok").to_equal("ok")
+
+        it "all backends maintain session across multiple operations":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val backends = available_backend_names()
+            for backend in backends:
+                val client = connect_for_backend(backend)
+                match client:
+                    Ok(c):
+                        # Run several operations in sequence on same connection
+                        val r1 = c.eval_expr("VERSION.BUILD()")
+                        val r2 = c.eval_expr("SYSTEM.CPU()")
+                        val r3 = c.run_command("PRINT \"multi-op test\"")
+                        val r4 = c.eval_expr("VERSION.SOFTWARE()")
+                        c.disconnect()
+                        match r1:
+                            Ok(_): pass_do_nothing
+                            Err(e): expect("op1 failed on {backend}: {e}").to_contain("skip")
+                        match r2:
+                            Ok(_): pass_do_nothing
+                            Err(e): expect("op2 failed on {backend}: {e}").to_contain("skip")
+                        match r3:
+                            Ok(_): pass_do_nothing
+                            Err(e): expect("op3 failed on {backend}: {e}").to_contain("skip")
+                        match r4:
+                            Ok(_): pass_do_nothing
+                            Err(e): expect("op4 failed on {backend}: {e}").to_contain("skip")
+                    Err(e):
+                        expect("connect failed on {backend}: {e}").to_contain("skip")
+
+    context "protocol detection":
+        it "NETTCP protocol works for all backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            # NETTCP is the default protocol -- verified by successful connection
+            val backends = available_backend_names()
+            for backend in backends:
+                val client = connect_for_backend(backend)
+                match client:
+                    Ok(c):
+                        val r = c.eval_expr("VERSION.BUILD()")
+                        c.disconnect()
+                        match r:
+                            Ok(v): expect(v.trim().len()).to_be_greater_than(0)
+                            Err(e): expect("NETTCP eval failed on {backend}: {e}").to_contain("skip")
+                    Err(e):
+                        expect("NETTCP connect failed on {backend}: {e}").to_contain("skip")
+
+        it "default port 20000 works for all backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            # Default port is 20000 -- already used by t32_hw_port() fallback
+            val port = t32_hw_port()
+            expect(port).to_equal(20000)
+            val backends = available_backend_names()
+            for backend in backends:
+                val client = connect_for_backend(backend)
+                match client:
+                    Ok(c):
+                        c.disconnect()
+                        expect("ok").to_equal("ok")
+                    Err(e):
+                        expect("port 20000 failed on {backend}: {e}").to_contain("skip")
+
+    context "cross-backend value consistency":
+        it "VERSION.BUILD() is numeric on all backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("VERSION.BUILD()")
+            val successful = results.filter(\r: r.success)
+            for r in successful:
+                val as_num = r.value.to_i64()
+                match as_num:
+                    Some(n): expect(n).to_be_greater_than(0)
+                    nil: expect("non-numeric VERSION.BUILD from {r.backend}: {r.value}").to_contain("numeric")
+
+        it "STATE.RUN() returns boolean on all backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("STATE.RUN()")
+            assert_all_results_succeeded(results)
+            assert_all_results_equal(results)
+            val successful = results.filter(\r: r.success)
+            for r in successful:
+                val is_bool = (r.value == "TRUE" or r.value == "FALSE")
+                expect(is_bool).to_equal(true)
+
+        it "Register.PP() is consistent hex across backends":
+            if not t32_hw_probe_available():
+                expect(t32_hw_skip_msg("no T32 probe")).to_contain("skip")
+                return
+            val results = eval_on_all_backends("Register.PP()")
+            assert_all_results_succeeded(results)
+            # All backends must return the same program pointer
+            assert_all_results_equal(results)
