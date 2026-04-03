@@ -552,13 +552,15 @@ pub(super) fn create_filtered_env(env: &Env) -> Env {
         .collect()
 }
 
-/// Export functions with filtered environment captured
+/// Export functions with filtered environment captured.
+/// Returns the `Arc<FunctionDef>` map so the caller can reuse the same Arc instances
+/// for caching (avoids creating duplicate Arc wrappers).
 pub(super) fn export_functions(
     local_functions: &HashMap<String, simple_parser::ast::FunctionDef>,
     filtered_env: &Env,
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
-) {
+) -> HashMap<String, Arc<simple_parser::ast::FunctionDef>> {
     // First pass: Add all module functions to env with empty captured_env
     // We pre-build shared Arc<FunctionDef> per function so both passes share the same allocation.
     trace!(functions = local_functions.len(), "First pass: adding functions to env");
@@ -605,6 +607,9 @@ pub(super) fn export_functions(
         exported = exported_count,
         "Finished exporting public functions"
     );
+
+    // Return the shared Arc defs so the caller can reuse them for caching
+    shared_defs
 }
 
 /// Process bare export statements

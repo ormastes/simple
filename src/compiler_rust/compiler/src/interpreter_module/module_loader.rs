@@ -417,9 +417,15 @@ pub fn load_and_merge_module(
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
         loader_trace!("cache-hit", "{}", module_path.display());
-        // Merge cached definitions (classes, functions, enums) into caller's HashMaps
-        // This ensures that static method calls work on imported classes
-        merge_cached_module_definitions(&module_path, classes, functions, enums);
+        // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
+        // This ensures that static method calls work on imported classes.
+        // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
+        // the interpreter's working set, but the Arc clone from cache is cheap.
+        let mut arc_functions: HashMap<String, Arc<simple_parser::ast::FunctionDef>> = HashMap::new();
+        merge_cached_module_definitions(&module_path, classes, &mut arc_functions, enums);
+        for (name, arc_def) in arc_functions {
+            functions.insert(name, (*arc_def).clone());
+        }
 
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
@@ -680,18 +686,20 @@ pub fn load_and_merge_module(
     let exports_value = Value::Dict(exports.clone());
     cache_module_exports(&module_path, exports_value);
 
-    // Also cache the module definitions (classes, functions, enums) for future imports
+    // Also cache the module definitions (classes, functions, enums) for future imports.
+    // module_functions is already HashMap<String, Arc<FunctionDef>> -- cache stores Arc clones (cheap).
     cache_module_definitions(&module_path, &module_classes, &module_functions, &module_enums);
 
-    // Merge freshly loaded definitions into caller's scope (same as cache case on line 264)
-    // This ensures static method calls work on imported classes
+    // Merge freshly loaded definitions into caller's scope (same as cache case above).
+    // This ensures static method calls work on imported classes.
     for (name, class_def) in &module_classes {
         classes.insert(name.clone(), class_def.clone());
     }
     for (name, func_def) in &module_functions {
         if name != "main" {
-            // Don't add "main" from imported modules
-            functions.insert(name.clone(), func_def.clone());
+            // Don't add "main" from imported modules.
+            // Unwrap Arc to raw FunctionDef for the interpreter's working set.
+            functions.insert(name.clone(), (**func_def).clone());
         }
     }
     for (name, enum_def) in &module_enums {

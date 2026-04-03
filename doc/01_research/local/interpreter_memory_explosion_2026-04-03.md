@@ -209,6 +209,34 @@ MCP wrappers should always set the narrowest possible `SIMPLE_LIB`.
 Add a CI job that runs key MCP entry points with `SIMPLE_MEMORY_LIMIT_MB=100`
 and asserts they load successfully. Any regression fails the build.
 
+### 6. Arc-by-Default Policy for AST/Value Types
+
+All large heap types in the interpreter should use `Arc<T>` not `Box<T>` or raw clones:
+- `FunctionDef` — **Done** (Arc in Value, cache, and exports pipeline)
+- `ClassDef` — Next candidate (same cache pattern)
+- `EnumDef` — Next candidate
+- `Env` (captured_env) — **Done** (Arc)
+
+**Rule:** If a type appears in both a cache and a Value variant, it MUST be `Arc<T>`.
+If it's cloned more than once during module loading, it MUST be `Arc<T>`.
+
+### 7. Module Loading Memory Budget (Future)
+
+Add per-module RSS delta tracking:
+```
+[module-load] path=cmm_parser_runtime.spl rss_before=16MB rss_after=18MB delta=+2MB functions=3
+```
+When delta exceeds a configurable threshold (e.g., 10MB), emit a warning.
+This makes memory regressions visible immediately in development.
+
+### 8. SIMPLE_LIB Scope Validation
+
+When `SIMPLE_LIB` points at a directory with >500 `.spl` files, emit a warning:
+```
+[warn] SIMPLE_LIB=/path/to/src contains 4553 .spl files — consider narrowing scope
+```
+MCP wrappers should always set the narrowest possible `SIMPLE_LIB`.
+
 ## Fix Priority
 
 | Bug | Impact | Effort | Priority | Status |

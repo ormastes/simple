@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node};
 
@@ -23,10 +24,11 @@ type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
 
 /// Collected module exports: (env, exports, functions, classes, enums).
+/// Functions are `Arc<FunctionDef>` for cheap sharing between cache and `Value::Function`.
 type ModuleExports = (
     Env,
     HashMap<String, Value>,
-    HashMap<String, simple_parser::ast::FunctionDef>,
+    HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     HashMap<String, ClassDef>,
     Enums,
 );
@@ -111,13 +113,15 @@ pub fn evaluate_module_exports_with_preloaded(
         &mut bare_exports,
     )?;
 
-    // Create filtered environment and export functions
+    // Create filtered environment and export functions.
+    // export_functions returns the Arc<FunctionDef> map it builds internally,
+    // so the same Arc instances flow into both Value::Function (in exports) and the cache.
     let filtered_env = create_filtered_env(&env);
-    export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
+    let local_functions_arc = export_functions(&local_functions, &filtered_env, &mut exports, &mut env);
 
     // Process bare export statements
     process_bare_exports(&bare_exports, &env, &mut exports);
 
     // Return env, exports, and the local definitions for caching
-    Ok((env, exports, local_functions, local_classes, local_enums))
+    Ok((env, exports, local_functions_arc, local_classes, local_enums))
 }

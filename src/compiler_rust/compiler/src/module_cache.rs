@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use tracing::trace;
 
@@ -59,8 +59,8 @@ thread_local! {
     pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
     // Cache for ClassDef objects - needed for static method calls on imported classes
     pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, ClassDef>>> = RefCell::new(HashMap::new());
-    // Cache for FunctionDef objects
-    pub static MODULE_FUNCTIONS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, FunctionDef>>> = RefCell::new(HashMap::new());
+    // Cache for FunctionDef objects (Arc-wrapped for cheap sharing with Value::Function)
+    pub static MODULE_FUNCTIONS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<FunctionDef>>>> = RefCell::new(HashMap::new());
     // Cache for EnumDef objects
     pub static MODULE_ENUMS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, EnumDef>>> = RefCell::new(HashMap::new());
     // Track modules currently being loaded to prevent circular import infinite recursion
@@ -255,11 +255,12 @@ pub fn cache_module_exports(path: &Path, exports: Value) {
     });
 }
 
-/// Cache module definitions (classes, functions, enums) for a path
+/// Cache module definitions (classes, functions, enums) for a path.
+/// Functions are stored as `Arc<FunctionDef>` for cheap sharing with `Value::Function`.
 pub fn cache_module_definitions(
     path: &Path,
     classes: &HashMap<String, ClassDef>,
-    functions: &HashMap<String, FunctionDef>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
     enums: &HashMap<String, EnumDef>,
 ) {
     let key = normalize_path_key(path);
@@ -275,12 +276,13 @@ pub fn cache_module_definitions(
     });
 }
 
-/// Get cached module definitions and merge them into the provided HashMaps
-/// Returns true if definitions were found and merged, false otherwise
+/// Get cached module definitions and merge them into the provided HashMaps.
+/// Functions are `Arc<FunctionDef>` -- cloning is a cheap reference-count bump.
+/// Returns true if definitions were found and merged, false otherwise.
 pub fn merge_cached_module_definitions(
     path: &Path,
     classes: &mut HashMap<String, ClassDef>,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     enums: &mut HashMap<String, EnumDef>,
 ) -> bool {
     let key = normalize_path_key(path);
@@ -299,7 +301,7 @@ pub fn merge_cached_module_definitions(
         if let Some(cached_functions) = cache.borrow().get(&key) {
             for (name, func_def) in cached_functions {
                 if name != "main" {
-                    // Don't add "main" from imported modules
+                    // Don't add "main" from imported modules -- Arc clone is cheap
                     functions.insert(name.clone(), func_def.clone());
                 }
             }
