@@ -279,28 +279,18 @@ while [ -L "\$SELF" ]; do
 done
 SCRIPT_DIR="\$(cd "\$(dirname "\$SELF")" && pwd)"
 REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
-PREFERRED_BINARY=""
-if [ -n "${preferred_binary}" ]; then
-  PREFERRED_BINARY="\${REPO_ROOT}/${preferred_binary}"
-fi
-HOST_KERNEL="\$(uname -s 2>/dev/null || echo unknown)"
-PREFER_NATIVE=0
-if [ "\${T32_MCP_USE_NATIVE:-0}" = "1" ]; then
-  PREFER_NATIVE=1
-elif [ "\$HOST_KERNEL" = "FreeBSD" ]; then
-  PREFER_NATIVE=1
-fi
-if [ "\$PREFER_NATIVE" = "1" ] && [ -n "\$PREFERRED_BINARY" ] && [ -x "\$PREFERRED_BINARY" ]; then
-  exec "\$PREFERRED_BINARY" "\$@"
-fi
-# Prefer bin/simple (user-managed link) so all tools follow the same binary
 RUNTIME="\${REPO_ROOT}/bin/simple"
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
+if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/release/simple"; fi
+if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; fi
+if [ ! -x "\$RUNTIME" ]; then echo "error: no runtime found for ${name}" >&2; exit 1; fi
 ENTRY="\${REPO_ROOT}/${entry}"
+STDERR_LOG="\${REPO_ROOT}/.simple/logs/${name}_stderr.log"
+mkdir -p "\$(dirname "\$STDERR_LOG")"
 export SIMPLE_LIB="\${REPO_ROOT}/src"
 export SIMPLE_LOG=error
 ${extra_env}
-RUST_LOG=error exec "\$RUNTIME" "\$ENTRY" "\$@" 2>/dev/null
+RUST_LOG=error exec "\$RUNTIME" "\$ENTRY" "\$@" 2>>"\$STDERR_LOG"
 LAUNCHER_EOF
   chmod +x "${launcher}"
 }
@@ -496,7 +486,7 @@ fi
 T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
 COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
-FULL_ENTRY="${REPO_ROOT}/src/app/t32_mcp_server/main.spl"
+FULL_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
 FULL_SIMPLE_LIB="${TRACE32_ROOT}"
 COLD_SIMPLE_LIB="${TRACE32_ROOT}"
 export SIMPLE_LOG=error
@@ -650,10 +640,10 @@ TOOL_DAEMON_CACHE_FILE="${CACHE_ROOT}/mcp_daemon.smf"
 TOOL_RUNNER_BIN_DEFAULT="${REPO_ROOT}/bin/release/t32_lsp_mcp_tool_runner"
 mkdir -p "$CACHE_ROOT"
 if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
-  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
 fi
 if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
-  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
 fi
 export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
@@ -661,7 +651,11 @@ export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/t
 if [ -x "$TOOL_RUNNER_BIN_DEFAULT" ]; then
   export T32_LSP_MCP_TOOL_RUNNER_BIN="${T32_LSP_MCP_TOOL_RUNNER_BIN:-$TOOL_RUNNER_BIN_DEFAULT}"
 fi
-export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_CACHE_FILE}"
+if [ -f "$TOOL_DAEMON_CACHE_FILE" ]; then
+  export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_CACHE_FILE}"
+else
+  export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_SOURCE}"
+fi
 export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
@@ -676,11 +670,13 @@ if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_
     SIMPLE_LIB="$DAEMON_SIMPLE_LIB" nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 </dev/null &
   fi
 fi
+MAIN_ARTIFACT="$CACHE_FILE"
+if [ ! -f "$MAIN_ARTIFACT" ]; then MAIN_ARTIFACT="$ENTRY"; fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
   printf '%s cache=%s daemon_cache=%s runner_bin=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CACHE_FILE" "$TOOL_DAEMON_CACHE_FILE" "${T32_LSP_MCP_TOOL_RUNNER_BIN:-}" >>"$WRAPPER_LOG"
-  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$CACHE_FILE" "$@" 2>>"$ERROR_LOG"
+  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$MAIN_ARTIFACT" "$@" 2>>"$ERROR_LOG"
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$CACHE_FILE" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$MAIN_ARTIFACT" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

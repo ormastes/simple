@@ -459,7 +459,7 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
                 .filter(|(_, v)| !matches!(v, Value::Function { .. }))
                 .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
                 .collect();
-            Value::Dict(filtered)
+            Value::Dict(Arc::new(filtered))
         }
         // For all other values, clone them as-is
         other => other.clone(),

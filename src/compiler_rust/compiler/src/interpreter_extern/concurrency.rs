@@ -139,7 +139,7 @@ pub fn rt_thread_spawn_isolated_with_context(
 
     // Extract the closure
     let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), HashMap::clone(env)),
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
                 "rt_thread_spawn_isolated expects first argument to be a closure".to_string(),
@@ -204,7 +204,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
 
     // Extract the closure
     let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), HashMap::clone(env)),
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), Env::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
                 "rt_thread_spawn_isolated2 expects first argument to be a closure".to_string(),

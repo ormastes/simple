@@ -90,7 +90,7 @@ pub fn handle_constructor_methods(
         // Find static method (no self parameter)
         if let Some(method_def) = class_def.methods.iter().find(|m| m.name == method) {
             // Execute without self - start with empty local_env to avoid shadowing defaults
-            let mut local_env: HashMap<String, Value> = HashMap::new();
+            let mut local_env: Env = Env::new();
             let mut positional_idx = 0;
 
             // Bind provided arguments
@@ -107,7 +107,7 @@ pub fn handle_constructor_methods(
 
             // Bind default values for remaining parameters using an empty scope
             // to prevent caller's variables from shadowing defaults
-            let mut empty_env: HashMap<String, Value> = HashMap::new();
+            let mut empty_env: Env = Env::new();
             for param in &method_def.params {
                 if !local_env.contains_key(&param.name) {
                     if let Some(default_expr) = &param.default {

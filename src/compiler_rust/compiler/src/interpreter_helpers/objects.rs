@@ -81,7 +81,7 @@ pub(crate) fn spawn_actor_with_expr(
                     // If it's a function or lambda, call it with no arguments
                     match value {
                         Value::Function { def, captured_env, .. } => {
-                            let mut local_env = HashMap::clone(&captured_env);
+                            let mut local_env = Env::clone(&captured_env);
                             let _ = exec_block(
                                 &def.body,
                                 &mut local_env,
@@ -96,7 +96,7 @@ pub(crate) fn spawn_actor_with_expr(
                             env: lambda_env,
                             ..
                         } => {
-                            let mut local_env = HashMap::clone(&lambda_env);
+                            let mut local_env = Env::clone(&lambda_env);
                             let _ = evaluate_expr(
                                 &body,
                                 &mut local_env,

@@ -517,7 +517,7 @@ impl BridgeValue {
             bridge_tags::TUPLE => self.to_vec_value(Value::Tuple),
             bridge_tags::DICT => {
                 // Return empty dict for now
-                Value::Dict(HashMap::new())
+                Value::Dict(Arc::new(HashMap::new()))
             }
             bridge_tags::OBJECT => {
                 let class = if self.extended.is_null() {

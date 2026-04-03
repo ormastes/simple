@@ -82,7 +82,7 @@ pub(crate) fn apply_lambda_to_vec(
     {
         let mut results = Vec::new();
         for item in arr {
-            let mut local_env = HashMap::clone(&captured);
+            let mut local_env = Env::clone(&captured);
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), item.clone());
             }

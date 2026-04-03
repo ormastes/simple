@@ -42,16 +42,35 @@ if [ "${T32_LSP_MCP_DEBUG_LOG:-0}" != "0" ]; then
   export T32_LSP_MCP_ERROR_LOG="$ERROR_LOG"
 fi
 DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-/tmp/t32_lsp_mcp_shared_${SUFFIX}}"
-export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
+T32_LSP_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_lsp_mcp_stderr.log"
+mkdir -p "$(dirname "$T32_LSP_MCP_STDERR_LOG")"
+CACHE_ROOT="${REPO_ROOT}/.simple/cache/t32_lsp_mcp"
+CACHE_FILE="${CACHE_ROOT}/main.smf"
+TOOL_DAEMON_SOURCE="${REPO_ROOT}/examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl"
+TOOL_DAEMON_CACHE_FILE="${CACHE_ROOT}/mcp_daemon.smf"
+TOOL_RUNNER_BIN_DEFAULT="${REPO_ROOT}/bin/release/t32_lsp_mcp_tool_runner"
+mkdir -p "$CACHE_ROOT"
+if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+fi
+if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+fi
+export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
-export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
+if [ -x "$TOOL_RUNNER_BIN_DEFAULT" ]; then
+  export T32_LSP_MCP_TOOL_RUNNER_BIN="${T32_LSP_MCP_TOOL_RUNNER_BIN:-$TOOL_RUNNER_BIN_DEFAULT}"
+fi
+if [ -f "$TOOL_DAEMON_CACHE_FILE" ]; then
+  export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_CACHE_FILE}"
+else
+  export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_SOURCE}"
+fi
 export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
-T32_LSP_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_lsp_mcp_stderr.log"
-mkdir -p "$(dirname "$T32_LSP_MCP_STDERR_LOG")"
 
 DAEMON_SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
@@ -62,8 +81,10 @@ if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_
     SIMPLE_LIB="$DAEMON_SIMPLE_LIB" nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 </dev/null &
   fi
 fi
-
+MAIN_ARTIFACT="$CACHE_FILE"
+if [ ! -f "$MAIN_ARTIFACT" ]; then MAIN_ARTIFACT="$ENTRY"; fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
-  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$ERROR_LOG"
+  printf '%s cache=%s daemon_cache=%s runner_bin=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CACHE_FILE" "$TOOL_DAEMON_CACHE_FILE" "${T32_LSP_MCP_TOOL_RUNNER_BIN:-}" >>"$WRAPPER_LOG"
+  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$MAIN_ARTIFACT" "$@" 2>>"$ERROR_LOG"
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$MAIN_ARTIFACT" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"

@@ -221,7 +221,7 @@ pub(super) fn eval_op_expr(
                             callee: Box::new(Expr::Identifier("__compose_g".to_string())),
                             args: vec![simple_parser::ast::Argument::new(None, inner_call)],
                         };
-                        let mut captured_env: Env = HashMap::new();
+                        let mut captured_env: Env = Env::new();
                         captured_env.insert("__compose_f".to_string(), left_val);
                         captured_env.insert("__compose_g".to_string(), right_val);
                         return Ok(Some(Value::Lambda {
@@ -247,7 +247,7 @@ pub(super) fn eval_op_expr(
                             }
                             match callee_val {
                                 Value::Function { def, captured_env, .. } => {
-                                    let mut env_clone = HashMap::clone(&captured_env);
+                                    let mut env_clone = Env::clone(&captured_env);
                                     return Ok(Some(super::super::exec_function_with_values(
                                         &def,
                                         &all_args,
@@ -263,7 +263,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
-                                    let mut local_env = HashMap::clone(&lambda_env);
+                                    let mut local_env = Env::clone(&lambda_env);
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
                                             local_env.insert(param_name.clone(), arg.clone());
@@ -304,7 +304,7 @@ pub(super) fn eval_op_expr(
                             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                             match right_val {
                                 Value::Function { def, captured_env, .. } => {
-                                    let mut env_clone = HashMap::clone(&captured_env);
+                                    let mut env_clone = Env::clone(&captured_env);
                                     return Ok(Some(super::super::exec_function_with_values(
                                         &def,
                                         &[left_val],
@@ -320,7 +320,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
-                                    let mut local_env = HashMap::clone(&lambda_env);
+                                    let mut local_env = Env::clone(&lambda_env);
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
                                     }
@@ -928,7 +928,7 @@ pub(super) fn eval_op_expr(
 
                             // Execute left function
                             if let Value::Function { def, captured_env, .. } = left_val {
-                                let mut captured_env_clone = HashMap::clone(&captured_env);
+                                let mut captured_env_clone = Env::clone(&captured_env);
                                 let left_result = super::super::exec_function_with_values(
                                     &def,
                                     &[],
@@ -943,7 +943,7 @@ pub(super) fn eval_op_expr(
 
                             // Execute right function
                             if let Value::Function { def, captured_env, .. } = right_val {
-                                let mut captured_env_clone = HashMap::clone(&captured_env);
+                                let mut captured_env_clone = Env::clone(&captured_env);
                                 let right_result = super::super::exec_function_with_values(
                                     &def,
                                     &[],

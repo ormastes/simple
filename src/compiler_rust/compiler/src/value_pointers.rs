@@ -239,7 +239,7 @@ impl Clone for Value {
                 data: data.clone(),
             },
             Value::Tuple(t) => Value::Tuple(t.clone()),
-            Value::Dict(d) => Value::Dict(d.clone()),
+            Value::Dict(d) => Value::Dict(Arc::clone(d)),
             Value::FrozenDict(d) => Value::FrozenDict(d.clone()),
             Value::Lambda { params, body, env } => Value::Lambda {
                 params: params.clone(),

@@ -2,6 +2,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use simple_parser::{Lexer, TokenKind, NamePattern, Token};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Token representation for FFI
 #[derive(Debug, Clone)]
@@ -179,7 +180,7 @@ pub fn simple_lexer_tokenize(args: &[Value]) -> Result<Value, CompileError> {
                 fields.insert("value".to_string(), Value::Int(value));
             }
 
-            Value::Dict(fields)
+            Value::Dict(Arc::new(fields))
         })
         .collect();
 

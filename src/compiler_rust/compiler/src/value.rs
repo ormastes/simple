@@ -3,7 +3,7 @@
 //! This module contains the runtime value representation and
 //! pointer wrapper types for manual memory management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -15,6 +15,18 @@ use simple_common::manual_mem::{
 use simple_parser::ast::{Expr, FunctionDef, Node};
 
 use crate::error::{codes, CompileError, ErrorContext};
+
+/// Frequently-used enum type and variant names as constants.
+/// Eliminates repeated string allocation at hot paths and establishes
+/// a single source of truth for these names.
+pub mod enum_names {
+    pub const OPTION: &str = "Option";
+    pub const SOME: &str = "Some";
+    pub const NONE: &str = "None";
+    pub const RESULT: &str = "Result";
+    pub const OK: &str = "Ok";
+    pub const ERR: &str = "Err";
+}
 
 // Async value types (Future, Generator, Channel, ThreadPool)
 // These are split into a separate file for maintainability
@@ -253,8 +265,344 @@ impl MethodLookupResult {
     }
 }
 
-/// Variable environment for compile-time evaluation
-pub type Env = HashMap<String, Value>;
+/// Copy-on-write environment: reads check overlay first, then immutable base.
+/// Clone is O(overlay_size) via Arc base + overlay clone, not O(base_size).
+///
+/// This replaces the old `type Env = HashMap<String, Value>` with a struct
+/// that avoids deep-cloning the entire captured environment on every
+/// function/lambda call.
+#[derive(Debug)]
+pub struct CowEnv {
+    /// Shared immutable base environment (cheap to clone via Arc)
+    base: Option<Arc<HashMap<String, Value>>>,
+    /// Local modifications/additions (typically small — function args, locals)
+    overlay: HashMap<String, Value>,
+    /// Keys removed from base (tombstones)
+    tombstones: HashSet<String>,
+}
+
+impl CowEnv {
+    /// Create an empty environment.
+    pub fn new() -> Self {
+        CowEnv {
+            base: None,
+            overlay: HashMap::new(),
+            tombstones: HashSet::new(),
+        }
+    }
+
+    /// Look up a key: overlay first, then base (skipping tombstones).
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        if let Some(v) = self.overlay.get(key) {
+            return Some(v);
+        }
+        if self.tombstones.contains(key) {
+            return None;
+        }
+        if let Some(ref base) = self.base {
+            return base.get(key);
+        }
+        None
+    }
+
+    /// Insert a key-value pair. Returns the previous value if any.
+    pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
+        self.tombstones.remove(&key);
+        self.overlay.insert(key, value)
+    }
+
+    /// Remove a key. Returns the removed value if any.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        if let Some(v) = self.overlay.remove(key) {
+            // If the key also exists in base, add a tombstone so we don't see it
+            if let Some(ref base) = self.base {
+                if base.contains_key(key) {
+                    self.tombstones.insert(key.to_string());
+                }
+            }
+            return Some(v);
+        }
+        if self.tombstones.contains(key) {
+            return None;
+        }
+        if let Some(ref base) = self.base {
+            if let Some(v) = base.get(key) {
+                self.tombstones.insert(key.to_string());
+                return Some(v.clone());
+            }
+        }
+        None
+    }
+
+    /// Check if a key exists in the environment.
+    pub fn contains_key(&self, key: &str) -> bool {
+        if self.overlay.contains_key(key) {
+            return true;
+        }
+        if self.tombstones.contains(key) {
+            return false;
+        }
+        if let Some(ref base) = self.base {
+            return base.contains_key(key);
+        }
+        false
+    }
+
+    /// Approximate number of entries.
+    pub fn len(&self) -> usize {
+        let base_count = match &self.base {
+            Some(b) => b.len(),
+            None => 0,
+        };
+        // base keys minus tombstones, plus overlay keys (some may shadow base)
+        let base_visible = if base_count > self.tombstones.len() {
+            base_count - self.tombstones.len()
+        } else {
+            0
+        };
+        // Count overlay keys that are NOT shadowing base keys
+        let overlay_new = self.overlay.keys().filter(|k| {
+            match &self.base {
+                Some(b) => !b.contains_key(k.as_str()),
+                None => true,
+            }
+        }).count();
+        base_visible + overlay_new + self.overlay.keys().filter(|k| {
+            match &self.base {
+                Some(b) => b.contains_key(k.as_str()),
+                None => false,
+            }
+        }).count()
+    }
+
+    /// Check if the environment is empty.
+    pub fn is_empty(&self) -> bool {
+        if !self.overlay.is_empty() {
+            return false;
+        }
+        match &self.base {
+            Some(b) => {
+                // All base keys must be tombstoned
+                b.len() <= self.tombstones.len()
+                    && b.keys().all(|k| self.tombstones.contains(k))
+            }
+            None => true,
+        }
+    }
+
+    /// Iterate over all keys (merged, deduplicated).
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        // Overlay keys + base keys not in overlay and not tombstoned
+        let overlay_keys = self.overlay.keys();
+        let base_keys: Box<dyn Iterator<Item = &String>> = match &self.base {
+            Some(b) => Box::new(
+                b.keys()
+                    .filter(|k| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
+            ),
+            None => Box::new(std::iter::empty()),
+        };
+        overlay_keys.chain(base_keys)
+    }
+
+    /// Iterate over all values (merged).
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        let overlay_vals = self.overlay.iter();
+        let base_vals: Box<dyn Iterator<Item = (&String, &Value)>> = match &self.base {
+            Some(b) => Box::new(
+                b.iter()
+                    .filter(|(k, _)| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
+            ),
+            None => Box::new(std::iter::empty()),
+        };
+        overlay_vals.chain(base_vals).map(|(_, v)| v)
+    }
+
+    /// Iterate over all (key, value) pairs (merged).
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        let overlay_iter = self.overlay.iter();
+        let base_iter: Box<dyn Iterator<Item = (&String, &Value)>> = match &self.base {
+            Some(b) => Box::new(
+                b.iter()
+                    .filter(|(k, _)| !self.overlay.contains_key(k.as_str()) && !self.tombstones.contains(k.as_str())),
+            ),
+            None => Box::new(std::iter::empty()),
+        };
+        overlay_iter.chain(base_iter)
+    }
+
+    /// Extend the overlay with entries from an iterator.
+    pub fn extend<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.tombstones.remove(&k);
+            self.overlay.insert(k, v);
+        }
+    }
+
+    /// Create a CowEnv from an existing HashMap (map becomes the overlay).
+    pub fn from_map(map: HashMap<String, Value>) -> Self {
+        CowEnv {
+            base: None,
+            overlay: map,
+            tombstones: HashSet::new(),
+        }
+    }
+
+    /// Create a CowEnv with a shared base (for function calls).
+    pub fn with_base(base: Arc<HashMap<String, Value>>) -> Self {
+        CowEnv {
+            base: Some(base),
+            overlay: HashMap::new(),
+            tombstones: HashSet::new(),
+        }
+    }
+
+    /// Materialize into a flat HashMap (for cases that need it).
+    pub fn to_map(&self) -> HashMap<String, Value> {
+        let mut result = match &self.base {
+            Some(b) => {
+                let mut m = (**b).clone();
+                for t in &self.tombstones {
+                    m.remove(t);
+                }
+                m
+            }
+            None => HashMap::new(),
+        };
+        // Overlay overwrites base entries
+        result.extend(self.overlay.iter().map(|(k, v)| (k.clone(), v.clone())));
+        result
+    }
+
+    /// Freeze current state into a shareable Arc<HashMap> for capture.
+    pub fn freeze(&self) -> Arc<HashMap<String, Value>> {
+        Arc::new(self.to_map())
+    }
+
+    /// Clear all entries.
+    pub fn clear(&mut self) {
+        self.overlay.clear();
+        if let Some(ref base) = self.base {
+            // Tombstone all base keys
+            self.tombstones = base.keys().cloned().collect();
+        }
+    }
+
+    /// Provide entry-like API by delegating to the overlay.
+    /// If the key exists in base but not overlay, copy it to overlay first.
+    pub fn entry(&mut self, key: String) -> std::collections::hash_map::Entry<'_, String, Value> {
+        // If key is in base but not in overlay, promote it
+        if !self.overlay.contains_key(&key) && !self.tombstones.contains(&key) {
+            if let Some(ref base) = self.base {
+                if let Some(v) = base.get(&key) {
+                    self.overlay.insert(key.clone(), v.clone());
+                }
+            }
+        }
+        self.tombstones.remove(&key);
+        self.overlay.entry(key)
+    }
+}
+
+impl Default for CowEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for CowEnv {
+    fn clone(&self) -> Self {
+        CowEnv {
+            base: self.base.clone(), // Arc::clone — O(1)
+            overlay: self.overlay.clone(), // small
+            tombstones: self.tombstones.clone(), // small
+        }
+    }
+}
+
+impl PartialEq for CowEnv {
+    fn eq(&self, other: &Self) -> bool {
+        // Materialize and compare — used rarely (e.g., in Value::PartialEq)
+        self.to_map() == other.to_map()
+    }
+}
+
+impl IntoIterator for CowEnv {
+    type Item = (String, Value);
+    type IntoIter = std::collections::hash_map::IntoIter<String, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_map().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a CowEnv {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = CowEnvIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CowEnvIter {
+            overlay_iter: self.overlay.iter(),
+            base_iter: self.base.as_ref().map(|b| b.iter()),
+            overlay: &self.overlay,
+            tombstones: &self.tombstones,
+        }
+    }
+}
+
+/// Iterator for &CowEnv — yields overlay entries then non-shadowed base entries.
+pub struct CowEnvIter<'a> {
+    overlay_iter: std::collections::hash_map::Iter<'a, String, Value>,
+    base_iter: Option<std::collections::hash_map::Iter<'a, String, Value>>,
+    overlay: &'a HashMap<String, Value>,
+    tombstones: &'a HashSet<String>,
+}
+
+impl<'a> Iterator for CowEnvIter<'a> {
+    type Item = (&'a String, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(item) = self.overlay_iter.next() {
+            return Some(item);
+        }
+        if let Some(ref mut base_it) = self.base_iter {
+            loop {
+                match base_it.next() {
+                    Some((k, v)) => {
+                        if !self.overlay.contains_key(k) && !self.tombstones.contains(k.as_str()) {
+                            return Some((k, v));
+                        }
+                        // Skip shadowed/tombstoned keys
+                    }
+                    None => return None,
+                }
+            }
+        }
+        None
+    }
+}
+
+impl From<HashMap<String, Value>> for CowEnv {
+    fn from(map: HashMap<String, Value>) -> Self {
+        CowEnv::from_map(map)
+    }
+}
+
+impl std::iter::FromIterator<(String, Value)> for CowEnv {
+    fn from_iter<T: IntoIterator<Item = (String, Value)>>(iter: T) -> Self {
+        CowEnv::from_map(iter.into_iter().collect())
+    }
+}
+
+impl std::ops::Index<&str> for CowEnv {
+    type Output = Value;
+    fn index(&self, key: &str) -> &Value {
+        self.get(key).expect("key not found in CowEnv")
+    }
+}
+
+/// Variable environment for compile-time evaluation.
+/// Now backed by CowEnv for O(1) clone at function call sites.
+pub type Env = CowEnv;
 
 thread_local! {
     pub(crate) static MANUAL_GC: ManualGc = ManualGc::new();
@@ -364,8 +712,8 @@ impl SpecialEnumType {
     /// Try to parse an enum name as a special enum type.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "Option" => Some(SpecialEnumType::Option),
-            "Result" => Some(SpecialEnumType::Result),
+            enum_names::OPTION => Some(SpecialEnumType::Option),
+            enum_names::RESULT => Some(SpecialEnumType::Result),
             _ => None,
         }
     }
@@ -373,8 +721,8 @@ impl SpecialEnumType {
     /// Get the string name of this special enum type.
     pub fn as_str(&self) -> &'static str {
         match self {
-            SpecialEnumType::Option => "Option",
-            SpecialEnumType::Result => "Result",
+            SpecialEnumType::Option => enum_names::OPTION,
+            SpecialEnumType::Result => enum_names::RESULT,
         }
     }
 }
@@ -397,8 +745,8 @@ impl OptionVariant {
     /// Try to parse a variant name as an Option variant.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "Some" => Some(OptionVariant::Some),
-            "None" => Some(OptionVariant::None),
+            enum_names::SOME => Some(OptionVariant::Some),
+            enum_names::NONE => Some(OptionVariant::None),
             _ => None,
         }
     }
@@ -406,8 +754,8 @@ impl OptionVariant {
     /// Get the string name of this variant.
     pub fn as_str(&self) -> &'static str {
         match self {
-            OptionVariant::Some => "Some",
-            OptionVariant::None => "None",
+            OptionVariant::Some => enum_names::SOME,
+            OptionVariant::None => enum_names::NONE,
         }
     }
 }
@@ -430,8 +778,8 @@ impl ResultVariant {
     /// Try to parse a variant name as a Result variant.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "Ok" => Some(ResultVariant::Ok),
-            "Err" => Some(ResultVariant::Err),
+            enum_names::OK => Some(ResultVariant::Ok),
+            enum_names::ERR => Some(ResultVariant::Err),
             _ => None,
         }
     }
@@ -439,8 +787,8 @@ impl ResultVariant {
     /// Get the string name of this variant.
     pub fn as_str(&self) -> &'static str {
         match self {
-            ResultVariant::Ok => "Ok",
-            ResultVariant::Err => "Err",
+            ResultVariant::Ok => enum_names::OK,
+            ResultVariant::Err => enum_names::ERR,
         }
     }
 }
@@ -511,7 +859,7 @@ pub enum Value {
     },
     Tuple(Vec<Value>),
     /// Mutable dict (default for dict literals)
-    Dict(HashMap<String, Value>),
+    Dict(Arc<HashMap<String, Value>>),
     /// Immutable frozen dict (created via freeze(), copy-on-freeze semantics)
     FrozenDict(Arc<HashMap<String, Value>>),
     Lambda {
@@ -646,7 +994,7 @@ impl Value {
 
     /// Create a new mutable dict value (default for dict literals)
     pub fn dict(map: HashMap<String, Value>) -> Self {
-        Value::Dict(map)
+        Value::Dict(Arc::new(map))
     }
 
     /// Create a new frozen (immutable) dict value

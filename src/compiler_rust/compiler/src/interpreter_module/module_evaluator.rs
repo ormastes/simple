@@ -57,7 +57,7 @@ pub fn evaluate_module_exports_with_preloaded(
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
-    let mut env: Env = HashMap::new();
+    let mut env: Env = Env::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
     let mut local_classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
@@ -94,7 +94,7 @@ pub fn evaluate_module_exports_with_preloaded(
     // Cache partial exports (type definitions) for circular import resolution
     // This allows other modules that import this one to access types even during circular imports
     if let Some(path) = module_path {
-        cache_partial_module_exports(path, Value::Dict(exports.clone()));
+        cache_partial_module_exports(path, Value::Dict(Arc::new(exports.clone())));
     }
 
     // Second pass: process imports and assignments to build the environment

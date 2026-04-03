@@ -55,7 +55,7 @@ pub(super) fn call_value_with_args(
             env: captured,
         } => {
             // Execute lambda with given args
-            let mut local_env = HashMap::clone(&captured);
+            let mut local_env = Env::clone(&captured);
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.clone(), arg.clone());
@@ -65,7 +65,7 @@ pub(super) fn call_value_with_args(
         }
         Value::Function { def, captured_env, .. } => {
             // Execute function with given args, using the captured environment for closure
-            let mut local_env = HashMap::clone(&captured_env);
+            let mut local_env = Env::clone(&captured_env);
             for (i, param) in def.params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.name.clone(), arg.clone());
@@ -1051,7 +1051,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Glob import: use module.*
                                 // Add all exports to env
                                 if let Value::Dict(exports) = &value {
-                                    for (name, export_value) in exports {
+                                    for (name, export_value) in exports.iter() {
                                         if let Value::Function { def, .. } = export_value {
                                             functions.insert(name.clone(), Arc::clone(def));
                                         }
@@ -1076,7 +1076,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     Err(e) => {
                         // Module loading failed - log and use empty dict as fallback
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);
-                        let empty = Value::Dict(HashMap::new());
+                        let empty = Value::Dict(Arc::new(HashMap::new()));
                         env.insert(binding_name.clone(), empty.clone());
                         MODULE_GLOBALS.with(|cell| {
                             cell.borrow_mut().insert(binding_name.clone(), empty);
@@ -1224,7 +1224,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
 
                     // Store module dict in environment
-                    env.insert(mod_decl.name.clone(), Value::Dict(module_dict));
+                    env.insert(mod_decl.name.clone(), Value::Dict(Arc::new(module_dict)));
                 }
                 // External module declarations (no body) are handled by the module resolver
             }

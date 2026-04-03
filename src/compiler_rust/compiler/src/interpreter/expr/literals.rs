@@ -80,7 +80,7 @@ pub(super) fn eval_literal_expr(
 
             if let Some(lit_fn_info) = literal_fn_result {
                 // Execute the literal function body with the string value
-                let mut local_env: HashMap<String, Value> = HashMap::new();
+                let mut local_env: Env = Env::new();
                 local_env.insert(lit_fn_info.param_name.clone(), Value::Str(s.clone()));
 
                 match exec_block_fn(
@@ -106,7 +106,7 @@ pub(super) fn eval_literal_expr(
                     // TypedString comes from double-quoted strings, so use `from`
                     if let Some(from_method) = class_def.methods.iter().find(|m| m.name == "from") {
                         // Execute the from method with the string value
-                        let mut local_env: HashMap<String, Value> = HashMap::new();
+                        let mut local_env: Env = Env::new();
 
                         // Bind the string value to the first parameter
                         if !from_method.params.is_empty() {

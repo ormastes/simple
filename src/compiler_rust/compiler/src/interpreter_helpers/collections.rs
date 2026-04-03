@@ -89,7 +89,7 @@ pub(crate) fn eval_array_reduce(
         let mut acc = init;
         for item in arr {
             crate::interpreter::check_execution_limit()?;
-            let mut local_env = HashMap::clone(&captured);
+            let mut local_env = Env::clone(&captured);
             if params.len() >= 2 {
                 local_env.insert(params[0].clone(), acc);
                 local_env.insert(params[1].clone(), item.clone());
@@ -207,7 +207,7 @@ pub(crate) fn eval_dict_map_values(
             let new_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
         }
-        Ok(Value::Dict(new_map))
+        Ok(Value::Dict(Arc::new(new_map)))
     })
 }
 
@@ -235,7 +235,7 @@ pub(crate) fn eval_dict_filter(
                 new_map.insert(k.clone(), v.clone());
             }
         }
-        Ok(Value::Dict(new_map))
+        Ok(Value::Dict(Arc::new(new_map)))
     })
 }
 

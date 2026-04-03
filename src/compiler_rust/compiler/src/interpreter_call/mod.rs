@@ -97,7 +97,7 @@ pub(crate) fn evaluate_call(
         if let Some(val) = env.get(name).cloned() {
             match val {
                 Value::Function { def, captured_env, .. } => {
-                    let mut captured_env_clone = HashMap::clone(&captured_env);
+                    let mut captured_env_clone = Env::clone(&captured_env);
                     return core::exec_function_with_captured_env(
                         &def,
                         args,
@@ -114,7 +114,7 @@ pub(crate) fn evaluate_call(
                     body,
                     env: captured,
                 } => {
-                    let mut captured_clone = HashMap::clone(&captured);
+                    let mut captured_clone = Env::clone(&captured);
                     return core::exec_lambda(
                         &params,
                         &body,
@@ -218,7 +218,7 @@ pub(crate) fn evaluate_call(
                 // Look up function in the module's exports
                 if let Some(func_val) = module_dict.get(field).cloned() {
                     if let Value::Function { def, captured_env, .. } = func_val {
-                        let mut captured_env_clone = HashMap::clone(&captured_env);
+                        let mut captured_env_clone = Env::clone(&captured_env);
                         return core::exec_function_with_captured_env(
                             &def,
                             args,
@@ -355,7 +355,7 @@ pub(crate) fn evaluate_call(
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
             } else if let Some(Value::Function { def, captured_env, .. }) = env.get(field).cloned() {
-                let mut captured_env_clone = HashMap::clone(&captured_env);
+                let mut captured_env_clone = Env::clone(&captured_env);
                 return core::exec_function_with_captured_env(
                     &def,
                     args,
@@ -568,7 +568,7 @@ pub(crate) fn evaluate_call(
                 );
                 // Special builtin types
                 match type_name.as_str() {
-                    "HashMap" | "BTreeMap" => return Ok(Value::Dict(std::collections::HashMap::new())),
+                    "HashMap" | "BTreeMap" => return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new()))),
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
                     "Device" => {
                         return Ok(Value::Enum {
@@ -599,7 +599,7 @@ pub(crate) fn evaluate_call(
                                 fields.insert(name.clone(), val);
                             }
                         }
-                        return Ok(Value::Dict(fields));
+                        return Ok(Value::Dict(std::sync::Arc::new(fields)));
                     }
                 }
             }
@@ -807,7 +807,7 @@ pub(crate) fn evaluate_call(
             body,
             env: captured,
         } => {
-            let mut captured_clone = HashMap::clone(&captured);
+            let mut captured_clone = Env::clone(&captured);
             core::exec_lambda(
                 &params,
                 &body,
@@ -821,11 +821,11 @@ pub(crate) fn evaluate_call(
             )
         }
         Value::BlockClosure { nodes, env: captured } => {
-            let captured_clone = HashMap::clone(&captured);
+            let captured_clone = Env::clone(&captured);
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
-            let mut captured_env_clone = HashMap::clone(&captured_env);
+            let mut captured_env_clone = Env::clone(&captured_env);
             core::exec_function_with_captured_env(
                 &def,
                 args,

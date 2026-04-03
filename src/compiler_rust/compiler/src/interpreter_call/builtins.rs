@@ -131,8 +131,8 @@ pub(super) fn eval_builtin(
                     Ok(Some(Value::FrozenArray(arc)))
                 }
                 Value::Dict(map) => {
-                    // Create immutable frozen copy of dict
-                    Ok(Some(Value::FrozenDict(std::sync::Arc::new(map))))
+                    // Create immutable frozen copy of dict (map is already Arc<HashMap>)
+                    Ok(Some(Value::FrozenDict(map)))
                 }
                 Value::FrozenArray(_) | Value::FrozenDict(_) => {
                     // Already frozen, return as-is
@@ -483,7 +483,7 @@ pub(super) fn eval_builtin(
                 ..
             } = val
             {
-                let mut captured_clone = HashMap::clone(&captured);
+                let mut captured_clone = Env::clone(&captured);
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
                 let _ = evaluate_expr(&body, &mut captured_clone, functions, classes, enums, impl_methods);
                 let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());

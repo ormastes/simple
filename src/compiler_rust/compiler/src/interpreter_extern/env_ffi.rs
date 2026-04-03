@@ -38,7 +38,7 @@ struct ScopeStack {
 impl ScopeStack {
     fn new() -> Self {
         ScopeStack {
-            env: HashMap::new(),
+            env: Env::new(),
             scope_vars: vec![vec![]],
             shadow_stack: vec![vec![]],
         }

@@ -25,7 +25,7 @@ use crate::value_bridge::BridgeValue;
 
 thread_local! {
     /// Environment for interpreted code
-    static INTERP_ENV: RefCell<Env> = RefCell::new(HashMap::new());
+    static INTERP_ENV: RefCell<Env> = RefCell::new(Env::new());
 
     /// Function definitions
     static INTERP_FUNCTIONS: RefCell<HashMap<String, Arc<FunctionDef>>> = RefCell::new(HashMap::new());

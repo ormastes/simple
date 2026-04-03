@@ -474,7 +474,7 @@ if let Value::Str(ref s) = recv_val {
             let dict_val = eval_arg(
                 args,
                 0,
-                Value::Dict(std::collections::HashMap::new()),
+                Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())),
                 env,
                 functions,
                 classes,
@@ -484,7 +484,7 @@ if let Value::Str(ref s) = recv_val {
 
             if let Value::Dict(data) = dict_val {
                 let mut result = s.clone();
-                for (key, value) in &data {
+                for (key, value) in data.iter() {
                     let placeholder = format!("{{{}}}", key);
                     let replacement = value.to_display_string();
                     result = result.replace(&placeholder, &replacement);

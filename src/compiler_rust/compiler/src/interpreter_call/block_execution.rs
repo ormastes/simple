@@ -256,7 +256,7 @@ pub(super) fn exec_block_closure(
                                 }
                                 Value::Dict(mut dict) => {
                                     let key = index_val.to_key_string();
-                                    dict.insert(key, val);
+                                    Arc::make_mut(&mut dict).insert(key, val);
                                     Value::Dict(dict)
                                 }
                                 Value::Tuple(mut tup) => {
@@ -546,7 +546,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -638,7 +638,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -666,7 +666,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -753,7 +753,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -909,7 +909,7 @@ fn exec_block_closure_mut(
                                 }
                                 Value::Dict(mut dict) => {
                                     let key = index_val.to_key_string();
-                                    dict.insert(key, val);
+                                    Arc::make_mut(&mut dict).insert(key, val);
                                     Value::Dict(dict)
                                 }
                                 Value::Tuple(mut tup) => {
@@ -1108,7 +1108,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -1136,7 +1136,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -1223,7 +1223,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(std::collections::HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }

@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{Expr, LambdaParam, Node};
+use simple_parser::FStringPart;
 
 use super::evaluate_expr;
 use crate::error::{codes, CompileError, ErrorContext};
@@ -11,6 +12,7 @@ use super::super::{
     exec_node, exec_block_fn, exec_if_expr, exec_match_expr, pattern_matches, ClassDef, Control, Enums, Env,
     FunctionDef, ImplMethods,
 };
+use crate::value::CowEnv;
 
 pub(super) fn eval_control_expr(
     expr: &Expr,
@@ -31,7 +33,17 @@ pub(super) fn eval_control_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = Arc::new(env.clone());
+            let captured_env = if *capture_all {
+                Arc::new(env.clone())
+            } else {
+                // Selective capture: only copy variables referenced in the lambda body
+                let used = collect_free_vars(body);
+                let filtered: HashMap<String, Value> = env.iter()
+                    .filter(|(k, _)| used.contains(k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                Arc::new(CowEnv::from_map(filtered))
+            };
             Ok(Some(Value::Lambda {
                 params: names,
                 body: body.clone(),
@@ -58,7 +70,7 @@ pub(super) fn eval_control_expr(
                 env: captured_env,
             } = branch_result
             {
-                let mut block_env = HashMap::clone(&captured_env);
+                let mut block_env = Env::clone(&captured_env);
                 let mut block = simple_parser::ast::Block::default();
                 block.statements = nodes;
                 let (flow, last_val) = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
@@ -205,5 +217,119 @@ pub(super) fn eval_control_expr(
             env: Arc::new(env.clone()),
         })),
         _ => Ok(None),
+    }
+}
+
+/// Collect all free variable references in an expression tree.
+///
+/// Walks the AST and gathers every `Identifier` name that appears.
+/// Used for selective lambda capture: only the variables actually
+/// referenced in the lambda body are copied into the captured env.
+fn collect_free_vars(expr: &Expr) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    collect_free_vars_recursive(expr, &mut vars);
+    vars
+}
+
+/// Recursively walk the expression tree and collect identifier names.
+fn collect_free_vars_recursive(expr: &Expr, vars: &mut HashSet<String>) {
+    match expr {
+        Expr::Identifier(name) => {
+            vars.insert(name.clone());
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_free_vars_recursive(left, vars);
+            collect_free_vars_recursive(right, vars);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_free_vars_recursive(operand, vars);
+        }
+        Expr::Call { callee, args } => {
+            collect_free_vars_recursive(callee, vars);
+            for arg in args {
+                collect_free_vars_recursive(&arg.value, vars);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            collect_free_vars_recursive(receiver, vars);
+            for arg in args {
+                collect_free_vars_recursive(&arg.value, vars);
+            }
+        }
+        Expr::FieldAccess { receiver, .. } => {
+            collect_free_vars_recursive(receiver, vars);
+        }
+        Expr::Index { receiver, index } => {
+            collect_free_vars_recursive(receiver, vars);
+            collect_free_vars_recursive(index, vars);
+        }
+        Expr::Tuple(exprs) | Expr::Array(exprs) | Expr::VecLiteral(exprs) => {
+            for e in exprs {
+                collect_free_vars_recursive(e, vars);
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_free_vars_recursive(condition, vars);
+            collect_free_vars_recursive(then_branch, vars);
+            if let Some(eb) = else_branch {
+                collect_free_vars_recursive(eb, vars);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            // Walk into nested lambdas — their free vars are also our free vars
+            collect_free_vars_recursive(body, vars);
+        }
+        Expr::Cast { expr, .. } => {
+            collect_free_vars_recursive(expr, vars);
+        }
+        Expr::FString { parts, .. } => {
+            for part in parts {
+                if let FStringPart::Expr(e) = part {
+                    collect_free_vars_recursive(e, vars);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_free_vars_recursive(value, vars);
+            }
+        }
+        Expr::New { expr, .. } => {
+            collect_free_vars_recursive(expr, vars);
+        }
+        Expr::Yield(Some(v)) => {
+            collect_free_vars_recursive(v, vars);
+        }
+        Expr::Yield(None) => {}
+        Expr::Spawn(inner) => {
+            collect_free_vars_recursive(inner, vars);
+        }
+        Expr::Match { subject, arms } => {
+            collect_free_vars_recursive(subject, vars);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_free_vars_recursive(guard, vars);
+                }
+                for stmt in &arm.body.statements {
+                    if let Node::Expression(e) = stmt {
+                        collect_free_vars_recursive(e, vars);
+                    }
+                }
+            }
+        }
+        Expr::DoBlock(nodes) => {
+            for stmt in nodes {
+                if let Node::Expression(e) = stmt {
+                    collect_free_vars_recursive(e, vars);
+                }
+            }
+        }
+        // Literals and other expressions that don't contain variable references
+        _ => {}
     }
 }

@@ -335,7 +335,7 @@ pub(crate) fn exec_block_value(
             body,
             env: captured,
         } => {
-            let mut captured_clone = HashMap::clone(&captured);
+            let mut captured_clone = Env::clone(&captured);
             exec_lambda(
                 &params,
                 &body,
@@ -349,7 +349,7 @@ pub(crate) fn exec_block_value(
             )
         }
         Value::BlockClosure { nodes, env: captured } => {
-            let captured_clone = HashMap::clone(&captured);
+            let captured_clone = Env::clone(&captured);
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),

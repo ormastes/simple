@@ -156,6 +156,7 @@ pub use value::{
     ChannelValue,
     // NewTypes for formal verification
     ClassName,
+    CowEnv,
     EnumTypeName,
     Env,
     FutureValue,

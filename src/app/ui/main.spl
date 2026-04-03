@@ -15,6 +15,10 @@ use app.ui.none.app.{run_headless}
 use app.ui.tui_web.app.{run_tui_web}
 use app.ui.cli.{run_cli_observer}
 use app.ui.detect.{detect_gui_backend}
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.dashboard.render.adapter.{render_dashboard}
+use app.llm_dashboard.render_adapter.{render_dashboard as render_llm_dashboard}
+use app.office.render_adapter.{office_render}
 
 extern fn rt_file_exists(path: text) -> bool
 
@@ -92,6 +96,20 @@ fn main() -> i64:
             val backend = detect_gui_backend()
             return run_detected_backend(backend, file_path, port)
 
+        "render" =>
+            val rcfg = parse_render_args(cli_args)
+            val result = run_render(rcfg)
+            if rcfg.format == "html" or rcfg.format == "both":
+                if result.html_output.len() > 0:
+                    print result.html_output
+            if rcfg.format == "text" or rcfg.format == "both":
+                if result.text_output.len() > 0:
+                    print result.text_output
+            if result.warnings.len() > 0:
+                for w in result.warnings:
+                    print "Warning: {w}"
+            return 0
+
         "headless" | "none" =>
             if cli_args.len() < 2:
                 print "Error: headless mode requires a .ui.sdn file path"
@@ -131,6 +149,70 @@ fn run_detected_backend(backend: text, file_path: text, port: i32) -> i64:
             print "Error: Unknown detected backend '{backend}', falling back to TUI"
             return run_tui(file_path)
 
+fn run_render(config: RenderConfig) -> RenderResult:
+    """Dispatch render to the appropriate app adapter."""
+    match config.adapter_name:
+        "dashboard" =>
+            # Dashboard adapter expects Dict<text, text> summary — pass empty for now
+            val req = render_request(config, {})
+            return render_dashboard(req)
+        "llm_dashboard" =>
+            return render_llm_dashboard(config)
+        "word" | "sheets" | "slides" | "mail" | "planner" | "launcher" =>
+            return office_render(config)
+        _ =>
+            # Default: try headless render of .ui.sdn file
+            if config.asset_path.len() > 0:
+                run_headless(config.asset_path)
+            return RenderResult.text("Rendered: {config.asset_path}")
+
+fn parse_render_args(args: [text]) -> RenderConfig:
+    """Parse render sub-command args into a RenderConfig."""
+    var config = RenderConfig.default()
+    var i = 1  # skip "render"
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--format" and i + 1 < args.len():
+            config.format = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--format="):
+            config.format = arg[9:]
+            i = i + 1
+        elif arg == "--adapter" and i + 1 < args.len():
+            config.adapter_name = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--adapter="):
+            config.adapter_name = arg[10:]
+            i = i + 1
+        elif arg == "--mode" and i + 1 < args.len():
+            config.mode = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--mode="):
+            config.mode = arg[7:]
+            i = i + 1
+        elif arg == "--theme" and i + 1 < args.len():
+            config.theme = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--theme="):
+            config.theme = arg[8:]
+            i = i + 1
+        elif arg == "--width" and i + 1 < args.len():
+            config.width = args[i + 1].to_int()
+            i = i + 2
+        elif arg == "--height" and i + 1 < args.len():
+            config.height = args[i + 1].to_int()
+            i = i + 2
+        elif arg == "--demo":
+            config.use_default_demo = true
+            config.asset_path = "examples/ui/widget_matrix.ui.sdn"
+            i = i + 1
+        elif not arg.starts_with("-"):
+            config.asset_path = arg
+            i = i + 1
+        else:
+            i = i + 1
+    return config
+
 fn print_usage():
     print "Simple UI Renderer"
     print ""
@@ -145,6 +227,16 @@ fn print_usage():
     print "  simple ui tui_web <file.ui.sdn> [--port N]   TUI + web hybrid mode"
     print "  simple ui headless <file.ui.sdn>             Headless mode (testing/CI)"
     print "  simple ui none <file.ui.sdn>                 Alias for headless"
+    print "  simple ui render [file] [options]             Export render (text/html)"
+    print ""
+    print "Render options:"
+    print "  --format text|html|both   Output format (default: text)"
+    print "  --adapter NAME            App adapter (dashboard, llm_dashboard, word, sheets, ...)"
+    print "  --mode MODE               Adapter-specific mode"
+    print "  --theme NAME              Theme name (default: dark)"
+    print "  --width N                 Viewport width (default: 80)"
+    print "  --height N                Viewport height (default: 24)"
+    print "  --demo                    Use built-in demo asset"
     print ""
     print "Options:"
     print "  --port N    Port for web/tauri/electron server (default: 3000)"

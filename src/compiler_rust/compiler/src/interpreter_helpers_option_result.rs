@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use crate::error::CompileError;
-use crate::value::{Env, OptionVariant, ResultVariant, Value};
+use crate::value::{enum_names, Env, OptionVariant, ResultVariant, Value};
 use simple_common::actor::Message;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ fn apply_lambda_to_value(
         env: captured,
     } = lambda_arg
     {
-        let mut local_env = HashMap::clone(&captured);
+        let mut local_env = Env::clone(&captured);
         if let Some(param) = params.first() {
             local_env.insert(param.clone(), val.clone());
         }
@@ -188,8 +188,8 @@ pub(crate) fn eval_option_or_else(
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         // Return Some(payload) as-is
         return Ok(Value::Enum {
-            enum_name: "Option".to_string(),
-            variant: "Some".to_string(),
+            enum_name: enum_names::OPTION.to_string(),
+            variant: enum_names::SOME.to_string(),
             payload: payload.clone(),
         });
     }
@@ -201,7 +201,7 @@ pub(crate) fn eval_option_or_else(
         env: captured,
     } = func_arg
     {
-        let mut local_env = HashMap::clone(&captured);
+        let mut local_env = Env::clone(&captured);
         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
     }
     Ok(Value::none())
@@ -228,7 +228,7 @@ pub(crate) fn eval_option_filter(
                 env: captured,
             } = func_arg
             {
-                let mut local_env = HashMap::clone(&captured);
+                let mut local_env = Env::clone(&captured);
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), val.as_ref().clone());
                 }
@@ -265,7 +265,7 @@ pub(crate) fn eval_result_map(
     }
     // Return Err as-is
     Ok(Value::Enum {
-        enum_name: "Result".to_string(),
+        enum_name: enum_names::RESULT.to_string(),
         variant: variant.to_string(),
         payload: payload.clone(),
     })
@@ -294,7 +294,7 @@ pub(crate) fn eval_result_map_err(
     }
     // Return Ok as-is
     Ok(Value::Enum {
-        enum_name: "Result".to_string(),
+        enum_name: enum_names::RESULT.to_string(),
         variant: variant.to_string(),
         payload: payload.clone(),
     })
@@ -321,7 +321,7 @@ pub(crate) fn eval_result_and_then(
     }
     // Return Err as-is
     Ok(Value::Enum {
-        enum_name: "Result".to_string(),
+        enum_name: enum_names::RESULT.to_string(),
         variant: variant.to_string(),
         payload: payload.clone(),
     })
@@ -342,8 +342,8 @@ pub(crate) fn eval_result_or_else(
     if ResultVariant::from_name(variant) == Some(ResultVariant::Ok) {
         // Return Ok as-is
         return Ok(Value::Enum {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
+            enum_name: enum_names::RESULT.to_string(),
+            variant: enum_names::OK.to_string(),
             payload: payload.clone(),
         });
     }
@@ -356,7 +356,7 @@ pub(crate) fn eval_result_or_else(
             env: captured,
         } = func_arg
         {
-            let mut local_env = HashMap::clone(&captured);
+            let mut local_env = Env::clone(&captured);
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), err_val.as_ref().clone());
             }

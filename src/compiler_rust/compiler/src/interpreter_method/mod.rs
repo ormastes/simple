@@ -63,7 +63,7 @@ pub(crate) fn evaluate_method_call(
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
             if let Value::Function { def, captured_env, .. } = func_val {
-                let mut captured_env_clone = HashMap::clone(captured_env);
+                let mut captured_env_clone = Env::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
                     args,
@@ -86,7 +86,7 @@ pub(crate) fn evaluate_method_call(
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
                     // Set up self as the dict
                     env.insert("self".to_string(), recv_val.clone());
-                    for (k, v) in module_dict {
+                    for (k, v) in module_dict.iter() {
                         env.insert(k.clone(), v.clone());
                     }
                     let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
@@ -97,7 +97,7 @@ pub(crate) fn evaluate_method_call(
             if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     env.insert("self".to_string(), recv_val.clone());
-                    for (k, v) in module_dict {
+                    for (k, v) in module_dict.iter() {
                         env.insert(k.clone(), v.clone());
                     }
                     let result = super::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
@@ -698,7 +698,7 @@ pub(crate) fn evaluate_method_call(
                             arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                         }
                         // Create local env from captured env and bind params
-                        let mut local_env = HashMap::clone(captured_env);
+                        let mut local_env = Env::clone(captured_env);
                         for (i, param) in params.iter().enumerate() {
                             if let Some(val) = arg_vals.get(i) {
                                 local_env.insert(param.clone(), val.clone());
@@ -715,7 +715,7 @@ pub(crate) fn evaluate_method_call(
                             def,
                             args,
                             env,
-                            &mut HashMap::clone(captured_env),
+                            &mut Env::clone(captured_env),
                             functions,
                             classes,
                             enums,
@@ -834,7 +834,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
-                        let mut local_env = HashMap::clone(&captured);
+                        let mut local_env = Env::clone(&captured);
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -862,7 +862,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
-                        let mut local_env = HashMap::clone(&captured);
+                        let mut local_env = Env::clone(&captured);
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
                     return Ok(Value::Nil);

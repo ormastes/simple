@@ -87,7 +87,7 @@ pub(super) fn eval_collection_expr(
                     }
                     Value::Dict(base_map) => {
                         // Also support dicts as spread base
-                        for (k, v) in base_map {
+                        for (k, v) in base_map.iter() {
                             map.insert(k.clone(), v.clone());
                         }
                     }
@@ -177,8 +177,8 @@ pub(super) fn eval_collection_expr(
                 if let Expr::DictSpread(inner) = k {
                     let spread_val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     if let Value::Dict(spread_map) = spread_val {
-                        for (sk, sv) in spread_map {
-                            map.insert(sk, sv);
+                        for (sk, sv) in spread_map.iter() {
+                            map.insert(sk.clone(), sv.clone());
                         }
                     } else {
                         let ctx = ErrorContext::new()
@@ -198,7 +198,7 @@ pub(super) fn eval_collection_expr(
                     map.insert(key_val.to_key_string(), val);
                 }
             }
-            Ok(Some(Value::Dict(map)))
+            Ok(Some(Value::Dict(Arc::new(map))))
         }
         Expr::Range { start, end, bound } => {
             let start_val = start
@@ -650,7 +650,7 @@ pub(super) fn eval_collection_expr(
                 let v = evaluate_expr(value, &mut inner_env, functions, classes, enums, impl_methods)?;
                 result.insert(k.to_key_string(), v);
             }
-            Ok(Some(Value::Dict(result)))
+            Ok(Some(Value::Dict(Arc::new(result))))
         }
         Expr::Slice {
             receiver,

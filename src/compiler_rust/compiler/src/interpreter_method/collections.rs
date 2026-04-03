@@ -323,7 +323,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = HashMap::clone(&captured);
+                    let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -348,7 +348,7 @@ pub fn handle_array_methods(
             {
                 for item in arr {
                     if dropping {
-                        let mut local_env = HashMap::clone(&captured);
+                        let mut local_env = Env::clone(&captured);
                         if let Some(param) = params.first() {
                             local_env.insert(param.clone(), item.clone());
                         }
@@ -408,7 +408,7 @@ pub fn handle_array_methods(
             {
                 let mut count = 0i64;
                 for item in arr {
-                    let mut local_env = HashMap::clone(&captured);
+                    let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -433,7 +433,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = HashMap::clone(&captured);
+                    let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -457,7 +457,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = HashMap::clone(&captured);
+                    let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -467,7 +467,7 @@ pub fn handle_array_methods(
                 }
             }
             let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::array(v))).collect();
-            Value::Dict(result)
+            Value::Dict(Arc::new(result))
         }
         "compact" => {
             // Remove nil/None values from array, unwrap Some values
@@ -691,7 +691,7 @@ pub fn handle_tuple_methods(
             {
                 let mut result = Vec::new();
                 for item in tup {
-                    let mut local_env = HashMap::clone(&captured);
+                    let mut local_env = Env::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -871,19 +871,19 @@ pub fn handle_dict_methods(
             let value = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_map = map.clone();
             new_map.insert(key, value);
-            Value::Dict(new_map)
+            Value::Dict(Arc::new(new_map))
         }
         "remove" | "delete" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
             let mut new_map = map.clone();
             new_map.remove(&key);
-            Value::Dict(new_map)
+            Value::Dict(Arc::new(new_map))
         }
         "merge" | "extend" => {
             let other = eval_arg(
                 args,
                 0,
-                Value::Dict(HashMap::new()),
+                Value::Dict(Arc::new(HashMap::new())),
                 env,
                 functions,
                 classes,
@@ -892,8 +892,8 @@ pub fn handle_dict_methods(
             )?;
             if let Value::Dict(other_map) = other {
                 let mut new_map = map.clone();
-                new_map.extend(other_map);
-                Value::Dict(new_map)
+                new_map.extend(other_map.iter().map(|(k, v)| (k.clone(), v.clone())));
+                Value::Dict(Arc::new(new_map))
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -903,11 +903,11 @@ pub fn handle_dict_methods(
         }
         "clear" => {
             // Return empty dict (functional style - original is not modified)
-            Value::Dict(HashMap::new())
+            Value::Dict(Arc::new(HashMap::new()))
         }
         "clone" | "copy" => {
             // Return a shallow copy of the dict
-            Value::Dict(map.clone())
+            Value::Dict(Arc::new(map.clone()))
         }
         "get_or" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -963,7 +963,7 @@ pub fn handle_dict_methods(
                     other => Some((k.clone(), other.clone())),
                 })
                 .collect();
-            Value::Dict(result)
+            Value::Dict(Arc::new(result))
         }
         "fetch" => {
             // Get value at key, or default if not present
@@ -978,12 +978,12 @@ pub fn handle_dict_methods(
             let mut new_map = map.clone();
             let value = new_map.entry(key).or_insert(default.clone()).clone();
             // Return tuple of [value, new_dict]
-            Value::Tuple(vec![value, Value::Dict(new_map)])
+            Value::Tuple(vec![value, Value::Dict(Arc::new(new_map))])
         }
         "dig" => {
             // Navigate nested structures safely
             // dig("key1", "key2", "key3") -> dict["key1"]["key2"]["key3"]
-            let mut current: Value = Value::Dict(map.clone());
+            let mut current: Value = Value::Dict(Arc::new(map.clone()));
 
             for arg in args {
                 let key = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
@@ -1014,7 +1014,7 @@ pub fn handle_dict_methods(
                     Value::Function { def, captured_env, .. } => {
                         // Call the function with the provided arguments
                         // Use the caller's env for evaluating arguments, but merge with captured_env for the function body
-                        let mut merged_env = HashMap::clone(captured_env);
+                        let mut merged_env = Env::clone(captured_env);
                         merged_env.extend(env.clone());
                         let result = exec_function(
                             def,
@@ -1034,7 +1034,7 @@ pub fn handle_dict_methods(
                         env: captured,
                     } => {
                         // Call the lambda
-                        let mut local_env = HashMap::clone(&captured);
+                        let mut local_env = Env::clone(&captured);
                         for (i, param) in params.iter().enumerate() {
                             let arg_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
                             local_env.insert(param.clone(), arg_val);

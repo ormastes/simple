@@ -46,7 +46,7 @@ pub fn load_export_source(
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
-        Ok(Value::Dict(dict)) => Ok(dict),
+        Ok(Value::Dict(dict)) => Ok(HashMap::clone(&dict)),
         Ok(_) => Ok(HashMap::new()),
         Err(e) => {
             warn!(error = %e, "Failed to load export source");

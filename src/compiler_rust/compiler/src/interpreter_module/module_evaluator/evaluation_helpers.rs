@@ -99,7 +99,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -149,7 +149,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -190,7 +190,7 @@ pub(super) fn register_definitions(
                                 Value::Function {
                                     name: mangled,
                                     def: arc_method,
-                                    captured_env: Arc::new(HashMap::new()),
+                                    captured_env: Arc::new(Env::new()),
                                 },
                             );
                         }
@@ -241,7 +241,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: arc_method,
-                                captured_env: Arc::new(HashMap::new()),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -436,7 +436,7 @@ fn process_use_stmt(
         Ok(value) => {
             // Unpack module exports into current namespace
             if let Value::Dict(module_exports) = &value {
-                for (name, export_value) in module_exports {
+                for (name, export_value) in module_exports.iter() {
                     if let Value::Function { def, .. } = export_value {
                         global_functions.insert(name.clone(), Arc::clone(def));
                     }
@@ -463,7 +463,7 @@ fn process_use_stmt(
         }
         Err(_e) => {
             // Module loading failed - use empty dict
-            env.insert(binding_name.clone(), Value::Dict(HashMap::new()));
+            env.insert(binding_name.clone(), Value::Dict(Arc::new(HashMap::new())));
         }
     }
     Ok(())

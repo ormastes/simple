@@ -377,7 +377,7 @@ pub(crate) fn exec_node(
                         Value::Function {
                             name: mangled,
                             def: arc_method,
-                            captured_env: Arc::new(std::collections::HashMap::new()),
+                            captured_env: Arc::new(Env::new()),
                         },
                     );
                 }
@@ -405,7 +405,7 @@ pub(crate) fn exec_node(
                         Value::Function {
                             name: mangled,
                             def: arc_method,
-                            captured_env: Arc::new(std::collections::HashMap::new()),
+                            captured_env: Arc::new(Env::new()),
                         },
                     );
                 }
@@ -433,7 +433,7 @@ pub(crate) fn exec_node(
                         Value::Function {
                             name: mangled,
                             def: arc_method,
-                            captured_env: Arc::new(std::collections::HashMap::new()),
+                            captured_env: Arc::new(Env::new()),
                         },
                     );
                 }
@@ -763,7 +763,7 @@ fn exec_assignment(
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
-                        dict.insert(key, value);
+                        Arc::make_mut(&mut dict).insert(key, value);
                         Value::Dict(dict)
                     }
                     Value::Tuple(mut tup) => {
@@ -889,7 +889,7 @@ fn exec_assignment(
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
-                                        dict.insert(key, value);
+                                        Arc::make_mut(&mut dict).insert(key, value);
                                         Value::Dict(dict)
                                     }
                                     Value::Tuple(mut tup) => {
@@ -997,7 +997,7 @@ fn exec_assignment(
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
-                                        dict.insert(key, value);
+                                        Arc::make_mut(&mut dict).insert(key, value);
                                         Value::Dict(dict)
                                     }
                                     _ => {

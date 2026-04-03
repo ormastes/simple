@@ -7,7 +7,7 @@ use simple_parser::ast::Expr;
 
 use crate::effects::check_effect_violations;
 use crate::error::{codes, ErrorContext};
-use crate::value::{OptionVariant, ResultVariant, SpecialEnumType};
+use crate::value::{enum_names, OptionVariant, ResultVariant, SpecialEnumType};
 
 use super::{
     evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols, ClassDef, CompileError, Enums,
@@ -61,7 +61,7 @@ fn call_closure_no_args(
             body,
             env: captured,
         } => {
-            let mut captured_clone = HashMap::clone(&captured);
+            let mut captured_clone = Env::clone(&captured);
             exec_lambda(
                 &params, // params is already Vec<String>
                 &body,
@@ -75,7 +75,7 @@ fn call_closure_no_args(
             )
         }
         Value::Function { def, captured_env, .. } => {
-            let mut captured_env_clone = HashMap::clone(&captured_env);
+            let mut captured_env_clone = Env::clone(&captured_env);
             exec_function_with_captured_env(
                 &def,
                 &[],
@@ -483,7 +483,7 @@ pub(crate) fn evaluate_expr(
                     payload,
                 } = &field_val
                 {
-                    if enum_name == "Option" && (variant == "Some" || variant == "None") {
+                    if enum_name == enum_names::OPTION && (variant == enum_names::SOME || variant == enum_names::NONE) {
                         // Field is already an Option, return it as-is (flattening behavior)
                         return Ok(field_val);
                     }
@@ -491,15 +491,15 @@ pub(crate) fn evaluate_expr(
 
                 // Wrap non-Option result in Some
                 Ok(Value::Enum {
-                    enum_name: "Option".to_string(),
-                    variant: "Some".to_string(),
+                    enum_name: enum_names::OPTION.to_string(),
+                    variant: enum_names::SOME.to_string(),
                     payload: Some(Box::new(field_val)),
                 })
             } else {
                 // Return None
                 Ok(Value::Enum {
-                    enum_name: "Option".to_string(),
-                    variant: "None".to_string(),
+                    enum_name: enum_names::OPTION.to_string(),
+                    variant: enum_names::NONE.to_string(),
                     payload: None,
                 })
             }
@@ -526,15 +526,15 @@ pub(crate) fn evaluate_expr(
                 env.remove(&temp_var_name);
                 // Wrap result in Some
                 Ok(Value::Enum {
-                    enum_name: "Option".to_string(),
-                    variant: "Some".to_string(),
+                    enum_name: enum_names::OPTION.to_string(),
+                    variant: enum_names::SOME.to_string(),
                     payload: Some(Box::new(result)),
                 })
             } else {
                 // Return None
                 Ok(Value::Enum {
-                    enum_name: "Option".to_string(),
-                    variant: "None".to_string(),
+                    enum_name: enum_names::OPTION.to_string(),
+                    variant: enum_names::NONE.to_string(),
                     payload: None,
                 })
             }
@@ -577,8 +577,8 @@ pub(crate) fn evaluate_expr(
                 Err(_) => {
                     // Return None to signal early return
                     let none_val = Value::Enum {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
+                        enum_name: enum_names::OPTION.to_string(),
+                        variant: enum_names::NONE.to_string(),
                         payload: None,
                     };
                     Err(CompileError::TryError(none_val))
