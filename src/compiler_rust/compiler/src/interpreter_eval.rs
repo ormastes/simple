@@ -43,7 +43,7 @@ pub(super) fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
     _env: &Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -196,7 +196,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
-    let mut functions: HashMap<String, FunctionDef> = HashMap::new();
+    let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
     let mut classes: HashMap<String, ClassDef> = HashMap::new();
     let mut enums: Enums = HashMap::new();
     let mut impl_methods: ImplMethods = HashMap::new();

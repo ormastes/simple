@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use super::super::{evaluate_expr, exec_block_value};
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 type ChannelRegistry = Arc<Mutex<HashMap<i64, (Sender<Value>, Arc<Mutex<Receiver<Value>>>)>>>;
 
@@ -126,7 +126,7 @@ pub fn rt_thread_yield(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_thread_spawn_isolated_with_context(
     args: &[Value],
     _env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -191,7 +191,7 @@ pub fn rt_thread_spawn_isolated_with_context(
 pub fn rt_thread_spawn_isolated2_with_context(
     args: &[Value],
     _env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

@@ -32,6 +32,7 @@
 //! - `repl`: REPL runner integration
 //! - `gpu`: Vulkan GPU compute operations (feature-gated)
 
+use std::sync::Arc;
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
@@ -90,7 +91,7 @@ pub mod rapier2d_ffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 // Import shared functions from parent module
 use super::{evaluate_expr, is_debug_mode};
@@ -104,7 +105,7 @@ use simple_runtime::value::diagram_ffi;
 fn resolve_fmt_for_print(
     values: &[Value],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -146,7 +147,7 @@ pub(crate) fn call_extern_function(
     name: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

@@ -15,7 +15,7 @@ use super::super::{
 pub(super) fn eval_call_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

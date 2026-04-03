@@ -1,6 +1,7 @@
 // Mock library for interpreter
 // Matchers: mock, spy, any, eq, be, gt, lt, contains, etc.
 
+use std::sync::Arc;
 use super::core::{eval_arg, eval_arg_int};
 use crate::error::{CompileError, ErrorContext, codes};
 use crate::interpreter::evaluate_expr;
@@ -9,13 +10,13 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 pub(super) fn eval_mock_builtin(
     name: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

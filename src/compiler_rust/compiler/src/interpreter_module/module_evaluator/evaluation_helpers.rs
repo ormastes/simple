@@ -18,7 +18,7 @@ use crate::interpreter::interpreter_module::export_handler::load_export_source;
 use crate::interpreter::module_cache::filter_functions_from_value;
 
 type Enums = HashMap<String, simple_parser::ast::EnumDef>;
-type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
 
 use crate::interpreter::evaluate_expr;
 use crate::interpreter::MODULE_GLOBALS;

@@ -47,7 +47,7 @@ pub(crate) fn create_range_object_opt(start: Option<i64>, end: Option<i64>, boun
 pub(crate) fn spawn_actor_with_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

@@ -3,6 +3,7 @@
 // This module provides utilities for evaluating function arguments with defaults
 // and type conversions, used by both builtin functions and mock matchers.
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
 use crate::value::*;
@@ -10,7 +11,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Evaluate an argument at a given index, returning a default value if not present
 ///
@@ -22,7 +23,7 @@ pub(crate) fn eval_arg(
     index: usize,
     default: Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -53,7 +54,7 @@ pub(crate) fn eval_arg_int(
     index: usize,
     default: i64,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

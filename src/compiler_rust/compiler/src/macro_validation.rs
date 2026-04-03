@@ -4,6 +4,7 @@
 //! validation rules to ensure macros can be compiled in a single pass with
 //! immediate symbol table updates.
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Env;
 use simple_parser::ast::{ClassDef, FunctionDef, MacroContractItem, MacroDef, MacroIntroSpec};
@@ -46,7 +47,7 @@ impl SymbolScope {
 /// Extract current symbol scope from execution context
 pub fn extract_symbol_scope(
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
     classes: &HashMap<String, ClassDef>,
 ) -> SymbolScope {
     SymbolScope {

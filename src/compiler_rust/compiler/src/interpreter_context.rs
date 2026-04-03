@@ -3,6 +3,7 @@
 //! Handles method dispatch for context objects, including method_missing hooks
 //! and value-to-expression conversion.
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
@@ -19,7 +20,7 @@ pub(super) fn dispatch_context_method(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

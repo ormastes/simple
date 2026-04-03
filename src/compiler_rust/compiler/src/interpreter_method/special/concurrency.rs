@@ -2,6 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::interpreter_helpers::spawn_future_with_callable;
 use crate::interpreter::{eval_arg, Enums, ImplMethods};
@@ -34,7 +35,7 @@ pub fn handle_channel_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -85,7 +86,7 @@ pub fn handle_threadpool_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

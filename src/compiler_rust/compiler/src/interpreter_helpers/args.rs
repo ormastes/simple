@@ -1,5 +1,6 @@
 //! Argument evaluation utilities
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
@@ -13,7 +14,7 @@ pub(crate) fn eval_arg(
     idx: usize,
     default: Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -31,7 +32,7 @@ pub(crate) fn eval_arg_int(
     idx: usize,
     default: i64,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -56,7 +57,7 @@ pub(crate) fn eval_arg_usize(
     idx: usize,
     default: usize,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -68,7 +69,7 @@ pub(crate) fn eval_arg_usize(
 pub(crate) fn apply_lambda_to_vec(
     arr: &[Value],
     lambda_val: &Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

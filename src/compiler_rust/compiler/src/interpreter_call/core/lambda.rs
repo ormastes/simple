@@ -1,5 +1,6 @@
 // Lambda execution support
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{await_value, evaluate_expr};
 use crate::value::*;
@@ -8,7 +9,7 @@ use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_lambda(
@@ -17,7 +18,7 @@ pub(crate) fn exec_lambda(
     args: &[Argument],
     call_env: &mut Env,
     captured_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

@@ -23,6 +23,7 @@ pub fn evaluate_module_with_di_and_aop(
     di_config: Option<&DiConfig>,
     aop_config: Option<&AopConfig>,
 ) -> Result<i32, CompileError> {
+    crate::memory_guard::MemoryGuard::init();
     set_di_config(di_config.cloned());
     set_aop_config(aop_config.cloned());
     let result = interpreter_eval::evaluate_module_impl(items);

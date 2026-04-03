@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Execute a function body with bound arguments in a local environment.
 ///
@@ -27,7 +27,7 @@ fn execute_function_body(
     func: &FunctionDef,
     bound_args: HashMap<String, Value>,
     local_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -108,7 +108,7 @@ pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -123,7 +123,7 @@ pub(crate) fn exec_function_with_values(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -139,7 +139,7 @@ pub(crate) fn exec_function_with_values_and_self(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -202,7 +202,7 @@ pub(crate) fn exec_function_with_captured_env(
     args: &[Argument],
     outer_env: &mut Env,
     captured_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -240,7 +240,7 @@ fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -336,7 +336,7 @@ fn exec_function_with_values_inner(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::collections::HashMap;
 
 use simple_parser::ast::{Expr, LambdaParam, Node};
@@ -14,7 +15,7 @@ use super::super::{
 pub(super) fn eval_control_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

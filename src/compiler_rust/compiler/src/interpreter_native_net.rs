@@ -36,6 +36,11 @@ thread_local! {
     static SOCKET_HANDLES: RefCell<StdHashMap<i64, SocketHandle>> = RefCell::new(StdHashMap::new());
 }
 
+/// Clear all socket handles (call between test runs to prevent resource leaks).
+pub(crate) fn clear_socket_handles() {
+    SOCKET_HANDLES.with(|handles| handles.borrow_mut().clear());
+}
+
 fn allocate_socket(socket: SocketHandle) -> i64 {
     let id = NEXT_SOCKET_HANDLE_ID.fetch_add(1, NetOrdering::SeqCst);
     SOCKET_HANDLES.with(|handles| {

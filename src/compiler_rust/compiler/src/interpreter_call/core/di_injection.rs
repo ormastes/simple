@@ -7,9 +7,10 @@ use crate::interpreter::{get_di_config, DI_SINGLETONS};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, SelfMode, Type};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
@@ -19,7 +20,7 @@ pub(crate) fn resolve_injected_args(
     args: &[Argument],
     class_name: &str,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -118,7 +119,7 @@ pub(crate) fn resolve_binding_instance(
     impl_type: &str,
     scope: DiScope,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

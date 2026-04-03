@@ -1,6 +1,7 @@
 // Core type definitions and utilities for the interpreter
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use simple_parser::ast::{EnumDef, FunctionDef, Type, UnitDef};
 
 /// Check if an expression is a simple identifier (for move tracking)
@@ -39,7 +40,7 @@ pub(crate) fn is_immutable_by_pattern(name: &str) -> bool {
 pub(crate) type Enums = HashMap<String, EnumDef>;
 
 /// Stores impl block methods: type_name -> list of methods
-pub(crate) type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+pub(crate) type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Stores extern function declarations: name -> definition
 pub(crate) type ExternFunctions = HashMap<String, simple_parser::ast::ExternDef>;
@@ -69,7 +70,7 @@ pub(crate) type Traits = HashMap<String, simple_parser::ast::TraitDef>;
 
 /// Stores trait implementations: (trait_name, type_name) -> list of methods
 /// Used to track which types implement which traits
-pub(crate) type TraitImpls = HashMap<(String, String), Vec<FunctionDef>>;
+pub(crate) type TraitImpls = HashMap<(String, String), Vec<Arc<FunctionDef>>>;
 
 /// Control flow for statement execution.
 pub(crate) enum Control {

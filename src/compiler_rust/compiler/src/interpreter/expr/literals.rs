@@ -18,7 +18,7 @@ use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBAL
 pub(super) fn eval_literal_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -301,7 +301,7 @@ pub(super) fn eval_literal_expr(
 fn try_call_fmt_method(
     value: &Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -324,7 +324,7 @@ fn try_call_fmt_method(
 pub(crate) fn try_call_debug_fmt_method(
     value: &Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

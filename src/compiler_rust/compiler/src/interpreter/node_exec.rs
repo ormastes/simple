@@ -30,7 +30,7 @@ macro_rules! check_timeout {
 pub(crate) fn exec_node(
     node: &Node,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -445,7 +445,7 @@ pub(crate) fn exec_node(
 fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -1114,7 +1114,7 @@ fn exec_assignment(
 fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

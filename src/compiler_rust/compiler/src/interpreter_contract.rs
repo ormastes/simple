@@ -181,7 +181,7 @@ where
 //==============================================================================
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Storage for captured old() values at function entry (AST version)
 #[derive(Debug, Clone, Default)]

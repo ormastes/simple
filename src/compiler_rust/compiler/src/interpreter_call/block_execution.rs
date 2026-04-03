@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Inject mixin fields and methods into a ClassDef.
 /// Returns a new ClassDef with mixin fields prepended and mixin methods appended.
@@ -132,7 +132,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
 pub(super) fn exec_block_closure(
     nodes: &[Node],
     captured_env: &Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -805,7 +805,7 @@ pub(super) fn exec_block_closure(
 fn exec_block_closure_mut(
     nodes: &[Node],
     local_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

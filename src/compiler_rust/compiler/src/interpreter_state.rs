@@ -606,6 +606,12 @@ pub fn clear_interpreter_state() {
     // Reset fault detection counters
     reset_recursion_depth();
     reset_timeout();
+
+    // Clear resource handles to prevent unbounded growth
+    super::interpreter_method::clear_pinned_strings();
+    super::interpreter_native_net::clear_socket_handles();
+    super::interpreter_native_io::clear_file_handles();
+    crate::interpreter_ffi::clear_expr_registry();
 }
 
 #[cfg(test)]

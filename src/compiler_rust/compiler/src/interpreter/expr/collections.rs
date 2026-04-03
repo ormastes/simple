@@ -64,7 +64,7 @@ fn require_integer_index_value(value: &Value, context: &str) -> Result<i64, Comp
 pub(super) fn eval_collection_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

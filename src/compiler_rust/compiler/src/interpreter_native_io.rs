@@ -31,6 +31,11 @@ thread_local! {
     static ORIGINAL_TERMIOS: RefCell<Option<libc::termios>> = const { RefCell::new(None) };
 }
 
+/// Clear all file handles (call between test runs to prevent resource leaks).
+pub(crate) fn clear_file_handles() {
+    FILE_HANDLES.with(|handles| handles.borrow_mut().clear());
+}
+
 fn allocate_handle(file: File) -> i64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
     FILE_HANDLES.with(|handles| {

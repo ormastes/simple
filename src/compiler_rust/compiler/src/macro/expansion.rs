@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, exec_node, Control, Enums, ImplMethods};
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
@@ -19,7 +20,7 @@ pub(super) fn expand_user_macro(
     macro_def: &MacroDef,
     args: &[MacroArg],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -38,7 +39,7 @@ fn expand_user_macro_inner(
     macro_def: &MacroDef,
     args: &[MacroArg],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -323,7 +324,7 @@ pub fn macro_has_const_params(macro_def: &MacroDef) -> bool {
 pub fn preprocess_macro_contract_at_definition(
     macro_def: &MacroDef,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
     classes: &HashMap<String, ClassDef>,
 ) -> Result<bool, CompileError> {
     // Cannot pre-process macros with const parameters

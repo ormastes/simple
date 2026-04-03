@@ -2,6 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
@@ -19,7 +20,7 @@ pub fn handle_trait_object_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -80,7 +81,7 @@ pub fn handle_constructor_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

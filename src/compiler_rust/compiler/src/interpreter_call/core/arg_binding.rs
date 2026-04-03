@@ -1,5 +1,6 @@
 // Argument binding and validation for function calls
 
+use std::sync::Arc;
 use super::macros::*;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
@@ -10,7 +11,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Paramet
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
@@ -22,7 +23,7 @@ pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -46,7 +47,7 @@ pub(crate) fn bind_args_with_injected(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -282,7 +283,7 @@ pub(crate) fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],
     outer_env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

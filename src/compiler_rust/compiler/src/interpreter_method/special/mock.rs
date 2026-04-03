@@ -2,6 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
+use std::sync::Arc;
 use crate::error::CompileError;
 use crate::interpreter::interpreter_helpers::eval_arg_int;
 use crate::interpreter::{eval_arg, evaluate_expr, Enums, ImplMethods};
@@ -47,7 +48,7 @@ pub fn handle_mock_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

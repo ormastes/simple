@@ -72,24 +72,25 @@ fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
     }
 }
 
-fn sibling_might_define_requested_names(path: &Path, requested_names: &[String]) -> bool {
-    if requested_names.is_empty() {
-        return true;
-    }
-
-    // Skip files larger than 50KB — unlikely to be simple re-export modules
-    const MAX_SIBLING_CHECK_BYTES: u64 = 50 * 1024;
+/// Check if a sibling file might define any of the requested names.
+/// Returns `Some(source)` if it might (caching the read), `None` if not.
+/// When `requested_names` is empty, returns `Some(source)` for all readable files.
+fn sibling_might_define_requested_names(path: &Path, requested_names: &[String]) -> Option<String> {
+    // Skip files larger than configurable limit — unlikely to be simple re-export modules
+    let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
     if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > MAX_SIBLING_CHECK_BYTES {
-            return false;
+        if meta.len() > max_check_bytes {
+            return None;
         }
     }
 
-    let Ok(source) = fs::read_to_string(path) else {
-        return false;
-    };
+    let source = fs::read_to_string(path).ok()?;
 
-    requested_names.iter().any(|name| {
+    if requested_names.is_empty() {
+        return Some(source);
+    }
+
+    let matches = requested_names.iter().any(|name| {
         let fn_pat = format!("fn {}(", name);
         let extern_pat = format!("extern fn {}(", name);
         let class_pat = format!("class {}", name);
@@ -104,7 +105,9 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
             || source.contains(&enum_pat)
             || source.contains(&trait_pat)
             || source.contains(&let_pat)
-    })
+    });
+
+    if matches { Some(source) } else { None }
 }
 
 fn locally_defined_names(items: &[Node]) -> Vec<String> {
@@ -243,7 +246,7 @@ pub fn get_import_alias(use_stmt: &UseStmt) -> Option<String> {
 pub fn load_and_merge_module(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
-    functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
+    functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &mut Enums,
 ) -> Result<Value, CompileError> {
@@ -421,11 +424,7 @@ pub fn load_and_merge_module(
         // This ensures that static method calls work on imported classes.
         // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
         // the interpreter's working set, but the Arc clone from cache is cheap.
-        let mut arc_functions: HashMap<String, Arc<simple_parser::ast::FunctionDef>> = HashMap::new();
-        merge_cached_module_definitions(&module_path, classes, &mut arc_functions, enums);
-        for (name, arc_def) in arc_functions {
-            functions.insert(name, (*arc_def).clone());
-        }
+        merge_cached_module_definitions(&module_path, classes, functions, enums);
 
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
@@ -473,6 +472,7 @@ pub fn load_and_merge_module(
     // Mark this module as currently loading
     debug!(path = ?module_path, depth, "Loading module");
     mark_module_loading(&module_path);
+    let _load_guard = crate::memory_guard::ModuleLoadGuard::enter(&module_path);
 
     // Read and parse the module
     let source = match fs::read_to_string(&module_path) {
@@ -510,7 +510,8 @@ pub fn load_and_merge_module(
     // modules: exported entrypoints often depend on private helper functions and
     // internal imports whose names do not match the requested export list. Keep
     // the full module so runtime evaluation remains correct.
-    let filtered_items: Vec<Node> = module.items.clone();
+    // Move instead of clone — `module` is not used after this point.
+    let filtered_items: Vec<Node> = module.items;
     let load_start = Instant::now();
 
     // Evaluate the module to get its environment (including imports)
@@ -540,7 +541,9 @@ pub fn load_and_merge_module(
                     if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
                         None
                     } else if let Ok(entries) = fs::read_dir(dir) {
-                        let mut sibling_files: Vec<std::path::PathBuf> = entries
+                        // Collect siblings with cached source strings to avoid double disk reads.
+                        // sibling_might_define_requested_names returns Some(source) on match.
+                        let mut sibling_files: Vec<(std::path::PathBuf, Option<String>)> = entries
                             .filter_map(|e| e.ok())
                             .map(|e| e.path())
                             .filter(|p| {
@@ -548,17 +551,24 @@ pub fn load_and_merge_module(
                                     && p.file_name().map_or(false, |f| f != "__init__.spl")
                                     && p.file_name().map_or(false, |f| f != "mod_stub.spl")
                                     && p.is_file()
-                                    && requested_names.as_ref().is_none_or(|names| {
-                                        let might = sibling_might_define_requested_names(p, names);
-                                        if !might {
-                                            loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                            })
+                            .filter_map(|p| {
+                                match requested_names.as_ref() {
+                                    None => Some((p, None)), // no filter — source read deferred
+                                    Some(names) => {
+                                        match sibling_might_define_requested_names(&p, names) {
+                                            Some(source) => Some((p, Some(source))),
+                                            None => {
+                                                loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                                                None
+                                            }
                                         }
-                                        might
-                                    })
+                                    }
+                                }
                             })
                             .collect();
                         // Sort for deterministic load order; mod.spl first if present
-                        sibling_files.sort_by(|a, b| {
+                        sibling_files.sort_by(|(a, _), (b, _)| {
                             let a_is_mod = a.file_name().map_or(false, |f| f == "mod.spl");
                             let b_is_mod = b.file_name().map_or(false, |f| f == "mod.spl");
                             match (a_is_mod, b_is_mod) {
@@ -568,10 +578,7 @@ pub fn load_and_merge_module(
                             }
                         });
                         // Cap sibling preload count to prevent unbounded memory growth (BUG-3)
-                        let max_siblings = std::env::var("SIMPLE_SIBLING_PRELOAD_LIMIT")
-                            .ok()
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(20);
+                        let max_siblings = crate::memory_guard::sibling_preload_limit();
                         if sibling_files.len() > max_siblings {
                             loader_trace!(
                                 "sibling-cap",
@@ -582,7 +589,7 @@ pub fn load_and_merge_module(
                             );
                             sibling_files.truncate(max_siblings);
                         }
-                        for sibling_path in &sibling_files {
+                        for (sibling_path, cached_source) in &sibling_files {
                             // Early termination: if all requested names are already found, skip remaining siblings
                             if let Some(names) = requested_names.as_ref() {
                                 if !names.is_empty() && names.iter().all(|n| merged_exports.contains_key(n)) {
@@ -602,7 +609,12 @@ pub fn load_and_merge_module(
                                 requested_names
                             );
                             debug!(sibling = ?sibling_path, "Preloading sibling for __init__.spl bare exports");
-                            if let Ok(sib_source) = fs::read_to_string(sibling_path) {
+                            // Use cached source from name-matching step to avoid re-reading from disk
+                            let sib_source_result = match cached_source {
+                                Some(s) => Ok(s.clone()),
+                                None => fs::read_to_string(sibling_path),
+                            };
+                            if let Ok(sib_source) = sib_source_result {
                                 let sib_source = if sib_source.contains('\r') {
                                     sib_source.replace('\r', "")
                                 } else {
@@ -698,8 +710,8 @@ pub fn load_and_merge_module(
     for (name, func_def) in &module_functions {
         if name != "main" {
             // Don't add "main" from imported modules.
-            // Unwrap Arc to raw FunctionDef for the interpreter's working set.
-            functions.insert(name.clone(), (**func_def).clone());
+            // Arc clone is cheap (refcount bump).
+            functions.insert(name.clone(), Arc::clone(func_def));
         }
     }
     for (name, enum_def) in &module_enums {

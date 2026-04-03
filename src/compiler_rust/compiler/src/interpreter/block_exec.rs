@@ -1,5 +1,6 @@
 // Block execution logic with tail injection support
 
+use std::sync::Arc;
 use std::collections::HashMap;
 use simple_parser::ast::{Block, ClassDef, FunctionDef};
 use crate::error::CompileError;
@@ -23,7 +24,7 @@ use super::interpreter_helpers::handle_method_call_with_self_update;
 pub(crate) fn exec_block(
     block: &Block,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -62,7 +63,7 @@ pub(crate) fn exec_block(
 pub(crate) fn exec_block_fn(
     block: &Block,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

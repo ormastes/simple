@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::collections::HashMap;
 
 use tracing::instrument;
@@ -49,7 +50,7 @@ fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
 fn call_closure_no_args(
     closure: Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -181,7 +182,7 @@ mod units;
 pub(crate) fn evaluate_expr(
     expr: &Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

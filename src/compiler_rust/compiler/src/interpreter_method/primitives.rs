@@ -1,5 +1,6 @@
 // Primitive type methods: Int, Float, Bool
 
+use std::sync::Arc;
 use super::super::{eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, Enums, ImplMethods};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -13,7 +14,7 @@ pub fn handle_int_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -238,7 +239,7 @@ pub fn handle_float_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -441,7 +442,7 @@ pub fn handle_bool_methods(
     method: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

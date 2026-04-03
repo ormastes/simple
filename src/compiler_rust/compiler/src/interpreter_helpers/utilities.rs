@@ -1,5 +1,6 @@
 //! Utility functions (index normalization, slicing, control flow, comprehensions, effects, futures)
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, FutureValue, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
@@ -84,7 +85,7 @@ pub(crate) fn comprehension_iterate(
     pattern: &Pattern,
     condition: &Option<Box<Expr>>,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -145,7 +146,7 @@ where
 /// Used to pass execution context across thread boundaries.
 #[derive(Clone)]
 struct ClonedContext {
-    functions: HashMap<String, FunctionDef>,
+    functions: HashMap<String, Arc<FunctionDef>>,
     classes: HashMap<String, ClassDef>,
     enums: Enums,
     impl_methods: ImplMethods,
@@ -154,7 +155,7 @@ struct ClonedContext {
 impl ClonedContext {
     /// Clone context from references
     fn from_refs(
-        functions: &mut HashMap<String, FunctionDef>,
+        functions: &mut HashMap<String, Arc<FunctionDef>>,
         classes: &mut HashMap<String, ClassDef>,
         enums: &Enums,
         impl_methods: &ImplMethods,
@@ -232,7 +233,7 @@ fn execute_callable_with_arg(
 pub(crate) fn spawn_future_with_callable(
     callable: Value,
     arg: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -248,7 +249,7 @@ pub(crate) fn spawn_future_with_callable_and_env(
     callable: Value,
     arg: Value,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -263,7 +264,7 @@ pub(crate) fn spawn_future_with_callable_and_env(
 pub(crate) fn spawn_future_with_expr(
     expr: Expr,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

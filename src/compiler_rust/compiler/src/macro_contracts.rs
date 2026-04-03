@@ -6,6 +6,7 @@
 //! and their return type (returns) in a contract header, enabling IDE autocomplete
 //! without macro expansion.
 
+use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{
@@ -24,7 +25,7 @@ use crate::value::{Env, Value};
 #[derive(Debug, Default, Clone)]
 pub struct MacroContractResult {
     /// Functions introduced by the macro (for enclosing scope)
-    pub introduced_functions: HashMap<String, FunctionDef>,
+    pub introduced_functions: HashMap<String, Arc<FunctionDef>>,
 
     /// Classes introduced by the macro (for enclosing scope)
     pub introduced_classes: HashMap<String, ClassDef>,
@@ -60,7 +61,7 @@ pub fn process_macro_contract(
     macro_def: &MacroDef,
     const_bindings: &HashMap<String, String>,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
+    functions: &HashMap<String, Arc<FunctionDef>>,
     classes: &HashMap<String, ClassDef>,
 ) -> Result<MacroContractResult, CompileError> {
     let mut result = MacroContractResult::default();

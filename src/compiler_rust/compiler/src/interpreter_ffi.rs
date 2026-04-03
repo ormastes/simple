@@ -4,6 +4,7 @@
 //! from compiled code. It enables the hybrid execution model where compiled
 //! code can fall back to the interpreter for unsupported features.
 
+use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
@@ -27,7 +28,7 @@ thread_local! {
     static INTERP_ENV: RefCell<Env> = RefCell::new(HashMap::new());
 
     /// Function definitions
-    static INTERP_FUNCTIONS: RefCell<HashMap<String, FunctionDef>> = RefCell::new(HashMap::new());
+    static INTERP_FUNCTIONS: RefCell<HashMap<String, Arc<FunctionDef>>> = RefCell::new(HashMap::new());
 
     /// Class definitions
     static INTERP_CLASSES: RefCell<HashMap<String, ClassDef>> = RefCell::new(HashMap::new());
@@ -197,7 +198,7 @@ pub fn clear_compiled_functions() {
 /// This eliminates the deeply nested `.with()` calls throughout the module.
 fn with_interp_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Env, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
+    F: FnOnce(&mut Env, &mut HashMap<String, Arc<FunctionDef>>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
 {
     INTERP_ENV.with(|env| {
         let mut env = env.borrow_mut();
@@ -297,7 +298,7 @@ fn call_interpreted_function(
     func: &FunctionDef,
     args: Vec<Value>,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

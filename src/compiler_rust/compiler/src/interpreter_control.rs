@@ -7,6 +7,7 @@
 //! - For loops
 //! - Loop control (break, continue)
 
+use std::sync::Arc;
 use crate::error::CompileError;
 
 /// Check if user requested interrupt (Ctrl-C) and return error if so.
@@ -86,7 +87,7 @@ fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
 pub(super) fn exec_if(
     if_stmt: &IfStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -165,7 +166,7 @@ pub(super) fn exec_if(
 pub(super) fn exec_while(
     while_stmt: &simple_parser::ast::WhileStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -236,7 +237,7 @@ pub(super) fn exec_while(
 pub(super) fn exec_loop(
     loop_stmt: &simple_parser::ast::LoopStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -258,7 +259,7 @@ pub(super) fn exec_loop(
 pub(super) fn exec_context(
     ctx_stmt: &ContextStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -351,7 +352,7 @@ pub(super) fn exec_context(
 pub fn exec_with(
     with_stmt: &WithStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -413,7 +414,7 @@ fn exec_method_body(
     fields: &HashMap<String, Value>,
     args: &[Value],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -458,7 +459,7 @@ pub(crate) fn call_method_if_exists(
     method_name: &str,
     args: &[Value],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -503,7 +504,7 @@ pub(crate) fn call_method_if_exists(
 pub(super) fn exec_for(
     for_stmt: &simple_parser::ast::ForStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -564,7 +565,7 @@ pub(super) fn exec_for(
 fn exec_match_core(
     match_stmt: &MatchStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -623,7 +624,7 @@ fn exec_match_core(
 pub(super) fn exec_match(
     match_stmt: &MatchStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -644,7 +645,7 @@ pub(super) fn exec_match(
 pub(crate) fn exec_if_expr(
     if_stmt: &IfStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -736,7 +737,7 @@ pub(crate) fn exec_if_expr(
 pub(crate) fn exec_match_expr(
     match_stmt: &MatchStmt,
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

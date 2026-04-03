@@ -1,5 +1,6 @@
 //! Collection operations (map, filter, reduce, etc.)
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value, BUILTIN_RANGE};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Pattern};
@@ -12,7 +13,7 @@ use super::patterns::bind_pattern;
 pub(crate) fn eval_array_map(
     arr: &[Value],
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -51,7 +52,7 @@ where
 pub(crate) fn eval_array_filter(
     arr: &[Value],
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -74,7 +75,7 @@ pub(crate) fn eval_array_reduce(
     arr: &[Value],
     init: Value,
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -113,7 +114,7 @@ pub(crate) fn eval_array_reduce(
 pub(crate) fn eval_array_find(
     arr: &[Value],
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -134,7 +135,7 @@ pub(crate) fn eval_array_find(
 pub(crate) fn eval_array_any(
     arr: &[Value],
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -155,7 +156,7 @@ pub(crate) fn eval_array_any(
 pub(crate) fn eval_array_all(
     arr: &[Value],
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -193,7 +194,7 @@ where
 pub(crate) fn eval_dict_map_values(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
@@ -214,7 +215,7 @@ pub(crate) fn eval_dict_map_values(
 pub(crate) fn eval_dict_filter(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

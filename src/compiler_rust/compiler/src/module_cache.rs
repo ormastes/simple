@@ -87,6 +87,8 @@ pub fn clear_module_cache() {
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
+    crate::memory_guard::print_diagnostics();
+    crate::memory_guard::reset_stats();
     // Print resolve stats before clearing (if profiling enabled)
     super::interpreter_module::print_resolve_stats();
     // Also clear path resolution cache
@@ -116,6 +118,7 @@ pub fn clear_module_cache_selective() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)
     super::interpreter_module::reset_resolve_stats();
+    crate::memory_guard::reset_stats();
 }
 
 /// Increment total modules loaded counter, return new count

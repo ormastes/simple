@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use super::expansion::expand_user_macro;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, Enums, ImplMethods};
@@ -96,7 +97,7 @@ pub(crate) fn evaluate_macro_invocation(
     name: &str,
     macro_args: &[MacroArg],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

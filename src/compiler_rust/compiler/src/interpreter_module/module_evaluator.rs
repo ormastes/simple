@@ -21,7 +21,7 @@ use evaluation_helpers::{
 };
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<simple_parser::ast::FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
 
 /// Collected module exports: (env, exports, functions, classes, enums).
 /// Functions are `Arc<FunctionDef>` for cheap sharing between cache and `Value::Function`.
@@ -52,14 +52,14 @@ pub fn evaluate_module_exports(
 pub fn evaluate_module_exports_with_preloaded(
     items: &[Node],
     module_path: Option<&Path>,
-    global_functions: &mut HashMap<String, FunctionDef>,
+    global_functions: &mut HashMap<String, Arc<FunctionDef>>,
     global_classes: &mut HashMap<String, ClassDef>,
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
-    let mut local_functions: HashMap<String, FunctionDef> = HashMap::new();
+    let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
     let mut local_classes: HashMap<String, ClassDef> = HashMap::new();
     let mut local_enums: Enums = HashMap::new();
     let impl_methods: ImplMethods = HashMap::new();

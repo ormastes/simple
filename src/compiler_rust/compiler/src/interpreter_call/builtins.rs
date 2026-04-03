@@ -1,6 +1,7 @@
 // Built-in functions for interpreter
 // Range, Option, Result, Actor primitives, Futures, Generators, etc.
 
+use std::sync::Arc;
 use super::core::{eval_arg, eval_arg_int};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
@@ -14,13 +15,13 @@ use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 pub(super) fn eval_builtin(
     name: &str,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

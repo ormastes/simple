@@ -4,6 +4,7 @@
 //! - Building constant bindings for macro parameters
 //! - Converting evaluated values to their string representations
 
+use std::sync::Arc;
 use simple_parser::ast::{ClassDef, FunctionDef, MacroArg, MacroDef};
 use std::collections::HashMap;
 
@@ -33,7 +34,7 @@ pub(crate) fn build_macro_const_bindings(
     macro_def: &MacroDef,
     args: &[MacroArg],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,

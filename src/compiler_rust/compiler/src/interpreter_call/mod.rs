@@ -18,6 +18,7 @@ pub(crate) use core::{
     exec_function_with_values_and_self, exec_lambda, instantiate_class, ProceedContext, IN_NEW_METHOD,
 };
 
+use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
@@ -30,7 +31,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
-type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
@@ -39,7 +40,7 @@ pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
     env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
