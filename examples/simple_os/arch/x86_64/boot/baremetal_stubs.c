@@ -844,7 +844,7 @@ void _start(void)
 
     serial_puts("SimpleOS x86_64 boot\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
-    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 200 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
     /* BGA + GUI rendering is now done by Pure Simple code in spl_start().
@@ -1424,7 +1424,7 @@ RuntimeValue rt_port_inl_real(RuntimeValue port)
 RuntimeValue rt_port_io_wait_real(void)
 {
     io_wait();
-    return NIL_VALUE;
+    return 0;
 }
 
 /* Expose as the primary symbols (linker sees these) */
@@ -1485,8 +1485,8 @@ RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
 
 RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_read_u8(RuntimeValue)
