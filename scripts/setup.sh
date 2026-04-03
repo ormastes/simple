@@ -279,6 +279,7 @@ while [ -L "\$SELF" ]; do
 done
 SCRIPT_DIR="\$(cd "\$(dirname "\$SELF")" && pwd)"
 REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
+cd "\$REPO_ROOT"
 RUNTIME="\${REPO_ROOT}/bin/simple"
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/release/simple"; fi
@@ -647,7 +648,12 @@ TOOL_DAEMON_CACHE_FILE="${CACHE_ROOT}/mcp_daemon.smf"
 TOOL_RUNNER_BIN_DEFAULT="${REPO_ROOT}/bin/release/t32_lsp_mcp_tool_runner"
 mkdir -p "$CACHE_ROOT"
 if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
-  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+  rm -f "$CACHE_FILE"
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
+fi
+if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
+  rm -f "$TOOL_DAEMON_CACHE_FILE"
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
 fi
 export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"

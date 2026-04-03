@@ -13,8 +13,21 @@ const ENTRY = 'src/app/mcp/main.spl';
 function findRuntime() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
   const nativeDir = path.join(__dirname, '..', 'native');
+  const projectRoot = path.join(__dirname, '..', '..', '..');
 
-  // 1. Check extracted bootstrap package
+  // 1. Prefer a live project checkout over any cached bootstrap bundle.
+  // The native bundle can lag behind the current source tree during development.
+  const devBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
+  if (fs.existsSync(devBinary)) {
+    return { binary: devBinary, repoRoot: projectRoot };
+  }
+  // Fallback: bin/simple symlink (common dev setup)
+  const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);
+  if (fs.existsSync(devSymlink)) {
+    return { binary: devSymlink, repoRoot: projectRoot };
+  }
+
+  // 2. Check extracted bootstrap package
   if (fs.existsSync(nativeDir)) {
     const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
     if (entries.length > 0) {
@@ -32,18 +45,6 @@ function findRuntime() {
     }
   }
 
-  // 2. Check project checkout (development)
-  const projectRoot = path.join(__dirname, '..', '..', '..');
-  const devBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
-  if (fs.existsSync(devBinary)) {
-    return { binary: devBinary, repoRoot: projectRoot };
-  }
-  // Fallback: bin/simple symlink (common dev setup)
-  const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);
-  if (fs.existsSync(devSymlink)) {
-    return { binary: devSymlink, repoRoot: projectRoot };
-  }
-
   // 3. Fall back to PATH
   return { binary: `simple${ext}`, repoRoot: process.cwd() };
 }
@@ -52,6 +53,7 @@ const { binary, repoRoot } = findRuntime();
 const entryPath = path.join(repoRoot, ENTRY);
 
 const child = spawn(binary, [entryPath, ...process.argv.slice(2)], {
+  cwd: repoRoot,
   stdio: 'inherit',
   env: {
     ...process.env,
