@@ -212,18 +212,34 @@ codegen init: Compilation error: Support for this target has not been implemente
 7. **riscv64 crt0.S** — `src/os/kernel/arch/riscv64/boot/crt0.S`: S-mode trampoline (set sp, zero BSS, call boot_main) ✅
 8. **riscv64 boot_main** — `src/os/kernel/arch/riscv64/boot.spl`: boot_main() function for S-mode entry ✅
 
-## Post-Fix Status
+## Post-Fix Status (2026-04-03)
 
-| Arch | Build | Boot | Notes |
-|------|-------|------|-------|
-| **riscv64** | OK | OK (no output) | Boots, enters boot_main, halts cleanly. No serial output because runtime string functions are stubbed. |
-| **arm64** | OK | Not tested yet | Needs crt0.S similar to riscv64 |
-| **x86_64** | OK | Needs ELF32 | QEMU multiboot needs 32-bit ELF; objcopy step fails |
-| **riscv32** | FAIL | N/A | Cranelift has no riscv32 backend |
+| Arch | Build | Boot | GUI | Notes |
+|------|-------|------|-----|-------|
+| **x86_64** | OK | OK | **C-level only** | BGA framebuffer renders via C boot stub. Simple code (`spl_start`) still crashes. |
+| **riscv64** | OK | OK (clean halt) | N/A | Boots via OpenSBI, enters boot_main, halts. Runtime string functions stubbed. |
+| **arm64** | OK | Not tested | N/A | Needs crt0.S |
+| **riscv32** | FAIL | N/A | N/A | Cranelift has no riscv32 backend |
+
+### Transparency: x86_64 GUI is NOT driven by Simple code
+
+The screenshot showing a desktop with a Hello World window is rendered by **C code** in `baremetal_stubs.c::_start()`, NOT by the Simple compositor/desktop shell. The Simple code path (`spl_start` → `gui_entry._start` → `gui_kernel_main`) still crashes because:
+
+1. Compiled Simple code calls ~6000 runtime functions (`rt_*`) absent from baremetal
+2. `auto_stubs.c` provides 6309 weak return-0 stubs — **this masks real breakage**
+3. Any stubbed call silently returns NIL, causing cascading failures when results are used as pointers/function references
+4. The IDT fault handler catches #UD exceptions from wild jumps to address 0x3 (NIL_VALUE), but eventually the stack corrupts
+
+### What IS proven
+- BGA framebuffer hardware path: port I/O init, PCI BAR0 detection, 1024x768x32
+- 4 GiB identity-mapped page tables (covers VGA LFB at 0xFD000000)
+- MMIO pixel writes to framebuffer
+- Multiboot1 → 32→64 bit mode switch → C runtime → serial + BGA
 
 ## Remaining
 
-1. **riscv32** — punt to LLVM or skip in matrix
-2. **arm64 crt0** — needs AArch64 boot stub similar to riscv64
-3. **x86_64 ELF32** — objcopy/multiboot32 path needs fixing
-4. **Serial output** — boot_main needs direct MMIO writes (not runtime string functions)
+1. **Remove auto_stubs.c** — stop masking failures
+2. **Audit minimum runtime** — which `rt_*` functions does `gui_entry._start → gui_kernel_main` actually need?
+3. **Implement or bypass** — either implement the needed rt functions, or rewrite gui_entry.spl to use only baremetal-safe patterns (no string interpolation, no complex objects)
+4. **riscv32** — punt to LLVM or skip in matrix
+5. **arm64 crt0** — needs AArch64 boot stub similar to riscv64

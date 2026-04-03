@@ -64,8 +64,36 @@ Implement basic string interpolation support:
 - Verify gui_main.spl creates Terminal app window
 - If needed, add a minimal hello-world app in the desktop shell app list
 
+## Current State (2026-04-03)
+
+### Proven
+- BGA framebuffer hardware path works (1024x768x32 at 0xFD000000)
+- 4 GiB page tables cover VGA LFB
+- C-level rendering: desktop background, window, text, taskbar
+- Screenshot captured via QMP
+
+### NOT proven (faked in C boot stub)
+- The GUI is rendered by C code in `baremetal_stubs.c::_start()`, NOT by the Simple compositor/desktop shell
+- `spl_start()` (the compiled Simple entry) still crashes after C rendering
+- The Simple code path `gui_entry._start → serial_init → serial_writeln → bga_init_framebuffer → gui_kernel_main` never executes successfully
+
+### Root cause: runtime function gap
+- The compiled Simple code calls ~6000 runtime functions (`rt_*`) that don't exist in baremetal
+- `auto_stubs.c` provides weak return-0 stubs for all of them — **this masks real breakage**
+- Any call to a stubbed function silently returns NIL, causing cascading failures
+- String interpolation (`"text {expr}"`) calls `rt_value_to_string` + `rt_string_concat` — now implemented
+- But deeper calls (dict, object, type checking, GC) are all stubbed to return 0
+
+### Remaining work to make Simple code drive the GUI
+1. **Remove auto_stubs.c** — stop masking failures
+2. **Audit which rt_* functions are actually called** on the gui_entry → gui_main path
+3. **Implement the minimum set** of runtime functions needed for that path
+4. **Or: rewrite gui_entry.spl to avoid runtime-heavy patterns** (no string interpolation, no arrays of complex objects, direct port I/O only)
+5. **Verify** spl_start() reaches bga_init_framebuffer() and gui_kernel_main()
+
 ## Test Plan
 
-- Serial output shows all `[BOOT]` and `[GUI]` messages
-- QEMU screenshot shows non-black display
-- Framebuffer shows at least colored rectangles or text
+- Serial output shows all `[BOOT]` and `[GUI]` messages from **Simple code** (not C boot stub)
+- `spl_start()` completes without crashing
+- QEMU screenshot shows GUI rendered by the Simple compositor
+- No weak catch-all stubs — every called function must be real
