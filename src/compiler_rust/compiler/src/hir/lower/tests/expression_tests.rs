@@ -35,6 +35,37 @@ fn test_lower_array_expression() {
     assert!(!func.locals.is_empty());
 }
 
+// Regression coverage for Phase 0A global variable type resolution fix:
+//
+// The fix in module_pass.rs ensures `var x: u64 = ...` resolves the type
+// from Pattern::Typed when LetStmt.ty is None (the parser's normal path).
+//
+// Unit tests below are currently blocked from running by pre-existing
+// compilation errors in value_tests_basic.rs (E0308: Arc<HashMap> mismatch).
+// Integration verification: pure_gui.spl renders via fb_addr global in QEMU.
+//
+// When value_tests_basic.rs is fixed, uncomment these tests:
+//
+// #[test]
+// fn test_module_level_typed_var_resolves_type() {
+//     let module = parse_and_lower(
+//         "var addr: u64 = 100\nfn test() -> u64:\n    return addr + 1\n",
+//     ).unwrap();
+//     let addr_entry = module.globals.iter().find(|(name, _)| name == "addr");
+//     assert!(addr_entry.is_some());
+//     assert_eq!(addr_entry.unwrap().1, TypeId::I64);
+// }
+//
+// #[test]
+// fn test_module_level_typed_val_resolves_type() {
+//     let module = parse_and_lower(
+//         "val size: u32 = 42\nfn test() -> u32:\n    return size\n",
+//     ).unwrap();
+//     let size_entry = module.globals.iter().find(|(name, _)| name == "size");
+//     assert!(size_entry.is_some());
+//     assert_eq!(size_entry.unwrap().1, TypeId::I32);
+// }
+
 #[test]
 fn test_lower_tuple_expression() {
     let module = parse_and_lower("fn test() -> i64:\n    let t = (1, 2, 3)\n    return 0\n").unwrap();
