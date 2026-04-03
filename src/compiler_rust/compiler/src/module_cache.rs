@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use tracing::trace;
 
-use crate::value::Value;
+use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
 /// Check if loader tracing/summary is enabled via SIMPLE_LOADER_TRACE env var.
@@ -442,21 +442,28 @@ pub fn print_loader_summary() {
     });
 }
 
-/// Recursively filter out Function values from a Value.
-/// This is used to prevent exponential memory growth when building captured environments.
-/// For Dict values (imported modules), we recursively filter their contents.
-/// For other values, we return them as-is unless they are functions.
+/// Recursively filter Function values from a Value to prevent exponential memory growth.
+/// Instead of removing functions entirely (which breaks transitive imports — BUG-002),
+/// we preserve the function but strip its inner `captured_env` to prevent O(N*M)
+/// cascading memory growth when modules import each other in chains.
+/// This way, module B's exported functions retain references to C's imported functions,
+/// so when A calls B's function that calls C's function, the lookup succeeds.
 pub fn filter_functions_from_value(value: &Value) -> Value {
     match value {
-        Value::Function { .. } => {
-            // Return a placeholder for functions to indicate they exist but without the heavy captured_env
-            Value::Str("__function__".to_string())
+        Value::Function { name, def, .. } => {
+            // Preserve the function but with an empty captured_env to prevent
+            // exponential memory growth from nested captured environments.
+            // The function definition (Arc<FunctionDef>) is cheap to clone (refcount bump).
+            Value::Function {
+                name: name.clone(),
+                def: def.clone(),
+                captured_env: Arc::new(Env::new()),
+            }
         }
         Value::Dict(dict) => {
-            // Recursively filter functions from dict values (imported modules)
+            // Recursively process dict values (imported modules) — preserve functions inside
             let filtered: HashMap<String, Value> = dict
                 .iter()
-                .filter(|(_, v)| !matches!(v, Value::Function { .. }))
                 .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
                 .collect();
             Value::Dict(Arc::new(filtered))

@@ -3,7 +3,7 @@
 **ID:** bootstrap_mir_zero_modules
 **Date:** 2026-01-29
 **Severity:** Critical (Blocks self-hosting)
-**Status:** Confirmed
+**Status:** Fixed
 
 ## Summary
 
@@ -151,9 +151,55 @@ ctx = ctx.with_hir_modules(new_hir_modules)
 - `[aot] MIR done, N modules` shows correct count (N ≥ 1)
 - All unit tests pass after fix
 
+## Fix Applied (2026-04-03)
+
+### Root Cause
+
+The `for (name, module) in dict` tuple-destructuring pattern for Dict iteration
+silently produces **zero iterations** in compiled (bootstrap gen2) mode. The
+interpreter handles this pattern correctly, which is why gen1 succeeds but gen2
+fails.
+
+The monomorphization pass (`MonomorphizationPass.process_modules()` in
+`src/compiler/40.mono/monomorphize_integration.spl`) used this broken pattern
+throughout:
+
+```simple
+# BROKEN in compiled mode - zero iterations
+for (name, module) in modules:
+    result[name] = self.rewrite_module(module)
+```
+
+This caused the output dict `result` to remain `{}` (empty), which was then
+assigned back to `self.ctx.hir_modules` in the driver, wiping all HIR modules
+before MIR lowering.
+
+### Fix
+
+Replaced all `for (k, v) in dict` patterns with keys()-based iteration:
+
+```simple
+# FIXED - works in both interpreter and compiled mode
+for name in modules.keys():
+    val module = modules[name]
+    result[name] = self.rewrite_module(module)
+```
+
+### Files Changed
+
+1. `src/compiler/40.mono/monomorphize_integration.spl` — Fixed 5 methods:
+   `process_modules`, `collect_generics`, `scan_call_sites`,
+   `process_specializations` (all used broken `for (k,v) in dict`)
+2. `src/compiler/30.types/type_system/effect_pass.spl` — Preventive fix for
+   when the early-return guard is removed (same pattern in dead code path)
+3. `src/compiler/80.driver/driver.spl` — Added diagnostic logging in
+   `monomorphize_impl()` and `lower_to_mir()` to verify module counts
+
 ## Notes
 
 - This bug affects **generation 2** of bootstrap, not generation 1
 - `simple_old` (Rust implementation) successfully compiles to `simple_new1`
 - Bug is in the **Simple-based compiler implementation**, not Rust runtime
+- The `for (k, v) in dict` pattern is a known compiled-mode limitation; all
+  Dict iteration in the compiler pipeline should use `.keys()` + indexing
 - MCP server integration planned to help analyze this and future bugs

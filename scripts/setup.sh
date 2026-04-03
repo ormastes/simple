@@ -676,10 +676,11 @@ if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt 
   rm -f "$CACHE_FILE"
   SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
 fi
-if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
-  rm -f "$TOOL_DAEMON_CACHE_FILE"
-  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
-fi
+# Do not compile the optional daemon on startup. Claude waits on MCP health
+# checks, and even a detached compile job can keep extra wrapper processes
+# around long enough to look like a load failure. Tools can still use an
+# existing cached daemon artifact when present, otherwise they fall back to
+# the source entrypoint.
 export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"

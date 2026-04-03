@@ -14,7 +14,7 @@ if [ -n "$RUNTIME" ] && [ ! -x "$RUNTIME" ]; then RUNTIME=""; fi
 if [ -z "$RUNTIME" ]; then RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/bin/simple}"; fi
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/release/simple"; fi
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/src/compiler_rust/target/release/simple"; fi
-ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
+ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/claude_frontend.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 cd "$REPO_ROOT"
 CWD="$(pwd)"
@@ -56,13 +56,11 @@ if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt 
   rm -f "$CACHE_FILE"
   SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true
 fi
-# Background daemon compilation — not on the critical startup path.
-# All tool dispatch currently uses lsp_run_tool_direct() with the native
-# tool_runner binary, so blocking here only delays server readiness.
-if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
-  rm -f "$TOOL_DAEMON_CACHE_FILE"
-  ( SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" SIMPLE_MEMORY_LIMIT_MB=512 SIMPLE_TIMEOUT_SECONDS=120 "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 || true ) &
-fi
+# Do not compile the optional daemon on startup. Claude waits on MCP health
+# checks, and even a detached compile job can keep extra wrapper processes
+# around long enough to look like a load failure. Tools can still use an
+# existing cached daemon artifact when present, otherwise they fall back to
+# the source entrypoint.
 export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
@@ -76,7 +74,8 @@ else
 fi
 export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
-export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
+# Interpreter mode needs more memory than compiled SMF (module loading overhead).
+export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-512}}
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 MAIN_ARTIFACT="$CACHE_FILE"
 # Validate the compiled SMF is non-trivial (>1024 bytes).  The compile

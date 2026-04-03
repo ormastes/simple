@@ -15,43 +15,44 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 
 ## Distinctive Features
 
-- **Self-hosted staged toolchain**: real source layers for frontend, types, borrow checking, backend, driver, interpreter, and loader.
-- **Verification-first workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec markdown all ship in-tree.
-- **MDSOC architecture support**: virtual capsules, capsule manifests, and architecture-oriented repo structure are first-class concepts.
-- **Parser-friendly macro system**: compiler-integrated macro definitions, validation, and hygiene instead of editor-hostile text substitution.
-- **Math DSL blocks**: `m{}`, `loss{}`, and `nograd{}` parse and evaluate as dedicated math-oriented syntax, with pretty/LaTeX rendering support.
-- **SDN-backed project databases**: the repo uses textual SDN stores for tests, todos, dashboards, and other project metadata.
-- **Baremetal-friendly execution model**: in-tree support for baremetal builds, semihosting lanes, QEMU/GHDL flows, host-aware remote baremetal plumbing, and real CH32/STM adapter-backed lanes.
-- **Multiple execution paths**: interpreter, loader, native/LLVM-oriented compilation paths, and SMF/module-loading infrastructure coexist in one repo.
-- **Tooling-aware language rules**: Tree-sitter integration, primitive-public-API linting, traceability tooling, and language statistics are part of the platform story.
-- **UI test sharing**: the UI test client is designed to exercise both web UI backends and the TUI web proxy through one HTTP-oriented test surface.
+- **Self-hosted staged toolchain**: real source layers for frontend, type analysis, borrow checking, backend, driver, interpreter, and loader live in-tree.
+- **Verification-native workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
+- **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
+- **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
+- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, and rendering support.
+- **SDN-backed textual databases**: tests, todos, dashboards, and other project metadata are stored through repo-native SDN data flows.
+- **Multiple execution paths**: interpreter, loader, SMF/module loading, and native/LLVM-oriented compilation paths coexist in one system.
+- **Baremetal-oriented build and test plumbing**: QEMU, semihosting, remote baremetal flows, and adapter-backed hardware lanes are built into the repo story.
+- **Tooling-aware language rules**: Tree-sitter integration, primitive-public-API linting, traceability tooling, and language statistics are part of the platform.
+- **Shared UI testing surface**: the UI test client can drive both web backends and the TUI web proxy through one HTTP-oriented test interface.
 
 ## Feature Status Highlights
 
 Implemented and safe to advertise:
 - SSpec, SDoctest, coverage, traceability checks, and generated spec docs
+- Self-hosted staged compiler, interpreter, and loader architecture
 - MDSOC manifests and architecture-focused project structure
+- Parser-friendly macros with validation and hygiene
 - Tree-sitter outline/query tooling
-- SDN project/test/todo databases
+- SDN-backed project, test, and todo databases
 - Primitive public API linting
 - Borrow-checking infrastructure
-- Watch mode / auto-build support
-- mmap-backed loader primitives and executable-memory support
-- Baremetal build/test plumbing, remote baremetal mode parsing, and adapter-backed CH32 composite execution
+- Watch mode and auto-build support
+- mmap-backed loader support and executable-memory plumbing
+- Baremetal build/test plumbing and host-aware remote baremetal flows
 
-Implemented but should be described carefully:
-- `loss{}` / `nograd{}` and math-block rendering work, but deeper DL automation around them is still evolving
-- LLVM support is real, but some flows still depend on external LLVM tools
-- GC and no-GC families both exist, but their completeness is not uniform across every toolchain path
-- UI sharing exists through test surfaces and multiple frontends, but not as a single finished “one UI layer everywhere” claim
+Implemented, but best described with qualifiers:
+- `m{}` / `loss{}` / `nograd{}` are real and usable, but the broader DL story is still evolving
+- LLVM support is real, but some paths still depend on external LLVM tooling
+- GC and no-GC runtime families both exist, but completeness varies by execution path
+- Shared UI testing across web and TUI-web surfaces is real, but this is not yet one finished unified UI layer
+- Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
-Partial or experimental:
-- [todo] AOP support has a verified baseline: Simple-side proceed enforcement, MIR weaving helpers, and Rust-side runtime `init(...)` interception with `@inject` are covered. The broader DI/AOP authoring surface should still be treated as in progress. Current state: [doc/01_research/local/aop.md](doc/01_research/local/aop.md)
-- [todo] Remote baremetal execution is real but still lane-dependent. Stable RV32 ELF/shared-workload proof, CH32 composite-runner execution, and runtime/readiness checks are implemented; full repo-wide “all hardware lanes green” status is still host-dependent. Current state: [doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md](doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
-- [todo] Loader/JIT instantiation still has stubbed pieces. Current state: [doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md](doc/03_plan/loader_linker_object_provider_refactor_2026-02-18.md)
-- [todo] VHDL backend code generation exists, but should still be treated as experimental. Current state: [doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md](doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md)
-- [todo] C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
-- [todo] Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
+Experimental or partial:
+- AOP support has a verified baseline, but the broader DI/AOP authoring surface is still in progress. Current state: [doc/01_research/local/aop.md](doc/01_research/local/aop.md)
+- VHDL backend code generation exists, but should still be treated as experimental. Current state: [doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md](doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md)
+- C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
+- Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 
@@ -119,7 +120,7 @@ bin/release/simple build bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
 
-See [doc/build/bootstrap_multi_platform.md](doc/build/bootstrap_multi_platform.md) and [plan_codex_bootstrap.md](plan_codex_bootstrap.md) for the current bootstrap flow.
+See [doc/08_tracking/build/bootstrap_multi_platform.md](doc/08_tracking/build/bootstrap_multi_platform.md) and [doc/03_plan/pure_simple_bootstrap.plan.md](doc/03_plan/pure_simple_bootstrap.plan.md) for the current bootstrap flow.
 
 ### Build with GPU Support
 
@@ -552,62 +553,36 @@ config = sdn::load("app.sdn")
 print("Server port: {config.server.port}")
 ```
 
-### Doctest
+### SDoctest
 
-Executable examples in docstrings — tests that serve as documentation:
+Executable examples are part of the maintained test surface. Simple supports both demonstration blocks and verified `sdoctest` blocks, with `sdoctest` intended for examples that must run and match output.
 
-```simple
-## Computes factorial of n
-##
-## Example: factorial(5) returns 120
-## Example: factorial(0) returns 1
-fn factorial(n: i64) -> i64:
-    if n <= 1: return 1
-    n * factorial(n - 1)
-
-print factorial(5)   # 120
-print factorial(0)   # 1
+```sdoctest
+>>> factorial(5)
+120
+>>> factorial(0)
+1
 ```
-
-**Data structures with doc comments:**
 
 ```simple
 ## Stack data structure with LIFO semantics
-##
-## Usage:
-##     var s = Stack(items: [])
-##     s.items.push(1)
-##     s.items.push(2)
-##     print s.items.len()  # 2
 struct Stack:
     items: [i64]
 
 var s = Stack(items: [])
 s.items.push(1)
 s.items.push(2)
-s.items.push(3)
-print s.items.len()  # 3
+print s.items.len()  # 2
 ```
 
-**Planned interactive doctest syntax** (under development):
-
-```text
-# Future syntax — not yet implemented:
-"""
->>> factorial(5)
-120
->>> generate_uuid()
-"........-....-....-....-............"
-"""
-```
-
-Run doctests:
+Run SDoctest examples:
 ```bash
-simple doctest src/math.spl      # Run doctests in file
-simple doctest doc/tutorial.md   # Run doctests in markdown
-simple test --doctest            # Run all doctests
-simple test --doctest --tag slow # Run only slow-tagged doctests
+simple test --sdoctest README.md      # Run verified examples in Markdown/docs
+simple test --sdoctest src/math.spl   # Run file-local doctest examples
+simple test --sdoctest --tag slow     # Filter by tag
 ```
+
+`--doctest` is still accepted as a compatibility alias, but `--sdoctest` is the clearer name for the implemented path.
 
 ### Functional Update Operator (`->`)
 
@@ -695,46 +670,48 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 
 | Topic | Description | Link |
 |-------|-------------|------|
-| **Language Spec** | Complete language specification | [doc/spec/README.md](doc/spec/README.md) |
-| **Grammar** | Parser grammar and syntax rules | [doc/spec/parser/](doc/spec/parser/) |
-| **Guides** | Practical how-to guides | [doc/guides/README.md](doc/guides/README.md) |
-| **Plans** | Implementation roadmap | [doc/plans/README.md](doc/plans/README.md) |
-| **Research** | Design explorations | [doc/research/README.md](doc/research/README.md) |
-| **Architecture** | System design principles | [doc/architecture/](doc/architecture/) |
-| **Features** | Feature catalog | [doc/features/feature.md](doc/features/feature.md) |
-| **Status** | Implementation tracking | [doc/status/](doc/status/) |
-| **Deep Learning** | Neural networks & GPU computing | [doc/guide/deep_learning_guide.md](doc/guide/deep_learning_guide.md) |
+| **Docs Hub** | Numbered documentation index | [doc/README.md](doc/README.md) |
+| **Language Spec** | Executable and generated specs | [doc/06_spec/README.md](doc/06_spec/README.md) |
+| **Guides** | Practical how-to guides | [doc/07_guide/README.md](doc/07_guide/README.md) |
+| **Plans** | Implementation roadmap | [doc/03_plan/README.md](doc/03_plan/README.md) |
+| **Research** | Design explorations | [doc/01_research/README.md](doc/01_research/README.md) |
+| **Architecture** | System design principles | [doc/04_architecture/README.md](doc/04_architecture/README.md) |
+| **Tracking** | Bugs, tests, and todo tracking | [doc/08_tracking/README.md](doc/08_tracking/README.md) |
+| **Reports** | Session and milestone reports | [doc/09_report/README.md](doc/09_report/README.md) |
+| **Deep Learning** | Neural networks and GPU computing | [doc/07_guide/deep_learning/deep_learning.md](doc/07_guide/deep_learning/deep_learning.md) |
 
 ### Core Documentation
 
 **Getting Started:**
-- [Language Specification Index](doc/spec/README.md) - Complete spec organized by topic
-- [Syntax Specification](doc/spec/syntax.md) - Lexical structure, literals, operators
-- [Type System](doc/spec/types.md) - Type system, mutability, inference
-- [Test Policy](doc/guides/test.md) - Testing framework and best practices
+- [Documentation Hub](doc/README.md) - Current entry point for the numbered doc tree
+- [Getting Started](doc/07_guide/getting_started.md) - Project setup and first steps
+- [Syntax Quick Reference](doc/07_guide/quick_reference/syntax_quick_reference.md) - Canonical public syntax cheat sheet
+- [Testing Guide](doc/07_guide/testing/testing.md) - Testing workflow and command surface
 
 **Language Reference:**
-- [Core Language](doc/spec/README.md#core-language) - Syntax, types, data structures, functions
-- [Advanced Features](doc/spec/README.md#advanced-features) - Concurrency, macros, contracts
-- [Standard Library](doc/spec/stdlib.md) - Standard library specification
+- [Syntax Guide](doc/07_guide/language/syntax.md) - Surface syntax and examples
+- [Type System Guide](doc/07_guide/language/type_system.md) - Types, mutability, and usage
+- [Module System Guide](doc/07_guide/language/module_system.md) - Imports, packages, and layout
+- [Standard Library Guide](doc/07_guide/library/stdlib.md) - Stdlib organization and usage
 
 **GPU Computing:**
-- [Deep Learning Guide](doc/guide/deep_learning_guide.md) - **Comprehensive DL guide** (Pure Simple, PyTorch, CUDA)
-- [Vulkan User Guide](doc/guides/vulkan_backend.md) - Getting started with GPU kernels
-- [GPU & SIMD Spec](doc/spec/gpu_simd/README.md) - GPU compute and SIMD specification
-- [Vulkan Architecture](doc/architecture/vulkan_backend.md) - Implementation details
+- [Deep Learning Guide](doc/07_guide/deep_learning/deep_learning.md) - Pure Simple, model-oriented, and training flows
+- [GPU Programming Guide](doc/07_guide/backend/gpu_programming.md) - Backend and kernel-oriented GPU usage
+- [GPU API](doc/api/gpu_api.md) - API-level GPU reference
+- [LLVM Backend Architecture](doc/04_architecture/LLVM_BACKEND_ARCHITECTURE.md) - Backend implementation details
 
 **Development:**
-- [Module System](doc/spec/modules.md) - Import/export, packages, __init__.spl
-- [Testing Framework](doc/spec/testing/testing_bdd_framework.md) - BDD testing with matchers
-- [Build System](doc/guides/test.md) - Building and testing Simple projects
+- [Build Guide](doc/07_guide/build.md) - Building Simple and common workflows
+- [Testing Guide](doc/07_guide/testing/testing.md) - Test runner behavior and flags
+- [Coverage Guide](doc/07_guide/testing/coverage.md) - Coverage, SDoctest, and enforcement
+- [MCP Tooling Guide](doc/07_guide/tooling/mcp.md) - MCP registration and usage
 
 **Advanced Features:**
-- [Macro System](doc/spec/macro.md) - Contract-first LL(1) macros
+- [Macro System](doc/06_spec/macro.md) - Executable macro spec and status
 - [AOP & Unified Predicates](doc/01_research/local/aop.md) - Aspect-oriented programming and current implementation status
-- [SDN Format](doc/spec/sdn.md) - Simple Data Notation specification
-- [Doctest](doc/spec/testing/sdoctest.md) - Documentation testing
-- [Feature Documentation](doc/features/feature.md) - BDD-generated feature docs
+- [SDN Format](doc/04_architecture/format/note_sdn_index.md) - Note/SDN storage and indexing format
+- [SDoctest](doc/06_spec/app/compiler/modules/testing/sdoctest.md) - Documentation testing and verified examples
+- [Feature Documentation](doc/06_spec/feature.md) - Generated feature-doc artifact format
 
 ---
 
@@ -742,9 +719,9 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 
 ### Deep Learning Examples
 
-Simple provides 17 deep learning examples across 4 categories:
+Simple ships multiple deep learning examples across pure-Simple, model-training, and GPU-oriented flows:
 
-**Pure Simple Neural Networks (7 examples - 100% working):**
+**Pure Simple Neural Networks:**
 ```bash
 # XOR neural network training
 bin/simple examples/pure_nn/xor_training_example.spl
@@ -756,19 +733,19 @@ bin/simple examples/pure_nn/simple_regression.spl
 bin/simple examples/pure_nn/iris_classification.spl
 ```
 
-**MedGemma Korean Fine-Tuning (3 phases - 100% working):**
+**MedGemma Korean Fine-Tuning:**
 ```bash
 # Progressive LoRA training to prevent catastrophic forgetting
 bin/simple examples/medgemma_korean/run_all.spl
 ```
 
-**CUDA Programming (1 example - 100% working):**
+**CUDA Programming:**
 ```bash
 # Direct CUDA C API - multi-GPU, streams, events
 bin/simple examples/cuda/basic.spl
 ```
 
-**See [Deep Learning Guide](doc/guide/deep_learning_guide.md) for complete documentation.**
+**See [Deep Learning Guide](doc/07_guide/deep_learning/deep_learning.md) for current documentation.**
 
 ### Other Examples
 
@@ -825,7 +802,7 @@ Run feature tests:
 ./target/debug/simple simple/std_lib/test/features/generate_docs.spl
 ```
 
-Generated docs appear in `doc/features/{category}/` folders with living documentation that stays in sync with the implementation.
+Generated docs land in the numbered documentation tree, primarily under `doc/06_spec/`, so the checked examples stay close to the current spec artifacts.
 
 ---
 
@@ -833,14 +810,15 @@ Generated docs appear in `doc/features/{category}/` folders with living document
 
 ### Language Grammar
 
-The Simple language grammar is formally specified in the parser documentation:
+Simple’s current language references are split between the guide tree for user-facing explanations and the spec tree for executable or generated reference material.
 
-**Grammar Documents:**
-- [Parser Overview](doc/spec/parser/overview.md) - Parser architecture and design
-- [Grammar Definitions](doc/spec/parser/lexer_parser_grammar_definitions.md) - Top-level definitions
-- [Grammar Expressions](doc/spec/parser/lexer_parser_grammar_expressions.md) - Expression grammar
-- [Lexer & Scanner](doc/spec/parser/lexer_parser_scanner.md) - Tokenization rules
-- [Complete Grammar](doc/spec/parser/lexer_parser_grammar.md) - Full BNF-style grammar
+**Current Reference Documents:**
+- [Syntax Quick Reference](doc/07_guide/quick_reference/syntax_quick_reference.md) - Fast public-language reference
+- [Syntax Guide](doc/07_guide/language/syntax.md) - User-facing language walkthrough
+- [Language Spec Index](doc/06_spec/README.md) - Current generated spec index
+- [Syntax Spec](doc/06_spec/syntax.md) - Spec artifact for syntax coverage
+- [Types Spec](doc/06_spec/types.md) - Spec artifact for type-system coverage
+- [Modules Spec](doc/06_spec/modules.md) - Spec artifact for module-system coverage
 
 **Quick Grammar Reference:**
 
@@ -867,39 +845,37 @@ literal ::= integer | float | string | bool | array | dict | tuple
 
 ### Specification Index
 
-The complete language specification is organized in [doc/spec/](doc/spec/):
+The current spec and guide material is organized under the numbered documentation tree:
 
-**Core Language (9 specs):**
-- [Syntax](doc/spec/syntax.md) - Lexical structure, operators
-- [Types](doc/spec/types.md) - Type system, mutability
-- [Data Structures](doc/spec/data_structures.md) - Structs, classes, enums
-- [Functions](doc/spec/functions.md) - Functions, pattern matching
-- [Traits](doc/spec/traits.md) - Traits and implementations
-- [Memory](doc/spec/memory.md) - Ownership, borrowing
-- [Modules](doc/spec/modules.md) - Import/export system
-- [Units](doc/spec/units.md) - Semantic unit types
-- [Primitive as Object](doc/spec/primitive_as_obj.md) - Primitive methods
+**Core Language:**
+- [Syntax Spec](doc/06_spec/syntax.md) - Syntax-oriented spec material
+- [Types Spec](doc/06_spec/types.md) - Type-system spec material
+- [Data Structures Spec](doc/06_spec/data_structures.md) - Data-structure coverage
+- [Functions Spec](doc/06_spec/functions.md) - Functions and pattern matching
+- [Traits Spec](doc/06_spec/traits.md) - Traits and implementations
+- [Memory Spec](doc/06_spec/memory.md) - Ownership and borrowing
+- [Modules Spec](doc/06_spec/modules.md) - Import/export system
 
-**Advanced Features (8 specs):**
-- [Concurrency](doc/spec/concurrency.md) - Actors, async/await
-- [Metaprogramming](doc/spec/metaprogramming.md) - Macros, decorators
-- [Macro System](doc/spec/macro.md) - Advanced macros
-- [Contracts](doc/spec/invariant.md) - Pre/postconditions
-- [Capability Effects](doc/spec/capability_effects.md) - Reference capabilities
-- [FFI & ABI](doc/spec/ffi_abi.md) - Foreign function interface
-- [Standard Library](doc/spec/stdlib.md) - Stdlib organization
-- [File I/O](doc/spec/file_io.md) - File operations
+**Advanced Features:**
+- [Concurrency Spec](doc/06_spec/concurrency.md) - Async and concurrency behavior
+- [Metaprogramming Spec](doc/06_spec/metaprogramming.md) - Macros and decorators
+- [Macro Spec](doc/06_spec/macro.md) - Macro-specific executable coverage
+- [Capability Effects](doc/06_spec/capability_effects.md) - Capability/effect system
+- [Standard Library Guide](doc/07_guide/library/stdlib.md) - Stdlib structure and usage
+- [SFFI Guide](doc/07_guide/ffi/sffi.md) - Interop guidance
 
 **Testing & Tooling:**
-- [BDD Testing](doc/spec/testing/testing_bdd_framework.md) - BDD framework, matchers
-- [Formatter](doc/spec/tooling/formatter.md) - Code formatting
-- [Linting](doc/spec/tooling/formatting_lints.md) - Linter rules
+- [Testing Guide](doc/07_guide/testing/testing.md) - Test runner and matchers
+- [Coverage Guide](doc/07_guide/testing/coverage.md) - Coverage and SDoctest enforcement
+- [Lint Guide](doc/07_guide/tooling/lint.md) - Lint rules and workflow
+- [MCP Guide](doc/07_guide/tooling/mcp.md) - MCP workflow and registration
 
-**GPU & Graphics:**
-- [GPU & SIMD](doc/spec/gpu_simd/README.md) - GPU compute specification
-- [3D Graphics](doc/spec/graphics_3d/README.md) - 3D rendering
+**GPU & Platform:**
+- [GPU Programming Guide](doc/07_guide/backend/gpu_programming.md) - GPU usage
+- [Deep Learning Guide](doc/07_guide/deep_learning/deep_learning.md) - Model-oriented examples
+- [Baremetal Guide](doc/07_guide/backend/baremetal.md) - Platform and baremetal flows
 
-See [doc/spec/README.md](doc/spec/README.md) for the complete specification index with status indicators.
+See [doc/README.md](doc/README.md), [doc/06_spec/README.md](doc/06_spec/README.md), and [doc/07_guide/README.md](doc/07_guide/README.md) for the current documentation entry points.
 
 ---
 
@@ -971,9 +947,9 @@ simple build --bootstrap
 
 ### Testing
 
-**Production Ready Test Suite: 4,067/4,067 passing (100%)**
+**Full-suite snapshot (2026-02-14): 4,067/4,067 passing**
 
-Simple uses a comprehensive test strategy with 100% pass rate:
+Simple uses a broad test strategy spanning spec tests, SDoctest, coverage, and system lanes. The counts below are from the linked 2026-02-14 report:
 
 ```bash
 # All tests (4,067 tests in 17.4 seconds)
@@ -1002,7 +978,7 @@ simple build coverage
 - Average per test: 4.3ms
 - All tests deterministic and fast
 
-See [doc/session/full_test_suite_results_2026-02-14.md](doc/session/full_test_suite_results_2026-02-14.md) for detailed test analysis.
+See [doc/09_report/session/full_test_suite_results_2026-02-14.md](doc/09_report/session/full_test_suite_results_2026-02-14.md) for detailed test analysis.
 
 ### Code Quality
 
@@ -1028,7 +1004,7 @@ Simple ships with MCP servers, LSP servers, and Claude Code plugins — all writ
 
 ### Install Simple MCP Server
 
-The Simple MCP server currently exposes 99 tools for code diagnostics, VCS, build, test, debug, and more, plus 3 resources and 2 prompts.
+The Simple MCP server exposes repo-native tools for code diagnostics, VCS, build, test, debug, and related workflows. For current registration details, use the repo scripts and guide docs rather than relying on hardcoded counts here.
 
 ```bash
 # From a repo checkout — register with Claude Code
@@ -1199,11 +1175,11 @@ claude plugin install cmm-lsp@simple-local
 See [CLAUDE.md](CLAUDE.md) for development guidelines and [AGENTS.md](AGENTS.md) for AI agent instructions.
 
 **Documentation Structure:**
-- **Specifications** go in [doc/spec/](doc/spec/) (what the language supports)
-- **Guides** go in [doc/guides/](doc/guides/) (how to use features)
-- **Research** goes in [doc/research/](doc/research/) (why/how decisions were made)
-- **Plans** go in [doc/plans/](doc/plans/) (implementation roadmaps)
-- **Reports** go in [doc/report/](doc/report/) (session summaries, completion reports)
+- **Specifications** go in [doc/06_spec/](doc/06_spec/) (what the language supports)
+- **Guides** go in [doc/07_guide/](doc/07_guide/) (how to use features)
+- **Research** goes in [doc/01_research/](doc/01_research/) (why/how decisions were made)
+- **Plans** go in [doc/03_plan/](doc/03_plan/) (implementation roadmaps)
+- **Reports** go in [doc/09_report/](doc/09_report/) (session summaries and completion reports)
 
 ---
 
@@ -1221,16 +1197,16 @@ Release packages also include `THIRD_PARTY_NOTICES.md`.
 ## Resources
 
 **Official Documentation:**
-- [Language Specification](doc/spec/README.md) - Complete spec index
-- [Grammar Reference](doc/spec/parser/) - Parser grammar
-- [User Guides](doc/guides/README.md) - Practical tutorials
+- [Documentation Hub](doc/README.md) - Entry point for the numbered docs tree
+- [Language Specification](doc/06_spec/README.md) - Current spec index
+- [User Guides](doc/07_guide/README.md) - Practical tutorials
 
 **Quick References:**
-- [Syntax Quick Reference](doc/spec/syntax.md#quick-reference)
-- [Type System Guide](doc/spec/types.md)
-- [GPU Computing Guide](doc/guides/vulkan_backend.md)
+- [Syntax Quick Reference](doc/07_guide/quick_reference/syntax_quick_reference.md)
+- [Type System Guide](doc/07_guide/language/type_system.md)
+- [GPU Computing Guide](doc/07_guide/backend/gpu_programming.md)
 
 **Development:**
-- [Architecture Overview](doc/architecture/overview.md)
-- [Feature Roadmap](doc/features/feature.md)
-- [Implementation Plans](doc/plans/README.md)
+- [Architecture Overview](doc/04_architecture/overview.md)
+- [Feature Documentation](doc/06_spec/feature.md)
+- [Implementation Plans](doc/03_plan/README.md)

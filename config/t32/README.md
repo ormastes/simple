@@ -3,9 +3,14 @@
 This directory contains repo-managed TRACE32 configuration files and container
 helpers for the local `trace32_x11_container.Dockerfile` flow.
 
-The current container path is headless and starts `t32mciserver`, not the older
-X11 or Qt frontends. The repo therefore does not ship bundled TRACE32 GUI
-compatibility shared libraries.
+The default container path is headless and starts `t32mciserver`. The repo also
+supports an explicit GUI path through the same Docker/Podman wrapper using host
+X11 forwarding (`DISPLAY`, `/tmp/.X11-unix`, and usually `XAUTHORITY`) via
+`config/t32/trace32_x11_container.shs gui-on` or `scripts/t32q.shs gui-on`.
+
+The repository does not ship bundled TRACE32 GUI compatibility shared
+libraries; the GUI path relies on the locally installed vendor runtime under
+`/opt/t32` plus host X11 access.
 
 Licensing and provenance:
 

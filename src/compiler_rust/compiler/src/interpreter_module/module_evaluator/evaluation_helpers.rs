@@ -549,10 +549,13 @@ fn process_export_stmt(
     Ok(())
 }
 
-/// Create a filtered environment that excludes Function values
+/// Create a filtered environment for captured closures.
+/// Preserves imported functions (with their inner captured_env stripped) so that
+/// transitive imports work: if module B imports C's functions, B's exported functions
+/// can still call C's functions when invoked from module A. (BUG-002 fix)
+/// Only the inner captured_env is stripped to prevent exponential memory growth.
 pub(super) fn create_filtered_env(env: &Env) -> Env {
     env.iter()
-        .filter(|(_, v)| !matches!(v, Value::Function { .. }))
         .map(|(k, v)| {
             let filtered_value = filter_functions_from_value(v);
             (k.clone(), filtered_value)

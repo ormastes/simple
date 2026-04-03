@@ -1,0 +1,617 @@
+@allow(unnamed_duplicate_typed_args)
+# T32 LSP MCP frontend for Claude.
+#
+# Keeps startup import-free so Claude's MCP load probe can complete quickly.
+# Tool execution is delegated to the existing tool runners.
+
+extern fn stdin_read_char() -> text
+extern fn stdout_write(data: text) -> i64
+extern fn rt_stdout_flush() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+val SERVER_NAME = "simple-mcp-t32-lsp"
+val SERVER_VERSION = "0.1.2"
+
+var USE_JSON_LINES = false
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+var REQUEST_SEQ = 0
+
+fn main():
+    while true:
+        val msg = read_stdin_message()
+        if msg == "":
+            debug_log("stdin closed")
+            return
+        debug_log("recv bytes=" + str(msg.len()))
+        debug_log("raw=" + msg)
+        val method = detect_method(msg)
+        val id = request_id(msg)
+        debug_log("method=" + method + " id=" + id)
+        var response = ""
+        if method == "initialize":
+            response = make_init_response(id)
+        elif method == "initialized" or method == "notifications/initialized":
+            response = ""
+        elif method == "shutdown":
+            response = jsonrpc_result(id, "null")
+        elif method == "tools/list":
+            response = make_tools_list(id)
+        elif method == "tools/call":
+            response = dispatch_tool(id, msg)
+        elif method == "resources/list":
+            response = jsonrpc_result(id, jo1(jp("resources", SB_L() + SB_R())))
+        elif method == "resources/templates/list":
+            response = jsonrpc_result(id, jo1(jp("resourceTemplates", SB_L() + SB_R())))
+        elif method == "prompts/list":
+            response = jsonrpc_result(id, jo1(jp("prompts", SB_L() + SB_R())))
+        elif method == "roots/list":
+            response = jsonrpc_result(id, jo1(jp("roots", SB_L() + SB_R())))
+        elif method == "logging/setLevel" or method == "logging/setlevel":
+            response = jsonrpc_result(id, "null")
+        elif method == "ping":
+            response = jsonrpc_result(id, LB() + RB())
+        elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            response = ""
+        elif id != "" and id != "null":
+            response = jsonrpc_error(id, -32601, "Method not found: " + method)
+        if response != "":
+            debug_log("send bytes=" + str(response.len()))
+            write_stdout_message(response)
+
+fn dispatch_tool(id: text, body: text) -> text:
+    val tool_name = detect_tool_name(body)
+    if tool_name == "":
+        return jsonrpc_error(id, -32602, "Missing tool name in tools/call request")
+    val args_raw = request_arguments_json(body)
+    val args_path = temp_args_path(id)
+    if not rt_file_write_text(args_path, args_raw):
+        return jsonrpc_error(id, -32002, "Failed to write tool arguments")
+    val runner_bin = tool_runner_bin_path()
+    val timeout_bin = timeout_bin_path()
+    val runner = tool_runner_path_for_tool(tool_name)
+    val runtime = tool_runtime_path()
+    val (stdout, stderr, code) =
+        if runner_bin != "":
+            if timeout_bin != "":
+                rt_process_run(timeout_bin, [tool_timeout_secs(), runner_bin, id, tool_name, args_path])
+            else:
+                rt_process_run(runner_bin, [id, tool_name, args_path])
+        else:
+            if timeout_bin != "":
+                rt_process_run(timeout_bin, [tool_timeout_secs(), runtime, runner, id, tool_name, args_path])
+            else:
+                rt_process_run(runtime, [runner, id, tool_name, args_path])
+    rt_file_delete(args_path)
+    if code == 124:
+        return jsonrpc_error(id, -32002, "Tool backend timed out")
+    if code != 0:
+        return jsonrpc_error(id, -32002, "Tool backend failed: " + trim_error_text(stderr, stdout))
+    val response = stdout.trim()
+    if response == "":
+        return jsonrpc_error(id, -32002, "Tool backend returned no response")
+    response
+
+fn temp_args_path(id: text) -> text:
+    REQUEST_SEQ = REQUEST_SEQ + 1
+    "/tmp/t32_lsp_mcp_req_" + str(rt_time_now_unix_micros()) + "_" + sanitize_path_segment(id) + "_" + str(REQUEST_SEQ) + ".json"
+
+fn debug_log(message: text):
+    val enabled = (rt_env_get("T32_LSP_MCP_DEBUG_LOG") ?? "").trim()
+    if enabled == "" or enabled == "0":
+        return
+    rt_file_append_text("/tmp/t32_lsp_mcp_claude_frontend.log", message + "\n")
+
+fn tool_timeout_secs() -> text:
+    "8s"
+
+fn tool_runtime_path() -> text:
+    val env_runtime = rt_env_get("SIMPLE_RUNTIME") ?? ""
+    if env_runtime != "":
+        return env_runtime
+    if rt_file_exists("bin/release/simple"):
+        return "bin/release/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if rt_file_exists("bin/release/simple.exe"):
+        return "bin/release/simple.exe"
+    "bin/release/simple"
+
+fn timeout_bin_path() -> text:
+    val env_timeout = rt_env_get("T32_LSP_MCP_TIMEOUT_BIN") ?? ""
+    if env_timeout != "":
+        return env_timeout
+    if rt_file_exists("/usr/bin/timeout"):
+        return "/usr/bin/timeout"
+    if rt_file_exists("/bin/timeout"):
+        return "/bin/timeout"
+    ""
+
+fn tool_runner_bin_path() -> text:
+    rt_env_get("T32_LSP_MCP_TOOL_RUNNER_BIN") ?? ""
+
+fn tool_runner_path_for_tool(tool_name: text) -> text:
+    if tool_name == "cmm_parse":
+        return parse_tool_runner_path()
+    if tool_name == "cmm_validate_cli":
+        return validate_tool_runner_path()
+    if tool_name == "cmm_complete" or tool_name == "cmm_hover":
+        return commands_tool_runner_path()
+    if tool_name == "cmm_diagnostics" or tool_name == "cmm_symbols" or tool_name == "cmm_definition":
+        return analyze_tool_runner_path()
+    if tool_name == "cmm_ast" or tool_name == "cmm_dialog_ast":
+        return ast_tool_runner_path()
+    tool_runner_path()
+
+fn tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_TOOL_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl"
+
+fn parse_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_PARSE_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_parse.spl"
+
+fn validate_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_VALIDATE_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_validate.spl"
+
+fn commands_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_COMMANDS_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_commands.spl"
+
+fn analyze_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_ANALYZE_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_analyze.spl"
+
+fn ast_tool_runner_path() -> text:
+    val env_runner = rt_env_get("T32_LSP_MCP_AST_RUNNER") ?? ""
+    if env_runner != "":
+        return env_runner
+    "examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner_ast.spl"
+
+fn trim_error_text(stderr: text, stdout: text) -> text:
+    var raw = stderr.trim()
+    if raw == "":
+        raw = stdout.trim()
+    if raw == "":
+        return "unknown error"
+    if raw.len() > 240:
+        return raw[0:240]
+    raw
+
+fn make_init_response(id: text) -> text:
+    if INIT_CACHE != "":
+        return jsonrpc_result(id, INIT_CACHE)
+    val tools_cap = jo1(jp("listChanged", "false"))
+    val resources_cap = jo1(jp("listChanged", "false"))
+    val prompts_cap = jo1(jp("listChanged", "false"))
+    val roots_cap = jo1(jp("listChanged", "false"))
+    var caps = LB()
+    caps = caps + jp("tools", tools_cap)
+    caps = caps + "," + jp("resources", resources_cap)
+    caps = caps + "," + jp("prompts", prompts_cap)
+    caps = caps + "," + jp("logging", LB() + RB())
+    caps = caps + "," + jp("roots", roots_cap)
+    caps = caps + RB()
+    val server_info = jo2(
+        jp("name", js(SERVER_NAME)),
+        jp("version", js(SERVER_VERSION))
+    )
+    var result = LB()
+    result = result + jp("protocolVersion", js("2025-11-25"))
+    result = result + "," + jp("capabilities", caps)
+    result = result + "," + jp("instructions", js("CMM language intelligence via MCP protocol. 9 tools for parsing, AST inspection, dialog extraction, diagnostics, completions, hover, symbols, definition, and CLI validation."))
+    result = result + "," + jp("serverInfo", server_info)
+    result = result + RB()
+    INIT_CACHE = result
+    jsonrpc_result(id, result)
+
+fn make_tools_list(id: text) -> text:
+    if TOOLS_CACHE != "":
+        return jsonrpc_result(id, TOOLS_CACHE)
+    var tool_parts: [text] = []
+    tool_parts.push(make_tool_schema("cmm_parse", "Parse CMM source and return AST summary with node count and errors"))
+    tool_parts.push(make_tool_schema("cmm_diagnostics", "Run semantic diagnostics on CMM source (labels, macros, unreachable code)"))
+    tool_parts.push(make_tool_schema("cmm_complete", "Get completions at a position in CMM source"))
+    tool_parts.push(make_tool_schema("cmm_hover", "Get hover documentation for a word at a position in CMM source"))
+    tool_parts.push(make_tool_schema("cmm_symbols", "List symbols (labels, macros) in CMM source"))
+    tool_parts.push(make_tool_schema("cmm_definition", "Get definition location for a symbol at a position in CMM source"))
+    tool_parts.push(make_tool_schema("cmm_validate_cli", "Validate CLI conversion quality of a CMM script"))
+    tool_parts.push(make_tool_schema("cmm_ast", "Parse CMM source and return full AST tree as structured JSON"))
+    tool_parts.push(make_tool_schema("cmm_dialog_ast", "Extract DIALOG blocks from CMM source and return dialog AST as structured JSON"))
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    TOOLS_CACHE = result
+    jsonrpc_result(id, result)
+
+fn make_tool_schema(name: text, description: text) -> text:
+    var props = LB() + RB()
+    var req = "[]"
+    if name == "cmm_parse" or name == "cmm_diagnostics" or name == "cmm_symbols" or name == "cmm_validate_cli":
+        props = jo1(jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text")))))
+        req = "[" + js("source") + "]"
+    elif name == "cmm_complete" or name == "cmm_hover" or name == "cmm_definition":
+        var p = LB()
+        p = p + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text"))))
+        p = p + "," + jp("line", jo2(jp("type", js("integer")), jp("description", js("Line number (1-based)"))))
+        p = p + "," + jp("character", jo2(jp("type", js("integer")), jp("description", js("Character offset (0-based)"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("source") + "," + js("line") + "," + js("character") + "]"
+    elif name == "cmm_ast" or name == "cmm_dialog_ast":
+        var p2 = LB()
+        p2 = p2 + jp("source", jo2(jp("type", js("string")), jp("description", js("CMM source text"))))
+        p2 = p2 + "," + jp("resolve_includes", jo2(jp("type", js("boolean")), jp("description", js("Follow DO/RUN includes and return multi-file AST (default false)"))))
+        p2 = p2 + "," + jp("base_path", jo2(jp("type", js("string")), jp("description", js("Base directory for resolving relative include paths"))))
+        p2 = p2 + RB()
+        props = p2
+        req = "[" + js("source") + "]"
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+    var annotations = LB()
+    annotations = annotations + jp("readOnlyHint", "true")
+    annotations = annotations + "," + jp("destructiveHint", "false")
+    annotations = annotations + "," + jp("idempotentHint", "true")
+    annotations = annotations + "," + jp("openWorldHint", "false")
+    annotations = annotations + RB()
+    var tool_obj = jo3(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", schema)
+    )
+    tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
+
+fn detect_method(msg: text) -> text:
+    if has_method(msg, "initialize"):
+        return "initialize"
+    if has_method(msg, "initialized") or has_method(msg, "notifications/initialized"):
+        return "initialized"
+    if has_method(msg, "notifications/cancelled"):
+        return "notifications/cancelled"
+    if has_method(msg, "notifications/roots/list_changed"):
+        return "notifications/roots/list_changed"
+    if has_method(msg, "shutdown"):
+        return "shutdown"
+    if has_method(msg, "tools/list"):
+        return "tools/list"
+    if has_method(msg, "tools/call"):
+        return "tools/call"
+    if has_method(msg, "resources/list"):
+        return "resources/list"
+    if has_method(msg, "resources/templates/list"):
+        return "resources/templates/list"
+    if has_method(msg, "prompts/list"):
+        return "prompts/list"
+    if has_method(msg, "roots/list"):
+        return "roots/list"
+    if has_method(msg, "logging/setLevel") or has_method(msg, "logging/setlevel"):
+        return "logging/setLevel"
+    if has_method(msg, "ping"):
+        return "ping"
+    extract_field(msg, "method")
+
+fn detect_tool_name(body: text) -> text:
+    if body.contains("\"name\":\"cmm_parse\"") or body.contains("\"name\": \"cmm_parse\""):
+        return "cmm_parse"
+    if body.contains("\"name\":\"cmm_diagnostics\"") or body.contains("\"name\": \"cmm_diagnostics\""):
+        return "cmm_diagnostics"
+    if body.contains("\"name\":\"cmm_complete\"") or body.contains("\"name\": \"cmm_complete\""):
+        return "cmm_complete"
+    if body.contains("\"name\":\"cmm_hover\"") or body.contains("\"name\": \"cmm_hover\""):
+        return "cmm_hover"
+    if body.contains("\"name\":\"cmm_symbols\"") or body.contains("\"name\": \"cmm_symbols\""):
+        return "cmm_symbols"
+    if body.contains("\"name\":\"cmm_definition\"") or body.contains("\"name\": \"cmm_definition\""):
+        return "cmm_definition"
+    if body.contains("\"name\":\"cmm_validate_cli\"") or body.contains("\"name\": \"cmm_validate_cli\""):
+        return "cmm_validate_cli"
+    if body.contains("\"name\":\"cmm_ast\"") or body.contains("\"name\": \"cmm_ast\""):
+        return "cmm_ast"
+    if body.contains("\"name\":\"cmm_dialog_ast\"") or body.contains("\"name\": \"cmm_dialog_ast\""):
+        return "cmm_dialog_ast"
+    extract_nested(body, "name")
+
+fn request_arguments_json(body: text) -> text:
+    val args = extract_nested_raw(body, "arguments")
+    if args == "null" or args == "":
+        return body
+    args
+
+fn request_id(body: text) -> text:
+    val candidates = [
+        "\"id\": ",
+        "\"id\":",
+        "\\\"id\\\": ",
+        "\\\"id\\\":"
+    ]
+    var ci = 0
+    while ci < candidates.len():
+        val marker = candidates[ci]
+        val idx = body.index_of(marker).unwrap_or(-1)
+        if idx >= 0:
+            var start = idx + marker.len()
+            while start < body.len() and is_ws(char_at(body, start)):
+                start = start + 1
+            if start >= body.len():
+                return "null"
+            val first = char_at(body, start)
+            if first == "\"":
+                var end = start + 1
+                var escaped = false
+                while end < body.len():
+                    val ch = char_at(body, end)
+                    if escaped:
+                        escaped = false
+                    elif ch == "\\":
+                        escaped = true
+                    elif ch == "\"":
+                        return body.substring(start, end + 1)
+                    end = end + 1
+                return "null"
+            var end2 = start
+            while end2 < body.len():
+                val ch = char_at(body, end2)
+                if ch == "," or ch == "}" or ch == "]" or is_ws(ch):
+                    break
+                end2 = end2 + 1
+            if end2 <= start:
+                return "null"
+            return body.substring(start, end2)
+        ci = ci + 1
+    "null"
+
+fn sanitize_path_segment(value: text) -> text:
+    if value == "":
+        return "empty"
+    var parts: [text] = []
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "-":
+            parts.push(ch)
+        else:
+            parts.push("_")
+        i = i + 1
+    val sanitized = parts.join("")
+    if sanitized == "":
+        return "empty"
+    sanitized
+
+fn has_method(msg: text, name: text) -> bool:
+    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+fn read_stdin_message() -> text:
+    var content_length = 0
+    while true:
+        var line = read_line()
+        if line.len() == 0:
+            if content_length > 0:
+                break
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        line = strip_line_end(line)
+        if line.starts_with(LB()):
+            USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    read_chars(content_length)
+
+fn write_stdout_message(body: text):
+    val nl = "\n"
+    if USE_JSON_LINES:
+        stdout_write(body + nl)
+        rt_stdout_flush()
+        return
+    val header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+    stdout_write(header + body)
+    rt_stdout_flush()
+
+fn read_line() -> text:
+    var line = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            return line
+        line = line + ch
+        if ch == "\n":
+            return line
+
+fn read_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch.len() == 0:
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+fn strip_line_end(line: text) -> text:
+    if line.ends_with("\r\n"):
+        return line.substring(0, line.len() - 2)
+    if line.ends_with("\n"):
+        return line.substring(0, line.len() - 1)
+    if line.ends_with("\r"):
+        return line.substring(0, line.len() - 1)
+    line
+
+fn extract_nested(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return ""
+    extract_field(params, key)
+
+fn extract_nested_raw(json: text, key: text) -> text:
+    val params = extract_field_raw(json, "params")
+    if params == "null":
+        return "null"
+    extract_field_raw(params, key)
+
+fn extract_field(json: text, key: text) -> text:
+    val start = find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    val first = char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start + 1, i)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json.len():
+        val ch = char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or is_ws(ch):
+            break
+        end = end + 1
+    json.substring(start, end)
+
+fn extract_field_raw(json: text, key: text) -> text:
+    val start = find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return "null"
+    val first = char_at(json, start)
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json.len():
+            val ch = char_at(json, i)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return json.substring(start, i + 1)
+            i = i + 1
+        return "null"
+    if first == LB() or first == "[":
+        var depth = 0
+        var i2 = start
+        var in_str = false
+        var esc = false
+        while i2 < json.len():
+            val ch = char_at(json, i2)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB() or ch == "[":
+                    depth = depth + 1
+                elif ch == RB() or ch == "]":
+                    depth = depth - 1
+                    if depth == 0:
+                        return json.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = char_at(json, end)
+        if ch == "," or ch == RB() or ch == "]" or is_ws(ch):
+            break
+        end = end + 1
+    val raw = json.substring(start, end)
+    if raw == "":
+        return "null"
+    raw
+
+fn find_json_value_start(json: text, key: text) -> i64:
+    val search = Q() + key + Q()
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if json.substring(offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var j = offset + search.len()
+        while j < json.len() and is_ws(char_at(json, j)):
+            j = j + 1
+        if j < json.len() and char_at(json, j) == ":":
+            j = j + 1
+            while j < json.len() and is_ws(char_at(json, j)):
+                j = j + 1
+            return j
+        offset = offset + search.len()
+    -1
+
+fn char_at(s: text, i: i64) -> text:
+    s.substring(i, i + 1)
+
+fn is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn jsonrpc_result(id: text, result: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn jsonrpc_error(id: text, code: i64, message: text) -> text:
+    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+fn Q() -> text: "\""
+fn LB() -> text: "{"
+fn RB() -> text: "}"
+fn SB_L() -> text: "["
+fn SB_R() -> text: "]"
+
+fn escape_json(s: text) -> text:
+    var out = s
+    out = out.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out
+
+fn js(value: text) -> text:
+    Q() + escape_json(value) + Q()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn jo1(p1: text) -> text:
+    LB() + p1 + RB()
+
+fn jo2(p1: text, p2: text) -> text:
+    LB() + p1 + "," + p2 + RB()
+
+fn jo3(p1: text, p2: text, p3: text) -> text:
+    LB() + p1 + "," + p2 + "," + p3 + RB()

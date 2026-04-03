@@ -328,6 +328,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_CHECK_RUST",
         needs_rust_flags: &[],
     },
+    CommandEntry {
+        name: "check-skip",
+        app_path: "src/app/check_skip/main.spl",
+        rust_handler: Handler::Args(handle_check_skip),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Localization
     CommandEntry {
         name: "i18n",

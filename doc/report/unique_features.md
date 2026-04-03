@@ -56,9 +56,9 @@ Several requested items are real but only partial, experimental, or host-depende
 | Language statistics | Implemented | CLI/tooling support exists |
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
 | Language-level ban on mocks in system tests | Not verified | Policy docs say “no mocks”, but hard enforcement was not confirmed |
-| Declarative argparser integrated into language | Not implemented | Proposal/docs exist; imperative CLI parser exists today |
-| Easy custom primitive type support | Not verified | Nearby custom literal/suffix mechanisms exist, but this specific claim is too strong |
-| VS Code / Neovim rendering for math/loss blocks | Not verified as product feature | Editor tooling exists, but this exact integrated rendering claim was not proven |
+| Declarative argparser integrated into language | Partial but real | `cli Name:` parser, interpreter evaluation, and backend codegen exist; this is not yet the uniform CLI path for every app |
+| Easy custom primitive type support | Unproven README claim | Nearby custom literal/suffix mechanisms exist, but the stronger “easy custom primitive type” claim still needs dedicated docs/tests |
+| VS Code / Neovim rendering for math/loss blocks | Unproven README claim | Editor tooling exists, but a polished integrated rendering feature should not be marketed without dedicated evidence |
 
 ## Evidence By Area
 
@@ -226,7 +226,6 @@ These should not be advertised as complete in README:
 - remote interpreter / remote baremetal end-to-end execution on all lanes
 - VHDL backend support as production-ready
 - C/C++ bidirectional interop as complete
-- declarative argparser integrated into the language
 - language-level prevention of mocks in system tests
 - easy custom primitive support
 - VS Code / Neovim rendering for math/loss blocks as a completed feature

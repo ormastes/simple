@@ -463,6 +463,19 @@ fn main() -> i64:
     crate::cli::basic::run_code(&code, gc_log, gc_off)
 }
 
+/// Handle 'check-skip' command - scan test files for skip/pending markers
+pub fn handle_check_skip(args: &[String]) -> i32 {
+    let entry = std::path::PathBuf::from("src/app/check_skip/main.spl");
+    if entry.exists() {
+        let mut file_args = vec![entry.to_string_lossy().to_string()];
+        file_args.extend(args[1..].iter().cloned());
+        crate::cli::basic::run_file_with_args(&entry, false, false, file_args)
+    } else {
+        eprintln!("error: check-skip requires Simple implementation at src/app/check_skip/main.spl");
+        1
+    }
+}
+
 /// Handle 'dashboard' command - project dashboard CLI
 pub fn handle_dashboard(args: &[String], _gc_log: bool, _gc_off: bool) -> i32 {
     let dashboard_args: Vec<String> = if args.len() > 1 {
