@@ -144,7 +144,7 @@ pub(super) fn eval_collection_expr(
                     Ok(Value::Function {
                         name: variant.clone(),
                         def: Box::new(func.clone()),
-                        captured_env: Env::new(),
+                        captured_env: Arc::new(Env::new()),
                     })
                 } else if classes.contains_key(variant) {
                     Ok(Value::Constructor {

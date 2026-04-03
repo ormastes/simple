@@ -96,7 +96,7 @@ pub(crate) fn evaluate_call(
         if let Some(val) = env.get(name).cloned() {
             match val {
                 Value::Function { def, captured_env, .. } => {
-                    let mut captured_env_clone = captured_env.clone();
+                    let mut captured_env_clone = HashMap::clone(&captured_env);
                     return core::exec_function_with_captured_env(
                         &def,
                         args,
@@ -217,7 +217,7 @@ pub(crate) fn evaluate_call(
                 // Look up function in the module's exports
                 if let Some(func_val) = module_dict.get(field).cloned() {
                     if let Value::Function { def, captured_env, .. } = func_val {
-                        let mut captured_env_clone = captured_env.clone();
+                        let mut captured_env_clone = HashMap::clone(&captured_env);
                         return core::exec_function_with_captured_env(
                             &def,
                             args,
@@ -354,7 +354,7 @@ pub(crate) fn evaluate_call(
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
             } else if let Some(Value::Function { def, captured_env, .. }) = env.get(field).cloned() {
-                let mut captured_env_clone = captured_env.clone();
+                let mut captured_env_clone = HashMap::clone(&captured_env);
                 return core::exec_function_with_captured_env(
                     &def,
                     args,
@@ -824,7 +824,7 @@ pub(crate) fn evaluate_call(
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
-            let mut captured_env_clone = captured_env.clone();
+            let mut captured_env_clone = HashMap::clone(&captured_env);
             core::exec_function_with_captured_env(
                 &def,
                 args,

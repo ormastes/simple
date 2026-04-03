@@ -6,12 +6,20 @@
 
 use std.cli.cli_util (get_cli_args, parse_csv_fields)
 use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional, parsed_positionals, generate_help}
-use app.io.mod (file_exists, file_read, file_write, dir_create_all, file_remove, file_modified_time, shell_int, shell_output_trimmed, shell_bool, shell_output, shell)
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_remove, file_modified_time}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{shell_int, shell_output_trimmed, shell_bool, shell_output, shell}
 use std.text.{to_int_or}
 use std.text.{escape_json}
 use app.web_dashboard.server.{DashboardServer}
 use app.ui.detect.{has_tauri_shell}
 use app.llm_dashboard.main.{run_llm_dashboard}
+use app.dashboard.framework_policy.{
+    FRAMEWORK_WORKER_FLAG, strip_framework_flags, is_framework_worker,
+    should_isolate_dashboard_command, dashboard_command_launch,
+    run_one_shot_worker, run_supervised_worker, build_dashboard_worker_args,
+    args_request_gui
+}
 
 fn main() -> i64:
     val args = get_cli_args()
@@ -30,12 +38,38 @@ fn run_dashboard(args: [text]) -> i64:
     Returns:
         Exit code (0 for success)
     """
-    if args.len() == 0:
+    val framework_worker = is_framework_worker(args)
+    val clean_args = strip_framework_flags(args)
+
+    if clean_args.len() == 0:
         run_status([])
         return 0
 
-    val cmd = args[0]
-    val sub_args = if args.len() > 1: args.slice(1, args.len()) else: []
+    val cmd = clean_args[0]
+    val sub_args = if clean_args.len() > 1: clean_args.slice(1, clean_args.len()) else: []
+
+    if not framework_worker and should_isolate_dashboard_command(cmd, sub_args):
+        val launch = dashboard_command_launch(cmd, sub_args)
+        if cmd == "gui":
+            val gui_args = build_dashboard_worker_args("serve", sub_args, launch)
+            val spec = cli_spec()
+            val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+            val spec3 = cli_spec_flag(spec2, "browser", "b", "Open in browser instead of desktop window")
+            val parsed = parse_cli_args(spec3, sub_args)
+            val port = to_int_or(parsed_option(parsed, "port"), 3000)
+            val use_browser = parsed_flag(parsed, "browser")
+
+            print "Starting Dashboard GUI on http://localhost:{port}"
+            if not use_browser and has_tauri_shell():
+                shell("tools/tauri-shell/src-tauri/target/release/simple-tauri-shell --url http://localhost:{port} &")
+            else:
+                shell("(sleep 1 && open http://localhost:{port}) &")
+            return run_supervised_worker(gui_args, launch)
+
+        val child_args = build_dashboard_worker_args(cmd, sub_args, launch)
+        if launch.long_running:
+            return run_supervised_worker(child_args, launch)
+        return run_one_shot_worker(child_args, launch)
 
     match cmd:
         case "status":
@@ -51,12 +85,18 @@ fn run_dashboard(args: [text]) -> i64:
             run_coverage(sub_args)
             return 0
         case "collect":
+            if not framework_worker:
+                return 1
             run_collect(sub_args)
             return 0
         case "serve":
+            if not framework_worker:
+                return 1
             run_serve(sub_args)
             return 0
         case "export":
+            if not framework_worker:
+                return 1
             run_export(sub_args)
             return 0
         case "invalidate-cache":
@@ -78,15 +118,23 @@ fn run_dashboard(args: [text]) -> i64:
             run_alert_remove(sub_args)
             return 0
         case "compare":
+            if not framework_worker:
+                return 1
             run_compare(sub_args)
             return 0
         case "query":
+            if not framework_worker:
+                return 1
             run_query(sub_args)
             return 0
         case "gui":
+            if not framework_worker:
+                return 1
             run_gui(sub_args)
             return 0
         case "agents":
+            if not framework_worker and args_request_gui(sub_args):
+                return 1
             run_llm_dashboard(sub_args)
             return 0
         case "help":
@@ -734,4 +782,3 @@ fn run_gui(args: [text]):
 
 # Re-export Phase 6 features (extracted to dashboard_phase6.spl)
 use app.dashboard.dashboard_phase6.*
-

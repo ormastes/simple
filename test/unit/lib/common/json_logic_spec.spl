@@ -1,0 +1,56 @@
+# codex-system-test
+# Focused SSpec coverage for deterministic JSON library behavior.
+
+use lib.json.types.{json_number, json_string, json_object, json_is_object, json_to_number, json_to_string}
+use lib.json.object_ops.{json_object_get}
+use lib.json.parser.{json_parse, json_parse_with_error}
+use lib.json.path_ops.{json_path_get, json_path_set}
+use lib.json.serializer.{json_minify, json_beautify}
+use lib.json.utilities.{json_unflatten_object}
+
+describe "JSON Library Logic":
+    describe "parser strictness":
+        it "parses nested object and array values":
+            val parsed = json_parse("{\"user\":{\"name\":\"Ada\",\"scores\":[1,2]}}")
+            expect(json_is_object(parsed)).to_equal(true)
+            expect(json_to_string(json_path_get(parsed, "user.name"))).to_equal("Ada")
+            expect(json_to_number(json_path_get(parsed, "user.scores.1"))).to_equal(2)
+
+        it "rejects trailing tokens after a valid value":
+            val parsed = json_parse("{\"ok\":true} []")
+            expect(parsed).to_be_nil()
+
+            val result = json_parse_with_error("{\"ok\":true} []")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("trailing")
+
+        it "keeps invalid trailing input unchanged during minify and beautify":
+            val input = "{\"ok\":true} garbage"
+            expect(json_minify(input)).to_equal(input)
+            expect(json_beautify(input)).to_equal(input)
+
+    describe "path write semantics":
+        it "creates missing nested objects for dotted paths":
+            val updated = json_path_set(json_object({}), "user.profile.name", json_string("Ada"))
+            expect(json_is_object(json_object_get(updated, "user"))).to_equal(true)
+            expect(json_to_string(json_path_get(updated, "user.profile.name"))).to_equal("Ada")
+
+        it "preserves existing siblings when writing nested paths":
+            val original = json_object({
+                "user": json_object({
+                    "id": json_number(7)
+                })
+            })
+            val updated = json_path_set(original, "user.profile.name", json_string("Ada"))
+            expect(json_to_number(json_path_get(updated, "user.id"))).to_equal(7)
+            expect(json_to_string(json_path_get(updated, "user.profile.name"))).to_equal("Ada")
+
+    describe "unflatten behavior":
+        it "builds nested objects from dotted keys":
+            val flat = json_object({
+                "user.name": json_string("Ada"),
+                "user.age": json_number(37)
+            })
+            val nested = json_unflatten_object(flat)
+            expect(json_to_string(json_path_get(nested, "user.name"))).to_equal("Ada")
+            expect(json_to_number(json_path_get(nested, "user.age"))).to_equal(37)

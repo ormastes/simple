@@ -517,7 +517,7 @@ pub(super) fn exec_block_closure(
                     Value::Function {
                         name: f.name.clone(),
                         def: Box::new(f.clone()),
-                        captured_env: local_env.clone(), // Capture current scope
+                        captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );
                 last_value = Value::Nil;
@@ -544,7 +544,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -635,7 +635,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -662,7 +662,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -746,7 +746,7 @@ pub(super) fn exec_block_closure(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -1100,7 +1100,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -1127,7 +1127,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -1211,7 +1211,7 @@ fn exec_block_closure_mut(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: std::collections::HashMap::new(),
+                                captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
                     }
@@ -1252,7 +1252,7 @@ fn exec_block_closure_mut(
                     Value::Function {
                         name: f.name.clone(),
                         def: Box::new(f.clone()),
-                        captured_env: local_env.clone(), // Capture current scope
+                        captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );
                 last_value = Value::Nil;

@@ -465,56 +465,23 @@ fn main() -> i64:
 
 /// Handle 'dashboard' command - project dashboard CLI
 pub fn handle_dashboard(args: &[String], _gc_log: bool, _gc_off: bool) -> i32 {
-    // Skip the command name ("dashboard")
-    let sub_args: Vec<&str> = if args.len() > 1 {
-        args[1..].iter().map(|s| s.as_str()).collect()
+    let dashboard_args: Vec<String> = if args.len() > 1 {
+        args[1..]
+            .iter()
+            .map(|a| format!("\"{}\"", a.replace("\"", "\\\"")))
+            .collect()
     } else {
         vec![]
     };
 
-    let cmd = sub_args.first().copied().unwrap_or("help");
+    let code = format!(
+        r#"use app.dashboard.main.{{run_dashboard}}
 
-    match cmd {
-        "status" => {
-            println!("==================================");
-            println!("  Project Status Overview");
-            println!("==================================");
-            println!();
-            println!("Dashboard status: Active");
-            println!();
-            println!("Run 'simple dashboard collect' to refresh data.");
-            0
-        }
-        "collect" => {
-            println!("Collecting metrics...");
-            println!("  [OK] Test results");
-            println!("  [OK] Feature database");
-            println!("  [OK] TODO items");
-            println!("  [OK] Coverage data");
-            println!();
-            println!("Collection complete.");
-            0
-        }
-        "help" | "--help" | "-h" => {
-            println!("Simple Dashboard CLI");
-            println!();
-            println!("USAGE:");
-            println!("  simple dashboard <command> [options]");
-            println!();
-            println!("COMMANDS:");
-            println!("  status         Show project status overview");
-            println!("  collect        Collect metrics from sources");
-            println!("  help           Show this help");
-            println!();
-            println!("Examples:");
-            println!("  simple dashboard status");
-            println!("  simple dashboard collect");
-            0
-        }
-        _ => {
-            eprintln!("Unknown command: {}", cmd);
-            eprintln!("Run 'simple dashboard help' for usage.");
-            1
-        }
-    }
+fn main() -> i64:
+    val args = [{}]
+    run_dashboard(args)"#,
+        dashboard_args.join(", ")
+    );
+
+    crate::cli::basic::run_code(&code, false, false)
 }

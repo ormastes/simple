@@ -185,7 +185,7 @@ fn execute_callable_with_arg(
             ..
         } => {
             // Use base_env if provided (spawn_isolated), otherwise use captured_env (pool.submit)
-            let mut local_env = base_env.cloned().unwrap_or_else(|| captured_env.clone());
+            let mut local_env = base_env.cloned().unwrap_or_else(|| HashMap::clone(captured_env));
             if let Some(first_param) = def.params.first() {
                 local_env.insert(first_param.name.clone(), arg);
             }

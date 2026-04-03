@@ -65,7 +65,7 @@ pub(super) fn call_value_with_args(
         }
         Value::Function { def, captured_env, .. } => {
             // Execute function with given args, using the captured environment for closure
-            let mut local_env = captured_env.clone();
+            let mut local_env = HashMap::clone(&captured_env);
             for (i, param) in def.params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.name.clone(), arg.clone());
@@ -284,7 +284,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let func_value = Value::Function {
                         name: f.name.clone(),
                         def: Box::new(f.clone()),
-                        captured_env: Env::new(),
+                        captured_env: Arc::new(Env::new()),
                     };
 
                     // Apply decorators in reverse order (bottom-to-top, outermost last)
@@ -399,7 +399,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: Env::new(),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -517,7 +517,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: Env::new(),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -571,7 +571,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 Value::Function {
                                     name: mangled,
                                     def: Box::new(method.clone()),
-                                    captured_env: Env::new(),
+                                    captured_env: Arc::new(Env::new()),
                                 },
                             );
                         }
@@ -896,7 +896,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             Value::Function {
                                 name: name.clone(),
                                 def: Box::new(functions.get(&name).unwrap().clone()),
-                                captured_env: Env::new(),
+                                captured_env: Arc::new(Env::new()),
                             },
                         );
                     }
@@ -1129,7 +1129,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 let func_value = Value::Function {
                                     name: f.name.clone(),
                                     def: Box::new(f.clone()),
-                                    captured_env: Env::new(),
+                                    captured_env: Arc::new(Env::new()),
                                 };
                                 module_dict.insert(f.name.clone(), func_value);
                             }

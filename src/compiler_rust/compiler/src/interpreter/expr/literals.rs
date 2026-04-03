@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use simple_parser::ast::{Expr, FStringPart};
 use simple_parser::token::NumericSuffix;
@@ -244,7 +245,7 @@ pub(super) fn eval_literal_expr(
                 return Ok(Some(Value::Function {
                     name: name.clone(),
                     def: Box::new(func.clone()),
-                    captured_env: Env::new(), // Top-level functions don't capture
+                    captured_env: Arc::new(Env::new()), // Top-level functions don't capture
                 }));
             }
             // Check classes - return as Constructor for constructor polymorphism

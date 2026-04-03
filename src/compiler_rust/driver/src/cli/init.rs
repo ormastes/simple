@@ -24,18 +24,21 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
         .unwrap_or(false);
 
     if !file_disabled {
-        let log_dir = std::env::var("SIMPLE_LOG_DIR").ok().map(PathBuf::from);
+        let requested_log_dir = std::env::var("SIMPLE_LOG_DIR").ok().map(PathBuf::from);
         let log_filter = std::env::var("SIMPLE_LOG")
             .ok()
             .or_else(|| std::env::var("RUST_LOG").ok());
+        let resolved_log_dir = crate::log::resolve_log_dir(requested_log_dir.as_deref());
 
-        if let Err(e) = crate::log::init_dual(log_dir.as_deref(), log_filter.as_deref()) {
+        if let Err(e) = crate::log::init_dual(resolved_log_dir.as_deref().ok(), log_filter.as_deref()) {
             eprintln!("warning: failed to initialize file logging: {}", e);
             crate::log::init(); // Fallback to stdout only
         }
 
-        // Cleanup old logs (keep 7 days) - non-fatal if it fails
-        let _ = crate::log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7);
+        if let Ok(log_dir) = resolved_log_dir {
+            // Cleanup old logs (keep 7 days) - non-fatal if it fails
+            let _ = crate::log::cleanup_old_logs(&log_dir, 7);
+        }
     } else {
         crate::log::init();
     }

@@ -4,6 +4,7 @@
 //! and collecting exports.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use simple_parser::ast::{ClassDef, EnumDef, Node};
 
@@ -32,7 +33,7 @@ pub fn merge_module_definitions(
                 let func_value = Value::Function {
                     name: f.name.clone(),
                     def: Box::new(f.clone()),
-                    captured_env: Env::new(),
+                    captured_env: Arc::new(Env::new()),
                 };
                 exports.insert(f.name.clone(), func_value);
             }

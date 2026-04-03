@@ -1013,7 +1013,7 @@ pub fn handle_dict_methods(
                     Value::Function { def, captured_env, .. } => {
                         // Call the function with the provided arguments
                         // Use the caller's env for evaluating arguments, but merge with captured_env for the function body
-                        let mut merged_env = captured_env.clone();
+                        let mut merged_env = HashMap::clone(captured_env);
                         merged_env.extend(env.clone());
                         let result = exec_function(
                             def,

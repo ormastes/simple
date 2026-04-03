@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tracing::{debug, error, trace, warn, instrument};
@@ -644,47 +644,13 @@ pub fn load_and_merge_module(
             }
         };
 
-    // Create exports with the module's environment captured
-    // IMPORTANT: Filter out Function values from captured_env to avoid exponential cloning.
-    // Functions can call other module functions through the global `functions` HashMap,
-    // so they don't need functions in their captured_env. Only capture non-function values
-    // (variables, classes, enums, etc.) that functions might need to access.
-    let filtered_env: Env = module_env
-        .iter()
-        .filter(|(_, v)| !matches!(v, Value::Function { .. }))
-        .map(|(k, v): (&String, &Value)| (k.clone(), v.clone()))
-        .collect();
-
+    // Export functions with their original captured_env from the defining module.
+    // Previously this merged the importer's entire filtered_env into each function's
+    // captured_env, causing O(N*M) cascading memory growth across import chains.
+    // Functions already have everything they need from their defining module's env.
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
-        match value {
-            Value::Function {
-                name: fn_name,
-                def,
-                captured_env: existing_env,
-            } => {
-                // Merge: start with the function's existing captured_env (from its defining module),
-                // then overlay with this module's filtered_env. This preserves variables from
-                // sub-modules (e.g., group_stack from dsl.spl when re-exported via __init__.spl).
-                let mut merged_env = existing_env;
-                for (k, v) in filtered_env.iter() {
-                    if !matches!(v, Value::Function { .. }) {
-                        merged_env.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-                }
-                exports.insert(
-                    name,
-                    Value::Function {
-                        name: fn_name,
-                        def,
-                        captured_env: merged_env,
-                    },
-                );
-            }
-            other => {
-                exports.insert(name, other);
-            }
-        }
+        exports.insert(name, value);
     }
 
     // Cache the full module exports for future use

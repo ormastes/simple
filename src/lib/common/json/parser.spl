@@ -79,6 +79,7 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                     var str_parts: [text] = []
                                     pos = pos + 1
                                     var escaped = false
+                                    var closed = false
                                     while pos < text.len():
                                         val sc = text.char_at(pos)
                                         if escaped:
@@ -91,18 +92,24 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                                 pos = pos + 1
                                             else:
                                                 if sc == "\"":
+                                                    closed = true
                                                     pos = pos + 1
                                                     break
                                                 else:
                                                     str_parts.push(sc)
                                                     pos = pos + 1
-                                    tokens.push(("STRING", str_parts.join("")))
+                                    if closed:
+                                        tokens.push(("STRING", str_parts.join("")))
+                                    else:
+                                        tokens.push(("INVALID", "Unterminated string"))
+                                        break
                                 else:
                                     if c == "t":
                                         if text.slice(pos, pos + 4) == "true":
                                             tokens.push(("TRUE", "true"))
                                             pos = pos + 4
                                         else:
+                                            tokens.push(("INVALID", c))
                                             pos = pos + 1
                                     else:
                                         if c == "f":
@@ -110,6 +117,7 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                                 tokens.push(("FALSE", "false"))
                                                 pos = pos + 5
                                             else:
+                                                tokens.push(("INVALID", c))
                                                 pos = pos + 1
                                         else:
                                             if c == "n":
@@ -117,6 +125,7 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                                     tokens.push(("NULL", "null"))
                                                     pos = pos + 4
                                                 else:
+                                                    tokens.push(("INVALID", c))
                                                     pos = pos + 1
                                             else:
                                                 if c == "-" or (c >= "0" and c <= "9"):
@@ -130,6 +139,7 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                                             break
                                                     tokens.push(("NUMBER", num_parts.join("")))
                                                 else:
+                                                    tokens.push(("INVALID", c))
                                                     pos = pos + 1
     tokens
 
@@ -273,7 +283,7 @@ fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i
             val next_token = tokens[p]
             val next_type = next_token.0
             if next_type == "RBRACE":
-                return (true, json_object(pairs), "", p + 1)
+                return (false, nil, "Trailing comma in object", p)
         if p >= tokens.len():
             return (false, nil, "Unexpected end in object", p)
         val key_token = tokens[p]
@@ -316,6 +326,10 @@ fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
     if tokens.len() == 0:
         return (false, nil, "Empty input", 0)
     val result = json_parse_value_at(tokens, 0)
+    if not result.0:
+        return result
+    if result.3 != tokens.len():
+        return (false, nil, "Unexpected trailing tokens", result.3)
     result
 
 fn json_parse(text: text) -> any:
@@ -355,4 +369,3 @@ fn json_parse_with_error(text: text) -> (any, text):
     if result.0:
         return (result.1, "")
     (nil, result.2)
-

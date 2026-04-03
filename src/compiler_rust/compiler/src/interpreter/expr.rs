@@ -74,7 +74,7 @@ fn call_closure_no_args(
             )
         }
         Value::Function { def, captured_env, .. } => {
-            let mut captured_env_clone = captured_env.clone();
+            let mut captured_env_clone = HashMap::clone(&captured_env);
             exec_function_with_captured_env(
                 &def,
                 &[],

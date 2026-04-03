@@ -1,0 +1,61 @@
+use std.sspec.*
+use app.dashboard.framework_policy.{
+    FRAMEWORK_WORKER_FLAG, FRAMEWORK_PROFILE_PREFIX,
+    strip_framework_flags, is_framework_worker, args_request_gui,
+    should_isolate_dashboard_command, dashboard_command_launch,
+    build_dashboard_worker_args, classify_worker_exit,
+    _trim_restart_history, _restart_backoff_millis, build_worker_shell_command
+}
+
+describe "Dashboard framework policy":
+    it "detects and strips internal worker flags":
+        val args = ["agents", "--gui", FRAMEWORK_WORKER_FLAG, FRAMEWORK_PROFILE_PREFIX + "llm_worker"]
+        expect(is_framework_worker(args)).to_equal(true)
+        expect(strip_framework_flags(args)).to_equal(["agents", "--gui"])
+
+    it "isolates only heavy dashboard commands":
+        expect(should_isolate_dashboard_command("status", [])).to_equal(false)
+        expect(should_isolate_dashboard_command("collect", [])).to_equal(true)
+        expect(should_isolate_dashboard_command("serve", [])).to_equal(true)
+        expect(should_isolate_dashboard_command("agents", ["--gui"])).to_equal(true)
+        expect(should_isolate_dashboard_command("agents", [])).to_equal(false)
+
+    it "recognizes gui request flags":
+        expect(args_request_gui(["--gui"])).to_equal(true)
+        expect(args_request_gui(["--web"])).to_equal(true)
+        expect(args_request_gui(["--tui"])).to_equal(false)
+
+    it "builds worker args with internal profile markers":
+        val launch = dashboard_command_launch("collect", [])
+        val args = build_dashboard_worker_args("collect", ["--mode=full"], launch)
+        expect(args[0]).to_equal("dashboard")
+        expect(args[1]).to_equal("collect")
+        expect(args.contains(FRAMEWORK_WORKER_FLAG)).to_equal(true)
+        expect(args.contains("--mode=full")).to_equal(true)
+
+    it "exports watchdog memory and timeout budgets to worker shells":
+        val launch = dashboard_command_launch("collect", [])
+        val shell_cmd = build_worker_shell_command(["dashboard", "collect"], launch)
+        expect(shell_cmd).to_contain("export SIMPLE_MEMORY_LIMIT_MB='8192'; ")
+        expect(shell_cmd).to_contain("export SIMPLE_TIMEOUT_SECONDS='30'; ")
+        expect(shell_cmd).to_contain("export SIMPLE_BINARY=")
+        expect(shell_cmd).to_contain("export SIMPLE_THREAD_BUDGET=")
+
+    it "classifies limit failures ahead of exit code mapping":
+        expect(classify_worker_exit(137, true, "memory")).to_equal("memory")
+        expect(classify_worker_exit(101, false, "")).to_equal("panic")
+
+    it "does not inject timeout wrapper for long running dashboard workers":
+        val launch = dashboard_command_launch("serve", [])
+        val shell_cmd = build_worker_shell_command(["dashboard", "serve"], launch)
+        expect(shell_cmd.contains("timeout --kill-after")).to_equal(false)
+        expect(shell_cmd.contains("SIMPLE_THREAD_BUDGET")).to_equal(true)
+
+    it "trims restart history by the configured window":
+        val trimmed = _trim_restart_history([1, 5_000_000, 70_000_000], 80_000_000, 60_000_000)
+        expect(trimmed).to_equal([70_000_000])
+
+    it "uses escalating restart backoff":
+        expect(_restart_backoff_millis(1)).to_equal(250)
+        expect(_restart_backoff_millis(2)).to_equal(1000)
+        expect(_restart_backoff_millis(3)).to_equal(5000)

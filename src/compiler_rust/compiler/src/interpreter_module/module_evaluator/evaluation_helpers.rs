@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use tracing::{trace, warn};
 
@@ -95,7 +96,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: HashMap::new(),
+                                captured_env: Arc::new(HashMap::new()),
                             },
                         );
                     }
@@ -143,7 +144,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: HashMap::new(),
+                                captured_env: Arc::new(HashMap::new()),
                             },
                         );
                     }
@@ -183,7 +184,7 @@ pub(super) fn register_definitions(
                                 Value::Function {
                                     name: mangled,
                                     def: Box::new(method.clone()),
-                                    captured_env: HashMap::new(),
+                                    captured_env: Arc::new(HashMap::new()),
                                 },
                             );
                         }
@@ -232,7 +233,7 @@ pub(super) fn register_definitions(
                             Value::Function {
                                 name: mangled,
                                 def: Box::new(method.clone()),
-                                captured_env: HashMap::new(),
+                                captured_env: Arc::new(HashMap::new()),
                             },
                         );
                     }
@@ -566,7 +567,7 @@ pub(super) fn export_functions(
             Value::Function {
                 name: name.clone(),
                 def: Box::new(f.clone()),
-                captured_env: Env::new(),
+                captured_env: Arc::new(Env::new()),
             },
         );
     }
@@ -578,12 +579,13 @@ pub(super) fn export_functions(
         env_size = filtered_env.len(),
         "Second pass: exporting public functions"
     );
+    let shared_env = Arc::new(filtered_env.clone());
     let mut exported_count = 0;
     for (name, f) in local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
             def: Box::new(f.clone()),
-            captured_env: filtered_env.clone(),
+            captured_env: shared_env.clone(),
         };
         // Always add to env (for internal module use)
         env.insert(name.clone(), func_with_env.clone());

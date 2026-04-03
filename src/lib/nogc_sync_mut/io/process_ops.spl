@@ -139,16 +139,19 @@ fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byte
     """
     if _is_windows_platform():
         eprint("[WARNING] Resource limits not supported on Windows - using timeout only")
-        val (stdout, stderr, exit_code) = process_run_timeout(cmd, args, timeout_ms)
+        val effective_timeout = if timeout_ms <= 0: 0 else: timeout_ms
+        val (stdout, stderr, exit_code) = if effective_timeout <= 0:
+            process_run(cmd, args)
+        else:
+            process_run_timeout(cmd, args, effective_timeout)
         return ProcessResult(
             stdout: stdout,
             stderr: stderr,
             exit_code: exit_code,
-            limit_exceeded: exit_code == -1,
-            limit_type: if exit_code == -1: "timeout" else: ""
+            limit_exceeded: effective_timeout > 0 and exit_code == -1,
+            limit_type: if effective_timeout > 0 and exit_code == -1: "timeout" else: ""
         )
 
-    val timeout_sec = if timeout_ms > 0: timeout_ms / 1000 else: 120
     val memory_kb = if memory_bytes > 0: memory_bytes / 1024 else: 0
 
     var limit_parts: [text] = []
@@ -167,8 +170,12 @@ fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byte
     val args_str = arg_parts.join(" ")
 
     val full_cmd = if args_str == "": "{cmd}" else: "{cmd} {args_str}"
-    val timeout_buffer = timeout_sec + 5
-    val wrapped_cmd = "{limit_cmds}exec timeout --kill-after=5s {timeout_buffer}s {full_cmd}"
+    val wrapped_cmd = if timeout_ms > 0:
+        val timeout_sec = if timeout_ms < 1000: 1 else: timeout_ms / 1000
+        val timeout_buffer = timeout_sec + 5
+        "{limit_cmds}exec timeout --kill-after=5s {timeout_buffer}s {full_cmd}"
+    else:
+        "{limit_cmds}exec {full_cmd}"
 
     val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", wrapped_cmd])
 
@@ -317,4 +324,3 @@ fn process_kill(pid: i64) -> bool:
 
 fn eprint(msg: text):
     print "[STDERR] {msg}"
-

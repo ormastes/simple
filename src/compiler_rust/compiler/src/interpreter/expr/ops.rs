@@ -245,7 +245,7 @@ pub(super) fn eval_op_expr(
                             }
                             match callee_val {
                                 Value::Function { def, captured_env, .. } => {
-                                    let mut env_clone = captured_env.clone();
+                                    let mut env_clone = HashMap::clone(&captured_env);
                                     return Ok(Some(super::super::exec_function_with_values(
                                         &def,
                                         &all_args,
@@ -302,7 +302,7 @@ pub(super) fn eval_op_expr(
                             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                             match right_val {
                                 Value::Function { def, captured_env, .. } => {
-                                    let mut env_clone = captured_env.clone();
+                                    let mut env_clone = HashMap::clone(&captured_env);
                                     return Ok(Some(super::super::exec_function_with_values(
                                         &def,
                                         &[left_val],
@@ -926,7 +926,7 @@ pub(super) fn eval_op_expr(
 
                             // Execute left function
                             if let Value::Function { def, captured_env, .. } = left_val {
-                                let mut captured_env_clone = captured_env.clone();
+                                let mut captured_env_clone = HashMap::clone(&captured_env);
                                 let left_result = super::super::exec_function_with_values(
                                     &def,
                                     &[],
@@ -941,7 +941,7 @@ pub(super) fn eval_op_expr(
 
                             // Execute right function
                             if let Value::Function { def, captured_env, .. } = right_val {
-                                let mut captured_env_clone = captured_env.clone();
+                                let mut captured_env_clone = HashMap::clone(&captured_env);
                                 let right_result = super::super::exec_function_with_values(
                                     &def,
                                     &[],

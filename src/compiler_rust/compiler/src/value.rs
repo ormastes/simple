@@ -530,7 +530,7 @@ pub enum Value {
     Function {
         name: String,
         def: Box<FunctionDef>,
-        captured_env: Env,
+        captured_env: Arc<Env>,
     },
     Object {
         class: String,

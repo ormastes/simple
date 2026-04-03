@@ -1,5 +1,6 @@
 //! Logging initialization (inlined from simple-log crate)
 
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Initialize structured logging with env-based filtering (stderr only).
@@ -18,13 +19,12 @@ pub fn init() {
 /// Initialize dual logging (stdout + file).
 pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std::io::Result<()> {
     use std::fs;
-    use std::path::Path;
     use tracing_subscriber::fmt::writer::MakeWriterExt;
 
-    let log_dir = log_dir.unwrap_or_else(|| Path::new(".simple/logs"));
-    fs::create_dir_all(log_dir)?;
+    let log_dir = resolve_log_dir(log_dir)?;
 
-    let file_appender = tracing_appender::rolling::daily(log_dir, "simple.log");
+    let file_appender = std::panic::catch_unwind(|| tracing_appender::rolling::daily(&log_dir, "simple.log"))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "failed to initialize rolling log appender"))?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Leak the guard to keep the file writer alive for program lifetime
@@ -49,6 +49,50 @@ pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std
 
     tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 
+    Ok(())
+}
+
+/// Pick a writable log directory without panicking if the preferred location is not usable.
+pub fn resolve_log_dir(log_dir: Option<&Path>) -> std::io::Result<PathBuf> {
+    let preferred = log_dir.unwrap_or_else(|| Path::new(".simple/logs"));
+    let default_dir = PathBuf::from(".simple/logs");
+    let temp_dir = std::env::temp_dir().join("simple_logs");
+    let mut candidates = vec![preferred.to_path_buf()];
+
+    if preferred != default_dir.as_path() {
+        candidates.push(default_dir);
+    }
+    if candidates.iter().all(|path| path != &temp_dir) {
+        candidates.push(temp_dir);
+    }
+
+    let mut last_error = None;
+    for candidate in candidates {
+        match ensure_log_dir_writable(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no writable log directory available")
+    }))
+}
+
+fn ensure_log_dir_writable(log_dir: &Path) -> std::io::Result<()> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+
+    fs::create_dir_all(log_dir)?;
+    let probe_path = log_dir.join(format!(".simple-log-probe-{}", std::process::id()));
+    let mut probe = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&probe_path)?;
+    probe.write_all(b"ok")?;
+    drop(probe);
+    let _ = fs::remove_file(&probe_path);
     Ok(())
 }
 
@@ -93,4 +137,28 @@ pub fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u64) -> std::io::R
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_log_dir;
+    use std::fs;
+
+    #[test]
+    fn resolve_log_dir_uses_preferred_directory_when_writable() {
+        let temp = tempfile::tempdir().unwrap();
+        let preferred = temp.path().join("logs");
+        let resolved = resolve_log_dir(Some(&preferred)).unwrap();
+        assert_eq!(resolved, preferred);
+    }
+
+    #[test]
+    fn resolve_log_dir_falls_back_when_preferred_is_not_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocking_file = temp.path().join("not-a-dir");
+        fs::write(&blocking_file, "blocked").unwrap();
+
+        let resolved = resolve_log_dir(Some(&blocking_file)).unwrap();
+        assert_ne!(resolved, blocking_file);
+    }
 }

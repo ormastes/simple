@@ -493,19 +493,12 @@ fn t32_dialog_find(label: text) -> i64:
 fn t32_find_substring(haystack: text, needle: text) -> i64:
     if needle == "":
         return 0
-    var i = 0
-    while i + needle.len() <= haystack.len():
-        var matches = true
-        var j = 0
-        while j < needle.len():
-            if haystack.substring(i + j, i + j + 1) != needle.substring(j, j + 1):
-                matches = false
-                break
-            j = j + 1
-        if matches:
+    val found = haystack.index_of(needle)
+    match found:
+        Some(i):
             return i
-        i = i + 1
-    return -1
+        nil:
+            return -1
 
 fn t32_index_of_text(body: text, needle: text) -> i64:
     val found = body.index_of(needle)
@@ -516,11 +509,12 @@ fn t32_index_of_text(body: text, needle: text) -> i64:
             return -1
 
 fn t32_json_string_after_key(body: text, key: text) -> text:
-    val needle = "\"" + key + "\":\""
-    val start = t32_find_substring(body, needle)
-    if start < 0:
+    val start = _find_json_value_start(body, key)
+    if start < 0 or start >= body.len():
         return ""
-    var i = start + needle.len()
+    if _char_at(body, start) != Q():
+        return ""
+    var i = start + 1
     var out = ""
     var escaped = false
     while i < body.len():
@@ -546,7 +540,7 @@ fn t32_json_string_after_key(body: text, key: text) -> text:
         else:
             out = out + ch
         i = i + 1
-    out
+    return ""
 
 fn t32_take_json_string_prefix(body: text) -> text:
     var i = 0
@@ -618,22 +612,58 @@ fn t32_request_string_field(body: text, key: text) -> text:
     return t32_json_string_after_key(body, key)
 
 fn t32_request_raw_field(body: text, key: text) -> text:
-    val object_compact = "\"" + key + "\":{"
-    val object_idx = t32_find_substring(body, object_compact)
-    if object_idx >= 0:
-        return "{" + t32_take_json_balanced_prefix(body.substring(object_idx + object_compact.len(), body.len()), "{", "}")
-    val array_compact = "\"" + key + "\":["
-    val array_idx = t32_find_substring(body, array_compact)
-    if array_idx >= 0:
-        return "[" + t32_take_json_balanced_prefix(body.substring(array_idx + array_compact.len(), body.len()), "[", "]")
-    val string_value = t32_json_string_after_key(body, key)
-    if string_value != "":
-        return "\"" + string_value + "\""
-    val compact = "\"" + key + "\":"
-    val compact_idx = t32_find_substring(body, compact)
-    if compact_idx >= 0:
-        return t32_take_json_scalar_prefix(body.substring(compact_idx + compact.len(), body.len()))
-    return "null"
+    val start = _find_json_value_start(body, key)
+    if start < 0 or start >= body.len():
+        return "null"
+    val first = _char_at(body, start)
+    if first == Q():
+        var i2 = start + 1
+        var escaped = false
+        while i2 < body.len():
+            val ch = _char_at(body, i2)
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return body.substring(start, i2 + 1)
+            i2 = i2 + 1
+        return "null"
+    if first == LB() or first == SB_L():
+        var depth = 0
+        var i3 = start
+        var in_str = false
+        var esc = false
+        while i3 < body.len():
+            val ch = _char_at(body, i3)
+            if in_str:
+                if esc:
+                    esc = false
+                elif ch == "\\":
+                    esc = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB() or ch == SB_L():
+                    depth = depth + 1
+                elif ch == RB() or ch == SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return body.substring(start, i3 + 1)
+            i3 = i3 + 1
+        return "null"
+    var end = start
+    while end < body.len():
+        val ch = _char_at(body, end)
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+            break
+        end = end + 1
+    val raw = body.substring(start, end)
+    if raw == "":
+        return "null"
+    return raw
 
 fn t32_detect_tool_name(msg: text) -> text:
     if msg.contains("\"name\":\"t32_sessions_list\"") or msg.contains("\"name\": \"t32_sessions_list\""):
@@ -750,38 +780,7 @@ fn t32_request_arguments_json(body: text) -> text:
     return args
 
 fn t32_request_id_text(body: text) -> text:
-    val pieces = body.split("\"id\":")
-    if pieces.len() < 2:
-        return "null"
-    val rest = pieces[1]
-    var start = 0
-    while start < rest.len() and _is_ws(_char_at(rest, start)):
-        start = start + 1
-    if start >= rest.len():
-        return "null"
-    val first = _char_at(rest, start)
-    if first == Q():
-        var i = start + 1
-        var escaped = false
-        while i < rest.len():
-            val ch = _char_at(rest, i)
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                return rest.substring(start, i + 1)
-            i = i + 1
-        return "null"
-    var end = start
-    while end < rest.len():
-        val ch = _char_at(rest, end)
-        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
-            break
-        end = end + 1
-    if end <= start:
-        return "null"
-    return rest.substring(start, end)
+    extract_field_raw(body, "id")
 
 fn t32_tool_schema_simple(name: text, description: text) -> text:
     LB() + jp("name", js(name)) + "," + jp("description", js(description)) + "," + jp("inputSchema", LB() + jp("type", js("object")) + "," + jp("properties", LB() + RB()) + "," + jp("required", SB_L() + SB_R()) + RB()) + RB()

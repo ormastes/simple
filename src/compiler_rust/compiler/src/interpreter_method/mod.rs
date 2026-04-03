@@ -63,7 +63,7 @@ pub(crate) fn evaluate_method_call(
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
             if let Value::Function { def, captured_env, .. } = func_val {
-                let mut captured_env_clone = captured_env.clone();
+                let mut captured_env_clone = HashMap::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
                     args,
@@ -715,7 +715,7 @@ pub(crate) fn evaluate_method_call(
                             def,
                             args,
                             env,
-                            &mut captured_env.clone(),
+                            &mut HashMap::clone(captured_env),
                             functions,
                             classes,
                             enums,

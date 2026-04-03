@@ -163,7 +163,7 @@ pub(super) fn eval_call_expr(
                         return Ok(Some(Value::Function {
                             name: field.clone(),
                             def: Box::new(func.clone()),
-                            captured_env: Env::new(),
+                            captured_env: Arc::new(Env::new()),
                         }));
                     }
                     if classes.contains_key(field) {
@@ -301,7 +301,7 @@ pub(super) fn eval_call_expr(
                             return Ok(Some(Value::Function {
                                 name: method.name.clone(),
                                 def: Box::new(method.clone()),
-                                captured_env: Env::new(),
+                                captured_env: Arc::new(Env::new()),
                             }));
                         }
                         // Then check methods defined in impl blocks
@@ -314,7 +314,7 @@ pub(super) fn eval_call_expr(
                                 return Ok(Some(Value::Function {
                                     name: method.name.clone(),
                                     def: Box::new(method.clone()),
-                                    captured_env: Env::new(),
+                                    captured_env: Arc::new(Env::new()),
                                 }));
                             }
                         }
@@ -407,7 +407,7 @@ pub(super) fn eval_call_expr(
                                 Ok(Value::Function {
                                     name: method.name.clone(),
                                     def: Box::new(method.clone()),
-                                    captured_env: Env::new(),
+                                    captured_env: Arc::new(Env::new()),
                                 })
                             } else {
                                 let ctx = ErrorContext::new()

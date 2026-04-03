@@ -360,6 +360,13 @@ t32_mcp_log_line() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$t32_mcp_log_file"
 }
 
+t32_mcp_startup_log() {
+  if [ "$DEBUG_ENABLED" != "1" ]; then
+    return 0
+  fi
+  t32_mcp_log_line "${DEBUG_ROOT}/startup.log" "$@"
+}
+
 t32_mcp_native_health_cache_path() {
   t32_mcp_health_cwd="$(pwd)"
   t32_mcp_health_segment="$(t32_mcp_sanitize_segment "$t32_mcp_health_cwd")"
@@ -486,9 +493,10 @@ elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/release/simple" ]; then
   RUNTIME_KIND="bin-release-simple"
 fi
 
-T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-cold}"
+T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
 COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
-FULL_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+FULL_ENTRY="${REPO_ROOT}/src/app/t32_mcp_server/main.spl"
+FULL_SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
@@ -521,17 +529,21 @@ if [ "$DEBUG_ENABLED" = "1" ]; then
   t32_mcp_log_line "$WRAPPER_LOG" "full_entrypoint=$FULL_ENTRY"
   t32_mcp_log_line "$WRAPPER_LOG" "daemon_dir=none"
   t32_mcp_log_line "$WRAPPER_LOG" "request_routing=$RUNTIME_KIND"
+  t32_mcp_startup_log "wrapper_start runtime_kind=$RUNTIME_KIND runtime=$RUNTIME frontend=$T32_MCP_FRONTEND cwd=$(pwd)"
   export T32_MCP_DEBUG=1
   export T32_MCP_DEBUG_FILE="$FRONTEND_LOG"
 fi
 
 cd "$REPO_ROOT"
+T32_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_mcp_stderr.log"
+mkdir -p "$(dirname "$T32_MCP_STDERR_LOG")"
+
 if [ "$RUNTIME_KIND" = "native" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
     t32_mcp_log_line "$WRAPPER_LOG" "request_routing=native"
     exec "$RUNTIME" "$@" 2>>"$ERROR_LOG"
   else
-    exec "$RUNTIME" "$@" 2>/dev/null
+    exec "$RUNTIME" "$@" 2>>"$T32_MCP_STDERR_LOG"
   fi
 fi
 
@@ -539,6 +551,7 @@ SOURCE_ARTIFACT="$COLD_ENTRY"
 case "$T32_MCP_FRONTEND" in
   full)
     SOURCE_ARTIFACT="$FULL_ENTRY"
+    export SIMPLE_LIB="$FULL_SIMPLE_LIB"
     ;;
   cold|*)
     SOURCE_ARTIFACT="$COLD_ENTRY"
@@ -546,10 +559,11 @@ case "$T32_MCP_FRONTEND" in
 esac
 
 if [ "$DEBUG_ENABLED" = "1" ]; then
+  t32_mcp_startup_log "wrapper_exec runtime=$RUNTIME source_artifact=$SOURCE_ARTIFACT"
   exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$ERROR_LOG"
 fi
 
-exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>/dev/null
+exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$T32_MCP_STDERR_LOG"
 T32_MCP_EOF
 chmod +x "${release_dir}/t32_mcp_server"
 echo "  t32_mcp_server"
@@ -607,18 +621,22 @@ export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+T32_LSP_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_lsp_mcp_stderr.log"
+mkdir -p "$(dirname "$T32_LSP_MCP_STDERR_LOG")"
+
+DAEMON_SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
   mkdir -p "$DAEMON_DIR"
   if [ "$DEBUG_ENABLED" = "1" ]; then
-    nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$ERROR_LOG" 2>&1 </dev/null &
+    SIMPLE_LIB="$DAEMON_SIMPLE_LIB" nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$ERROR_LOG" 2>&1 </dev/null &
   else
-    nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >/dev/null 2>&1 </dev/null &
+    SIMPLE_LIB="$DAEMON_SIMPLE_LIB" nohup "${SIMPLE_RUNTIME:-$RUNTIME}" "$T32_LSP_MCP_TOOL_DAEMON" "$DAEMON_DIR" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1 </dev/null &
   fi
 fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
   RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$ERROR_LOG"
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>/dev/null
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

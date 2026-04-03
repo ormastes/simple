@@ -518,6 +518,24 @@ fn t32_add_history(command: text, result: text, session_id: text, core_id: text)
 
 var MCP_T32_NEXT_SESSION_ID: i64 = 1
 
+fn t32_i64_to_text(value: i64) -> text:
+    if value == 0:
+        return "0"
+    var n = value
+    var negative = false
+    if n < 0:
+        negative = true
+        n = 0 - n
+    val digits = "0123456789"
+    var out = ""
+    while n > 0:
+        val rem = n % 10
+        out = digits.substring(rem, rem + 1) + out
+        n = n / 10
+    if negative:
+        return "-" + out
+    out
+
 # --- Blocking pattern detection ---
 # Detects GUI-interactive / script-blocking PRACTICE commands that hang headless MCP
 
@@ -627,6 +645,8 @@ fn t32_scan_cmm_file(path: text) -> [text]:
 # --- Tool handlers ---
 
 fn handle_t32_session_open(id: text, body: text) -> text:
+    stderr_write("[t32-mcp] session_open: enter\n")
+    stderr_flush()
     var host = t32_extract_field(body, "host")
     val port_str = t32_extract_field(body, "port")
     val name = t32_extract_field(body, "name")
@@ -647,14 +667,19 @@ fn handle_t32_session_open(id: text, body: text) -> text:
             var digit = int(ch)
             port = port * 10 + digit
             pi = pi + 1
-    val session_id = "t32_" + str(MCP_T32_NEXT_SESSION_ID)
-    MCP_T32_NEXT_SESSION_ID = MCP_T32_NEXT_SESSION_ID + 1
+    stderr_write("[t32-mcp] session_open: parsed host/port\n")
+    stderr_flush()
+    val session_id = "t32_probe"
+    stderr_write("[t32-mcp] session_open: session_id allocated\n")
+    stderr_flush()
     var intercom_name = name
     if intercom_name == "":
         intercom_name = session_id
     var architecture = arch
     if architecture == "":
         architecture = "unknown"
+    stderr_write("[t32-mcp] session_open: metadata ready\n")
+    stderr_flush()
     val session = McpT32Session(
         id: session_id,
         host: host,
@@ -665,6 +690,8 @@ fn handle_t32_session_open(id: text, body: text) -> text:
         connected: false,
         cores: []
     )
+    stderr_write("[t32-mcp] session_open: probe session built\n")
+    stderr_flush()
     # Try PING to verify connection — retry up to 3 attempts with exponential backoff
     val max_attempts: i64 = 3
     var backoff_ms: [i64] = [1000, 2000, 4000]
@@ -692,7 +719,7 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     val backend_attempts = attempt + 1
     if not connected:
         # All attempts failed — return error without creating a duplicate session
-        val err_msg = t32_err_connection_failed(host, str(port), str(backend_attempts), last_ping_result.trim(), t32_get_backend_type())
+        val err_msg = t32_err_connection_failed(host, t32_i64_to_text(port), t32_i64_to_text(backend_attempts), last_ping_result.trim(), t32_get_backend_type())
         return t32_make_tool_error(id, -32000, err_msg)
     val final_session = McpT32Session(
         id: session_id,
@@ -710,13 +737,13 @@ fn handle_t32_session_open(id: text, body: text) -> text:
     var r = t32_LB()
     r = r + t32_jp("session_id", t32_js(session_id))
     r = r + "," + t32_jp("host", t32_js(host))
-    r = r + "," + t32_jp("port", str(port))
+    r = r + "," + t32_jp("port", t32_i64_to_text(port))
     r = r + "," + t32_jp("intercom_name", t32_js(intercom_name))
     r = r + "," + t32_jp("proxy_core", t32_js(proxy_core))
     r = r + "," + t32_jp("architecture", t32_js(architecture))
     r = r + "," + t32_jp("connected", "true")
     r = r + "," + t32_jp("backend", t32_js(t32_get_backend_type()))
-    r = r + "," + t32_jp("backend_attempts", str(backend_attempts))
+    r = r + "," + t32_jp("backend_attempts", t32_i64_to_text(backend_attempts))
     r = r + t32_RB()
     t32_make_tool_result(id, r)
 

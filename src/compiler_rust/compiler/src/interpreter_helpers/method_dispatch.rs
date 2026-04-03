@@ -166,7 +166,7 @@ pub(crate) fn call_method_on_value(
                 if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
                     let mut result = Vec::new();
                     for item in arr.iter() {
-                        let mut call_env = captured_env.clone();
+                        let mut call_env = HashMap::clone(captured_env);
                         let val = exec_function_with_values(
                             def,
                             std::slice::from_ref(item),
@@ -186,7 +186,7 @@ pub(crate) fn call_method_on_value(
                 if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
                     let mut result = Vec::new();
                     for item in arr.iter() {
-                        let mut call_env = captured_env.clone();
+                        let mut call_env = HashMap::clone(captured_env);
                         let val = exec_function_with_values(
                             def,
                             std::slice::from_ref(item),
@@ -208,7 +208,7 @@ pub(crate) fn call_method_on_value(
                 if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
                     let mut result = Vec::new();
                     for item in arr.iter() {
-                        let mut call_env = captured_env.clone();
+                        let mut call_env = HashMap::clone(captured_env);
                         let val = exec_function_with_values(
                             def,
                             std::slice::from_ref(item),
@@ -264,7 +264,7 @@ pub(crate) fn call_method_on_value(
             "any" => {
                 if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
                     for item in arr.iter() {
-                        let mut call_env = captured_env.clone();
+                        let mut call_env = HashMap::clone(captured_env);
                         let val = exec_function_with_values(
                             def,
                             std::slice::from_ref(item),
@@ -285,7 +285,7 @@ pub(crate) fn call_method_on_value(
             "all" => {
                 if let Some(Value::Function { def, captured_env, .. }) = _args.first() {
                     for item in arr.iter() {
-                        let mut call_env = captured_env.clone();
+                        let mut call_env = HashMap::clone(captured_env);
                         let val = exec_function_with_values(
                             def,
                             std::slice::from_ref(item),
