@@ -15,7 +15,7 @@ pub(crate) fn eval_arg(
     default: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -33,7 +33,7 @@ pub(crate) fn eval_arg_int(
     default: i64,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<i64, CompileError> {
@@ -58,7 +58,7 @@ pub(crate) fn eval_arg_usize(
     default: usize,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
@@ -70,7 +70,7 @@ pub(crate) fn apply_lambda_to_vec(
     arr: &[Value],
     lambda_val: &Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
@@ -82,7 +82,7 @@ pub(crate) fn apply_lambda_to_vec(
     {
         let mut results = Vec::new();
         for item in arr {
-            let mut local_env = captured.clone();
+            let mut local_env = HashMap::clone(&captured);
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), item.clone());
             }

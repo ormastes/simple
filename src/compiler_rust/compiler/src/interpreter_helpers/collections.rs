@@ -14,7 +14,7 @@ pub(crate) fn eval_array_map(
     arr: &[Value],
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -53,7 +53,7 @@ pub(crate) fn eval_array_filter(
     arr: &[Value],
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -76,7 +76,7 @@ pub(crate) fn eval_array_reduce(
     init: Value,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -89,7 +89,7 @@ pub(crate) fn eval_array_reduce(
         let mut acc = init;
         for item in arr {
             crate::interpreter::check_execution_limit()?;
-            let mut local_env = captured.clone();
+            let mut local_env = HashMap::clone(&captured);
             if params.len() >= 2 {
                 local_env.insert(params[0].clone(), acc);
                 local_env.insert(params[1].clone(), item.clone());
@@ -115,7 +115,7 @@ pub(crate) fn eval_array_find(
     arr: &[Value],
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -136,7 +136,7 @@ pub(crate) fn eval_array_any(
     arr: &[Value],
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -157,7 +157,7 @@ pub(crate) fn eval_array_all(
     arr: &[Value],
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -195,7 +195,7 @@ pub(crate) fn eval_dict_map_values(
     map: &HashMap<String, Value>,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -216,7 +216,7 @@ pub(crate) fn eval_dict_filter(
     map: &HashMap<String, Value>,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

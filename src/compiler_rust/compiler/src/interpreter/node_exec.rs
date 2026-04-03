@@ -31,7 +31,7 @@ pub(crate) fn exec_node(
     node: &Node,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -345,7 +345,7 @@ pub(crate) fn exec_node(
             );
             classes.insert(
                 s.name.clone(),
-                ClassDef {
+                Arc::new(ClassDef {
                     span: s.span,
                     name: s.name.clone(),
                     generic_params: Vec::new(),
@@ -363,19 +363,20 @@ pub(crate) fn exec_node(
                     is_generic_template: false,
                     specialization_of: None,
                     type_bindings: std::collections::HashMap::new(),
-                },
+                }),
             );
             // Register static methods as mangled free functions (StructName__method)
             for method in &s.methods {
                 let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", s.name, method.name);
-                    functions.insert(mangled.clone(), method.clone());
+                    let arc_method = Arc::new(method.clone());
+                    functions.insert(mangled.clone(), Arc::clone(&arc_method));
                     env.insert(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Arc::new(method.clone()),
+                            def: arc_method,
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );
@@ -385,7 +386,7 @@ pub(crate) fn exec_node(
         }
         Node::Class(c) => {
             // Register class constructor in local scope
-            classes.insert(c.name.clone(), c.clone());
+            classes.insert(c.name.clone(), Arc::new(c.clone()));
             env.insert(
                 c.name.clone(),
                 Value::Constructor {
@@ -397,12 +398,13 @@ pub(crate) fn exec_node(
                 let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", c.name, method.name);
-                    functions.insert(mangled.clone(), method.clone());
+                    let arc_method = Arc::new(method.clone());
+                    functions.insert(mangled.clone(), Arc::clone(&arc_method));
                     env.insert(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Arc::new(method.clone()),
+                            def: arc_method,
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );
@@ -412,7 +414,7 @@ pub(crate) fn exec_node(
         }
         Node::Enum(e) => {
             // Register enum type in local scope via thread-local
-            BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+            BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));
             env.insert(
                 e.name.clone(),
                 Value::EnumType {
@@ -424,12 +426,13 @@ pub(crate) fn exec_node(
                 let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                 if is_static {
                     let mangled = format!("{}__{}", e.name, method.name);
-                    functions.insert(mangled.clone(), method.clone());
+                    let arc_method = Arc::new(method.clone());
+                    functions.insert(mangled.clone(), Arc::clone(&arc_method));
                     env.insert(
                         mangled.clone(),
                         Value::Function {
                             name: mangled,
-                            def: Arc::new(method.clone()),
+                            def: arc_method,
                             captured_env: Arc::new(std::collections::HashMap::new()),
                         },
                     );
@@ -446,7 +449,7 @@ fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -790,6 +793,7 @@ fn exec_assignment(
                         let setitem_method = classes
                             .get(class.as_str())
                             .and_then(|cd| cd.methods.iter().find(|m| m.name == "__setitem__").cloned())
+                            .map(Arc::new)
                             .or_else(|| {
                                 impl_methods
                                     .get(class.as_str())
@@ -1115,7 +1119,7 @@ fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {

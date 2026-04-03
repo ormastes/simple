@@ -48,7 +48,7 @@ pub(crate) fn spawn_actor_with_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Value {
@@ -93,12 +93,13 @@ pub(crate) fn spawn_actor_with_expr(
                         }
                         Value::Lambda {
                             body,
-                            env: mut lambda_env,
+                            env: lambda_env,
                             ..
                         } => {
+                            let mut local_env = HashMap::clone(&lambda_env);
                             let _ = evaluate_expr(
                                 &body,
-                                &mut lambda_env,
+                                &mut local_env,
                                 &mut funcs,
                                 &mut classes_clone,
                                 &enums_clone,

@@ -5,6 +5,7 @@ use super::types::{ConcreteType, SpecializationKey};
 use super::util::{ast_type_to_concrete, concrete_to_ast_type};
 use simple_parser::ast::{Block, ClassDef, Expr, Field, FunctionDef, Module, Node, StructDef, Type as AstType};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Trait for types that have fields and methods (StructDef and ClassDef)
 trait HasFieldsAndMethods {
@@ -42,7 +43,7 @@ pub struct Monomorphizer<'a> {
     pub(super) generic_structs: HashMap<String, StructDef>,
 
     /// Generic class definitions
-    pub(super) generic_classes: HashMap<String, ClassDef>,
+    pub(super) generic_classes: HashMap<String, Arc<ClassDef>>,
 
     /// The specialization table
     table: MonomorphizationTable,
@@ -65,7 +66,7 @@ impl<'a> Monomorphizer<'a> {
                     generic_structs.insert(s.name.clone(), s.clone());
                 }
                 Node::Class(c) if !c.generic_params.is_empty() => {
-                    generic_classes.insert(c.name.clone(), c.clone());
+                    generic_classes.insert(c.name.clone(), Arc::new(c.clone()));
                 }
                 _ => {}
             }

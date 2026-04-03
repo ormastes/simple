@@ -54,7 +54,7 @@ use super::module_cache::{
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 
 fn requested_group_import_names(use_stmt: &UseStmt) -> Option<Vec<String>> {
     match &use_stmt.target {
@@ -247,7 +247,7 @@ pub fn load_and_merge_module(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
     functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &mut Enums,
 ) -> Result<Value, CompileError> {
     // Check depth limit to prevent infinite recursion

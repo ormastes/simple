@@ -9,7 +9,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, Se
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
@@ -21,7 +21,7 @@ pub(crate) fn resolve_injected_args(
     class_name: &str,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -120,7 +120,7 @@ pub(crate) fn resolve_binding_instance(
     scope: DiScope,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

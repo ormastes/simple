@@ -65,7 +65,7 @@ pub(super) fn eval_collection_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -143,7 +143,7 @@ pub(super) fn eval_collection_expr(
                 } else if let Some(func) = functions.get(variant).cloned() {
                     Ok(Value::Function {
                         name: variant.clone(),
-                        def: Arc::new(func.clone()),
+                        def: func,
                         captured_env: Arc::new(Env::new()),
                     })
                 } else if classes.contains_key(variant) {
@@ -337,6 +337,7 @@ pub(super) fn eval_collection_expr(
                             let getitem_method = classes
                                 .get(class.as_str())
                                 .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
+                                .map(Arc::new)
                                 .or_else(|| {
                                     impl_methods
                                         .get(class.as_str())
@@ -523,6 +524,7 @@ pub(super) fn eval_collection_expr(
                     let getitem_method = classes
                         .get(class.as_str())
                         .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getitem__").cloned())
+                        .map(Arc::new)
                         .or_else(|| {
                             impl_methods
                                 .get(class.as_str())
@@ -668,6 +670,7 @@ pub(super) fn eval_collection_expr(
                     let getslice_method = classes
                         .get(class.as_str())
                         .and_then(|cd| cd.methods.iter().find(|m| m.name == "__getslice__").cloned())
+                        .map(Arc::new)
                         .or_else(|| {
                             impl_methods
                                 .get(class.as_str())

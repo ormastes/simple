@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use tracing::{instrument, trace, warn};
 
@@ -15,15 +16,15 @@ use crate::value::Value;
 
 use super::module_loader::load_and_merge_module;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 
 /// Load a module for re-export (export X from Y)
 #[instrument(skip(export_stmt, current_file, functions, classes, enums), fields(path = ?export_stmt.path.segments))]
 pub fn load_export_source(
     export_stmt: &ExportUseStmt,
     current_file: Option<&Path>,
-    functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &mut Enums,
 ) -> Result<HashMap<String, Value>, CompileError> {
     trace!(path = ?export_stmt.path.segments, target = ?export_stmt.target, "Loading export source");

@@ -21,7 +21,7 @@ pub(super) fn expand_user_macro(
     args: &[MacroArg],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -40,7 +40,7 @@ fn expand_user_macro_inner(
     args: &[MacroArg],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -192,7 +192,7 @@ fn expand_user_macro_inner(
                                 // Replace stub with real function definition
                                 let mut real_func = (**def).clone();
                                 real_func.name = original_name;
-                                e.insert(real_func);
+                                e.insert(Arc::new(real_func));
                                 matched_by_name = true;
                             }
                         }
@@ -211,7 +211,7 @@ fn expand_user_macro_inner(
                                     real_func.name = public_name.clone();
                                     contract_result
                                         .introduced_functions
-                                        .insert(public_name.clone(), real_func);
+                                        .insert(public_name.clone(), Arc::new(real_func));
                                 }
                             }
                         }
@@ -274,7 +274,7 @@ fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroCont
                 // Replace stub with real function definition
                 contract_result
                     .introduced_functions
-                    .insert(original_name, (**def).clone());
+                    .insert(original_name, Arc::clone(def));
             } else {
                 // Check if the env key (which might also be gensym'd) matches an intro stub
                 let original_key = strip_gensym_suffix(name);
@@ -282,7 +282,7 @@ fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroCont
                     // Replace stub with real function, using original key as the public name
                     let mut real_func = (**def).clone();
                     real_func.name = original_key.clone();
-                    contract_result.introduced_functions.insert(original_key, real_func);
+                    contract_result.introduced_functions.insert(original_key, Arc::new(real_func));
                 }
             }
         }
@@ -325,7 +325,7 @@ pub fn preprocess_macro_contract_at_definition(
     macro_def: &MacroDef,
     env: &mut Env,
     functions: &HashMap<String, Arc<FunctionDef>>,
-    classes: &HashMap<String, ClassDef>,
+    classes: &HashMap<String, Arc<ClassDef>>,
 ) -> Result<bool, CompileError> {
     // Cannot pre-process macros with const parameters
     if macro_has_const_params(macro_def) {

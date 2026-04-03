@@ -51,7 +51,7 @@ pub(crate) fn handle_functional_update(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(String, Value)>, CompileError> {
@@ -125,7 +125,7 @@ pub(crate) fn handle_method_call_with_self_update(
     value_expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {

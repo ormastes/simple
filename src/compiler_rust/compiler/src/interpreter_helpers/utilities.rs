@@ -86,7 +86,7 @@ pub(crate) fn comprehension_iterate(
     condition: &Option<Box<Expr>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Env>, CompileError> {
@@ -147,7 +147,7 @@ where
 #[derive(Clone)]
 struct ClonedContext {
     functions: HashMap<String, Arc<FunctionDef>>,
-    classes: HashMap<String, ClassDef>,
+    classes: HashMap<String, Arc<ClassDef>>,
     enums: Enums,
     impl_methods: ImplMethods,
 }
@@ -156,7 +156,7 @@ impl ClonedContext {
     /// Clone context from references
     fn from_refs(
         functions: &mut HashMap<String, Arc<FunctionDef>>,
-        classes: &mut HashMap<String, ClassDef>,
+        classes: &mut HashMap<String, Arc<ClassDef>>,
         enums: &Enums,
         impl_methods: &ImplMethods,
     ) -> Self {
@@ -209,7 +209,7 @@ fn execute_callable_with_arg(
             ref env,
         } => {
             // For lambdas, always use the captured env (they are closures)
-            let mut local_env = env.clone();
+            let mut local_env = HashMap::clone(env);
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
@@ -234,7 +234,7 @@ pub(crate) fn spawn_future_with_callable(
     callable: Value,
     arg: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
@@ -250,7 +250,7 @@ pub(crate) fn spawn_future_with_callable_and_env(
     arg: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
@@ -265,7 +265,7 @@ pub(crate) fn spawn_future_with_expr(
     expr: Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {

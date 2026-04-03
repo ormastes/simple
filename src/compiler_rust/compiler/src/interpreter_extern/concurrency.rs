@@ -19,7 +19,7 @@ use std::collections::HashMap;
 // super::super refers to the interpreter module (super is interpreter_extern)
 use super::super::{evaluate_expr, exec_block_value};
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 type ChannelRegistry = Arc<Mutex<HashMap<i64, (Sender<Value>, Arc<Mutex<Receiver<Value>>>)>>>;
@@ -127,7 +127,7 @@ pub fn rt_thread_spawn_isolated_with_context(
     args: &[Value],
     _env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -139,7 +139,7 @@ pub fn rt_thread_spawn_isolated_with_context(
 
     // Extract the closure
     let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), env.clone()),
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), HashMap::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
                 "rt_thread_spawn_isolated expects first argument to be a closure".to_string(),
@@ -192,7 +192,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
     args: &[Value],
     _env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -204,7 +204,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
 
     // Extract the closure
     let (params, body, captured_env) = match &args[0] {
-        Value::Lambda { params, body, env } => (params.clone(), body.clone(), env.clone()),
+        Value::Lambda { params, body, env } => (params.clone(), body.clone(), HashMap::clone(env)),
         _ => {
             return Err(CompileError::Runtime(
                 "rt_thread_spawn_isolated2 expects first argument to be a closure".to_string(),

@@ -39,8 +39,8 @@ pub(crate) fn exec_method_function(
     args: &[simple_parser::ast::Argument],
     self_val: &crate::value::Value,
     env: &mut crate::value::Env,
-    functions: &mut std::collections::HashMap<String, simple_parser::ast::FunctionDef>,
-    classes: &mut std::collections::HashMap<String, simple_parser::ast::ClassDef>,
+    functions: &mut std::collections::HashMap<String, std::sync::Arc<simple_parser::ast::FunctionDef>>,
+    classes: &mut std::collections::HashMap<String, std::sync::Arc<simple_parser::ast::ClassDef>>,
     enums: &super::core_types::Enums,
     impl_methods: &super::core_types::ImplMethods,
 ) -> Result<crate::value::Value, CompileError> {

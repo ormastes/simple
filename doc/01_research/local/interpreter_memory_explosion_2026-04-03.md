@@ -250,3 +250,53 @@ MCP wrappers should always set the narrowest possible `SIMPLE_LIB`.
 | BUG-3 (sibling preload cap) | Prevents edge cases | Low | P1 | **DONE** |
 
 **Verification:** 112,384 tests passed, 0 failed. All MCP servers under 100MB watchdog.
+
+## Phase 2: Deep Memory Analysis & Arc Propagation (2026-04-03)
+
+### Additional Findings (3 Opus Explore Agents)
+
+| Finding | Impact | Location | Status |
+|---------|--------|----------|--------|
+| Every function call deep-clones captured_env | O(env * depth) per call | function_exec.rs:211, 57 sites | **Known** (CowEnv deferred) |
+| `(**func_def).clone()` unwraps Arc on import | Defeats Arc sharing | module_loader.rs:427,702 | **FIXED** |
+| Lambda/BlockClosure env not Arc-wrapped | O(n) clone vs O(1) | value.rs:517-527 | **FIXED** |
+| ClassDef/EnumDef never Arc'd | 148+25 sites, deep clone | entire pipeline | **FIXED** |
+| memory_guard completely unwired | Zero call sites | all of memory_guard.rs | **FIXED** |
+| PINNED_STRINGS/handles never cleared | Unbounded growth | interpreter_state.rs | **FIXED** |
+| module.items.clone() at line 513 | Full AST cloned needlessly | module_loader.rs:513 | **FIXED** |
+| Sibling files read from disk twice | I/O waste | module_loader.rs:87,605 | **FIXED** |
+
+### Fixes Applied
+
+#### Arc<FunctionDef> Full Pipeline Propagation
+Changed `HashMap<String, FunctionDef>` to `HashMap<String, Arc<FunctionDef>>` across 19 files.
+Eliminated deep clone at module_loader.rs:427,702 — every module import now shares FunctionDef via Arc.
+
+#### Arc<ClassDef> / Arc<EnumDef> Full Pipeline Propagation
+Changed 58 files. All caches, function signatures, and thread-local state now use Arc-wrapped types.
+Used `Arc::make_mut()` at 8 mutation sites where impl methods are merged.
+
+#### Lambda/BlockClosure env → Arc<Env>
+Changed `Value::Lambda { env: Env }` and `Value::BlockClosure { env: Env }` to `Arc<Env>`.
+Clone of Lambda/BlockClosure values is now O(1) instead of O(env_size). 15 files updated.
+
+#### memory_guard Integration
+- `ModuleLoadGuard::enter()` wired into module_loader.rs
+- `sibling_preload_limit()` and `sibling_max_check_bytes()` replace inline env var reads
+- `MemoryGuard::init()` called at interpreter startup
+- `print_diagnostics()` and `reset_stats()` wired into cache clear
+
+#### Resource Handle Leak Fixes
+Added `clear_socket_handles()`, `clear_file_handles()`, `clear_pinned_strings()`, `clear_expr_registry()` to `clear_interpreter_state()`.
+
+#### Eliminated Unnecessary Clones
+- `module.items.clone()` → move (module not used after)
+- Sibling `sibling_might_define_requested_names` returns `Option<String>` to cache source for reuse
+
+### Deferred: CowEnv (57 sites, 24 files)
+Every function call still deep-clones captured_env HashMap for local scope.
+A CowEnv wrapper (base: Arc<HashMap>, overlay: HashMap, tombstones: HashSet) would make
+this O(overlay_size) instead of O(base_size). Deferred due to high blast radius (changes Env
+type alias used in 123 function signatures).
+
+**Verification:** 112,448 tests passed, 0 failed. All changes validated.

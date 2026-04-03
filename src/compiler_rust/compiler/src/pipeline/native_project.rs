@@ -295,6 +295,35 @@ impl NativeProjectBuilder {
         true
     }
 
+    fn runtime_bundle_is_explicit_all(&self) -> bool {
+        if self.config.runtime_bundle == "all" {
+            return true;
+        }
+        std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").as_deref() == Ok("all")
+    }
+
+    fn reject_unexpected_native_all(
+        &self,
+        selected_runtime: Option<&(PathBuf, bool)>,
+    ) -> Result<(), String> {
+        if self.runtime_bundle_is_explicit_all() || !self.runtime_bundle_prefers_runtime_only() {
+            return Ok(());
+        }
+        if let Some((runtime_lib, true)) = selected_runtime {
+            let entry = self
+                .entry_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            return Err(format!(
+                "native-build refused oversized runtime bundle for non-compiler entry `{}`: selected `{}`. Provide libsimple_runtime.a or pass `--runtime-bundle all` to opt in explicitly.",
+                entry,
+                runtime_lib.display()
+            ));
+        }
+        Ok(())
+    }
+
     fn selected_runtime_library(&self, temp_dir: &Path) -> Option<(PathBuf, bool)> {
         let prefer_runtime_only = self.runtime_bundle_prefers_runtime_only();
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
@@ -1084,12 +1113,13 @@ int main(int argc, char** argv) {
             std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(format!("/Fo{}", main_o.display()))
+                .arg("/Gy")
                 .arg(&main_cpp)
                 .output()
                 .map_err(|e| format!("compile main stub: {e}"))?
         } else {
             std::process::Command::new(&cxx)
-                .args(["-c", "-o"])
+                .args(["-c", "-ffunction-sections", "-fdata-sections", "-o"])
                 .arg(&main_o)
                 .arg(&main_cpp)
                 .output()
@@ -1154,6 +1184,8 @@ int main(int argc, char** argv) {
         let status = std::process::Command::new(&cxx)
             .arg("-c")
             .arg("-O2")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
             .arg(&init_cpp)
             .arg("-o")
             .arg(&init_o)
@@ -1201,6 +1233,7 @@ int main(int argc, char** argv) {
         // When libsimple_native_all.a is present (always contains LLVM C++ objects),
         // use clang++ to ensure proper C++ runtime initialization ordering.
         let selected_runtime = self.selected_runtime_library(temp_dir);
+        self.reject_unexpected_native_all(selected_runtime.as_ref())?;
         let has_native_all = selected_runtime.as_ref().map_or(false, |(_, is_native_all)| *is_native_all);
         let cc = if has_native_all {
             find_cxx_compiler()
@@ -1413,6 +1446,10 @@ int main(int argc, char** argv) {
         #[cfg(target_os = "windows")]
         if is_clang_cl || is_msvc {
             std::env::set_var("SIMPLE_LINKER_FLAVOR", "msvc");
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if !is_clang_cl && !is_msvc {
+            cmd.arg("-Wl,--gc-sections");
         }
         let link_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
         for path in &link_config.library_search_paths {
@@ -1990,6 +2027,8 @@ fn generate_stub_object(
         let empty_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
         let status = std::process::Command::new(&empty_cc)
             .arg("-c")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
             .arg(&stub_c)
@@ -2035,6 +2074,8 @@ fn generate_stub_object(
         let stub_cc = std::env::var("CC").unwrap_or_else(|_| "gcc".to_string());
         let output = std::process::Command::new(&stub_cc)
             .arg("-c")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
             .arg(&stub_c)
@@ -2082,6 +2123,8 @@ fn generate_stub_object(
         let asm_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
         let output = std::process::Command::new(&asm_cc)
             .arg("-c")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
             .arg(&stub_s)
@@ -4505,5 +4548,52 @@ mod tests {
         let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
         assert_eq!(selected, native_all);
         assert!(is_native_all);
+    }
+
+    #[test]
+    fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let native_all = temp.path().join("libsimple_native_all.a");
+        std::fs::write(&native_all, b"all").unwrap();
+
+        let mut config = NativeBuildConfig::default();
+        config.runtime_path = Some(temp.path().to_path_buf());
+
+        let mut builder =
+            NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"))
+                .config(config);
+        builder.entry_file = Some(PathBuf::from(
+            "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
+        ));
+
+        let selected_runtime = builder.selected_runtime_library(temp.path());
+        let err = builder
+            .reject_unexpected_native_all(selected_runtime.as_ref())
+            .unwrap_err();
+        assert!(err.contains("refused oversized runtime bundle"));
+        assert!(err.contains("tool_runner.spl"));
+    }
+
+    #[test]
+    fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let native_all = temp.path().join("libsimple_native_all.a");
+        std::fs::write(&native_all, b"all").unwrap();
+
+        let mut config = NativeBuildConfig::default();
+        config.runtime_path = Some(temp.path().to_path_buf());
+        config.runtime_bundle = "all".to_string();
+
+        let mut builder =
+            NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"))
+                .config(config);
+        builder.entry_file = Some(PathBuf::from(
+            "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
+        ));
+
+        let selected_runtime = builder.selected_runtime_library(temp.path());
+        builder
+            .reject_unexpected_native_all(selected_runtime.as_ref())
+            .unwrap();
     }
 }

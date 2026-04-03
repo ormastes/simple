@@ -29,17 +29,17 @@ fn apply_lambda_to_value(
     val: &Value,
     lambda_arg: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     if let Value::Lambda {
         params,
         body,
-        env: mut captured,
+        env: captured,
     } = lambda_arg
     {
-        let mut local_env = captured.clone();
+        let mut local_env = HashMap::clone(&captured);
         if let Some(param) = params.first() {
             local_env.insert(param.clone(), val.clone());
         }
@@ -59,7 +59,7 @@ fn handle_option_operation<F, W>(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     _mapper: F,
@@ -70,7 +70,7 @@ where
         &Value,
         Value,
         &mut HashMap<String, Arc<FunctionDef>>,
-        &mut HashMap<String, ClassDef>,
+        &mut HashMap<String, Arc<ClassDef>>,
         &Enums,
         &ImplMethods,
     ) -> Result<Value, CompileError>,
@@ -96,7 +96,7 @@ fn handle_result_map_operation<WOk, WErr>(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     check_ok: bool,
@@ -129,7 +129,7 @@ pub(crate) fn eval_option_map(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -155,7 +155,7 @@ pub(crate) fn eval_option_and_then(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -181,7 +181,7 @@ pub(crate) fn eval_option_or_else(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -198,10 +198,11 @@ pub(crate) fn eval_option_or_else(
     if let Value::Lambda {
         params: _,
         body,
-        env: mut captured,
+        env: captured,
     } = func_arg
     {
-        return evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods);
+        let mut local_env = HashMap::clone(&captured);
+        return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
     }
     Ok(Value::none())
 }
@@ -214,7 +215,7 @@ pub(crate) fn eval_option_filter(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -224,10 +225,10 @@ pub(crate) fn eval_option_filter(
             if let Value::Lambda {
                 params,
                 body,
-                env: mut captured,
+                env: captured,
             } = func_arg
             {
-                let mut local_env = captured.clone();
+                let mut local_env = HashMap::clone(&captured);
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), val.as_ref().clone());
                 }
@@ -249,7 +250,7 @@ pub(crate) fn eval_result_map(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -278,7 +279,7 @@ pub(crate) fn eval_result_map_err(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -307,7 +308,7 @@ pub(crate) fn eval_result_and_then(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -334,7 +335,7 @@ pub(crate) fn eval_result_or_else(
     args: &[simple_parser::ast::Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -352,10 +353,10 @@ pub(crate) fn eval_result_or_else(
         if let Value::Lambda {
             params,
             body,
-            env: mut captured,
+            env: captured,
         } = func_arg
         {
-            let mut local_env = captured.clone();
+            let mut local_env = HashMap::clone(&captured);
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), err_val.as_ref().clone());
             }

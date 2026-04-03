@@ -35,7 +35,7 @@ pub(crate) fn build_macro_const_bindings(
     args: &[MacroArg],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<HashMap<String, String>, CompileError> {

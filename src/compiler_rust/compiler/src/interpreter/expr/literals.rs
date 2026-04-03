@@ -19,7 +19,7 @@ pub(super) fn eval_literal_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -244,7 +244,7 @@ pub(super) fn eval_literal_expr(
             if let Some(func) = functions.get(name).cloned() {
                 return Ok(Some(Value::Function {
                     name: name.clone(),
-                    def: Arc::new(func.clone()),
+                    def: func,
                     captured_env: Arc::new(Env::new()), // Top-level functions don't capture
                 }));
             }
@@ -302,7 +302,7 @@ fn try_call_fmt_method(
     value: &Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Option<String> {
@@ -325,7 +325,7 @@ pub(crate) fn try_call_debug_fmt_method(
     value: &Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Option<String> {

@@ -180,7 +180,7 @@ where
 // AST-level Contract Checking for the Interpreter
 //==============================================================================
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Storage for captured old() values at function entry (AST version)

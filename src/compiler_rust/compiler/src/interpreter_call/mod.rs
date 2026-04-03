@@ -30,7 +30,7 @@ use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
@@ -41,7 +41,7 @@ pub(crate) fn evaluate_call(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -114,7 +114,7 @@ pub(crate) fn evaluate_call(
                     body,
                     env: captured,
                 } => {
-                    let mut captured_clone = captured.clone();
+                    let mut captured_clone = HashMap::clone(&captured);
                     return core::exec_lambda(
                         &params,
                         &body,
@@ -370,7 +370,7 @@ pub(crate) fn evaluate_call(
 
             // Cross-module fallback for FieldAccess: search MODULE_CLASSES_CACHE
             // for the class definition when it's not in the local classes map.
-            let cached_fa_class: Option<ClassDef> = MODULE_CLASSES_CACHE.with(|cache| {
+            let cached_fa_class: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
                 let cache = cache.borrow();
                 for (_path, module_classes) in cache.iter() {
                     if let Some(class_def) = module_classes.get(module_name.as_str()) {
@@ -397,7 +397,7 @@ pub(crate) fn evaluate_call(
             // Last resort: try GLOBAL_IMPL_METHODS for impl methods that weren't
             // merged into the class definition (e.g., cross-module impl blocks,
             // or impl methods added after the class was cached)
-            let global_impl_method: Option<FunctionDef> = GLOBAL_IMPL_METHODS.with(|cell| {
+            let global_impl_method: Option<Arc<FunctionDef>> = GLOBAL_IMPL_METHODS.with(|cell| {
                 cell.borrow()
                     .get(module_name)
                     .and_then(|methods| methods.iter().find(|m| &m.name == field).cloned())
@@ -694,7 +694,7 @@ pub(crate) fn evaluate_call(
             // When a class is imported from another module, its ClassDef may not be in the
             // local `classes` map if the import path didn't fully merge definitions.
             // Search all cached module definitions for the class and dispatch the method.
-            let cached_class_def: Option<ClassDef> = MODULE_CLASSES_CACHE.with(|cache| {
+            let cached_class_def: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
                 let cache = cache.borrow();
                 for (_path, module_classes) in cache.iter() {
                     if let Some(class_def) = module_classes.get(type_name.as_str()) {
@@ -723,7 +723,7 @@ pub(crate) fn evaluate_call(
 
             // Last resort: try GLOBAL_IMPL_METHODS for impl methods that weren't
             // merged into the class definition
-            let global_path_impl_method: Option<FunctionDef> = GLOBAL_IMPL_METHODS.with(|cell| {
+            let global_path_impl_method: Option<Arc<FunctionDef>> = GLOBAL_IMPL_METHODS.with(|cell| {
                 cell.borrow()
                     .get(type_name.as_str())
                     .and_then(|methods| methods.iter().find(|m| m.name == *method_name).cloned())
@@ -807,7 +807,7 @@ pub(crate) fn evaluate_call(
             body,
             env: captured,
         } => {
-            let mut captured_clone = captured.clone();
+            let mut captured_clone = HashMap::clone(&captured);
             core::exec_lambda(
                 &params,
                 &body,
@@ -821,7 +821,7 @@ pub(crate) fn evaluate_call(
             )
         }
         Value::BlockClosure { nodes, env: captured } => {
-            let mut captured_clone = captured.clone();
+            let captured_clone = HashMap::clone(&captured);
             block_execution::exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {

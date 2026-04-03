@@ -19,7 +19,7 @@ pub fn handle_array_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -323,7 +323,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -348,7 +348,7 @@ pub fn handle_array_methods(
             {
                 for item in arr {
                     if dropping {
-                        let mut local_env = captured.clone();
+                        let mut local_env = HashMap::clone(&captured);
                         if let Some(param) = params.first() {
                             local_env.insert(param.clone(), item.clone());
                         }
@@ -408,7 +408,7 @@ pub fn handle_array_methods(
             {
                 let mut count = 0i64;
                 for item in arr {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -433,7 +433,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -457,7 +457,7 @@ pub fn handle_array_methods(
             } = func
             {
                 for item in arr {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -649,7 +649,7 @@ pub fn handle_tuple_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -691,7 +691,7 @@ pub fn handle_tuple_methods(
             {
                 let mut result = Vec::new();
                 for item in tup {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
@@ -749,7 +749,7 @@ pub fn handle_frozen_array_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -780,7 +780,7 @@ pub fn handle_fixed_size_array_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -813,7 +813,7 @@ pub fn handle_frozen_dict_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -843,7 +843,7 @@ pub fn handle_dict_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -1034,7 +1034,7 @@ pub fn handle_dict_methods(
                         env: captured,
                     } => {
                         // Call the lambda
-                        let mut local_env = captured.clone();
+                        let mut local_env = HashMap::clone(&captured);
                         for (i, param) in params.iter().enumerate() {
                             let arg_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
                             local_env.insert(param.clone(), arg_val);

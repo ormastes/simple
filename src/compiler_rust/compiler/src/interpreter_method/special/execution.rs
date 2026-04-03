@@ -32,7 +32,7 @@ pub fn find_and_exec_method_with_self(
     fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
@@ -80,7 +80,7 @@ pub fn exec_function_with_self_return(
     args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     class_name: &str,

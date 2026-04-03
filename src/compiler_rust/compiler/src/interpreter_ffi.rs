@@ -31,7 +31,7 @@ thread_local! {
     static INTERP_FUNCTIONS: RefCell<HashMap<String, Arc<FunctionDef>>> = RefCell::new(HashMap::new());
 
     /// Class definitions
-    static INTERP_CLASSES: RefCell<HashMap<String, ClassDef>> = RefCell::new(HashMap::new());
+    static INTERP_CLASSES: RefCell<HashMap<String, Arc<ClassDef>>> = RefCell::new(HashMap::new());
 
     /// Enum definitions
     static INTERP_ENUMS: RefCell<Enums> = RefCell::new(HashMap::new());
@@ -102,7 +102,7 @@ pub fn init_interpreter_state(items: &[Node]) {
         funcs.clear();
         for item in items {
             if let Node::Function(f) = item {
-                funcs.insert(f.name.clone(), f.clone());
+                funcs.insert(f.name.clone(), Arc::new(f.clone()));
             }
         }
     });
@@ -112,12 +112,12 @@ pub fn init_interpreter_state(items: &[Node]) {
         classes.clear();
         for item in items {
             if let Node::Class(c) = item {
-                classes.insert(c.name.clone(), c.clone());
+                classes.insert(c.name.clone(), Arc::new(c.clone()));
             } else if let Node::Struct(s) = item {
                 // Struct is treated as class for now
                 classes.insert(
                     s.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: Span::new(0, 0, 0, 0),
                         name: s.name.clone(),
                         generic_params: s.generic_params.clone(),
@@ -135,7 +135,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         is_generic_template: s.is_generic_template,
                         specialization_of: s.specialization_of.clone(),
                         type_bindings: s.type_bindings.clone(),
-                    },
+                    }),
                 );
             }
         }
@@ -146,7 +146,7 @@ pub fn init_interpreter_state(items: &[Node]) {
         enums.clear();
         for item in items {
             if let Node::Enum(e) = item {
-                enums.insert(e.name.clone(), e.clone());
+                enums.insert(e.name.clone(), Arc::new(e.clone()));
             }
         }
     });
@@ -163,7 +163,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                     _ => "unknown".to_string(),
                 };
                 let methods = impl_methods.entry(type_name).or_insert_with(Vec::new);
-                methods.extend(impl_block.methods.clone());
+                methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
             }
         }
     });
@@ -198,7 +198,7 @@ pub fn clear_compiled_functions() {
 /// This eliminates the deeply nested `.with()` calls throughout the module.
 fn with_interp_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Env, &mut HashMap<String, Arc<FunctionDef>>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
+    F: FnOnce(&mut Env, &mut HashMap<String, Arc<FunctionDef>>, &mut HashMap<String, Arc<ClassDef>>, &Enums, &ImplMethods) -> R,
 {
     INTERP_ENV.with(|env| {
         let mut env = env.borrow_mut();
@@ -299,7 +299,7 @@ fn call_interpreted_function(
     args: Vec<Value>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

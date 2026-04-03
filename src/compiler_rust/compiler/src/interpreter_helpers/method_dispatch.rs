@@ -19,7 +19,7 @@ pub(crate) fn call_method_on_value(
     _args: &[Value],
     _env: &mut Env,
     _functions: &mut HashMap<String, Arc<FunctionDef>>,
-    _classes: &mut HashMap<String, ClassDef>,
+    _classes: &mut HashMap<String, Arc<ClassDef>>,
     _enums: &Enums,
     _impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -406,7 +406,7 @@ pub(crate) fn call_method_on_value(
         };
 
         if !type_names.is_empty() {
-            let trait_method: Option<simple_parser::ast::FunctionDef> = TRAIT_IMPLS.with(|cell| {
+            let trait_method: Option<Arc<simple_parser::ast::FunctionDef>> = TRAIT_IMPLS.with(|cell| {
                 let trait_impls = cell.borrow();
                 for type_alias in type_names {
                     for ((_trait_name, impl_type), methods) in trait_impls.iter() {
@@ -438,7 +438,7 @@ pub(crate) fn call_method_on_value(
             }
 
             // Also check blanket impls
-            let blanket_method: Option<simple_parser::ast::FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+            let blanket_method: Option<Arc<simple_parser::ast::FunctionDef>> = BLANKET_IMPL_METHODS.with(|cell| {
                 let blanket_impls = cell.borrow();
                 for (_trait_name, methods) in blanket_impls.iter() {
                     if let Some(func) = methods.iter().find(|m| m.name == method) {
@@ -513,7 +513,7 @@ fn find_method_and_exec(
     fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -549,7 +549,7 @@ fn find_method_and_exec(
     }
 
     // Check trait implementations - search TRAIT_IMPLS for this specific type
-    let trait_method: Option<FunctionDef> = TRAIT_IMPLS.with(|cell| {
+    let trait_method: Option<Arc<FunctionDef>> = TRAIT_IMPLS.with(|cell| {
         let trait_impls = cell.borrow();
         // Search through all trait implementations for this type
         for ((trait_name, type_name), methods) in trait_impls.iter() {
@@ -577,7 +577,7 @@ fn find_method_and_exec(
 
     // Check blanket impls - search all registered blanket impls for the method
     // Blanket impls apply to any type that doesn't have a concrete impl
-    let blanket_method: Option<FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+    let blanket_method: Option<Arc<FunctionDef>> = BLANKET_IMPL_METHODS.with(|cell| {
         let blanket_impls = cell.borrow();
         // Search through all blanket impls (keyed by trait name)
         for (_trait_name, methods) in blanket_impls.iter() {
@@ -615,7 +615,7 @@ pub(crate) fn find_and_exec_method(
     fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -642,7 +642,7 @@ pub(crate) fn try_method_missing(
     fields: &Arc<HashMap<String, Value>>,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {

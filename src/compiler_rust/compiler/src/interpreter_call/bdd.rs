@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 // Type aliases for BDD registry types
@@ -257,7 +257,7 @@ fn build_expect_failure_message(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> String {
@@ -322,7 +322,7 @@ pub(crate) fn exec_block_value(
     block: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -335,7 +335,7 @@ pub(crate) fn exec_block_value(
             body,
             env: captured,
         } => {
-            let mut captured_clone = captured.clone();
+            let mut captured_clone = HashMap::clone(&captured);
             exec_lambda(
                 &params,
                 &body,
@@ -349,7 +349,7 @@ pub(crate) fn exec_block_value(
             )
         }
         Value::BlockClosure { nodes, env: captured } => {
-            let mut captured_clone = captured.clone();
+            let captured_clone = HashMap::clone(&captured);
             exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),
@@ -363,7 +363,7 @@ fn eval_arg(
     default: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -388,7 +388,7 @@ pub(super) fn eval_bdd_builtin(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {

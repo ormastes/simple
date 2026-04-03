@@ -36,8 +36,8 @@ pub(crate) fn is_immutable_by_pattern(name: &str) -> bool {
     true
 }
 
-/// Stores enum definitions: name -> EnumDef
-pub(crate) type Enums = HashMap<String, EnumDef>;
+/// Stores enum definitions: name -> EnumDef (Arc-wrapped for cheap sharing)
+pub(crate) type Enums = HashMap<String, Arc<EnumDef>>;
 
 /// Stores impl block methods: type_name -> list of methods
 pub(crate) type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;

@@ -37,7 +37,7 @@ pub fn handle_unit_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -180,7 +180,7 @@ pub fn handle_option_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -256,12 +256,13 @@ pub fn handle_option_methods(
             if let Value::Lambda {
                 params: _,
                 body,
-                env: mut captured,
+                env: captured,
             } = func_arg
             {
+                let mut local_env = HashMap::clone(&captured);
                 return Ok(Some(evaluate_expr(
                     &body,
-                    &mut captured,
+                    &mut local_env,
                     functions,
                     classes,
                     enums,
@@ -396,7 +397,7 @@ pub fn handle_result_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -495,10 +496,10 @@ pub fn handle_result_methods(
                 if let Value::Lambda {
                     params,
                     body,
-                    env: mut captured,
+                    env: captured,
                 } = func_arg
                 {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), err_val.as_ref().clone());
                     }

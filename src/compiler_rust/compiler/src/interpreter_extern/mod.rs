@@ -90,7 +90,7 @@ pub mod winit_ffi;
 pub mod rapier2d_ffi;
 
 // Import parent interpreter types
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 // Import shared functions from parent module
@@ -106,7 +106,7 @@ fn resolve_fmt_for_print(
     values: &[Value],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Vec<Value> {
@@ -148,7 +148,7 @@ pub(crate) fn call_extern_function(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

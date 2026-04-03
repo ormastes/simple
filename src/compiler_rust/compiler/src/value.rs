@@ -517,13 +517,13 @@ pub enum Value {
     Lambda {
         params: Vec<String>,
         body: Box<Expr>,
-        env: Env,
+        env: Arc<Env>,
     },
     /// A block closure - used for BDD DSL colon-blocks like `describe "name": body`
     /// Contains a list of statements to execute when called
     BlockClosure {
         nodes: Vec<Node>,
-        env: Env,
+        env: Arc<Env>,
     },
     /// A function reference - used for decorators and first-class functions
     /// Includes captured environment for closure semantics

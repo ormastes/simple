@@ -48,7 +48,7 @@ impl SymbolScope {
 pub fn extract_symbol_scope(
     env: &mut Env,
     functions: &HashMap<String, Arc<FunctionDef>>,
-    classes: &HashMap<String, ClassDef>,
+    classes: &HashMap<String, Arc<ClassDef>>,
 ) -> SymbolScope {
     SymbolScope {
         functions: functions.keys().cloned().collect(),

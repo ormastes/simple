@@ -16,7 +16,7 @@ pub(super) fn eval_call_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -162,7 +162,7 @@ pub(super) fn eval_call_expr(
                     if let Some(func) = functions.get(field).cloned() {
                         return Ok(Some(Value::Function {
                             name: field.clone(),
-                            def: Arc::new(func.clone()),
+                            def: func,
                             captured_env: Arc::new(Env::new()),
                         }));
                     }
@@ -313,7 +313,7 @@ pub(super) fn eval_call_expr(
                                 }
                                 return Ok(Some(Value::Function {
                                     name: method.name.clone(),
-                                    def: Arc::new(method.clone()),
+                                    def: Arc::clone(method),
                                     captured_env: Arc::new(Env::new()),
                                 }));
                             }

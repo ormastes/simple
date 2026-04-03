@@ -35,7 +35,7 @@ use super::{
     UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 
 /// Call a value (function or lambda) with evaluated arguments.
 /// Used for decorator application where we have Value arguments, not AST Arguments.
@@ -44,7 +44,7 @@ pub(super) fn call_value_with_args(
     args: Vec<Value>,
     _env: &Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -55,7 +55,7 @@ pub(super) fn call_value_with_args(
             env: captured,
         } => {
             // Execute lambda with given args
-            let mut local_env = captured.clone();
+            let mut local_env = HashMap::clone(&captured);
             for (i, param) in params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
                     local_env.insert(param.clone(), arg.clone());
@@ -197,7 +197,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
-    let mut classes: HashMap<String, ClassDef> = HashMap::new();
+    let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
     let mut enums: Enums = HashMap::new();
     let mut impl_methods: ImplMethods = HashMap::new();
     let mut extern_functions: ExternFunctions = HashMap::new();
@@ -213,7 +213,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     for item in items {
         match item {
             Node::Function(f) => {
-                functions.insert(f.name.clone(), f.clone());
+                functions.insert(f.name.clone(), Arc::new(f.clone()));
             }
             Node::Struct(s) => {
                 // Pre-register struct constructor and class definition
@@ -225,7 +225,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
                 classes.insert(
                     s.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: s.span,
                         name: s.name.clone(),
                         generic_params: Vec::new(),
@@ -243,14 +243,15 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
-                    },
+                    }),
                 );
             }
             Node::Enum(e) => {
                 // Pre-register enum
-                enums.insert(e.name.clone(), e.clone());
+                let arc_e = Arc::new(e.clone());
+                enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 GLOBAL_ENUMS.with(|cell| {
-                    cell.borrow_mut().insert(e.name.clone(), e.clone());
+                    cell.borrow_mut().insert(e.name.clone(), arc_e.clone());
                 });
                 env.insert(
                     e.name.clone(),
@@ -267,7 +268,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         class_name: c.name.clone(),
                     },
                 );
-                classes.insert(c.name.clone(), c.clone());
+                classes.insert(c.name.clone(), Arc::new(c.clone()));
             }
             _ => {}
         }
@@ -368,7 +369,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Also register as a class so instantiation works
                 classes.insert(
                     s.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: s.span,
                         name: s.name.clone(),
                         generic_params: Vec::new(),
@@ -386,19 +387,20 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
-                    },
+                    }),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -406,7 +408,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
             }
             Node::Enum(e) => {
-                enums.insert(e.name.clone(), e.clone());
+                enums.insert(e.name.clone(), Arc::new(e.clone()));
                 // Also register in env so EnumName.VariantName syntax works
                 env.insert(
                     e.name.clone(),
@@ -498,7 +500,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     updated
                 };
 
-                classes.insert(final_class.name.clone(), final_class.clone());
+                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
                 // Store in env as Constructor value so it can be called like MyClass()
                 env.insert(
                     final_class.name.clone(),
@@ -511,12 +513,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -536,7 +539,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         BLANKET_IMPL_METHODS.with(|cell| {
                             let mut blanket_impls = cell.borrow_mut();
                             let methods = blanket_impls.entry(trait_name.clone()).or_insert_with(Vec::new);
-                            methods.extend(impl_block.methods.clone());
+                            methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
                         });
                     }
                 } else {
@@ -545,19 +548,19 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let type_name = get_type_name(&impl_block.target_type);
                     let methods = impl_methods.entry(type_name.clone()).or_default();
                     for method in &impl_block.methods {
-                        methods.push(method.clone());
+                        methods.push(Arc::new(method.clone()));
                     }
 
                     // Populate GLOBAL_IMPL_METHODS for cross-module fallback
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let global_methods = global_impls.entry(type_name.clone()).or_default();
-                        global_methods.extend(impl_block.methods.clone());
+                        global_methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
                     });
 
                     // Also add impl methods to class/struct definition for Constructor method dispatch
                     if let Some(class_def) = classes.get_mut(&type_name) {
-                        class_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                     }
 
                     // Register static methods from impl blocks as mangled free functions
@@ -565,12 +568,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            functions.insert(mangled.clone(), method.clone());
+                            let arc_method = Arc::new(method.clone());
+                            functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             env.insert(
                                 mangled.clone(),
                                 Value::Function {
                                     name: mangled,
-                                    def: Arc::new(method.clone()),
+                                    def: arc_method,
                                     captured_env: Arc::new(Env::new()),
                                 },
                             );
@@ -597,13 +601,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
 
                             // Build combined methods: impl methods + default trait methods
-                            let mut combined_methods = impl_block.methods.clone();
+                            let mut combined_methods: Vec<Arc<FunctionDef>> = impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect();
                             for trait_method in &trait_def.methods {
                                 // Add default implementations that weren't overridden
                                 if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                    combined_methods.push(trait_method.clone());
+                                    let arc_tm = Arc::new(trait_method.clone());
+                                    combined_methods.push(Arc::clone(&arc_tm));
                                     // Also add to impl_methods so method dispatch can find it
-                                    methods.push(trait_method.clone());
+                                    methods.push(arc_tm);
                                 }
                             }
 
@@ -663,7 +668,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Actors have fields (state) and methods like classes
                 classes.insert(
                     a.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: a.span,
                         name: a.name.clone(),
                         generic_params: Vec::new(),
@@ -681,7 +686,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
-                    },
+                    }),
                 );
                 env.insert(
                     a.name.clone(),
@@ -895,7 +900,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             name.clone(),
                             Value::Function {
                                 name: name.clone(),
-                                def: Arc::new(functions.get(&name).unwrap().clone()),
+                                def: Arc::clone(functions.get(&name).unwrap()),
                                 captured_env: Arc::new(Env::new()),
                             },
                         );
@@ -1019,7 +1024,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                                 // Import with alias: {Item as alias}
                                                 if let Some(export_value) = exports.get(name) {
                                                     if let Value::Function { def, .. } = export_value {
-                                                        functions.insert(alias.clone(), (**def).clone());
+                                                        functions.insert(alias.clone(), Arc::clone(def));
                                                     }
                                                     env.insert(alias.clone(), export_value.clone());
                                                     MODULE_GLOBALS.with(|cell| {
@@ -1032,7 +1037,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                         };
                                         if let Some(export_value) = exports.get(&item_name) {
                                             if let Value::Function { def, .. } = export_value {
-                                                functions.insert(item_name.clone(), (**def).clone());
+                                                functions.insert(item_name.clone(), Arc::clone(def));
                                             }
                                             env.insert(item_name.clone(), export_value.clone());
                                             MODULE_GLOBALS.with(|cell| {
@@ -1048,7 +1053,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 if let Value::Dict(exports) = &value {
                                     for (name, export_value) in exports {
                                         if let Value::Function { def, .. } = export_value {
-                                            functions.insert(name.clone(), (**def).clone());
+                                            functions.insert(name.clone(), Arc::clone(def));
                                         }
                                         env.insert(name.clone(), export_value.clone());
                                         MODULE_GLOBALS.with(|cell| {
@@ -1123,12 +1128,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             Node::Function(f) => {
                                 // Register function in parent scope with module prefix for internal use
                                 let prefixed_name = format!("{}.{}", mod_decl.name, f.name);
-                                functions.insert(prefixed_name, f.clone());
+                                let arc_f = Arc::new(f.clone());
+                                functions.insert(prefixed_name, Arc::clone(&arc_f));
 
                                 // Also add to module dict for module.func() calls
                                 let func_value = Value::Function {
                                     name: f.name.clone(),
-                                    def: Arc::new(f.clone()),
+                                    def: arc_f,
                                     captured_env: Arc::new(Env::new()),
                                 };
                                 module_dict.insert(f.name.clone(), func_value);
@@ -1136,8 +1142,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             Node::Class(c) => {
                                 // Register class in parent scope with module prefix
                                 let prefixed_name = format!("{}.{}", mod_decl.name, c.name);
-                                classes.insert(prefixed_name, c.clone());
-                                classes.insert(c.name.clone(), c.clone()); // Also register unqualified for internal use
+                                let arc_c = Arc::new(c.clone());
+                                classes.insert(prefixed_name, Arc::clone(&arc_c));
+                                classes.insert(c.name.clone(), arc_c); // Also register unqualified for internal use
 
                                 // Add constructor to module dict
                                 module_dict.insert(
@@ -1169,8 +1176,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                     type_bindings: s.type_bindings.clone(),
                                 };
                                 let prefixed_name = format!("{}.{}", mod_decl.name, s.name);
-                                classes.insert(prefixed_name, class_def.clone());
-                                classes.insert(s.name.clone(), class_def);
+                                let arc_class_def = Arc::new(class_def);
+                                classes.insert(prefixed_name, Arc::clone(&arc_class_def));
+                                classes.insert(s.name.clone(), arc_class_def);
 
                                 module_dict.insert(
                                     s.name.clone(),
@@ -1181,8 +1189,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
                             Node::Enum(e) => {
                                 let prefixed_name = format!("{}.{}", mod_decl.name, e.name);
-                                enums.insert(prefixed_name, e.clone());
-                                enums.insert(e.name.clone(), e.clone());
+                                let arc_e = Arc::new(e.clone());
+                                enums.insert(prefixed_name, Arc::clone(&arc_e));
+                                enums.insert(e.name.clone(), arc_e);
 
                                 // Add enum variants to module dict as constructors
                                 for variant in &e.variants {

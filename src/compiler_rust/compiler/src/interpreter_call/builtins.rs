@@ -14,7 +14,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, RangeBo
 use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 pub(super) fn eval_builtin(
@@ -22,7 +22,7 @@ pub(super) fn eval_builtin(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -479,12 +479,13 @@ pub(super) fn eval_builtin(
             let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
                 body,
-                env: mut captured,
+                env: captured,
                 ..
             } = val
             {
+                let mut captured_clone = HashMap::clone(&captured);
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
-                let _ = evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods);
+                let _ = evaluate_expr(&body, &mut captured_clone, functions, classes, enums, impl_methods);
                 let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
                 let gen = GeneratorValue::new_with_values(yields);
                 return Ok(Some(Value::Generator(gen)));

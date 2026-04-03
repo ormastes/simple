@@ -10,7 +10,7 @@ use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Evaluate an argument at a given index, returning a default value if not present
@@ -24,7 +24,7 @@ pub(crate) fn eval_arg(
     default: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -55,7 +55,7 @@ pub(crate) fn eval_arg_int(
     default: i64,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     error_context: &str,

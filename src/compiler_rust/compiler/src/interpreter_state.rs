@@ -122,7 +122,7 @@ thread_local! {
     /// Order in which macros are defined (for validating defined-before-use)
     pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Block-scoped enums (for enums defined inside closures like `it` blocks)
-    pub(crate) static BLOCK_SCOPED_ENUMS: RefCell<HashMap<String, EnumDef>> = RefCell::new(HashMap::new());
+    pub(crate) static BLOCK_SCOPED_ENUMS: RefCell<HashMap<String, Arc<EnumDef>>> = RefCell::new(HashMap::new());
     /// Type-safe execution mode (new, replaces Option fields above)
     pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = const { RefCell::new(ExecutionMode::Normal) };
     /// Maps unit suffix -> family name (for looking up which family a unit belongs to)
@@ -165,12 +165,12 @@ thread_local! {
     /// When an impl block has #[default] attribute and generic params (e.g., impl<T> Display for T:),
     /// its methods are stored here. Key is the trait name, value is the list of methods.
     /// These methods apply to any type that doesn't have a concrete impl for the trait.
-    pub(crate) static BLANKET_IMPL_METHODS: RefCell<HashMap<String, Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
+    pub(crate) static BLANKET_IMPL_METHODS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
 
     /// Trait implementations registry.
     /// Key is (trait_name, type_name), value is the list of methods implementing the trait.
     /// This enables trait method dispatch for types implementing traits.
-    pub(crate) static TRAIT_IMPLS: RefCell<HashMap<(String, String), Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
+    pub(crate) static TRAIT_IMPLS: RefCell<HashMap<(String, String), Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
 
     /// Trait definitions registry.
     /// Key is trait name, value is the trait definition.
@@ -185,14 +185,14 @@ thread_local! {
     /// Global enum definitions registry (mirrors MODULE_GLOBALS but for enums).
     /// Populated during module evaluation first pass; provides fallback enum lookups
     /// for imported enums that are not in the local `enums` parameter.
-    pub(crate) static GLOBAL_ENUMS: RefCell<HashMap<String, simple_parser::ast::EnumDef>> = RefCell::new(HashMap::new());
+    pub(crate) static GLOBAL_ENUMS: RefCell<HashMap<String, Arc<simple_parser::ast::EnumDef>>> = RefCell::new(HashMap::new());
 
     /// Global impl methods registry (mirrors GLOBAL_ENUMS but for impl block methods).
     /// Populated during module evaluation first pass and top-level impl block processing;
     /// provides fallback impl method lookups for imported types whose impl methods
     /// are not in the local `impl_methods` parameter.
     /// Key is type name, value is list of methods from impl blocks for that type.
-    pub(crate) static GLOBAL_IMPL_METHODS: RefCell<HashMap<String, Vec<simple_parser::ast::FunctionDef>>> = RefCell::new(HashMap::new());
+    pub(crate) static GLOBAL_IMPL_METHODS: RefCell<HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
 }
 
 //==============================================================================

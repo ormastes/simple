@@ -10,13 +10,13 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 pub(crate) struct ProceedContext {
     pub(super) env: Arc<Env>,
     pub(super) functions: Arc<HashMap<String, Arc<FunctionDef>>>,
-    pub(super) classes: Arc<HashMap<String, ClassDef>>,
+    pub(super) classes: Arc<HashMap<String, Arc<ClassDef>>>,
     pub(super) enums: Arc<Enums>,
     pub(super) impl_methods: Arc<ImplMethods>,
 }

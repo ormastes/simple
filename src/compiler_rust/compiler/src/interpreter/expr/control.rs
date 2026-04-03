@@ -16,7 +16,7 @@ pub(super) fn eval_control_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -31,7 +31,7 @@ pub(super) fn eval_control_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = env.clone();
+            let captured_env = Arc::new(env.clone());
             Ok(Some(Value::Lambda {
                 params: names,
                 body: body.clone(),
@@ -58,7 +58,7 @@ pub(super) fn eval_control_expr(
                 env: captured_env,
             } = branch_result
             {
-                let mut block_env = captured_env.clone();
+                let mut block_env = HashMap::clone(&captured_env);
                 let mut block = simple_parser::ast::Block::default();
                 block.statements = nodes;
                 let (flow, last_val) = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
@@ -202,7 +202,7 @@ pub(super) fn eval_control_expr(
         }
         Expr::DoBlock(nodes) => Ok(Some(Value::BlockClosure {
             nodes: nodes.clone(),
-            env: env.clone(),
+            env: Arc::new(env.clone()),
         })),
         _ => Ok(None),
     }

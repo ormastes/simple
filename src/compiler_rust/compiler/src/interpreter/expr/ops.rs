@@ -24,7 +24,7 @@ fn try_dunder_binop(
     right: &Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Option<Result<Value, CompileError>> {
@@ -32,6 +32,7 @@ fn try_dunder_binop(
         let method = classes
             .get(class.as_str())
             .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
+            .map(Arc::new)
             .or_else(|| {
                 impl_methods
                     .get(class.as_str())
@@ -61,7 +62,7 @@ fn try_dunder_unaryop(
     operand: &Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Option<Result<Value, CompileError>> {
@@ -69,6 +70,7 @@ fn try_dunder_unaryop(
         let method = classes
             .get(class.as_str())
             .and_then(|cd| cd.methods.iter().find(|m| m.name == dunder_name).cloned())
+            .map(Arc::new)
             .or_else(|| {
                 impl_methods
                     .get(class.as_str())
@@ -119,7 +121,7 @@ pub(super) fn eval_op_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -225,7 +227,7 @@ pub(super) fn eval_op_expr(
                         return Ok(Some(Value::Lambda {
                             params: vec!["__c0".to_string()],
                             body: Box::new(outer_call),
-                            env: captured_env,
+                            env: Arc::new(captured_env),
                         }));
                     }
                     // Fall through to integer shift-right for non-function operands
@@ -261,7 +263,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
-                                    let mut local_env = lambda_env.clone();
+                                    let mut local_env = HashMap::clone(&lambda_env);
                                     for (i, param_name) in params.iter().enumerate() {
                                         if let Some(arg) = all_args.get(i) {
                                             local_env.insert(param_name.clone(), arg.clone());
@@ -318,7 +320,7 @@ pub(super) fn eval_op_expr(
                                     body,
                                     env: lambda_env,
                                 } => {
-                                    let mut local_env = lambda_env.clone();
+                                    let mut local_env = HashMap::clone(&lambda_env);
                                     if let Some(param_name) = params.first() {
                                         local_env.insert(param_name.clone(), left_val);
                                     }

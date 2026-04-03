@@ -51,7 +51,7 @@ fn call_closure_no_args(
     closure: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -61,7 +61,7 @@ fn call_closure_no_args(
             body,
             env: captured,
         } => {
-            let mut captured_clone = captured.clone();
+            let mut captured_clone = HashMap::clone(&captured);
             exec_lambda(
                 &params, // params is already Vec<String>
                 &body,
@@ -183,7 +183,7 @@ pub(crate) fn evaluate_expr(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

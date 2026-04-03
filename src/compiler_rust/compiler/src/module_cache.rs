@@ -57,12 +57,12 @@ pub const MAX_TOTAL_MODULES: usize = 800;
 // Key: normalized module path, Value: module exports dict
 thread_local! {
     pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
-    // Cache for ClassDef objects - needed for static method calls on imported classes
-    pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, ClassDef>>> = RefCell::new(HashMap::new());
+    // Cache for ClassDef objects (Arc-wrapped for cheap sharing)
+    pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<ClassDef>>>> = RefCell::new(HashMap::new());
     // Cache for FunctionDef objects (Arc-wrapped for cheap sharing with Value::Function)
     pub static MODULE_FUNCTIONS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<FunctionDef>>>> = RefCell::new(HashMap::new());
-    // Cache for EnumDef objects
-    pub static MODULE_ENUMS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, EnumDef>>> = RefCell::new(HashMap::new());
+    // Cache for EnumDef objects (Arc-wrapped for cheap sharing)
+    pub static MODULE_ENUMS_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<EnumDef>>>> = RefCell::new(HashMap::new());
     // Track modules currently being loaded to prevent circular import infinite recursion
     pub static MODULES_LOADING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
     // Track current loading depth to prevent infinite recursion
@@ -262,9 +262,9 @@ pub fn cache_module_exports(path: &Path, exports: Value) {
 /// Functions are stored as `Arc<FunctionDef>` for cheap sharing with `Value::Function`.
 pub fn cache_module_definitions(
     path: &Path,
-    classes: &HashMap<String, ClassDef>,
+    classes: &HashMap<String, Arc<ClassDef>>,
     functions: &HashMap<String, Arc<FunctionDef>>,
-    enums: &HashMap<String, EnumDef>,
+    enums: &HashMap<String, Arc<EnumDef>>,
 ) {
     let key = normalize_path_key(path);
     trace!(path = ?key, classes = classes.len(), functions = functions.len(), enums = enums.len(), "Caching module definitions");
@@ -284,9 +284,9 @@ pub fn cache_module_definitions(
 /// Returns true if definitions were found and merged, false otherwise.
 pub fn merge_cached_module_definitions(
     path: &Path,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    enums: &mut HashMap<String, EnumDef>,
+    enums: &mut HashMap<String, Arc<EnumDef>>,
 ) -> bool {
     let key = normalize_path_key(path);
     let mut found = false;

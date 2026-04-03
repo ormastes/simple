@@ -244,11 +244,11 @@ impl Clone for Value {
             Value::Lambda { params, body, env } => Value::Lambda {
                 params: params.clone(),
                 body: body.clone(),
-                env: env.clone(),
+                env: Arc::clone(env),
             },
             Value::BlockClosure { nodes, env } => Value::BlockClosure {
                 nodes: nodes.clone(),
-                env: env.clone(),
+                env: Arc::clone(env),
             },
             Value::Function {
                 name,

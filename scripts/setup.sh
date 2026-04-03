@@ -495,12 +495,28 @@ fi
 
 T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
 COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
+TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 FULL_ENTRY="${REPO_ROOT}/src/app/t32_mcp_server/main.spl"
-FULL_SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
-export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
+FULL_SIMPLE_LIB="${TRACE32_ROOT}"
+COLD_SIMPLE_LIB="${TRACE32_ROOT}"
 export SIMPLE_LOG=error
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
+
+t32_mcp_compile_cached_entry() {
+  t32_mcp_source_artifact="$1"
+  t32_mcp_cache_file="$2"
+  t32_mcp_simple_lib="$3"
+  mkdir -p "$(dirname "$t32_mcp_cache_file")"
+  if [ ! -f "$t32_mcp_cache_file" ] || [ "$t32_mcp_source_artifact" -nt "$t32_mcp_cache_file" ] || [ "$RUNTIME" -nt "$t32_mcp_cache_file" ]; then
+    if [ "$DEBUG_ENABLED" = "1" ]; then
+      t32_mcp_log_line "$WRAPPER_LOG" "compile_cache source=$t32_mcp_source_artifact cache=$t32_mcp_cache_file lib=$t32_mcp_simple_lib"
+      SIMPLE_LIB="$t32_mcp_simple_lib" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$t32_mcp_source_artifact" -o "$t32_mcp_cache_file" >>"$ERROR_LOG" 2>&1
+    else
+      SIMPLE_LIB="$t32_mcp_simple_lib" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$t32_mcp_source_artifact" -o "$t32_mcp_cache_file" >>"$T32_MCP_STDERR_LOG" 2>&1
+    fi
+  fi
+}
 
 if [ -z "$RUNTIME" ]; then
   if [ "$DEBUG_ENABLED" = "1" ]; then
@@ -548,22 +564,34 @@ if [ "$RUNTIME_KIND" = "native" ]; then
 fi
 
 SOURCE_ARTIFACT="$COLD_ENTRY"
+SOURCE_SIMPLE_LIB="$COLD_SIMPLE_LIB"
 case "$T32_MCP_FRONTEND" in
   full)
     SOURCE_ARTIFACT="$FULL_ENTRY"
-    export SIMPLE_LIB="$FULL_SIMPLE_LIB"
+    SOURCE_SIMPLE_LIB="$FULL_SIMPLE_LIB"
     ;;
   cold|*)
     SOURCE_ARTIFACT="$COLD_ENTRY"
     ;;
 esac
 
+CACHE_ROOT="${REPO_ROOT}/.simple/cache/t32_mcp"
+CACHE_FILE="${CACHE_ROOT}/${T32_MCP_FRONTEND}.smf"
+if ! t32_mcp_compile_cached_entry "$SOURCE_ARTIFACT" "$CACHE_FILE" "$SOURCE_SIMPLE_LIB"; then
+  if [ "$DEBUG_ENABLED" = "1" ]; then
+    t32_mcp_log_line "$ERROR_LOG" "error=failed to compile cached frontend source=$SOURCE_ARTIFACT cache=$CACHE_FILE"
+  fi
+  echo "error: failed to compile cached t32_mcp frontend" >&2
+  exit 1
+fi
+export SIMPLE_LIB="${SIMPLE_LIB:-$SOURCE_SIMPLE_LIB}"
+
 if [ "$DEBUG_ENABLED" = "1" ]; then
-  t32_mcp_startup_log "wrapper_exec runtime=$RUNTIME source_artifact=$SOURCE_ARTIFACT"
-  exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$ERROR_LOG"
+  t32_mcp_startup_log "wrapper_exec runtime=$RUNTIME source_artifact=$SOURCE_ARTIFACT cache_file=$CACHE_FILE"
+  exec "$RUNTIME" "$CACHE_FILE" "$@" 2>>"$ERROR_LOG"
 fi
 
-exec "$RUNTIME" "$SOURCE_ARTIFACT" "$@" 2>>"$T32_MCP_STDERR_LOG"
+exec "$RUNTIME" "$CACHE_FILE" "$@" 2>>"$T32_MCP_STDERR_LOG"
 T32_MCP_EOF
 chmod +x "${release_dir}/t32_mcp_server"
 echo "  t32_mcp_server"
@@ -613,16 +641,31 @@ if [ "${T32_LSP_MCP_DEBUG_LOG:-0}" != "0" ]; then
   export T32_LSP_MCP_ERROR_LOG="$ERROR_LOG"
 fi
 DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-/tmp/t32_lsp_mcp_shared_${SUFFIX}}"
-export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/src}"
+T32_LSP_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_lsp_mcp_stderr.log"
+mkdir -p "$(dirname "$T32_LSP_MCP_STDERR_LOG")"
+CACHE_ROOT="${REPO_ROOT}/.simple/cache/t32_lsp_mcp"
+CACHE_FILE="${CACHE_ROOT}/main.smf"
+TOOL_DAEMON_SOURCE="${REPO_ROOT}/examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl"
+TOOL_DAEMON_CACHE_FILE="${CACHE_ROOT}/mcp_daemon.smf"
+TOOL_RUNNER_BIN_DEFAULT="${REPO_ROOT}/bin/release/t32_lsp_mcp_tool_runner"
+mkdir -p "$CACHE_ROOT"
+if [ ! -f "$CACHE_FILE" ] || [ "$ENTRY" -nt "$CACHE_FILE" ] || [ "$RUNTIME" -nt "$CACHE_FILE" ]; then
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$ENTRY" -o "$CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1
+fi
+if [ ! -f "$TOOL_DAEMON_CACHE_FILE" ] || [ "$TOOL_DAEMON_SOURCE" -nt "$TOOL_DAEMON_CACHE_FILE" ] || [ "$RUNTIME" -nt "$TOOL_DAEMON_CACHE_FILE" ]; then
+  SIMPLE_LIB="$TRACE32_ROOT" SIMPLE_BINARY="$RUNTIME" "$RUNTIME" compile "$TOOL_DAEMON_SOURCE" -o "$TOOL_DAEMON_CACHE_FILE" >>"$T32_LSP_MCP_STDERR_LOG" 2>&1
+fi
+export SIMPLE_LIB="${SIMPLE_LIB:-$TRACE32_ROOT}"
 export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-$RUNTIME}"
 export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
-export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
+if [ -x "$TOOL_RUNNER_BIN_DEFAULT" ]; then
+  export T32_LSP_MCP_TOOL_RUNNER_BIN="${T32_LSP_MCP_TOOL_RUNNER_BIN:-$TOOL_RUNNER_BIN_DEFAULT}"
+fi
+export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-$TOOL_DAEMON_CACHE_FILE}"
 export T32_LSP_MCP_TOOL_DAEMON_DIR="$DAEMON_DIR"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 export SIMPLE_LOG="${SIMPLE_LOG:-error}"
-T32_LSP_MCP_STDERR_LOG="${REPO_ROOT}/.simple/logs/t32_lsp_mcp_stderr.log"
-mkdir -p "$(dirname "$T32_LSP_MCP_STDERR_LOG")"
 
 DAEMON_SIMPLE_LIB="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_DIR" >/dev/null 2>&1; then
@@ -634,9 +677,10 @@ if [ ! -f "$DAEMON_DIR/ready" ] && ! pgrep -f "$T32_LSP_MCP_TOOL_DAEMON $DAEMON_
   fi
 fi
 if [ "$DEBUG_ENABLED" = "1" ]; then
-  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$ERROR_LOG"
+  printf '%s cache=%s daemon_cache=%s runner_bin=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$CACHE_FILE" "$TOOL_DAEMON_CACHE_FILE" "${T32_LSP_MCP_TOOL_RUNNER_BIN:-}" >>"$WRAPPER_LOG"
+  RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$CACHE_FILE" "$@" 2>>"$ERROR_LOG"
 fi
-RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$ENTRY" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
+RUST_LOG="${RUST_LOG:-error}" exec "${SIMPLE_RUNTIME:-$RUNTIME}" "$CACHE_FILE" "$@" 2>>"$T32_LSP_MCP_STDERR_LOG"
 T32LSP_EOF
 chmod +x "${release_dir}/t32_lsp_mcp_server"
 echo "  t32_lsp_mcp_server"

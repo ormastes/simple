@@ -20,7 +20,7 @@ use evaluation_helpers::{
     register_definitions,
 };
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
 
 /// Collected module exports: (env, exports, functions, classes, enums).
@@ -29,7 +29,7 @@ type ModuleExports = (
     Env,
     HashMap<String, Value>,
     HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
-    HashMap<String, ClassDef>,
+    HashMap<String, Arc<ClassDef>>,
     Enums,
 );
 
@@ -37,8 +37,8 @@ type ModuleExports = (
 pub fn evaluate_module_exports(
     items: &[Node],
     module_path: Option<&Path>,
-    global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
 ) -> Result<ModuleExports, CompileError> {
     evaluate_module_exports_with_preloaded(items, module_path, global_functions, global_classes, global_enums, None)
@@ -53,14 +53,14 @@ pub fn evaluate_module_exports_with_preloaded(
     items: &[Node],
     module_path: Option<&Path>,
     global_functions: &mut HashMap<String, Arc<FunctionDef>>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
     let mut env: Env = HashMap::new();
     let mut exports: HashMap<String, Value> = HashMap::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
-    let mut local_classes: HashMap<String, ClassDef> = HashMap::new();
+    let mut local_classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
     let mut local_enums: Enums = HashMap::new();
     let impl_methods: ImplMethods = HashMap::new();
 

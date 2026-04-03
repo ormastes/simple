@@ -41,7 +41,7 @@ pub(crate) fn evaluate_method_call(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -698,7 +698,7 @@ pub(crate) fn evaluate_method_call(
                             arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                         }
                         // Create local env from captured env and bind params
-                        let mut local_env = captured_env.clone();
+                        let mut local_env = HashMap::clone(captured_env);
                         for (i, param) in params.iter().enumerate() {
                             if let Some(val) = arg_vals.get(i) {
                                 local_env.insert(param.clone(), val.clone());
@@ -834,7 +834,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
-                        let mut local_env = captured.clone();
+                        let mut local_env = HashMap::clone(&captured);
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -862,7 +862,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
-                        let mut local_env = captured.clone();
+                        let mut local_env = HashMap::clone(&captured);
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
                     return Ok(Value::Nil);
@@ -915,7 +915,7 @@ pub(crate) fn evaluate_method_call(
 
         if !type_names.is_empty() {
             // Search TRAIT_IMPLS for a method matching this type
-            let trait_method: Option<FunctionDef> = TRAIT_IMPLS.with(|cell| {
+            let trait_method: Option<Arc<FunctionDef>> = TRAIT_IMPLS.with(|cell| {
                 let trait_impls = cell.borrow();
                 for type_alias in type_names {
                     for ((_trait_name, impl_type), methods) in trait_impls.iter() {
@@ -948,7 +948,7 @@ pub(crate) fn evaluate_method_call(
             }
 
             // Also check blanket impls for built-in types
-            let blanket_method: Option<FunctionDef> = BLANKET_IMPL_METHODS.with(|cell| {
+            let blanket_method: Option<Arc<FunctionDef>> = BLANKET_IMPL_METHODS.with(|cell| {
                 let blanket_impls = cell.borrow();
                 for (_trait_name, methods) in blanket_impls.iter() {
                     if let Some(func) = methods.iter().find(|m| m.name == method) {
@@ -1064,7 +1064,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {

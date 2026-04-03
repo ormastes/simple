@@ -17,7 +17,7 @@ use crate::value::{Env, Value};
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
 use crate::interpreter::module_cache::filter_functions_from_value;
 
-type Enums = HashMap<String, simple_parser::ast::EnumDef>;
+type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
 
 use crate::interpreter::evaluate_expr;
@@ -56,10 +56,10 @@ pub(super) fn add_builtin_types(env: &mut Env) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn register_definitions(
     items: &[Node],
-    local_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    local_classes: &mut HashMap<String, ClassDef>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    local_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    local_classes: &mut HashMap<String, Arc<ClassDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     local_enums: &mut Enums,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
@@ -68,16 +68,18 @@ pub(super) fn register_definitions(
     for item in items.iter() {
         match item {
             Node::Function(f) => {
-                local_functions.insert(f.name.clone(), f.clone());
+                let arc_f = Arc::new(f.clone());
+                local_functions.insert(f.name.clone(), Arc::clone(&arc_f));
                 // Don't add "main" from imported modules to global functions
                 // to prevent auto-execution when the main script finishes
                 if f.name != "main" {
-                    global_functions.insert(f.name.clone(), f.clone());
+                    global_functions.insert(f.name.clone(), arc_f);
                 }
             }
             Node::Class(c) => {
-                local_classes.insert(c.name.clone(), c.clone());
-                global_classes.insert(c.name.clone(), c.clone());
+                let arc_c = Arc::new(c.clone());
+                local_classes.insert(c.name.clone(), Arc::clone(&arc_c));
+                global_classes.insert(c.name.clone(), arc_c);
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {
@@ -89,13 +91,14 @@ pub(super) fn register_definitions(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", c.name, method.name);
-                        local_functions.insert(mangled.clone(), method.clone());
-                        global_functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                        global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -124,8 +127,9 @@ pub(super) fn register_definitions(
                     specialization_of: s.specialization_of.clone(),
                     type_bindings: s.type_bindings.clone(),
                 };
-                local_classes.insert(s.name.clone(), class_def.clone());
-                global_classes.insert(s.name.clone(), class_def);
+                let arc_class_def = Arc::new(class_def);
+                local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
+                global_classes.insert(s.name.clone(), arc_class_def);
                 exports.insert(
                     s.name.clone(),
                     Value::Constructor {
@@ -137,13 +141,14 @@ pub(super) fn register_definitions(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
-                        local_functions.insert(mangled.clone(), method.clone());
-                        global_functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                        global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -160,30 +165,31 @@ pub(super) fn register_definitions(
                 if let Some(type_name) = type_name {
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
-                        class_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                     }
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
-                        class_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
-                        enum_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(enum_def).methods.extend(impl_block.methods.clone());
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
-                        enum_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(enum_def).methods.extend(impl_block.methods.clone());
                     }
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            local_functions.insert(mangled.clone(), method.clone());
-                            global_functions.insert(mangled.clone(), method.clone());
+                            let arc_method = Arc::new(method.clone());
+                            local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                            global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             exports.insert(
                                 mangled.clone(),
                                 Value::Function {
                                     name: mangled,
-                                    def: Arc::new(method.clone()),
+                                    def: arc_method,
                                     captured_env: Arc::new(HashMap::new()),
                                 },
                             );
@@ -194,7 +200,7 @@ pub(super) fn register_definitions(
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(impl_block.methods.clone());
+                        methods.extend(impl_block.methods.iter().map(|m| Arc::new(m.clone())));
                     });
                     // Update MODULE_CLASSES_CACHE with the enriched class definition
                     // so cross-module fallback lookups find impl-added methods
@@ -212,8 +218,9 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Enum(e) => {
-                local_enums.insert(e.name.clone(), e.clone());
-                global_enums.insert(e.name.clone(), e.clone());
+                let arc_e = Arc::new(e.clone());
+                local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
+                global_enums.insert(e.name.clone(), arc_e);
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
@@ -226,13 +233,14 @@ pub(super) fn register_definitions(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", e.name, method.name);
-                        local_functions.insert(mangled.clone(), method.clone());
-                        global_functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                        global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(HashMap::new()),
                             },
                         );
@@ -300,12 +308,12 @@ pub(super) fn process_imports_and_assignments(
     items: &[Node],
     module_path: Option<&Path>,
     env: &mut Env,
-    local_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    local_classes: &mut HashMap<String, ClassDef>,
+    local_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    local_classes: &mut HashMap<String, Arc<ClassDef>>,
     local_enums: &Enums,
     impl_methods: &ImplMethods,
-    global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
     bare_exports: &mut Vec<Vec<String>>,
@@ -388,8 +396,8 @@ fn process_use_stmt(
     use_stmt: &simple_parser::ast::UseStmt,
     module_path: Option<&Path>,
     env: &mut Env,
-    global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
 ) -> Result<(), CompileError> {
@@ -430,7 +438,7 @@ fn process_use_stmt(
             if let Value::Dict(module_exports) = &value {
                 for (name, export_value) in module_exports {
                     if let Value::Function { def, .. } = export_value {
-                        global_functions.insert(name.clone(), (**def).clone());
+                        global_functions.insert(name.clone(), Arc::clone(def));
                     }
                     env.insert(name.clone(), export_value.clone());
                     exports.insert(name.clone(), export_value.clone());
@@ -467,8 +475,8 @@ fn process_export_stmt(
     export_stmt: &simple_parser::ast::ExportUseStmt,
     module_path: Option<&Path>,
     env: &mut Env,
-    global_functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    global_classes: &mut HashMap<String, ClassDef>,
+    global_functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
     bare_exports: &mut Vec<Vec<String>>,
@@ -556,7 +564,7 @@ pub(super) fn create_filtered_env(env: &Env) -> Env {
 /// Returns the `Arc<FunctionDef>` map so the caller can reuse the same Arc instances
 /// for caching (avoids creating duplicate Arc wrappers).
 pub(super) fn export_functions(
-    local_functions: &HashMap<String, simple_parser::ast::FunctionDef>,
+    local_functions: &HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     filtered_env: &Env,
     exports: &mut HashMap<String, Value>,
     env: &mut Env,
@@ -566,7 +574,7 @@ pub(super) fn export_functions(
     trace!(functions = local_functions.len(), "First pass: adding functions to env");
     let shared_defs: HashMap<String, Arc<simple_parser::ast::FunctionDef>> = local_functions
         .iter()
-        .map(|(name, f)| (name.clone(), Arc::new(f.clone())))
+        .map(|(name, f)| (name.clone(), Arc::clone(f)))
         .collect();
     for (name, shared_def) in &shared_defs {
         env.insert(

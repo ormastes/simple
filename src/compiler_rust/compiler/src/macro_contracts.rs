@@ -28,7 +28,7 @@ pub struct MacroContractResult {
     pub introduced_functions: HashMap<String, Arc<FunctionDef>>,
 
     /// Classes introduced by the macro (for enclosing scope)
-    pub introduced_classes: HashMap<String, ClassDef>,
+    pub introduced_classes: HashMap<String, Arc<ClassDef>>,
 
     /// Type aliases introduced by the macro
     pub introduced_types: HashMap<String, Type>,
@@ -62,7 +62,7 @@ pub fn process_macro_contract(
     const_bindings: &HashMap<String, String>,
     env: &mut Env,
     functions: &HashMap<String, Arc<FunctionDef>>,
-    classes: &HashMap<String, ClassDef>,
+    classes: &HashMap<String, Arc<ClassDef>>,
 ) -> Result<MacroContractResult, CompileError> {
     let mut result = MacroContractResult::default();
 
@@ -219,7 +219,7 @@ fn process_intro_decl(
                         .intro_function_labels
                         .insert(intro_label.to_string(), func_def.name.clone());
 
-                    result.introduced_functions.insert(func_def.name.clone(), func_def);
+                    result.introduced_functions.insert(func_def.name.clone(), Arc::new(func_def));
                 }
                 MacroDeclStub::Field(field_stub) => {
                     let field = create_field_from_stub(field_stub, const_bindings)?;

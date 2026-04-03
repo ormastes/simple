@@ -14,7 +14,7 @@ use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Inject mixin fields and methods into a ClassDef.
@@ -133,7 +133,7 @@ pub(super) fn exec_block_closure(
     nodes: &[Node],
     captured_env: &Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -509,14 +509,15 @@ pub(super) fn exec_block_closure(
                 // Register in both local_env and functions map for recursive calls to work
 
                 // Add to functions map so recursive calls can find it
-                functions.insert(f.name.clone(), f.clone());
+                let arc_f = Arc::new(f.clone());
+                functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
                 local_env.insert(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
-                        def: Arc::new(f.clone()),
+                        def: arc_f,
                         captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );
@@ -526,7 +527,7 @@ pub(super) fn exec_block_closure(
                 // Handle class definitions inside block closures (like in `it` blocks)
                 // Inject mixin fields/methods before registration
                 let final_class = inject_mixins(class_def);
-                classes.insert(final_class.name.clone(), final_class.clone());
+                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
                 local_env.insert(
                     final_class.name.clone(),
                     Value::Constructor {
@@ -538,12 +539,13 @@ pub(super) fn exec_block_closure(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -589,9 +591,9 @@ pub(super) fn exec_block_closure(
                     },
                 );
                 // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
-                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));
                 // Also register in GLOBAL_ENUMS for cross-function enum visibility
-                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));
                 last_value = Value::Nil;
             }
             Node::Struct(s) => {
@@ -604,7 +606,7 @@ pub(super) fn exec_block_closure(
                 );
                 classes.insert(
                     s.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: s.span,
                         name: s.name.clone(),
                         generic_params: Vec::new(),
@@ -622,19 +624,20 @@ pub(super) fn exec_block_closure(
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
-                    },
+                    }),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -644,7 +647,7 @@ pub(super) fn exec_block_closure(
             }
             Node::Class(c) => {
                 let final_class = inject_mixins(c);
-                classes.insert(final_class.name.clone(), final_class.clone());
+                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
                 local_env.insert(
                     final_class.name.clone(),
                     Value::Constructor {
@@ -656,12 +659,13 @@ pub(super) fn exec_block_closure(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -695,43 +699,45 @@ pub(super) fn exec_block_closure(
 
                     if let Some(trait_def) = trait_def_opt {
                         // Build combined methods: impl methods + default trait methods
-                        let mut combined_methods = impl_block.methods.clone();
+                        let mut combined_methods_bare = impl_block.methods.clone();
                         let impl_method_names: std::collections::HashSet<_> =
                             impl_block.methods.iter().map(|m| m.name.clone()).collect();
 
                         for trait_method in &trait_def.methods {
                             // Add default implementations that weren't overridden
                             if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                combined_methods.push(trait_method.clone());
+                                combined_methods_bare.push(trait_method.clone());
                             }
                         }
+
+                        let combined_methods_arc: Vec<Arc<FunctionDef>> = combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
                             cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), combined_methods.clone());
+                                .insert((trait_name.clone(), type_name.clone()), combined_methods_arc);
                         });
 
                         // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
                         if let Some(class_def) = classes.get_mut(&type_name) {
-                            class_def.methods.extend(combined_methods);
+                            Arc::make_mut(class_def).methods.extend(combined_methods_bare);
                         }
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
                             cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.clone());
+                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect());
                         });
 
                         // Merge impl methods into ClassDef
                         if let Some(class_def) = classes.get_mut(&type_name) {
-                            class_def.methods.extend(impl_block.methods.clone());
+                            Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                         }
                     }
                 } else {
                     // Non-trait impl block - merge methods into ClassDef
                     if let Some(class_def) = classes.get_mut(&type_name) {
-                        class_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                     }
                 }
 
@@ -740,12 +746,13 @@ pub(super) fn exec_block_closure(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", type_name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -806,7 +813,7 @@ fn exec_block_closure_mut(
     nodes: &[Node],
     local_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -1055,9 +1062,9 @@ fn exec_block_closure_mut(
                     },
                 );
                 // Also register in BLOCK_SCOPED_ENUMS for pattern matching support
-                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));
                 // Also register in GLOBAL_ENUMS for cross-function enum visibility
-                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), e.clone()));
+                GLOBAL_ENUMS.with(|cell| cell.borrow_mut().insert(e.name.clone(), Arc::new(e.clone())));
                 last_value = Value::Nil;
             }
             Node::Struct(s) => {
@@ -1069,7 +1076,7 @@ fn exec_block_closure_mut(
                 );
                 classes.insert(
                     s.name.clone(),
-                    ClassDef {
+                    Arc::new(ClassDef {
                         span: s.span,
                         name: s.name.clone(),
                         generic_params: Vec::new(),
@@ -1087,19 +1094,20 @@ fn exec_block_closure_mut(
                         is_generic_template: false,
                         specialization_of: None,
                         type_bindings: std::collections::HashMap::new(),
-                    },
+                    }),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1109,7 +1117,7 @@ fn exec_block_closure_mut(
             }
             Node::Class(c) => {
                 let final_class = inject_mixins(c);
-                classes.insert(final_class.name.clone(), final_class.clone());
+                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
                 local_env.insert(
                     final_class.name.clone(),
                     Value::Constructor {
@@ -1121,12 +1129,13 @@ fn exec_block_closure_mut(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", final_class.name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1160,43 +1169,45 @@ fn exec_block_closure_mut(
 
                     if let Some(trait_def) = trait_def_opt {
                         // Build combined methods: impl methods + default trait methods
-                        let mut combined_methods = impl_block.methods.clone();
+                        let mut combined_methods_bare = impl_block.methods.clone();
                         let impl_method_names: std::collections::HashSet<_> =
                             impl_block.methods.iter().map(|m| m.name.clone()).collect();
 
                         for trait_method in &trait_def.methods {
                             // Add default implementations that weren't overridden
                             if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                combined_methods.push(trait_method.clone());
+                                combined_methods_bare.push(trait_method.clone());
                             }
                         }
+
+                        let combined_methods_arc: Vec<Arc<FunctionDef>> = combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
                             cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), combined_methods.clone());
+                                .insert((trait_name.clone(), type_name.clone()), combined_methods_arc);
                         });
 
                         // Merge impl methods into ClassDef (mirrors interpreter_eval.rs:358-359)
                         if let Some(class_def) = classes.get_mut(&type_name) {
-                            class_def.methods.extend(combined_methods);
+                            Arc::make_mut(class_def).methods.extend(combined_methods_bare);
                         }
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
                             cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.clone());
+                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect());
                         });
 
                         // Merge impl methods into ClassDef
                         if let Some(class_def) = classes.get_mut(&type_name) {
-                            class_def.methods.extend(impl_block.methods.clone());
+                            Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                         }
                     }
                 } else {
                     // Non-trait impl block - merge methods into ClassDef
                     if let Some(class_def) = classes.get_mut(&type_name) {
-                        class_def.methods.extend(impl_block.methods.clone());
+                        Arc::make_mut(class_def).methods.extend(impl_block.methods.clone());
                     }
                 }
 
@@ -1205,12 +1216,13 @@ fn exec_block_closure_mut(
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", type_name, method.name);
-                        functions.insert(mangled.clone(), method.clone());
+                        let arc_method = Arc::new(method.clone());
+                        functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         local_env.insert(
                             mangled.clone(),
                             Value::Function {
                                 name: mangled,
-                                def: Arc::new(method.clone()),
+                                def: arc_method,
                                 captured_env: Arc::new(std::collections::HashMap::new()),
                             },
                         );
@@ -1244,14 +1256,15 @@ fn exec_block_closure_mut(
                 // Register in both local_env and functions map for recursive calls to work
 
                 // Add to functions map so recursive calls can find it
-                functions.insert(f.name.clone(), f.clone());
+                let arc_f = Arc::new(f.clone());
+                functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Also add to local_env as a Function value with captured environment
                 local_env.insert(
                     f.name.clone(),
                     Value::Function {
                         name: f.name.clone(),
-                        def: Arc::new(f.clone()),
+                        def: arc_f,
                         captured_env: Arc::new(local_env.clone()), // Capture current scope
                     },
                 );

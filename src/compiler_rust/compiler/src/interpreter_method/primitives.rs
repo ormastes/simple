@@ -15,7 +15,7 @@ pub fn handle_int_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -87,11 +87,11 @@ pub fn handle_int_methods(
             if let Value::Lambda {
                 params,
                 body,
-                env: mut captured,
+                env: captured,
             } = func
             {
                 for i in 0..n.max(0) {
-                    let mut local_env = captured.clone();
+                    let mut local_env = HashMap::clone(&captured);
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), Value::Int(i));
                     }
@@ -240,7 +240,7 @@ pub fn handle_float_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -443,7 +443,7 @@ pub fn handle_bool_methods(
     args: &[Argument],
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -457,10 +457,11 @@ pub fn handle_bool_methods(
                 if let Value::Lambda {
                     params: _,
                     body,
-                    env: mut captured,
+                    env: captured,
                 } = func
                 {
-                    let result = evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods)?;
+                    let mut local_env = HashMap::clone(&captured);
+                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::some(result)));
                 }
                 return Ok(Some(Value::some(Value::Nil)));
@@ -474,12 +475,13 @@ pub fn handle_bool_methods(
             if let Value::Lambda {
                 params: _,
                 body,
-                env: mut captured,
+                env: captured,
             } = func
             {
+                let mut local_env = HashMap::clone(&captured);
                 return Ok(Some(evaluate_expr(
                     &body,
-                    &mut captured,
+                    &mut local_env,
                     functions,
                     classes,
                     enums,

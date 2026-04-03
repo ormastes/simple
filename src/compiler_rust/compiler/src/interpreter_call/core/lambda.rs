@@ -8,7 +8,7 @@ use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 #[allow(clippy::too_many_arguments)]
@@ -19,7 +19,7 @@ pub(crate) fn exec_lambda(
     call_env: &mut Env,
     captured_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

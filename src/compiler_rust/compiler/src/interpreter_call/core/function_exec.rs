@@ -12,7 +12,7 @@ use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 /// Execute a function body with bound arguments in a local environment.
@@ -28,7 +28,7 @@ fn execute_function_body(
     bound_args: HashMap<String, Value>,
     local_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     wrap_async: bool,
@@ -109,7 +109,7 @@ pub(crate) fn exec_function(
     args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
@@ -124,7 +124,7 @@ pub(crate) fn exec_function_with_values(
     args: &[Value],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -140,7 +140,7 @@ pub(crate) fn exec_function_with_values_and_self(
     args: &[Value],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
@@ -203,7 +203,7 @@ pub(crate) fn exec_function_with_captured_env(
     outer_env: &mut Env,
     captured_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -241,7 +241,7 @@ fn exec_function_inner(
     args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
@@ -337,7 +337,7 @@ fn exec_function_with_values_inner(
     args: &[Value],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, ClassDef>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

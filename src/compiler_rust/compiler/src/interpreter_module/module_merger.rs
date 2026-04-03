@@ -11,13 +11,13 @@ use simple_parser::ast::{ClassDef, EnumDef, Node};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
-type Enums = HashMap<String, EnumDef>;
+type Enums = HashMap<String, Arc<EnumDef>>;
 
 /// Merge module definitions into global state and collect exports
 pub fn merge_module_definitions(
     items: &[Node],
-    functions: &mut HashMap<String, simple_parser::ast::FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &mut Enums,
 ) -> Result<HashMap<String, Value>, CompileError> {
     let mut exports: HashMap<String, Value> = HashMap::new();
@@ -27,19 +27,20 @@ pub fn merge_module_definitions(
         match item {
             Node::Function(f) => {
                 // Add to global functions map
-                functions.insert(f.name.clone(), f.clone());
+                let arc_f = Arc::new(f.clone());
+                functions.insert(f.name.clone(), Arc::clone(&arc_f));
 
                 // Add to exports dict
                 let func_value = Value::Function {
                     name: f.name.clone(),
-                    def: Arc::new(f.clone()),
+                    def: arc_f,
                     captured_env: Arc::new(Env::new()),
                 };
                 exports.insert(f.name.clone(), func_value);
             }
             Node::Class(c) => {
                 // Add to global classes map
-                classes.insert(c.name.clone(), c.clone());
+                classes.insert(c.name.clone(), Arc::new(c.clone()));
 
                 // Add to exports dict
                 exports.insert(
@@ -51,7 +52,7 @@ pub fn merge_module_definitions(
             }
             Node::Enum(e) => {
                 // Add to global enums map - this is critical for enum variant access
-                enums.insert(e.name.clone(), e.clone());
+                enums.insert(e.name.clone(), Arc::new(e.clone()));
 
                 // Export the enum as EnumType for variant construction (EnumName.Variant)
                 exports.insert(
