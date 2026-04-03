@@ -13,56 +13,24 @@ use dashboard.render.progress.{render_progress_bar, render_percentage,
 use dashboard.render.table.{TableBuilder, render_html_table_limited,
     pad_right}
 
+use app.ui.render.types.{RenderConfig, RenderRequest, RenderResult}
+
 # =========================================================================
-# Shared Render Types (from ui_render_feature_caret design)
+# Dashboard-specific render request (extends shared RenderRequest with summary)
 # =========================================================================
 
-struct RenderConfig:
-    mode: text           # "status", "sspec", "todos", "coverage", "full"
-    backend: text        # "auto", "headless", "tui", "web"
-    format: text         # "text", "html", "both"
-    width: i64
-    height: i64
-    theme: text          # "dark", "light"
-    asset_path: text
-    adapter_name: text
-    use_default_demo: bool
-
-fn default_render_config() -> RenderConfig:
-    RenderConfig(
-        mode: "status",
-        backend: "auto",
-        format: "text",
-        width: 80,
-        height: 24,
-        theme: "dark",
-        asset_path: "",
-        adapter_name: "dashboard",
-        use_default_demo: false
-    )
-
-struct RenderRequest:
+struct DashboardRenderRequest:
     config: RenderConfig
     summary: Dict<text, text>
 
-fn render_request(config: RenderConfig, summary: Dict<text, text>) -> RenderRequest:
-    RenderRequest(config: config, summary: summary)
+fn dashboard_render_request(config: RenderConfig, summary: Dict<text, text>) -> DashboardRenderRequest:
+    DashboardRenderRequest(config: config, summary: summary)
 
-struct RenderResult:
-    format: text         # "text", "html", "both"
-    text: text
-    html: text
-    metadata: Dict<text, text>
-    warnings: [text]
-
-fn empty_render_result(format: text) -> RenderResult:
-    RenderResult(
-        format: format,
-        text: "",
-        html: "",
-        metadata: {},
-        warnings: []
-    )
+fn default_dashboard_config() -> RenderConfig:
+    var cfg = RenderConfig.default()
+    cfg.adapter_name = "dashboard"
+    cfg.mode = "status"
+    return cfg
 
 # =========================================================================
 # Dashboard Summary — lightweight snapshot for rendering
@@ -113,7 +81,7 @@ fn dict_int(d: Dict<text, text>, key: text) -> i64:
 # Main Adapter Entry Point
 # =========================================================================
 
-fn render_dashboard(request: RenderRequest) -> RenderResult:
+fn render_dashboard(request: DashboardRenderRequest) -> RenderResult:
     """Render dashboard data according to the request config.
 
     Produces text and/or html output depending on config.format.
@@ -121,7 +89,14 @@ fn render_dashboard(request: RenderRequest) -> RenderResult:
     """
     val summary = summary_from_dict(request.summary)
     val fmt = request.config.format
-    var result = empty_render_result(fmt)
+    var result = RenderResult.empty()
+    result = RenderResult(
+        format: fmt,
+        text_output: result.text_output,
+        html_output: result.html_output,
+        metadata: result.metadata,
+        warnings: result.warnings
+    )
 
     val mode = request.config.mode
     if fmt == "text" or fmt == "both":
@@ -134,8 +109,8 @@ fn render_dashboard(request: RenderRequest) -> RenderResult:
             _: render_status_text(summary)
         result = RenderResult(
             format: result.format,
-            text: text_output,
-            html: result.html,
+            text_output: text_output,
+            html_output: result.html_output,
             metadata: result.metadata,
             warnings: result.warnings
         )
@@ -150,8 +125,8 @@ fn render_dashboard(request: RenderRequest) -> RenderResult:
             _: render_status_html(summary, request.config)
         result = RenderResult(
             format: result.format,
-            text: result.text,
-            html: html_output,
+            text_output: result.text_output,
+            html_output: html_output,
             metadata: result.metadata,
             warnings: result.warnings
         )
@@ -163,8 +138,8 @@ fn render_dashboard(request: RenderRequest) -> RenderResult:
     }
     result = RenderResult(
         format: result.format,
-        text: result.text,
-        html: result.html,
+        text_output: result.text_output,
+        html_output: result.html_output,
         metadata: meta,
         warnings: result.warnings
     )

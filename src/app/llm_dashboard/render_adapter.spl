@@ -20,102 +20,18 @@ use app.llm_dashboard.tui.activity_feed.{FeedState, render_feed}
 use app.llm_dashboard.tui.status_bar.{render_status_bar}
 use app.llm_dashboard.gui.html_views.{generate_agents_html}
 use dashboard.render.colors.{RESET, BOLD, DIM, CYAN}
-
-# =========================================================================
-# Render Contract Types
-# =========================================================================
-
-class RenderConfig:
-    """Configuration for a render request."""
-    mode: text            # "text" | "html" | "tree"
-    backend: text         # "auto" | "headless" | "tui" | "web"
-    format: text          # "text" | "html"
-    width: i32
-    height: i32
-    theme: text           # "dark" | "light"
-    asset_path: text
-    adapter_name: text
-    use_default_demo: bool
-
-    static fn default() -> RenderConfig:
-        return RenderConfig(
-            mode: "text",
-            backend: "auto",
-            format: "text",
-            width: 120,
-            height: 40,
-            theme: "dark",
-            asset_path: "",
-            adapter_name: "llm_dashboard",
-            use_default_demo: false
-        )
-
-    static fn text_export(width: i32, height: i32) -> RenderConfig:
-        """Config for plain-text export."""
-        return RenderConfig(
-            mode: "text",
-            backend: "headless",
-            format: "text",
-            width: width,
-            height: height,
-            theme: "dark",
-            asset_path: "",
-            adapter_name: "llm_dashboard",
-            use_default_demo: false
-        )
-
-    static fn html_export() -> RenderConfig:
-        """Config for HTML export."""
-        return RenderConfig(
-            mode: "html",
-            backend: "headless",
-            format: "html",
-            width: 0,
-            height: 0,
-            theme: "dark",
-            asset_path: "",
-            adapter_name: "llm_dashboard",
-            use_default_demo: false
-        )
-
-class RenderRequest:
-    """A render request combining config with data source."""
-    config: RenderConfig
-    store: AgentDashboardStore
-
-    static fn new(config: RenderConfig, store: AgentDashboardStore) -> RenderRequest:
-        return RenderRequest(config: config, store: store)
-
-class RenderResult:
-    """Result of a render operation."""
-    format: text          # "text" | "html"
-    text_content: text    # Plain text output (TUI-style, with or without ANSI)
-    html_content: text    # HTML output
-    metadata: [text]      # Key-value metadata pairs
-    warnings: [text]      # Any warnings during rendering
-
-    static fn empty(format: text) -> RenderResult:
-        return RenderResult(
-            format: format,
-            text_content: "",
-            html_content: "",
-            metadata: [],
-            warnings: []
-        )
+use app.ui.render.types.{RenderConfig, RenderRequest, RenderResult}
 
 # =========================================================================
 # Render Adapter Entry Point
 # =========================================================================
 
-fn render_dashboard(request: RenderRequest) -> RenderResult:
+fn render_dashboard(config: RenderConfig, store: AgentDashboardStore) -> RenderResult:
     """Render the LLM dashboard via the shared render contract.
 
     Dispatches to text or HTML rendering based on config.format.
     Both paths delegate to existing tui/ and gui/ modules.
     """
-    val config = request.config
-    val store = request.store
-
     match config.format:
         "html":
             return render_as_html(store, config)
@@ -124,10 +40,10 @@ fn render_dashboard(request: RenderRequest) -> RenderResult:
         "tree":
             return render_as_tree(store, config)
         _:
-            var result = RenderResult.empty("text")
+            var result = RenderResult.empty()
             result.warnings = ["Unknown format: {config.format}, falling back to text"]
             val text_result = render_as_text(store, config)
-            result.text_content = text_result.text_content
+            result.text_output = text_result.text_output
             result.metadata = text_result.metadata
             return result
 
@@ -141,7 +57,7 @@ fn render_as_text(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
     Produces a multi-line text snapshot of the dashboard state including
     rooms, agent tree, activity feed, and status bar.
     """
-    var result = RenderResult.empty("text")
+    var result = RenderResult.empty()
     var lines: [text] = []
 
     # Header
@@ -153,7 +69,7 @@ fn render_as_text(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
         lines.push("JSONL Transcript Watching Unavailable")
         lines.push("Expected directory: ~/.claude/projects/")
         lines.push("Run Claude Code to generate transcript files.")
-        result.text_content = join_lines(lines)
+        result.text_output = join_lines(lines)
         result.warnings = ["JSONL watching not available"]
         return result
 
@@ -203,7 +119,7 @@ fn render_as_text(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
     val status = render_status_bar(store)
     lines.push(status)
 
-    result.text_content = join_lines(lines)
+    result.text_output = join_lines(lines)
     result.metadata = build_metadata(store)
     return result
 
@@ -213,7 +129,7 @@ fn render_as_text(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
 
 fn render_as_tree(store: AgentDashboardStore, config: RenderConfig) -> RenderResult:
     """Render only the agent hierarchy tree as text."""
-    var result = RenderResult.empty("text")
+    var result = RenderResult.empty()
     var lines: [text] = []
 
     lines.push("{BOLD}Agent Hierarchy{RESET}")
@@ -227,7 +143,7 @@ fn render_as_tree(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
     lines.push("")
     lines.push(store.summary_line())
 
-    result.text_content = join_lines(lines)
+    result.text_output = join_lines(lines)
     result.metadata = build_metadata(store)
     return result
 
@@ -242,14 +158,14 @@ fn render_as_html(store: AgentDashboardStore, config: RenderConfig) -> RenderRes
     complete HTML document with CSS sprites, room grid, agent tree,
     activity feed, and status bar.
     """
-    var result = RenderResult.empty("html")
+    var result = RenderResult.empty()
 
     if not store.is_available():
-        result.html_content = generate_unavailable_html()
+        result.html_output = generate_unavailable_html()
         result.warnings = ["JSONL watching not available"]
         return result
 
-    result.html_content = generate_agents_html(store)
+    result.html_output = generate_agents_html(store)
     result.metadata = build_metadata(store)
     return result
 
@@ -276,9 +192,9 @@ fn append_indented(target: [text], source: [text], indent: text):
     for line in source:
         target.push("{indent}{line}")
 
-fn build_metadata(store: AgentDashboardStore) -> [text]:
+fn build_metadata(store: AgentDashboardStore) -> Dict<text, text>:
     """Build metadata key-value pairs about the current dashboard state."""
-    var meta: [text] = []
+    var meta: Dict<text, text> = {}
     val agents = store.tree.agent_count()
     val reads = store.total_files_read()
     val writes = store.total_files_written()
@@ -286,22 +202,22 @@ fn build_metadata(store: AgentDashboardStore) -> [text]:
     val tools = store.total_tools_used()
     val events = store.total_events
 
-    meta.push("adapter=llm_dashboard")
-    meta.push("agents={agents}")
-    meta.push("files_read={reads}")
-    meta.push("files_written={writes}")
-    meta.push("urls={urls}")
-    meta.push("tools={tools}")
-    meta.push("total_events={events}")
+    meta["adapter"] = "llm_dashboard"
+    meta["agents"] = "{agents}"
+    meta["files_read"] = "{reads}"
+    meta["files_written"] = "{writes}"
+    meta["urls"] = "{urls}"
+    meta["tools"] = "{tools}"
+    meta["total_events"] = "{events}"
 
     # Provider connection status
     for status in store.llm_statuses:
         val pname = provider_name(status.provider).to_lower()
         val connected = if status.connected: "true" else: "false"
-        meta.push("{pname}_connected={connected}")
+        meta["{pname}_connected"] = connected
         if status.connected:
             val tokens = status.tokens_used
-            meta.push("{pname}_tokens={tokens}")
+            meta["{pname}_tokens"] = "{tokens}"
 
     return meta
 
@@ -349,14 +265,16 @@ p { color: #8b949e; line-height: 1.6; }
 
 fn render_text_snapshot(store: AgentDashboardStore) -> text:
     """Quick text snapshot of the dashboard — convenience wrapper."""
-    val config = RenderConfig.text_export(width: 120, height: 40)
-    val request = RenderRequest.new(config, store)
-    val result = render_dashboard(request)
-    return result.text_content
+    var config = RenderConfig.text_export()
+    config.width = 120
+    config.height = 40
+    config.adapter_name = "llm_dashboard"
+    val result = render_dashboard(config, store)
+    return result.text_output
 
 fn render_html_snapshot(store: AgentDashboardStore) -> text:
     """Quick HTML snapshot of the dashboard — convenience wrapper."""
-    val config = RenderConfig.html_export()
-    val request = RenderRequest.new(config, store)
-    val result = render_dashboard(request)
-    return result.html_content
+    var config = RenderConfig.html_export()
+    config.adapter_name = "llm_dashboard"
+    val result = render_dashboard(config, store)
+    return result.html_output

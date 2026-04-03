@@ -9,7 +9,11 @@ const fs = require('fs');
 const os = require('os');
 
 const T32_ROOT_REL = 'examples/10_tooling/trace32_tools';
-const ENTRY_REL = T32_ROOT_REL + '/t32_lsp_mcp/main.spl';
+
+function getWrapperPath(repoRoot) {
+  const ext = os.platform() === 'win32' ? '.cmd' : '';
+  return path.join(repoRoot, 'bin', `t32_lsp_mcp_server${ext}`);
+}
 
 function findRuntime() {
   const ext = os.platform() === 'win32' ? '.exe' : '';
@@ -53,25 +57,32 @@ function findRuntime() {
 }
 
 const { binary, repoRoot } = findRuntime();
-const entryPath = path.join(repoRoot, ENTRY_REL);
+const wrapperPath = getWrapperPath(repoRoot);
 const t32Root = path.join(repoRoot, T32_ROOT_REL);
+const env = {
+  ...process.env,
+  SIMPLE_BINARY: binary,
+  SIMPLE_LIB: process.env.SIMPLE_LIB || t32Root,
+  SIMPLE_RUNTIME: process.env.SIMPLE_RUNTIME || binary,
+  T32_LSP_MCP_TOOL_RUNNER: process.env.T32_LSP_MCP_TOOL_RUNNER ||
+    path.join(repoRoot, T32_ROOT_REL, 't32_lsp_mcp', 'tool_runner.spl'),
+  T32_LSP_MCP_TOOL_DAEMON: process.env.T32_LSP_MCP_TOOL_DAEMON ||
+    path.join(repoRoot, T32_ROOT_REL, 'cmm_lsp', 'mcp_daemon.spl'),
+  T32_LSP_MCP_TOOL_DAEMON_DIR: process.env.T32_LSP_MCP_TOOL_DAEMON_DIR ||
+    path.join(os.tmpdir(), 't32_lsp_mcp_shared'),
+  SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
+  RUST_LOG: process.env.RUST_LOG || 'error'
+};
 
-const child = spawn(binary, [entryPath, ...process.argv.slice(2)], {
-  stdio: 'inherit',
-  env: {
-    ...process.env,
-    SIMPLE_LIB: process.env.SIMPLE_LIB || t32Root,
-    SIMPLE_RUNTIME: process.env.SIMPLE_RUNTIME || binary,
-    T32_LSP_MCP_TOOL_RUNNER: process.env.T32_LSP_MCP_TOOL_RUNNER ||
-      path.join(repoRoot, T32_ROOT_REL, 't32_lsp_mcp', 'tool_runner.spl'),
-    T32_LSP_MCP_TOOL_DAEMON: process.env.T32_LSP_MCP_TOOL_DAEMON ||
-      path.join(repoRoot, T32_ROOT_REL, 'cmm_lsp', 'mcp_daemon.spl'),
-    T32_LSP_MCP_TOOL_DAEMON_DIR: process.env.T32_LSP_MCP_TOOL_DAEMON_DIR ||
-      path.join(os.tmpdir(), 't32_lsp_mcp_shared'),
-    SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
-    RUST_LOG: process.env.RUST_LOG || 'error'
-  }
-});
+const child = fs.existsSync(wrapperPath)
+  ? spawn(wrapperPath, process.argv.slice(2), { stdio: 'inherit', env })
+  : spawn(binary, [
+      path.join(repoRoot, T32_ROOT_REL, 't32_lsp_mcp', 'main.spl'),
+      ...process.argv.slice(2)
+    ], {
+      stdio: 'inherit',
+      env
+    });
 
 child.on('error', (err) => {
   if (err.code === 'ENOENT') {
