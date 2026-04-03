@@ -1,12 +1,14 @@
 # codex-system-test
 # Focused SSpec coverage for deterministic JSON library behavior.
 
-use lib.json.types.{json_number, json_string, json_object, json_is_object, json_to_number, json_to_string}
+use lib.json.types.{json_number, json_string, json_object, json_array, json_is_object, json_to_number, json_to_string}
 use lib.json.object_ops.{json_object_get}
 use lib.json.parser.{json_parse, json_parse_with_error}
 use lib.json.path_ops.{json_path_get, json_path_set}
 use lib.json.serializer.{json_minify, json_beautify}
-use lib.json.utilities.{json_unflatten_object}
+use lib.json.builder.{JsonBuilder}
+use lib.json.utilities.{json_diff, json_patch, json_unflatten_object}
+use lib.json.validation.{json_deep_equals}
 
 describe "JSON Library Logic":
     describe "parser strictness":
@@ -23,6 +25,31 @@ describe "JSON Library Logic":
             val result = json_parse_with_error("{\"ok\":true} []")
             expect(result.0).to_be_nil()
             expect(result.1).to_contain("trailing")
+
+        it "rejects trailing commas in objects":
+            val parsed = json_parse("{\"ok\":true,}")
+            expect(parsed).to_be_nil()
+
+            val result = json_parse_with_error("{\"ok\":true,}")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Trailing comma")
+
+        it "rejects trailing commas in arrays":
+            val parsed = json_parse("[1,2,]")
+            expect(parsed).to_be_nil()
+
+            val result = json_parse_with_error("[1,2,]")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Unexpected token")
+
+        it "reports unterminated strings":
+            val result = json_parse_with_error("{\"name\":\"Ada}")
+            expect(result.0).to_be_nil()
+            expect(result.1).to_contain("Unterminated string")
+
+        it "decodes escaped slash and control escapes in strings":
+            val parsed = json_parse("{\"path\":\"https:\\/\\/example.com\\b\\f\"}")
+            expect(json_to_string(json_path_get(parsed, "path"))).to_equal("https://example.com\b\f")
 
         it "keeps invalid trailing input unchanged during minify and beautify":
             val input = "{\"ok\":true} garbage"
@@ -54,3 +81,34 @@ describe "JSON Library Logic":
             val nested = json_unflatten_object(flat)
             expect(json_to_string(json_path_get(nested, "user.name"))).to_equal("Ada")
             expect(json_to_number(json_path_get(nested, "user.age"))).to_equal(37)
+
+    describe "diff and patch behavior":
+        it "applies object diffs back to the original object":
+            val original = json_object({
+                "user": json_object({
+                    "name": json_string("Ada"),
+                    "age": json_number(36)
+                }),
+                "tags": json_array([json_string("core")])
+            })
+            val updated = json_object({
+                "user": json_object({
+                    "name": json_string("Ada"),
+                    "age": json_number(37)
+                }),
+                "tags": json_array([json_string("core")]),
+                "active": json_string("yes")
+            })
+
+            val diff = json_diff(original, updated)
+            val patched = json_patch(original, diff)
+
+            expect(json_deep_equals(patched, updated)).to_equal(true)
+
+    describe "builder escaping":
+        it "escapes object keys as well as values":
+            val built = JsonBuilder.object()
+                .field("say\"hi", "line\nbreak")
+                .build()
+
+            expect(built).to_equal("{\"say\\\"hi\": \"line\\nbreak\"}")
