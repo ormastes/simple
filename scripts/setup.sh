@@ -466,7 +466,7 @@ if [ -x "${REPO_ROOT}/bin/release/t32_mcp_native" ]; then
 fi
 HOST_KERNEL="$(uname -s 2>/dev/null || echo unknown)"
 NATIVE_REQUESTED=0
-case "${T32_MCP_USE_NATIVE:-0}" in
+case "${T32_MCP_USE_NATIVE:-auto}" in
   0|false|FALSE|no|NO|off|OFF)
     NATIVE_REQUESTED=0
     ;;

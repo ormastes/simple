@@ -1,0 +1,259 @@
+@allow(primitive_api)
+# 2D Engine — Engine Facade
+#
+# High-level entry point that auto-selects the best available rendering
+# backend and delegates all drawing operations to it.
+#
+# Backend priority: cuda > vulkan > opengl > software > cpu
+#
+# Usage:
+#   use std.gpu.engine2d.engine.{Engine2D}
+#
+#   var engine = Engine2D.create(800, 600)
+#   engine.clear(color_white())
+#   engine.draw_rect_filled(10, 10, 100, 50, color_red())
+#   engine.present()
+#   val pixels = engine.read_pixels()
+
+use std.gpu.engine2d.backend.{RenderBackend}
+use std.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+
+# ============================================================================
+# Engine2D
+# ============================================================================
+
+class Engine2D:
+    """2D rendering engine with automatic backend selection.
+
+    Creates the best available backend at initialization time. All drawing
+    methods delegate to the active backend through the RenderBackend trait.
+
+    Lifecycle:
+        1. Engine2D.create(width, height)  — auto-detect and init backend
+        2. clear(), draw_*(), present()     — render frames
+        3. shutdown()                       — release resources
+
+    Example:
+        var engine = Engine2D.create(800, 600)
+        print "Using backend: {engine.backend_name()}"
+
+        engine.clear(rgb(30, 30, 30))
+        engine.draw_rect_filled(10, 10, 200, 100, rgb(255, 0, 0))
+        engine.draw_text(20, 40, "Hello Engine2D", rgb(255, 255, 255), 14)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        engine.shutdown()
+    """
+
+    backend: RenderBackend
+    w: i32
+    h: i32
+
+    # ========================================================================
+    # Constructors
+    # ========================================================================
+
+    static fn create(width: i32, height: i32) -> Engine2D:
+        """Create engine with auto-detected best backend.
+
+        Tries backends in priority order: cuda, vulkan, opengl, software, cpu.
+        Falls back to cpu if all others fail.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+
+        Returns:
+            Initialized Engine2D
+        """
+        val best = detect_best_backend()
+        Engine2D.create_with_backend(width, height, best)
+
+    static fn create_with_backend(width: i32, height: i32, backend_name: text) -> Engine2D:
+        """Create engine with a specific backend.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+            backend_name: One of "cuda", "vulkan", "opengl", "software", "cpu"
+
+        Returns:
+            Initialized Engine2D (falls back to cpu on failure)
+        """
+        if backend_name == "cuda":
+            var cuda = CudaBackend.create()
+            if cuda.init(width, height):
+                return Engine2D(backend: cuda, w: width, h: height)
+
+        if backend_name == "vulkan":
+            var vulkan = VulkanBackend.create()
+            if vulkan.init(width, height):
+                return Engine2D(backend: vulkan, w: width, h: height)
+
+        if backend_name == "opengl":
+            var opengl = OpenGLBackend.create()
+            if opengl.init(width, height):
+                return Engine2D(backend: opengl, w: width, h: height)
+
+        if backend_name == "software":
+            var sw = SoftwareBackend.create()
+            if sw.init(width, height):
+                return Engine2D(backend: sw, w: width, h: height)
+
+        # Fallback: CPU backend always succeeds
+        var cpu = CpuBackend.create()
+        cpu.init(width, height)
+        Engine2D(backend: cpu, w: width, h: height)
+
+    # ========================================================================
+    # Backend Discovery
+    # ========================================================================
+
+    static fn detect_best_backend() -> text:
+        """Detect the best available backend.
+
+        Priority: cuda > vulkan > opengl > software > cpu
+
+        Returns:
+            Backend name string
+        """
+        # Try CUDA
+        var cuda = CudaBackend.create()
+        if cuda.init(1, 1):
+            cuda.shutdown()
+            return "cuda"
+
+        # Try Vulkan
+        var vulkan = VulkanBackend.create()
+        if vulkan.init(1, 1):
+            vulkan.shutdown()
+            return "vulkan"
+
+        # Try OpenGL
+        var opengl = OpenGLBackend.create()
+        if opengl.init(1, 1):
+            opengl.shutdown()
+            return "opengl"
+
+        # Software is always available but use it over plain CPU
+        "software"
+
+    static fn list_backends() -> [text]:
+        """List all available backend names.
+
+        Returns:
+            Array of backend name strings that can successfully init
+        """
+        var available: [text] = []
+
+        var cuda = CudaBackend.create()
+        if cuda.init(1, 1):
+            available.push("cuda")
+            cuda.shutdown()
+
+        var vulkan = VulkanBackend.create()
+        if vulkan.init(1, 1):
+            available.push("vulkan")
+            vulkan.shutdown()
+
+        var opengl = OpenGLBackend.create()
+        if opengl.init(1, 1):
+            available.push("opengl")
+            opengl.shutdown()
+
+        # Software and CPU are always available
+        available.push("software")
+        available.push("cpu")
+
+        available
+
+    # ========================================================================
+    # Backend Info
+    # ========================================================================
+
+    fn backend_name() -> text:
+        """Get the name of the active backend."""
+        self.backend.name()
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    # ========================================================================
+    # Drawing Operations (delegate to backend)
+    # ========================================================================
+
+    me clear(color: u32):
+        """Clear the framebuffer to a solid color."""
+        self.backend.clear(color)
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a rectangle outline."""
+        self.backend.draw_rect(x, y, w, h, color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a filled rectangle."""
+        self.backend.draw_rect_filled(x, y, w, h, color)
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        """Draw a line between two points."""
+        self.backend.draw_line(x1, y1, x2, y2, color, thickness)
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw a circle outline."""
+        self.backend.draw_circle(cx, cy, r, color)
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw a filled circle."""
+        self.backend.draw_circle_filled(cx, cy, r, color)
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        """Draw a rounded rectangle outline."""
+        self.backend.draw_rounded_rect(x, y, w, h, radius, color)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        """Draw a filled triangle."""
+        self.backend.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        """Draw a rectangle with vertical gradient."""
+        self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        """Draw text using bitmap font."""
+        self.backend.draw_text(x, y, text_val, color, font_size)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        """Blit a pixel array onto the framebuffer."""
+        self.backend.draw_image(x, y, w, h, pixels)
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        """Set the clipping rectangle. Drawing outside this rect is discarded."""
+        self.backend.set_clip(x, y, w, h)
+
+    me clear_clip():
+        """Remove the clipping rectangle."""
+        self.backend.clear_clip()
+
+    me present():
+        """Flush the framebuffer to the screen / finalize the frame."""
+        self.backend.present()
+
+    fn read_pixels() -> [u32]:
+        """Read the framebuffer contents as a flat u32 array."""
+        self.backend.read_pixels()
+
+    # ========================================================================
+    # Lifecycle
+    # ========================================================================
+
+    me shutdown():
+        """Shut down the backend and release all resources."""
+        self.backend.shutdown()
