@@ -701,12 +701,28 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
 
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
-    return (a == b) ? 1 : 0;
+    /* Fast path: bitwise identical (same int, same pointer, both nil) */
+    if (a == b) return 1;
+    /* Heap objects: compare by content if both are strings */
+    if (IS_HEAP(a) && IS_HEAP(b)) {
+        HeapHeader *ha = (HeapHeader *)DECODE_PTR(a);
+        HeapHeader *hb = (HeapHeader *)DECODE_PTR(b);
+        if (ha && hb && ha->type == HEAP_STRING && hb->type == HEAP_STRING) {
+            RuntimeString *sa = (RuntimeString *)ha;
+            RuntimeString *sb = (RuntimeString *)hb;
+            if (sa->len != sb->len) return 0;
+            for (uint32_t i = 0; i < sa->len; i++) {
+                if (sa->data[i] != sb->data[i]) return 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
 }
 
 RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 {
-    return (a != b) ? 1 : 0;
+    return rt_native_eq(a, b) ? 0 : 1;
 }
 
 /* ===================================================================
