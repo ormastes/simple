@@ -1,0 +1,63 @@
+# Thread Types — L4-style execution context separate from address space
+#
+# In L4 microkernel design, a Thread is an execution context that runs
+# within an address space (VmSpace). Multiple threads can share the
+# same address space (lightweight threads) or each have their own
+# (traditional processes).
+#
+# Thread objects own: saved CPU registers, kernel stack, scheduling state.
+# They do NOT own: page tables, capabilities, file descriptors.
+
+use os.kernel.types.task_types.{TaskPriority, TaskState}
+
+# Thread ID — unique per-thread, not per-process
+struct ThreadId:
+    id: u64
+
+# Thread CPU context — architecture-neutral representation
+# Architecture-specific save/restore lives in arch/*/context.spl
+struct ThreadContext:
+    # General-purpose register save area (architecture-specific count)
+    regs: [u64; 32]
+    # Instruction pointer / program counter
+    pc: u64
+    # Stack pointer
+    sp: u64
+    # Flags / status register
+    flags: u64
+    # FPU/SIMD state pointer (nil if not used)
+    fpu_state: u64?
+
+# Thread Control Block
+struct Thread:
+    id: ThreadId
+    # The VmSpace this thread executes in
+    vmspace_id: u64
+    # Scheduling
+    state: TaskState
+    priority: TaskPriority
+    time_slice_remaining: u64
+    # Context
+    context: ThreadContext
+    kernel_stack_base: u64
+    kernel_stack_size: u64
+    # Blocking
+    blocked_on: BlockTarget?
+    # Fault handler — endpoint to deliver exceptions to (L4 style)
+    fault_handler: u64?
+
+# What a thread can be blocked on
+enum BlockTarget:
+    EndpointRecv(endpoint_id: u64)
+    EndpointSend(endpoint_id: u64)
+    NotificationWait(notification_id: u64)
+    Sleep(wake_at_ticks: u64)
+    PageFault(fault_addr: u64)
+
+# Thread creation parameters
+struct ThreadCreateParams:
+    vmspace_id: u64
+    entry_point: u64
+    stack_pointer: u64
+    priority: TaskPriority
+    fault_handler: u64?

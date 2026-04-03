@@ -387,3 +387,172 @@ fn test_all_architectures() -> bool:
     print "Results: {passed_count} passed, {failed_count} failed"
 
     all_passed
+
+# ===========================================================================
+# QEMU Scenarios — named device/machine configurations for testing
+# ===========================================================================
+
+class QemuScenario:
+    """Named QEMU configuration for specific test/development scenarios.
+
+    Instead of hardcoding QEMU flags per target, scenarios let tests
+    bind to specific machine shapes (e.g., NVMe lab, GPU test, network).
+    """
+    name: text
+    arch: Architecture
+    machine: text
+    cpu: text
+    memory: text
+    qemu_extra: [text]
+    gui_mode: bool
+    description: text
+
+fn scenario_rv64_base() -> QemuScenario:
+    """RV64 baseline — OpenSBI + virt, serial only."""
+    QemuScenario(
+        name: "rv64-base",
+        arch: Architecture.Riscv64,
+        machine: "virt",
+        cpu: "rv64",
+        memory: "256M",
+        qemu_extra: ["-bios", "default"],
+        gui_mode: false,
+        description: "RISC-V 64 baseline (OpenSBI, serial-only)"
+    )
+
+fn scenario_rv64_dtb_pci() -> QemuScenario:
+    """RV64 with PCIe — for DTB discovery and PCI driver testing."""
+    QemuScenario(
+        name: "rv64-dtb-pci",
+        arch: Architecture.Riscv64,
+        machine: "virt",
+        cpu: "rv64",
+        memory: "256M",
+        qemu_extra: ["-bios", "default", "-device", "pcie-root-port,id=rp0,slot=0"],
+        gui_mode: false,
+        description: "RISC-V 64 with PCIe host bridge for DTB/PCI discovery"
+    )
+
+fn scenario_x64_pci_lab() -> QemuScenario:
+    """x86_64 Q35 PCI lab — for PCIe device testing."""
+    QemuScenario(
+        name: "x64-pci-lab",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false,
+        description: "x86_64 Q35 PCIe lab"
+    )
+
+fn scenario_x64_nvme() -> QemuScenario:
+    """x86_64 with NVMe — for block device driver testing."""
+    QemuScenario(
+        name: "x64-nvme",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-drive", "file=build/os/nvme.img,if=none,id=nvm,format=raw",
+            "-device", "nvme,serial=deadbeef,drive=nvm"
+        ],
+        gui_mode: false,
+        description: "x86_64 with NVMe block device"
+    )
+
+fn scenario_x64_net_user() -> QemuScenario:
+    """x86_64 with virtio-net (user mode networking)."""
+    QemuScenario(
+        name: "x64-net-user",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-netdev", "user,id=n0",
+            "-device", "virtio-net-pci,netdev=n0"
+        ],
+        gui_mode: false,
+        description: "x86_64 with virtio-net (QEMU user-mode networking)"
+    )
+
+fn scenario_x64_gpu_2d() -> QemuScenario:
+    """x86_64 with virtio-gpu 2D scanout."""
+    QemuScenario(
+        name: "x64-gpu-2d",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: ["-device", "virtio-gpu", "-vga", "none"],
+        gui_mode: true,
+        description: "x86_64 with virtio-gpu 2D scanout"
+    )
+
+fn scenario_x64_gui() -> QemuScenario:
+    """x86_64 GUI — BGA framebuffer for desktop compositor."""
+    QemuScenario(
+        name: "x64-gui",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "512M",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-vga", "std"
+        ],
+        gui_mode: true,
+        description: "x86_64 BGA framebuffer GUI"
+    )
+
+fn get_all_scenarios() -> [QemuScenario]:
+    """Returns all defined QEMU scenarios."""
+    [
+        scenario_rv64_base(),
+        scenario_rv64_dtb_pci(),
+        scenario_x64_pci_lab(),
+        scenario_x64_nvme(),
+        scenario_x64_net_user(),
+        scenario_x64_gpu_2d(),
+        scenario_x64_gui()
+    ]
+
+fn get_scenario(name: text) -> QemuScenario?:
+    """Look up a scenario by name."""
+    for s in get_all_scenarios():
+        if s.name == name:
+            return s
+    nil
+
+fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
+    """Build QEMU command line from a scenario."""
+    val qemu_bin = match scenario.arch:
+        Architecture.X86_64: "qemu-system-x86_64"
+        Architecture.Riscv64: "qemu-system-riscv64"
+        Architecture.Riscv32: "qemu-system-riscv32"
+        Architecture.Arm64: "qemu-system-aarch64"
+        Architecture.Arm32: "qemu-system-arm"
+        _: "qemu-system-x86_64"
+
+    var args: [text] = [qemu_bin]
+    args.push("-machine")
+    args.push(scenario.machine)
+    args.push("-cpu")
+    args.push(scenario.cpu)
+    args.push("-m")
+    args.push(scenario.memory)
+    args.push("-serial")
+    args.push("stdio")
+    if not scenario.gui_mode:
+        args.push("-display")
+        args.push("none")
+    args.push("-no-reboot")
+    args.push("-kernel")
+    args.push(kernel_path)
+    for extra in scenario.qemu_extra:
+        args.push(extra)
+    args

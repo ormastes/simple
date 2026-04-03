@@ -518,6 +518,10 @@ RuntimeValue rt_len(RuntimeValue v)
         RuntimeArray *a = (RuntimeArray *)h;
         return ENCODE_INT(a->len);
     }
+    if (h->type == HEAP_MAP) {
+        RuntimeMap *m = (RuntimeMap *)h;
+        return ENCODE_INT(m->len);
+    }
     return ENCODE_INT(0);
 }
 
@@ -917,40 +921,211 @@ void _start(void)
 #define V1(n) void n(RuntimeValue a) { (void)a; }
 #define V2(n) void n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
 
-/* --- Arithmetic / comparison --- */
-S2(rt_add)
-S2(rt_sub)
-S2(rt_mul)
-S2(rt_div)
-S2(rt_mod)
-S2(rt_pow)
-S2(rt_eq)
-S2(rt_ne)
-S2(rt_lt)
-S2(rt_gt)
-S2(rt_le)
-S2(rt_ge)
-S2(rt_and)
-S2(rt_or)
-S1(rt_not)
-S2(rt_shl)
-S2(rt_shr)
-S2(rt_bitand)
-S2(rt_bitor)
-S2(rt_bitxor)
-S1(rt_bitnot)
-S1(rt_neg)
+/* --- Arithmetic / comparison ---
+ *
+ * Cranelift emits raw i64 values.  These operate on tagged RuntimeValues:
+ * integer args are ENCODE_INT(n) = n<<3, results likewise.
+ * Comparison results are raw 1 or 0 (Cranelift boolean convention).
+ */
 
-/* --- Type introspection / conversion --- */
-S1(rt_type_of)
-S1(rt_is_nil)
-S1(rt_is_int)
-S1(rt_is_float)
-S1(rt_is_string)
-S1(rt_is_bool)
-S1(rt_is_array)
-S1(rt_is_map)
-S1(rt_is_object)
+RuntimeValue rt_add(RuntimeValue a, RuntimeValue b)
+{
+    if (IS_INT(a) && IS_INT(b))
+        return ENCODE_INT(DECODE_INT(a) + DECODE_INT(b));
+    /* String concat fallback */
+    if (IS_HEAP(a) || IS_HEAP(b))
+        return rt_string_concat(a, b);
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_sub(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) - DECODE_INT(b));
+}
+
+RuntimeValue rt_mul(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) * DECODE_INT(b));
+}
+
+RuntimeValue rt_div(RuntimeValue a, RuntimeValue b)
+{
+    int64_t denom = DECODE_INT(b);
+    if (denom == 0) return ENCODE_INT(0); /* avoid div-by-zero trap */
+    return ENCODE_INT(DECODE_INT(a) / denom);
+}
+
+RuntimeValue rt_mod(RuntimeValue a, RuntimeValue b)
+{
+    int64_t denom = DECODE_INT(b);
+    if (denom == 0) return ENCODE_INT(0);
+    return ENCODE_INT(DECODE_INT(a) % denom);
+}
+
+RuntimeValue rt_pow(RuntimeValue a, RuntimeValue b)
+{
+    int64_t base = DECODE_INT(a);
+    int64_t exp  = DECODE_INT(b);
+    if (exp < 0) return ENCODE_INT(0);
+    int64_t result = 1;
+    for (int64_t i = 0; i < exp; i++) result *= base;
+    return ENCODE_INT(result);
+}
+
+RuntimeValue rt_eq(RuntimeValue a, RuntimeValue b)
+{
+    return rt_native_eq(a, b) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_ne(RuntimeValue a, RuntimeValue b)
+{
+    return rt_native_eq(a, b) ? FALSE_VALUE : TRUE_VALUE;
+}
+
+RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) < DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) > DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_le(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) <= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) >= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_and(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) && DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_or(RuntimeValue a, RuntimeValue b)
+{
+    return (DECODE_INT(a) || DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_not(RuntimeValue a)
+{
+    return DECODE_INT(a) ? FALSE_VALUE : TRUE_VALUE;
+}
+
+RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) << DECODE_INT(b));
+}
+
+RuntimeValue rt_shr(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) >> DECODE_INT(b));
+}
+
+RuntimeValue rt_bitand(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) & DECODE_INT(b));
+}
+
+RuntimeValue rt_bitor(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) | DECODE_INT(b));
+}
+
+RuntimeValue rt_bitxor(RuntimeValue a, RuntimeValue b)
+{
+    return ENCODE_INT(DECODE_INT(a) ^ DECODE_INT(b));
+}
+
+RuntimeValue rt_bitnot(RuntimeValue a)
+{
+    return ENCODE_INT(~DECODE_INT(a));
+}
+
+RuntimeValue rt_neg(RuntimeValue a)
+{
+    return ENCODE_INT(-DECODE_INT(a));
+}
+
+/* --- Type introspection / conversion ---
+ *
+ * rt_typeof returns a string describing the type.
+ * rt_is_* predicates return raw 1 or 0 for Cranelift boolean ABI.
+ */
+
+RuntimeValue rt_type_of(RuntimeValue val)
+{
+    if (IS_NIL(val))   return rt_string_from_cstr("nil");
+    if (IS_INT(val))   return rt_string_from_cstr("int");
+    if (IS_FLOAT(val)) return rt_string_from_cstr("float");
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h) {
+            if (h->type == HEAP_STRING) return rt_string_from_cstr("string");
+            if (h->type == HEAP_ARRAY)  return rt_string_from_cstr("array");
+            if (h->type == HEAP_MAP)    return rt_string_from_cstr("map");
+            if (h->type == HEAP_OBJECT) return rt_string_from_cstr("object");
+        }
+        return rt_string_from_cstr("heap");
+    }
+    return rt_string_from_cstr("unknown");
+}
+
+RuntimeValue rt_is_nil(RuntimeValue val)
+{
+    return IS_NIL(val) ? 1 : 0;
+}
+
+RuntimeValue rt_is_int(RuntimeValue val)
+{
+    return IS_INT(val) ? 1 : 0;
+}
+
+RuntimeValue rt_is_float(RuntimeValue val)
+{
+    return IS_FLOAT(val) ? 1 : 0;
+}
+
+RuntimeValue rt_is_string(RuntimeValue val)
+{
+    if (!IS_HEAP(val)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    return (h && h->type == HEAP_STRING) ? 1 : 0;
+}
+
+RuntimeValue rt_is_bool(RuntimeValue val)
+{
+    /* Booleans are encoded as ENCODE_INT(0) or ENCODE_INT(1) */
+    if (!IS_INT(val)) return 0;
+    int64_t v = DECODE_INT(val);
+    return (v == 0 || v == 1) ? 1 : 0;
+}
+
+RuntimeValue rt_is_array(RuntimeValue val)
+{
+    if (!IS_HEAP(val)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    return (h && h->type == HEAP_ARRAY) ? 1 : 0;
+}
+
+RuntimeValue rt_is_map(RuntimeValue val)
+{
+    if (!IS_HEAP(val)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    return (h && h->type == HEAP_MAP) ? 1 : 0;
+}
+
+RuntimeValue rt_is_object(RuntimeValue val)
+{
+    if (!IS_HEAP(val)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    return (h && h->type == HEAP_OBJECT) ? 1 : 0;
+}
 /* rt_to_int: convert to integer */
 RuntimeValue rt_to_int(RuntimeValue val)
 {
@@ -1003,9 +1178,41 @@ RuntimeValue rt_to_bool(RuntimeValue val)
     }
     return FALSE_VALUE;
 }
-S1(rt_clone)
-S1(rt_freeze)
-S1(rt_is_frozen)
+/* rt_clone: return as-is for primitives; shallow copy for heap objects */
+RuntimeValue rt_clone(RuntimeValue val)
+{
+    if (!IS_HEAP(val)) return val; /* int, nil, float: value semantics */
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    if (!h) return val;
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        return rt_string_new((RuntimeValue)(uintptr_t)s->data, (RuntimeValue)s->len);
+    }
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
+        for (uint32_t i = 0; i < a->len; i++) {
+            new_arr = rt_array_push(new_arr, a->items[i]);
+        }
+        return new_arr;
+    }
+    if (h->type == HEAP_MAP) {
+        return rt_map_clone(val);
+    }
+    return val; /* unknown heap type: return as-is */
+}
+
+/* rt_freeze / rt_is_frozen: no-ops on bare metal (no GC, no mutability tracking) */
+RuntimeValue rt_freeze(RuntimeValue val)
+{
+    return val;
+}
+
+RuntimeValue rt_is_frozen(RuntimeValue val)
+{
+    (void)val;
+    return 0; /* always mutable on bare metal */
+}
 
 /* --- String extras --- */
 S2(rt_string_contains)
@@ -1152,20 +1359,232 @@ S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
 
-/* --- Map / Dictionary --- */
-S0(rt_map_new)
-S3(rt_map_set)
-S2(rt_map_get)
-S2(rt_map_has)
-S2(rt_map_remove)
-S1(rt_map_keys)
-S1(rt_map_values)
-S1(rt_map_entries)
-S1(rt_map_len)
-S1(rt_map_clear)
-S1(rt_map_clone)
-S2(rt_map_merge)
-S2(rt_map_for_each)
+/* --- Map / Dictionary ---
+ *
+ * RuntimeMap: linear-probe map with separate key/value arrays.
+ * Keys are RuntimeValues compared via rt_native_eq (works for ints
+ * and strings).  Suitable for small maps (VFS mount table, IPC
+ * service registry) on bare metal.
+ */
+
+typedef struct {
+    HeapHeader    hdr;
+    uint32_t      len;
+    uint32_t      cap;
+    RuntimeValue *keys;
+    RuntimeValue *values;
+} RuntimeMap;
+
+/* Forward declaration — defined in section 8b */
+RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
+
+static RuntimeMap *decode_map(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return (RuntimeMap *)0;
+    RuntimeMap *m = (RuntimeMap *)DECODE_PTR(v);
+    if (!m || m->hdr.type != HEAP_MAP) return (RuntimeMap *)0;
+    return m;
+}
+
+/* rt_map_new: create map.  Ignores argument (raw ABI); uses default cap 16. */
+RuntimeValue rt_map_new(void)
+{
+    uint32_t cap = 16;
+    RuntimeMap *m = (RuntimeMap *)malloc(sizeof(RuntimeMap));
+    if (!m) return NIL_VALUE;
+    m->hdr.type = HEAP_MAP;
+    m->hdr.size = (uint32_t)sizeof(RuntimeMap);
+    m->len = 0;
+    m->cap = cap;
+    m->keys   = (RuntimeValue *)malloc(cap * sizeof(RuntimeValue));
+    m->values = (RuntimeValue *)malloc(cap * sizeof(RuntimeValue));
+    if (!m->keys || !m->values) return NIL_VALUE;
+    for (uint32_t i = 0; i < cap; i++) {
+        m->keys[i]   = NIL_VALUE;
+        m->values[i] = NIL_VALUE;
+    }
+    return ENCODE_PTR(m);
+}
+
+/* Linear scan for key; returns index or -1 */
+static int32_t map_find_key(RuntimeMap *m, RuntimeValue key)
+{
+    for (uint32_t i = 0; i < m->len; i++) {
+        if (rt_native_eq(m->keys[i], key)) return (int32_t)i;
+    }
+    return -1;
+}
+
+/* Grow the map arrays when full */
+static void map_grow(RuntimeMap *m)
+{
+    uint32_t new_cap = m->cap * 2;
+    if (new_cap < 16) new_cap = 16;
+    RuntimeValue *nk = (RuntimeValue *)malloc(new_cap * sizeof(RuntimeValue));
+    RuntimeValue *nv = (RuntimeValue *)malloc(new_cap * sizeof(RuntimeValue));
+    if (!nk || !nv) return; /* OOM: silently fail on bare metal */
+    for (uint32_t i = 0; i < m->len; i++) {
+        nk[i] = m->keys[i];
+        nv[i] = m->values[i];
+    }
+    for (uint32_t i = m->len; i < new_cap; i++) {
+        nk[i] = NIL_VALUE;
+        nv[i] = NIL_VALUE;
+    }
+    /* Bump allocator: old arrays leak but that is acceptable on bare metal */
+    m->keys   = nk;
+    m->values = nv;
+    m->cap    = new_cap;
+}
+
+/* rt_map_set(map, key, value) — insert or update */
+RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key);
+    if (idx >= 0) {
+        m->values[idx] = value;
+        return map; /* return same map pointer */
+    }
+    /* Insert new entry */
+    if (m->len >= m->cap) map_grow(m);
+    if (m->len >= m->cap) return map; /* grow failed */
+    m->keys[m->len]   = key;
+    m->values[m->len]  = value;
+    m->len++;
+    return map;
+}
+
+/* rt_map_get(map, key) — return value or NIL_VALUE */
+RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key);
+    if (idx >= 0) return m->values[idx];
+    return NIL_VALUE;
+}
+
+/* rt_map_has(map, key) — return 1 or 0 (raw i64) */
+RuntimeValue rt_map_has(RuntimeValue map, RuntimeValue key)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return 0;
+    return map_find_key(m, key) >= 0 ? 1 : 0;
+}
+
+/* rt_map_remove(map, key) — remove entry, return removed value */
+RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key);
+    if (idx < 0) return NIL_VALUE;
+    RuntimeValue removed = m->values[idx];
+    /* Shift remaining entries down */
+    for (uint32_t i = (uint32_t)idx; i + 1 < m->len; i++) {
+        m->keys[i]   = m->keys[i + 1];
+        m->values[i] = m->values[i + 1];
+    }
+    m->len--;
+    m->keys[m->len]   = NIL_VALUE;
+    m->values[m->len]  = NIL_VALUE;
+    return removed;
+}
+
+/* rt_map_keys(map) — return array of keys */
+RuntimeValue rt_map_keys(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) {
+        arr = rt_array_push(arr, m->keys[i]);
+    }
+    return arr;
+}
+
+/* rt_map_values(map) — return array of values */
+RuntimeValue rt_map_values(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) {
+        arr = rt_array_push(arr, m->values[i]);
+    }
+    return arr;
+}
+
+/* rt_map_entries(map) — return array of [key, value] pairs (as 2-element arrays) */
+RuntimeValue rt_map_entries(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) {
+        RuntimeValue pair = rt_array_new(ENCODE_INT(2));
+        pair = rt_array_push(pair, m->keys[i]);
+        pair = rt_array_push(pair, m->values[i]);
+        arr = rt_array_push(arr, pair);
+    }
+    return arr;
+}
+
+/* rt_map_len(map) — return entry count */
+RuntimeValue rt_map_len(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return ENCODE_INT(0);
+    return ENCODE_INT(m->len);
+}
+
+/* rt_map_clear(map) — remove all entries */
+RuntimeValue rt_map_clear(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    for (uint32_t i = 0; i < m->len; i++) {
+        m->keys[i]   = NIL_VALUE;
+        m->values[i] = NIL_VALUE;
+    }
+    m->len = 0;
+    return map;
+}
+
+/* rt_map_clone(map) — shallow copy */
+RuntimeValue rt_map_clone(RuntimeValue map)
+{
+    RuntimeMap *m = decode_map(map);
+    if (!m) return NIL_VALUE;
+    RuntimeValue new_map = rt_map_new();
+    RuntimeMap *nm = decode_map(new_map);
+    if (!nm) return NIL_VALUE;
+    for (uint32_t i = 0; i < m->len; i++) {
+        rt_map_set(new_map, m->keys[i], m->values[i]);
+    }
+    return new_map;
+}
+
+/* rt_map_merge(map_a, map_b) — merge b into a copy of a */
+RuntimeValue rt_map_merge(RuntimeValue map_a, RuntimeValue map_b)
+{
+    RuntimeValue result = rt_map_clone(map_a);
+    RuntimeMap *mb = decode_map(map_b);
+    if (!mb) return result;
+    for (uint32_t i = 0; i < mb->len; i++) {
+        result = rt_map_set(result, mb->keys[i], mb->values[i]);
+    }
+    return result;
+}
+
+/* rt_map_for_each(map, callback) — no-op on bare metal (closures not callable from C) */
+RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
+{
+    (void)map; (void)callback;
+    return NIL_VALUE;
+}
 
 /* --- File I/O --- */
 S1(rt_file_read)
@@ -1313,21 +1732,151 @@ S0(rt_bdd_suite_end)
 S0(rt_bdd_report)
 
 /* --- Misc / Debug --- */
-S1(rt_hash)
-S2(rt_hash_combine)
-S1(rt_debug_print)
-S1(rt_debug_dump)
-S0(rt_debug_break)
-S1(rt_panic)
-S1(rt_assert)
-S2(rt_assert_eq)
-S2(rt_assert_ne)
-S1(rt_abort)
+
+/* rt_hash: FNV-1a-like hash for integers and strings */
+RuntimeValue rt_hash(RuntimeValue val)
+{
+    uint64_t h = 14695981039346656037ULL; /* FNV offset basis */
+    if (IS_INT(val)) {
+        int64_t n = DECODE_INT(val);
+        for (int i = 0; i < 8; i++) {
+            h ^= (uint8_t)(n & 0xFF);
+            h *= 1099511628211ULL; /* FNV prime */
+            n >>= 8;
+        }
+    } else if (IS_HEAP(val)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(val);
+        if (hdr && hdr->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)hdr;
+            for (uint32_t i = 0; i < s->len; i++) {
+                h ^= (uint8_t)s->data[i];
+                h *= 1099511628211ULL;
+            }
+        } else {
+            /* Hash by pointer address */
+            uint64_t p = (uint64_t)(uintptr_t)hdr;
+            for (int i = 0; i < 8; i++) {
+                h ^= (uint8_t)(p & 0xFF);
+                h *= 1099511628211ULL;
+                p >>= 8;
+            }
+        }
+    }
+    return ENCODE_INT((int64_t)(h >> 3)); /* Ensure tag bits are clear */
+}
+
+RuntimeValue rt_hash_combine(RuntimeValue h1, RuntimeValue h2)
+{
+    /* Boost-style hash combine */
+    int64_t a = DECODE_INT(h1);
+    int64_t b = DECODE_INT(h2);
+    uint64_t combined = (uint64_t)a ^ ((uint64_t)b + 0x9e3779b97f4a7c15ULL
+                         + ((uint64_t)a << 6) + ((uint64_t)a >> 2));
+    return ENCODE_INT((int64_t)(combined >> 3));
+}
+
+RuntimeValue rt_debug_print(RuntimeValue val)
+{
+    serial_puts("[DEBUG] ");
+    rt_print_value(val);
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_debug_dump(RuntimeValue val)
+{
+    serial_puts("[DUMP] raw=");
+    serial_put_hex((uint64_t)val);
+    serial_puts(" tag=");
+    serial_put_dec((int64_t)((uint64_t)val & TAG_MASK));
+    if (IS_INT(val)) {
+        serial_puts(" int=");
+        serial_put_dec(DECODE_INT(val));
+    } else if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        serial_puts(" heap_type=");
+        serial_put_dec(h ? (int64_t)h->type : -1);
+    }
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_debug_break(void)
+{
+    serial_puts("[BREAK] debug break\r\n");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_panic(RuntimeValue msg)
+{
+    serial_puts("[PANIC] ");
+    if (IS_HEAP(msg)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(msg);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        } else {
+            serial_puts("<non-string>");
+        }
+    } else {
+        serial_put_hex((uint64_t)msg);
+    }
+    serial_puts("\r\n");
+    /* Halt the system */
+    for (;;) __asm__ volatile("hlt");
+    return NIL_VALUE; /* unreachable */
+}
+
+RuntimeValue rt_assert(RuntimeValue cond)
+{
+    if (IS_INT(cond) && DECODE_INT(cond)) return NIL_VALUE; /* truthy */
+    if (IS_HEAP(cond)) return NIL_VALUE; /* non-nil heap is truthy */
+    /* Assertion failed */
+    serial_puts("[ASSERT] assertion failed\r\n");
+    for (;;) __asm__ volatile("hlt");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_assert_eq(RuntimeValue a, RuntimeValue b)
+{
+    if (rt_native_eq(a, b)) return NIL_VALUE;
+    serial_puts("[ASSERT_EQ] ");
+    rt_print_value(a);
+    serial_puts(" != ");
+    rt_print_value(b);
+    serial_puts("\r\n");
+    for (;;) __asm__ volatile("hlt");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_assert_ne(RuntimeValue a, RuntimeValue b)
+{
+    if (!rt_native_eq(a, b)) return NIL_VALUE;
+    serial_puts("[ASSERT_NE] values are equal: ");
+    rt_print_value(a);
+    serial_puts("\r\n");
+    for (;;) __asm__ volatile("hlt");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_abort(RuntimeValue msg)
+{
+    serial_puts("[ABORT] ");
+    rt_print_value(msg);
+    serial_puts("\r\n");
+    for (;;) __asm__ volatile("hlt");
+    return NIL_VALUE;
+}
+
+/* GC: no-ops on bare metal (bump allocator, no GC) */
 S0(rt_gc_collect)
 S0(rt_gc_disable)
 S0(rt_gc_enable)
 S0(rt_gc_stats)
-S1(rt_typeof)
+
+/* rt_typeof already implemented above in type introspection section */
 
 /* --- Threading (no-ops on bare metal) --- */
 S1(rt_thread_create)

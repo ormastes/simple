@@ -1,0 +1,69 @@
+# Endpoint Types — L4-style capability-based IPC endpoints
+#
+# Endpoints replace string-named ports. An endpoint is a capability-protected
+# IPC channel. Threads send/recv through endpoints. The kernel never inspects
+# message payloads — it only validates capabilities and routes messages.
+#
+# Design: seL4-inspired capability-based endpoints with async notifications.
+
+# Endpoint ID — kernel-assigned, used in capability tokens
+struct EndpointId:
+    id: u64
+
+# Message buffer — shared memory region for zero-copy IPC
+struct MessageBuffer:
+    # Physical page(s) backing the buffer
+    phys_base: u64
+    # Size in bytes (typically 4096 for single-page messages)
+    size: u64
+    # Current message length (set by sender, read by receiver)
+    msg_len: u64
+
+# IPC message header — placed at start of message buffer
+struct IpcHeader:
+    # Method identifier (application-defined)
+    method: u32
+    # Number of capability tokens being transferred
+    cap_count: u16
+    # Flags
+    flags: u16
+    # Payload length (bytes after header)
+    payload_len: u32
+
+# IPC endpoint — kernel object for message passing
+struct Endpoint:
+    id: EndpointId
+    # Queue of waiting senders (thread IDs)
+    send_waiters: [u64]
+    # Queue of waiting receivers (thread IDs)
+    recv_waiters: [u64]
+    # Message buffer (shared between sender and receiver)
+    buffer: MessageBuffer?
+    # Badge — opaque value stamped on messages sent through this endpoint
+    # Used by servers to identify clients without inspecting payloads
+    badge: u64
+
+# Endpoint creation parameters
+struct EndpointCreateParams:
+    # Initial badge value (0 = no badge)
+    badge: u64
+
+# IPC operation result
+enum IpcResult:
+    Ok(msg_len: u64)
+    WouldBlock
+    InvalidEndpoint
+    PermissionDenied
+    BufferTooSmall(needed: u64)
+    Timeout
+
+# IPC wait set — wait on multiple endpoints + notifications
+struct WaitSet:
+    endpoint_ids: [u64]
+    notification_ids: [u64]
+
+# Wait result — which object became ready
+enum WaitResult:
+    EndpointReady(endpoint_id: u64)
+    NotificationReady(notification_id: u64, bits: u64)
+    Timeout
