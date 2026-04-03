@@ -1,0 +1,398 @@
+# Browser Engine Render Backend
+#
+# Bridges the UI render library to the browser engine + 2D engine pipeline.
+# Converts widget trees to DOM nodes, runs CSS layout, and paints to a
+# GPU-backed (or software) framebuffer via the 2D engine.
+#
+# Architecture:
+#   App -> BrowserBackend -> BrowserRenderer (browser_engine)
+#                         -> Engine2D (engine2d)
+
+use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect}
+use common.ui.widget.{UIMode}
+use common.layout.box_model.{LayoutBox, BoxKind, BoxModel}
+use app.ui.render.widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
+
+# GPU backend imports for device selection
+use std.gpu.{preferred_backend, gpu_cuda, gpu_vulkan, gpu_none, Gpu, GpuBackend}
+
+# =========================================================================
+# Framebuffer — CPU-side pixel buffer for software and GPU readback
+# =========================================================================
+
+class Framebuffer:
+    width: i32
+    height: i32
+    pixels: [i32]
+
+    static fn create(w: i32, h: i32) -> Framebuffer:
+        """Create a framebuffer filled with a default background color."""
+        val pixel_count = w * h
+        var px: [i32] = []
+        var i = 0
+        while i < pixel_count:
+            # Default background: dark gray (0xFF2D2D2D in ARGB)
+            px = px.push(0x2D2D2D)
+            i = i + 1
+        return Framebuffer(width: w, height: h, pixels: px)
+
+    me clear(color: i32):
+        """Clear the framebuffer to a solid color."""
+        var px: [i32] = []
+        val count = self.width * self.height
+        var i = 0
+        while i < count:
+            px = px.push(color)
+            i = i + 1
+        self.pixels = px
+
+    fn pixel_at(x: i32, y: i32) -> i32:
+        """Read a pixel value at (x, y)."""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return 0
+        val idx = y * self.width + x
+        return self.pixels[idx]
+
+    me set_pixel(x: i32, y: i32, color: i32):
+        """Write a pixel value at (x, y)."""
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+            return
+        val idx = y * self.width + x
+        self.pixels[idx] = color
+
+# =========================================================================
+# DomNode — lightweight DOM representation for layout
+# =========================================================================
+
+class DomNode:
+    tag: text
+    id: text
+    classes: [text]
+    text_content: text
+    children: [DomNode]
+    style_width: f64
+    style_height: f64
+
+    static fn element(tag: text, id: text) -> DomNode:
+        return DomNode(
+            tag: tag, id: id, classes: [],
+            text_content: "", children: [],
+            style_width: 0.0, style_height: 0.0
+        )
+
+    static fn text_node(content: text) -> DomNode:
+        return DomNode(
+            tag: "#text", id: "", classes: [],
+            text_content: content, children: [],
+            style_width: 0.0, style_height: 0.0
+        )
+
+    fn add_child(child: DomNode) -> DomNode:
+        var new_children = self.children
+        new_children = new_children.push(child)
+        return DomNode(
+            tag: self.tag, id: self.id, classes: self.classes,
+            text_content: self.text_content, children: new_children,
+            style_width: self.style_width, style_height: self.style_height
+        )
+
+    fn add_class(cls: text) -> DomNode:
+        var new_classes = self.classes
+        new_classes = new_classes.push(cls)
+        return DomNode(
+            tag: self.tag, id: self.id, classes: new_classes,
+            text_content: self.text_content, children: self.children,
+            style_width: self.style_width, style_height: self.style_height
+        )
+
+# =========================================================================
+# BrowserBackend
+# =========================================================================
+
+class BrowserBackend:
+    width: i32
+    height: i32
+    gpu_backend_name: text
+    framebuffer: Framebuffer
+    event_queue: [UIEvent]
+    layout_cache: [LayoutEntry]
+    initialized: bool
+
+    static fn create(w: i32, h: i32, backend: text) -> Result<BrowserBackend, text>:
+        """Create a BrowserBackend with the specified GPU backend.
+
+        backend: "cuda", "vulkan", "cpu", "software", or "auto" (auto-detect).
+        """
+        val resolved = resolve_gpu_backend(backend)
+        val fb = Framebuffer.create(w, h)
+
+        return Ok(BrowserBackend(
+            width: w,
+            height: h,
+            gpu_backend_name: resolved,
+            framebuffer: fb,
+            event_queue: [],
+            layout_cache: [],
+            initialized: true
+        ))
+
+    me render_frame(tree: UITree, state: UIState):
+        """Convert widget tree to DOM, layout, and paint to framebuffer."""
+        # Step 1: Build DOM from widget tree
+        val root_node = tree.root_node()
+        val dom = widget_to_dom(root_node)
+
+        # Step 2: Compute layout (block layout)
+        val layout = compute_layout(dom, self.width, self.height)
+
+        # Step 3: Cache layout for hit testing
+        self.layout_cache = collect_layout_entries(layout, [])
+
+        # Step 4: Clear and paint
+        self.framebuffer.clear(0x1E1E1E)
+        paint_layout(self.framebuffer, layout)
+
+    me poll_events() -> [UIEvent]:
+        """Return queued events and clear the queue."""
+        val events = self.event_queue
+        self.event_queue = []
+        return events
+
+    me push_event(event: UIEvent):
+        """Push an external event into the queue."""
+        self.event_queue = self.event_queue.push(event)
+
+    me resize(w: i32, h: i32):
+        """Resize the framebuffer."""
+        self.width = w
+        self.height = h
+        self.framebuffer = Framebuffer.create(w, h)
+
+    me shutdown():
+        """Release resources."""
+        self.initialized = false
+        self.event_queue = []
+        self.layout_cache = []
+
+    fn backend_name() -> text:
+        return "browser"
+
+    fn gpu_backend() -> text:
+        return self.gpu_backend_name
+
+    fn viewport_width() -> i32:
+        return self.width
+
+    fn viewport_height() -> i32:
+        return self.height
+
+    fn find_widget_at(x: i32, y: i32) -> text:
+        """Hit-test: find the widget id at pixel coordinates."""
+        return hit_test_entries(self.layout_cache, x, y)
+
+# =========================================================================
+# LayoutEntry — flat list for fast hit testing
+# =========================================================================
+
+class LayoutEntry:
+    id: text
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+
+fn collect_layout_entries(box: LayoutBox, acc: [LayoutEntry]) -> [LayoutEntry]:
+    """Flatten a LayoutBox tree into a list of entries for hit testing."""
+    var result = acc
+    val entry = LayoutEntry(
+        id: "{box.node_id}",
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height
+    )
+    result = result.push(entry)
+    for child in box.children:
+        result = collect_layout_entries(child, result)
+    return result
+
+fn hit_test_entries(entries: [LayoutEntry], px: i32, py: i32) -> text:
+    """Find the deepest (last) entry that contains the point."""
+    val fx: f64 = px.to_f64()
+    val fy: f64 = py.to_f64()
+    var best_id = ""
+    for entry in entries:
+        if (fx >= entry.x and fx < entry.x + entry.width
+            and fy >= entry.y and fy < entry.y + entry.height):
+            best_id = entry.id
+    return best_id
+
+# =========================================================================
+# Widget -> DOM Conversion
+# =========================================================================
+
+fn widget_to_dom(node: WidgetNode) -> DomNode:
+    """Convert a WidgetNode tree into a DomNode tree."""
+    val kind = node.kind_name()
+    val tag = widget_kind_to_tag(kind)
+    var dom = DomNode.element(tag, node.id)
+    dom = dom.add_class("widget-{kind}")
+
+    # Add text content for text-bearing widgets
+    val text_val = node.get_prop("text")
+    if text_val != "":
+        val text_child = DomNode.text_node(text_val)
+        dom = dom.add_child(text_child)
+
+    val title_val = node.get_prop("title")
+    if title_val != "" and text_val == "":
+        val title_child = DomNode.text_node(title_val)
+        dom = dom.add_child(title_child)
+
+    # Recurse into children
+    val children = node.children()
+    for child in children:
+        val child_dom = widget_to_dom(child)
+        dom = dom.add_child(child_dom)
+
+    return dom
+
+fn widget_kind_to_tag(kind: text) -> text:
+    """Map widget kind names to HTML-like tag names."""
+    match kind:
+        "panel" => "div"
+        "text" => "span"
+        "label" => "label"
+        "heading" => "h2"
+        "button" => "button"
+        "input" => "input"
+        "textfield" => "input"
+        "textarea" => "textarea"
+        "list" => "ul"
+        "table" => "table"
+        "image" => "img"
+        "menubar" => "nav"
+        "statusbar" => "footer"
+        "tabs" => "div"
+        "progress" => "progress"
+        "checkbox" => "input"
+        "dropdown" => "select"
+        "divider" => "hr"
+        "dialog" => "dialog"
+        "tooltip" => "div"
+        "tree" => "ul"
+        "treenode" => "li"
+        "scroll" => "div"
+        "card" => "div"
+        "switch" => "input"
+        _ => "div"
+
+# =========================================================================
+# Layout Engine — simple block layout
+# =========================================================================
+
+fn compute_layout(dom: DomNode, viewport_w: i32, viewport_h: i32) -> LayoutBox:
+    """Compute block layout for a DOM tree.
+
+    This is a simplified block layout: each child is stacked vertically,
+    taking the full width of the parent. Text nodes get a fixed height.
+    """
+    val root = layout_node(dom, 0.0, 0.0, viewport_w.to_f64(), viewport_h.to_f64(), 0)
+    return root
+
+fn layout_node(dom: DomNode, x: f64, y: f64, avail_w: f64, avail_h: f64, id_counter: i64) -> LayoutBox:
+    """Layout a single DOM node and its children."""
+    var box_kind = BoxKind.Block
+    if dom.tag == "span" or dom.tag == "#text":
+        box_kind = BoxKind.Inline
+
+    var node_id = id_counter
+
+    # Text nodes get a fixed height based on font size approximation
+    if dom.tag == "#text":
+        val text_height: f64 = 20.0
+        val text_width = avail_w
+        return LayoutBox(
+            node_id: node_id, kind: box_kind,
+            x: x, y: y, width: text_width, height: text_height,
+            box_model: BoxModel.zero(),
+            children: List<LayoutBox>()
+        )
+
+    # Container elements: layout children vertically
+    var child_y = y
+    var child_boxes: List<LayoutBox> = List<LayoutBox>()
+    var next_id = id_counter + 1
+
+    for child_dom in dom.children:
+        val child_box = layout_node(child_dom, x, child_y, avail_w, avail_h, next_id)
+        child_y = child_y + child_box.height
+        child_boxes = child_boxes.push(child_box)
+        next_id = next_id + 1
+
+    val total_height = child_y - y
+    val final_height = if total_height > 0.0: total_height else: 0.0
+
+    return LayoutBox(
+        node_id: node_id, kind: box_kind,
+        x: x, y: y, width: avail_w, height: final_height,
+        box_model: BoxModel.zero(),
+        children: child_boxes
+    )
+
+# =========================================================================
+# Paint — rasterize layout boxes to framebuffer
+# =========================================================================
+
+fn paint_layout(fb: Framebuffer, box: LayoutBox):
+    """Paint a layout box tree into a framebuffer."""
+    # Draw background for block-level elements
+    if box.kind == BoxKind.Block and box.height > 0.0:
+        paint_rect(fb, box.x, box.y, box.width, box.height, 0x2D2D2D)
+
+    # Draw text (inline elements get a lighter foreground)
+    if box.kind == BoxKind.Inline and box.height > 0.0:
+        paint_rect(fb, box.x, box.y, box.width, box.height, 0xE0E0E0)
+
+    # Recurse into children
+    for child in box.children:
+        paint_layout(fb, child)
+
+fn paint_rect(fb: Framebuffer, x: f64, y: f64, w: f64, h: f64, color: i32):
+    """Paint a filled rectangle into the framebuffer."""
+    val x0: i32 = x.to_i32()
+    val y0: i32 = y.to_i32()
+    val x1: i32 = (x + w).to_i32()
+    val y1: i32 = (y + h).to_i32()
+
+    var py = y0
+    while py < y1 and py < fb.height:
+        if py >= 0:
+            var px = x0
+            while px < x1 and px < fb.width:
+                if px >= 0:
+                    fb.set_pixel(px, py, color)
+                px = px + 1
+        py = py + 1
+
+# =========================================================================
+# GPU Backend Resolution
+# =========================================================================
+
+fn resolve_gpu_backend(name: text) -> text:
+    """Resolve a backend name string to a canonical GPU backend name."""
+    match name:
+        "cuda" => "cuda"
+        "vulkan" => "vulkan"
+        "cpu" | "software" => "software"
+        "auto" =>
+            val detected = preferred_backend()
+            match detected:
+                GpuBackend.Cuda => "cuda"
+                GpuBackend.Vulkan => "vulkan"
+                GpuBackend.Metal => "metal"
+                GpuBackend.Rocm => "rocm"
+                _ => "software"
+        _ => "software"

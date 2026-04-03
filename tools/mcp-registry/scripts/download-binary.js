@@ -93,13 +93,22 @@ async function main() {
     // Remove archive after extraction
     fs.unlinkSync(dest);
 
-    // Make binary executable on Unix
+    // Make runtime and native MCP binary executable on Unix when present.
     const ext = os.platform() === 'win32' ? '.exe' : '';
     const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
     if (entries.length > 0) {
-      const binary = path.join(nativeDir, entries[0], 'bin', `simple${ext}`);
-      if (fs.existsSync(binary) && os.platform() !== 'win32') {
-        fs.chmodSync(binary, 0o755);
+      const pkgDir = path.join(nativeDir, entries[0]);
+      const binaries = [
+        path.join(pkgDir, 'bin', `simple${ext}`),
+        path.join(pkgDir, 'bin', `simple_mcp_server${ext}`),
+        path.join(pkgDir, 'bin', 'release', `simple_mcp_server${ext}`)
+      ];
+      if (os.platform() !== 'win32') {
+        for (const binary of binaries) {
+          if (fs.existsSync(binary)) {
+            fs.chmodSync(binary, 0o755);
+          }
+        }
       }
     }
 

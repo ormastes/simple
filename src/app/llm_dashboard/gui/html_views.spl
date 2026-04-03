@@ -7,18 +7,26 @@ use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.gui.css_sprites.{generate_agent_css, generate_room_css}
 use app.llm_dashboard.gui.room_layout_html.{generate_room_grid, generate_agent_tree_html,
     generate_status_bar_html, generate_feed_html}
+use app.llm_dashboard.gui.terminal_panel.{generate_terminal_panel_html, generate_terminal_css, generate_terminal_js}
+use app.llm_dashboard.gui.tmux_panel.{handle_tmux_api}
 
 # =========================================================================
 # Full Page HTML
 # =========================================================================
 
 fn generate_agents_html(store: AgentDashboardStore) -> text:
-    """Generate the full HTML page for the agent dashboard."""
+    """Generate the full HTML page for the agent dashboard.
+
+    Includes three tabs: Agents (room grid + tree + feed), Terminal, and Tmux.
+    Terminal and Tmux panels are ported from the former web_dashboard app.
+    """
     val css = generate_agents_css()
     val room_grid = generate_room_grid(store)
     val agent_tree = generate_agent_tree_html(store)
     val feed = generate_feed_html(store, 50)
     val status_bar = generate_status_bar_html(store)
+    val term_html = generate_terminal_panel_html()
+    val term_js = generate_terminal_js()
 
     val html_head = """<!DOCTYPE html>
 <html lang="en">
@@ -33,9 +41,14 @@ fn generate_agents_html(store: AgentDashboardStore) -> text:
 <div class="dashboard-container">
     <header class="dashboard-header">
         <h1>LLM Agent Dashboard</h1>
+        <nav class="tab-bar">
+            <button class="tab-btn active" onclick="switchTab('agents', this)">Agents</button>
+            <button class="tab-btn" onclick="switchTab('terminal', this)">Terminal</button>
+        </nav>
         <div id="refresh-status" class="refresh-status">Auto-refresh: 2s</div>
     </header>
 
+    <div id="tab-agents" class="tab-content active">
     <div class="main-content">
         <div class="left-panel">
 """
@@ -52,9 +65,25 @@ fn generate_agents_html(store: AgentDashboardStore) -> text:
     val html_tail = """    </div>
 
 """
+    val html_agents_close = """    </div>
+
+    <div id="tab-terminal" class="tab-content">
+"""
+    val html_terminal_close = """    </div>
+"""
+
     val html_script = """</div>
 
 <script>
+// Tab switching
+function switchTab(name, btn) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    if (btn) btn.classList.add('active');
+    if (name === 'terminal') loadTmuxSessions();
+}
+
 // Auto-refresh via WebSocket or polling
 (function() {
     var ws = null;
@@ -87,10 +116,12 @@ fn generate_agents_html(store: AgentDashboardStore) -> text:
         }
     }, 5000);
 })();
-</script>
+
+"""
+    val html_end = """</script>
 </body>
 </html>"""
-    return html_head + css + html_mid + room_grid + html_right + agent_tree + html_bottom + feed + html_tail + status_bar + html_script
+    return html_head + css + html_mid + room_grid + html_right + agent_tree + html_bottom + feed + html_tail + status_bar + html_agents_close + term_html + html_terminal_close + html_script + term_js + html_end
 
 fn generate_agents_css() -> text:
     """Generate combined CSS for the agent dashboard."""
@@ -174,4 +205,22 @@ body {
     }
 }
 """
-    return base_css + sprite_css + room_css
+    val tab_css = """
+/* Tab Bar */
+.tab-bar { display: flex; gap: 4px; }
+.tab-btn {
+    background: transparent;
+    border: 1px solid #30363d;
+    color: #8b949e;
+    padding: 4px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+}
+.tab-btn:hover { color: #c9d1d9; border-color: #58a6ff; }
+.tab-btn.active { background: #58a6ff; color: #fff; border-color: #58a6ff; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+"""
+    val term_css = generate_terminal_css()
+    return base_css + sprite_css + room_css + tab_css + term_css

@@ -1,0 +1,378 @@
+# DevTools Panel — Rich UI using shared render components
+#
+# Builds developer-tools panels (Elements, Styles, Network, Console) using
+# shared UI render library components: draw_box with border_rounded for
+# DOM tree, html_kv_table for CSS styles, TableBuilder for network requests,
+# and html_card for console output.
+#
+# Produces both text (TUI) and HTML output for each panel.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{
+    html_page, html_escape,
+    html_flex_row, html_flex_col, html_section,
+    html_card, html_card_with_status,
+    html_badge, html_status_dot,
+    html_table, html_kv_table,
+    css_reset, css_dark_theme, css_light_theme
+}
+use app.ui.render.css.{card_css, badge_css, table_css, grid_css, responsive_css}
+use app.ui.render.fmt.{fmt_bytes, fmt_duration_ms, fmt_number, truncate, heading, separator, pad_right, indent}
+use app.ui.render.border.{draw_box, border_rounded, border_single, BorderStyle}
+use app.ui.render.table.{TableBuilder, ALIGN_LEFT, ALIGN_RIGHT}
+use app.ui.render.layout.{text_width, pad_to_width}
+
+use examples.browser.entity.dom.node_types.{DomNode, NodeKind, Element}
+use examples.browser.entity.dom.css_types.{CSSDeclaration, CSSValue}
+use examples.browser.feature.browser.devtools.{NetworkEntry, ConsoleEntry}
+
+# =========================================================================
+# Elements Panel — DOM Tree View
+# =========================================================================
+
+fn elements_panel_text(nodes: List<DomNode>, width: i32) -> text:
+    """Render the DOM tree as a TUI box using draw_box with rounded borders.
+
+    Each node is indented by its depth (approximated via parent_id lookup).
+    """
+    if nodes.len() == 0:
+        val empty_lines = draw_box(["(no DOM nodes)"], border_rounded(), "Elements")
+        return _lines_to_text(empty_lines)
+
+    var content_lines: [text] = []
+    for node in nodes:
+        val depth = _estimate_depth(node, nodes)
+        val prefix = _make_indent(depth)
+        val kind = _node_kind_tag(node.kind)
+        val data = if node.data != "": " \"{truncate(node.data, width - depth * 2 - 20)}\"" else: ""
+        val children_count = node.children.len()
+        val children_info = if children_count > 0: " ({children_count})" else: ""
+        content_lines.push("{prefix}{kind}{data}{children_info}")
+
+    val boxed = draw_box(content_lines, border_rounded(), "Elements")
+    return _lines_to_text(boxed)
+
+fn elements_panel_html(nodes: List<DomNode>) -> text:
+    """Render the DOM tree as an HTML card with syntax-highlighted nodes."""
+    if nodes.len() == 0:
+        return html_card("Elements", "<div style=\"color:var(--text-dim)\">(empty document)</div>")
+
+    var tree_html = "<div class=\"dom-tree\" style=\"font-family:'SF Mono',Menlo,monospace;font-size:13px;line-height:1.6\">"
+
+    for node in nodes:
+        val depth = _estimate_depth(node, nodes)
+        val pad_px = depth * 16
+        val kind = _node_kind_tag(node.kind)
+        val tag_color = _kind_syntax_color(node.kind)
+
+        tree_html = "{tree_html}<div style=\"padding-left:{pad_px}px\">"
+
+        match node.kind:
+            NodeKind.Element:
+                tree_html = "{tree_html}<span style=\"color:{tag_color}\">&lt;{html_escape(node.data)}&gt;</span>"
+                if node.children.len() > 0:
+                    tree_html = "{tree_html} <span style=\"color:var(--text-dim);font-size:11px\">{node.children.len()} children</span>"
+            NodeKind.Text:
+                val display_text = truncate(node.data, 80)
+                tree_html = "{tree_html}<span style=\"color:var(--text)\">\"{html_escape(display_text)}\"</span>"
+            NodeKind.Comment:
+                val display_comment = truncate(node.data, 60)
+                tree_html = "{tree_html}<span style=\"color:{tag_color}\">&lt;!-- {html_escape(display_comment)} --&gt;</span>"
+            NodeKind.Document:
+                tree_html = "{tree_html}<span style=\"color:{tag_color};font-weight:600\">#document</span>"
+            NodeKind.DocumentFragment:
+                tree_html = "{tree_html}<span style=\"color:{tag_color}\">#fragment</span>"
+            NodeKind.Attribute:
+                tree_html = "{tree_html}<span style=\"color:{tag_color}\">{html_escape(node.data)}</span>"
+
+        tree_html = "{tree_html} <span style=\"color:var(--gray);font-size:11px\">id={node.id}</span>"
+        tree_html = "{tree_html}</div>"
+
+    tree_html = "{tree_html}</div>"
+    return html_card("Elements", tree_html)
+
+# =========================================================================
+# Styles Panel — CSS Computed Styles
+# =========================================================================
+
+fn styles_panel_text(declarations: List<CSSDeclaration>, width: i32) -> text:
+    """Render CSS computed styles as a TUI box with rounded borders."""
+    if declarations.len() == 0:
+        val empty_lines = draw_box(["(no computed styles)"], border_rounded(), "Styles")
+        return _lines_to_text(empty_lines)
+
+    var content_lines: [text] = []
+    for decl in declarations:
+        val value_str = _css_value_display(decl.value)
+        val important = if decl.important: " !important" else: ""
+        val prop = pad_right(decl.property, 24)
+        content_lines.push("{prop} {value_str}{important}")
+
+    val boxed = draw_box(content_lines, border_rounded(), "Styles")
+    return _lines_to_text(boxed)
+
+fn styles_panel_html(declarations: List<CSSDeclaration>) -> text:
+    """Render CSS computed styles as an HTML card with a key-value table."""
+    if declarations.len() == 0:
+        return html_card("Styles", "<div style=\"color:var(--text-dim)\">(no computed styles)</div>")
+
+    var pairs: [(text, text)] = []
+    for decl in declarations:
+        val value_str = _css_value_display(decl.value)
+        val important = if decl.important: " !important" else: ""
+        pairs.push((decl.property, "{value_str}{important}"))
+
+    return html_card("Styles", html_kv_table(pairs))
+
+# =========================================================================
+# Network Panel — Request Table
+# =========================================================================
+
+fn network_panel_text(entries: List<NetworkEntry>, bytes_transferred: i64) -> text:
+    """Render network requests as a TUI table using TableBuilder."""
+    if entries.len() == 0:
+        val empty_lines = draw_box(["(no network requests)"], border_single(), "Network")
+        return _lines_to_text(empty_lines)
+
+    var builder = TableBuilder.new(["Method", "Status", "URL", "Request ID"])
+    builder = builder.set_max_width(2, 50)
+    builder = builder.set_alignment(1, ALIGN_RIGHT)
+
+    for entry in entries:
+        val status = if entry.status_code == 0: "..." else: "{entry.status_code}"
+        builder = builder.add_row([entry.method, status, entry.url, entry.request_id])
+
+    var result = "Network ({entries.len()} requests, {fmt_bytes(bytes_transferred)} transferred)\n"
+    result = "{result}{builder.build()}"
+    return result
+
+fn network_panel_html(entries: List<NetworkEntry>, bytes_transferred: i64) -> text:
+    """Render network requests as an HTML card with a table."""
+    val summary = "{entries.len()} requests, {fmt_bytes(bytes_transferred)} transferred"
+
+    if entries.len() == 0:
+        return html_card("Network", "<div style=\"color:var(--text-dim)\">(no requests)</div>")
+
+    var builder = TableBuilder.new(["Method", "Status", "URL", "Request ID"])
+    builder = builder.set_max_width(2, 60)
+    builder = builder.set_alignment(1, ALIGN_RIGHT)
+
+    for entry in entries:
+        val status = if entry.status_code == 0: "pending" else: "{entry.status_code}"
+        val status_display = _status_code_styled(entry.status_code, status)
+        builder = builder.add_row([entry.method, status_display, entry.url, entry.request_id])
+
+    val table_html = builder.build_html()
+    val content = "<div style=\"font-size:12px;color:var(--text-dim);margin-bottom:8px\">{html_escape(summary)}</div>{table_html}"
+    return html_card("Network", content)
+
+# =========================================================================
+# Console Panel — Console Output
+# =========================================================================
+
+fn console_panel_text(entries: List<ConsoleEntry>, width: i32) -> text:
+    """Render console log entries as a TUI box."""
+    if entries.len() == 0:
+        val empty_lines = draw_box(["(no console output)"], border_rounded(), "Console")
+        return _lines_to_text(empty_lines)
+
+    var content_lines: [text] = []
+    for entry in entries:
+        val level = pad_right("[{entry.level}]", 8)
+        val msg = truncate(entry.message, width - 12)
+        content_lines.push("{level} {msg}")
+
+    val boxed = draw_box(content_lines, border_rounded(), "Console")
+    return _lines_to_text(boxed)
+
+fn console_panel_html(entries: List<ConsoleEntry>) -> text:
+    """Render console log entries as an HTML card."""
+    if entries.len() == 0:
+        return html_card("Console", "<div style=\"color:var(--text-dim)\">(no console output)</div>")
+
+    var console_html = "<div style=\"font-family:'SF Mono',Menlo,monospace;font-size:13px;background:var(--bg,#0d1117);padding:10px;border-radius:6px;max-height:300px;overflow-y:auto\">"
+
+    for entry in entries:
+        val color = _level_color(entry.level)
+        val icon = _level_icon(entry.level)
+        console_html = "{console_html}<div style=\"padding:3px 0;border-bottom:1px solid var(--border,#30363d)\">"
+        console_html = "{console_html}<span style=\"color:{color};font-weight:600\">{icon} [{html_escape(entry.level)}]</span> "
+        console_html = "{console_html}<span style=\"color:var(--text)\">{html_escape(entry.message)}</span>"
+        console_html = "{console_html}</div>"
+
+    console_html = "{console_html}</div>"
+    return html_card("Console ({entries.len()} entries)", console_html)
+
+# =========================================================================
+# Combined DevTools Panel
+# =========================================================================
+
+fn devtools_combined_text(
+    nodes: List<DomNode>,
+    declarations: List<CSSDeclaration>,
+    net_entries: List<NetworkEntry>,
+    console_entries: List<ConsoleEntry>,
+    bytes_transferred: i64,
+    width: i32
+) -> text:
+    """Render all DevTools panels as combined text output."""
+    var lines: [text] = []
+
+    lines.push(elements_panel_text(nodes, width))
+    lines.push("")
+    lines.push(styles_panel_text(declarations, width))
+    lines.push("")
+    lines.push(network_panel_text(net_entries, bytes_transferred))
+    lines.push("")
+    lines.push(console_panel_text(console_entries, width))
+
+    return _join_lines(lines)
+
+fn devtools_combined_html(
+    nodes: List<DomNode>,
+    declarations: List<CSSDeclaration>,
+    net_entries: List<NetworkEntry>,
+    console_entries: List<ConsoleEntry>,
+    bytes_transferred: i64,
+    config: RenderConfig
+) -> text:
+    """Render all DevTools panels as a complete HTML page."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val all_css = "{css_reset()}\n{theme_css}\n{card_css()}\n{badge_css()}\n{table_css()}\n{grid_css()}\n{responsive_css()}\n{_devtools_css()}"
+
+    var body = ""
+    body = "{body}<div class=\"container\">\n"
+    body = "{body}<h1 style=\"margin-bottom:16px\">DevTools</h1>\n"
+
+    # Two-column layout: Elements+Styles on left, Network+Console on right
+    var left_col: [text] = []
+    left_col.push(elements_panel_html(nodes))
+    left_col.push(styles_panel_html(declarations))
+
+    var right_col: [text] = []
+    right_col.push(network_panel_html(net_entries, bytes_transferred))
+    right_col.push(console_panel_html(console_entries))
+
+    val left_html = html_flex_col(left_col, "12px")
+    val right_html = html_flex_col(right_col, "12px")
+
+    body = "{body}<div style=\"display:grid;grid-template-columns:1fr 1fr;gap:16px\">\n"
+    body = "{body}  <div>{left_html}</div>\n"
+    body = "{body}  <div>{right_html}</div>\n"
+    body = "{body}</div>\n"
+
+    body = "{body}</div>\n"
+    return html_page("DevTools - Simple Browser", all_css, body)
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _estimate_depth(node: DomNode, all_nodes: List<DomNode>) -> i32:
+    """Estimate the depth of a node by following parent_id references."""
+    var depth: i32 = 0
+    var current_parent = node.parent_id
+    var iterations = 0
+    val max_depth = 20
+
+    while current_parent > 0 and iterations < max_depth:
+        var found = false
+        for n in all_nodes:
+            if n.id == current_parent:
+                current_parent = n.parent_id
+                depth = depth + 1
+                found = true
+                break
+        if not found:
+            break
+        iterations = iterations + 1
+
+    return depth
+
+fn _node_kind_tag(kind: NodeKind) -> text:
+    match kind:
+        NodeKind.Document: "#document"
+        NodeKind.Element: "<element>"
+        NodeKind.Text: "#text"
+        NodeKind.Comment: "<!-- -->"
+        NodeKind.DocumentFragment: "#fragment"
+        NodeKind.Attribute: "@attr"
+
+fn _kind_syntax_color(kind: NodeKind) -> text:
+    match kind:
+        NodeKind.Document: "var(--blue, #58a6ff)"
+        NodeKind.Element: "var(--green, #3fb950)"
+        NodeKind.Text: "var(--text, #c9d1d9)"
+        NodeKind.Comment: "var(--gray, #8b949e)"
+        NodeKind.DocumentFragment: "var(--yellow, #d29922)"
+        NodeKind.Attribute: "var(--blue, #58a6ff)"
+
+fn _css_value_display(value: CSSValue) -> text:
+    match value:
+        CSSValue.Keyword(v): v
+        CSSValue.Length(v, unit): "{v}{unit}"
+        CSSValue.Percentage(v): "{v}%"
+        CSSValue.Color(color): "(color)"
+        CSSValue.Number(v): "{v}"
+        CSSValue.Url(v): "url({v})"
+        CSSValue.Inherit: "inherit"
+        CSSValue.Initial: "initial"
+        CSSValue.Unset: "unset"
+
+fn _status_code_styled(code: i64, label: text) -> text:
+    """Return a label string. HTML styling is applied at the table level."""
+    return label
+
+fn _level_color(level: text) -> text:
+    match level:
+        "error": "var(--red, #f85149)"
+        "warn": "var(--yellow, #d29922)"
+        "info": "var(--blue, #58a6ff)"
+        "debug": "var(--gray, #8b949e)"
+        _: "var(--text, #c9d1d9)"
+
+fn _level_icon(level: text) -> text:
+    match level:
+        "error": "X"
+        "warn": "!"
+        "info": "i"
+        "debug": "."
+        _: ">"
+
+fn _make_indent(depth: i32) -> text:
+    var s = ""
+    var i: i32 = 0
+    while i < depth:
+        s = "{s}  "
+        i = i + 1
+    return s
+
+fn _lines_to_text(lines: [text]) -> text:
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn _join_lines(lines: [text]) -> text:
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn _devtools_css() -> text:
+    var s = ""
+    s = "{s}.dom-tree div:hover {\n"
+    s = "{s}  background: var(--bg-card-hover, #1c2128);\n"
+    s = "{s}}\n"
+    s = "{s}.data-table td:nth-child(2) {\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}}\n"
+    return s

@@ -1,0 +1,450 @@
+# Browser UI Bridge
+#
+# Connects the browser example to the shared UI render library.
+# Produces text and HTML output representing browser chrome: tab bar,
+# address bar, toolbar, page title, visible text content, and status.
+#
+# Uses shared components from app.ui.render (html builders, css, fmt,
+# table, progress, border) instead of duplicating rendering logic.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{
+    html_page, html_page_with_js, html_escape,
+    html_flex_row, html_flex_col, html_section,
+    html_card, html_card_with_status, html_metric_card,
+    html_badge, html_status_dot, html_progress_bar,
+    html_table, html_kv_table,
+    css_reset, css_dark_theme, css_light_theme
+}
+use app.ui.render.css.{card_css, badge_css, table_css, progress_css, grid_css, responsive_css}
+use app.ui.render.fmt.{fmt_bytes, fmt_duration_ms, fmt_number, truncate, heading, separator}
+use app.ui.render.border.{draw_box, border_rounded, border_single, BorderStyle}
+use app.ui.render.layout.{text_width, pad_to_width}
+
+use examples.browser.entity.browser.tab_types.{Tab, TabId, TabState, TabGroup}
+use examples.browser.entity.browser.navigation_types.{NavigationState, NavigationEntry}
+use examples.browser.entity.browser.window_types.{BrowserWindow}
+use examples.browser.entity.net.cookie_types.{Cookie, CookieJar}
+use examples.browser.entity.net.request_types.{FetchRequest, FetchResponse, Headers}
+use examples.browser.entity.dom.node_types.{DomNode, NodeKind, Element}
+use examples.browser.entity.dom.css_types.{CSSDeclaration, CSSValue}
+use examples.browser.feature.browser.devtools.{DevToolsServer, ConsoleEntry, NetworkEntry}
+
+# =========================================================================
+# Browser State Snapshot
+# =========================================================================
+
+class BrowserSnapshot:
+    """Snapshot of browser state for rendering.
+
+    Collects the data needed to render the browser UI without requiring
+    mutable access to the live browser engine.
+    """
+    tabs: List<Tab>
+    active_tab_id: i64
+    tab_groups: List<TabGroup>
+    current_url: text
+    page_title: text
+    page_text_content: text
+    nav_state: NavigationState
+    load_progress: i64
+    is_secure: bool
+    cookies: List<Cookie>
+    network_entries: List<NetworkEntry>
+    console_entries: List<ConsoleEntry>
+    dom_nodes: List<DomNode>
+    css_declarations: List<CSSDeclaration>
+    bytes_transferred: i64
+    load_time_ms: i64
+    window: BrowserWindow?
+
+    static fn empty() -> BrowserSnapshot:
+        BrowserSnapshot(
+            tabs: List<Tab>(),
+            active_tab_id: 0,
+            tab_groups: List<TabGroup>(),
+            current_url: "about:blank",
+            page_title: "New Tab",
+            page_text_content: "",
+            nav_state: NavigationState.Idle,
+            load_progress: 100,
+            is_secure: false,
+            cookies: List<Cookie>(),
+            network_entries: List<NetworkEntry>(),
+            console_entries: List<ConsoleEntry>(),
+            dom_nodes: List<DomNode>(),
+            css_declarations: List<CSSDeclaration>(),
+            bytes_transferred: 0,
+            load_time_ms: 0,
+            window: nil
+        )
+
+# =========================================================================
+# Main Render Entry Point
+# =========================================================================
+
+fn render_browser_ui(config: RenderConfig, snapshot: BrowserSnapshot) -> RenderResult:
+    """Render the browser UI using the shared render contract.
+
+    Produces text and/or HTML output depending on config.format.
+    """
+    val text_out = _render_text(config, snapshot)
+    val html_out = _render_html(config, snapshot)
+
+    match config.format:
+        "html":
+            return RenderResult(
+                format: "html",
+                text_output: text_out,
+                html_output: html_out,
+                metadata: _build_metadata(snapshot),
+                warnings: []
+            )
+        "both":
+            return RenderResult(
+                format: "both",
+                text_output: text_out,
+                html_output: html_out,
+                metadata: _build_metadata(snapshot),
+                warnings: []
+            )
+        _:
+            return RenderResult(
+                format: "text",
+                text_output: text_out,
+                html_output: "",
+                metadata: _build_metadata(snapshot),
+                warnings: []
+            )
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn _render_text(config: RenderConfig, snap: BrowserSnapshot) -> text:
+    """Render browser chrome and page content as plain text."""
+    val width = config.width
+    var lines: [text] = []
+
+    # Tab bar
+    lines.push(heading("Simple Browser", "=", width))
+    lines.push("")
+    lines.push(_text_tab_bar(snap))
+    lines.push("")
+
+    # Address bar
+    val lock = if snap.is_secure: "[S]" else: "[ ]"
+    val nav_indicator = _nav_state_text(snap.nav_state)
+    lines.push("{lock} {snap.current_url} {nav_indicator}")
+
+    # Loading progress
+    if snap.load_progress < 100:
+        val bar_width = width - 4
+        val filled = (snap.load_progress * bar_width) / 100
+        var bar = "["
+        var i = 0
+        while i < bar_width:
+            if i < filled:
+                bar = "{bar}="
+            else:
+                bar = "{bar} "
+            i = i + 1
+        bar = "{bar}]"
+        lines.push(bar)
+
+    lines.push(separator("-", width))
+
+    # Page title and content
+    lines.push("Title: {snap.page_title}")
+    lines.push("")
+    if snap.page_text_content.len() > 0:
+        lines.push(snap.page_text_content)
+    else:
+        lines.push("(empty page)")
+
+    # Status bar
+    lines.push("")
+    lines.push(separator("-", width))
+    val tab_count = snap.tabs.len()
+    val transfer = fmt_bytes(snap.bytes_transferred)
+    val load_time = fmt_duration_ms(snap.load_time_ms)
+    lines.push("Tabs: {tab_count} | Transferred: {transfer} | Load: {load_time}")
+
+    return _join_lines(lines)
+
+fn _text_tab_bar(snap: BrowserSnapshot) -> text:
+    """Render tab bar as text with box-drawing characters."""
+    if snap.tabs.len() == 0:
+        return "(no tabs)"
+
+    var parts: [text] = []
+    for tab in snap.tabs:
+        val title = truncate(tab.title, 20)
+        val active = if tab.id.id == snap.active_tab_id: "*" else: " "
+        val pin = if tab.is_pinned: "P" else: " "
+        val state = _tab_state_icon(tab.state)
+        parts.push("[{active}{pin}{state} {title}]")
+
+    return parts.join(" ")
+
+fn _tab_state_icon(state: TabState) -> text:
+    match state:
+        TabState.Loading: "~"
+        TabState.Complete: " "
+        TabState.Error: "!"
+        TabState.Crashed: "X"
+        TabState.Frozen: "#"
+
+fn _nav_state_text(state: NavigationState) -> text:
+    match state:
+        NavigationState.Idle: ""
+        NavigationState.Loading: "(loading...)"
+        NavigationState.Committed: "(committed)"
+        NavigationState.Failed: "(failed)"
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn _render_html(config: RenderConfig, snap: BrowserSnapshot) -> text:
+    """Render browser chrome and page content as HTML."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val all_css = "{css_reset()}\n{theme_css}\n{card_css()}\n{badge_css()}\n{table_css()}\n{progress_css()}\n{grid_css()}\n{responsive_css()}\n{_browser_css()}"
+
+    var body = ""
+
+    # Browser chrome container
+    body = "{body}<div class=\"browser-chrome\">\n"
+
+    # Tab bar
+    body = "{body}{_html_tab_bar(snap)}\n"
+
+    # Toolbar: address bar + controls
+    body = "{body}{_html_toolbar(snap)}\n"
+
+    # Loading progress bar
+    if snap.load_progress < 100:
+        body = "{body}<div class=\"loading-bar\">{html_progress_bar(snap.load_progress)}</div>\n"
+
+    body = "{body}</div>\n"
+
+    # Page content area
+    body = "{body}<div class=\"page-content\">\n"
+    body = "{body}  <h1>{html_escape(snap.page_title)}</h1>\n"
+    if snap.page_text_content.len() > 0:
+        body = "{body}  <div class=\"page-text\">{html_escape(snap.page_text_content)}</div>\n"
+    else:
+        body = "{body}  <div class=\"page-empty\">(empty page)</div>\n"
+    body = "{body}</div>\n"
+
+    # Status bar
+    body = "{body}{_html_status_bar(snap)}\n"
+
+    return html_page("Simple Browser - {html_escape(snap.page_title)}", all_css, body)
+
+fn _html_tab_bar(snap: BrowserSnapshot) -> text:
+    """Render tab bar as HTML using shared card components."""
+    var tab_items: [text] = []
+
+    for tab in snap.tabs:
+        val is_active = tab.id.id == snap.active_tab_id
+        val active_class = if is_active: " tab-active" else: ""
+        val title = html_escape(truncate(tab.title, 25))
+        val state_badge = _html_tab_state_badge(tab.state)
+        val pin_badge = if tab.is_pinned: html_badge("PIN", "var(--blue, #58a6ff)") else: ""
+
+        var tab_html = "<div class=\"tab-item{active_class}\">"
+        tab_html = "{tab_html}<span class=\"tab-title\">{title}</span>"
+        if pin_badge != "":
+            tab_html = "{tab_html} {pin_badge}"
+        tab_html = "{tab_html} {state_badge}"
+        tab_html = "{tab_html}</div>"
+        tab_items.push(tab_html)
+
+    if tab_items.len() == 0:
+        return "<div class=\"tab-bar\">(no tabs)</div>"
+
+    return "<div class=\"tab-bar\">{html_flex_row(tab_items, \"4px\")}</div>"
+
+fn _html_tab_state_badge(state: TabState) -> text:
+    match state:
+        TabState.Loading: html_badge("Loading", "var(--yellow, #d29922)")
+        TabState.Complete: ""
+        TabState.Error: html_badge("Error", "var(--red, #f85149)")
+        TabState.Crashed: html_badge("Crashed", "var(--red, #f85149)")
+        TabState.Frozen: html_badge("Frozen", "var(--gray, #8b949e)")
+
+fn _html_toolbar(snap: BrowserSnapshot) -> text:
+    """Render address bar and toolbar as HTML."""
+    val secure_dot = if snap.is_secure: html_status_dot("ok") else: html_status_dot("warning")
+    val nav_status = _nav_state_text(snap.nav_state)
+
+    var items: [text] = []
+    items.push("<div class=\"nav-buttons\"><button>Back</button><button>Fwd</button><button>Reload</button></div>")
+    items.push("<div class=\"address-bar\">{secure_dot}<input type=\"text\" value=\"{html_escape(snap.current_url)}\" readonly></div>")
+    if nav_status != "":
+        items.push("<span class=\"nav-status\">{html_escape(nav_status)}</span>")
+
+    return "<div class=\"toolbar\">{html_flex_row(items, \"8px\")}</div>"
+
+fn _html_status_bar(snap: BrowserSnapshot) -> text:
+    """Render status bar with metrics as HTML."""
+    val tab_count = "{snap.tabs.len()}"
+    val transfer = fmt_bytes(snap.bytes_transferred)
+    val load_time = fmt_duration_ms(snap.load_time_ms)
+
+    var items: [text] = []
+    items.push("<span>Tabs: {tab_count}</span>")
+    items.push("<span>Transferred: {transfer}</span>")
+    items.push("<span>Load: {load_time}</span>")
+    if snap.is_secure:
+        items.push(html_badge("Secure", "var(--green, #3fb950)"))
+    else:
+        items.push(html_badge("Not Secure", "var(--yellow, #d29922)"))
+
+    return "<div class=\"status-bar\">{html_flex_row(items, \"16px\")}</div>"
+
+# =========================================================================
+# Cookie / Header Display Helpers
+# =========================================================================
+
+fn render_cookies_html(cookies: List<Cookie>) -> text:
+    """Render cookies as an HTML table using shared html_table."""
+    var rows: [[text]] = []
+    for c in cookies:
+        val secure_flag = if c.secure: "Yes" else: "No"
+        val http_only = if c.http_only: "Yes" else: "No"
+        rows.push([c.name, c.value, c.domain, c.path, secure_flag, http_only])
+    return html_table(
+        ["Name", "Value", "Domain", "Path", "Secure", "HttpOnly"],
+        rows
+    )
+
+fn render_headers_html(entries: List<Pair<text, text>>) -> text:
+    """Render HTTP headers as a key-value table."""
+    var pairs: [(text, text)] = []
+    for entry in entries:
+        pairs.push((entry.first, entry.second))
+    return html_kv_table(pairs)
+
+# =========================================================================
+# Browser-Specific CSS
+# =========================================================================
+
+fn _browser_css() -> text:
+    var s = ""
+    s = "{s}.browser-chrome {\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 8px 8px 0 0;\n"
+    s = "{s}  overflow: hidden;\n"
+    s = "{s}}\n"
+    s = "{s}.tab-bar {\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  padding: 8px 8px 0;\n"
+    s = "{s}  border-bottom: 1px solid var(--border, #30363d);\n"
+    s = "{s}}\n"
+    s = "{s}.tab-item {\n"
+    s = "{s}  padding: 6px 12px;\n"
+    s = "{s}  border-radius: 6px 6px 0 0;\n"
+    s = "{s}  background: var(--bg, #0d1117);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-bottom: none;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  cursor: pointer;\n"
+    s = "{s}  white-space: nowrap;\n"
+    s = "{s}}\n"
+    s = "{s}.tab-item.tab-active {\n"
+    s = "{s}  background: var(--bg-card-hover, #1c2128);\n"
+    s = "{s}  border-color: var(--blue, #58a6ff);\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}}\n"
+    s = "{s}.tab-title { margin-right: 6px; }\n"
+    s = "{s}.toolbar {\n"
+    s = "{s}  padding: 8px 12px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border-bottom: 1px solid var(--border, #30363d);\n"
+    s = "{s}}\n"
+    s = "{s}.nav-buttons button {\n"
+    s = "{s}  background: var(--bg, #0d1117);\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 4px;\n"
+    s = "{s}  padding: 4px 10px;\n"
+    s = "{s}  font-size: 12px;\n"
+    s = "{s}  cursor: pointer;\n"
+    s = "{s}  margin-right: 4px;\n"
+    s = "{s}}\n"
+    s = "{s}.address-bar {\n"
+    s = "{s}  flex: 1;\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  align-items: center;\n"
+    s = "{s}  gap: 6px;\n"
+    s = "{s}}\n"
+    s = "{s}.address-bar input {\n"
+    s = "{s}  flex: 1;\n"
+    s = "{s}  background: var(--bg, #0d1117);\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 20px;\n"
+    s = "{s}  padding: 6px 14px;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}}\n"
+    s = "{s}.loading-bar { padding: 0 12px; }\n"
+    s = "{s}.page-content {\n"
+    s = "{s}  padding: 20px;\n"
+    s = "{s}  min-height: 200px;\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-top: none;\n"
+    s = "{s}}\n"
+    s = "{s}.page-content h1 {\n"
+    s = "{s}  font-size: 18px;\n"
+    s = "{s}  margin-bottom: 12px;\n"
+    s = "{s}}\n"
+    s = "{s}.page-text { font-size: 14px; line-height: 1.6; }\n"
+    s = "{s}.page-empty { color: var(--text-dim, #8b949e); font-style: italic; }\n"
+    s = "{s}.status-bar {\n"
+    s = "{s}  padding: 6px 12px;\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-top: none;\n"
+    s = "{s}  border-radius: 0 0 8px 8px;\n"
+    s = "{s}  font-size: 12px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.nav-status { font-size: 12px; color: var(--text-dim, #8b949e); }\n"
+    return s
+
+# =========================================================================
+# Metadata Builder
+# =========================================================================
+
+fn _build_metadata(snap: BrowserSnapshot) -> Dict<text, text>:
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "browser"
+    meta["tab_count"] = "{snap.tabs.len()}"
+    meta["active_tab_id"] = "{snap.active_tab_id}"
+    meta["current_url"] = snap.current_url
+    meta["page_title"] = snap.page_title
+    meta["is_secure"] = if snap.is_secure: "true" else: "false"
+    meta["bytes_transferred"] = "{snap.bytes_transferred}"
+    meta["load_time_ms"] = "{snap.load_time_ms}"
+    meta["load_progress"] = "{snap.load_progress}"
+    meta["network_requests"] = "{snap.network_entries.len()}"
+    meta["console_entries"] = "{snap.console_entries.len()}"
+    meta["dom_nodes"] = "{snap.dom_nodes.len()}"
+    meta["cookies"] = "{snap.cookies.len()}"
+    return meta
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _join_lines(lines: [text]) -> text:
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result

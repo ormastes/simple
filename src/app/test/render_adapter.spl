@@ -1,0 +1,239 @@
+# Test Runner Render Adapter
+#
+# Bridges the test runner app to the shared ui.render contract.
+# Produces text (pass/fail colored test results with progress) and HTML
+# (test report with badges, metrics, and test list table) via RenderResult.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_card, html_table, html_badge, html_metric_card, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, RESET, BOLD, DIM, GREEN, RED, YELLOW, CYAN, WHITE}
+use app.ui.render.progress.{progress_bar, progress_bar_html}
+use app.ui.render.table.{TableBuilder}
+use app.ui.render.fmt.{fmt_number}
+use app.ui.render.css.{card_css, badge_css, metric_css, table_css, progress_css}
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_test(config: RenderConfig) -> RenderResult:
+    """Render test results via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    Shows test summary, progress bar, and individual test results.
+    """
+    match config.format:
+        "html":
+            return render_test_html(config)
+        "both":
+            return RenderResult.both(
+                render_test_text(config).text_output,
+                render_test_html(config).html_output
+            )
+        _:
+            return render_test_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_test_text(config: RenderConfig) -> RenderResult:
+    """Render test results as ANSI-colored text with progress bar.
+
+    Shows header, summary counts, progress bar, and per-test results.
+    """
+    var lines: [text] = []
+
+    # Demo data — in production, this would come from test runner state
+    val total = 48
+    val passed = 42
+    val failed = 3
+    val skipped = 3
+
+    # Header
+    lines.push(colorize("Test Results", BOLD))
+    lines.push(colorize("Simple Language Test Suite", DIM))
+    lines.push("")
+
+    # Summary line
+    val pass_str = colorize("{passed} passed", GREEN)
+    val fail_str = colorize("{failed} failed", RED)
+    val skip_str = colorize("{skipped} skipped", YELLOW)
+    lines.push("{pass_str}  {fail_str}  {skip_str}  ({fmt_number(total)} total)")
+    lines.push("")
+
+    # Progress bar
+    val bar = progress_bar(passed, total, 40)
+    lines.push(colorize("Progress: ", BOLD) + bar)
+    lines.push("")
+
+    # Results table
+    var tb = TableBuilder.new(["Status", "Test", "Duration"])
+    tb = tb.add_row([colorize("PASS", GREEN), "test/lib/math_spec.spl", "12ms"])
+    tb = tb.add_row([colorize("PASS", GREEN), "test/lib/text_spec.spl", "8ms"])
+    tb = tb.add_row([colorize("FAIL", RED), "test/lib/json_spec.spl", "45ms"])
+    tb = tb.add_row([colorize("PASS", GREEN), "test/compiler/parser_spec.spl", "156ms"])
+    tb = tb.add_row([colorize("SKIP", YELLOW), "test/system/live_api_spec.spl", "-"])
+    tb = tb.add_row([colorize("FAIL", RED), "test/compiler/codegen_spec.spl", "89ms"])
+    lines.push(colorize("Recent Results:", BOLD))
+    lines.push(tb.build())
+
+    # Failure details
+    lines.push("")
+    lines.push(colorize("Failures:", BOLD))
+    lines.push("  " + colorize("1)", RED) + " test/lib/json_spec.spl")
+    lines.push("     Expected: " + colorize("true", GREEN))
+    lines.push("     Got:      " + colorize("false", RED))
+    lines.push("  " + colorize("2)", RED) + " test/compiler/codegen_spec.spl")
+    lines.push("     Expected: " + colorize("\"exit 0\"", GREEN))
+    lines.push("     Got:      " + colorize("\"exit 1\"", RED))
+
+    var result = RenderResult.text(join_lines(lines))
+    result.metadata = test_metadata(total, passed, failed, skipped)
+    return result
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_test_html(config: RenderConfig) -> RenderResult:
+    """Render test results as a full HTML page with badges and metrics."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + card_css() + badge_css() + metric_css() + table_css() + progress_css() + test_css()
+    val body = test_html_body()
+    val page = html_page("Test Results", css, body)
+
+    val total = 48
+    val passed = 42
+    val failed = 3
+    val skipped = 3
+    var result = RenderResult.html(page)
+    result.metadata = test_metadata(total, passed, failed, skipped)
+    return result
+
+fn test_css() -> text:
+    """Test-report-specific CSS styles."""
+    var s = ""
+    s = "{s}.test-container {\n"
+    s = "{s}  max-width: 900px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.test-header {\n"
+    s = "{s}  margin-bottom: 20px;\n"
+    s = "{s}}\n"
+    s = "{s}.test-header h1 {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: var(--green, #3fb950);\n"
+    s = "{s}}\n"
+    s = "{s}.test-header .subtitle {\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}}\n"
+    s = "{s}.metrics-row {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  gap: 12px;\n"
+    s = "{s}  margin-bottom: 20px;\n"
+    s = "{s}}\n"
+    s = "{s}.failure-detail {\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--red, #f85149);\n"
+    s = "{s}  border-radius: 6px;\n"
+    s = "{s}  padding: 12px 16px;\n"
+    s = "{s}  margin-top: 8px;\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}}\n"
+    s = "{s}.failure-detail .expected {\n"
+    s = "{s}  color: var(--green, #3fb950);\n"
+    s = "{s}}\n"
+    s = "{s}.failure-detail .actual {\n"
+    s = "{s}  color: var(--red, #f85149);\n"
+    s = "{s}}\n"
+    return s
+
+fn test_html_body() -> text:
+    """Generate test report HTML body content."""
+    val total = 48
+    val passed = 42
+    val failed = 3
+    val skipped = 3
+    var h = ""
+    h = "{h}<div class=\"test-container\">\n"
+
+    # Header
+    h = "{h}  <div class=\"test-header\">\n"
+    h = "{h}    <h1>Test Results</h1>\n"
+    h = "{h}    <div class=\"subtitle\">Simple Language Test Suite</div>\n"
+    h = "{h}  </div>\n"
+
+    # Metric cards
+    h = "{h}  <div class=\"metrics-row\">\n"
+    h = "{h}    {html_metric_card("Total", fmt_number(total), "")}\n"
+    h = "{h}    {html_metric_card("Passed", fmt_number(passed), "")}\n"
+    h = "{h}    {html_metric_card("Failed", fmt_number(failed), "")}\n"
+    h = "{h}    {html_metric_card("Skipped", fmt_number(skipped), "")}\n"
+    h = "{h}  </div>\n"
+
+    # Progress bar
+    h = "{h}  <div style=\"margin-bottom:20px\">\n"
+    h = "{h}    <div style=\"font-size:13px;margin-bottom:4px;color:var(--text-dim)\">Progress</div>\n"
+    h = "{h}    {progress_bar_html(passed, total)}\n"
+    h = "{h}  </div>\n"
+
+    # Test results table with badges
+    val headers = ["Status", "Test", "Duration"]
+    val rows = [
+        [html_badge("PASS", "#3fb950"), html_escape("test/lib/math_spec.spl"), "12ms"],
+        [html_badge("PASS", "#3fb950"), html_escape("test/lib/text_spec.spl"), "8ms"],
+        [html_badge("FAIL", "#f85149"), html_escape("test/lib/json_spec.spl"), "45ms"],
+        [html_badge("PASS", "#3fb950"), html_escape("test/compiler/parser_spec.spl"), "156ms"],
+        [html_badge("SKIP", "#d29922"), html_escape("test/system/live_api_spec.spl"), "-"],
+        [html_badge("FAIL", "#f85149"), html_escape("test/compiler/codegen_spec.spl"), "89ms"]
+    ]
+    h = "{h}  {html_card("Test List", html_table(headers, rows))}\n"
+
+    # Failure details
+    h = "{h}  {html_card("Failures", failure_details_html())}\n"
+
+    h = "{h}</div>\n"
+    return h
+
+fn failure_details_html() -> text:
+    """Generate HTML for failure detail cards."""
+    var h = ""
+    h = "{h}<div class=\"failure-detail\">\n"
+    h = "{h}  <strong>test/lib/json_spec.spl</strong><br>\n"
+    h = "{h}  Expected: <span class=\"expected\">true</span><br>\n"
+    h = "{h}  Got: <span class=\"actual\">false</span>\n"
+    h = "{h}</div>\n"
+    h = "{h}<div class=\"failure-detail\">\n"
+    h = "{h}  <strong>test/compiler/codegen_spec.spl</strong><br>\n"
+    h = "{h}  Expected: <span class=\"expected\">\"exit 0\"</span><br>\n"
+    h = "{h}  Got: <span class=\"actual\">\"exit 1\"</span>\n"
+    h = "{h}</div>\n"
+    return h
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn test_metadata(total: i64, passed: i64, failed: i64, skipped: i64) -> Dict<text, text>:
+    """Build metadata for test render results."""
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "test"
+    meta["total"] = "{total}"
+    meta["passed"] = "{passed}"
+    meta["failed"] = "{failed}"
+    meta["skipped"] = "{skipped}"
+    return meta

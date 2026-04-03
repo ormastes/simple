@@ -1,0 +1,300 @@
+# Search Render Adapter
+#
+# Bridges the search (package search) app to the shared ui.render contract.
+# Produces text (grep-like results with line numbers + context) and HTML
+# (search results with highlighted matches in cards) via RenderResult.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.html.{html_page, html_card, html_badge, html_escape, css_dark_theme, css_light_theme, css_reset}
+use app.ui.render.ansi.{colorize, RESET, BOLD, DIM, GREEN, RED, YELLOW, CYAN, WHITE, BRIGHT_BLACK, MAGENTA}
+use app.ui.render.fmt.{fmt_number}
+use app.ui.render.css.{card_css, badge_css}
+
+# =========================================================================
+# Render Adapter Entry Point
+# =========================================================================
+
+fn render_search(config: RenderConfig) -> RenderResult:
+    """Render search results via the shared render contract.
+
+    Dispatches to text or HTML rendering based on config.format.
+    Shows search results with match highlighting and context.
+    """
+    match config.format:
+        "html":
+            return render_search_html(config)
+        "both":
+            return RenderResult.both(
+                render_search_text(config).text_output,
+                render_search_html(config).html_output
+            )
+        _:
+            return render_search_text(config)
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_search_text(config: RenderConfig) -> RenderResult:
+    """Render search results as grep-like ANSI-colored text.
+
+    Shows file paths, line numbers, match context, and summary.
+    """
+    var lines: [text] = []
+    val query = "http"
+
+    # Header
+    lines.push(colorize("Search Results", BOLD))
+    lines.push(colorize("Query: \"{query}\"", DIM))
+    lines.push("")
+
+    # Result 1
+    lines.push(colorize("src/lib/nogc_sync_mut/http/client.spl", MAGENTA))
+    lines.push(format_match_line(12, "fn http_get(url: text) -> Response:", query))
+    lines.push(format_match_line(45, "fn http_post(url: text, body: text) -> Response:", query))
+    lines.push(format_match_line(78, "    val http_status = response.status_code", query))
+    lines.push("")
+
+    # Result 2
+    lines.push(colorize("src/lib/nogc_sync_mut/http/server.spl", MAGENTA))
+    lines.push(format_match_line(8, "# Simple HTTP Server", query))
+    lines.push(format_match_line(23, "fn start_http_server(port: i64) -> HttpServer:", query))
+    lines.push("")
+
+    # Result 3
+    lines.push(colorize("test/lib/http_spec.spl", MAGENTA))
+    lines.push(format_match_line(5, "use std.http.{http_get, http_post}", query))
+    lines.push(format_match_line(15, "    describe \"http_get\":", query))
+    lines.push("")
+
+    # Result 4
+    lines.push(colorize("src/app/package/registry/config.spl", MAGENTA))
+    lines.push(format_match_line(3, "val DEFAULT_REGISTRY = \"https://registry.simple-lang.org\"", query))
+    lines.push("")
+
+    # Summary
+    lines.push(colorize("9 matches", GREEN) + " in " + colorize("4 files", CYAN))
+
+    var result = RenderResult.text(join_lines(lines))
+    result.metadata = search_metadata(query, 9, 4)
+    return result
+
+fn format_match_line(line_num: i64, content: text, query: text) -> text:
+    """Format a search result line with line number and highlighted match."""
+    val num_str = colorize(pad_num(line_num), BRIGHT_BLACK)
+    val highlighted = highlight_match(content, query)
+    return "  {num_str}: {highlighted}"
+
+fn pad_num(n: i64) -> text:
+    """Right-align a line number to 4 chars."""
+    var s = "{n}"
+    while s.len() < 4:
+        s = " {s}"
+    return s
+
+fn highlight_match(line: text, query: text) -> text:
+    """Highlight all occurrences of query in a line with bold red."""
+    # Simple case-insensitive highlight
+    var result = ""
+    var lower_line = line.to_lower()
+    var lower_query = query.to_lower()
+    var pos = 0
+    while pos < line.len():
+        val remaining_lower = lower_line.substring(pos)
+        val idx = remaining_lower.index_of(lower_query) ?? -1
+        if idx == 0:
+            val matched = line.substring(pos, pos + query.len())
+            result = "{result}{colorize(matched, RED)}"
+            pos = pos + query.len()
+        else:
+            val ch = line.substring(pos, pos + 1)
+            result = "{result}{ch}"
+            pos = pos + 1
+    return result
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_search_html(config: RenderConfig) -> RenderResult:
+    """Render search results as a full HTML page with highlighted matches."""
+    val theme_css = if config.theme == "light": css_light_theme() else: css_dark_theme()
+    val css = css_reset() + theme_css + card_css() + badge_css() + search_css()
+    val body = search_html_body()
+    val page = html_page("Search Results", css, body)
+
+    var result = RenderResult.html(page)
+    result.metadata = search_metadata("http", 9, 4)
+    return result
+
+fn search_css() -> text:
+    """Search-results-specific CSS styles."""
+    var s = ""
+    s = "{s}.search-container {\n"
+    s = "{s}  max-width: 900px;\n"
+    s = "{s}  margin: 0 auto;\n"
+    s = "{s}}\n"
+    s = "{s}.search-header {\n"
+    s = "{s}  margin-bottom: 20px;\n"
+    s = "{s}}\n"
+    s = "{s}.search-header h1 {\n"
+    s = "{s}  font-size: 20px;\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}}\n"
+    s = "{s}.search-header .query {\n"
+    s = "{s}  font-size: 14px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  margin-top: 4px;\n"
+    s = "{s}}\n"
+    s = "{s}.search-header .query em {\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}  font-style: normal;\n"
+    s = "{s}  font-weight: 600;\n"
+    s = "{s}}\n"
+    s = "{s}.result-card {\n"
+    s = "{s}  background: var(--bg-card, #161b22);\n"
+    s = "{s}  border: 1px solid var(--border, #30363d);\n"
+    s = "{s}  border-radius: 8px;\n"
+    s = "{s}  margin-bottom: 12px;\n"
+    s = "{s}  overflow: hidden;\n"
+    s = "{s}}\n"
+    s = "{s}.result-card .file-header {\n"
+    s = "{s}  padding: 8px 16px;\n"
+    s = "{s}  background: var(--bg, #0d1117);\n"
+    s = "{s}  border-bottom: 1px solid var(--border, #30363d);\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--blue, #58a6ff);\n"
+    s = "{s}}\n"
+    s = "{s}.match-line {\n"
+    s = "{s}  display: flex;\n"
+    s = "{s}  padding: 2px 16px;\n"
+    s = "{s}  font-family: monospace;\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  line-height: 1.6;\n"
+    s = "{s}}\n"
+    s = "{s}.match-line:hover {\n"
+    s = "{s}  background: rgba(88, 166, 255, 0.05);\n"
+    s = "{s}}\n"
+    s = "{s}.match-line .line-num {\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  min-width: 40px;\n"
+    s = "{s}  text-align: right;\n"
+    s = "{s}  padding-right: 12px;\n"
+    s = "{s}  user-select: none;\n"
+    s = "{s}}\n"
+    s = "{s}.match-line .code {\n"
+    s = "{s}  color: var(--text, #c9d1d9);\n"
+    s = "{s}  white-space: pre;\n"
+    s = "{s}}\n"
+    s = "{s}.match-line .highlight {\n"
+    s = "{s}  background: rgba(248, 81, 73, 0.25);\n"
+    s = "{s}  color: var(--red, #f85149);\n"
+    s = "{s}  font-weight: 600;\n"
+    s = "{s}  border-radius: 2px;\n"
+    s = "{s}  padding: 0 2px;\n"
+    s = "{s}}\n"
+    s = "{s}.search-summary {\n"
+    s = "{s}  font-size: 13px;\n"
+    s = "{s}  color: var(--text-dim, #8b949e);\n"
+    s = "{s}  margin-top: 16px;\n"
+    s = "{s}}\n"
+    return s
+
+fn search_html_body() -> text:
+    """Generate search results HTML body content."""
+    val query = "http"
+    var h = ""
+    h = "{h}<div class=\"search-container\">\n"
+
+    # Header
+    h = "{h}  <div class=\"search-header\">\n"
+    h = "{h}    <h1>Search Results</h1>\n"
+    h = "{h}    <div class=\"query\">Query: <em>{html_escape(query)}</em></div>\n"
+    h = "{h}  </div>\n"
+
+    # Result cards
+    h = "{h}  {result_card_html("src/lib/nogc_sync_mut/http/client.spl", "spl", [
+        (12, "fn http_get(url: text) -> Response:", query),
+        (45, "fn http_post(url: text, body: text) -> Response:", query),
+        (78, "    val http_status = response.status_code", query)
+    ])}\n"
+
+    h = "{h}  {result_card_html("src/lib/nogc_sync_mut/http/server.spl", "spl", [
+        (8, "# Simple HTTP Server", query),
+        (23, "fn start_http_server(port: i64) -> HttpServer:", query)
+    ])}\n"
+
+    h = "{h}  {result_card_html("test/lib/http_spec.spl", "spl", [
+        (5, "use std.http.{http_get, http_post}", query),
+        (15, "    describe \"http_get\":", query)
+    ])}\n"
+
+    h = "{h}  {result_card_html("src/app/package/registry/config.spl", "spl", [
+        (3, "val DEFAULT_REGISTRY = \"https://registry.simple-lang.org\"", query)
+    ])}\n"
+
+    # Summary
+    h = "{h}  <div class=\"search-summary\">9 matches in 4 files</div>\n"
+
+    h = "{h}</div>\n"
+    return h
+
+fn result_card_html(filepath: text, filetype: text, matches: [(i64, text, text)]) -> text:
+    """Generate a result card for a single file with match lines."""
+    var h = ""
+    h = "{h}<div class=\"result-card\">\n"
+    h = "{h}  <div class=\"file-header\">{html_escape(filepath)} {html_badge(filetype, "#58a6ff")}</div>\n"
+    for match_item in matches:
+        val line_num = match_item.0
+        val content = match_item.1
+        val query = match_item.2
+        h = "{h}  <div class=\"match-line\">\n"
+        h = "{h}    <span class=\"line-num\">{line_num}</span>\n"
+        h = "{h}    <span class=\"code\">{highlight_html(html_escape(content), query)}</span>\n"
+        h = "{h}  </div>\n"
+    h = "{h}</div>\n"
+    return h
+
+fn highlight_html(escaped_content: text, query: text) -> text:
+    """Highlight query matches in HTML-escaped content."""
+    var result = ""
+    var lower_content = escaped_content.to_lower()
+    var lower_query = query.to_lower()
+    var pos = 0
+    while pos < escaped_content.len():
+        val remaining_lower = lower_content.substring(pos)
+        val idx = remaining_lower.index_of(lower_query) ?? -1
+        if idx == 0:
+            val matched = escaped_content.substring(pos, pos + query.len())
+            result = "{result}<span class=\"highlight\">{matched}</span>"
+            pos = pos + query.len()
+        else:
+            val ch = escaped_content.substring(pos, pos + 1)
+            result = "{result}{ch}"
+            pos = pos + 1
+    return result
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn join_lines(lines: [text]) -> text:
+    """Join lines with newline separator."""
+    var result = ""
+    var first = true
+    for line in lines:
+        if not first:
+            result = "{result}\n"
+        result = "{result}{line}"
+        first = false
+    return result
+
+fn search_metadata(query: text, match_count: i64, file_count: i64) -> Dict<text, text>:
+    """Build metadata for search render results."""
+    var meta: Dict<text, text> = {}
+    meta["adapter"] = "search"
+    meta["query"] = query
+    meta["match_count"] = "{match_count}"
+    meta["file_count"] = "{file_count}"
+    return meta

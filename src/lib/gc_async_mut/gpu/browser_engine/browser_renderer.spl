@@ -1,0 +1,156 @@
+# Browser Renderer — Top-Level API
+#
+# Renders UI content through the browser engine pipeline:
+#   Input (DOM/HTML/Widgets) -> CSS Resolution -> Layout -> Paint -> 2D Engine
+#
+# This is the primary entry point for applications that want to render
+# UI through the browser engine onto a 2D pixel surface.
+
+use common.ui.widget.{UITree, UIState}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{default_style}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
+use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand, Engine2D,
+    generate_paint_list, execute_paint, paint_tree}
+use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{widget_to_dom,
+    ui_tree_to_dom, html_string_to_dom}
+
+# =========================================================================
+# Render Result
+# =========================================================================
+
+class BeRenderResult:
+    """Result of a browser engine render operation.
+
+    Fields:
+        format      - "pixels", "commands", "both"
+        pixel_data  - rendered pixel buffer (RGBA u32 per pixel)
+        commands    - paint command list (for inspection/caching)
+        width       - rendered width in pixels
+        height      - rendered height in pixels
+        node_count  - number of DOM nodes processed
+        warnings    - any warnings generated during rendering
+    """
+    format: text
+    pixel_data: [u32]
+    commands: [PaintCommand]
+    width: i32
+    height: i32
+    node_count: i32
+    warnings: [text]
+
+    static fn empty() -> BeRenderResult:
+        return BeRenderResult(
+            format: "pixels",
+            pixel_data: [],
+            commands: [],
+            width: 0, height: 0,
+            node_count: 0,
+            warnings: []
+        )
+
+# =========================================================================
+# Browser Renderer
+# =========================================================================
+
+class BrowserRenderer:
+    """Top-level browser rendering engine.
+
+    Manages the 2D engine and provides high-level render methods for
+    DOM trees, HTML strings, and widget trees.
+
+    Fields:
+        engine      - the underlying 2D rendering engine
+        viewport_w  - viewport width in pixels
+        viewport_h  - viewport height in pixels
+        bg_color    - background clear color (default: white)
+    """
+    engine: Engine2D
+    viewport_w: i32
+    viewport_h: i32
+    bg_color: u32
+
+    static fn create(w: i32, h: i32) -> BrowserRenderer:
+        """Create a browser renderer with the given viewport size."""
+        return BrowserRenderer(
+            engine: Engine2D.create(w, h),
+            viewport_w: w,
+            viewport_h: h,
+            bg_color: 0xFFFFFFFF
+        )
+
+    static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
+        """Create a browser renderer with a specific backend.
+        Currently only 'software' is supported. Future: 'gpu', 'vulkan'.
+        """
+        # For now, all backends use the same software engine
+        return BrowserRenderer.create(w, h)
+
+    me set_background(color: u32):
+        """Set the background clear color."""
+        self.bg_color = color
+
+    me render_dom(root: BeDomNode) -> BeRenderResult:
+        """Render a DOM tree to pixels.
+
+        Pipeline: DOM -> Layout -> Paint -> Pixels
+        """
+        # Clear canvas
+        self.engine.clear(self.bg_color)
+
+        # Layout
+        val layout = layout_tree(root, self.viewport_w, self.viewport_h)
+
+        # Paint
+        val commands = generate_paint_list(layout)
+        execute_paint(self.engine, commands)
+
+        # Count nodes
+        val node_count = count_nodes(root)
+
+        return BeRenderResult(
+            format: "pixels",
+            pixel_data: self.engine.get_pixels(),
+            commands: commands,
+            width: self.viewport_w,
+            height: self.viewport_h,
+            node_count: node_count,
+            warnings: []
+        )
+
+    me render_html(html: text) -> BeRenderResult:
+        """Render an HTML string to pixels.
+
+        Pipeline: HTML -> DOM -> Layout -> Paint -> Pixels
+        """
+        val dom = html_string_to_dom(html)
+        return self.render_dom(dom)
+
+    me render_widget_tree(tree: UITree, state: UIState) -> BeRenderResult:
+        """Render a UI widget tree to pixels.
+
+        Pipeline: Widgets -> DOM -> Layout -> Paint -> Pixels
+        """
+        val dom = ui_tree_to_dom(tree, state)
+        return self.render_dom(dom)
+
+    me render_to_pixels() -> [u32]:
+        """Return the current pixel buffer contents."""
+        return self.engine.get_pixels()
+
+    me resize(w: i32, h: i32):
+        """Resize the viewport and recreate the engine."""
+        self.viewport_w = w
+        self.viewport_h = h
+        self.engine = Engine2D.create(w, h)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn count_nodes(node: BeDomNode) -> i32:
+    """Count total nodes in a DOM tree."""
+    var count = 1
+    for child in node.children:
+        count = count + count_nodes(child)
+    return count

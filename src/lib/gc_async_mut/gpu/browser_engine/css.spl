@@ -1,0 +1,214 @@
+# CSS Property Resolution
+#
+# Style property types and resolution for the browser engine.
+# Provides a flat StyleProps structure that is computed per-node,
+# with inheritance from parent styles where applicable.
+
+# =========================================================================
+# CSS Value Types
+# =========================================================================
+
+class CssValue:
+    """A CSS length/size value with unit.
+
+    Fields:
+        value - numeric value
+        unit  - "px", "%", "auto", "em", "rem"
+    """
+    value: f32
+    unit: text
+
+    static fn px(v: f32) -> CssValue:
+        return CssValue(value: v, unit: "px")
+
+    static fn pct(v: f32) -> CssValue:
+        return CssValue(value: v, unit: "%")
+
+    static fn auto() -> CssValue:
+        return CssValue(value: 0.0, unit: "auto")
+
+    fn is_auto() -> bool:
+        return self.unit == "auto"
+
+    fn is_percent() -> bool:
+        return self.unit == "%"
+
+    fn value_as_i32() -> i32:
+        """Convert the value to i32, truncating."""
+        return self.value.to_i32()
+
+    fn resolve_px(container_size: i32) -> i32:
+        """Resolve this value to pixels given a container size for percentages."""
+        if self.unit == "auto":
+            return 0
+        if self.unit == "%":
+            return (self.value * container_size.to_f32() / 100.0).to_i32()
+        # px, em, rem all treated as px for now
+        return self.value.to_i32()
+
+# =========================================================================
+# Box Edges
+# =========================================================================
+
+class BoxEdges:
+    """Margin or padding edge values (top, right, bottom, left)."""
+    top: i32
+    right: i32
+    bottom: i32
+    left: i32
+
+    static fn zero() -> BoxEdges:
+        return BoxEdges(top: 0, right: 0, bottom: 0, left: 0)
+
+    static fn uniform(v: i32) -> BoxEdges:
+        return BoxEdges(top: v, right: v, bottom: v, left: v)
+
+    fn horizontal() -> i32:
+        return self.left + self.right
+
+    fn vertical() -> i32:
+        return self.top + self.bottom
+
+# =========================================================================
+# Border Properties
+# =========================================================================
+
+class BorderProps:
+    """Border properties for all four sides."""
+    width: i32
+    color: u32
+    style: text  # "solid", "dashed", "dotted", "none"
+
+    static fn none() -> BorderProps:
+        return BorderProps(width: 0, color: 0x000000FF, style: "none")
+
+    static fn solid(width: i32, color: u32) -> BorderProps:
+        return BorderProps(width: width, color: color, style: "solid")
+
+# =========================================================================
+# Style Properties
+# =========================================================================
+
+class StyleProps:
+    """Computed style properties for a DOM node.
+
+    Contains all CSS properties needed for layout and painting.
+    """
+    display: text           # "block", "flex", "grid", "inline", "none"
+    width: CssValue
+    height: CssValue
+    margin: BoxEdges
+    padding: BoxEdges
+    border: BorderProps
+    background_color: u32
+    color: u32
+    font_size: i32
+    font_weight: text
+    text_align: text
+    flex_direction: text
+    gap: i32
+    border_radius: i32
+    overflow: text
+    position: text
+    top: CssValue
+    left: CssValue
+    opacity: f32
+    z_index: i32
+
+fn default_style() -> StyleProps:
+    """Create a StyleProps with default values (block display, no margins, black text)."""
+    return StyleProps(
+        display: "block",
+        width: CssValue.auto(),
+        height: CssValue.auto(),
+        margin: BoxEdges.zero(),
+        padding: BoxEdges.zero(),
+        border: BorderProps.none(),
+        background_color: 0x00000000,
+        color: 0x000000FF,
+        font_size: 16,
+        font_weight: "normal",
+        text_align: "left",
+        flex_direction: "row",
+        gap: 0,
+        border_radius: 0,
+        overflow: "visible",
+        position: "static",
+        top: CssValue.auto(),
+        left: CssValue.auto(),
+        opacity: 1.0,
+        z_index: 0
+    )
+
+# =========================================================================
+# CSS Value Parsing
+# =========================================================================
+
+fn parse_css_value(s: text) -> CssValue:
+    """Parse a CSS value string like '100px', '50%', or 'auto'."""
+    val trimmed = s.trim()
+
+    if trimmed == "auto" or trimmed == "":
+        return CssValue.auto()
+
+    if trimmed.ends_with("px"):
+        val num_str = trimmed.slice(0, trimmed.len() - 2)
+        val num = num_str.parse_f64()
+        if num != nil:
+            return CssValue.px(num.to_f32())
+        return CssValue.px(0.0)
+
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val num = num_str.parse_f64()
+        if num != nil:
+            return CssValue.pct(num.to_f32())
+        return CssValue.pct(0.0)
+
+    if trimmed.ends_with("em"):
+        val num_str = trimmed.slice(0, trimmed.len() - 2)
+        val num = num_str.parse_f64()
+        if num != nil:
+            return CssValue.px(num.to_f32() * 16.0)  # 1em = 16px default
+        return CssValue.px(0.0)
+
+    if trimmed.ends_with("rem"):
+        val num_str = trimmed.slice(0, trimmed.len() - 3)
+        val num = num_str.parse_f64()
+        if num != nil:
+            return CssValue.px(num.to_f32() * 16.0)
+        return CssValue.px(0.0)
+
+    # Try as plain number (treat as px)
+    val num = trimmed.parse_f64()
+    if num != nil:
+        return CssValue.px(num.to_f32())
+
+    return CssValue.auto()
+
+# =========================================================================
+# Style Resolution (Inheritance)
+# =========================================================================
+
+fn resolve_style(node: BeDomNode, parent_style: StyleProps) -> StyleProps:
+    """Resolve the computed style for a node, inheriting from parent where appropriate.
+
+    Inherited properties (per CSS spec): color, font_size, font_weight, text_align.
+    Non-inherited properties use their own values or defaults.
+    """
+    var s = node.style
+
+    # Inherit text-related properties from parent if not explicitly set
+    if s.color == 0x000000FF and parent_style.color != 0x000000FF:
+        s.color = parent_style.color
+
+    if s.font_size == 16 and parent_style.font_size != 16:
+        s.font_size = parent_style.font_size
+
+    if s.font_weight == "normal" and parent_style.font_weight != "normal":
+        s.font_weight = parent_style.font_weight
+
+    if s.text_align == "left" and parent_style.text_align != "left":
+        s.text_align = parent_style.text_align
+
+    return s

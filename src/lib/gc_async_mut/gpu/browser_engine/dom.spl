@@ -1,0 +1,272 @@
+# Simplified DOM for UI Rendering
+#
+# A lightweight DOM tree that the browser engine uses internally.
+# Unlike the full browser DOM (examples/browser/entity/dom/), this is
+# optimized for UI widget rendering: fewer node types, inline style props,
+# and a tree structure using direct child references rather than ID-based
+# lookups.
+
+class BeDomNode:
+    """A DOM node in the browser engine's simplified tree.
+
+    Fields:
+        tag          - element tag name ("div", "span", "button", "input", etc.)
+        id           - unique identifier for this node
+        classes      - CSS class names applied to this node
+        style        - inline style properties
+        children     - child nodes (direct references, not IDs)
+        text_content - text content for text nodes
+        attributes   - key-value attribute pairs stored as flat [key, value, key, value, ...]
+    """
+    tag: text
+    id: text
+    classes: [text]
+    style: StyleProps
+    children: [BeDomNode]
+    text_content: text
+    attributes: [text]
+
+    static fn element(tag: text) -> BeDomNode:
+        """Create an element node with the given tag name."""
+        return BeDomNode(
+            tag: tag,
+            id: "",
+            classes: [],
+            style: default_style(),
+            children: [],
+            text_content: "",
+            attributes: []
+        )
+
+    static fn text(content: text) -> BeDomNode:
+        """Create a text node with the given content."""
+        return BeDomNode(
+            tag: "#text",
+            id: "",
+            classes: [],
+            style: default_style(),
+            children: [],
+            text_content: content,
+            attributes: []
+        )
+
+    me add_child(child: BeDomNode):
+        """Append a child node."""
+        self.children = self.children + [child]
+
+    me set_style(prop: text, value: text):
+        """Set a style property by name and string value."""
+        var s = self.style
+        match prop:
+            "display" =>
+                s.display = value
+            "width" =>
+                s.width = parse_css_value(value)
+            "height" =>
+                s.height = parse_css_value(value)
+            "background-color" =>
+                s.background_color = parse_color_value(value)
+            "background_color" =>
+                s.background_color = parse_color_value(value)
+            "color" =>
+                s.color = parse_color_value(value)
+            "font-size" =>
+                val cv = parse_css_value(value)
+                s.font_size = cv.value_as_i32()
+            "font_size" =>
+                val cv = parse_css_value(value)
+                s.font_size = cv.value_as_i32()
+            "font-weight" =>
+                s.font_weight = value
+            "font_weight" =>
+                s.font_weight = value
+            "text-align" =>
+                s.text_align = value
+            "text_align" =>
+                s.text_align = value
+            "flex-direction" =>
+                s.flex_direction = value
+            "flex_direction" =>
+                s.flex_direction = value
+            "gap" =>
+                val cv = parse_css_value(value)
+                s.gap = cv.value_as_i32()
+            "border-radius" =>
+                val cv = parse_css_value(value)
+                s.border_radius = cv.value_as_i32()
+            "border_radius" =>
+                val cv = parse_css_value(value)
+                s.border_radius = cv.value_as_i32()
+            "overflow" =>
+                s.overflow = value
+            "position" =>
+                s.position = value
+            "top" =>
+                s.top = parse_css_value(value)
+            "left" =>
+                s.left = parse_css_value(value)
+            "opacity" =>
+                s.opacity = parse_float_value(value)
+            "z-index" =>
+                s.z_index = parse_int_value(value)
+            "z_index" =>
+                s.z_index = parse_int_value(value)
+            "margin" =>
+                val cv = parse_css_value(value)
+                val v = cv.value_as_i32()
+                s.margin = BoxEdges(top: v, right: v, bottom: v, left: v)
+            "padding" =>
+                val cv = parse_css_value(value)
+                val v = cv.value_as_i32()
+                s.padding = BoxEdges(top: v, right: v, bottom: v, left: v)
+            _ =>
+                pass_dn
+        self.style = s
+
+    me set_attr(key: text, value: text):
+        """Set an attribute key-value pair."""
+        # Check if key already exists and update it
+        var new_attrs: [text] = []
+        var found = false
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] == key:
+                new_attrs = new_attrs + [key, value]
+                found = true
+            else:
+                new_attrs = new_attrs + [self.attributes[i], self.attributes[i + 1]]
+            i = i + 2
+        if not found:
+            new_attrs = new_attrs + [key, value]
+        self.attributes = new_attrs
+
+    fn get_attr(key: text) -> text:
+        """Get an attribute value by key. Returns empty string if not found."""
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] == key:
+                return self.attributes[i + 1]
+            i = i + 2
+        return ""
+
+    fn is_text_node() -> bool:
+        """True if this is a text node (tag == '#text')."""
+        return self.tag == "#text"
+
+    fn is_element() -> bool:
+        """True if this is an element node (not a text node)."""
+        return self.tag != "#text"
+
+    fn has_class(name: text) -> bool:
+        """Check if this node has a given CSS class."""
+        for cls in self.classes:
+            if cls == name:
+                return true
+        return false
+
+# =========================================================================
+# Color Parsing Helpers
+# =========================================================================
+
+fn parse_color_value(s: text) -> u32:
+    """Parse a color string to a u32 RGBA value.
+    Supports: '#RRGGBB', '#RGB', named colors, and decimal numbers.
+    """
+    if s.len() == 0:
+        return 0x000000FF
+
+    if s.starts_with("#"):
+        return parse_hex_color(s)
+
+    # Named colors
+    match s:
+        "black" => return 0x000000FF
+        "white" => return 0xFFFFFFFF
+        "red" => return 0xFF0000FF
+        "green" => return 0x00FF00FF
+        "blue" => return 0x0000FFFF
+        "yellow" => return 0xFFFF00FF
+        "cyan" => return 0x00FFFFFF
+        "magenta" => return 0xFF00FFFF
+        "gray" => return 0x808080FF
+        "grey" => return 0x808080FF
+        "transparent" => return 0x00000000
+        _ =>
+            # Try as decimal number
+            val num = s.parse_i64()
+            if num != nil:
+                return num.to_u32()
+            return 0x000000FF
+
+fn parse_hex_color(s: text) -> u32:
+    """Parse a hex color string like '#RRGGBB' or '#RGB' to u32 RGBA."""
+    val hex = s.slice(1, s.len())
+    if hex.len() == 6:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        return (r * 16777216) + (g * 65536) + (b * 256) + 255
+    elif hex.len() == 3:
+        val r = hex_nibble(hex.slice(0, 1))
+        val g = hex_nibble(hex.slice(1, 2))
+        val b = hex_nibble(hex.slice(2, 3))
+        val rr = r * 17
+        val gg = g * 17
+        val bb = b * 17
+        return (rr * 16777216) + (gg * 65536) + (bb * 256) + 255
+    return 0x000000FF
+
+fn hex_byte(s: text) -> u32:
+    """Parse a two-character hex string to a byte value (0-255)."""
+    if s.len() != 2:
+        return 0
+    val high = hex_digit(s[0])
+    val low = hex_digit(s[1])
+    return high * 16 + low
+
+fn hex_nibble(s: text) -> u32:
+    """Parse a single hex character to a nibble value (0-15)."""
+    if s.len() != 1:
+        return 0
+    return hex_digit(s[0])
+
+fn hex_digit(ch: text) -> u32:
+    """Convert a single hex digit character to its numeric value."""
+    match ch:
+        "0" => 0
+        "1" => 1
+        "2" => 2
+        "3" => 3
+        "4" => 4
+        "5" => 5
+        "6" => 6
+        "7" => 7
+        "8" => 8
+        "9" => 9
+        "a" => 10
+        "A" => 10
+        "b" => 11
+        "B" => 11
+        "c" => 12
+        "C" => 12
+        "d" => 13
+        "D" => 13
+        "e" => 14
+        "E" => 14
+        "f" => 15
+        "F" => 15
+        _ => 0
+
+fn parse_float_value(s: text) -> f32:
+    """Parse a string to f32. Returns 1.0 on failure."""
+    val f = s.parse_f64()
+    if f != nil:
+        return f.to_f32()
+    return 1.0
+
+fn parse_int_value(s: text) -> i32:
+    """Parse a string to i32. Returns 0 on failure."""
+    val n = s.parse_i64()
+    if n != nil:
+        return n.to_i32()
+    return 0

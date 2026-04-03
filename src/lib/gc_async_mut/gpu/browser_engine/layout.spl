@@ -1,0 +1,274 @@
+# CSS Layout Engine (Block + Flexbox)
+#
+# Computes the position and size of every DOM node in the tree.
+# Supports block layout (vertical stacking) and flexbox layout
+# (row/column with gap). Grid layout is a future extension.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
+    default_style, resolve_style}
+
+# =========================================================================
+# Layout Box
+# =========================================================================
+
+class BeLayoutBox:
+    """A positioned box in the layout tree.
+
+    The outer box (x, y, width, height) includes margin.
+    The content box (content_x, content_y, content_width, content_height)
+    is inset by margin + border + padding.
+
+    Fields:
+        x, y              - top-left corner of the margin box
+        width, height     - total size including margin
+        content_x, content_y     - top-left corner of the content area
+        content_width, content_height - size of the content area
+        node              - the DOM node this box corresponds to
+        children          - child layout boxes
+    """
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    content_x: i32
+    content_y: i32
+    content_width: i32
+    content_height: i32
+    node: BeDomNode
+    children: [BeLayoutBox]
+
+    static fn empty(node: BeDomNode) -> BeLayoutBox:
+        return BeLayoutBox(
+            x: 0, y: 0, width: 0, height: 0,
+            content_x: 0, content_y: 0,
+            content_width: 0, content_height: 0,
+            node: node, children: []
+        )
+
+# =========================================================================
+# Main Layout Entry Point
+# =========================================================================
+
+fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox:
+    """Lay out the entire DOM tree within the given viewport dimensions."""
+    var container = BeLayoutBox(
+        x: 0, y: 0,
+        width: viewport_w, height: viewport_h,
+        content_x: 0, content_y: 0,
+        content_width: viewport_w, content_height: viewport_h,
+        node: root, children: []
+    )
+    return layout_node(root, container, default_style())
+
+# =========================================================================
+# Node Layout Dispatch
+# =========================================================================
+
+fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
+    """Lay out a single node within its container, dispatching by display type."""
+    val style = resolve_style(node, parent_style)
+
+    if style.display == "none":
+        return BeLayoutBox.empty(node)
+
+    if node.is_text_node():
+        return layout_text(node, container)
+
+    if style.display == "flex":
+        return layout_flex(node, container, style)
+
+    # Default: block layout
+    return layout_block(node, container, style)
+
+# =========================================================================
+# Block Layout
+# =========================================================================
+
+fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
+    """Lay out a block-level element: full width, children stacked vertically."""
+    val margin = style.margin
+    val padding = style.padding
+    val border_w = style.border.width
+
+    # Resolve width
+    var box_width = container.content_width - margin.horizontal()
+    if not style.width.is_auto():
+        box_width = style.width.resolve_px(container.content_width)
+
+    # Content area
+    val inset_h = padding.horizontal() + border_w * 2
+    val inset_v = padding.vertical() + border_w * 2
+    val content_w = box_width - inset_h
+
+    # Position
+    val box_x = container.content_x + margin.left
+    val box_y = container.content_y + margin.top
+    val cont_x = box_x + border_w + padding.left
+    val cont_y = box_y + border_w + padding.top
+
+    # Layout children vertically
+    var child_boxes: [BeLayoutBox] = []
+    var cursor_y = cont_y
+    for child in node.children:
+        var child_container = BeLayoutBox(
+            x: cont_x, y: cursor_y,
+            width: content_w, height: 0,
+            content_x: cont_x, content_y: cursor_y,
+            content_width: content_w, content_height: 0,
+            node: child, children: []
+        )
+        val child_box = layout_node(child, child_container, style)
+        cursor_y = cursor_y + child_box.height
+        child_boxes = child_boxes + [child_box]
+
+    # Resolve height
+    val children_height = cursor_y - cont_y
+    var content_h = children_height
+    if not style.height.is_auto():
+        content_h = style.height.resolve_px(container.content_height) - inset_v
+
+    val box_height = content_h + inset_v
+
+    return BeLayoutBox(
+        x: box_x, y: box_y,
+        width: box_width, height: box_height + margin.vertical(),
+        content_x: cont_x, content_y: cont_y,
+        content_width: content_w, content_height: content_h,
+        node: node, children: child_boxes
+    )
+
+# =========================================================================
+# Flexbox Layout
+# =========================================================================
+
+fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
+    """Lay out a flex container: children arranged in row or column with gap."""
+    val margin = style.margin
+    val padding = style.padding
+    val border_w = style.border.width
+    val gap = style.gap
+    val is_row = style.flex_direction == "row"
+
+    # Resolve width
+    var box_width = container.content_width - margin.horizontal()
+    if not style.width.is_auto():
+        box_width = style.width.resolve_px(container.content_width)
+
+    # Content area
+    val inset_h = padding.horizontal() + border_w * 2
+    val inset_v = padding.vertical() + border_w * 2
+    val content_w = box_width - inset_h
+
+    # Position
+    val box_x = container.content_x + margin.left
+    val box_y = container.content_y + margin.top
+    val cont_x = box_x + border_w + padding.left
+    val cont_y = box_y + border_w + padding.top
+
+    # Count visible children for gap calculation
+    var visible_count = 0
+    for child in node.children:
+        val child_style = child.style
+        if child_style.display != "none":
+            visible_count = visible_count + 1
+
+    val total_gaps = if visible_count > 1: gap * (visible_count - 1) else: 0
+
+    # Layout children
+    var child_boxes: [BeLayoutBox] = []
+    var cursor_x = cont_x
+    var cursor_y = cont_y
+    var max_cross = 0  # max size on cross axis
+    var child_index = 0
+
+    for child in node.children:
+        val child_style = child.style
+        if child_style.display == "none":
+            continue
+
+        var child_container: BeLayoutBox
+        if is_row:
+            # Row: divide available width among children
+            val avail_w = content_w - total_gaps
+            val per_child = if visible_count > 0: avail_w / visible_count else: avail_w
+            child_container = BeLayoutBox(
+                x: cursor_x, y: cont_y,
+                width: per_child, height: 0,
+                content_x: cursor_x, content_y: cont_y,
+                content_width: per_child, content_height: 0,
+                node: child, children: []
+            )
+        else:
+            # Column: full width, stack vertically
+            child_container = BeLayoutBox(
+                x: cont_x, y: cursor_y,
+                width: content_w, height: 0,
+                content_x: cont_x, content_y: cursor_y,
+                content_width: content_w, content_height: 0,
+                node: child, children: []
+            )
+
+        val child_box = layout_node(child, child_container, style)
+        child_boxes = child_boxes + [child_box]
+
+        if is_row:
+            cursor_x = cursor_x + child_box.width + gap
+            if child_box.height > max_cross:
+                max_cross = child_box.height
+        else:
+            cursor_y = cursor_y + child_box.height + gap
+            if child_box.width > max_cross:
+                max_cross = child_box.width
+
+        child_index = child_index + 1
+
+    # Calculate total size
+    var content_h: i32
+    if is_row:
+        content_h = max_cross
+    else:
+        content_h = cursor_y - cont_y
+        if child_boxes.len() > 0:
+            content_h = content_h - gap  # remove trailing gap
+
+    if not style.height.is_auto():
+        content_h = style.height.resolve_px(container.content_height) - inset_v
+
+    val box_height = content_h + inset_v
+
+    return BeLayoutBox(
+        x: box_x, y: box_y,
+        width: box_width, height: box_height + margin.vertical(),
+        content_x: cont_x, content_y: cont_y,
+        content_width: content_w, content_height: content_h,
+        node: node, children: child_boxes
+    )
+
+# =========================================================================
+# Text Layout
+# =========================================================================
+
+fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
+    """Lay out a text node. Estimates width from character count,
+    height from a single line (font_size approximation)."""
+    val text_len = node.text_content.len()
+    # Rough estimate: 8px per character at default font size
+    val char_width = 8
+    val line_height = 20
+    val text_w = text_len * char_width
+    val wrapped_lines = if container.content_width > 0:
+        (text_w + container.content_width - 1) / container.content_width
+    else:
+        1
+    val actual_lines = if wrapped_lines < 1: 1 else: wrapped_lines
+    val h = actual_lines * line_height
+    val w = if text_w < container.content_width: text_w else: container.content_width
+
+    return BeLayoutBox(
+        x: container.content_x, y: container.content_y,
+        width: w, height: h,
+        content_x: container.content_x, content_y: container.content_y,
+        content_width: w, content_height: h,
+        node: node, children: []
+    )

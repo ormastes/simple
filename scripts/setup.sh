@@ -65,6 +65,24 @@ case "${host_kernel}" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT) host_runtime_os="windows" ;;
 esac
 
+# Returns 0 if file is (or transitively resolves to) a Rust build artifact.
+is_rust_artifact() {
+  local target="$1"
+  local resolved="$target"
+  while [ -L "$resolved" ]; do
+    local link
+    link="$(readlink "$resolved")"
+    case "$link" in
+      /*) resolved="$link" ;;
+      *)  resolved="$(dirname "$resolved")/$link" ;;
+    esac
+  done
+  case "$resolved" in
+    */src/compiler_rust/target/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ===========================================================================
 # Platform detection — <arch>-<vendor>-<os>-<abi>
 # ===========================================================================
@@ -100,16 +118,17 @@ if [ "${os}" != "windows" ]; then
   fi
 fi
 
-# Resolve a release binary.
+# Resolve a self-hosted release binary.
+# Skips symlinks that resolve to Rust build artifacts (from previous fallback setups).
 # Target-specific paths are always valid. The flat bin/release/simple fallback is
 # only valid when the target runtime OS matches the current host runtime OS.
 find_release_bin() {
   local plat="$1" fos="$2" farch="$3" fext="$4"
-  if [ -f "${release_dir}/${plat}/simple${fext}" ]; then
+  if [ -f "${release_dir}/${plat}/simple${fext}" ] && ! is_rust_artifact "${release_dir}/${plat}/simple${fext}"; then
     echo "${plat}/simple${fext}"; return 0
-  elif [ -f "${release_dir}/${fos}-${farch}/simple${fext}" ]; then
+  elif [ -f "${release_dir}/${fos}-${farch}/simple${fext}" ] && ! is_rust_artifact "${release_dir}/${fos}-${farch}/simple${fext}"; then
     echo "${fos}-${farch}/simple${fext}"; return 0
-  elif [ "${fos}" = "${host_runtime_os}" ] && [ -f "${release_dir}/simple${fext}" ]; then
+  elif [ "${fos}" = "${host_runtime_os}" ] && [ -f "${release_dir}/simple${fext}" ] && ! is_rust_artifact "${release_dir}/simple${fext}"; then
     echo "simple${fext}"; return 0
   fi
   return 1
@@ -245,18 +264,24 @@ if [ "${os}" = "windows" ]; then
     create_link "release/${msvc_bin}" "simple.exe"
   fi
 else
-  if [ -n "${preferred_runtime}" ]; then
+  if [ -n "${release_bin}" ]; then
+    # Self-hosted binary found — use it (preferred)
+    create_link "release/${release_bin}" "simple"
+  elif [ -n "${preferred_runtime}" ]; then
+    # No self-hosted binary — fall back to Rust (temporary until bootstrap)
+    echo "  (warning: using Rust fallback — run bootstrap to get self-hosted binary)"
     create_link "${preferred_runtime}" "simple"
     create_release_link "${preferred_runtime}" "${release_dir}/${PLATFORM}/simple"
     create_release_link "${preferred_runtime}" "${release_dir}/${os}-${arch}/simple"
-  else
-    create_link "release/${release_bin}" "simple"
   fi
 fi
 
-# Clean up any stale bin/release/simple(.exe) flat file/symlink
+# Clean up Rust-pointing symlinks at bin/release/simple(.exe), but preserve real self-hosted binaries
 for _stale in "${release_dir}/simple" "${release_dir}/simple.exe"; do
-  [ -L "${_stale}" ] || [ -f "${_stale}" ] && rm -f "${_stale}" 2>/dev/null || true
+  if [ -L "${_stale}" ] && is_rust_artifact "${_stale}"; then
+    rm -f "${_stale}" 2>/dev/null || true
+    echo "  Removed stale Rust symlink: ${_stale#${repo_root}/}"
+  fi
 done
 
 # ===========================================================================
@@ -777,6 +802,20 @@ if [ "${os}" = "windows" ]; then
   [ -n "${msvc_bin}" ]  && echo "  bin\\simple.exe --version   (MSVC, for CMD)"
 else
   echo "  bin/simple --version"
+fi
+
+# ===========================================================================
+# Run violation checker
+# ===========================================================================
+
+echo ""
+violation_checker="${repo_root}/scripts/violation-checker.shs"
+if [ -x "${violation_checker}" ]; then
+  echo "Running violation checker..."
+  echo ""
+  "${violation_checker}" || true
+else
+  echo "(violation-checker.shs not found, skipping)"
 fi
 
 echo ""
