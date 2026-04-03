@@ -448,6 +448,62 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     return ENCODE_PTR(r);
 }
 
+/* --- rt_value_to_string: convert any RuntimeValue to a string RuntimeValue --- */
+RuntimeValue rt_value_to_string(RuntimeValue val)
+{
+    /* Integer -> decimal string */
+    if (IS_INT(val)) {
+        int64_t n = DECODE_INT(val);
+        /* Handle zero */
+        if (n == 0) return rt_string_from_cstr("0");
+        /* Handle INT64_MIN */
+        if (n == (-9223372036854775807LL - 1))
+            return rt_string_from_cstr("-9223372036854775808");
+
+        char buf[21]; /* max 20 digits + sign */
+        int pos = 0;
+        int neg = 0;
+        uint64_t uv;
+        if (n < 0) {
+            neg = 1;
+            uv = (uint64_t)(-n);
+        } else {
+            uv = (uint64_t)n;
+        }
+        /* Build digits in reverse */
+        while (uv > 0) {
+            buf[pos++] = '0' + (char)(uv % 10);
+            uv /= 10;
+        }
+        /* Total length */
+        uint32_t len = (uint32_t)(pos + neg);
+        RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+        if (!s) return NIL_VALUE;
+        s->hdr.type = HEAP_STRING;
+        s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+        s->len = len;
+        int out = 0;
+        if (neg) s->data[out++] = '-';
+        while (pos > 0) s->data[out++] = buf[--pos];
+        s->data[out] = '\0';
+        return ENCODE_PTR(s);
+    }
+    /* Heap string -> return as-is */
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) return val;
+        if (h && h->type == HEAP_ARRAY) return rt_string_from_cstr("<array>");
+        if (h && h->type == HEAP_MAP) return rt_string_from_cstr("<map>");
+        return rt_string_from_cstr("<object>");
+    }
+    /* nil */
+    if (IS_NIL(val)) return rt_string_from_cstr("nil");
+    /* float */
+    if (IS_FLOAT(val)) return rt_string_from_cstr("<float>");
+    /* unknown */
+    return rt_string_from_cstr("<unknown>");
+}
+
 RuntimeValue rt_len(RuntimeValue v)
 {
     if (IS_INT(v)) return ENCODE_INT(0);
@@ -586,6 +642,35 @@ void rt_println_bool(RuntimeValue val)
     serial_putchar('\n');
 }
 
+/* --- rt_print: generic print to serial --- */
+RuntimeValue rt_print(RuntimeValue val)
+{
+    if (IS_INT(val)) {
+        serial_put_dec(DECODE_INT(val));
+    } else if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        } else {
+            serial_puts("<object>");
+        }
+    } else if (IS_NIL(val)) {
+        serial_puts("nil");
+    } else {
+        serial_puts("<value>");
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_println(RuntimeValue val)
+{
+    rt_print(val);
+    serial_putchar('\r');
+    serial_putchar('\n');
+    return NIL_VALUE;
+}
+
 /* ===================================================================
  * 8. Framebuffer copy
  * =================================================================== */
@@ -630,6 +715,127 @@ static void _serial_init(void)
     outb(0x3F8 + 4, 0x0B);
 }
 
+/* ===================================================================
+ * 9a. BGA framebuffer init — direct C, no runtime dependencies
+ * =================================================================== */
+
+#define BGA_INDEX_PORT 0x01CE
+#define BGA_DATA_PORT  0x01CF
+
+static void bga_write(uint16_t index, uint16_t value)
+{
+    outw(BGA_INDEX_PORT, index);
+    outw(BGA_DATA_PORT, value);
+}
+
+static uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
+    uint32_t addr = 0x80000000u
+        | ((uint32_t)bus << 16)
+        | ((uint32_t)dev << 11)
+        | ((uint32_t)func << 8)
+        | ((uint32_t)(off & 0xFC));
+    outl(0x0CF8, addr);
+    return inl(0x0CFC);
+}
+
+static uint64_t detect_vga_lfb(void)
+{
+    for (uint8_t d = 0; d < 32; d++) {
+        uint32_t vendor = pci_config_read32(0, d, 0, 0x00) & 0xFFFF;
+        if (vendor == 0xFFFF || vendor == 0) continue;
+        uint32_t cls = pci_config_read32(0, d, 0, 0x08);
+        if (((cls >> 24) & 0xFF) == 0x03 && ((cls >> 16) & 0xFF) == 0x00) {
+            uint32_t bar0 = pci_config_read32(0, d, 0, 0x10);
+            uint64_t a = (uint64_t)(bar0 & 0xFFFFFFF0u);
+            if (a) return a;
+        }
+    }
+    return 0xFD000000ULL; /* QEMU Q35 fallback */
+}
+
+static uint64_t g_fb_addr;
+static uint32_t g_fb_width, g_fb_height, g_fb_pitch;
+
+static void bga_init(uint32_t w, uint32_t h, uint32_t bpp)
+{
+    bga_write(0x04, 0x00);           /* VBE_DISPI_DISABLE */
+    bga_write(0x01, (uint16_t)w);    /* XRES */
+    bga_write(0x02, (uint16_t)h);    /* YRES */
+    bga_write(0x03, (uint16_t)bpp);  /* BPP */
+    bga_write(0x04, 0x01 | 0x40);    /* ENABLE | LFB */
+    g_fb_addr = detect_vga_lfb();
+    g_fb_width = w;
+    g_fb_height = h;
+    g_fb_pitch = w * (bpp / 8);
+}
+
+static void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color)
+{
+    if (x >= g_fb_width || y >= g_fb_height) return;
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    fb[y * (g_fb_pitch / 4) + x] = color;
+}
+
+static void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
+{
+    for (uint32_t dy = 0; dy < h; dy++)
+        for (uint32_t dx = 0; dx < w; dx++)
+            fb_put_pixel(x + dx, y + dy, color);
+}
+
+/* 8x16 bitmap font — minimal ASCII subset for "Hello World" */
+static const uint8_t font_H[] = {0x42,0x42,0x42,0x42,0x7E,0x42,0x42,0x42,0x42,0x42,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_e[] = {0x00,0x00,0x00,0x00,0x3C,0x42,0x7E,0x40,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_l[] = {0x00,0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_o[] = {0x00,0x00,0x00,0x00,0x3C,0x42,0x42,0x42,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_W[] = {0x41,0x41,0x41,0x41,0x49,0x49,0x55,0x55,0x22,0x22,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_r[] = {0x00,0x00,0x00,0x00,0x5C,0x62,0x40,0x40,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_d[] = {0x00,0x02,0x02,0x02,0x3E,0x42,0x42,0x42,0x3E,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_bang[] = {0x00,0x10,0x10,0x10,0x10,0x10,0x10,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_space[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static const uint8_t font_S[] = {0x3C,0x42,0x40,0x40,0x3C,0x02,0x02,0x42,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_i[] = {0x00,0x00,0x10,0x00,0x10,0x10,0x10,0x10,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_m[] = {0x00,0x00,0x00,0x00,0x76,0x49,0x49,0x49,0x49,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_p[] = {0x00,0x00,0x00,0x00,0x5C,0x62,0x42,0x62,0x5C,0x40,0x40,0x00,0x00,0x00,0x00,0x00};
+static const uint8_t font_O[] = {0x3C,0x42,0x42,0x42,0x42,0x42,0x42,0x42,0x3C,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+static void fb_draw_char(uint32_t x, uint32_t y, const uint8_t *glyph, uint32_t fg, uint32_t bg)
+{
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = (row < 10) ? glyph[row] : 0;
+        for (int col = 0; col < 8; col++) {
+            uint32_t color = (bits & (0x80 >> col)) ? fg : bg;
+            fb_put_pixel(x + (uint32_t)col, y + (uint32_t)row, color);
+        }
+    }
+}
+
+static const uint8_t *get_glyph(char c)
+{
+    switch (c) {
+        case 'H': return font_H; case 'e': return font_e; case 'l': return font_l;
+        case 'o': return font_o; case 'W': return font_W; case 'r': return font_r;
+        case 'd': return font_d; case '!': return font_bang; case ' ': return font_space;
+        case 'S': return font_S; case 'i': return font_i; case 'm': return font_m;
+        case 'p': return font_p; case 'O': return font_O;
+        default: return font_space;
+    }
+}
+
+static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, uint32_t bg)
+{
+    while (*text) {
+        fb_draw_char(x, y, get_glyph(*text), fg, bg);
+        x += 9; /* 8px char + 1px gap */
+        text++;
+    }
+}
+
+/* ===================================================================
+ * 9b. _start — BGA init, hello world, then spl_start
+ * =================================================================== */
+
 extern void spl_start(void) __attribute__((weak));
 
 void _start(void)
@@ -641,6 +847,35 @@ void _start(void)
     serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
+    /* Init BGA framebuffer — direct C, no Simple runtime needed */
+    serial_puts("[BOOT] Initializing BGA framebuffer (1024x768x32)...\r\n");
+    bga_init(1024, 768, 32);
+    serial_puts("[BOOT] BGA framebuffer at ");
+    serial_put_hex(g_fb_addr);
+    serial_puts("\r\n");
+
+    /* Draw desktop background — dark blue */
+    fb_fill_rect(0, 0, 1024, 768, 0x001B2838);
+
+    /* Draw title bar */
+    fb_fill_rect(0, 0, 1024, 32, 0x002C3E50);
+    fb_draw_text(12, 8, "SimpleOS", 0x00FFFFFF, 0x002C3E50);
+
+    /* Draw a window */
+    fb_fill_rect(200, 100, 600, 400, 0x00FFFFFF);  /* window background */
+    fb_fill_rect(200, 100, 600, 30, 0x003498DB);   /* window title bar */
+    fb_draw_text(212, 107, "Hello World!", 0x00FFFFFF, 0x003498DB);
+
+    /* Draw window content */
+    fb_draw_text(220, 160, "SimpleOS", 0x00333333, 0x00FFFFFF);
+    fb_draw_text(220, 190, "Hello World!", 0x00333333, 0x00FFFFFF);
+
+    /* Draw taskbar */
+    fb_fill_rect(0, 738, 1024, 30, 0x002C3E50);
+    fb_draw_text(12, 746, "SimpleOS", 0x00FFFFFF, 0x002C3E50);
+
+    serial_puts("[BOOT] Hello World GUI rendered\r\n");
+
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");
         spl_start();
@@ -651,10 +886,7 @@ void _start(void)
 
     serial_puts("[BOOT] x86_64 boot complete\r\n");
 
-    /* isa-debug-exit: writing to port 0xF4 causes QEMU to exit */
-    outb(0xF4, 0x00);
-
-    /* If that didn't work, halt forever */
+    /* Halt forever (don't exit — keep display visible) */
     for (;;) {
         __asm__ volatile("hlt");
     }
@@ -713,10 +945,58 @@ S1(rt_is_bool)
 S1(rt_is_array)
 S1(rt_is_map)
 S1(rt_is_object)
-S1(rt_to_int)
+/* rt_to_int: convert to integer */
+RuntimeValue rt_to_int(RuntimeValue val)
+{
+    if (IS_INT(val)) return val;
+    if (IS_NIL(val)) return ENCODE_INT(0);
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) {
+            /* Parse decimal string to integer */
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len == 0) return ENCODE_INT(0);
+            int64_t result = 0;
+            int neg = 0;
+            uint32_t i = 0;
+            if (s->data[0] == '-') { neg = 1; i = 1; }
+            else if (s->data[0] == '+') { i = 1; }
+            for (; i < s->len; i++) {
+                char c = s->data[i];
+                if (c < '0' || c > '9') break;
+                result = result * 10 + (c - '0');
+            }
+            if (neg) result = -result;
+            return ENCODE_INT(result);
+        }
+    }
+    return ENCODE_INT(0);
+}
 S1(rt_to_float)
-S1(rt_to_string)
-S1(rt_to_bool)
+/* rt_to_string: convert to string (delegates to rt_value_to_string) */
+RuntimeValue rt_to_string(RuntimeValue val)
+{
+    return rt_value_to_string(val);
+}
+/* rt_to_bool: convert to boolean */
+RuntimeValue rt_to_bool(RuntimeValue val)
+{
+    if (IS_NIL(val)) return FALSE_VALUE;
+    if (IS_INT(val)) return DECODE_INT(val) ? TRUE_VALUE : FALSE_VALUE;
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            return s->len > 0 ? TRUE_VALUE : FALSE_VALUE;
+        }
+        if (h && h->type == HEAP_ARRAY) {
+            RuntimeArray *a = (RuntimeArray *)h;
+            return a->len > 0 ? TRUE_VALUE : FALSE_VALUE;
+        }
+        return TRUE_VALUE; /* non-nil heap object is truthy */
+    }
+    return FALSE_VALUE;
+}
 S1(rt_clone)
 S1(rt_freeze)
 S1(rt_is_frozen)
@@ -747,12 +1027,98 @@ S2(rt_string_compare)
 S2(rt_string_format)
 
 /* --- Array --- */
-S1(rt_array_new)
-S2(rt_array_push)
-S1(rt_array_pop)
-S2(rt_array_get)
-S3(rt_array_set)
-S1(rt_array_len)
+
+/* rt_array_new: create a new array with given capacity */
+RuntimeValue rt_array_new(RuntimeValue cap_val)
+{
+    int64_t cap = DECODE_INT(cap_val);
+    if (cap <= 0) cap = 4; /* default capacity */
+    if (cap > 0x100000) cap = 0x100000; /* safety limit */
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)alloc_size;
+    a->len = 0;
+    a->cap = (uint32_t)cap;
+    /* Zero-init items */
+    for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+/* rt_array_push: push a value onto the array, growing if needed */
+RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    /* Grow if needed */
+    if (a->len >= a->cap) {
+        uint32_t new_cap = a->cap * 2;
+        if (new_cap < 8) new_cap = 8;
+        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        RuntimeArray *na = (RuntimeArray *)malloc(new_size);
+        if (!na) return NIL_VALUE;
+        /* Copy header and existing items */
+        na->hdr.type = HEAP_ARRAY;
+        na->hdr.size = (uint32_t)new_size;
+        na->len = a->len;
+        na->cap = new_cap;
+        for (uint32_t i = 0; i < a->len; i++) na->items[i] = a->items[i];
+        /* Zero new slots */
+        for (uint32_t i = a->len; i < new_cap; i++) na->items[i] = NIL_VALUE;
+        /* Note: bump allocator can't free old array, but we return the new pointer.
+           Callers must use the returned value. This is a limitation of the bump allocator. */
+        a = na;
+    }
+    a->items[a->len] = val;
+    a->len++;
+    return ENCODE_PTR(a);
+}
+
+/* rt_array_pop: remove and return last element */
+RuntimeValue rt_array_pop(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return NIL_VALUE;
+    a->len--;
+    RuntimeValue val = a->items[a->len];
+    a->items[a->len] = NIL_VALUE;
+    return val;
+}
+
+/* rt_array_get: get element at index */
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    return a->items[i];
+}
+
+/* rt_array_set: set element at index */
+RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx);
+    if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    a->items[i] = val;
+    return val;
+}
+
+/* rt_array_len: return array length */
+RuntimeValue rt_array_len(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    return ENCODE_INT(a->len);
+}
 S3(rt_array_slice)
 S2(rt_array_contains)
 S2(rt_array_index_of)
