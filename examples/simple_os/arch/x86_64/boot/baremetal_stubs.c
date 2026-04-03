@@ -177,7 +177,7 @@ typedef struct {
  * 4. Heap allocator — bump allocator, 16 MB
  * =================================================================== */
 
-static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[200 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
@@ -847,34 +847,9 @@ void _start(void)
     serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
-    /* Init BGA framebuffer — direct C, no Simple runtime needed */
-    serial_puts("[BOOT] Initializing BGA framebuffer (1024x768x32)...\r\n");
-    bga_init(1024, 768, 32);
-    serial_puts("[BOOT] BGA framebuffer at ");
-    serial_put_hex(g_fb_addr);
-    serial_puts("\r\n");
-
-    /* Draw desktop background — dark blue */
-    fb_fill_rect(0, 0, 1024, 768, 0x001B2838);
-
-    /* Draw title bar */
-    fb_fill_rect(0, 0, 1024, 32, 0x002C3E50);
-    fb_draw_text(12, 8, "SimpleOS", 0x00FFFFFF, 0x002C3E50);
-
-    /* Draw a window */
-    fb_fill_rect(200, 100, 600, 400, 0x00FFFFFF);  /* window background */
-    fb_fill_rect(200, 100, 600, 30, 0x003498DB);   /* window title bar */
-    fb_draw_text(212, 107, "Hello World!", 0x00FFFFFF, 0x003498DB);
-
-    /* Draw window content */
-    fb_draw_text(220, 160, "SimpleOS", 0x00333333, 0x00FFFFFF);
-    fb_draw_text(220, 190, "Hello World!", 0x00333333, 0x00FFFFFF);
-
-    /* Draw taskbar */
-    fb_fill_rect(0, 738, 1024, 30, 0x002C3E50);
-    fb_draw_text(12, 746, "SimpleOS", 0x00FFFFFF, 0x002C3E50);
-
-    serial_puts("[BOOT] Hello World GUI rendered\r\n");
+    /* BGA + GUI rendering is now done by Pure Simple code in spl_start().
+     * C boot stub only provides serial, heap, and runtime stubs.
+     */
 
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");
@@ -1410,37 +1385,40 @@ S1(rt_closure_bind)
 
 /* --- Port I/O: real x86 implementations --- */
 
+/* Port I/O and MMIO: Cranelift passes RAW (untagged) integer values
+ * to extern fns. Return RAW values too. No ENCODE/DECODE needed. */
+
 RuntimeValue rt_port_outb_real(RuntimeValue port, RuntimeValue val)
 {
-    outb((uint16_t)DECODE_INT(port), (uint8_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outb((uint16_t)(uint64_t)port, (uint8_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_outw_real(RuntimeValue port, RuntimeValue val)
 {
-    outw((uint16_t)DECODE_INT(port), (uint16_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outw((uint16_t)(uint64_t)port, (uint16_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_outl_real(RuntimeValue port, RuntimeValue val)
 {
-    outl((uint16_t)DECODE_INT(port), (uint32_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outl((uint16_t)(uint64_t)port, (uint32_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_inb_real(RuntimeValue port)
 {
-    return ENCODE_INT(inb((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inb((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_inw_real(RuntimeValue port)
 {
-    return ENCODE_INT(inw((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inw((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_inl_real(RuntimeValue port)
 {
-    return ENCODE_INT(inl((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inl((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_io_wait_real(void)
@@ -1469,40 +1447,40 @@ RuntimeValue rt_port_io_wait(void)
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
-    return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr));
+    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
-    return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr));
+    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
 {
-    return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr));
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
 {
-    return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr));
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)

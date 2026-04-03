@@ -1,0 +1,102 @@
+# Pure Simple GUI — single-file, zero imports
+#
+# Proves Pure Simple code can drive BGA framebuffer on x86_64 QEMU.
+# All logic in one file. Only extern fn calls to C runtime.
+
+extern fn rt_port_outw(port: u64, value: u64)
+extern fn rt_port_inw(port: u64) -> u64
+extern fn rt_port_outl(port: u64, value: u64)
+extern fn rt_port_inl(port: u64) -> u64
+extern fn rt_port_outb(port: u64, value: u64)
+extern fn rt_port_inb(port: u64) -> u64
+extern fn rt_mmio_write_u32(addr: u64, value: u64)
+
+var fb_addr: u64 = 0xFD000000
+var fb_w: u64 = 1024
+var fb_h: u64 = 768
+
+fn bga_wr(idx: u64, val: u64):
+    rt_port_outw(0x01CE, idx)
+    rt_port_outw(0x01CF, val)
+
+fn pci_rd(bus: u64, dev: u64, fn_: u64, off: u64) -> u64:
+    val a: u64 = 0x80000000 | (bus << 16) | (dev << 11) | (fn_ << 8) | (off & 0xFC)
+    rt_port_outl(0x0CF8, a)
+    rt_port_inl(0x0CFC)
+
+fn find_fb() -> u64:
+    var d: u64 = 0
+    while d < 32:
+        val v = pci_rd(0, d, 0, 0) & 0xFFFF
+        if v != 0xFFFF and v != 0:
+            val c = pci_rd(0, d, 0, 8)
+            if ((c >> 24) & 0xFF) == 3 and ((c >> 16) & 0xFF) == 0:
+                val b = pci_rd(0, d, 0, 0x10)
+                val addr = b & 0xFFFFFFF0
+                if addr != 0:
+                    return addr
+        d = d + 1
+    0xFD000000
+
+fn init_display():
+    bga_wr(4, 0)
+    bga_wr(1, fb_w)
+    bga_wr(2, fb_h)
+    bga_wr(3, 32)
+    bga_wr(4, 0x41)
+    fb_addr = find_fb()
+
+fn px(x: u64, y: u64, c: u64):
+    if x < fb_w and y < fb_h:
+        # Use hardcoded LFB address — global var fb_addr reads as 0 due to Cranelift
+        rt_mmio_write_u32(0xFD000000 + (y * 1024 + x) * 4, c)
+
+fn rect(x: u64, y: u64, w: u64, h: u64, c: u64):
+    var dy: u64 = 0
+    while dy < h:
+        var dx: u64 = 0
+        while dx < w:
+            px(x + dx, y + dy, c)
+            dx = dx + 1
+        dy = dy + 1
+
+fn sputc(c: u64):
+    # Wait for THR empty (LSR bit 5)
+    # Use < 1 instead of == 0 to avoid rt_int_eq call (undefined symbol)
+    var ready: u64 = rt_port_inb(0x3FD) & 0x20
+    while ready < 1:
+        ready = rt_port_inb(0x3FD) & 0x20
+    rt_port_outb(0x3F8, c)
+
+fn sprint(s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64):
+    if s0 != 0: sputc(s0)
+    if s1 != 0: sputc(s1)
+    if s2 != 0: sputc(s2)
+    if s3 != 0: sputc(s3)
+    if s4 != 0: sputc(s4)
+    if s5 != 0: sputc(s5)
+    if s6 != 0: sputc(s6)
+    if s7 != 0: sputc(s7)
+
+fn _start():
+    # Skip serial — go straight to BGA init
+    init_display()
+
+    # Desktop: dark background (small strips to avoid heap exhaustion)
+    rect(0, 0, 1024, 32, 0x002C3E50)     # title bar
+    rect(0, 738, 1024, 30, 0x002C3E50)   # taskbar
+
+    # Window: white background with blue title bar
+    rect(150, 80, 700, 30, 0x003498DB)   # window title bar (blue)
+    rect(150, 110, 700, 500, 0x00FFFFFF) # window body (white)
+
+    # Content: colored blocks inside window as "Hello World" indicator
+    rect(170, 130, 120, 40, 0x00FF0000)  # red block
+    rect(310, 130, 120, 40, 0x0000CC00)  # green block
+    rect(450, 130, 120, 40, 0x000066FF)  # blue block
+
+    # "Window content" area — horizontal lines as text placeholder
+    rect(170, 200, 400, 3, 0x00333333)
+    rect(170, 220, 350, 3, 0x00333333)
+    rect(170, 240, 420, 3, 0x00333333)
+    rect(170, 260, 300, 3, 0x00333333)
