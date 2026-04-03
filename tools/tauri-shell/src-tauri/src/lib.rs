@@ -126,7 +126,6 @@ fn update_status(app: &AppHandle, message: &str) {
 // ---------------------------------------------------------------------------
 
 fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: AppHandle) {
-    let mut got_render = false;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -141,12 +140,7 @@ fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: App
         eprintln!("[tauri-shell] raw stdout: {}", trimmed);
 
         match serde_json::from_str::<SubprocessMessage>(trimmed) {
-            Ok(msg) => {
-                if matches!(&msg, SubprocessMessage::Render { .. }) {
-                    got_render = true;
-                }
-                handle_subprocess_message(msg, &app)
-            }
+            Ok(msg) => handle_subprocess_message(msg, &app),
             Err(e) => {
                 eprintln!("[tauri-shell] parse error: {} — line: {}", e, trimmed);
                 update_status(
@@ -157,9 +151,7 @@ fn read_subprocess_stdout(reader: BufReader<std::process::ChildStdout>, app: App
         }
     }
     eprintln!("[tauri-shell] subprocess stdout closed");
-    if !got_render {
-        update_status(&app, "Simple subprocess stdout closed before a valid render arrived.");
-    }
+    update_status(&app, "Simple subprocess stdout closed before a valid render arrived.");
 }
 
 fn read_subprocess_stderr(

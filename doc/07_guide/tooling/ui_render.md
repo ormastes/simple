@@ -76,24 +76,6 @@ it for:
 - HTML capture
 - container verification
 
-Current practical Docker verification paths in this repo are:
-- `simple-test-isolation:codex-current` for noninteractive example and probe runs
-- `simple-tauri-gui:latest` for real desktop-window capture via Xvfb/VNC
-
-Examples verified on 2026-04-03:
-- `examples/ui/launch_verified.spl`
-- `examples/ui/launch_tui_verified.spl`
-- `examples/ui/runtime_probe.spl`
-- `examples/ui/smoke_test.spl`
-
-The Tauri container also produced a real GUI screenshot from
-`examples/ui/test_render.spl` after rebuilding the shell from current mounted
-sources.
-
-Known limitation from that pass:
-- `examples/ui/hello_tui.spl` still times out in Docker and needs separate
-  runtime investigation
-
 ## Migration Guidance
 
 If an app already has local preview/render flags:
@@ -101,11 +83,3 @@ If an app already has local preview/render flags:
 1. keep a temporary compatibility shim
 2. delegate implementation into shared UI render
 3. remove app-local semantics once migration is complete
-
-## Notes From The 2026-04-03 Verification Pass
-
-- `examples/ui/launch_verified.spl` required a fix from `UITree(root_id: ...)`
-  to `UITree.new(root)`.
-- the Tauri shell required the same `got_render` guard in `lib.rs` that already
-  existed in the duplicate `app.rs` path, otherwise the fallback status page
-  overwrote valid rendered HTML after stdout closed.

@@ -225,11 +225,19 @@ impl NativeProjectBuilder {
     }
 
     /// Resolve the cache directory path.
+    /// Includes target triple in the path to prevent cross-target contamination
+    /// (e.g., host Mach-O objects being served for a riscv64-elf build).
     fn cache_dir(&self) -> PathBuf {
-        self.config
+        let base = self.config
             .cache_dir
             .clone()
-            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))
+            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"));
+        let target = effective_target();
+        if target.is_host() {
+            base
+        } else {
+            base.join(target.triple_str())
+        }
     }
 
     fn effective_source_root_for(&self, path: &Path) -> PathBuf {
@@ -1531,7 +1539,19 @@ int main(int argc, char** argv) {
                 if self.config.verbose {
                     eprintln!("  Boot directory: {}", boot_dir.display());
                 }
-                // Assemble .S/.s files
+                // Assemble .S/.s files.
+                // On macOS, Apple clang can't cross-assemble for RISC-V/ARM etc.
+                // Try system cc first, then fall back to Homebrew LLVM clang.
+                let asm_compilers: Vec<String> = {
+                    let mut v = vec![cc.clone()];
+                    #[cfg(target_os = "macos")]
+                    for p in ["/opt/homebrew/opt/llvm@18/bin/clang", "/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"] {
+                        if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
+                            v.push(p.to_string());
+                        }
+                    }
+                    v
+                };
                 for ext in &["S", "s"] {
                     if let Ok(entries) = std::fs::read_dir(&boot_dir) {
                         for de in entries.flatten() {
@@ -1539,13 +1559,23 @@ int main(int argc, char** argv) {
                             if path.extension().and_then(|e| e.to_str()) == Some(ext) {
                                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                                 let out = temp_dir.join(format!("_boot_{}.o", stem));
-                                let mut asm_cmd = std::process::Command::new(&cc);
-                                asm_cmd.args(["-c", "-o"]).arg(&out).arg(&path)
-                                    .arg(format!("--target={}", triple));
-                                if !march.is_empty() { asm_cmd.arg(march); }
-                                if !mabi.is_empty() { asm_cmd.arg(mabi); }
-                                if let Ok(r) = asm_cmd.output() {
-                                    if r.status.success() { boot_objects.push(out); }
+                                let mut assembled = false;
+                                for asm_cc in &asm_compilers {
+                                    let mut asm_cmd = std::process::Command::new(asm_cc);
+                                    asm_cmd.args(["-c", "-o"]).arg(&out).arg(&path)
+                                        .arg(format!("--target={}", triple));
+                                    if !march.is_empty() { asm_cmd.arg(march); }
+                                    if !mabi.is_empty() { asm_cmd.arg(mabi); }
+                                    if let Ok(r) = asm_cmd.output() {
+                                        if r.status.success() {
+                                            boot_objects.push(out.clone());
+                                            assembled = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if !assembled && self.config.verbose {
+                                    eprintln!("  WARNING: failed to assemble {}", path.display());
                                 }
                             }
                         }
@@ -1576,31 +1606,107 @@ int main(int argc, char** argv) {
             }
         }
 
-        let mut cmd = std::process::Command::new(&cc);
-        cmd.arg(format!("--target={}", triple));
-        cmd.arg("-nostdlib");
-        cmd.arg("-ffreestanding");
-        cmd.arg("-static");
-        cmd.arg("-fno-pic");
-        cmd.arg("-fno-pie");
-        cmd.arg("-fuse-ld=lld");
+        // Arch filters for _start symbol matching: precise path segments to avoid
+        // riscv matching riscv32, etc. Used for both link ordering and defsym.
+        let arch_filters: &[&str] = match cross_target.arch {
+            simple_common::target::TargetArch::Riscv64 => &["__riscv__", "__riscv64__"],
+            simple_common::target::TargetArch::Riscv32 => &["__riscv32__"],
+            simple_common::target::TargetArch::Aarch64 => &["__arm64__", "__aarch64__", "__arm__"],
+            simple_common::target::TargetArch::Arm => &["__arm__", "__arm32__"],
+            simple_common::target::TargetArch::X86_64 => &["__x86_64__", "__x86__"],
+            simple_common::target::TargetArch::X86 => &["__x86__", "__x86_32__"],
+            _ => &[],
+        };
+        let arch_neg_filters: &[&str] = match cross_target.arch {
+            simple_common::target::TargetArch::Riscv64 => &["__riscv32__"],
+            simple_common::target::TargetArch::X86_64 => &["__x86_32__"],
+            _ => &[],
+        };
 
-        // Linker script
-        if let Some(ref ls) = self.config.linker_script {
-            cmd.arg(format!("-T{}", ls.display()));
-        }
+        // On macOS, `clang --target=<elf-triple> -fuse-ld=lld` still invokes
+        // ld64.lld (Mach-O linker) and passes macOS SDK flags. For freestanding
+        // cross-compilation we must use ld.lld (ELF linker) directly on macOS.
+        #[cfg(target_os = "macos")]
+        let use_direct_lld = {
+            ["ld.lld", "/opt/homebrew/bin/ld.lld", "/usr/local/bin/ld.lld"]
+                .iter()
+                .find(|p| {
+                    std::process::Command::new(p)
+                        .arg("--version")
+                        .output()
+                        .map_or(false, |o| o.status.success())
+                })
+                .map(|s| s.to_string())
+        };
+        #[cfg(not(target_os = "macos"))]
+        let use_direct_lld: Option<String> = None;
 
-        cmd.arg("-o").arg(&self.output);
+        // Reorder objects: place the one containing ___start first so the
+        // startup function ends up at the beginning of .text (required for
+        // OpenSBI payload handoff and similar boot protocols).
+        let ordered_objects = {
+            let mut start_obj_idx: Option<usize> = None;
+            for (i, obj) in object_paths.iter().enumerate() {
+                if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if stdout.lines().any(|l| {
+                        let parts: Vec<&str> = l.split_whitespace().collect();
+                        parts.len() >= 3 && parts[2].ends_with("___start") && parts[2] != "_start"
+                            && !parts[2].contains("_starts_with")
+                            && arch_filters.iter().any(|f| parts[2].contains(f))
+                            && !arch_neg_filters.iter().any(|f| parts[2].contains(f))
+                    }) {
+                        start_obj_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+            let mut ordered: Vec<&PathBuf> = Vec::with_capacity(object_paths.len());
+            if let Some(idx) = start_obj_idx {
+                ordered.push(&object_paths[idx]);
+                for (i, obj) in object_paths.iter().enumerate() {
+                    if i != idx { ordered.push(obj); }
+                }
+            } else {
+                ordered.extend(object_paths.iter());
+            }
+            ordered
+        };
 
-        // Boot objects (crt0, stubs) first — they define _start/_entry_asm
-        for boot_obj in &boot_objects {
-            cmd.arg(boot_obj);
-        }
-
-        // Add all compiled objects
-        for obj in object_paths {
-            cmd.arg(obj);
-        }
+        let mut cmd = if let Some(ref lld_path) = use_direct_lld {
+            // Direct ld.lld invocation — no clang driver, no macOS SDK contamination.
+            let mut c = std::process::Command::new(lld_path);
+            // Linker script
+            if let Some(ref ls) = self.config.linker_script {
+                c.arg(format!("-T{}", ls.display()));
+            }
+            c.arg("-o").arg(&self.output);
+            // Boot objects first
+            for boot_obj in &boot_objects { c.arg(boot_obj); }
+            // All compiled objects (startup first)
+            for obj in &ordered_objects { c.arg(obj.as_os_str()); }
+            c
+        } else {
+            // Non-macOS: use clang as linker driver
+            let mut c = std::process::Command::new(&cc);
+            c.arg(format!("--target={}", triple));
+            c.arg("-nostdlib");
+            c.arg("-ffreestanding");
+            c.arg("-static");
+            c.arg("-fno-pic");
+            c.arg("-fno-pie");
+            c.arg("-fuse-ld=lld");
+            // Linker script
+            if let Some(ref ls) = self.config.linker_script {
+                c.arg(format!("-T{}", ls.display()));
+            }
+            c.arg("-o").arg(&self.output);
+            // Boot objects first
+            for boot_obj in &boot_objects { c.arg(boot_obj); }
+            // All compiled objects (startup first)
+            for obj in &ordered_objects { c.arg(obj.as_os_str()); }
+            c
+        };
 
         // Scan for _entry32 in boot objects (multiboot x86)
         if !boot_objects.is_empty() {
@@ -1609,13 +1715,17 @@ int main(int argc, char** argv) {
                     .map_or(false, |out| String::from_utf8_lossy(&out.stdout).contains(" _entry32"))
             });
             if has_entry32 {
-                cmd.arg("-Wl,--entry=_entry32");
+                let entry_flag = if use_direct_lld.is_some() { "--entry=_entry32" } else { "-Wl,--entry=_entry32" };
+                cmd.arg(entry_flag);
             }
         }
 
-        // Scan for mangled _start → create defsym alias
+        // Scan for mangled _start → create defsym alias.
+        // Filter candidates by target arch to avoid x86 _start winning on riscv64 builds.
         {
             let has_boot = !boot_objects.is_empty();
+            let mut best_start: Option<String> = None;
+            let mut fallback_start: Option<String> = None;
             for obj in object_paths {
                 if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
                     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1624,22 +1734,38 @@ int main(int argc, char** argv) {
                         if parts.len() >= 3 {
                             let sym = parts[2];
                             if sym.ends_with("___start") && sym != "_start" {
-                                let alias = if has_boot { "spl_start" } else { "_start" };
-                                cmd.arg(format!("-Wl,--defsym={}={}", alias, sym));
-                                break;
+                                let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
+                                if neg_match { continue; }
+                                let pos_match = arch_filters.iter().any(|f| sym.contains(f));
+                                if pos_match {
+                                    best_start = Some(sym.to_string());
+                                } else if fallback_start.is_none() {
+                                    fallback_start = Some(sym.to_string());
+                                }
                             }
                         }
                     }
                 }
             }
+            if let Some(sym) = best_start.or(fallback_start) {
+                let alias = if has_boot { "spl_start" } else { "_start" };
+                if use_direct_lld.is_some() {
+                    cmd.arg(format!("--defsym={}={}", alias, sym));
+                } else {
+                    cmd.arg(format!("-Wl,--defsym={}={}", alias, sym));
+                }
+            }
         }
 
         // Allow unresolved symbols and multiple definitions
-        cmd.arg("-Wl,-z,muldefs");
-        cmd.arg("-Wl,--unresolved-symbols=ignore-all");
-
-        if self.config.strip {
-            cmd.arg("-Wl,-s");
+        if use_direct_lld.is_some() {
+            cmd.arg("-z").arg("muldefs");
+            cmd.arg("--unresolved-symbols=ignore-all");
+            if self.config.strip { cmd.arg("-s"); }
+        } else {
+            cmd.arg("-Wl,-z,muldefs");
+            cmd.arg("-Wl,--unresolved-symbols=ignore-all");
+            if self.config.strip { cmd.arg("-Wl,-s"); }
         }
 
         if self.config.verbose {
@@ -1656,7 +1782,12 @@ int main(int argc, char** argv) {
             {
                 let elf64 = self.output.with_extension("elf64");
                 let _ = std::fs::rename(&self.output, &elf64);
-                let objcopy = std::process::Command::new("objcopy")
+                let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
+                    .iter()
+                    .find(|bin| std::process::Command::new(bin).arg("--version").output()
+                        .map_or(false, |o| o.status.success()))
+                    .unwrap_or(&"objcopy");
+                let objcopy = std::process::Command::new(objcopy_bin)
                     .args(["-O", "elf32-i386"])
                     .arg(&elf64).arg(&self.output)
                     .output();

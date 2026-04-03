@@ -21,24 +21,6 @@ docker run --rm -p 5900:5900 simple-tauri-gui
 # Connect VNC viewer to localhost:5900 to see the window
 ```
 
-### Desktop Test Against Current Repo Sources
-
-When the baked image is older than the current workspace, mount the current UI
-examples and Tauri shell sources into the container and rebuild the shell in
-place before launching:
-
-```bash
-docker run --rm -p 5900:5900 \
-  -v "$(pwd)/examples/ui:/app/examples/ui:ro" \
-  -v "$(pwd)/tools/tauri-shell/src-tauri/src:/app/tools/tauri-shell/src-tauri/src:ro" \
-  -v "$(pwd)/tools/tauri-shell/src-tauri/Cargo.toml:/app/tools/tauri-shell/src-tauri/Cargo.toml:ro" \
-  simple-tauri-gui:latest \
-  /bin/bash -lc 'cd /app/tools/tauri-shell/src-tauri && cargo build && cd /app && /app/run-tauri-gui.sh examples/ui/test_render.spl'
-```
-
-This is the safest way to verify the current repo state when the image was built
-from an older checkout.
-
 ### Android Test
 
 ```bash
@@ -121,45 +103,6 @@ Check stderr logs for these key lines:
 ```
 
 If `creating window` never appears, `dbus-run-session` is likely missing.
-
-During the 2026-04-03 Docker verification pass, the following sequence was used
-as the success criterion:
-
-```text
-[tauri-shell] creating window from app://index.html
-[tauri-shell] window created
-[tauri-shell] raw stdout: {"type":"render",...}
-[tauri-shell] render, html_len=440
-[tauri-shell] eval OK
-```
-
-The old fallback where the window was overwritten by `stdout closed before a
-valid render arrived` was fixed in `tools/tauri-shell/src-tauri/src/lib.rs` by
-tracking whether a render message had already been received before applying the
-fallback status.
-
-### Capturing a Desktop Screenshot
-
-Inside the running GUI container:
-
-```bash
-apt-get update && apt-get install -y x11-apps imagemagick
-export DISPLAY=:99
-xwd -root -silent -out /tmp/gui.xwd
-convert /tmp/gui.xwd /tmp/gui.png
-```
-
-Copy the capture back to the host:
-
-```bash
-docker cp <container>:/tmp/gui.png /tmp/simple-ui-gui.png
-```
-
-On 2026-04-03 this produced a valid capture showing:
-- `Simple UI - Tauri 2`
-- `Hello from Simple Language!`
-- `Desktop render working.`
-- the dark info panel with platform and IPC text
 
 ## Android Testing in Detail
 
@@ -246,8 +189,7 @@ if let Some(win) = app.get_webview_window("main") { ... }
 | GTK init failed | No display or dbus | Use `dbus-run-session` with `DISPLAY` set |
 | `creating window` never appears | WebKitGTK can't init | Set `WEBKIT_DISABLE_DMABUF_RENDERER=1` |
 | `incompatible Simple binary` | Binary lacks `ui` command | Use `.spl` entry file instead of `.ui.sdn` |
-| Render shows then gets overwritten | stale shell fallback in `lib.rs` | Rebuild the shell from current sources or use the fixed `got_render` guard |
-| Container sees stale example files | baked image older than repo | bind-mount `examples/ui` into `/app/examples/ui` |
+| Render shows then gets overwritten | `stdout closed` status | Fixed — `got_render` flag prevents overwrite |
 | Android `no library targets` | Missing `lib.rs` | Ensure `app.rs` + `main.rs` + `lib.rs` split |
 | Android `close()` not found | Desktop-only API | Add `#[cfg(desktop)]` guard |
 | Emulator won't start | No KVM | Run with `--privileged --device /dev/kvm` |

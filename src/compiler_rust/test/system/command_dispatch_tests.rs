@@ -114,6 +114,17 @@ fn test_dashboard_unknown_subcommand() {
     assert!(!output.is_empty(), "unknown subcommand should produce output");
 }
 
+#[test]
+fn test_dashboard_agents_help_dispatches_to_llm_dashboard() {
+    let (code, stdout, _stderr) = run_simple(&["dashboard", "agents", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("LLM Agent Dashboard") || stdout.contains("simple dashboard agents"),
+        "dashboard agents --help should reach the llm dashboard app, got: {}",
+        &stdout[..stdout.len().min(200)]
+    );
+}
+
 // ============================================================================
 // 2. Context dispatch
 // ============================================================================

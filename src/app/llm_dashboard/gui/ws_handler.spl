@@ -3,8 +3,11 @@
 # Handles WebSocket connections for real-time dashboard updates.
 # Sends refresh events when new JSONL data is detected.
 
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.thread_sffi.{thread_sleep}
 use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.data.types.{format_tokens, provider_name}
+use app.ui.web.ws_handler.{extract_ws_key, compute_ws_accept, send_ws_text}
 use std.json.builder.{escape_json}
 
 # =========================================================================
@@ -40,6 +43,30 @@ fn ws_status_message(store: AgentDashboardStore) -> text:
 # =========================================================================
 # Agent WebSocket Handler
 # =========================================================================
+
+fn handle_agents_ws(stream: TcpStream, headers: text, store: AgentDashboardStore):
+    """Upgrade to WebSocket and push refresh messages when agent data changes."""
+    val key = extract_ws_key(headers)
+    if key == "":
+        return
+
+    val accept = compute_ws_accept(key)
+
+    var response = "HTTP/1.1 101 Switching Protocols\r\n"
+    response = "{response}Upgrade: websocket\r\n"
+    response = "{response}Connection: Upgrade\r\n"
+    response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+    response = "{response}\r\n"
+    stream.write_all(response)
+
+    store.poll()
+    var handler = AgentWsHandler.new(store)
+    handler.last_event_count = store.total_events
+
+    while stream.is_open():
+        thread_sleep(2000)
+        if handler.check_and_get_message() != nil:
+            send_ws_text(stream, ws_refresh_message())
 
 class AgentWsHandler:
     store: AgentDashboardStore

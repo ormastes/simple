@@ -218,7 +218,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/compiler/80.driver/build/cli_entry.spl",
         rust_handler: Handler::ArgsGc(handle_build),
         env_override: "",
-        needs_rust_flags: &[],
+        needs_rust_flags: &["agents"],
     },
     // Compilation commands
     CommandEntry {
@@ -489,7 +489,7 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/dashboard/main.spl",
         rust_handler: Handler::ArgsGc(handle_dashboard),
         env_override: "SIMPLE_DASHBOARD_RUST",
-        needs_rust_flags: &[],
+        needs_rust_flags: &["agents"],
     },
     // Office suite
     CommandEntry {
@@ -809,7 +809,7 @@ fn real_main() {
 /// 1. Relative to CWD (development: running from project root)
 /// 2. Relative to the executable's directory (installed/native)
 /// 3. SIMPLE_HOME environment variable
-fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
     // 1. Relative to CWD
     let cwd_path = PathBuf::from(relative_path);
     if cwd_path.exists() {

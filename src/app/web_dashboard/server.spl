@@ -16,6 +16,7 @@ use dashboard.views.status.{render_status_html, render_vcs_state_html}
 use std.tmux.{tmux_available, tmux_server_running, tmux_list_sessions}
 use app.llm_dashboard.data.store.{AgentDashboardStore}
 use app.llm_dashboard.gui.html_views.{generate_agents_html}
+use app.llm_dashboard.gui.ws_handler.{handle_agents_ws}
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -37,11 +38,20 @@ fn parse_request_line(request_line: text) -> (text, text):
 class DashboardServer:
     port: i32
     auto_refresh_seconds: i32
+    agent_watch_dir: text
 
     static fn new(port: i32) -> DashboardServer:
         return DashboardServer {
             port: port,
-            auto_refresh_seconds: 30
+            auto_refresh_seconds: 30,
+            agent_watch_dir: ""
+        }
+
+    static fn new_with_agent_dir(port: i32, agent_watch_dir: text) -> DashboardServer:
+        return DashboardServer {
+            port: port,
+            auto_refresh_seconds: 30,
+            agent_watch_dir: agent_watch_dir
         }
 
     fn start():
@@ -102,6 +112,11 @@ class DashboardServer:
                             body = data
                         Err(_):
                             pass_dn
+
+                if is_ws and path.starts_with("/ws/agents"):
+                    val store = self.agent_store()
+                    handle_agents_ws(stream, headers, store)
+                    return
 
                 if is_ws and path.starts_with("/ws/terminal"):
                     val query = if path.contains("?"):
@@ -194,13 +209,18 @@ class DashboardServer:
         return http_response(200, "text/html", html)
 
     fn serve_agents() -> text:
-        var store = AgentDashboardStore.new()
+        var store = self.agent_store()
         store.poll()
         val html = generate_agents_html(store)
         return http_response(200, "text/html", html)
 
     fn serve_static(path: text) -> text:
         return http_error(404, "Not Found")
+
+    fn agent_store() -> AgentDashboardStore:
+        if self.agent_watch_dir != "":
+            return AgentDashboardStore.with_dir(self.agent_watch_dir)
+        return AgentDashboardStore.new()
 
     # =========================================================================
     # API Endpoints

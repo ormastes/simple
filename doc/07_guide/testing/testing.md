@@ -759,23 +759,6 @@ bin/simple ui tui_web app.ui.sdn --port 9000
 bin/simple ui web app.ui.sdn --port 9001 --test-api-external
 ```
 
-### Docker Verification Notes
-
-During the 2026-04-03 verification pass:
-- `simple-test-isolation:codex-current` was the current working noninteractive
-  image for UI example checks
-- `simple-tauri-gui:latest` was used for GUI-window capture under Xvfb/VNC
-- `examples/ui/launch_verified.spl`, `examples/ui/launch_tui_verified.spl`,
-  `examples/ui/runtime_probe.spl`, and `examples/ui/smoke_test.spl` all ran in
-  Docker after fixing the `UITree` constructor in `launch_verified.spl`
-
-Two important caveats:
-- long-running server examples such as `hello_web.spl` do not terminate by
-  themselves and will trip the example timeout guard unless they are exercised
-  as managed server processes
-- `examples/ui/hello_tui.spl` still times out in Docker and should be treated as
-  a runtime investigation item, not a verified smoke example
-
 ### UITestClient
 
 ```simple

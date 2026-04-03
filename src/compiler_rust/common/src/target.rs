@@ -516,7 +516,7 @@ impl Target {
             // Baremetal / freestanding targets (TargetOS::None, non-WASM)
             (TargetArch::X86_64, TargetOS::None) => "x86_64-unknown-none-elf",
             (TargetArch::X86, TargetOS::None) => "i686-unknown-none-elf",
-            (TargetArch::Aarch64, TargetOS::None) => "aarch64-unknown-none",
+            (TargetArch::Aarch64, TargetOS::None) => "aarch64-unknown-none-elf",
             (TargetArch::Arm, TargetOS::None) => "armv7a-unknown-none-eabihf",
             (TargetArch::Riscv64, TargetOS::None) => "riscv64gc-unknown-none-elf",
             (TargetArch::Riscv32, TargetOS::None) => "riscv32gc-unknown-none-elf",

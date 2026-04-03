@@ -40,6 +40,7 @@ class OsTarget:
     qemu_memory: text
     qemu_bios: text
     qemu_extra: [text]
+    gui_mode: bool
 
 fn profile_to_target(profile: MachineProfile) -> OsTarget:
     OsTarget(
@@ -53,7 +54,8 @@ fn profile_to_target(profile: MachineProfile) -> OsTarget:
         qemu_cpu: profile.qemu_cpu,
         qemu_memory: profile.qemu_memory,
         qemu_bios: profile.qemu_bios,
-        qemu_extra: profile.qemu_extra
+        qemu_extra: profile.qemu_extra,
+        gui_mode: false
     )
 
 # ===========================================================================
@@ -75,7 +77,8 @@ fn get_target(arch: Architecture) -> OsTarget:
                 qemu_cpu: "qemu64",
                 qemu_memory: "128M",
                 qemu_bios: "",
-                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+                gui_mode: false
             )
         Architecture.Riscv64:
             if val Some(profile) = get_machine_profile(Architecture.Riscv64):
@@ -99,7 +102,8 @@ fn get_target(arch: Architecture) -> OsTarget:
                 qemu_cpu: "qemu32",
                 qemu_memory: "128M",
                 qemu_bios: "",
-                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+                qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+                gui_mode: false
             )
         Architecture.Arm64:
             OsTarget(
@@ -113,7 +117,8 @@ fn get_target(arch: Architecture) -> OsTarget:
                 qemu_cpu: "cortex-a72",
                 qemu_memory: "128M",
                 qemu_bios: "",
-                qemu_extra: []
+                qemu_extra: [],
+                gui_mode: false
             )
         Architecture.Arm32:
             OsTarget(
@@ -127,12 +132,30 @@ fn get_target(arch: Architecture) -> OsTarget:
                 qemu_cpu: "cortex-a15",
                 qemu_memory: "128M",
                 qemu_bios: "",
-                qemu_extra: []
+                qemu_extra: [],
+                gui_mode: false
             )
 
 # ===========================================================================
 # Target Enumeration & Name Parsing
 # ===========================================================================
+
+fn get_gui_target() -> OsTarget:
+    """Returns the x86_64 GUI target with BGA framebuffer and display enabled."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_gui_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "128M",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: true
+    )
 
 fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -226,9 +249,10 @@ fn build_qemu_command(target: OsTarget) -> [text]:
     args.push("-serial")
     args.push("stdio")
 
-    # Headless operation
-    args.push("-display")
-    args.push("none")
+    # Display mode: headless for text-mode, show window for GUI
+    if not target.gui_mode:
+        args.push("-display")
+        args.push("none")
 
     # Don't reboot on crash
     args.push("-no-reboot")
@@ -268,7 +292,8 @@ fn run_os(target: OsTarget) -> bool:
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[run] {arch_display_name(target.arch)}: {cmd_parts.join(" ")}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, 30000)
+    val timeout: i64 = if target.gui_mode: 600000 else: 30000
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout)
     if stdout != "":
         print "[run] serial output:\n{stdout}"
     if stderr != "":
