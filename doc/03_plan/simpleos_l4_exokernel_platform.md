@@ -1,7 +1,7 @@
 # Plan: SimpleOS L4/Exokernel Platform for Simple Language
 
 **Date:** 2026-04-04
-**Status:** In Progress (Phase 0-3 complete, Phase 4-5 pending)
+**Status:** In Progress (Phase 0-3 complete, Phase 4 in progress, Phase 5 pending)
 **Research:** [local/simpleos_l4_exokernel_platform.md](../01_research/local/simpleos_l4_exokernel_platform.md)
 
 ## Objective
@@ -103,10 +103,19 @@ Capsule graph: init → {pager, log, pcimgr} → {nvme, net, gpu} → {fs, netst
   - `request_device_grant`, `map_bar`, `map_bar_at`, `alloc_dma`, `free_dma` added to `src/os/userlib/device.spl`
 - Network syscalls (70-77): Remain as -ENOSYS stubs (Phase 3+ — needs TCP/IP stack)
 
-### Phase 4: Simple Runtime on SimpleOS (3-5 weeks) — PENDING
-- 4A: Cross-compile Rust interpreter for x86_64-unknown-simpleos
-- 4B: Test: `simple run hello.spl` prints via serial
-- Prerequisite: Phase 2 POSIX file I/O (VFS service must be connected)
+### Phase 4: Simple Runtime on SimpleOS — IN PROGRESS (2026-04-04)
+- 4A: Storage stack wiring — **DONE**
+  - `src/os/services/vfs/vfs_init.spl` (233 lines): NvmeBlockAdapter + vfs_boot_init() orchestrates PCI→NVMe→FAT32→VFS
+  - `src/os/kernel/boot/init_services.spl` (90 lines): Boot-time service spawner
+  - QEMU scenarios: x64-nvme-fat32, x64-full-stack added to qemu_runner.spl
+  - Disk image tool: `scripts/make_os_disk.shs` builds FAT32 test images
+  - `vmm_verify_user_write()`: PTE-level copy_to_user guard in vmm.spl
+- 4B: Hello world app — **DONE** (code written, needs QEMU boot test)
+  - `examples/simple_os/apps/hello_world.spl`: serial print, arithmetic, loops
+  - `examples/simple_os/apps/device_test.spl`: PCI enumeration via syscall 80
+  - `src/os/test/phase3_driver_test.spl`: Integration test for driver stack
+- 4C: Cross-compile interpreter — PENDING (alternative: compile hello.spl to native ELF via native-build)
+- 4D: End-to-end test — PENDING (`simple run hello.spl` prints via serial on QEMU)
 
 ### Phase 5: Self-Hosted Compiler (6-9 months) — PENDING
 - Integrated ELF linker in Simple (no external mold/lld)
