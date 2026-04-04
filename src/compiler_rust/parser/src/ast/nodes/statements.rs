@@ -116,6 +116,8 @@ pub struct ForStmt {
     ///     sum = sum + arr[i]
     /// ```
     pub invariants: Vec<ContractClause>,
+    /// Optional label for labeled break/continue: `'outer: for x in items:`
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

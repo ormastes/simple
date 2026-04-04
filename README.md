@@ -9,7 +9,7 @@ Simple is a self-hosted language and toolchain that combines a readable Python-l
 
 The repo is unusually broad: language, compiler, interpreter, loader, test runner, doc generation, traceability tooling, SDN-backed project databases, editor tooling, and hardware-oriented test flows all live together.
 
-**Quick Navigation:** [Distinctive Features](#distinctive-features) | [Feature Status](#feature-status-highlights) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Documentation](#documentation)
+**Quick Navigation:** [Distinctive Features](#distinctive-features) | [Feature Status](#feature-status-highlights) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Editor Plugins](#editor-plugins) | [Documentation](#documentation)
 
 ---
 
@@ -19,7 +19,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Verification-native workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
 - **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
 - **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
-- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, and rendering support.
+- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (VSCode highlighting with nested brace support, Neovim inline Unicode preview with conceal).
 - **SDN-backed textual databases**: tests, todos, dashboards, and other project metadata are stored through repo-native SDN data flows.
 - **Multiple execution paths**: interpreter, loader, SMF/module loading, and native/LLVM-oriented compilation paths coexist in one system.
 - **Baremetal-oriented build and test plumbing**: QEMU, semihosting, remote baremetal flows, and adapter-backed hardware lanes are built into the repo story.
@@ -1076,6 +1076,49 @@ Once the MCP server and LSP plugin are installed, try these prompts in Claude Co
 
 > "Debug why test/unit/lib/common/value_spec.spl is failing"
 ```
+
+---
+
+## Editor Plugins
+
+### VSCode Extension
+
+Full-featured extension with Tree-sitter highlighting, LSP integration, and math block support.
+
+```bash
+cd src/app/vscode_extension
+npm install && npm run compile && npm run package
+code --install-extension simple-language-0.1.0.vsix
+```
+
+**Key features:**
+- Semantic syntax highlighting (Tree-sitter powered)
+- LSP: completions, hover, go-to-definition, diagnostics
+- Math block highlighting for `m{}`, `loss{}`, `nograd{}` with nested brace support
+- Test CodeLens: "Run Test/File/Doctest" gutter arrows on `describe`/`it`/`context`/`sdoctest` blocks
+- AI-powered completions and chat (requires GitHub Copilot)
+
+See [`src/app/vscode_extension/README.md`](src/app/vscode_extension/README.md) for full documentation.
+
+### Neovim Plugin
+
+```lua
+-- lazy.nvim
+{ "nicholasgasior/simple.nvim", ft = "simple", opts = {} }
+
+-- Or from project checkout
+vim.opt.rtp:prepend("/path/to/simple/src/app/nvim_plugin")
+require("simple").setup()
+```
+
+**Key features:**
+- LSP integration with auto-detection
+- Math block conceal with inline Unicode preview (`frac(1,2)` -> `(1)/(2)`, `alpha` -> `α`, `sqrt(x)` -> `√(x)`)
+- Test lens: "Run" virtual text beside test blocks
+- Tree-sitter queries (highlights, folds, text objects, injections)
+- Brief view (fold to signatures)
+
+See [`src/app/nvim_plugin/README.md`](src/app/nvim_plugin/README.md) for full documentation.
 
 ---
 

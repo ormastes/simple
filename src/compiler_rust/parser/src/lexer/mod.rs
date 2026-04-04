@@ -481,7 +481,28 @@ impl<'a> Lexer<'a> {
                     self.scan_fstring() // Double quotes are interpolated by default
                 }
             }
-            '\'' => self.scan_raw_string(), // Single quotes are raw strings
+            '\'' => {
+                // Check if this is a label: 'identifier (tick + alpha/underscore)
+                if let Some(next_ch) = self.peek() {
+                    if next_ch.is_alphabetic() || next_ch == '_' {
+                        // Scan label: consume identifier chars
+                        let mut label = String::new();
+                        while let Some(ch) = self.peek() {
+                            if ch.is_alphanumeric() || ch == '_' {
+                                label.push(ch);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        TokenKind::Label(label)
+                    } else {
+                        self.scan_raw_string() // Single quotes are raw strings
+                    }
+                } else {
+                    self.scan_raw_string()
+                }
+            }
 
             // Numbers
             '0'..='9' => self.scan_number(ch),

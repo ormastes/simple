@@ -240,6 +240,7 @@ pub enum TokenKind {
     Repr,    // repr (for unit representation constraints)
     Literal, // literal (for literal fn definitions)
     Alias,   // alias (for type/class aliasing: alias NewName = OldName)
+    Label(String), // 'label (tick-prefixed identifier for labeled break/continue)
     // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
     // or "lean import" statement to avoid breaking existing module paths
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
