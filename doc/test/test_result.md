@@ -1,16 +1,16 @@
 # Test Results
 
-**Generated:** 2026-03-29 00:31:03
-**Total Tests:** 11116
-**Status:** ⚠️ 4 FAILED
+**Generated:** 2026-04-05 04:19:07
+**Total Tests:** 11528
+**Status:** ✅ ALL PASSED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 10890 | 98.0% |
-| ❌ Failed | 4 | 0.0% |
-| ⏭️ Skipped | 222 | 2.0% |
+| ✅ Passed | 11336 | 98.3% |
+| ❌ Failed | 0 | 0.0% |
+| ⏭️ Skipped | 192 | 1.7% |
 | 🔕 Ignored | 0 | 0.0% |
 | 🔐 Qualified Ignore | 0 | 0.0% |
 
@@ -20,66 +20,26 @@
 
 | Test | Change | Run |
 |------|--------|-----|
-| normalizes date suffixed slugs | new_test |  |
-| extracts relative paths from markdown and plain text | new_test |  |
-| extracts REQ and NFR identifiers | new_test |  |
-| maps compiler sources to unit candidates | new_test |  |
-| maps lib sources to unit candidates | new_test |  |
-| maps source directories to integration candidates | new_test |  |
-| warns when a requirement identifier is not covered | new_test |  |
-| warns on legacy requirement roots in specs | new_test |  |
-| warns when docs point to raw specs | new_test |  |
-| warns for opted-in source roots without unit tests | new_test |  |
-| normalizes date suffixed slugs | fail_to_pass |  |
-| maps compiler sources to unit candidates | fail_to_pass |  |
-| maps lib sources to unit candidates | fail_to_pass |  |
-| maps source directories to integration candidates | fail_to_pass |  |
-| extracts REQ and NFR identifiers | fail_to_pass |  |
-| extracts relative paths from markdown and plain text | fail_to_pass |  |
+| doc_nav_spec | new_test |  |
+| github_release_spec | new_test |  |
+| test_lens_spec | new_test |  |
+| main_render_spec | new_test |  |
+| render_integration_spec | new_test |  |
+| types_spec | new_test |  |
+| dashboard_render_spec | new_test |  |
+| llm_agent_dashboard_spec | new_test |  |
+| tmux_rest_api_spec | new_test |  |
+| web_dashboard_html_shell_spec | new_test |  |
+| web_dashboard_server_spec | new_test |  |
 | backend_port_feature_spec | new_test |  |
 | bootstrap_spec | new_test |  |
 | code_quality_tools_spec | new_test |  |
 | codegen_parity_completion_spec | new_test |  |
-
----
-
-## ❌ Failed Tests (4)
-
-### 🔴 warns when a requirement identifier is not covered
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 warns on legacy requirement roots in specs
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 warns for opted-in source roots without unit tests
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
-
-### 🔴 warns when docs point to raw specs
-
-**File:** `test/unit/app/tooling/traceability_spec.spl`
-**Category:** Unit
-**Failed:** 
-**Flaky:** No (100.0% failure rate)
-
----
+| compiler_services_error_cases_spec | new_test |  |
+| compiler_services_feature_spec | new_test |  |
+| config_env_spec | new_test |  |
+| config_loader_spec | new_test |  |
+| database_resource_spec | new_test |  |
 
 ---
 
@@ -88,20 +48,4 @@
 ---
 
 ## 🎯 Action Items
-
-### Priority 1: Fix Failing Tests (4)
-
-1. **warns when a requirement identifier is not covered** - 
-2. **warns on legacy requirement roots in specs** - 
-3. **warns for opted-in source roots without unit tests** - 
-4. **warns when docs point to raw specs** - 
-
-### Priority 3: Stabilize Flaky Tests (6)
-
-Tests with intermittent failures:
-- normalizes date suffixed slugs (4.0% failure rate)
-- extracts REQ and NFR identifiers (32.0% failure rate)
-- extracts relative paths from markdown and plain text (36.0% failure rate)
-- maps source directories to integration candidates (24.0% failure rate)
-- maps lib sources to unit candidates (24.0% failure rate)
 
