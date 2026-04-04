@@ -12,13 +12,14 @@ CFLAGS  = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib -fno-builtin \
           -mno-red-zone -fno-stack-protector -fno-exceptions \
           -fno-unwind-tables -fno-asynchronous-unwind-tables \
-          -O2 -Wall -Wextra -Wno-unused-parameter
+          -O2 -Wall -Wextra -Wno-unused-parameter \
+          -I include
 
 ASFLAGS = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib
 
-C_SRCS  = simpleos_libc.c simpleos_math.c
-ASM_SRCS = simpleos_crt0.S simpleos_syscall.S
+C_SRCS  = simpleos_libc.c simpleos_math.c simpleos_fs.c simpleos_pthread.c simpleos_alloc.c
+ASM_SRCS = simpleos_crt0.S simpleos_syscall.S simpleos_setjmp.S
 
 C_OBJS  = $(C_SRCS:.c=.o)
 ASM_OBJS = $(ASM_SRCS:.S=.o)
