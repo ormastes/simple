@@ -428,6 +428,37 @@ fn _vmm_check_pte_flags(vaddr: u64, required_bits: u64) -> bool:
 
     (pt_entry & required_bits) == required_bits
 
+fn vmm_read_pte(virt: VirtAddr) -> u64:
+    """Read the page table entry for a virtual address.
+
+    Returns the raw PTE value (physical address + flags), or 0 if not mapped.
+    Handles both 4KB pages (PT level) and 2MB huge pages (PD level).
+    """
+    val vaddr = virt.addr
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return 0
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return 0
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return 0
+
+    # Check for 2MB huge page
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        return pd_entry
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    pt_entry
+
 # ============================================================================
 # Address Space Management
 # ============================================================================

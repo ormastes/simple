@@ -1,10 +1,330 @@
-# POSIX Pipes — implemented over IPC port pairs
+# POSIX Pipes — ring-buffer pipes with notification-based blocking
 #
-# NOT YET IMPLEMENTED — needs IPC endpoint create syscall.
-# Returns -ENOSYS on all calls.
+# Pipes use a shared ring buffer between reader and writer FDs.
+# Blocking is implemented via kernel notifications (syscalls 24-26):
+#   - Reader blocks on data_ready_notif when buffer is empty
+#   - Writer blocks on space_avail_notif when buffer is full
+#
+# Design:
+#   posix_pipe() allocates two FDs and a PipeState entry.
+#   The FD table entry's ipc_port field stores the pipe index.
 
-val ENOSYS: i32 = 38
+use os.posix.errno.{EBADF, EINVAL, EMFILE, EPIPE, EAGAIN, ENOSYS}
+use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_types, fd_ports, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, MAX_FDS, O_RDONLY, O_WRONLY}
+use os.userlib.syscall_raw.{syscall}
+
+# Syscall numbers for notifications
+val _SYS_NOTIF_CREATE: u64 = 24
+val _SYS_NOTIF_SIGNAL: u64 = 25
+val _SYS_NOTIF_WAIT: u64 = 26
+val _SYS_NOTIF_POLL: u64 = 27
+val _SYS_NOTIF_DESTROY: u64 = 28
+
+# Pipe buffer configuration
+val PIPE_BUF_SIZE: u64 = 4096
+val MAX_PIPES: u64 = 64
+
+# ============================================================================
+# Pipe State — ring buffer + notification pair
+# ============================================================================
+
+# Flat arrays for pipe state (baremetal-safe, no heap structs)
+var _pipe_active: [bool; 64]
+var _pipe_head: [u64; 64]           # Read position (consumer)
+var _pipe_tail: [u64; 64]           # Write position (producer)
+var _pipe_count: [u64; 64]          # Bytes currently in buffer
+var _pipe_data_notif: [u64; 64]     # Notification: data available (for reader)
+var _pipe_space_notif: [u64; 64]    # Notification: space available (for writer)
+var _pipe_read_closed: [bool; 64]   # Read end closed
+var _pipe_write_closed: [bool; 64]  # Write end closed
+
+# Pipe buffer storage: MAX_PIPES * PIPE_BUF_SIZE bytes
+# Each pipe index `p` uses bytes [p * PIPE_BUF_SIZE .. (p+1) * PIPE_BUF_SIZE)
+var _pipe_buffers: [u8; 262144]     # 64 * 4096
+
+fn _pipe_init():
+    """Initialize pipe table."""
+    var i: u64 = 0
+    while i < MAX_PIPES:
+        _pipe_active[i] = false
+        _pipe_head[i] = 0
+        _pipe_tail[i] = 0
+        _pipe_count[i] = 0
+        _pipe_data_notif[i] = 0
+        _pipe_space_notif[i] = 0
+        _pipe_read_closed[i] = false
+        _pipe_write_closed[i] = false
+        i = i + 1
+
+fn _pipe_alloc() -> i64:
+    """Allocate a pipe slot. Returns index or -1 if full."""
+    var i: u64 = 0
+    while i < MAX_PIPES:
+        if not _pipe_active[i]:
+            _pipe_active[i] = true
+            _pipe_head[i] = 0
+            _pipe_tail[i] = 0
+            _pipe_count[i] = 0
+            _pipe_read_closed[i] = false
+            _pipe_write_closed[i] = false
+            return i as i64
+        i = i + 1
+    -1
+
+fn _pipe_buf_offset(pipe_idx: u64, pos: u64) -> u64:
+    """Calculate the buffer offset for a position within a pipe."""
+    pipe_idx * PIPE_BUF_SIZE + (pos % PIPE_BUF_SIZE)
+
+# ============================================================================
+# Public API
+# ============================================================================
 
 fn posix_pipe(fds_out_read: u64, fds_out_write: u64) -> i32:
-    """Create a pipe. NOT YET IMPLEMENTED. Returns -ENOSYS."""
-    0 - ENOSYS
+    """Create a pipe. Returns 0 on success, -errno on error.
+
+    fds_out_read:  address to write the read-end FD (i32)
+    fds_out_write: address to write the write-end FD (i32)
+    """
+    # Allocate pipe slot
+    val pipe_idx = _pipe_alloc()
+    if pipe_idx < 0:
+        return 0 - EMFILE
+
+    val pidx = pipe_idx as u64
+
+    # Create notifications for blocking
+    val data_notif = syscall(_SYS_NOTIF_CREATE, 0, 0, 0, 0, 0)
+    if data_notif < 0:
+        _pipe_active[pidx] = false
+        return 0 - ENOSYS
+    val space_notif = syscall(_SYS_NOTIF_CREATE, 0, 0, 0, 0, 0)
+    if space_notif < 0:
+        syscall(_SYS_NOTIF_DESTROY, data_notif as u64, 0, 0, 0, 0)
+        _pipe_active[pidx] = false
+        return 0 - ENOSYS
+
+    _pipe_data_notif[pidx] = data_notif as u64
+    _pipe_space_notif[pidx] = space_notif as u64
+
+    # Signal space_avail immediately (buffer starts empty = fully available)
+    syscall(_SYS_NOTIF_SIGNAL, space_notif as u64, 0, 0, 0, 0)
+
+    # Allocate FDs
+    val read_fd = fd_alloc()
+    if read_fd < 0:
+        _pipe_free(pidx)
+        return read_fd  # -EMFILE
+
+    fd_set(read_fd, FD_TYPE_PIPE_READ, O_RDONLY, pidx)
+
+    val write_fd = fd_alloc()
+    if write_fd < 0:
+        fd_close(read_fd)
+        _pipe_free(pidx)
+        return write_fd  # -EMFILE
+
+    fd_set(write_fd, FD_TYPE_PIPE_WRITE, O_WRONLY, pidx)
+
+    # Write FDs to output addresses
+    extern fn mmio_write32(addr: u64, val_: u32)
+    mmio_write32(fds_out_read, read_fd as u32)
+    mmio_write32(fds_out_write, write_fd as u32)
+
+    0
+
+fn pipe_read(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Read from a pipe. Blocks if empty, returns 0 on EOF (write end closed).
+
+    Returns bytes read on success, or -errno on error.
+    """
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_READ:
+        return 0 - EBADF as i64
+
+    val pidx = fd_ports[idx]
+    if not _pipe_active[pidx]:
+        return 0 - EBADF as i64
+
+    # Block until data is available or write end is closed
+    while _pipe_count[pidx] == 0:
+        if _pipe_write_closed[pidx]:
+            return 0  # EOF: write end closed, no more data
+        # Wait on data notification
+        syscall(_SYS_NOTIF_WAIT, _pipe_data_notif[pidx], 0, 0, 0, 0)
+
+    # Read up to `count` bytes from the ring buffer
+    var bytes_read: u64 = 0
+    extern fn mmio_write8(addr: u64, val_: u8)
+    while bytes_read < count and _pipe_count[pidx] > 0:
+        val buf_off = _pipe_buf_offset(pidx, _pipe_head[pidx])
+        val byte = _pipe_buffers[buf_off]
+        mmio_write8(buf_addr + bytes_read, byte)
+        _pipe_head[pidx] = (_pipe_head[pidx] + 1) % PIPE_BUF_SIZE
+        _pipe_count[pidx] = _pipe_count[pidx] - 1
+        bytes_read = bytes_read + 1
+
+    # Signal space available for writers
+    if bytes_read > 0:
+        syscall(_SYS_NOTIF_SIGNAL, _pipe_space_notif[pidx], 0, 0, 0, 0)
+
+    bytes_read as i64
+
+fn pipe_write(fd: i32, buf_addr: u64, count: u64) -> i64:
+    """Write to a pipe. Blocks if full, returns -EPIPE if read end closed.
+
+    Returns bytes written on success, or -errno on error.
+    """
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_WRITE:
+        return 0 - EBADF as i64
+
+    val pidx = fd_ports[idx]
+    if not _pipe_active[pidx]:
+        return 0 - EBADF as i64
+
+    # Check if read end is closed (broken pipe)
+    if _pipe_read_closed[pidx]:
+        return 0 - EPIPE as i64
+
+    var bytes_written: u64 = 0
+    extern fn mmio_read8(addr: u64) -> u8
+
+    while bytes_written < count:
+        # Block until space is available
+        while _pipe_count[pidx] >= PIPE_BUF_SIZE:
+            if _pipe_read_closed[pidx]:
+                if bytes_written > 0:
+                    return bytes_written as i64
+                return 0 - EPIPE as i64
+            syscall(_SYS_NOTIF_WAIT, _pipe_space_notif[pidx], 0, 0, 0, 0)
+
+        # Write bytes into ring buffer
+        while bytes_written < count and _pipe_count[pidx] < PIPE_BUF_SIZE:
+            val byte = mmio_read8(buf_addr + bytes_written)
+            val buf_off = _pipe_buf_offset(pidx, _pipe_tail[pidx])
+            _pipe_buffers[buf_off] = byte
+            _pipe_tail[pidx] = (_pipe_tail[pidx] + 1) % PIPE_BUF_SIZE
+            _pipe_count[pidx] = _pipe_count[pidx] + 1
+            bytes_written = bytes_written + 1
+
+    # Signal data available for readers
+    if bytes_written > 0:
+        syscall(_SYS_NOTIF_SIGNAL, _pipe_data_notif[pidx], 0, 0, 0, 0)
+
+    bytes_written as i64
+
+fn pipe_close_read(fd: i32) -> i32:
+    """Close the read end of a pipe."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_READ:
+        return 0 - EBADF
+
+    val pidx = fd_ports[idx]
+    _pipe_read_closed[pidx] = true
+
+    # Wake any blocked writers (they'll see EPIPE)
+    syscall(_SYS_NOTIF_SIGNAL, _pipe_space_notif[pidx], 0, 0, 0, 0)
+
+    # If both ends closed, free the pipe
+    if _pipe_write_closed[pidx]:
+        _pipe_free(pidx)
+
+    fd_close(fd)
+
+fn pipe_close_write(fd: i32) -> i32:
+    """Close the write end of a pipe."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_WRITE:
+        return 0 - EBADF
+
+    val pidx = fd_ports[idx]
+    _pipe_write_closed[pidx] = true
+
+    # Wake any blocked readers (they'll see EOF)
+    syscall(_SYS_NOTIF_SIGNAL, _pipe_data_notif[pidx], 0, 0, 0, 0)
+
+    # If both ends closed, free the pipe
+    if _pipe_read_closed[pidx]:
+        _pipe_free(pidx)
+
+    fd_close(fd)
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _pipe_free(pidx: u64):
+    """Release a pipe slot and its notifications."""
+    if pidx >= MAX_PIPES:
+        return
+    if _pipe_data_notif[pidx] != 0:
+        syscall(_SYS_NOTIF_DESTROY, _pipe_data_notif[pidx], 0, 0, 0, 0)
+        _pipe_data_notif[pidx] = 0
+    if _pipe_space_notif[pidx] != 0:
+        syscall(_SYS_NOTIF_DESTROY, _pipe_space_notif[pidx], 0, 0, 0, 0)
+        _pipe_space_notif[pidx] = 0
+    _pipe_active[pidx] = false
+
+fn pipe_get_data_notif(fd: i32) -> u64:
+    """Get the data-ready notification ID for a pipe read FD.
+
+    Used by select/poll to multiplex across FDs.
+    Returns 0 if not a valid pipe read FD.
+    """
+    if not fd_is_valid(fd):
+        return 0
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_READ:
+        return 0
+    val pidx = fd_ports[idx]
+    if pidx >= MAX_PIPES or not _pipe_active[pidx]:
+        return 0
+    _pipe_data_notif[pidx]
+
+fn pipe_get_space_notif(fd: i32) -> u64:
+    """Get the space-available notification ID for a pipe write FD.
+
+    Used by select/poll to multiplex across FDs.
+    Returns 0 if not a valid pipe write FD.
+    """
+    if not fd_is_valid(fd):
+        return 0
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_WRITE:
+        return 0
+    val pidx = fd_ports[idx]
+    if pidx >= MAX_PIPES or not _pipe_active[pidx]:
+        return 0
+    _pipe_space_notif[pidx]
+
+fn pipe_has_data(fd: i32) -> bool:
+    """Check if a pipe read FD has data available (non-blocking check)."""
+    if not fd_is_valid(fd):
+        return false
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_READ:
+        return false
+    val pidx = fd_ports[idx]
+    if pidx >= MAX_PIPES or not _pipe_active[pidx]:
+        return false
+    _pipe_count[pidx] > 0 or _pipe_write_closed[pidx]
+
+fn pipe_has_space(fd: i32) -> bool:
+    """Check if a pipe write FD has space available (non-blocking check)."""
+    if not fd_is_valid(fd):
+        return false
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_PIPE_WRITE:
+        return false
+    val pidx = fd_ports[idx]
+    if pidx >= MAX_PIPES or not _pipe_active[pidx]:
+        return false
+    _pipe_count[pidx] < PIPE_BUF_SIZE

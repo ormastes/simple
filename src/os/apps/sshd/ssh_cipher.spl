@@ -1,0 +1,241 @@
+# SSH Cipher Layer — AES-256-GCM
+#
+# Wraps the pure Simple AES-GCM implementation for SSH packet encryption.
+# Handles bidirectional encryption state, nonce management, and sequence
+# numbers per RFC 5647 (AES-GCM for SSH).
+#
+# GCM nonce construction:
+#   The 12-byte nonce is the IV XOR'd with the 32-bit sequence number
+#   placed in the last 4 bytes (big-endian).
+
+use os.crypto.aes_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, AesGcmResult}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_kex.{SshSessionKeys}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32, SSH_MIN_PADDING}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val GCM_TAG_LEN: u64 = 16       # AES-GCM authentication tag length
+val GCM_NONCE_LEN: u64 = 12     # AES-GCM nonce length
+val AES_BLOCK_SIZE: u64 = 16    # AES block size for padding calculation
+
+# ============================================================================
+# Cipher State
+# ============================================================================
+
+class SshCipher:
+    """Bidirectional SSH encryption state."""
+    enc_key_c2s: [u8]     # Client-to-server encryption key (32 bytes)
+    enc_key_s2c: [u8]     # Server-to-client encryption key (32 bytes)
+    iv_c2s: [u8]          # Client-to-server base nonce (12 bytes)
+    iv_s2c: [u8]          # Server-to-client base nonce (12 bytes)
+    mac_key_c2s: [u8]     # Client-to-server integrity key
+    mac_key_s2c: [u8]     # Server-to-client integrity key
+    seq_c2s: u32          # Client-to-server sequence number
+    seq_s2c: u32          # Server-to-client sequence number
+    active: bool          # Encryption enabled (after NEWKEYS)
+
+impl SshCipher:
+
+    static fn new() -> SshCipher:
+        """Create an inactive cipher (pre-kex, no encryption)."""
+        SshCipher(
+            enc_key_c2s: [],
+            enc_key_s2c: [],
+            iv_c2s: [],
+            iv_s2c: [],
+            mac_key_c2s: [],
+            mac_key_s2c: [],
+            seq_c2s: 0,
+            seq_s2c: 0,
+            active: false
+        )
+
+    me activate(keys: SshSessionKeys):
+        """Activate encryption with derived session keys."""
+        self.enc_key_c2s = keys.enc_key_c2s
+        self.enc_key_s2c = keys.enc_key_s2c
+        self.iv_c2s = keys.iv_c2s
+        self.iv_s2c = keys.iv_s2c
+        self.mac_key_c2s = keys.mac_key_c2s
+        self.mac_key_s2c = keys.mac_key_s2c
+        self.seq_c2s = 0
+        self.seq_s2c = 0
+        self.active = true
+
+    me encrypt_packet(payload: [u8]) -> [u8]:
+        """Encrypt an outgoing SSH packet (server-to-client direction).
+
+        1. Build plaintext packet: padding_length(1) + payload + padding
+        2. The 4-byte packet_length is sent as AAD (authenticated but not encrypted)
+        3. Encrypt the rest with AES-256-GCM
+        4. Append 16-byte GCM tag
+
+        Returns: length(4) || encrypted_body || tag(16)
+        """
+        val payload_len = payload.len()
+
+        # Calculate padding (block size 16 for AES)
+        # Body = padding_length(1) + payload + padding
+        # Body length must be multiple of AES_BLOCK_SIZE
+        var padding_len: u64 = AES_BLOCK_SIZE - ((1 + payload_len) % AES_BLOCK_SIZE)
+        if padding_len < SSH_MIN_PADDING.to_u64():
+            padding_len = padding_len + AES_BLOCK_SIZE
+
+        val packet_length = 1 + payload_len + padding_len
+
+        # Build plaintext body (everything after the 4-byte length)
+        var body: [u8] = []
+        body.push(padding_len.to_u8())
+
+        var i: u64 = 0
+        while i < payload_len:
+            body.push(payload[i])
+            i = i + 1
+
+        # Random padding
+        val pad = random_bytes(padding_len)
+        i = 0
+        while i < padding_len:
+            body.push(pad[i])
+            i = i + 1
+
+        # Build AAD: the 4-byte packet_length
+        var aad: [u8] = []
+        ssh_put_u32(aad, packet_length.to_u32())
+
+        # Compute GCM nonce: iv_s2c XOR seq_s2c
+        val nonce = _make_nonce(self.iv_s2c, self.seq_s2c)
+
+        # Encrypt body
+        val encrypted_with_tag = aes256_gcm_encrypt(
+            self.enc_key_s2c, nonce, body, aad
+        )
+
+        # Increment sequence number
+        self.seq_s2c = (self.seq_s2c + 1) & 0xFFFFFFFF
+
+        # Result: AAD (packet_length) || encrypted body || GCM tag
+        var result: [u8] = []
+        i = 0
+        while i < aad.len():
+            result.push(aad[i])
+            i = i + 1
+        i = 0
+        while i < encrypted_with_tag.len():
+            result.push(encrypted_with_tag[i])
+            i = i + 1
+
+        result
+
+    me decrypt_packet(data: [u8]) -> Result<[u8], text>:
+        """Decrypt an incoming SSH packet (client-to-server direction).
+
+        Expects: length(4) || encrypted_body || tag(16)
+        Returns: decrypted payload bytes.
+        """
+        if data.len() < 4 + GCM_TAG_LEN:
+            return Err("encrypted packet too short")
+
+        # Extract AAD (4-byte packet_length)
+        var aad: [u8] = []
+        var i: u64 = 0
+        while i < 4:
+            aad.push(data[i])
+            i = i + 1
+
+        val packet_length = ssh_get_u32(data, 0).to_u64()
+
+        # The rest is encrypted_body + tag
+        val ct_with_tag_len = data.len() - 4
+        if ct_with_tag_len < GCM_TAG_LEN:
+            return Err("no ciphertext in encrypted packet")
+
+        val ct_len = ct_with_tag_len - GCM_TAG_LEN
+
+        # Extract ciphertext
+        var ciphertext: [u8] = []
+        i = 0
+        while i < ct_len:
+            ciphertext.push(data[4 + i])
+            i = i + 1
+
+        # Extract tag
+        var tag: [u8] = []
+        i = 0
+        while i < GCM_TAG_LEN:
+            tag.push(data[4 + ct_len + i])
+            i = i + 1
+
+        # Compute GCM nonce
+        val nonce = _make_nonce(self.iv_c2s, self.seq_c2s)
+
+        # Decrypt
+        val result = aes256_gcm_decrypt(self.enc_key_c2s, nonce, ciphertext, aad, tag)
+
+        match result:
+            AesGcmResult.Ok(plaintext):
+                # Increment sequence number
+                self.seq_c2s = (self.seq_c2s + 1) & 0xFFFFFFFF
+
+                # Parse plaintext: padding_length(1) + payload + padding
+                if plaintext.len() < 1:
+                    return Err("decrypted body empty")
+
+                val padding_len = plaintext[0].to_u64()
+                if 1 + padding_len > plaintext.len():
+                    return Err("invalid padding in decrypted packet")
+
+                val payload_len = plaintext.len() - 1 - padding_len
+
+                var payload: [u8] = []
+                i = 0
+                while i < payload_len:
+                    payload.push(plaintext[1 + i])
+                    i = i + 1
+
+                Ok(payload)
+
+            AesGcmResult.Err(msg):
+                Err("GCM decryption failed: {msg}")
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
+    """Construct GCM nonce by XOR-ing the base IV with the sequence number.
+
+    The sequence number is placed in the last 4 bytes (big-endian)
+    and XOR'd with the corresponding IV bytes.
+    """
+    var nonce: [u8] = []
+    var i: u64 = 0
+
+    # Copy first 8 bytes unchanged
+    while i < 8:
+        if i < base_iv.len():
+            nonce.push(base_iv[i])
+        else:
+            nonce.push(0)
+        i = i + 1
+
+    # XOR last 4 bytes with big-endian sequence number
+    val s3 = ((seq >> 24) & 0xFF).to_u8()
+    val s2 = ((seq >> 16) & 0xFF).to_u8()
+    val s1 = ((seq >> 8) & 0xFF).to_u8()
+    val s0 = (seq & 0xFF).to_u8()
+
+    val b8 = if 8 < base_iv.len(): base_iv[8] else: 0
+    val b9 = if 9 < base_iv.len(): base_iv[9] else: 0
+    val b10 = if 10 < base_iv.len(): base_iv[10] else: 0
+    val b11 = if 11 < base_iv.len(): base_iv[11] else: 0
+
+    nonce.push(b8 ^ s3)
+    nonce.push(b9 ^ s2)
+    nonce.push(b10 ^ s1)
+    nonce.push(b11 ^ s0)
+
+    nonce

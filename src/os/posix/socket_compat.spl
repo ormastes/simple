@@ -1,0 +1,388 @@
+# POSIX Socket Compatibility — wrappers over netstack IPC
+#
+# Provides POSIX-like socket API (socket, bind, listen, connect, accept,
+# send, recv, close) that communicates with the netstack service via IPC
+# on port 2 (exokernel design — user-space service, not kernel-mediated).
+#
+# Wire protocol (matches netstack_service.spl IPC handlers):
+#   Request:  method(u32) | payload(bytes)
+#   Response: status(i32) | payload(bytes)
+#
+# Each socket operation sends a request to port 2 and blocks waiting
+# for the reply. The netstack service manages the actual TCP/UDP state.
+
+use os.posix.errno.{EBADF, EINVAL, ENOSYS, ECONNREFUSED, ENOTCONN, ENOTSOCK, EIO, EAGAIN, EMFILE, EADDRINUSE}
+use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_types, fd_ports, FD_TYPE_SOCKET, MAX_FDS, O_RDWR}
+use os.userlib.syscall_raw.{syscall}
+use os.userlib.ipc_protocol.{NET_SOCKET, NET_BIND, NET_LISTEN, NET_CONNECT, NET_ACCEPT, NET_SEND, NET_RECV, NET_CLOSE}
+
+# Well-known netstack service IPC port
+val _NET_PORT: u64 = 2
+
+# Syscall numbers for IPC
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+
+# Socket types (POSIX)
+val SOCK_STREAM: i32 = 1   # TCP
+val SOCK_DGRAM: i32 = 2    # UDP
+val AF_INET: i32 = 2
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+# ============================================================================
+# Socket Address
+# ============================================================================
+
+struct SockaddrIn:
+    """IPv4 socket address (POSIX sockaddr_in equivalent)."""
+    family: i32     # AF_INET = 2
+    port: u16       # Port number (host byte order)
+    addr: u32       # IPv4 address as packed u32 (network byte order)
+
+fn sockaddr_in(port: u16, a: u8, b: u8, c: u8, d: u8) -> SockaddrIn:
+    """Create an IPv4 socket address from octets and port."""
+    val packed = (a as u32) | ((b as u32) << 8) | ((c as u32) << 16) | ((d as u32) << 24)
+    SockaddrIn(family: AF_INET, port: port, addr: packed)
+
+fn sockaddr_any(port: u16) -> SockaddrIn:
+    """Create an INADDR_ANY socket address (bind to all interfaces)."""
+    SockaddrIn(family: AF_INET, port: port, addr: 0)
+
+# ============================================================================
+# Socket Operations
+# ============================================================================
+
+fn posix_socket(domain: i32, type_: i32, protocol: i32) -> i64:
+    """Create a socket. Returns fd or -errno.
+
+    domain:   AF_INET (2)
+    type_:    SOCK_STREAM (1) for TCP, SOCK_DGRAM (2) for UDP
+    protocol: 0 (auto-select based on type)
+    """
+    if domain != AF_INET:
+        return 0 - EINVAL as i64
+
+    # Map POSIX type to netstack protocol byte
+    var proto_byte: u8 = 0
+    if type_ == SOCK_STREAM:
+        proto_byte = 1  # TCP
+    elif type_ == SOCK_DGRAM:
+        proto_byte = 2  # UDP
+    else:
+        return 0 - EINVAL as i64
+
+    # Send NET_SOCKET IPC to netstack
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_SOCKET)
+    payload.push(proto_byte)
+
+    val reply = _net_ipc_request(payload)
+    if reply.status < 0:
+        return reply.status as i64
+
+    # Netstack returned a socket fd in its own table.
+    # Allocate a local POSIX fd that maps to the netstack fd.
+    val net_fd = reply.value_i32
+    val local_fd = fd_alloc()
+    if local_fd < 0:
+        # Close the netstack socket since we can't track it
+        _net_close_remote(net_fd)
+        return 0 - EMFILE as i64
+
+    # Store netstack fd in the ipc_port field
+    fd_set(local_fd, FD_TYPE_SOCKET, O_RDWR, net_fd as u64)
+    local_fd as i64
+
+fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
+    """Bind socket to address. Returns 0 or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | ip(u32) | port(u16)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_BIND)
+    _sock_push_i32(payload, net_fd)
+    _sock_push_u32(payload, addr.addr)
+    _sock_push_u16(payload, addr.port)
+
+    val reply = _net_ipc_request(payload)
+    reply.status as i64
+
+fn posix_listen(fd: i32, backlog: i32) -> i64:
+    """Start listening for connections. Returns 0 or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | backlog(u32)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_LISTEN)
+    _sock_push_i32(payload, net_fd)
+    _sock_push_u32(payload, backlog as u32)
+
+    val reply = _net_ipc_request(payload)
+    reply.status as i64
+
+fn posix_connect(fd: i32, addr: SockaddrIn) -> i64:
+    """Connect to remote address. Returns 0 or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | ip(u32) | port(u16)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_CONNECT)
+    _sock_push_i32(payload, net_fd)
+    _sock_push_u32(payload, addr.addr)
+    _sock_push_u16(payload, addr.port)
+
+    val reply = _net_ipc_request(payload)
+    reply.status as i64
+
+fn posix_accept(fd: i32) -> i64:
+    """Accept incoming connection. Returns new fd or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_ACCEPT)
+    _sock_push_i32(payload, net_fd)
+
+    val reply = _net_ipc_request(payload)
+    if reply.status < 0:
+        return reply.status as i64
+
+    # Netstack returned a new socket fd for the accepted connection
+    val new_net_fd = reply.value_i32
+    val new_local_fd = fd_alloc()
+    if new_local_fd < 0:
+        _net_close_remote(new_net_fd)
+        return 0 - EMFILE as i64
+
+    fd_set(new_local_fd, FD_TYPE_SOCKET, O_RDWR, new_net_fd as u64)
+    new_local_fd as i64
+
+fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
+    """Send data on connected socket. Returns bytes sent or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | data(bytes)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_SEND)
+    _sock_push_i32(payload, net_fd)
+
+    # Copy data from user buffer
+    extern fn mmio_read8(addr: u64) -> u8
+    var i: u64 = 0
+    while i < data_len:
+        payload.push(mmio_read8(data_addr + i))
+        i = i + 1
+
+    val reply = _net_ipc_request(payload)
+    if reply.status < 0:
+        return reply.status as i64
+    reply.value_i32 as i64
+
+fn posix_send_bytes(fd: i32, data: [u8], flags: i32) -> i64:
+    """Send byte array on connected socket. Returns bytes sent or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | data(bytes)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_SEND)
+    _sock_push_i32(payload, net_fd)
+    var i: u64 = 0
+    while i < data.len():
+        payload.push(data[i])
+        i = i + 1
+
+    val reply = _net_ipc_request(payload)
+    if reply.status < 0:
+        return reply.status as i64
+    reply.value_i32 as i64
+
+fn posix_recv(fd: i32, buf_addr: u64, max_len: u64, flags: i32) -> i64:
+    """Receive data from socket into user buffer. Returns bytes received or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Payload: fd(i32) | max_len(u32)
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_RECV)
+    _sock_push_i32(payload, net_fd)
+    _sock_push_u32(payload, max_len as u32)
+
+    val reply = _net_ipc_request_bytes(payload)
+    if reply.status < 0:
+        return reply.status as i64
+
+    # Copy received bytes to user buffer
+    extern fn mmio_write8(addr: u64, val_: u8)
+    var i: u64 = 0
+    while i < reply.data.len() and i < max_len:
+        mmio_write8(buf_addr + i, reply.data[i])
+        i = i + 1
+
+    i as i64
+
+fn posix_recv_bytes(fd: i32, max_len: u64, flags: i32) -> Result<[u8], text>:
+    """Receive data from socket as byte array. Returns bytes or error text."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return Err("invalid socket fd")
+
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_RECV)
+    _sock_push_i32(payload, net_fd)
+    _sock_push_u32(payload, max_len as u32)
+
+    val reply = _net_ipc_request_bytes(payload)
+    if reply.status < 0:
+        return Err("recv failed with status {reply.status}")
+
+    Ok(reply.data)
+
+fn posix_close_socket(fd: i32) -> i64:
+    """Close a socket. Returns 0 or -errno."""
+    val net_fd = _get_net_fd(fd)
+    if net_fd < 0:
+        return net_fd as i64
+
+    # Send NET_CLOSE to netstack
+    _net_close_remote(net_fd)
+
+    # Close local FD
+    fd_close(fd)
+    0
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+struct _NetIpcReply:
+    """Parsed IPC reply from netstack."""
+    status: i32
+    value_i32: i32
+
+struct _NetIpcReplyBytes:
+    """Parsed IPC reply with byte payload from netstack."""
+    status: i32
+    data: [u8]
+
+fn _get_net_fd(fd: i32) -> i32:
+    """Get the netstack-side fd for a local socket fd. Returns -EBADF on error."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF
+    val idx = fd as u64
+    if fd_types[idx] != FD_TYPE_SOCKET:
+        return 0 - ENOTSOCK
+    fd_ports[idx] as i32
+
+fn _net_ipc_request(payload: [u8]) -> _NetIpcReply:
+    """Send IPC request to netstack and receive i32 reply."""
+    val payload_ptr = unsafe_addr_of(payload)
+    val payload_len = payload.len()
+
+    # Extract method from first 4 bytes for the IPC method field
+    val method = if payload.len() >= 4: _sock_read_u32(payload, 0) else: 0
+
+    val send_result = syscall(_SYS_IPC_SEND, _NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    if send_result < 0:
+        return _NetIpcReply(status: 0 - EIO, value_i32: 0)
+
+    # Receive reply: status(i32) | value(i32)
+    var reply_buf: [u8; 64] = [0; 64]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _NET_PORT, reply_ptr, 64, 0, 0)
+    if recv_result < 0:
+        return _NetIpcReply(status: 0 - EIO, value_i32: 0)
+
+    val status = _sock_read_i32(reply_buf, 0)
+    val value = _sock_read_i32(reply_buf, 4)
+    _NetIpcReply(status: status, value_i32: value)
+
+fn _net_ipc_request_bytes(payload: [u8]) -> _NetIpcReplyBytes:
+    """Send IPC request to netstack and receive byte array reply."""
+    val payload_ptr = unsafe_addr_of(payload)
+    val payload_len = payload.len()
+
+    val method = if payload.len() >= 4: _sock_read_u32(payload, 0) else: 0
+
+    val send_result = syscall(_SYS_IPC_SEND, _NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    if send_result < 0:
+        return _NetIpcReplyBytes(status: 0 - EIO, data: [])
+
+    # Receive reply: status(i32) | data(bytes)
+    var reply_buf: [u8; 4096] = [0; 4096]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _NET_PORT, reply_ptr, 4096, 0, 0)
+    if recv_result < 0:
+        return _NetIpcReplyBytes(status: 0 - EIO, data: [])
+
+    val status = _sock_read_i32(reply_buf, 0)
+    if status < 0:
+        return _NetIpcReplyBytes(status: status, data: [])
+
+    # Extract data bytes (after 4-byte status)
+    val data_len = if recv_result > 4: (recv_result - 4) as u64 else: 0
+    var data: [u8] = []
+    var i: u64 = 0
+    while i < data_len:
+        data.push(reply_buf[4 + i])
+        i = i + 1
+
+    _NetIpcReplyBytes(status: 0, data: data)
+
+fn _net_close_remote(net_fd: i32):
+    """Send NET_CLOSE to netstack for a netstack-side fd."""
+    var payload: [u8] = []
+    _sock_push_u32(payload, NET_CLOSE)
+    _sock_push_i32(payload, net_fd)
+    val payload_ptr = unsafe_addr_of(payload)
+    syscall(_SYS_IPC_SEND, _NET_PORT, NET_CLOSE as u64, 0, payload_ptr, payload.len())
+    # Best-effort close: ignore IPC errors
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _sock_push_u16(buf: [u8], val_: u16):
+    """Push a u16 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+
+fn _sock_push_u32(buf: [u8], val_: u32):
+    """Push a u32 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+    buf.push(((val_ >> 16) & 0xFF) as u8)
+    buf.push(((val_ >> 24) & 0xFF) as u8)
+
+fn _sock_push_i32(buf: [u8], val_: i32):
+    """Push an i32 in little-endian byte order."""
+    _sock_push_u32(buf, val_ as u32)
+
+fn _sock_read_i32(buf: [u8], offset: u64) -> i32:
+    """Read a little-endian i32 from a byte buffer."""
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _sock_read_u32(buf: [u8], offset: u64) -> u32:
+    """Read a little-endian u32 from a byte buffer."""
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)

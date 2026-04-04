@@ -1,0 +1,364 @@
+# SSH Channel Multiplexing — RFC 4254
+#
+# Manages SSH channels for session, exec, and forwarding requests.
+# Each channel has independent flow control via sliding window.
+#
+# Channel lifecycle:
+#   CHANNEL_OPEN -> OPEN_CONFIRMATION -> data transfer -> CHANNEL_CLOSE
+
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSH_MSG_CHANNEL_OPEN: u8 = 90
+val SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91
+val SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92
+val SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93
+val SSH_MSG_CHANNEL_DATA: u8 = 94
+val SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95
+val SSH_MSG_CHANNEL_EOF: u8 = 96
+val SSH_MSG_CHANNEL_CLOSE: u8 = 97
+val SSH_MSG_CHANNEL_REQUEST: u8 = 98
+val SSH_MSG_CHANNEL_SUCCESS: u8 = 99
+val SSH_MSG_CHANNEL_FAILURE: u8 = 100
+
+# Default window and packet sizes
+val DEFAULT_WINDOW_SIZE: u32 = 2097152    # 2 MiB
+val DEFAULT_MAX_PACKET: u32 = 32768       # 32 KiB
+
+# Channel open failure reason codes (RFC 4254 section 5.1)
+val SSH_OPEN_ADMINISTRATIVELY_PROHIBITED: u32 = 1
+val SSH_OPEN_CONNECT_FAILED: u32 = 2
+val SSH_OPEN_UNKNOWN_CHANNEL_TYPE: u32 = 3
+val SSH_OPEN_RESOURCE_SHORTAGE: u32 = 4
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum ChannelType:
+    Session
+    DirectTcpip
+    ForwardedTcpip
+
+enum ChannelState:
+    Opening
+    Open
+    Closing
+    Closed
+
+struct SshChannel:
+    """State for one SSH channel."""
+    local_id: u32
+    remote_id: u32
+    channel_type: ChannelType
+    state: ChannelState
+    local_window: u32       # Bytes we can still receive
+    remote_window: u32      # Bytes we can still send
+    local_max_packet: u32
+    remote_max_packet: u32
+    pty_requested: bool
+    shell_requested: bool
+    env_vars: [(text, text)]
+
+class ChannelTable:
+    """Manages all active SSH channels for one session."""
+    channels: [SshChannel]
+    next_id: u32
+
+impl ChannelTable:
+
+    static fn new() -> ChannelTable:
+        """Create an empty channel table."""
+        ChannelTable(channels: [], next_id: 0)
+
+    me open(channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> u32:
+        """Allocate a new channel. Returns the local channel ID."""
+        val local_id = self.next_id
+        self.next_id = self.next_id + 1
+
+        self.channels.push(SshChannel(
+            local_id: local_id,
+            remote_id: remote_id,
+            channel_type: channel_type,
+            state: ChannelState.Open,
+            local_window: DEFAULT_WINDOW_SIZE,
+            remote_window: remote_window,
+            local_max_packet: DEFAULT_MAX_PACKET,
+            remote_max_packet: remote_max_packet,
+            pty_requested: false,
+            shell_requested: false,
+            env_vars: []
+        ))
+
+        local_id
+
+    me close(local_id: u32):
+        """Mark a channel as closed."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                self.channels[i].state = ChannelState.Closed
+                return
+            i = i + 1
+
+    fn find(local_id: u32) -> SshChannel?:
+        """Find a channel by local ID. Returns nil if not found."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                return self.channels[i]
+            i = i + 1
+        nil
+
+    fn find_mut(local_id: u32) -> SshChannel?:
+        """Find a channel by local ID (mutable access)."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                return self.channels[i]
+            i = i + 1
+        nil
+
+    me adjust_window(local_id: u32, bytes: u32):
+        """Increase local receive window by bytes."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                self.channels[i].local_window = self.channels[i].local_window + bytes
+                return
+            i = i + 1
+
+    me consume_remote_window(local_id: u32, bytes: u32) -> bool:
+        """Consume bytes from the remote send window. Returns false if insufficient."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                if self.channels[i].remote_window < bytes:
+                    return false
+                self.channels[i].remote_window = self.channels[i].remote_window - bytes
+                return true
+            i = i + 1
+        false
+
+    me consume_local_window(local_id: u32, bytes: u32) -> bool:
+        """Consume bytes from the local receive window. Returns false if insufficient."""
+        var i: u64 = 0
+        while i < self.channels.len():
+            if self.channels[i].local_id == local_id:
+                if self.channels[i].local_window < bytes:
+                    return false
+                self.channels[i].local_window = self.channels[i].local_window - bytes
+                return true
+            i = i + 1
+        false
+
+    me remove_closed():
+        """Remove all channels in Closed state."""
+        var new_channels: [SshChannel] = []
+        var i: u64 = 0
+        while i < self.channels.len():
+            match self.channels[i].state:
+                ChannelState.Closed:
+                    pass_dn
+                _:
+                    new_channels.push(self.channels[i])
+            i = i + 1
+        self.channels = new_channels
+
+# ============================================================================
+# Message Parsing
+# ============================================================================
+
+fn ssh_parse_channel_open(data: [u8]) -> Result<(text, u32, u32, u32), text>:
+    """Parse SSH_MSG_CHANNEL_OPEN.
+
+    Format:
+      byte      SSH_MSG_CHANNEL_OPEN (90)
+      string    channel type ("session", "direct-tcpip", etc.)
+      uint32    sender channel
+      uint32    initial window size
+      uint32    maximum packet size
+      ... channel-type-specific data ...
+
+    Returns: (channel_type, sender_channel, window, max_packet)
+    """
+    if data.len() < 2:
+        return Err("CHANNEL_OPEN too short")
+    if data[0] != SSH_MSG_CHANNEL_OPEN:
+        return Err("not a CHANNEL_OPEN")
+
+    var off: u64 = 1
+
+    val r_type = ssh_get_text(data, off)
+    if val type_pair = r_type.ok():
+        off = type_pair.1
+    else:
+        return Err("CHANNEL_OPEN: bad channel type")
+    val ch_type = r_type.ok_val().0
+
+    if off + 12 > data.len():
+        return Err("CHANNEL_OPEN: truncated")
+
+    val sender = ssh_get_u32(data, off)
+    off = off + 4
+    val window = ssh_get_u32(data, off)
+    off = off + 4
+    val max_packet = ssh_get_u32(data, off)
+
+    Ok((ch_type, sender, window, max_packet))
+
+fn ssh_parse_channel_data(data: [u8]) -> Result<(u32, [u8]), text>:
+    """Parse SSH_MSG_CHANNEL_DATA.
+
+    Format:
+      byte      SSH_MSG_CHANNEL_DATA (94)
+      uint32    recipient channel
+      string    data
+
+    Returns: (recipient_channel, data_bytes)
+    """
+    if data.len() < 6:
+        return Err("CHANNEL_DATA too short")
+    if data[0] != SSH_MSG_CHANNEL_DATA:
+        return Err("not a CHANNEL_DATA")
+
+    val recipient = ssh_get_u32(data, 1)
+    val r_data = ssh_get_string(data, 5)
+    if val data_pair = r_data.ok():
+        Ok((recipient, data_pair.0))
+    else:
+        Err("CHANNEL_DATA: bad data field")
+
+fn ssh_parse_channel_request(data: [u8]) -> Result<(u32, text, bool, u64), text>:
+    """Parse SSH_MSG_CHANNEL_REQUEST.
+
+    Format:
+      byte      SSH_MSG_CHANNEL_REQUEST (98)
+      uint32    recipient channel
+      string    request type ("pty-req", "shell", "exec", "env", etc.)
+      boolean   want reply
+
+    Returns: (recipient_channel, request_type, want_reply, offset_after_header)
+    """
+    if data.len() < 6:
+        return Err("CHANNEL_REQUEST too short")
+    if data[0] != SSH_MSG_CHANNEL_REQUEST:
+        return Err("not a CHANNEL_REQUEST")
+
+    val recipient = ssh_get_u32(data, 1)
+    var off: u64 = 5
+
+    val r_type = ssh_get_text(data, off)
+    if val type_pair = r_type.ok():
+        off = type_pair.1
+    else:
+        return Err("CHANNEL_REQUEST: bad type")
+    val req_type = r_type.ok_val().0
+
+    if off >= data.len():
+        return Err("CHANNEL_REQUEST: missing want_reply")
+    val want_reply = data[off] != 0
+    off = off + 1
+
+    Ok((recipient, req_type, want_reply, off))
+
+fn ssh_parse_window_adjust(data: [u8]) -> Result<(u32, u32), text>:
+    """Parse SSH_MSG_CHANNEL_WINDOW_ADJUST.
+
+    Returns: (recipient_channel, bytes_to_add)
+    """
+    if data.len() < 9:
+        return Err("WINDOW_ADJUST too short")
+    if data[0] != SSH_MSG_CHANNEL_WINDOW_ADJUST:
+        return Err("not a WINDOW_ADJUST")
+
+    val recipient = ssh_get_u32(data, 1)
+    val bytes_to_add = ssh_get_u32(data, 5)
+    Ok((recipient, bytes_to_add))
+
+fn ssh_parse_channel_eof(data: [u8]) -> Result<u32, text>:
+    """Parse SSH_MSG_CHANNEL_EOF. Returns recipient channel."""
+    if data.len() < 5:
+        return Err("CHANNEL_EOF too short")
+    if data[0] != SSH_MSG_CHANNEL_EOF:
+        return Err("not a CHANNEL_EOF")
+    Ok(ssh_get_u32(data, 1))
+
+fn ssh_parse_channel_close(data: [u8]) -> Result<u32, text>:
+    """Parse SSH_MSG_CHANNEL_CLOSE. Returns recipient channel."""
+    if data.len() < 5:
+        return Err("CHANNEL_CLOSE too short")
+    if data[0] != SSH_MSG_CHANNEL_CLOSE:
+        return Err("not a CHANNEL_CLOSE")
+    Ok(ssh_get_u32(data, 1))
+
+# ============================================================================
+# Message Builders
+# ============================================================================
+
+fn ssh_build_channel_open_confirmation(recipient: u32, sender: u32, window: u32, max_packet: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_OPEN_CONFIRMATION."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_OPEN_CONFIRMATION)
+    ssh_put_u32(buf, recipient)    # recipient channel (client's)
+    ssh_put_u32(buf, sender)       # sender channel (our local ID)
+    ssh_put_u32(buf, window)       # initial window size
+    ssh_put_u32(buf, max_packet)   # maximum packet size
+    buf
+
+fn ssh_build_channel_open_failure(recipient: u32, reason: u32, description: text) -> [u8]:
+    """Build SSH_MSG_CHANNEL_OPEN_FAILURE."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_OPEN_FAILURE)
+    ssh_put_u32(buf, recipient)
+    ssh_put_u32(buf, reason)
+    ssh_put_text(buf, description)
+    ssh_put_text(buf, "")     # language tag
+    buf
+
+fn ssh_build_channel_data(recipient: u32, payload: [u8]) -> [u8]:
+    """Build SSH_MSG_CHANNEL_DATA."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_DATA)
+    ssh_put_u32(buf, recipient)
+    ssh_put_string(buf, payload)
+    buf
+
+fn ssh_build_channel_window_adjust(recipient: u32, bytes: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_WINDOW_ADJUST."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_WINDOW_ADJUST)
+    ssh_put_u32(buf, recipient)
+    ssh_put_u32(buf, bytes)
+    buf
+
+fn ssh_build_channel_eof(recipient: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_EOF."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_EOF)
+    ssh_put_u32(buf, recipient)
+    buf
+
+fn ssh_build_channel_close(recipient: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_CLOSE."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_CLOSE)
+    ssh_put_u32(buf, recipient)
+    buf
+
+fn ssh_build_channel_success(recipient: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_SUCCESS."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_SUCCESS)
+    ssh_put_u32(buf, recipient)
+    buf
+
+fn ssh_build_channel_failure(recipient: u32) -> [u8]:
+    """Build SSH_MSG_CHANNEL_FAILURE."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_CHANNEL_FAILURE)
+    ssh_put_u32(buf, recipient)
+    buf

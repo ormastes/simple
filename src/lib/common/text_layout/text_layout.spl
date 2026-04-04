@@ -1,0 +1,182 @@
+# Text Layout — text measurement and word-wrap layout using bitmap font metrics.
+#
+# Provides measurement and line-breaking for the VGA 8x16 bitmap font
+# (and a compact 5x7 variant for small sizes).  These are pure functions
+# with no side effects — they return metric structs that callers feed to
+# a renderer (render_scene executor, framebuffer driver, etc.).
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct TextMetrics:
+    """Width and height of measured text in pixels."""
+    width: i32
+    height: i32
+    char_count: i32
+
+struct GlyphRun:
+    """A positioned run of text at a fixed font size and color."""
+    text_val: text
+    x: i32
+    y: i32
+    font_size: i32
+    color: u32
+    width: i32
+    height: i32
+
+struct TextLayoutResult:
+    """Result of word-wrap layout: a list of positioned glyph runs."""
+    runs: [GlyphRun]
+    total_width: i32
+    total_height: i32
+    line_count: i32
+
+struct TextStyle:
+    """Font styling parameters."""
+    font_size: i32
+    color: u32
+    bold: bool
+    italic: bool
+
+# ============================================================================
+# Font metrics helpers
+# ============================================================================
+
+fn text_char_width(font_size: i32) -> i32:
+    """Return character width in pixels for the given font size.
+
+    font_size <= 8 uses the compact 5x7 font; larger uses VGA 8x16.
+    """
+    if font_size <= 8:
+        return 5
+    return 8
+
+fn text_line_height(font_size: i32) -> i32:
+    """Return line height in pixels (glyph height + leading).
+
+    font_size <= 8: 8px (7px glyph + 1px leading).
+    font_size >  8: 18px (16px glyph + 2px leading).
+    """
+    if font_size <= 8:
+        return 8
+    return 18
+
+fn text_glyph_height(font_size: i32) -> i32:
+    """Return raw glyph height without leading."""
+    if font_size <= 8:
+        return 7
+    return 16
+
+# ============================================================================
+# Measurement
+# ============================================================================
+
+fn measure_text(content: text, font_size: i32) -> TextMetrics:
+    """Measure the pixel dimensions of a single-line text string.
+
+    Uses the monospace bitmap font metrics — every character occupies the
+    same width cell.
+    """
+    val cw = text_char_width(font_size)
+    val ch = text_glyph_height(font_size)
+    val count = content.len()
+    TextMetrics(width: count * cw, height: ch, char_count: count)
+
+fn measure_char(ch: text, font_size: i32) -> TextMetrics:
+    """Measure a single character."""
+    val cw = text_char_width(font_size)
+    val ch_h = text_glyph_height(font_size)
+    TextMetrics(width: cw, height: ch_h, char_count: 1)
+
+# ============================================================================
+# Word-wrap layout
+# ============================================================================
+
+fn layout_text(content: text, max_width: i32, font_size: i32, color: u32) -> TextLayoutResult:
+    """Lay out text with word-wrap into positioned GlyphRuns.
+
+    Words are split on space characters.  Each line is a single GlyphRun
+    positioned at (0, line_index * line_height).  If a single word is
+    wider than max_width it is placed on its own line (no mid-word break).
+    """
+    val cw = text_char_width(font_size)
+    val lh = text_line_height(font_size)
+    val gh = text_glyph_height(font_size)
+
+    # Split content into words on spaces
+    var words: [text] = []
+    var current_word: text = ""
+    for ch in content:
+        if ch == " ":
+            if current_word.len() > 0:
+                words.push(current_word)
+                current_word = ""
+        else:
+            current_word = current_word + ch
+    if current_word.len() > 0:
+        words.push(current_word)
+
+    # Build lines by accumulating words
+    var runs: [GlyphRun] = []
+    var line_text: text = ""
+    var line_width: i32 = 0
+    var line_y: i32 = 0
+    var max_line_width: i32 = 0
+
+    var i: i32 = 0
+    while i < words.len():
+        val word = words[i]
+        val word_width = word.len() * cw
+        val space_needed = if line_text.len() > 0: cw else: 0
+        val needed = line_width + space_needed + word_width
+
+        if line_text.len() > 0 and needed > max_width:
+            # Emit current line and start a new one
+            val run = GlyphRun(text_val: line_text, x: 0, y: line_y,
+                               font_size: font_size, color: color,
+                               width: line_width, height: gh)
+            runs.push(run)
+            if line_width > max_line_width:
+                max_line_width = line_width
+            line_y = line_y + lh
+            line_text = word
+            line_width = word_width
+        else:
+            if line_text.len() > 0:
+                line_text = line_text + " " + word
+                line_width = line_width + cw + word_width
+            else:
+                line_text = word
+                line_width = word_width
+        i = i + 1
+
+    # Emit final line
+    if line_text.len() > 0:
+        val run = GlyphRun(text_val: line_text, x: 0, y: line_y,
+                           font_size: font_size, color: color,
+                           width: line_width, height: gh)
+        runs.push(run)
+        if line_width > max_line_width:
+            max_line_width = line_width
+
+    val total_h = if runs.len() > 0: line_y + gh else: 0
+
+    TextLayoutResult(runs: runs, total_width: max_line_width,
+                     total_height: total_h, line_count: runs.len())
+
+fn layout_text_styled(content: text, max_width: i32, style: TextStyle) -> TextLayoutResult:
+    """Word-wrap layout using a TextStyle (delegates to layout_text)."""
+    layout_text(content, max_width, style.font_size, style.color)
+
+# ============================================================================
+# Style helpers
+# ============================================================================
+
+fn text_style(font_size: i32, color: u32) -> TextStyle:
+    """Create a plain TextStyle (no bold/italic)."""
+    TextStyle(font_size: font_size, color: color, bold: false, italic: false)
+
+fn text_style_bold(font_size: i32, color: u32) -> TextStyle:
+    """Create a bold TextStyle."""
+    TextStyle(font_size: font_size, color: color, bold: true, italic: false)

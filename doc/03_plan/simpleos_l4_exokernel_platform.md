@@ -314,6 +314,31 @@ Purpose: make every user-space driver share the same runtime and protocol model.
 - storage/network/GPU drivers can share the same runtime crate/module pattern
 - no driver uses ad hoc polling loops when notifications are available
 
+## Phase 3.5: Async Exokernel Services — COMPLETE (2026-04-04)
+
+Purpose: notification-driven async I/O throughout the OS stack. Dual interface: POSIX sync + Simple-native async.
+
+### Deliverables (all complete)
+
+- **OS Async Runtime** (`src/os/async/`, 8 files): OsFuture, OsExecutor (notification-based sleep), SpscRing, WaitAny
+- **Kernel WaitAny syscall 29**: multiplex wait on up to 4 notifications
+- **Async NVMe Driver**: `BlockDevice`/`AsyncBlockDevice` traits, notification-based completion
+- **Async VirtIO-Net Driver**: `NetworkDevice`/`AsyncNetworkDevice` traits, async frame I/O
+- **Async Filesystem + FAT32 Write**: `AsyncFilesystem` trait, VFS IPC service (port 1), LRU block cache, FAT32 write (create/delete/rename)
+- **TCP/IP Stack** (`src/os/services/netstack/`, 10 files, 3739 lines): Ethernet/ARP/IPv4/ICMP/UDP/TCP (full RFC 793), socket API, NetstackService (port 2, libOS pattern)
+- **POSIX Layer Completion**: fd_io wired to VFS IPC, pipes (ring buffer + notifications), posix_spawn/waitpid, posix_kill, POSIX sockets over netstack IPC, select/poll via WaitAny
+- **Async Shell** (`src/os/apps/shell/`, 1034 lines): job control (fg/bg/jobs), pipes, redirection, background execution, bidirectional file access
+- **SSH Server** (`src/os/apps/sshd/`, 10 files, 2911 lines): SSH-2 transport, Curve25519-SHA256 kex, AES-256-GCM, password/pubkey auth, channels, PTY emulation
+- **Pure Simple Crypto** (`src/os/crypto/`, 5 files, 1984 lines): SHA-256, AES-256-GCM, Curve25519, ChaCha20 CSPRNG
+
+### Acceptance
+
+- Applications use either POSIX sync or async Future API for all I/O
+- No polling loops in driver hot paths — all use notification-based wakeup
+- TCP/IP stack runs entirely in user-space (exokernel pattern)
+- SSH daemon accepts connections on port 22, provides interactive shell
+- Shell supports `cmd1 | cmd2 > file &` with job control
+
 ## Phase 4: LLVM/Clang Porting Program
 
 Purpose: upgrade the current "README-level" LLVM work into a tracked porting program with staging, ABI validation, and output consumption by SimpleOS.
@@ -380,16 +405,18 @@ Purpose: make Rust a real secondary systems language for SimpleOS services and l
 
 Purpose: validate the user-driver model before the GPU stack depends on it.
 
+**Note:** Phase 3.5 delivered async NVMe and VirtIO-net user drivers with `BlockDevice`/`AsyncBlockDevice` and `NetworkDevice`/`AsyncNetworkDevice` traits. Remaining work: restart behavior validation and service registry integration.
+
 ### Deliverables
 
-- NVMe or virtio-blk user driver capsule
-- virtio-net user driver capsule
+- ~~NVMe or virtio-blk user driver capsule~~ — **DONE** (Phase 3.5)
+- ~~virtio-net user driver capsule~~ — **DONE** (Phase 3.5)
 - service registry integration
 - fault and restart behavior validation
 
 ### Acceptance
 
-- block and network I/O work without kernel-resident drivers
+- block and network I/O work without kernel-resident drivers — **DONE** (Phase 3.5)
 - restart path is proven on at least one driver
 
 ### Workstream mapping
@@ -589,21 +616,23 @@ Purpose: verify that the browser rendering library is not dead code.
 
 Purpose: finish the runtime gaps that desktop apps and ported toolchains need.
 
+**Note:** Phase 3.5 delivered most of the core infrastructure listed below. Remaining work: app asset/manifest loading, launcher integration, file-manager UX, and script execution model.
+
 ### Deliverables
 
-- connect VFS to POSIX layer
+- ~~connect VFS to POSIX layer~~ — **DONE** (Phase 3.5: posix_open/read/write/close wired to VFS IPC)
 - complete enough process and file semantics for:
   - launcher
   - app loading
   - dynamic resource loading
   - toolchain-produced binary execution
 - keep "no `fork` by design" unless there is a strong later reason to change it
-- document async-native alternatives to `select`/`poll`
-- add shell-userland closure for:
-  - terminal session lifecycle
-  - shell command execution
+- ~~document async-native alternatives to `select`/`poll`~~ — **DONE** (Phase 3.5: select_compat.spl via WaitAny, OsExecutor)
+- ~~add shell-userland closure for:~~
+  - ~~terminal session lifecycle~~ — **DONE**
+  - ~~shell command execution~~ — **DONE** (async shell with job control)
   - script execution model
-  - remote shell / SSH entry points
+  - ~~remote shell / SSH entry points~~ — **DONE** (SSH server with PTY)
   - file-manager and shell coexistence over the same VFS/process APIs
 
 ### File / Bash / SSH split

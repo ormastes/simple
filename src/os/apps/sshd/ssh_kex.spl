@@ -1,0 +1,254 @@
+# SSH Key Exchange — Curve25519-SHA256 (RFC 8731)
+#
+# Implements the curve25519-sha256 key exchange method.
+# Uses the pure Simple Curve25519 and SHA-256 implementations.
+#
+# Exchange hash H is computed over:
+#   string  V_C   (client version string, without CR LF)
+#   string  V_S   (server version string, without CR LF)
+#   string  I_C   (client KEXINIT payload)
+#   string  I_S   (server KEXINIT payload)
+#   string  K_S   (server host key blob)
+#   string  Q_C   (client ephemeral public key, 32 bytes)
+#   string  Q_S   (server ephemeral public key, 32 bytes)
+#   mpint   K     (shared secret)
+#
+# Session keys are derived per RFC 4253 section 7.2.
+
+use os.crypto.curve25519.{x25519, x25519_base}
+use os.crypto.sha256.{sha256}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_mpint}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSH_MSG_KEX_ECDH_INIT: u8 = 30
+val SSH_MSG_KEX_ECDH_REPLY: u8 = 31
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct SshKexState:
+    """State for Curve25519 key exchange."""
+    server_private: [u8]    # 32-byte ephemeral private key
+    server_public: [u8]     # 32-byte ephemeral public key
+    client_public: [u8]     # Client's ephemeral public key
+    shared_secret: [u8]     # 32-byte DH shared secret
+    exchange_hash: [u8]     # H = SHA-256(...)
+    session_id: [u8]        # First exchange hash (stays fixed)
+
+struct SshSessionKeys:
+    """Derived session keys for encryption and MAC."""
+    iv_c2s: [u8]            # Initial IV, client-to-server (12 bytes for GCM)
+    iv_s2c: [u8]            # Initial IV, server-to-client
+    enc_key_c2s: [u8]       # Encryption key, client-to-server (32 bytes)
+    enc_key_s2c: [u8]       # Encryption key, server-to-client
+    mac_key_c2s: [u8]       # Integrity key, client-to-server (32 bytes)
+    mac_key_s2c: [u8]       # Integrity key, server-to-client
+
+# ============================================================================
+# Key Generation
+# ============================================================================
+
+fn ssh_kex_generate_keypair() -> ([u8], [u8]):
+    """Generate ephemeral Curve25519 keypair.
+
+    Returns: (private_key, public_key) each 32 bytes.
+    """
+    val private = random_bytes(32)
+    val public = x25519_base(private)
+    (private, public)
+
+fn ssh_kex_compute_shared(our_private: [u8], their_public: [u8]) -> [u8]:
+    """Compute DH shared secret via X25519.
+
+    Returns: 32-byte shared secret.
+    """
+    x25519(our_private, their_public)
+
+# ============================================================================
+# Exchange Hash
+# ============================================================================
+
+fn ssh_kex_compute_exchange_hash(
+    client_version: text,
+    server_version: text,
+    client_kexinit: [u8],
+    server_kexinit: [u8],
+    host_key_blob: [u8],
+    client_public: [u8],
+    server_public: [u8],
+    shared_secret: [u8]
+) -> [u8]:
+    """Compute exchange hash H = SHA-256(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K).
+
+    Each field is encoded as an SSH string (uint32 length + data),
+    except the shared secret K which is encoded as an SSH mpint.
+    """
+    var hash_input: [u8] = []
+
+    # V_C: client version string (without CR LF)
+    ssh_put_text(hash_input, client_version)
+
+    # V_S: server version string (without CR LF)
+    ssh_put_text(hash_input, server_version)
+
+    # I_C: client KEXINIT payload (the full packet payload including msg type)
+    ssh_put_string(hash_input, client_kexinit)
+
+    # I_S: server KEXINIT payload
+    ssh_put_string(hash_input, server_kexinit)
+
+    # K_S: server host key blob
+    ssh_put_string(hash_input, host_key_blob)
+
+    # Q_C: client ephemeral public key (as string, 32 bytes)
+    ssh_put_string(hash_input, client_public)
+
+    # Q_S: server ephemeral public key (as string, 32 bytes)
+    ssh_put_string(hash_input, server_public)
+
+    # K: shared secret (as mpint — big-endian with sign handling)
+    ssh_put_mpint(hash_input, shared_secret)
+
+    sha256(hash_input)
+
+# ============================================================================
+# Key Derivation (RFC 4253 Section 7.2)
+# ============================================================================
+
+fn _derive_key(shared_secret: [u8], exchange_hash: [u8], letter: u8, session_id: [u8], needed: u64) -> [u8]:
+    """Derive a session key per RFC 4253 section 7.2.
+
+    K1 = SHA-256(K || H || letter || session_id)
+    K2 = SHA-256(K || H || K1)
+    K3 = SHA-256(K || H || K1 || K2)
+    ...
+    Key = K1 || K2 || ... (truncated to needed bytes)
+
+    K is encoded as mpint, H and session_id as raw bytes.
+    """
+    # Build the initial hash input: mpint(K) || H || letter || session_id
+    var input: [u8] = []
+    ssh_put_mpint(input, shared_secret)
+
+    var i: u64 = 0
+    while i < exchange_hash.len():
+        input.push(exchange_hash[i])
+        i = i + 1
+
+    input.push(letter)
+
+    i = 0
+    while i < session_id.len():
+        input.push(session_id[i])
+        i = i + 1
+
+    val k1 = sha256(input)
+
+    var key_material: [u8] = []
+    i = 0
+    while i < k1.len():
+        key_material.push(k1[i])
+        i = i + 1
+
+    # If we need more than 32 bytes, extend
+    var prev = k1
+    while key_material.len() < needed:
+        # next = SHA-256(K || H || K1 || K2 || ...)
+        var ext_input: [u8] = []
+        ssh_put_mpint(ext_input, shared_secret)
+
+        i = 0
+        while i < exchange_hash.len():
+            ext_input.push(exchange_hash[i])
+            i = i + 1
+
+        i = 0
+        while i < key_material.len():
+            ext_input.push(key_material[i])
+            i = i + 1
+
+        val next = sha256(ext_input)
+        i = 0
+        while i < next.len():
+            key_material.push(next[i])
+            i = i + 1
+        prev = next
+
+    # Truncate to needed length
+    var result: [u8] = []
+    i = 0
+    while i < needed:
+        result.push(key_material[i])
+        i = i + 1
+    result
+
+fn ssh_derive_keys(shared_secret: [u8], exchange_hash: [u8], session_id: [u8]) -> SshSessionKeys:
+    """Derive all session keys from shared secret per RFC 4253 section 7.2.
+
+    Letters A-F correspond to:
+      A = IV client->server         (12 bytes for GCM nonce)
+      B = IV server->client         (12 bytes for GCM nonce)
+      C = encryption key c->s       (32 bytes for AES-256)
+      D = encryption key s->c       (32 bytes for AES-256)
+      E = integrity key c->s        (32 bytes)
+      F = integrity key s->c        (32 bytes)
+    """
+    val iv_c2s = _derive_key(shared_secret, exchange_hash, 0x41, session_id, 12)   # 'A'
+    val iv_s2c = _derive_key(shared_secret, exchange_hash, 0x42, session_id, 12)   # 'B'
+    val enc_key_c2s = _derive_key(shared_secret, exchange_hash, 0x43, session_id, 32) # 'C'
+    val enc_key_s2c = _derive_key(shared_secret, exchange_hash, 0x44, session_id, 32) # 'D'
+    val mac_key_c2s = _derive_key(shared_secret, exchange_hash, 0x45, session_id, 32) # 'E'
+    val mac_key_s2c = _derive_key(shared_secret, exchange_hash, 0x46, session_id, 32) # 'F'
+
+    SshSessionKeys(
+        iv_c2s: iv_c2s,
+        iv_s2c: iv_s2c,
+        enc_key_c2s: enc_key_c2s,
+        enc_key_s2c: enc_key_s2c,
+        mac_key_c2s: mac_key_c2s,
+        mac_key_s2c: mac_key_s2c
+    )
+
+# ============================================================================
+# KEX Message Builders
+# ============================================================================
+
+fn ssh_build_kex_ecdh_reply(host_key_blob: [u8], server_public: [u8], signature: [u8]) -> [u8]:
+    """Build SSH_MSG_KEX_ECDH_REPLY payload.
+
+    Fields:
+      byte      SSH_MSG_KEX_ECDH_REPLY (31)
+      string    K_S (server host key blob)
+      string    Q_S (server ephemeral public key)
+      string    signature of H
+    """
+    var buf: [u8] = []
+    buf.push(SSH_MSG_KEX_ECDH_REPLY)
+    ssh_put_string(buf, host_key_blob)
+    ssh_put_string(buf, server_public)
+    ssh_put_string(buf, signature)
+    buf
+
+fn ssh_parse_kex_ecdh_init(data: [u8]) -> Result<[u8], text>:
+    """Parse SSH_MSG_KEX_ECDH_INIT. Returns client's ephemeral public key Q_C."""
+    if data.len() < 2:
+        return Err("KEX_ECDH_INIT too short")
+    if data[0] != SSH_MSG_KEX_ECDH_INIT:
+        return Err("not a KEX_ECDH_INIT message")
+
+    val r = ssh_get_string(data, 1)
+    if val pair = r.ok():
+        Ok(pair.0)
+    else:
+        Err("KEX_ECDH_INIT: bad client public key")
+
+fn ssh_build_newkeys() -> [u8]:
+    """Build SSH_MSG_NEWKEYS payload (just the message type byte)."""
+    var buf: [u8] = []
+    buf.push(21)   # SSH_MSG_NEWKEYS
+    buf

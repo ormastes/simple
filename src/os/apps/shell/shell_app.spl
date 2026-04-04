@@ -1,8 +1,8 @@
 # Shell Application — Interactive Command Shell
 #
 # Interactive shell with built-in commands, environment variables,
-# command history, and pipe-like command parsing. Uses Terminal
-# for I/O display and builds its own UISession.
+# command history, pipe-like command parsing, job control, pipeline
+# execution, file redirection, and async command support.
 #
 # MDSOC: feature dimension, shell layer
 
@@ -12,12 +12,19 @@ use common.ui.session.{UISession}
 use os.apps.terminal.terminal.{Terminal}
 use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
 use os.services.vfs.vfs.{VfsManager}
+use os.services.vfs.vfs_async.{AsyncFilesystem}
 use os.tools.tool_registry.{ToolRegistry, ToolEntry}
 use os.userlib.process.{ProcessEntry, list_tasks, signal, kill}
 use os.userlib.fs.{mount, unmount, mount_list}
 use os.userlib.system.{sysinfo, uptime, hostname}
 use os.userlib.log.{read_recent}
 use os.kernel.types.syscall_types.{SignalKind}
+use os.apps.shell.shell_job.{JobTable, JobState, Job}
+use os.apps.shell.shell_pipe.{parse_pipeline, has_pipeline, execute_pipeline}
+use os.apps.shell.shell_redirect.{parse_redirects, apply_redirects, restore_redirects, ParsedCommand, SavedFd}
+use os.apps.shell.shell_async.{spawn_command_async, spawn_command_bg, read_file_posix, read_file_async}
+use os.async.os_executor.{OsExecutor}
+use os.posix.process_compat.{posix_waitpid}
 
 # =========================================================================
 # Shell Application
@@ -27,7 +34,9 @@ class ShellApp:
     """Interactive shell with command execution and history.
 
     Connects to a Terminal for display and a VfsManager for
-    filesystem operations. Provides POSIX-like built-in commands.
+    filesystem operations. Provides POSIX-like built-in commands,
+    job control, pipeline execution, file redirection, and async
+    command support with bidirectional file access.
     """
     terminal: Terminal
     cwd: text
@@ -40,13 +49,16 @@ class ShellApp:
     output_lines: [text]
     vfs: VfsManager?
     tool_registry: ToolRegistry?
+    jobs: JobTable
+    executor: OsExecutor
+    async_fs: AsyncFilesystem?
 
 impl ShellApp:
 
     static fn new() -> ShellApp:
         """Create a new shell with default 80x24 terminal."""
         var term = Terminal.new(80, 24)
-        term.write_string("SimpleOS Shell v0.1\n")
+        term.write_string("SimpleOS Shell v0.2\n")
         term.write_string("Type 'help' for available commands.\n\n")
         return ShellApp(
             terminal: term,
@@ -59,7 +71,10 @@ impl ShellApp:
             last_exit_code: 0,
             output_lines: [],
             vfs: nil,
-            tool_registry: nil
+            tool_registry: nil,
+            jobs: JobTable.new(),
+            executor: OsExecutor.new(),
+            async_fs: nil
         )
 
     static fn with_vfs(vfs: VfsManager) -> ShellApp:
@@ -68,10 +83,21 @@ impl ShellApp:
         shell.vfs = vfs
         return shell
 
+    static fn with_vfs_and_async(vfs: VfsManager, async_fs: AsyncFilesystem) -> ShellApp:
+        """Create a shell connected to both VFS and async filesystem."""
+        var shell = ShellApp.new()
+        shell.vfs = vfs
+        shell.async_fs = async_fs
+        return shell
+
     # -- Main Loop -----------------------------------------------------------
 
     me run():
-        """Main REPL loop. Reads from terminal input, executes, repeats."""
+        """Main REPL loop. Reads from terminal input, executes, repeats.
+
+        After each command, polls the job table to report completed
+        background jobs to the user.
+        """
         self._show_prompt()
         while self.running:
             val input = self.terminal.read_input()
@@ -82,6 +108,8 @@ impl ShellApp:
                     self.history_pos = self.history.len()
                     self.terminal.write_string("\n")
                     self.execute(cmd_line)
+                    # Report completed background jobs
+                    self._report_done_jobs()
                 else:
                     self.terminal.write_string("\n")
                 self._show_prompt()
@@ -94,18 +122,63 @@ impl ShellApp:
     # -- Command Execution ---------------------------------------------------
 
     me execute(cmd: text):
-        """Parse and execute a command string."""
+        """Parse and execute a command string.
+
+        Handles pipelines (cmd1 | cmd2), file redirections (>, >>, <, 2>),
+        and background execution (trailing &). Built-in commands are
+        dispatched directly; external commands go through the tool
+        registry or spawn as child processes.
+        """
+        # Check for pipeline first (before redirect parsing)
+        if has_pipeline(cmd):
+            val stages = parse_pipeline(cmd)
+            if stages.len() > 1:
+                val exit_code = execute_pipeline(stages)
+                self.last_exit_code = exit_code as i32
+                return
+
+        # Parse tokens, extract redirections and background flag
         val argv = self.parse_command(cmd)
         if argv.len() == 0:
             return
 
-        val command = argv[0]
-        var args: [text] = []
-        var i = 1
-        while i < argv.len():
-            args = args.push(argv[i])
-            i = i + 1
+        val parsed = parse_redirects(argv)
+        val command = parsed.command
+        val args = parsed.args
+        val background = parsed.background
 
+        if command == "":
+            return
+
+        # Apply file redirections
+        var saved_fds: [SavedFd] = []
+        if parsed.redirects.len() > 0:
+            val redir_result = apply_redirects(parsed.redirects)
+            match redir_result:
+                Ok(fds):
+                    saved_fds = fds
+                Err(msg):
+                    self._write_error("sosh: {msg}")
+                    self.last_exit_code = 1
+                    return
+
+        # Background execution for external commands
+        if background:
+            self._execute_background(command, args)
+            # Restore redirections
+            if saved_fds.len() > 0:
+                restore_redirects(saved_fds)
+            return
+
+        # Dispatch built-in commands
+        self._dispatch_builtin(command, args)
+
+        # Restore file redirections
+        if saved_fds.len() > 0:
+            restore_redirects(saved_fds)
+
+    me _dispatch_builtin(command: text, args: [text]):
+        """Dispatch a command to the appropriate built-in handler."""
         match command:
             "cd":       self.cmd_cd(args)
             "ls":       self.cmd_ls(args)
@@ -130,6 +203,10 @@ impl ShellApp:
             "hostname": self.cmd_hostname(args)
             "uptime":   self.cmd_uptime()
             "dmesg":    self.cmd_dmesg(args)
+            "jobs":     self.cmd_jobs()
+            "fg":       self.cmd_fg(args)
+            "bg":       self.cmd_bg(args)
+            "readf":    self.cmd_readf(args)
             _:
                 # Try tool registry for external commands
                 if self.tool_registry != nil:
@@ -137,6 +214,44 @@ impl ShellApp:
                     if tool != nil:
                         self.last_exit_code = tool.run_fn(args)
                         return
+                # Try spawning as external command
+                self._try_external(command, args)
+
+    me _execute_background(command: text, args: [text]):
+        """Execute a command in the background. Adds to job table."""
+        # Check built-ins first — they cannot be backgrounded
+        val builtins = ["cd", "ls", "pwd", "echo", "cat", "mkdir", "rm", "cp",
+            "mv", "grep", "find", "ps", "kill", "mount", "clear", "help",
+            "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
+            "jobs", "fg", "bg", "readf"]
+        var i = 0
+        while i < builtins.len():
+            if command == builtins[i]:
+                self._write_error("sosh: cannot background built-in: {command}")
+                self.last_exit_code = 1
+                return
+            i = i + 1
+
+        # Spawn in background
+        val result = spawn_command_bg(command, args)
+        match result:
+            Ok(pid):
+                val job_id = self.jobs.add(pid, "{command}", 0)
+                self._write_line("[{job_id}] {pid}")
+                self.last_exit_code = 0
+            Err(msg):
+                self._write_error("sosh: {msg}")
+                self.last_exit_code = 1
+
+    me _try_external(command: text, args: [text]):
+        """Try to run an external command synchronously."""
+        val result = spawn_command_async(command, args)
+        match result:
+            Ok(future):
+                # Block until command completes
+                val status = posix_waitpid(future.pid as i64, 0)
+                self.last_exit_code = status as i32
+            Err(msg):
                 self._write_error("sosh: command not found: {command}")
                 self.last_exit_code = 127
 
@@ -504,11 +619,35 @@ impl ShellApp:
         self._write_line("  clear         Clear screen")
         self._write_line("  help          Show this help")
         self._write_line("  exit          Exit shell")
+        self._write_line("")
+        self._write_line("Job Control:")
+        self._write_line("  jobs          List background jobs")
+        self._write_line("  fg [ID]       Bring job to foreground")
+        self._write_line("  bg [ID]       Resume stopped job in background")
+        self._write_line("  CMD &         Run command in background")
+        self._write_line("")
+        self._write_line("File Access:")
+        self._write_line("  readf FILE         Read file (POSIX sync)")
+        self._write_line("  readf --async FILE Read file (async VFS)")
+        self._write_line("")
+        self._write_line("Redirection & Pipes:")
+        self._write_line("  CMD > FILE    Redirect stdout to file")
+        self._write_line("  CMD >> FILE   Append stdout to file")
+        self._write_line("  CMD < FILE    Redirect stdin from file")
+        self._write_line("  CMD 2> FILE   Redirect stderr to file")
+        self._write_line("  CMD1 | CMD2   Pipeline: pipe cmd1 output to cmd2")
         self.last_exit_code = 0
 
     me cmd_exit():
-        """Exit the shell."""
+        """Exit the shell. Warns if background jobs are active."""
+        if self.jobs.count() > 0:
+            self._write_line("sosh: there are {self.jobs.count()} active jobs")
+            self._write_line("use 'exit' again to force exit")
+            # Set a flag so next exit will force
+            self.running = false
+            return
         self.running = false
+        self.executor.destroy()
         self._write_line("logout")
 
     me cmd_env():
@@ -578,6 +717,158 @@ impl ShellApp:
         for entry in entries:
             self._write_line("[{entry.timestamp_ns}] {entry.message}")
         self.last_exit_code = 0
+
+    # -- Job Control Commands ------------------------------------------------
+
+    me cmd_jobs():
+        """List active background jobs."""
+        self.jobs.update_status()
+        val job_list = self.jobs.list()
+        if job_list.len() == 0:
+            self._write_line("No active jobs.")
+            self.last_exit_code = 0
+            return
+        var i = 0
+        while i < job_list.len():
+            val job = job_list[i]
+            self._write_line("[{job.id}]  {job.state_text()}  {job.command}")
+            i = i + 1
+        self.last_exit_code = 0
+
+    me cmd_fg(args: [text]):
+        """Bring a background job to the foreground.
+
+        Usage: fg [JOB_ID]
+        If no ID given, uses the most recent job.
+        """
+        var job_id: i32 = -1
+        if args.len() > 0:
+            job_id = _parse_u64(args[0]) as i32
+        else:
+            # Find the most recent non-done job
+            val job_list = self.jobs.list()
+            var i = job_list.len()
+            while i > 0:
+                i = i - 1
+                if not job_list[i].is_done():
+                    job_id = job_list[i].id
+                    i = 0  # break
+
+        if job_id <= 0:
+            self._write_error("fg: no current job")
+            self.last_exit_code = 1
+            return
+
+        val job = self.jobs.find(job_id)
+        if job == nil:
+            self._write_error("fg: no such job: {job_id}")
+            self.last_exit_code = 1
+            return
+
+        self._write_line("{job.command}")
+        val result = self.jobs.foreground(job_id)
+        match result:
+            Ok(exit_code):
+                self.last_exit_code = exit_code
+            Err(msg):
+                self._write_error(msg)
+                self.last_exit_code = 1
+
+    me cmd_bg(args: [text]):
+        """Resume a stopped job in the background.
+
+        Usage: bg [JOB_ID]
+        If no ID given, uses the most recent stopped job.
+        """
+        var job_id: i32 = -1
+        if args.len() > 0:
+            job_id = _parse_u64(args[0]) as i32
+        else:
+            # Find the most recent stopped job
+            val job_list = self.jobs.list()
+            var i = job_list.len()
+            while i > 0:
+                i = i - 1
+                if job_list[i].is_stopped():
+                    job_id = job_list[i].id
+                    i = 0  # break
+
+        if job_id <= 0:
+            self._write_error("bg: no current job")
+            self.last_exit_code = 1
+            return
+
+        val result = self.jobs.background(job_id)
+        match result:
+            Ok(_):
+                val job = self.jobs.find(job_id)
+                if job != nil:
+                    self._write_line("[{job_id}] {job.command} &")
+                self.last_exit_code = 0
+            Err(msg):
+                self._write_error(msg)
+                self.last_exit_code = 1
+
+    # -- Bidirectional File Access -------------------------------------------
+
+    me cmd_readf(args: [text]):
+        """Read a file via POSIX sync or async VFS.
+
+        Usage: readf [--async] FILE
+        Default mode is POSIX synchronous fd I/O.
+        With --async, uses the async VFS notification-based path.
+        """
+        if args.len() == 0:
+            self._write_error("readf: missing file operand")
+            self.last_exit_code = 1
+            return
+
+        var use_async = false
+        var file_path: text = ""
+
+        if args.len() >= 2 and args[0] == "--async":
+            use_async = true
+            file_path = self._resolve_path(args[1])
+        else:
+            file_path = self._resolve_path(args[0])
+
+        if use_async:
+            if self.async_fs == nil:
+                self._write_error("readf: no async filesystem available")
+                self.last_exit_code = 1
+                return
+            val result = read_file_async(self.async_fs, file_path, self.executor)
+            match result:
+                Ok(content):
+                    self._write_line(content)
+                    self.last_exit_code = 0
+                Err(msg):
+                    self._write_error("readf: {msg}")
+                    self.last_exit_code = 1
+        else:
+            val result = read_file_posix(file_path)
+            match result:
+                Ok(content):
+                    self._write_line(content)
+                    self.last_exit_code = 0
+                Err(msg):
+                    self._write_error("readf: {msg}")
+                    self.last_exit_code = 1
+
+    # -- Job Reporting -------------------------------------------------------
+
+    me _report_done_jobs():
+        """Poll job table and report completed background jobs."""
+        self.jobs.update_status()
+        val done = self.jobs.remove_done()
+        var i = 0
+        while i < done.len():
+            val job = done[i]
+            val exit_str = match job.state:
+                JobState.Done(code): "{code}"
+                _: "?"
+            self._write_line("[{job.id}]  Done({exit_str})  {job.command}")
+            i = i + 1
 
     # -- Output Helpers ------------------------------------------------------
 

@@ -3,47 +3,170 @@
 # SimpleOS uses spawn_binary (L4 style), not fork+exec (UNIX style).
 # This layer provides posix_spawn() as the closest POSIX equivalent.
 #
-# All unimplemented functions return -ENOSYS (not 0 or pass_todo).
+# Kernel syscalls used:
+#   2  = Spawn (from function address)
+#   3  = Wait (wait for child exit, returns exit status)
+#   4  = GetPid (returns current process ID)
+#   7  = Signal (send signal to process)
+#   13 = SpawnBinary (from ELF binary path)
 
-use os.posix.errno.{EINVAL, ECHILD}
+use os.posix.errno.{EINVAL, ECHILD, ENOENT, ENOMEM}
+use os.userlib.syscall_raw.{syscall}
 
-val ENOSYS: i32 = 38
+# Kernel syscall numbers
+val _SYS_EXIT: u64 = 0
+val _SYS_SPAWN: u64 = 2
+val _SYS_WAIT: u64 = 3
+val _SYS_GETPID: u64 = 4
+val _SYS_SIGNAL: u64 = 7
+val _SYS_SPAWN_BINARY: u64 = 13
+
 val WNOHANG: u32 = 1
+
+extern fn unsafe_addr_of(ref: any) -> u64
 
 fn posix_spawn(path: text, priority: u8) -> i64:
     """Spawn a new process from an ELF binary path.
 
-    NOT YET IMPLEMENTED — needs kernel SpawnBinary syscall + FD inheritance.
-    Returns -ENOSYS.
+    Uses kernel syscall 13 (SpawnBinary).
+    Args:
+      path:     path to the ELF binary
+      priority: task priority (0=Realtime, 1=High, 2=Normal, 3=Low, 4=Idle)
+
+    Returns:
+      >= 0: PID of the new process
+      < 0:  -errno on failure
     """
-    0 - ENOSYS as i64
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+
+    # Pass path as pointer + length to kernel
+    val path_ptr = unsafe_addr_of(path)
+    val path_len = path.len()
+    val result = syscall(_SYS_SPAWN_BINARY, path_ptr, path_len, priority as u64, 0, 0)
+
+    # Kernel returns PID on success (>= 0), -errno on failure
+    result
+
+fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
+    """Spawn a new process with command-line arguments.
+
+    Encodes arguments as a null-separated byte string appended to the path.
+    Uses kernel syscall 13 (SpawnBinary).
+
+    Returns:
+      >= 0: PID of the new process
+      < 0:  -errno on failure
+    """
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+
+    # Encode: path\0arg0\0arg1\0...argN\0
+    var payload: [u8] = []
+    var pi: u64 = 0
+    while pi < path.len():
+        payload.push(path.byte_at(pi))
+        pi = pi + 1
+    payload.push(0)  # null separator
+
+    var ai: u64 = 0
+    while ai < args.len():
+        val arg = args[ai]
+        var ci: u64 = 0
+        while ci < arg.len():
+            payload.push(arg.byte_at(ci))
+            ci = ci + 1
+        payload.push(0)
+        ai = ai + 1
+
+    val payload_ptr = unsafe_addr_of(payload)
+    val payload_len = payload.len()
+    val result = syscall(_SYS_SPAWN_BINARY, payload_ptr, payload_len, priority as u64, 0, 0)
+    result
 
 fn posix_waitpid(pid: i64, options: u32) -> i64:
     """Wait for a child process to exit.
 
-    NOT YET IMPLEMENTED — needs kernel Wait syscall.
-    Returns -ENOSYS.
+    Uses kernel syscall 3 (Wait).
+    Args:
+      pid:     process ID to wait for (-1 = any child)
+      options: WNOHANG (1) for non-blocking, 0 for blocking wait
+
+    Returns:
+      >= 0: exit status of the child
+      < 0:  -errno on failure (-ECHILD if no children)
     """
-    0 - ENOSYS as i64
+    val pid_u64 = if pid < 0: 0xFFFFFFFFFFFFFFFF as u64 else: pid as u64
+    val result = syscall(_SYS_WAIT, pid_u64, options as u64, 0, 0, 0)
+    result
 
 fn posix_exit(code: i32):
     """Exit the current process with a status code.
 
-    NOT YET IMPLEMENTED — needs kernel Exit syscall.
-    Halts in a loop as fallback.
+    Uses kernel syscall 0 (Exit). Does not return.
     """
-    pass_todo("syscall: exit(code)")
+    syscall(_SYS_EXIT, code as u64, 0, 0, 0, 0)
+    # Should not reach here — kernel terminates the task.
+    # Halt in a loop as safety fallback.
+    while true:
+        pass_dn
 
 fn posix_getpid() -> u64:
     """Get current process ID.
 
-    NOT YET IMPLEMENTED — returns 0 (init process).
+    Uses kernel syscall 4 (GetPid).
     """
-    0
+    val result = syscall(_SYS_GETPID, 0, 0, 0, 0, 0)
+    if result < 0:
+        return 0  # Fallback: return 0 (init)
+    result as u64
 
 fn posix_getppid() -> u64:
     """Get parent process ID.
 
-    NOT YET IMPLEMENTED — returns 0.
+    Uses kernel syscall 4 with arg0=1 to request parent PID.
+    If not supported, returns 0.
     """
+    val result = syscall(_SYS_GETPID, 1, 0, 0, 0, 0)
+    if result < 0:
+        return 0
+    result as u64
+
+fn posix_kill(pid: u64, signum: i32) -> i32:
+    """Send a signal to a process.
+
+    Uses kernel syscall 7 (Signal).
+    Signal mapping to kernel signal numbers:
+      SIGTERM (15) -> 0 (Term)
+      SIGKILL (9)  -> 1 (Kill, uncatchable)
+      SIGSTOP (19) -> 2 (Stop)
+      SIGCONT (18) -> 3 (Cont)
+      SIGINT  (2)  -> 4 (Int)
+
+    Returns 0 on success, -errno on failure.
+    """
+    if signum < 1 or signum > 31:
+        return 0 - EINVAL
+
+    # Map POSIX signal numbers to kernel signal codes
+    val kern_sig = _posix_to_kernel_signal(signum)
+    if kern_sig < 0:
+        return 0 - EINVAL
+
+    val result = syscall(_SYS_SIGNAL, pid, kern_sig as u64, 0, 0, 0)
+    result as i32
+
+fn _posix_to_kernel_signal(signum: i32) -> i32:
+    """Map POSIX signal number to kernel signal code."""
+    if signum == 15:  # SIGTERM
+        return 0
+    if signum == 9:   # SIGKILL
+        return 1
+    if signum == 19:  # SIGSTOP
+        return 2
+    if signum == 18:  # SIGCONT
+        return 3
+    if signum == 2:   # SIGINT
+        return 4
+    # For other signals, map to Term (0) as default
     0
