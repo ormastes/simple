@@ -17,7 +17,7 @@ use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, PAGE_SIZE}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, PAGE_SIZE}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
@@ -978,6 +978,8 @@ fn _handle_dev_enumerate(args: SyscallArgs) -> SyscallResult:
         val buf_ptr = args.arg2
         if index >= _pci_devices_count:
             SyscallResult(value: -1)
+        else if not vmm_verify_user_write(buf_ptr, 12):
+            SyscallResult(value: -14)  # EFAULT
         else:
             _pci_write_device_info_buf(buf_ptr, index)
             SyscallResult(value: 0)
@@ -995,6 +997,11 @@ fn _handle_dev_get_info(args: SyscallArgs) -> SyscallResult:
     """
     val bdf = args.arg0
     val buf_ptr = args.arg1
+
+    # Verify buf_ptr is user-writable before writing device info
+    if not vmm_verify_user_write(buf_ptr, 12):
+        return SyscallResult(value: -14)  # EFAULT
+
     val bus = ((bdf >> 16) & 0xFF).to_u8()
     val dev = ((bdf >> 8) & 0xFF).to_u8()
     val func = (bdf & 0xFF).to_u8()
@@ -1052,9 +1059,11 @@ fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
     val bdf = args.arg0
     val grant_ptr = args.arg1 as u64
 
-    # Validate grant_ptr is in userspace (not kernel address space)
+    # Validate grant_ptr is user-writable via page table walk
     if not _is_userspace_ptr(grant_ptr):
         return SyscallResult(value: -14)  # EFAULT: bad address
+    if not vmm_verify_user_write(grant_ptr, 120):
+        return SyscallResult(value: -14)  # EFAULT: not user-writable
 
     val bus = ((bdf >> 16) & 0xFF).to_u8()
     val dev = ((bdf >> 8) & 0xFF).to_u8()
@@ -1200,9 +1209,11 @@ fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
     if size == 0 or size > 0x4000000:
         return SyscallResult(value: -22)  # EINVAL: empty or >64MB
 
-    # Validate result_ptr is in userspace (not kernel address space)
+    # Validate result_ptr is user-writable via page table walk
     if not _is_userspace_ptr(result_ptr):
         return SyscallResult(value: -14)  # EFAULT: bad address
+    if not vmm_verify_user_write(result_ptr, 16):
+        return SyscallResult(value: -14)  # EFAULT: not user-writable
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
 

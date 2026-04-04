@@ -362,6 +362,73 @@ fn vmm_unmap_page(virt: VirtAddr) -> bool:
     true
 
 # ============================================================================
+# User Pointer Verification (copy_to_user guard)
+# ============================================================================
+
+fn vmm_verify_user_write(addr: u64, size: u64) -> bool:
+    """Verify that [addr, addr+size) is mapped as user-writable.
+
+    Walks the page table for each page in the range and checks that the
+    leaf PTE has PRESENT | USER | WRITABLE set. Returns false if any page
+    in the range is unmapped, kernel-only, or read-only.
+
+    This is the kernel equivalent of Linux's access_ok() + page table check.
+    Must be called before the kernel writes to any user-provided pointer.
+    """
+    if size == 0:
+        return false
+
+    val required_bits = PTE_PRESENT | PTE_USER | PTE_WRITABLE
+
+    # Check each page in the range
+    var offset: u64 = 0
+    val end = addr + size
+    while addr + offset < end:
+        val vaddr = addr + offset
+        if not _vmm_check_pte_flags(vaddr, required_bits):
+            return false
+        offset = offset + PAGE_SIZE
+    true
+
+fn _vmm_check_pte_flags(vaddr: u64, required_bits: u64) -> bool:
+    """Walk page tables and verify the leaf PTE has all required_bits set.
+
+    Read-only walk — does not allocate or modify tables.
+    Handles both 4KB pages (PT level) and 2MB huge pages (PD level).
+    """
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # PML4
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return false
+
+    # PDPT
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return false
+
+    # PD
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return false
+
+    # Check for 2MB huge page (PDE with huge-page bit)
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        # Huge page — check PDE flags directly
+        return (pd_entry & required_bits) == required_bits
+
+    # 4KB page — walk to PT
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if not _pte_is_present(pt_entry):
+        return false
+
+    (pt_entry & required_bits) == required_bits
+
+# ============================================================================
 # Address Space Management
 # ============================================================================
 
