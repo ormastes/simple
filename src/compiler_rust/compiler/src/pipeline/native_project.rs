@@ -164,7 +164,9 @@ pub struct NativeProjectBuilder {
 impl NativeProjectBuilder {
     /// Create a new builder.
     pub fn new(project_root: PathBuf, output: PathBuf) -> Self {
+        eprintln!("[NativeProjectBuilder::new] project_root={:?} output={:?}", project_root, output);
         let project_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
+        eprintln!("[NativeProjectBuilder::new] canonicalized ok");
         let source_root = project_root.join("src");
         Self {
             source_dirs: vec![],
