@@ -12,6 +12,32 @@ use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
 # ============================================================================
+# Runtime Function Operand Helpers
+# ============================================================================
+
+fn _rt_fn_operand_void(name: text) -> MirOperand:
+    """Create a MirOperand referencing a runtime function with no params returning void."""
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [],
+            return_type: MirType.unit(),
+            is_variadic: false
+        )))
+    ))
+
+fn _rt_fn_operand_i64_void(name: text) -> MirOperand:
+    """Create a MirOperand referencing a runtime function taking i64, returning void."""
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType.i64()],
+            return_type: MirType.unit(),
+            is_variadic: false
+        )))
+    ))
+
+# ============================================================================
 # Custom Block Lowering
 # ============================================================================
 
@@ -49,26 +75,21 @@ impl MirLowering:
         """Lower loss block to MIR.
 
         Loss blocks:
-        1. Enable gradient tracking
-        2. Evaluate the body
-        3. Call backward() on the result
-        4. Restore gradient tracking state
-        """
-        # Emit call to enable autograd
-        # rt_autograd_push(enabled: bool)
-        val _push_result = self.builder.new_temp(MirType.unit())
+        1. Evaluate the body (loss expression)
+        2. Call rt_torch_autograd_backward() on the result tensor handle
+        3. Return the body result (the loss value)
 
-        # Lower the body
+        The body is expected to produce a gradient-capable tensor handle (i64).
+        backward() computes gradients for all requires_grad parameters in the graph.
+        """
+        # Lower the body — evaluates the loss expression
         val body_result = self.lower_block(body)
 
-        # Emit call to backward
-        # rt_backward(value: Tensor)
+        # Emit call to backward on the result tensor
+        # rt_torch_autograd_backward(handle: i64) -> void
         if body_result.?:
-            pass  # Would emit: rt_backward(body_result.unwrap())
-
-        # Emit call to restore autograd state
-        # rt_autograd_pop()
-        val _pop_result = self.builder.new_temp(MirType.unit())
+            val backward_fn = _rt_fn_operand_i64_void("rt_torch_autograd_backward")
+            self.builder.emit_call(backward_fn, [mir_operand_copy(body_result.unwrap())], MirType.unit())
 
         body_result ?? self.builder.new_temp(MirType.unit())
 
@@ -76,20 +97,26 @@ impl MirLowering:
         """Lower nograd block to MIR.
 
         Nograd blocks:
-        1. Disable gradient tracking
+        1. Call rt_torch_autograd_no_grad_begin() to disable gradient tracking
         2. Evaluate the body
-        3. Restore gradient tracking state
+        3. Call rt_torch_autograd_no_grad_end() to restore gradient tracking
+
+        Begin/end calls are balanced and nesting-safe — the torch runtime
+        maintains an internal counter so nested nograd{} blocks restore
+        correctly.
         """
-        # Emit call to disable autograd
-        # rt_autograd_push(enabled: false)
-        val _push_result = self.builder.new_temp(MirType.unit())
+        # Emit call to disable gradient tracking
+        # rt_torch_autograd_no_grad_begin() -> void
+        val begin_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_begin")
+        self.builder.emit_call(begin_fn, [], MirType.unit())
 
         # Lower the body
         val body_result = self.lower_block(body)
 
-        # Emit call to restore autograd state
-        # rt_autograd_pop()
-        val _pop_result = self.builder.new_temp(MirType.unit())
+        # Emit call to restore gradient tracking
+        # rt_torch_autograd_no_grad_end() -> void
+        val end_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_end")
+        self.builder.emit_call(end_fn, [], MirType.unit())
 
         body_result ?? self.builder.new_temp(MirType.unit())
 
