@@ -29,7 +29,13 @@ typedef int64_t RuntimeValue;
 
 /* ===================================================================
  * 2. Serial I/O — COM1 at 0x3F8 via x86 outb / inb
+ *
+ * Note: These use x86-specific asm constraints ("a", "Nd") that are
+ * only valid when compiling for x86/x86_64 targets. Guard with
+ * __x86_64__ to suppress false diagnostics on non-x86 host compilers.
  * =================================================================== */
+
+#if defined(__x86_64__) || defined(__i386__)
 
 static inline void outb(uint16_t port, uint8_t val)
 {
@@ -71,6 +77,17 @@ static inline void io_wait(void)
 {
     outb(0x80, 0);
 }
+
+#else
+/* Stubs for non-x86 host analysis (never called at runtime) */
+static inline void outb(uint16_t p, uint8_t v) { (void)p; (void)v; }
+static inline uint8_t inb(uint16_t p) { (void)p; return 0; }
+static inline void outw(uint16_t p, uint16_t v) { (void)p; (void)v; }
+static inline uint16_t inw(uint16_t p) { (void)p; return 0; }
+static inline void outl(uint16_t p, uint32_t v) { (void)p; (void)v; }
+static inline uint32_t inl(uint16_t p) { (void)p; return 0; }
+static inline void io_wait(void) {}
+#endif
 
 static void serial_putchar(char c)
 {
@@ -194,6 +211,8 @@ RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_value_to_string(RuntimeValue val);
+RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
+RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
 /* ===================================================================
@@ -354,7 +373,9 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     /* Parameters are raw (untagged) per the Rust runtime ABI.
        len_val is the raw byte count, data is a raw pointer. */
     int64_t len = len_val;
-    if (len <= 0 || len > 0x100000) return NIL_VALUE;
+    if (len < 0 || len > 0x100000) return NIL_VALUE;
+    /* len == 0 is valid: creates an empty string (used as f-string accumulator
+       by compile_fstring_format which calls rt_string_new(NULL, 0)) */
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -362,7 +383,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     s->len = (uint32_t)len;
     /* data is a raw pointer cast to i64 */
     const char *src = (const char *)(uintptr_t)data;
-    if (src) __builtin_memcpy(s->data, src, (size_t)len);
+    if (src && len > 0) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
 }
@@ -935,23 +956,69 @@ void _start(void)
 }
 
 /* ===================================================================
- * 10. No-op stubs — macro-generated runtime function stubs
+ * 10. Fatal-panic stubs — macro-generated runtime function stubs
  *
  * These provide link-time symbols for all runtime functions that the
- * Simple compiler may reference.  On bare metal most of them are no-ops.
+ * Simple compiler may reference.  On bare metal, unimplemented stubs
+ * print the function name to serial and halt (cli; hlt) instead of
+ * silently returning 0, which would cause cascading silent failures.
+ *
+ * Functions that are intentionally safe as no-ops on bare metal
+ * (GC, thread yield/current/sleep, async yield) are defined as
+ * explicit inline implementations, NOT via the S* macros.
  * =================================================================== */
 
-#define S0(n) RuntimeValue n(void) { return 0; }
-#define S1(n) RuntimeValue n(RuntimeValue a) { (void)a; return 0; }
-#define S2(n) RuntimeValue n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return 0; }
-#define S3(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return 0; }
-#define S4(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a; (void)b; (void)c; (void)d; return 0; }
-#define S5(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
+#define S0(n) RuntimeValue n(void) { \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
+#define S1(n) RuntimeValue n(RuntimeValue a) { \
+    (void)a; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
+#define S2(n) RuntimeValue n(RuntimeValue a, RuntimeValue b) { \
+    (void)a; (void)b; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
+#define S3(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c) { \
+    (void)a; (void)b; (void)c; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
+#define S4(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { \
+    (void)a; (void)b; (void)c; (void)d; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
+#define S5(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { \
+    (void)a; (void)b; (void)c; (void)d; (void)e; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+    return 0; \
+}
 
 /* void-return stub macros */
-#define V0(n) void n(void) {}
-#define V1(n) void n(RuntimeValue a) { (void)a; }
-#define V2(n) void n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+#define V0(n) void n(void) { \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+}
+#define V1(n) void n(RuntimeValue a) { \
+    (void)a; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+}
+#define V2(n) void n(RuntimeValue a, RuntimeValue b) { \
+    (void)a; (void)b; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("cli; hlt"); \
+}
 
 /* --- Arithmetic / comparison ---
  *
@@ -1456,14 +1523,198 @@ RuntimeValue rt_string_to_lower(RuntimeValue str)
     return ENCODE_PTR(r);
 }
 
-S2(rt_string_replace)
-S3(rt_string_replace_all)
-S2(rt_string_repeat)
-S2(rt_string_pad_start)
-S2(rt_string_pad_end)
-S1(rt_string_reverse)
-S1(rt_string_chars)
-S1(rt_string_bytes)
+/* rt_string_replace(str, old, new) — replace first occurrence */
+RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *o = decode_string(old_val);
+    RuntimeString *n = decode_string(new_val);
+    if (!s || !o || o->len == 0) return str;
+    if (o->len > s->len) return str; /* needle longer than haystack */
+    if (!n) n = (RuntimeString *)0; /* treat nil replacement as empty */
+    uint32_t nlen = n ? n->len : 0;
+
+    /* Find first occurrence */
+    for (uint32_t i = 0; i <= s->len - o->len; i++) {
+        uint32_t j;
+        for (j = 0; j < o->len; j++) {
+            if (s->data[i + j] != o->data[j]) break;
+        }
+        if (j == o->len) {
+            /* Found at position i */
+            uint32_t result_len = s->len - o->len + nlen;
+            RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+            if (!r) return str;
+            r->hdr.type = HEAP_STRING;
+            r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+            r->len = result_len;
+            /* Copy: prefix + replacement + suffix */
+            __builtin_memcpy(r->data, s->data, i);
+            if (n && nlen > 0) __builtin_memcpy(r->data + i, n->data, nlen);
+            __builtin_memcpy(r->data + i + nlen, s->data + i + o->len, s->len - i - o->len);
+            r->data[result_len] = '\0';
+            return ENCODE_PTR(r);
+        }
+    }
+    return str; /* not found, return original */
+}
+
+/* rt_string_replace_all(str, old, new) — replace all occurrences (single-pass) */
+RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeString *o = decode_string(old_val);
+    RuntimeString *n = decode_string(new_val);
+    if (!s || !o || o->len == 0) return str;
+    uint32_t nlen = n ? n->len : 0;
+
+    /* First pass: count occurrences to compute result size */
+    uint32_t count = 0;
+    for (uint32_t i = 0; i + o->len <= s->len; ) {
+        uint32_t j;
+        for (j = 0; j < o->len; j++) {
+            if (s->data[i + j] != o->data[j]) break;
+        }
+        if (j == o->len) { count++; i += o->len; }
+        else { i++; }
+    }
+    if (count == 0) return str;
+
+    /* Allocate result */
+    uint32_t result_len = s->len - count * o->len + count * nlen;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+    r->len = result_len;
+
+    /* Second pass: build result */
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < s->len; ) {
+        if (i + o->len <= s->len) {
+            uint32_t j;
+            for (j = 0; j < o->len; j++) {
+                if (s->data[i + j] != o->data[j]) break;
+            }
+            if (j == o->len) {
+                if (n && nlen > 0) {
+                    __builtin_memcpy(r->data + out, n->data, nlen);
+                    out += nlen;
+                }
+                i += o->len;
+                continue;
+            }
+        }
+        r->data[out++] = s->data[i++];
+    }
+    r->data[result_len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+/* rt_string_repeat(str, count) — repeat string N times */
+RuntimeValue rt_string_repeat(RuntimeValue str, RuntimeValue count_val)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s || s->len == 0) return str;
+    int64_t count = DECODE_INT(count_val);
+    if (count <= 0) return rt_string_from_cstr("");
+    if (count == 1) return str;
+    if ((uint64_t)count * s->len > 0x100000) count = (int64_t)(0x100000 / s->len);
+    uint32_t result_len = s->len * (uint32_t)count;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+    r->len = result_len;
+    for (int64_t i = 0; i < count; i++) {
+        __builtin_memcpy(r->data + i * s->len, s->data, s->len);
+    }
+    r->data[result_len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+/* rt_string_pad_start(str, width) — left-pad with spaces to width */
+RuntimeValue rt_string_pad_start(RuntimeValue str, RuntimeValue width_val)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s) return str;
+    int64_t width = DECODE_INT(width_val);
+    if (width <= 0 || (uint32_t)width <= s->len) return str;
+    uint32_t pad = (uint32_t)width - s->len;
+    uint32_t result_len = (uint32_t)width;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+    r->len = result_len;
+    __builtin_memset(r->data, ' ', pad);
+    __builtin_memcpy(r->data + pad, s->data, s->len);
+    r->data[result_len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+/* rt_string_pad_end(str, width) — right-pad with spaces to width */
+RuntimeValue rt_string_pad_end(RuntimeValue str, RuntimeValue width_val)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s) return str;
+    int64_t width = DECODE_INT(width_val);
+    if (width <= 0 || (uint32_t)width <= s->len) return str;
+    uint32_t pad = (uint32_t)width - s->len;
+    uint32_t result_len = (uint32_t)width;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
+    r->len = result_len;
+    __builtin_memcpy(r->data, s->data, s->len);
+    __builtin_memset(r->data + s->len, ' ', pad);
+    r->data[result_len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+/* rt_string_reverse(str) — reverse the string */
+RuntimeValue rt_string_reverse(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    if (!s || s->len <= 1) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str;
+    r->hdr.type = HEAP_STRING;
+    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1);
+    r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) {
+        r->data[i] = s->data[s->len - 1 - i];
+    }
+    r->data[s->len] = '\0';
+    return ENCODE_PTR(r);
+}
+
+/* rt_string_chars(str) — return array of single-character strings */
+RuntimeValue rt_string_chars(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
+    if (!s) return arr;
+    for (uint32_t i = 0; i < s->len; i++) {
+        RuntimeValue ch = rt_string_new(
+            (RuntimeValue)(uintptr_t)&s->data[i], 1);
+        arr = rt_array_push(arr, ch);
+    }
+    return arr;
+}
+
+/* rt_string_bytes(str) — return array of byte values */
+RuntimeValue rt_string_bytes(RuntimeValue str)
+{
+    RuntimeString *s = decode_string(str);
+    RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
+    if (!s) return arr;
+    for (uint32_t i = 0; i < s->len; i++) {
+        arr = rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+    }
+    return arr;
+}
 
 RuntimeValue rt_string_is_empty(RuntimeValue str)
 {
@@ -1490,7 +1741,332 @@ RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b)
     return ENCODE_INT(0);
 }
 
-S2(rt_string_format)
+/* --- rt_string_format(fmt, args_or_val) ---
+ *
+ * The compiler does NOT use this function for f-string interpolation
+ * (it uses rt_string_new + rt_value_to_string + rt_string_concat instead).
+ * This is a fallback/legacy symbol. Implement as simple concatenation
+ * of the format template with the value converted to string. */
+RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val)
+{
+    /* If fmt is a string template, just concatenate with val's string repr.
+       For proper Python-style formatting, use rt_value_format_string. */
+    RuntimeValue val_str = rt_value_to_string(val);
+    if (!IS_HEAP(fmt)) return val_str;
+    return rt_string_concat(fmt, val_str);
+}
+
+/* --- Helper: integer to decimal string in buffer, returns length --- */
+static int int_to_buf(char *buf, int buf_size, int64_t n)
+{
+    if (n == 0) { buf[0] = '0'; return 1; }
+    int neg = 0;
+    uint64_t uv;
+    if (n < 0) { neg = 1; uv = (uint64_t)(-n); }
+    else { uv = (uint64_t)n; }
+    /* Build digits in reverse */
+    char tmp[21];
+    int pos = 0;
+    while (uv > 0 && pos < 20) {
+        tmp[pos++] = '0' + (char)(uv % 10);
+        uv /= 10;
+    }
+    int out = 0;
+    if (neg && out < buf_size) buf[out++] = '-';
+    while (pos > 0 && out < buf_size) buf[out++] = tmp[--pos];
+    return out;
+}
+
+/* --- Helper: integer to hex string in buffer, returns length --- */
+static int int_to_hex_buf(char *buf, int buf_size, uint64_t v, int uppercase)
+{
+    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    if (v == 0) { buf[0] = '0'; return 1; }
+    char tmp[17];
+    int pos = 0;
+    while (v > 0 && pos < 16) {
+        tmp[pos++] = digits[v & 0xF];
+        v >>= 4;
+    }
+    int out = 0;
+    while (pos > 0 && out < buf_size) buf[out++] = tmp[--pos];
+    return out;
+}
+
+/* --- Helper: integer to octal string in buffer, returns length --- */
+static int int_to_oct_buf(char *buf, int buf_size, uint64_t v)
+{
+    if (v == 0) { buf[0] = '0'; return 1; }
+    char tmp[23];
+    int pos = 0;
+    while (v > 0 && pos < 22) {
+        tmp[pos++] = '0' + (char)(v & 7);
+        v >>= 3;
+    }
+    int out = 0;
+    while (pos > 0 && out < buf_size) buf[out++] = tmp[--pos];
+    return out;
+}
+
+/* --- Helper: integer to binary string in buffer, returns length --- */
+static int int_to_bin_buf(char *buf, int buf_size, uint64_t v)
+{
+    if (v == 0) { buf[0] = '0'; return 1; }
+    char tmp[65];
+    int pos = 0;
+    while (v > 0 && pos < 64) {
+        tmp[pos++] = '0' + (char)(v & 1);
+        v >>= 1;
+    }
+    int out = 0;
+    while (pos > 0 && out < buf_size) buf[out++] = tmp[--pos];
+    return out;
+}
+
+/* --- rt_value_format_string(val, fmt_ptr, fmt_len) ---
+ *
+ * Format a RuntimeValue using a Python-style format specifier.
+ * Signature: (RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len) -> RuntimeValue
+ * where fmt_ptr is a raw pointer to the format spec bytes and fmt_len is the byte count.
+ *
+ * Supports: [[fill]align][sign][#][0][width][.precision][type]
+ * Types: f(fixed-point), d(decimal), x/X(hex), o(octal), b(binary), s(string)
+ */
+RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, RuntimeValue fmt_len_rv)
+{
+    const char *spec = (const char *)(uintptr_t)fmt_ptr_rv;
+    int64_t spec_len = fmt_len_rv;
+
+    /* If no format spec, just convert to string */
+    if (!spec || spec_len <= 0) {
+        return rt_value_to_string(val);
+    }
+
+    /* Parse the format spec: [[fill]align][sign][#][0][width][.precision][type] */
+    char fill = ' ';
+    char align = '\0';    /* '<' '>' '^' '=' or '\0' for default */
+    char sign_mode = '\0'; /* '+' '-' ' ' or '\0' */
+    int alt_form = 0;     /* '#' prefix */
+    int zero_pad = 0;     /* '0' before width */
+    int width = -1;       /* -1 = no width */
+    int precision = -1;   /* -1 = no precision */
+    char type_code = '\0';
+    int pos = 0;
+
+    /* Check for [fill]align */
+    if (spec_len >= 2 && (spec[1] == '<' || spec[1] == '>' || spec[1] == '^' || spec[1] == '=')) {
+        fill = spec[0];
+        align = spec[1];
+        pos = 2;
+    } else if (spec_len >= 1 && (spec[0] == '<' || spec[0] == '>' || spec[0] == '^' || spec[0] == '=')) {
+        align = spec[0];
+        pos = 1;
+    }
+
+    /* Sign */
+    if (pos < spec_len && (spec[pos] == '+' || spec[pos] == '-' || spec[pos] == ' ')) {
+        sign_mode = spec[pos];
+        pos++;
+    }
+
+    /* Alt form '#' */
+    if (pos < spec_len && spec[pos] == '#') {
+        alt_form = 1;
+        pos++;
+    }
+
+    /* Zero pad '0' (before width) */
+    if (pos < spec_len && spec[pos] == '0') {
+        zero_pad = 1;
+        pos++;
+    }
+
+    /* Width (digits) */
+    if (pos < spec_len && spec[pos] >= '1' && spec[pos] <= '9') {
+        width = 0;
+        while (pos < spec_len && spec[pos] >= '0' && spec[pos] <= '9') {
+            width = width * 10 + (spec[pos] - '0');
+            pos++;
+        }
+    }
+
+    /* Precision */
+    if (pos < spec_len && spec[pos] == '.') {
+        pos++;
+        precision = 0;
+        while (pos < spec_len && spec[pos] >= '0' && spec[pos] <= '9') {
+            precision = precision * 10 + (spec[pos] - '0');
+            pos++;
+        }
+    }
+
+    /* Type code */
+    if (pos < spec_len) {
+        type_code = spec[pos];
+    }
+
+    /* Format the raw value based on type code */
+    char raw_buf[128];
+    int raw_len = 0;
+
+    int64_t int_val = 0;
+    if (IS_INT(val)) int_val = DECODE_INT(val);
+
+    switch (type_code) {
+    case 'd': {
+        /* Decimal integer */
+        int64_t v = int_val;
+        int is_neg = (v < 0);
+        uint64_t abs_v = is_neg ? (uint64_t)(-v) : (uint64_t)v;
+        char digits[21];
+        int dlen = int_to_buf(digits, 21, (int64_t)abs_v);
+        /* Apply sign */
+        raw_len = 0;
+        if (is_neg) raw_buf[raw_len++] = '-';
+        else if (sign_mode == '+') raw_buf[raw_len++] = '+';
+        else if (sign_mode == ' ') raw_buf[raw_len++] = ' ';
+        __builtin_memcpy(raw_buf + raw_len, digits, (size_t)dlen);
+        raw_len += dlen;
+        break;
+    }
+    case 'x': case 'X': {
+        /* Hexadecimal */
+        uint64_t v = (uint64_t)int_val;
+        raw_len = 0;
+        if (alt_form) {
+            raw_buf[raw_len++] = '0';
+            raw_buf[raw_len++] = (type_code == 'X') ? 'X' : 'x';
+        }
+        int hlen = int_to_hex_buf(raw_buf + raw_len, (int)(sizeof(raw_buf) - (size_t)raw_len),
+                                  v, (type_code == 'X'));
+        raw_len += hlen;
+        break;
+    }
+    case 'o': {
+        /* Octal */
+        uint64_t v = (uint64_t)int_val;
+        raw_len = 0;
+        if (alt_form) {
+            raw_buf[raw_len++] = '0';
+            raw_buf[raw_len++] = 'o';
+        }
+        int olen = int_to_oct_buf(raw_buf + raw_len, (int)(sizeof(raw_buf) - (size_t)raw_len), v);
+        raw_len += olen;
+        break;
+    }
+    case 'b': {
+        /* Binary */
+        uint64_t v = (uint64_t)int_val;
+        raw_len = 0;
+        if (alt_form) {
+            raw_buf[raw_len++] = '0';
+            raw_buf[raw_len++] = 'b';
+        }
+        int blen = int_to_bin_buf(raw_buf + raw_len, (int)(sizeof(raw_buf) - (size_t)raw_len), v);
+        raw_len += blen;
+        break;
+    }
+    case 'f': case 'F': {
+        /* Fixed-point float — baremetal approximation for integers.
+           Without FPU support, treat int as fixed-point: just append ".000000".
+           If precision is 0, no decimal point. */
+        int prec = (precision >= 0) ? precision : 6;
+        int is_neg = (int_val < 0);
+        int64_t abs_v = is_neg ? -int_val : int_val;
+        raw_len = 0;
+        if (is_neg) raw_buf[raw_len++] = '-';
+        else if (sign_mode == '+') raw_buf[raw_len++] = '+';
+        else if (sign_mode == ' ') raw_buf[raw_len++] = ' ';
+        int dlen = int_to_buf(raw_buf + raw_len, (int)(sizeof(raw_buf) - (size_t)raw_len), abs_v);
+        raw_len += dlen;
+        if (prec > 0) {
+            raw_buf[raw_len++] = '.';
+            for (int i = 0; i < prec && raw_len < (int)sizeof(raw_buf) - 1; i++) {
+                raw_buf[raw_len++] = '0';
+            }
+        }
+        break;
+    }
+    case 's': case '\0': default: {
+        /* String or default: convert to string, apply precision as max length */
+        RuntimeValue str_rv = rt_value_to_string(val);
+        RuntimeString *str_s = decode_string(str_rv);
+        if (str_s) {
+            int slen = (int)str_s->len;
+            if (precision >= 0 && slen > precision) slen = precision;
+            if (slen > (int)sizeof(raw_buf) - 1) slen = (int)sizeof(raw_buf) - 1;
+            __builtin_memcpy(raw_buf, str_s->data, (size_t)slen);
+            raw_len = slen;
+        } else {
+            /* rt_value_to_string returned nil — use "nil" */
+            __builtin_memcpy(raw_buf, "nil", 3);
+            raw_len = 3;
+        }
+        break;
+    }
+    }
+
+    /* Apply width and alignment */
+    if (width > 0 && raw_len < width) {
+        int padding = width - raw_len;
+        char fill_char = (zero_pad && align == '\0') ? '0' : fill;
+        char eff_align = align;
+        if (eff_align == '\0') {
+            eff_align = zero_pad ? '>' : '<'; /* default alignment */
+        }
+
+        char result_buf[256];
+        int result_len = 0;
+
+        switch (eff_align) {
+        case '>': {
+            /* Right-align: for zero-pad, insert after sign */
+            if (fill_char == '0' && raw_len > 0 &&
+                (raw_buf[0] == '+' || raw_buf[0] == '-' || raw_buf[0] == ' ')) {
+                result_buf[result_len++] = raw_buf[0]; /* sign */
+                for (int i = 0; i < padding && result_len < 255; i++) result_buf[result_len++] = fill_char;
+                for (int i = 1; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            } else {
+                for (int i = 0; i < padding && result_len < 255; i++) result_buf[result_len++] = fill_char;
+                for (int i = 0; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            }
+            break;
+        }
+        case '<': {
+            /* Left-align */
+            for (int i = 0; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            for (int i = 0; i < padding && result_len < 255; i++) result_buf[result_len++] = fill_char;
+            break;
+        }
+        case '^': {
+            /* Center-align */
+            int left_pad = padding / 2;
+            int right_pad = padding - left_pad;
+            for (int i = 0; i < left_pad && result_len < 255; i++) result_buf[result_len++] = fill_char;
+            for (int i = 0; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            for (int i = 0; i < right_pad && result_len < 255; i++) result_buf[result_len++] = fill_char;
+            break;
+        }
+        case '=': {
+            /* Pad between sign and digits */
+            if (raw_len > 0 && (raw_buf[0] == '+' || raw_buf[0] == '-' || raw_buf[0] == ' ')) {
+                result_buf[result_len++] = raw_buf[0];
+                for (int i = 0; i < padding && result_len < 255; i++) result_buf[result_len++] = fill_char;
+                for (int i = 1; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            } else {
+                for (int i = 0; i < padding && result_len < 255; i++) result_buf[result_len++] = fill_char;
+                for (int i = 0; i < raw_len && result_len < 255; i++) result_buf[result_len++] = raw_buf[i];
+            }
+            break;
+        }
+        }
+
+        return rt_string_new((RuntimeValue)(uintptr_t)result_buf, (RuntimeValue)result_len);
+    }
+
+    /* No width/alignment needed — return raw formatted value */
+    return rt_string_new((RuntimeValue)(uintptr_t)raw_buf, (RuntimeValue)raw_len);
+}
 
 /* --- Array --- */
 
@@ -2257,20 +2833,21 @@ RuntimeValue rt_abort(RuntimeValue msg)
     return NIL_VALUE;
 }
 
-/* GC: no-ops on bare metal (bump allocator, no GC) */
-S0(rt_gc_collect)
-S0(rt_gc_disable)
-S0(rt_gc_enable)
-S0(rt_gc_stats)
+/* GC: safe no-ops on bare metal (bump allocator, no GC) */
+RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
+RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
+RuntimeValue rt_gc_enable(void)  { return NIL_VALUE; }
+RuntimeValue rt_gc_stats(void)   { return NIL_VALUE; }
 
 /* rt_typeof already implemented above in type introspection section */
 
 /* --- Threading (no scheduler on bare metal) --- */
 TRAP_STUB_RET(rt_thread_create, 1)
 TRAP_STUB_RET(rt_thread_join, 1)
-S0(rt_thread_yield)     /* yield is safe as no-op (single-threaded) */
-S0(rt_thread_current)   /* current thread ID — 0 is acceptable */
-S1(rt_thread_sleep)     /* sleep — returns immediately, acceptable */
+/* Safe no-ops on single-threaded bare metal */
+RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
+RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
+RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
 TRAP_STUB_RET(rt_mutex_new, 0)
 TRAP_STUB_RET(rt_mutex_lock, 1)
 TRAP_STUB_RET(rt_mutex_unlock, 1)
@@ -2290,7 +2867,8 @@ TRAP_STUB_RET(rt_channel_close, 1)
 /* --- Async (no async runtime on bare metal) --- */
 TRAP_STUB_RET(rt_async_spawn, 1)
 TRAP_STUB_RET(rt_async_await, 1)
-S0(rt_async_yield)     /* yield is safe as no-op (single-threaded) */
+/* Safe no-op on single-threaded bare metal */
+RuntimeValue rt_async_yield(void) { return NIL_VALUE; }
 TRAP_STUB_RET(rt_async_select, 2)
 
 /* --- Encoding --- */
@@ -2350,6 +2928,7 @@ S1(rt_closure_bind)
  * be explicit and avoid redefinition warnings.
  * =================================================================== */
 
+#if defined(__x86_64__) || defined(__i386__)
 /* --- Port I/O: real x86 implementations --- */
 
 /* Port I/O and MMIO: Cranelift passes RAW (untagged) integer values
@@ -2394,21 +2973,29 @@ RuntimeValue rt_port_io_wait_real(void)
     return 0;
 }
 
-/* Expose as the primary symbols (linker sees these) */
-RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val)
-    __attribute__((alias("rt_port_outb_real")));
-RuntimeValue rt_port_outw(RuntimeValue port, RuntimeValue val)
-    __attribute__((alias("rt_port_outw_real")));
-RuntimeValue rt_port_outl(RuntimeValue port, RuntimeValue val)
-    __attribute__((alias("rt_port_outl_real")));
-RuntimeValue rt_port_inb(RuntimeValue port)
-    __attribute__((alias("rt_port_inb_real")));
-RuntimeValue rt_port_inw(RuntimeValue port)
-    __attribute__((alias("rt_port_inw_real")));
-RuntimeValue rt_port_inl(RuntimeValue port)
-    __attribute__((alias("rt_port_inl_real")));
-RuntimeValue rt_port_io_wait(void)
-    __attribute__((alias("rt_port_io_wait_real")));
+/* Expose as the primary symbols (linker sees these).
+ * Use inline wrappers instead of __attribute__((alias)) for Mach-O compat. */
+RuntimeValue rt_port_outb(RuntimeValue port, RuntimeValue val) {
+    return rt_port_outb_real(port, val);
+}
+RuntimeValue rt_port_outw(RuntimeValue port, RuntimeValue val) {
+    return rt_port_outw_real(port, val);
+}
+RuntimeValue rt_port_outl(RuntimeValue port, RuntimeValue val) {
+    return rt_port_outl_real(port, val);
+}
+RuntimeValue rt_port_inb(RuntimeValue port) {
+    return rt_port_inb_real(port);
+}
+RuntimeValue rt_port_inw(RuntimeValue port) {
+    return rt_port_inw_real(port);
+}
+RuntimeValue rt_port_inl(RuntimeValue port) {
+    return rt_port_inl_real(port);
+}
+RuntimeValue rt_port_io_wait(void) {
+    return rt_port_io_wait_real();
+}
 
 /* --- MMIO: real x86_64 implementations --- */
 
@@ -2456,22 +3043,14 @@ RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
     return 0;
 }
 
-RuntimeValue rt_mmio_read_u8(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u8_real")));
-RuntimeValue rt_mmio_read_u16(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u16_real")));
-RuntimeValue rt_mmio_read_u32(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u32_real")));
-RuntimeValue rt_mmio_read_u64(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u64_real")));
-RuntimeValue rt_mmio_write_u8(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u8_real")));
-RuntimeValue rt_mmio_write_u16(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u16_real")));
-RuntimeValue rt_mmio_write_u32(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u32_real")));
-RuntimeValue rt_mmio_write_u64(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u64_real")));
+RuntimeValue rt_mmio_read_u8(RuntimeValue a) { return rt_mmio_read_u8_real(a); }
+RuntimeValue rt_mmio_read_u16(RuntimeValue a) { return rt_mmio_read_u16_real(a); }
+RuntimeValue rt_mmio_read_u32(RuntimeValue a) { return rt_mmio_read_u32_real(a); }
+RuntimeValue rt_mmio_read_u64(RuntimeValue a) { return rt_mmio_read_u64_real(a); }
+RuntimeValue rt_mmio_write_u8(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u8_real(a, v); }
+RuntimeValue rt_mmio_write_u16(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u16_real(a, v); }
+RuntimeValue rt_mmio_write_u32(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u32_real(a, v); }
+RuntimeValue rt_mmio_write_u64(RuntimeValue a, RuntimeValue v) { return rt_mmio_write_u64_real(a, v); }
 
 /* --- CPU: real x86_64 implementations --- */
 
@@ -2559,28 +3138,20 @@ RuntimeValue rt_read_cr2_real(RuntimeValue dummy)
     return ENCODE_INT((int64_t)cr2);
 }
 
-RuntimeValue rt_hlt(void)     __attribute__((alias("rt_hlt_real")));
-RuntimeValue rt_sti(void)     __attribute__((alias("rt_sti_real")));
-RuntimeValue rt_cli(void)     __attribute__((alias("rt_cli_real")));
-RuntimeValue rt_enable_interrupts(void)
-    __attribute__((alias("rt_enable_interrupts_real")));
-RuntimeValue rt_disable_interrupts(void)
-    __attribute__((alias("rt_disable_interrupts_real")));
-RuntimeValue rt_invlpg(RuntimeValue)
-    __attribute__((alias("rt_invlpg_real")));
-RuntimeValue rt_rdtsc(void)
-    __attribute__((alias("rt_rdtsc_real")));
-RuntimeValue rt_lgdt(RuntimeValue)
-    __attribute__((alias("rt_lgdt_real")));
-RuntimeValue rt_lidt(RuntimeValue)
-    __attribute__((alias("rt_lidt_real")));
-RuntimeValue rt_ltr(RuntimeValue)
-    __attribute__((alias("rt_ltr_real")));
-RuntimeValue rt_read_cr3(RuntimeValue)
-    __attribute__((alias("rt_read_cr3_real")));
-RuntimeValue rt_write_cr3(RuntimeValue)
-    __attribute__((alias("rt_write_cr3_real")));
-RuntimeValue rt_read_cr2(RuntimeValue)
-    __attribute__((alias("rt_read_cr2_real")));
+RuntimeValue rt_hlt(void) { return rt_hlt_real(); }
+RuntimeValue rt_sti(void) { return rt_sti_real(); }
+RuntimeValue rt_cli(void) { return rt_cli_real(); }
+RuntimeValue rt_enable_interrupts(void) { return rt_enable_interrupts_real(); }
+RuntimeValue rt_disable_interrupts(void) { return rt_disable_interrupts_real(); }
+RuntimeValue rt_invlpg(RuntimeValue a) { return rt_invlpg_real(a); }
+RuntimeValue rt_rdtsc(void) { return rt_rdtsc_real(); }
+RuntimeValue rt_lgdt(RuntimeValue a) { return rt_lgdt_real(a); }
+RuntimeValue rt_lidt(RuntimeValue a) { return rt_lidt_real(a); }
+RuntimeValue rt_ltr(RuntimeValue a) { return rt_ltr_real(a); }
+RuntimeValue rt_read_cr3(RuntimeValue a) { return rt_read_cr3_real(a); }
+RuntimeValue rt_write_cr3(RuntimeValue a) { return rt_write_cr3_real(a); }
+RuntimeValue rt_read_cr2(RuntimeValue a) { return rt_read_cr2_real(a); }
+
+#endif /* __x86_64__ || __i386__ */
 
 /* End of x86_64 baremetal_stubs.c */

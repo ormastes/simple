@@ -1,0 +1,115 @@
+# SimpleOS Native Build Configuration
+#
+# Provides linker flags, sysroot paths, and library lists for
+# `simple native-build --target simpleos` to auto-configure.
+#
+# The sysroot layout (built by src/os/port/llvm/sysroot.shs):
+#   build/os/sysroot/
+#     include/              — C headers (simpleos_libc.h, stdio.h, etc.)
+#     include/c++/          — Minimal C++ headers (new, cstdlib, etc.)
+#     lib/                  — libsimpleos_c.a, crt0.o, compiler-rt
+#     share/simpleos/       — simpleos.ld linker script
+#
+# Usage from Simple compiler:
+#   val flags = simpleos_linker_flags()
+#   val includes = simpleos_include_paths()
+
+use std.fs
+use std.process
+
+# ============================================================================
+# Sysroot Path
+# ============================================================================
+
+fn simpleos_sysroot_path() -> text:
+    """Return the path to the SimpleOS sysroot directory."""
+    "build/os/sysroot"
+
+# ============================================================================
+# Linker Flags
+# ============================================================================
+
+fn simpleos_linker_flags() -> [text]:
+    """Return linker flags for SimpleOS target.
+
+    These flags configure the linker for a freestanding static binary:
+    - nostdlib: no host C library
+    - ffreestanding: no hosted environment assumptions
+    - static: no dynamic linking
+    - linker script: simpleos.ld places .text at 0x10000000
+    - library: libsimpleos_c.a (minimal libc for SimpleOS)
+    - crt0: startup code that calls main()
+    """
+    [
+        "-nostdlib",
+        "-ffreestanding",
+        "-static",
+        "-T", "build/os/sysroot/share/simpleos/simpleos.ld",
+        "-L", "build/os/sysroot/lib",
+        "-lsimpleos_c",
+        "build/os/sysroot/lib/crt0.o"
+    ]
+
+# ============================================================================
+# Include Paths
+# ============================================================================
+
+fn simpleos_include_paths() -> [text]:
+    """Return include paths for SimpleOS target.
+
+    Used when compiling C stubs or FFI wrappers against
+    the SimpleOS libc headers.
+    """
+    [
+        "build/os/sysroot/include",
+        "build/os/sysroot/include/c++"
+    ]
+
+# ============================================================================
+# Sysroot Build
+# ============================================================================
+
+fn simpleos_ensure_sysroot() -> bool:
+    """Build the sysroot if it doesn't exist.
+
+    Checks for libsimpleos_c.a in the sysroot. If missing,
+    runs the sysroot build script to compile the libc, install
+    headers, and generate the linker script.
+
+    Returns true if the sysroot is ready, false on build failure.
+    """
+    if fs.exists("build/os/sysroot/lib/libsimpleos_c.a"):
+        return true
+
+    val (stdout, stderr, exit_code) = process.run("sh", ["src/os/port/llvm/sysroot.shs"])
+    if exit_code != 0:
+        print("[simpleos] sysroot build failed: {stderr}")
+        return false
+
+    # Verify the sysroot was built successfully
+    fs.exists("build/os/sysroot/lib/libsimpleos_c.a")
+
+# ============================================================================
+# Target Validation
+# ============================================================================
+
+fn simpleos_is_target(target: text) -> bool:
+    """Check if a target string refers to SimpleOS.
+
+    Recognized patterns:
+    - "simpleos"
+    - "x86_64-simpleos"
+    - "aarch64-simpleos"
+    - "riscv64gc-simpleos"
+    - "riscv32imac-simpleos"
+    """
+    target == "simpleos" or target.ends_with("-simpleos")
+
+fn simpleos_supported_targets() -> [text]:
+    """Return list of supported SimpleOS target triples."""
+    [
+        "x86_64-simpleos",
+        "aarch64-simpleos",
+        "riscv64gc-simpleos",
+        "riscv32imac-simpleos"
+    ]

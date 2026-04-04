@@ -8,7 +8,7 @@
 #   - FbCompositorBackend:  wraps FramebufferDriver (software double-buffer)
 #   - GpuCompositorBackend: wraps VirtioGpuDriver (DMA framebuffer + GPU flush)
 
-use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color, get_glyph_8x16}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.kernel.boot.mmio.{mmio_write32}
 
@@ -145,23 +145,24 @@ impl CompositorBackend for GpuCompositorBackend:
             cx = cx + 8
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        """Draw a single 8x16 character glyph into the GPU framebuffer."""
-        # Use the same glyph data as FramebufferDriver's font
-        # We write directly to GPU DMA buffer via put_pixel
+        """Draw a single 8x16 character glyph into the GPU framebuffer.
+
+        Uses the VGA 8x16 bitmap font from fb_driver. Each glyph row is
+        a byte where MSB = leftmost pixel. Set bits draw fg, clear bits draw bg.
+        """
+        val glyph = get_glyph_8x16(ch)
         var row: i32 = 0
         while row < 16:
+            val bits = glyph[row]
             var col: i32 = 0
             while col < 8:
+                val mask = 0x80 >> col
+                val color = if (bits & mask) != 0: fg else: bg
                 val px = x + col
                 val py = y + row
-                # For simplicity, draw all pixels as fg (no font bitmap in GPU path)
-                # Real implementation would use get_glyph_8x16 from fb_driver
-                me put_pixel(px, py, bg)
+                me put_pixel(px, py, color)
                 col = col + 1
             row = row + 1
-        # The above fills with bg; actual glyph rendering requires the font bitmap.
-        # For now, delegate to a helper that marks the character area.
-        pass_todo("GPU text rendering needs font bitmap access from fb_driver module")
 
     me put_pixel(x: i32, y: i32, color: u32):
         """Write a single pixel to the GPU DMA framebuffer."""

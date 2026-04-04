@@ -1,11 +1,31 @@
-# x86_64 Interrupt HAL — IDT, APIC, PIC Stub
+# x86_64 Interrupt HAL — IDT, APIC, PIC
 #
-# Stub implementation for the x86_64 interrupt subsystem.
-# The full IDT setup, APIC configuration, and PIC masking live in
-# src/os/kernel/interrupts/ (idt.spl, apic.spl, pic.spl).
-#
-# This file provides a HAL-compatible wrapper that will eventually
-# delegate to those existing implementations.
+# HAL-compatible wrapper for the x86_64 interrupt subsystem.
+# Delegates to the existing fully-implemented modules:
+#   - os.kernel.interrupts.idt   (IDT setup, handler table, dispatch)
+#   - os.kernel.interrupts.apic  (Local APIC init, EOI)
+#   - os.kernel.interrupts.pic   (legacy 8259 PIC disable/masking)
+#   - os.kernel.arch.x86_64.cpu  (CLI/STI/HLT wrappers)
+
+use os.kernel.interrupts.idt.{idt_init, idt_set_handler, idt_register_handler,
+    VEC_IRQ_BASE, VEC_SPURIOUS}
+use os.kernel.interrupts.apic.{apic_init, apic_eoi, apic_write, apic_read,
+    APIC_BASE, APIC_REG_EOI}
+use os.kernel.interrupts.pic.{pic_disable}
+use os.kernel.arch.x86_64.cpu.{cli, sti}
+use os.kernel.types.task_types.{TaskContext}
+use std.baremetal.x86.io.{outb, inb}
+
+# ============================================================================
+# PIC Port Constants (for IRQ mask control when PIC is in use)
+# ============================================================================
+
+val PIC1_CMD_PORT: i32  = 0x20
+val PIC1_DATA_PORT: i32 = 0x21
+val PIC2_CMD_PORT: i32  = 0xA0
+val PIC2_DATA_PORT: i32 = 0xA1
+
+val PIC_EOI: i32 = 0x20    # End-of-interrupt command byte
 
 # ============================================================================
 # X86Interrupt
@@ -14,42 +34,118 @@
 struct X86Interrupt:
     """x86_64 interrupt management (IDT + APIC/PIC).
 
-    Stub — delegates to existing interrupts/ directory code.
-    See: src/os/kernel/interrupts/idt.spl
-         src/os/kernel/interrupts/apic.spl
-         src/os/kernel/interrupts/pic.spl
+    Thin HAL wrapper that delegates to the existing interrupt subsystem
+    modules in os.kernel.interrupts/.
     """
     pass_dn
 
 impl X86Interrupt:
     fn init():
-        """Initialize IDT, remap PIC, configure APIC."""
-        pass_todo("delegate to existing interrupts/idt.spl init")
+        """Initialize IDT with 256 entries, remap and disable legacy PIC,
+        then initialize the Local APIC.
+
+        After this call, interrupts are NOT enabled — caller must call
+        enable() (STI) when ready.
+        """
+        # Set up the 256-entry IDT with exception handlers
+        idt_init()
+
+        # APIC init handles: PIC disable, APIC enable via MSR, SVR setup,
+        # TPR=0, ESR clear, initial EOI, mask all LVT, calibrate timer
+        apic_init()
 
     fn enable():
-        """Enable interrupts (STI)."""
-        pass_todo("call rt_sti()")
+        """Enable maskable interrupts (STI instruction)."""
+        sti()
 
     fn disable():
-        """Disable interrupts (CLI)."""
-        pass_todo("call rt_cli()")
+        """Disable maskable interrupts (CLI instruction)."""
+        cli()
 
     fn register_handler(vector: u64, handler_addr: u64):
-        """Register an interrupt handler for a given vector number."""
-        pass_todo("write IDT entry for vector")
+        """Register an interrupt handler for a given vector number.
+
+        Sets the IDT entry so the CPU dispatches to handler_addr when
+        this vector fires. The handler_addr must point to a valid ISR
+        stub that saves context and calls the handler table.
+        """
+        idt_set_handler(vector as u32, handler_addr, 0)
 
     fn unregister_handler(vector: u64):
-        """Remove interrupt handler for a given vector number."""
-        pass_todo("clear IDT entry for vector")
+        """Remove interrupt handler for a given vector.
+
+        Restores the vector to a default no-op handler by installing
+        _default_unhandled as the high-level handler.
+        """
+        idt_register_handler(vector as u32, _default_unhandled)
 
     fn send_eoi(vector: u64):
-        """Send End-Of-Interrupt for given vector."""
-        pass_todo("APIC EOI or PIC EOI depending on vector")
+        """Send End-Of-Interrupt for the given vector.
+
+        For vectors in the PIC range (32-47), sends EOI to the legacy
+        PIC(s) as well. For all vectors, sends EOI to the Local APIC.
+
+        PIC EOI protocol:
+        - Master PIC (IRQ 0-7, vectors 32-39): outb 0x20, 0x20
+        - Slave PIC (IRQ 8-15, vectors 40-47): outb 0xA0, 0x20 then outb 0x20, 0x20
+        """
+        val vec = vector as u32
+
+        # If this is a slave PIC IRQ (vectors 40-47), EOI the slave first
+        if vec >= 40 and vec < 48:
+            outb(PIC2_CMD_PORT, PIC_EOI)
+
+        # If this is any PIC IRQ (vectors 32-47), EOI the master
+        if vec >= 32 and vec < 48:
+            outb(PIC1_CMD_PORT, PIC_EOI)
+
+        # Always send LAPIC EOI (write 0 to EOI register)
+        apic_eoi()
 
     fn set_irq_mask(irq: u64, masked: bool):
-        """Mask or unmask a hardware IRQ line."""
-        pass_todo("PIC/IOAPIC mask control")
+        """Mask or unmask a hardware IRQ line on the legacy PIC.
+
+        irq: IRQ number 0-15
+        masked: true = disable IRQ, false = enable IRQ
+
+        IRQ 0-7 are on the master PIC (data port 0x21).
+        IRQ 8-15 are on the slave PIC (data port 0xA1).
+        Each bit in the mask register corresponds to one IRQ line.
+        """
+        if irq > 15:
+            return
+
+        var port = PIC1_DATA_PORT
+        var bit = irq
+        if irq >= 8:
+            port = PIC2_DATA_PORT
+            bit = irq - 8
+
+        val current_mask = inb(port)
+        val bit_mask = 1 << (bit as i32)
+
+        if masked:
+            # Set the bit to mask (disable) the IRQ
+            outb(port, current_mask | bit_mask)
+        else:
+            # Clear the bit to unmask (enable) the IRQ
+            outb(port, current_mask & (bit_mask ^ 0xFF))
 
     fn acknowledge():
-        """Acknowledge the current interrupt (generic EOI)."""
-        pass_todo("send EOI to LAPIC")
+        """Acknowledge the current interrupt by sending EOI to the Local APIC.
+
+        This is the generic EOI path used when the specific vector is not
+        known (e.g., from a timer or IPI handler). For PIC-routed IRQs,
+        use send_eoi(vector) instead to also acknowledge the PIC.
+        """
+        apic_eoi()
+
+# ============================================================================
+# Default Handler
+# ============================================================================
+
+fn _default_unhandled(ctx: TaskContext):
+    """Default handler installed when a vector is unregistered.
+    Silently ignores the interrupt.
+    """
+    pass_dn

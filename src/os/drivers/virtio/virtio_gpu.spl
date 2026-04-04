@@ -28,7 +28,8 @@ use os.drivers.virtio.virtio_gpu_types.{
     VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
     CTRL_HDR_SIZE, DISPLAY_INFO_RESP_SIZE, RESOURCE_CREATE_SIZE,
     SET_SCANOUT_SIZE, TRANSFER_SIZE, ATTACH_BACKING_TOTAL_SIZE,
-    FLUSH_SIZE, MEM_ENTRY_SIZE
+    FLUSH_SIZE, MEM_ENTRY_SIZE,
+    DETACH_BACKING_SIZE, RESOURCE_UNREF_SIZE
 }
 use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 
@@ -533,6 +534,38 @@ impl VirtioGpuDriver:
         if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
             serial_println("[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
             return Err("SET_SCANOUT failed")
+        Ok(true)
+
+    me cmd_resource_detach_backing(res_id: u32) -> Result<bool, text>:
+        """Detach the memory backing from a resource.
+
+        Command layout: hdr(24) + resource_id(4) + padding(4) = 32 bytes
+        Must be called before cmd_resource_unref to release backing memory.
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING)
+        mmio_write32(self.cmd_buf_virt + 24, res_id)
+        mmio_write32(self.cmd_buf_virt + 28, 0)  # padding
+
+        val resp_type = self._send_command(DETACH_BACKING_SIZE, CTRL_HDR_SIZE)
+        if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
+            serial_println("[virtio-gpu] DETACH_BACKING error: resp=0x{resp_type}")
+            return Err("RESOURCE_DETACH_BACKING failed")
+        Ok(true)
+
+    me cmd_resource_unref(res_id: u32) -> Result<bool, text>:
+        """Destroy a GPU 2D resource.
+
+        Command layout: hdr(24) + resource_id(4) + padding(4) = 32 bytes
+        Call cmd_resource_detach_backing first to release backing memory.
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_UNREF)
+        mmio_write32(self.cmd_buf_virt + 24, res_id)
+        mmio_write32(self.cmd_buf_virt + 28, 0)  # padding
+
+        val resp_type = self._send_command(RESOURCE_UNREF_SIZE, CTRL_HDR_SIZE)
+        if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
+            serial_println("[virtio-gpu] RESOURCE_UNREF error: resp=0x{resp_type}")
+            return Err("RESOURCE_UNREF failed")
         Ok(true)
 
     # ========================================================================

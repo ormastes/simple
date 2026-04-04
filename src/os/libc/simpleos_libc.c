@@ -16,7 +16,50 @@
  *   result in rax
  */
 
-#include "simpleos_libc.h"
+/*
+ * When cross-compiled (-target x86_64-unknown-none-elf -I include), our
+ * freestanding headers provide all types. When analyzed by clangd on
+ * macOS, the host headers conflict. This file uses compiler builtins
+ * for base types and defines only what it needs locally.
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <stdarg.h>
+
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+typedef long ssize_t;
+#endif
+#ifndef _OFF_T_DEFINED
+#define _OFF_T_DEFINED
+typedef long off_t;
+#endif
+
+#ifndef ENOMEM
+#define ENOMEM 12
+#endif
+#ifndef EINVAL
+#define EINVAL 22
+#endif
+#ifndef ENOSYS
+#define ENOSYS 38
+#endif
+#ifndef EBADF
+#define EBADF  9
+#endif
+#ifndef O_RDONLY
+#define O_RDONLY 0
+#endif
+
+/* Forward declarations for functions defined in other libc .c files
+   or later in this file. Needed because we don't include full headers. */
+struct __simpleos_FILE;
+typedef struct __simpleos_FILE FILE;
+extern void *malloc(size_t);
+extern void free(void *);
+extern void *memcpy(void *restrict, const void *restrict, size_t);
+extern void *memset(void *, int, size_t);
+extern int errno;
 
 /* ====================================================================
  * 1. Syscall interface
@@ -41,92 +84,15 @@ static int set_errno(int64_t r) {
     return -1;
 }
 
-/* ====================================================================
- * 3. Memory allocation — bump allocator using mmap
- * ==================================================================== */
-
-#define PAGE_SIZE 4096
-#define INITIAL_HEAP (64 * 1024 * 1024)  /* 64 MB */
-
-static uint8_t *heap_base = NULL;
-static size_t   heap_used = 0;
-static size_t   heap_size = 0;
-
-__attribute__((weak))
-void *malloc(size_t size) {
-    if (size == 0) return NULL;
-
-    /* Lazy init: allocate initial heap via Mmap syscall (10) */
-    if (!heap_base) {
-        int64_t r = simpleos_syscall(10, 0, INITIAL_HEAP, 3 /* RW */, 0, 0);
-        if (r < 0) {
-            errno = ENOMEM;
-            return NULL;
-        }
-        heap_base = (uint8_t *)r;
-        heap_size = INITIAL_HEAP;
-    }
-
-    /* 16-byte alignment */
-    size = (size + 15) & ~(size_t)15;
-
-    if (heap_used + size > heap_size) {
-        /* Expand: request more pages */
-        size_t expand = (size > INITIAL_HEAP) ? size * 2 : INITIAL_HEAP;
-        int64_t r = simpleos_syscall(10, 0, (int64_t)expand, 3 /* RW */, 0, 0);
-        if (r < 0) {
-            errno = ENOMEM;
-            return NULL;
-        }
-        /*
-         * If the new region is contiguous with the existing heap, extend.
-         * Otherwise, move to the new region (losing the unused tail).
-         */
-        if ((uint8_t *)r == heap_base + heap_size) {
-            heap_size += expand;
-        } else {
-            heap_base = (uint8_t *)r;
-            heap_size = expand;
-            heap_used = 0;
-        }
-    }
-
-    void *ptr = heap_base + heap_used;
-    heap_used += size;
-    return ptr;
-}
-
-__attribute__((weak))
-void free(void *ptr) {
-    /* Bump allocator — no individual free (sufficient for compiler bootstrapping) */
-    (void)ptr;
-}
-
-__attribute__((weak))
-void *calloc(size_t nmemb, size_t size) {
-    size_t total = nmemb * size;
-    void *p = malloc(total);
-    if (p) memset(p, 0, total);
-    return p;
-}
-
-__attribute__((weak))
-void *realloc(void *ptr, size_t size) {
-    if (!ptr) return malloc(size);
-    if (size == 0) { free(ptr); return NULL; }
-
-    void *new_ptr = malloc(size);
-    if (new_ptr && ptr) {
-        /* Copy conservatively — may over-read for bump allocator, but safe
-         * within the heap region. For a proper allocator, we'd store sizes. */
-        memcpy(new_ptr, ptr, size);
-    }
-    return new_ptr;
-}
+/* Memory allocation: see simpleos_dlmalloc.c */
 
 /* ====================================================================
  * 4. mmap / munmap
  * ==================================================================== */
+
+#ifndef MAP_FAILED
+#define MAP_FAILED ((void *)-1)
+#endif
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     (void)flags; (void)fd; (void)offset;
@@ -268,11 +234,11 @@ int memcmp(const void *s1, const void *s2, size_t n) {
  * 7. I/O — FILE wrappers + POSIX file syscalls
  * ==================================================================== */
 
-struct simpleos_FILE { int fd; };
+struct __simpleos_FILE { int fd; };
 
-static struct simpleos_FILE _stdin_f  = { 0 };
-static struct simpleos_FILE _stdout_f = { 1 };
-static struct simpleos_FILE _stderr_f = { 2 };
+static struct __simpleos_FILE _stdin_f  = { 0 };
+static struct __simpleos_FILE _stdout_f = { 1 };
+static struct __simpleos_FILE _stderr_f = { 2 };
 
 FILE *stdin  = &_stdin_f;
 FILE *stdout = &_stdout_f;

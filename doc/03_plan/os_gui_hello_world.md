@@ -1,7 +1,9 @@
 # OS GUI Hello World — Plan
 
-**Date:** 2026-04-03
-**Status:** In Progress
+**Date:** 2026-04-03 (updated 2026-04-04)
+**Status:** In Progress (Workstream A, Phase 7 scope)
+**Depends on:** Phase 3.5 (Async Exokernel Services) — COMPLETE 2026-04-04
+**Context:** Phase 3.5 delivered filesystem (FAT32 R/W + VFS IPC), networking (TCP/IP + SSH), and async runtime. GUI work can now assume those services are available for asset loading and remote display.
 
 ## Objective
 
