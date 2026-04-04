@@ -70,6 +70,61 @@ is_elf_binary() {
   file "$1" 2>/dev/null | grep -q "ELF"
 }
 
+# Check if item is in a space-separated allowed list
+is_allowed() {
+  _item="$1"
+  shift
+  for _a in "$@"; do
+    [ "$_item" = "$_a" ] && return 0
+  done
+  return 1
+}
+
+# Suggest where a stray root entry should be moved
+suggest_move() {
+  _name="$1"
+  _is_dir="$2"
+  case "$_name" in
+    unit|integration|system|feature|fuzz|perf|specs|verification|fixtures|shared)
+      printf "test/%s/ (test directory)" "$_name" ;;
+    bootstrap|bootstrap_*)
+      printf "build/bootstrap/ (bootstrap artifacts)" ;;
+    compile|target|artifacts)
+      printf "build/ (build artifacts) or DELETE" ;;
+    rustc*) printf "DELETE (Rust compiler temp)" ;;
+    cc*.c|cc*.res|*.o|*.obj)
+      printf "DELETE (compiler temp artifact)" ;;
+    tmp|.tmp*)
+      printf "DELETE (temporary files)" ;;
+    app)
+      printf "test/app/ or examples/ (application test dir)" ;;
+    lib)
+      printf "test/lib/ or src/lib/ (library test dir)" ;;
+    docs)
+      printf "MERGE into doc/ (duplicate documentation dir)" ;;
+    data)
+      printf "resources/ or config/ (project data)" ;;
+    qemu)
+      printf "examples/qemu/ or tools/qemu/" ;;
+    resources)
+      printf "config/ or data/ (project resources)" ;;
+    .agents)
+      printf ".claude/agents/ (agent definitions)" ;;
+    *.md)
+      printf "doc/09_report/ (documentation file)" ;;
+    *.txt)
+      printf "doc/09_report/ (documentation file)" ;;
+    *.sh)
+      printf "scripts/ (shell script)" ;;
+    *)
+      if [ "$_is_dir" = "dir" ]; then
+        printf "REVIEW — unknown directory, check contents"
+      else
+        printf "REVIEW — unknown file, check contents"
+      fi ;;
+  esac
+}
+
 printf "${BOLD}=== Binary Violation Detector ===${NC}\n"
 printf "Repo:       %s\n" "$REPO_ROOT"
 printf "Rust target: %s\n\n" "$RUST_TARGET_DIR"
@@ -237,6 +292,82 @@ done
 if [ "$FOUND_PLAT_LINKS" = "0" ]; then
   info "No symlinks found in platform directories"
 fi
+echo
+
+# ─────────────────────────────────────────────────────────
+# 7. Root directory structure validation (per FILE.md)
+# ─────────────────────────────────────────────────────────
+printf "${BOLD}--- 7. Root directory structure (per FILE.md) ---${NC}\n"
+
+# Documented directories from FILE.md / CLAUDE.md
+ALLOWED_DIRS="bin build config doc examples scripts src test tools"
+# Dot-directories that tooling requires in project root
+ALLOWED_DOTDIRS=".build .claude .codex .gemini .git .github .jj .simple .vscode"
+# Files documented in FILE.md as belonging in root
+ALLOWED_FILES="AGENTS.md CHANGELOG.md CLAUDE.md FILE.md GEMINI.md LICENSE MCP.md README.md THIRD_PARTY_NOTICES.md VERSION gemini-extension.json install.sh simple.sdn Makefile_use_simple_command_instead"
+# Dot-files that must be in project root (tooling/VCS)
+ALLOWED_DOTFILES=".dockerignore .envrc .gitattributes .gitignore .gitmodules .jjignore .jscpd.json .mcp.json"
+
+# Check non-dot entries in root
+for entry in "${REPO_ROOT}"/*; do
+  [ -e "$entry" ] || continue
+  name="$(basename "$entry")"
+  check
+
+  if is_allowed "$name" $ALLOWED_DIRS $ALLOWED_FILES; then
+    ok "root/$name"
+    continue
+  fi
+
+  entry_type="file"
+  [ -d "$entry" ] && entry_type="dir"
+
+  # Empty entries → violation (safe to delete)
+  if [ "$entry_type" = "dir" ]; then
+    item_count="$(ls -1A "$entry" 2>/dev/null | wc -l)"
+    if [ "$item_count" -eq 0 ]; then
+      violation "root/$name/ — empty directory not in FILE.md" \
+        "DELETE (empty, not documented)"
+      continue
+    fi
+  elif [ ! -s "$entry" ]; then
+    violation "root/$name — empty file not in FILE.md" \
+      "DELETE (empty, not documented)"
+    continue
+  fi
+
+  suggestion="$(suggest_move "$name" "$entry_type")"
+  warning "root/$name — not in documented structure" \
+    "Suggested: $suggestion"
+done
+
+# Check dot entries in root
+for entry in "${REPO_ROOT}"/.*; do
+  name="$(basename "$entry")"
+  [ "$name" = "." ] || [ "$name" = ".." ] && continue
+  check
+
+  if is_allowed "$name" $ALLOWED_DOTDIRS $ALLOWED_DOTFILES; then
+    ok "root/$name (root-only)"
+    continue
+  fi
+
+  entry_type="file"
+  [ -d "$entry" ] && entry_type="dir"
+
+  # Temp dot-entries → violation
+  case "$name" in
+    .tmp*)
+      violation "root/$name — temp file/dir" \
+        "DELETE (temporary, not documented)"
+      continue
+      ;;
+  esac
+
+  suggestion="$(suggest_move "$name" "$entry_type")"
+  warning "root/$name — not in documented root structure" \
+    "Suggested: $suggestion"
+done
 echo
 
 # ─────────────────────────────────────────────────────────

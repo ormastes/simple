@@ -48,10 +48,10 @@ Several requested items are real but only partial, experimental, or host-depende
 | Remote baremetal test runner | Implemented with host-dependent lanes | Plumbing exists, CH32 composite execution is real, but repo-wide end-to-end status still depends on host tools and boards |
 | Test session sharing | Implemented | Test DB/run DB support |
 | UI sharing with TUI and GUI | Implemented (scoped) | Shared UI contract (Protocol V1) across web backend and TUI-web proxy with cross-surface contract suite; not a full unified rendering layer |
-| AOP | Partial | Real compiler/runtime surface, but some stubs remain |
+| AOP | Implemented with bounded scope | Predicate-based pointcuts, deterministic advice ordering, compile-time weaving, and scoped runtime interception are documented and verified for the supported subset |
 | C/C++ bidirectional interface | Partial (advancing) | Strong SFFI stack with class-level plugin imports, callback trampolines, SFFI006 lint; bidirectional completeness not yet fully proven |
 | LLVM backend | Partial but real | Real backend and LLVM-oriented flows; still tool-dependent and not uniformly complete |
-| VHDL backend | Experimental | Concrete codegen surface exists, but should not be presented as complete |
+| VHDL backend | Implemented with bounded hardware subset | Documented subset contract, CLI path, hard-fail behavior, and GHDL analysis/elaboration validation exist; broader simulation/synthesis lanes remain follow-on work |
 | GC and no-GC mode support | Public/stable (5 families) | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc` with compiler enforcement, interpreter warnings, target preset mapping. `nogc_async_immut` advanced-scoped. [Support matrix](../04_architecture/runtime_family_support_matrix.md) |
 | Language statistics | Implemented | CLI/tooling support exists |
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
@@ -286,12 +286,15 @@ Use Simple's differentiators in three tiers:
 - mmap-backed loader support
 
 3. Experimental / partial
-- AOP
 - remote baremetal end-to-end hardware flows
-- LLVM/VHDL backend completeness
+- LLVM backend completeness
 - C/C++ bidirectional interop
 - `nogc_async_immut` (advanced-scoped, limited tests)
 - Lean verification integration
+
+4. Implemented with bounded scope
+- AOP
+- VHDL backend
 
 ## Spawn-Agent Check
 

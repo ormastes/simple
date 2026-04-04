@@ -49,11 +49,9 @@ Implemented, but best described with qualifiers:
 - Shared UI contract across web backend and TUI-web proxy (Protocol V1): shared handler, structured error model, stable element IDs, cross-surface contract suite — but this is a shared test protocol, not a full unified UI rendering layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
-Complete with bounded scope:
+Implemented with bounded scope:
 - AOP provides predicate-based pointcuts (`execution`, `within`, `attr`), deterministic before/after/around advice, compile-time weaving as the default backend, and scoped runtime interception. Support matrix: [doc/05_design/aop_support_matrix.md](doc/05_design/aop_support_matrix.md)
-
-Complete with bounded scope:
-- VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed execution is a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
+- VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed CPU execution remains a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
 
 Experimental or partial:
 - C/C++ bidirectional interop has substantial SFFI infrastructure including class-level plugin imports, callback trampolines for safe function-pointer bridging, and SFFI lint rules (SFFI006 callback ownership). Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
