@@ -219,7 +219,7 @@ void rt_print_value(RuntimeValue val);
  * 4. Heap allocator — bump allocator, 16 MB
  * =================================================================== */
 
-static char   _heap[200 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
@@ -928,11 +928,18 @@ extern void spl_start(void) __attribute__((weak));
 
 void _start(void)
 {
+    /* Disable all PIC IRQs to prevent timer interrupts during rendering.
+     * Mask all IRQs on both PICs (master 0x21, slave 0xA1). */
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+    /* Also disable APIC timer if APIC is present */
+    __asm__ volatile("cli");
+
     _serial_init();
 
     serial_puts("SimpleOS x86_64 boot\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
-    serial_puts("[BOOT] Heap: 200 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
 
     /* BGA + GUI rendering is now done by Pure Simple code in spl_start().

@@ -193,50 +193,168 @@ long_mode_entry:
     hlt
     jmp .halt64
 
-/* Minimal fault handler: returns 0 (NIL_VALUE) in RAX and resumes.
- * For error-code exceptions (#GP, #PF, etc.) we must pop the error code.
- * Strategy: pop error code if present (detected via vector number),
- * set RAX=0, increment RIP past the faulting CALL (assume 2-byte callq *reg),
- * then iretq.
+/* Diagnostic fault handler: prints fault address to serial and halts.
  *
- * NOTE: This is a demo-quality handler. Production code needs per-vector
- * entry points that know whether an error code is pushed.
+ * On first fault: prints "FAULT @ 0x<RIP>\r\n" to COM1, then halts.
+ * This makes crashes visible instead of silently looping.
+ *
+ * Stack on entry (no error code): [RIP, CS, RFLAGS, RSP, SS]
+ * Stack on entry (with error code): [errcode, RIP, CS, RFLAGS, RSP, SS]
+ * We detect error code by checking if value at +8(%rsp) == 0x08 (CS).
  */
 .align 16
 _fault_handler:
-    /* Save scratch registers */
-    pushq %rcx
-    pushq %rdx
+    /* Only print the first fault — subsequent faults just halt silently */
+    pushq %rax
+    leaq _fault_count(%rip), %rax
+    lock incq (%rax)
+    cmpq $1, (%rax)
+    popq %rax
+    ja .fault_halt_silent
 
-    /* Check if this is a fault with error code by looking at the stack.
-     * For interrupts without error code, stack is: [RIP, CS, RFLAGS, RSP, SS]
-     * For interrupts with error code: [errcode, RIP, CS, RFLAGS, RSP, SS]
-     * We detect by checking if the value at +24(%rsp) looks like a valid CS (0x08).
-     * +0: saved rdx, +8: saved rcx, +16: return-RIP-or-errcode
-     * If +24(%rsp) == 0x08, then +16 is RIP (no error code).
-     * If +32(%rsp) == 0x08, then +16 is error code, +24 is RIP.
-     */
-    cmpq $0x08, 24(%rsp)
-    je .no_error_code
-    /* Has error code: remove it by shifting RIP down */
-    movq 24(%rsp), %rcx           /* RIP */
-    addq $2, %rcx                 /* skip past callq *reg (2 bytes: FF Dx) */
-    movq %rcx, 24(%rsp)           /* write adjusted RIP back */
-    /* Remove error code: shift the saved regs + RIP */
-    movq 8(%rsp), %rcx            /* saved rcx */
-    movq 0(%rsp), %rdx            /* saved rdx */
-    addq $8, %rsp                 /* pop error code slot */
-    movq %rdx, 0(%rsp)
-    movq %rcx, 8(%rsp)
-    jmp .fault_return
-.no_error_code:
-    /* RIP is at +16(%rsp), advance past faulting instruction */
-    addq $2, 16(%rsp)
-.fault_return:
-    xorq %rax, %rax               /* return 0 (NIL_VALUE) */
-    popq %rdx
-    popq %rcx
-    iretq
+    /* Print "FAULT @ 0x" to COM1 (port 0x3F8) */
+    pushq %rax
+    pushq %rdx
+    pushq %rcx
+    pushq %rsi
+
+    /* Wait for UART TX ready then send char — inline for each byte */
+    movw $0x3FD, %dx
+.fw0: inb %dx, %al
+    testb $0x20, %al
+    jz .fw0
+    movw $0x3F8, %dx
+    movb $'F', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw1: inb %dx, %al
+    testb $0x20, %al
+    jz .fw1
+    movw $0x3F8, %dx
+    movb $'A', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw2: inb %dx, %al
+    testb $0x20, %al
+    jz .fw2
+    movw $0x3F8, %dx
+    movb $'U', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw3: inb %dx, %al
+    testb $0x20, %al
+    jz .fw3
+    movw $0x3F8, %dx
+    movb $'L', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw4: inb %dx, %al
+    testb $0x20, %al
+    jz .fw4
+    movw $0x3F8, %dx
+    movb $'T', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw5: inb %dx, %al
+    testb $0x20, %al
+    jz .fw5
+    movw $0x3F8, %dx
+    movb $' ', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw6: inb %dx, %al
+    testb $0x20, %al
+    jz .fw6
+    movw $0x3F8, %dx
+    movb $'@', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw7: inb %dx, %al
+    testb $0x20, %al
+    jz .fw7
+    movw $0x3F8, %dx
+    movb $' ', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw8: inb %dx, %al
+    testb $0x20, %al
+    jz .fw8
+    movw $0x3F8, %dx
+    movb $'0', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fw9: inb %dx, %al
+    testb $0x20, %al
+    jz .fw9
+    movw $0x3F8, %dx
+    movb $'x', %al
+    outb %al, %dx
+
+    /* Get faulting RIP: check for error code.
+     * Stack: [saved rsi, saved rcx, saved rdx, saved rax, RIP-or-errcode, ...]
+     * +32(%rsp) = first frame value. If +40(%rsp) == 0x08, no error code.
+     * Otherwise +40(%rsp) is errcode and +48(%rsp) has CS. */
+    cmpq $0x08, 40(%rsp)
+    je .fh_no_errcode
+    movq 40(%rsp), %rsi           /* RIP (after error code) */
+    jmp .fh_print_rip
+.fh_no_errcode:
+    movq 32(%rsp), %rsi           /* RIP (no error code) */
+
+.fh_print_rip:
+    /* Print RSI as 16 hex digits to COM1 */
+    movl $16, %ecx
+.fh_hex_loop:
+    rolq $4, %rsi                 /* rotate left 4 bits (MSB first) */
+    movq %rsi, %rax
+    andq $0x0F, %rax
+    cmpb $10, %al
+    jb .fh_digit
+    addb $('a' - 10), %al
+    jmp .fh_send
+.fh_digit:
+    addb $'0', %al
+.fh_send:
+    movw $0x3FD, %dx
+.fh_wait: inb %dx, %al
+    testb $0x20, %al
+    jz .fh_wait
+    movw $0x3F8, %dx
+    /* Recalculate the digit (inb clobbered %al) */
+    movq %rsi, %rax
+    andq $0x0F, %rax
+    cmpb $10, %al
+    jb .fh_digit2
+    addb $('a' - 10), %al
+    jmp .fh_out
+.fh_digit2:
+    addb $'0', %al
+.fh_out:
+    outb %al, %dx
+    decl %ecx
+    jnz .fh_hex_loop
+
+    /* Print \r\n */
+    movw $0x3FD, %dx
+.fhcr: inb %dx, %al
+    testb $0x20, %al
+    jz .fhcr
+    movw $0x3F8, %dx
+    movb $'\r', %al
+    outb %al, %dx
+    movw $0x3FD, %dx
+.fhlf: inb %dx, %al
+    testb $0x20, %al
+    jz .fhlf
+    movw $0x3F8, %dx
+    movb $'\n', %al
+    outb %al, %dx
+
+    /* Halt — do NOT resume, do NOT loop */
+.fault_halt_silent:
+    cli
+    hlt
+    jmp . - 2
 
 /* ==================================================================
  * 64-bit GDT (minimal: null, code64, data64)
@@ -272,6 +390,10 @@ gdt64_ptr:
  * IDT — 256 entries * 16 bytes = 4 KiB, in BSS
  * ================================================================== */
 .section .bss
+.align 8
+_fault_count:
+    .quad 0
+
 .align 4096
 _idt:
     .space 4096

@@ -1,0 +1,171 @@
+#!/bin/sh
+# SimpleOS QEMU Boot Test — builds kernel, boots in QEMU, validates serial output
+#
+# Usage:
+#   sh scripts/os_qemu_test.shs              # full test (all tiers)
+#   sh scripts/os_qemu_test.shs --tier 1     # boot only
+#   sh scripts/os_qemu_test.shs --skip-build # use prebuilt kernel
+#
+# Exit codes:
+#   0 — all checked tiers passed
+#   1 — at least one tier failed
+#   (SKIP exits 0 when QEMU or kernel is unavailable)
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KERNEL="$REPO_ROOT/build/os/simpleos_x86_64.elf"
+SERIAL_LOG="$REPO_ROOT/build/os/serial_output.log"
+TIMEOUT_SEC=30
+SKIP_BUILD=0
+TIER="all"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tier)   shift; TIER="${1:-all}" ;;
+        --skip-build) SKIP_BUILD=1 ;;
+        *)        echo "Unknown option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+# Locate timeout command (GNU coreutils; macOS ships gtimeout via brew)
+# ---------------------------------------------------------------------------
+TIMEOUT_CMD=""
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+fi
+
+# ---------------------------------------------------------------------------
+# Check QEMU availability
+# ---------------------------------------------------------------------------
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "SKIP: qemu-system-x86_64 not found"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Build kernel (unless --skip-build or compiler absent)
+# ---------------------------------------------------------------------------
+if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$REPO_ROOT/bin/simple" ]; then
+    echo "[test] Building kernel..."
+    mkdir -p "$REPO_ROOT/build/os"
+    "$REPO_ROOT/bin/simple" native-build \
+        --entry src/os/kernel/boot/kernel_entry.spl \
+        --target x86_64-unknown-none \
+        -o "$KERNEL" \
+        --linker-script src/os/kernel/arch/x86_64/linker.ld 2>&1
+    BUILD_RC=$?
+    if [ "$BUILD_RC" -ne 0 ]; then
+        echo "FAIL: Kernel build failed (exit $BUILD_RC)"
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Check kernel binary
+# ---------------------------------------------------------------------------
+if [ ! -f "$KERNEL" ]; then
+    echo "SKIP: Kernel binary not found at $KERNEL"
+    echo "  Build with:"
+    echo "    bin/simple native-build --entry src/os/kernel/boot/kernel_entry.spl \\"
+    echo "      --target x86_64-unknown-none -o build/os/simpleos_x86_64.elf \\"
+    echo "      --linker-script src/os/kernel/arch/x86_64/linker.ld"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Boot QEMU — capture serial to file
+# ---------------------------------------------------------------------------
+echo "[test] Booting SimpleOS in QEMU (timeout: ${TIMEOUT_SEC}s)..."
+rm -f "$SERIAL_LOG"
+
+QEMU_ARGS="-machine q35 -cpu qemu64 -m 128M \
+    -serial file:$SERIAL_LOG \
+    -display none \
+    -no-reboot \
+    -kernel $KERNEL \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04"
+
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-x86_64 $QEMU_ARGS 2>/dev/null
+else
+    # No timeout command available — run QEMU directly.
+    # The kernel should halt or exit via isa-debug-exit.
+    qemu-system-x86_64 $QEMU_ARGS 2>/dev/null
+fi
+
+QEMU_EXIT=$?
+echo "[test] QEMU exited with code: $QEMU_EXIT"
+
+# ---------------------------------------------------------------------------
+# Check serial output was captured
+# ---------------------------------------------------------------------------
+if [ ! -f "$SERIAL_LOG" ]; then
+    echo "FAIL: No serial output captured"
+    exit 1
+fi
+
+echo "[test] Serial output:"
+head -50 "$SERIAL_LOG"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Tier checks
+# ---------------------------------------------------------------------------
+PASS=0
+FAIL=0
+
+check_tier() {
+    _tier_num="$1"
+    _tier_name="$2"
+    _pattern="$3"
+
+    # Skip tiers above the requested one (unless --tier all)
+    if [ "$TIER" != "all" ] && [ "$_tier_num" -gt "$TIER" ]; then
+        return
+    fi
+
+    if grep -qiE "$_pattern" "$SERIAL_LOG"; then
+        echo "TIER $_tier_num PASS: $_tier_name"
+        PASS=$((PASS + 1))
+    else
+        echo "TIER $_tier_num FAIL: $_tier_name"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# Tier 1: Boot banner — kernel_main reached, serial works
+check_tier 1 "Boot banner (serial_init / kernel booted)" \
+    "SimpleOS|simpleos|kernel_main|serial_init|Hello from SimpleOS|Kernel booted"
+
+# Tier 2: Memory initialization (PMM / VMM / page tables)
+check_tier 2 "Memory initialization" \
+    "PMM|VMM|memory.*init|page.*alloc|PhysMemManager|pmm_init"
+
+# Tier 3: Service initialization (init_services / PCI / VFS)
+check_tier 3 "Service initialization" \
+    "init.*service|pcimgr|vfs|init_all_services|\\[init\\]"
+
+# Tier 4: Shell / OS main loop
+check_tier 4 "Shell / main loop" \
+    "shell|prompt|os_main|ready|ShellApp"
+
+# Tier 5: Compositor / display
+check_tier 5 "Display / compositor" \
+    "compositor|window.*manager|framebuffer|display.*init|fb_backend"
+
+echo ""
+echo "=== Results: $PASS passed, $FAIL failed ==="
+
+if [ "$FAIL" -gt 0 ]; then
+    echo "TEST FAILED"
+    exit 1
+fi
+
+echo "TEST PASSED"
+exit 0

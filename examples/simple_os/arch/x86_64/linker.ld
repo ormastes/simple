@@ -69,7 +69,7 @@ SECTIONS
     /* Stack (grows downward) */
     .stack ALIGN(4K) :
     {
-        . = . + 64K;  /* 64KB stack */
+        . = . + 8M;  /* 8MB stack — Simple code uses large stack frames */
         _stack_top = .;
     }
 
