@@ -1,0 +1,135 @@
+# Async Driver Event Loop — shared runtime for all user-space drivers
+#
+# Provides a select-style event loop that waits on multiple event sources:
+# - IRQ notifications (device interrupts)
+# - IPC messages (control requests from other services)
+# - Timer notifications (periodic health/maintenance)
+#
+# Usage:
+#   var loop = DriverEventLoop.new(irq_notif_id, ipc_port)
+#   loop.add_timer(1000)  # 1 second periodic
+#   while loop.running:
+#       val event = loop.wait()
+#       match event.kind:
+#           EVENT_IRQ: handle_irq(event.bits)
+#           EVENT_IPC: handle_ipc(event.ipc_payload)
+#           EVENT_TIMER: handle_timer()
+
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+
+# Event kinds
+val EVENT_NONE: u8 = 0
+val EVENT_IRQ: u8 = 1
+val EVENT_IPC: u8 = 2
+val EVENT_TIMER: u8 = 3
+val EVENT_SHUTDOWN: u8 = 4
+
+# Syscall numbers (must match kernel definitions)
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_NOTIFICATION_CREATE: u64 = 24
+val SYS_NOTIFICATION_WAIT: u64 = 26
+val SYS_NOTIFICATION_POLL: u64 = 27
+
+struct DriverEvent:
+    """An event returned by the driver event loop.
+
+    kind:        EVENT_NONE / EVENT_IRQ / EVENT_IPC / EVENT_TIMER / EVENT_SHUTDOWN
+    bits:        IRQ notification bits (meaningful when kind == EVENT_IRQ)
+    ipc_method:  IPC method ID (meaningful when kind == EVENT_IPC)
+    ipc_payload: IPC payload value (meaningful when kind == EVENT_IPC)
+    ipc_sender:  IPC sender task ID (meaningful when kind == EVENT_IPC)
+    """
+    kind: u8
+    bits: u64
+    ipc_method: u32
+    ipc_payload: u64
+    ipc_sender: u64
+
+struct DriverEventLoop:
+    """Select-style event loop for user-space drivers.
+
+    Polls IRQ, IPC, and timer sources in priority order.
+    Falls back to blocking on the IRQ notification when all polls return nothing.
+    """
+    irq_notif_id: u64
+    ipc_port: u64
+    timer_notif_id: u64
+    running: bool
+    poll_mode: bool     # true = non-blocking poll only, false = block when idle
+
+impl DriverEventLoop:
+    static fn new(irq_notif: u64, ipc_port: u64) -> DriverEventLoop:
+        """Create a new event loop bound to an IRQ notification and IPC port."""
+        DriverEventLoop(
+            irq_notif_id: irq_notif,
+            ipc_port: ipc_port,
+            timer_notif_id: 0,
+            running: true,
+            poll_mode: false
+        )
+
+    me add_timer(interval_ms: u64):
+        """Create a timer notification for periodic events."""
+        val notif = syscall(SYS_NOTIFICATION_CREATE, 0, 0, 0, 0, 0)
+        if notif > 0:
+            self.timer_notif_id = notif as u64
+            serial_println("[event-loop] Timer notification created: {self.timer_notif_id}")
+        else:
+            serial_println("[event-loop] Failed to create timer notification")
+
+    me stop():
+        """Signal the event loop to stop."""
+        self.running = false
+
+    me set_poll_mode(enabled: bool):
+        """Enable or disable poll-only mode (no blocking waits)."""
+        self.poll_mode = enabled
+
+    me wait() -> DriverEvent:
+        """Wait for the next event.
+
+        Priority order: IRQ first, then IPC, then timer.
+        If all non-blocking polls return nothing, blocks on the IRQ notification
+        (unless poll_mode is true, in which case returns EVENT_NONE).
+        """
+        # 1. Poll IRQ notification (non-blocking)
+        if self.irq_notif_id > 0:
+            val bits = syscall(SYS_NOTIFICATION_POLL, self.irq_notif_id, 0, 0, 0, 0)
+            if bits > 0:
+                return DriverEvent(kind: EVENT_IRQ, bits: bits as u64,
+                                   ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
+
+        # 2. Poll IPC port (non-blocking try-recv)
+        if self.ipc_port > 0:
+            val msg = syscall(SYS_IPC_RECV, self.ipc_port, 0, 0, 0, 0)
+            if msg >= 0:
+                return DriverEvent(kind: EVENT_IPC, bits: 0,
+                                   ipc_method: 0, ipc_payload: msg as u64, ipc_sender: 0)
+
+        # 3. Poll timer notification
+        if self.timer_notif_id > 0:
+            val timer_bits = syscall(SYS_NOTIFICATION_POLL, self.timer_notif_id, 0, 0, 0, 0)
+            if timer_bits > 0:
+                return DriverEvent(kind: EVENT_TIMER, bits: timer_bits as u64,
+                                   ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
+
+        # 4. All polls returned nothing — block on IRQ notification (unless poll_mode)
+        if not self.poll_mode and self.irq_notif_id > 0:
+            val bits = syscall(SYS_NOTIFICATION_WAIT, self.irq_notif_id, 0, 0, 0, 0)
+            if bits > 0:
+                return DriverEvent(kind: EVENT_IRQ, bits: bits as u64,
+                                   ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
+
+        DriverEvent(kind: EVENT_NONE, bits: 0, ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
+
+fn make_empty_event() -> DriverEvent:
+    """Create an empty (EVENT_NONE) event."""
+    DriverEvent(kind: EVENT_NONE, bits: 0, ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
+
+fn make_shutdown_event() -> DriverEvent:
+    """Create a shutdown event for signaling event loop termination."""
+    DriverEvent(kind: EVENT_SHUTDOWN, bits: 0, ipc_method: 0, ipc_payload: 0, ipc_sender: 0)
