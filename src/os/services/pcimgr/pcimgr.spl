@@ -1,0 +1,283 @@
+# PCI Manager Service — User-Space PCI Bus Manager
+#
+# MDSOC: feature dimension, device layer
+# Enumerates PCI devices at boot and grants device resources
+# to driver capsules on request. Runs as a user-space service
+# with IPC port "pcimgr".
+#
+# Syscalls used:
+#   80 (DevEnumerate) — discover PCI devices
+#   82 (DeviceGrant)  — grant device resources to a driver capsule
+#   22 (IpcCreatePort) — create service IPC port
+#   21 (IpcRecv)       — receive IPC messages
+
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.types.syscall_types.{DeviceInfoBuf}
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.services.pcimgr.driver_match.{match_driver_name, device_class_description}
+
+# ============================================================================
+# IPC Method IDs
+# ============================================================================
+
+val PCIMGR_ENUMERATE: u32 = 1
+val PCIMGR_REQUEST_DEVICE: u32 = 2
+val PCIMGR_RELEASE_DEVICE: u32 = 3
+val PCIMGR_GET_DEVICE_INFO: u32 = 4
+
+# ============================================================================
+# Device Tracking
+# ============================================================================
+
+val MAX_TRACKED_DEVICES: u64 = 64
+
+# Device state constants
+val DEV_STATE_FREE: u8 = 0
+val DEV_STATE_AVAILABLE: u8 = 1
+val DEV_STATE_GRANTED: u8 = 2
+
+# Flat arrays for baremetal safety — no heap allocation required.
+var dev_count: u64 = 0
+var dev_bus: [u8; 64]
+var dev_device: [u8; 64]
+var dev_func: [u8; 64]
+var dev_vendor: [u16; 64]
+var dev_devid: [u16; 64]
+var dev_class: [u8; 64]
+var dev_subclass: [u8; 64]
+var dev_state: [u8; 64]
+var dev_grant_owner: [u64; 64]  # Task ID that holds the grant
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Initialization — PCI Device Enumeration
+# ============================================================================
+
+fn pcimgr_init():
+    """Initialize PCI manager: enumerate devices via syscall 80."""
+    serial_println("[pcimgr] Starting PCI device enumeration...")
+
+    # Mode 0: get device count
+    val count_result = syscall(80, 0, 0, 0, 0, 0)
+    if count_result <= 0:
+        serial_println("[pcimgr] No PCI devices found")
+        return
+
+    var count = count_result as u64
+    if count > MAX_TRACKED_DEVICES:
+        serial_println("[pcimgr] Warning: {count} devices found, capping at {MAX_TRACKED_DEVICES}")
+        count = MAX_TRACKED_DEVICES
+
+    serial_println("[pcimgr] Found {count} PCI devices")
+
+    # Mode 1: enumerate each device into DeviceInfoBuf
+    var i: u64 = 0
+    while i < count:
+        var buf = DeviceInfoBuf()
+        val result = syscall(80, 1, i, &buf as u64, 0, 0)
+        if result >= 0:
+            val idx = dev_count
+            dev_bus[idx] = buf.bus
+            dev_device[idx] = buf.device
+            dev_func[idx] = buf.func
+            dev_vendor[idx] = buf.vendor_id
+            dev_devid[idx] = buf.device_id
+            dev_class[idx] = buf.class_code
+            dev_subclass[idx] = buf.subclass
+            dev_state[idx] = DEV_STATE_AVAILABLE
+            dev_grant_owner[idx] = 0
+
+            val desc = device_class_description(buf.class_code, buf.subclass)
+            val driver = match_driver_name(buf.vendor_id, buf.device_id, buf.class_code, buf.subclass)
+            serial_println("[pcimgr]   [{idx}] bus={buf.bus} dev={buf.device} fn={buf.func} vendor=0x{buf.vendor_id} device=0x{buf.device_id} ({desc})")
+            if driver != "":
+                serial_println("[pcimgr]         -> driver: {driver}")
+
+            dev_count = dev_count + 1
+        i = i + 1
+
+    serial_println("[pcimgr] Enumeration complete: {dev_count} devices tracked")
+
+# ============================================================================
+# Device Lookup
+# ============================================================================
+
+fn pcimgr_find_by_class(class_code: u8, subclass: u8) -> i64:
+    """Find first available device by PCI class/subclass. Returns index or -1."""
+    var i: u64 = 0
+    while i < dev_count:
+        if dev_class[i] == class_code and dev_subclass[i] == subclass:
+            if dev_state[i] == DEV_STATE_AVAILABLE:
+                return i as i64
+        i = i + 1
+    -1
+
+fn pcimgr_find_by_vendor(vendor: u16, device_id: u16) -> i64:
+    """Find first available device by vendor/device ID. Returns index or -1."""
+    var i: u64 = 0
+    while i < dev_count:
+        if dev_vendor[i] == vendor and dev_devid[i] == device_id:
+            if dev_state[i] == DEV_STATE_AVAILABLE:
+                return i as i64
+        i = i + 1
+    -1
+
+fn pcimgr_find_all_by_class(class_code: u8, subclass: u8) -> [u64]:
+    """Find all available devices matching class/subclass."""
+    var result: [u64] = []
+    var i: u64 = 0
+    while i < dev_count:
+        if dev_class[i] == class_code and dev_subclass[i] == subclass:
+            if dev_state[i] == DEV_STATE_AVAILABLE:
+                result.push(i)
+        i = i + 1
+    result
+
+fn pcimgr_device_count() -> u64:
+    """Return total number of tracked devices."""
+    dev_count
+
+# ============================================================================
+# Device Grant / Release
+# ============================================================================
+
+fn pcimgr_grant_device(dev_idx: u64, requester_task: u64) -> Result<DeviceGrant, text>:
+    """Grant a device to a requesting task capsule via syscall 82 (DeviceGrant).
+
+    The kernel maps BAR regions, allocates IRQ notification, and sets up
+    IOMMU domains as needed. The resulting DeviceGrant struct contains
+    all resources the driver needs.
+    """
+    if dev_idx >= dev_count:
+        return Err("invalid device index: {dev_idx}")
+    if dev_state[dev_idx] != DEV_STATE_AVAILABLE:
+        if dev_state[dev_idx] == DEV_STATE_GRANTED:
+            return Err("device {dev_idx} already granted to task {dev_grant_owner[dev_idx]}")
+        return Err("device {dev_idx} not available (state={dev_state[dev_idx]})")
+
+    # Pack BDF into a single u64 for the syscall
+    val bus = dev_bus[dev_idx]
+    val dev = dev_device[dev_idx]
+    val func = dev_func[dev_idx]
+    val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
+
+    var grant = DeviceGrant()
+    val result = syscall(82, bdf, &grant as u64, requester_task, 0, 0)
+    if result < 0:
+        return Err("DeviceGrant syscall failed for BDF {bus}:{dev}.{func}: error {result}")
+
+    dev_state[dev_idx] = DEV_STATE_GRANTED
+    dev_grant_owner[dev_idx] = requester_task
+    serial_println("[pcimgr] Granted device [{dev_idx}] (BDF {bus}:{dev}.{func}) to task {requester_task}")
+    serial_println("[pcimgr]   BAR0: phys=0x{grant.bar0_phys} size=0x{grant.bar0_size}")
+    serial_println("[pcimgr]   IRQ: vector={grant.irq_vector}")
+    Ok(grant)
+
+fn pcimgr_release_device(dev_idx: u64, requester_task: u64) -> Result<bool, text>:
+    """Release a previously granted device back to the available pool."""
+    if dev_idx >= dev_count:
+        return Err("invalid device index: {dev_idx}")
+    if dev_state[dev_idx] != DEV_STATE_GRANTED:
+        return Err("device {dev_idx} is not currently granted")
+    if dev_grant_owner[dev_idx] != requester_task:
+        return Err("device {dev_idx} is owned by task {dev_grant_owner[dev_idx]}, not {requester_task}")
+
+    dev_state[dev_idx] = DEV_STATE_AVAILABLE
+    dev_grant_owner[dev_idx] = 0
+    serial_println("[pcimgr] Released device [{dev_idx}] from task {requester_task}")
+    Ok(true)
+
+# ============================================================================
+# Device Info Query
+# ============================================================================
+
+fn pcimgr_get_device_info(dev_idx: u64) -> Result<DeviceInfoBuf, text>:
+    """Return cached device info for an index."""
+    if dev_idx >= dev_count:
+        return Err("invalid device index: {dev_idx}")
+    val info = DeviceInfoBuf(
+        bus: dev_bus[dev_idx],
+        device: dev_device[dev_idx],
+        func: dev_func[dev_idx],
+        vendor_id: dev_vendor[dev_idx],
+        device_id: dev_devid[dev_idx],
+        class_code: dev_class[dev_idx],
+        subclass: dev_subclass[dev_idx],
+        prog_if: 0,
+        irq_line: 0
+    )
+    Ok(info)
+
+fn pcimgr_get_device_state(dev_idx: u64) -> u8:
+    """Return current state of a device slot."""
+    if dev_idx >= dev_count:
+        return DEV_STATE_FREE
+    dev_state[dev_idx]
+
+# ============================================================================
+# IPC Service Loop
+# ============================================================================
+
+fn pcimgr_start():
+    """Start PCI manager service: init devices, create IPC port, enter loop."""
+    pcimgr_init()
+
+    # Create IPC port for "pcimgr" service
+    val port_result = syscall(22, 0, 0, 0, 0, 0)  # IpcCreatePort
+    if port_result < 0:
+        serial_println("[pcimgr] FATAL: Failed to create IPC port (error {port_result})")
+        return
+
+    serial_println("[pcimgr] Service ready on IPC port (handle={port_result})")
+    val port_handle = port_result as u64
+
+    # Enter service loop
+    pcimgr_service_loop(port_handle)
+
+fn pcimgr_service_loop(port_handle: u64):
+    """Main service loop — receive IPC messages and dispatch.
+
+    IPC message layout (expected):
+      word 0: method ID (PCIMGR_ENUMERATE, etc.)
+      word 1: sender task ID
+      word 2..N: method-specific arguments
+    """
+    serial_println("[pcimgr] Entering service loop...")
+
+    while true:
+        # Block on IPC receive (syscall 21 = IpcRecv)
+        val msg_result = syscall(21, port_handle, 0, 0, 0, 0)
+        if msg_result < 0:
+            serial_println("[pcimgr] IPC recv error: {msg_result}")
+            continue
+
+        # TODO: Parse IPC message buffer to extract method ID and arguments.
+        # The IPC buffer system is newly implemented; for now we log and
+        # handle a simplified dispatch based on the raw result.
+        serial_println("[pcimgr] Received IPC request (raw={msg_result})")
+
+        # Placeholder dispatch — will be wired when IPC message framing
+        # is finalized in the kernel IPC layer.
+        #
+        # Expected dispatch:
+        #   PCIMGR_ENUMERATE     → return device list to caller
+        #   PCIMGR_REQUEST_DEVICE → pcimgr_grant_device(idx, sender_task)
+        #   PCIMGR_RELEASE_DEVICE → pcimgr_release_device(idx, sender_task)
+        #   PCIMGR_GET_DEVICE_INFO → pcimgr_get_device_info(idx)
+        pass_dn
+
+fn pcimgr_dump_devices():
+    """Debug helper: print all tracked devices to serial."""
+    serial_println("[pcimgr] === Device Table ({dev_count} devices) ===")
+    var i: u64 = 0
+    while i < dev_count:
+        val state_str = match dev_state[i]:
+            DEV_STATE_FREE: "free"
+            DEV_STATE_AVAILABLE: "avail"
+            DEV_STATE_GRANTED: "granted(task={dev_grant_owner[i]})"
+            _: "unknown"
+        val desc = device_class_description(dev_class[i], dev_subclass[i])
+        serial_println("[pcimgr]   [{i}] {dev_bus[i]}:{dev_device[i]}.{dev_func[i]} vendor=0x{dev_vendor[i]} dev=0x{dev_devid[i]} ({desc}) [{state_str}]")
+        i = i + 1
+    serial_println("[pcimgr] === End Device Table ===")

@@ -1,0 +1,697 @@
+# VirtIO-GPU 2D Driver — DeviceGrant-based PCI Legacy Transport
+#
+# MDSOC: feature dimension, drivers layer
+# Provides 2D framebuffer rendering via VirtIO-GPU protocol.
+# Uses controlq (queue 0) for all display commands.
+#
+# VirtIO legacy PCI transport (BAR0 I/O register layout):
+#   0x00 host_features, 0x04 guest_features, 0x08 queue_pfn,
+#   0x0C queue_size, 0x0E queue_sel, 0x10 queue_notify,
+#   0x12 status, 0x13 isr
+#
+# Communication: driver writes a command struct into a controlq descriptor,
+# device writes response back. Each command uses a two-descriptor chain:
+#   desc[0] = request (device-readable), desc[1] = response (device-writable).
+#
+# All DMA buffers are allocated via syscall 84 (AllocDma).
+# BAR0 is mapped via syscall 83 (MapBar).
+
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64, mmio_read64}
+use os.userlib.syscall_raw.{syscall}
+use os.drivers.virtio.virtio_gpu_types.{
+    VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
+    VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+    VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+    VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_UNREF,
+    VIRTIO_GPU_RESP_OK_NODATA, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+    VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+    CTRL_HDR_SIZE, DISPLAY_INFO_RESP_SIZE, RESOURCE_CREATE_SIZE,
+    SET_SCANOUT_SIZE, TRANSFER_SIZE, ATTACH_BACKING_TOTAL_SIZE,
+    FLUSH_SIZE, MEM_ENTRY_SIZE
+}
+use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# VirtIO Legacy PCI BAR0 Register Offsets
+# ============================================================================
+
+val VIRTIO_PCI_HOST_FEATURES: u64 = 0x00
+val VIRTIO_PCI_GUEST_FEATURES: u64 = 0x04
+val VIRTIO_PCI_QUEUE_PFN: u64 = 0x08
+val VIRTIO_PCI_QUEUE_SIZE: u64 = 0x0C
+val VIRTIO_PCI_QUEUE_SEL: u64 = 0x0E
+val VIRTIO_PCI_QUEUE_NOTIFY: u64 = 0x10
+val VIRTIO_PCI_STATUS: u64 = 0x12
+val VIRTIO_PCI_ISR: u64 = 0x13
+
+# Device status bits
+val STATUS_ACKNOWLEDGE: u8 = 1
+val STATUS_DRIVER: u8 = 2
+val STATUS_DRIVER_OK: u8 = 4
+val STATUS_FEATURES_OK: u8 = 8
+val STATUS_FAILED: u8 = 128
+
+# Controlq index
+val VIRTIO_GPU_CONTROLQ: u16 = 0
+
+# ============================================================================
+# Virtqueue Ring Layout Helpers
+# ============================================================================
+# For a queue of size N:
+#   Descriptor table: N * 16 bytes
+#   Available ring:   4 + 2*N bytes (flags:u16, idx:u16, ring[N]:u16)
+#   Used ring:        4 + 8*N bytes (flags:u16, idx:u16, ring[N]:(id:u32,len:u32))
+# Legacy PCI virtqueue: all three placed contiguously, PFN = phys >> 12
+
+fn virtqueue_desc_size(queue_size: u64) -> u64:
+    queue_size * 16
+
+fn virtqueue_avail_size(queue_size: u64) -> u64:
+    4 + 2 * queue_size
+
+fn virtqueue_used_size(queue_size: u64) -> u64:
+    4 + 8 * queue_size
+
+fn virtqueue_total_size(queue_size: u64) -> u64:
+    val ds = virtqueue_desc_size(queue_size)
+    val avs = virtqueue_avail_size(queue_size)
+    val us = virtqueue_used_size(queue_size)
+    # Align used ring to 4096 boundary (virtio spec requirement for legacy)
+    val desc_avail = ds + avs
+    val aligned = (desc_avail + 4095) & ~4095
+    aligned + us
+
+# ============================================================================
+# DMA Allocation Result (baremetal-safe, no heap)
+# ============================================================================
+
+struct GpuDmaAllocResult:
+    """Result of a DMA buffer allocation."""
+    virt: u64
+    phys: u64
+    ok: bool
+
+impl GpuDmaAllocResult:
+    fn is_err() -> bool:
+        not self.ok
+
+    fn unwrap_virt() -> u64:
+        self.virt
+
+    fn unwrap_phys() -> u64:
+        self.phys
+
+# ============================================================================
+# VirtIO-GPU 2D Driver
+# ============================================================================
+
+struct VirtioGpuDriver:
+    """VirtIO-GPU 2D driver using PCI legacy transport.
+
+    Manages a controlq (queue 0) for sending GPU commands and
+    a DMA framebuffer for pixel rendering. Supports 2D resource
+    creation, scanout binding, and flush operations.
+    """
+    bar0_virt: u64
+    notif_id: u64
+    # Control queue
+    ctrl_desc_virt: u64
+    ctrl_desc_phys: u64
+    ctrl_avail_virt: u64
+    ctrl_used_virt: u64
+    ctrl_queue_size: u16
+    ctrl_desc_idx: u16      # Next free descriptor index
+    ctrl_last_used: u16
+    # Command/response DMA buffers (shared for all commands)
+    cmd_buf_virt: u64
+    cmd_buf_phys: u64
+    resp_buf_virt: u64
+    resp_buf_phys: u64
+    # Framebuffer
+    fb_virt: u64
+    fb_phys: u64
+    fb_size: u64
+    width: u32
+    height: u32
+    resource_id: u32
+    next_resource_id: u32
+    initialized: bool
+
+impl VirtioGpuDriver:
+    static fn new() -> VirtioGpuDriver:
+        VirtioGpuDriver(
+            bar0_virt: 0, notif_id: 0,
+            ctrl_desc_virt: 0, ctrl_desc_phys: 0,
+            ctrl_avail_virt: 0, ctrl_used_virt: 0,
+            ctrl_queue_size: 0, ctrl_desc_idx: 0, ctrl_last_used: 0,
+            cmd_buf_virt: 0, cmd_buf_phys: 0,
+            resp_buf_virt: 0, resp_buf_phys: 0,
+            fb_virt: 0, fb_phys: 0, fb_size: 0,
+            width: 0, height: 0,
+            resource_id: 0, next_resource_id: 1,
+            initialized: false
+        )
+
+    # ========================================================================
+    # Initialization from DeviceGrant
+    # ========================================================================
+
+    me init_from_grant(grant: DeviceGrant) -> Result<bool, text>:
+        """Initialize VirtIO-GPU device from a kernel DeviceGrant.
+
+        Steps:
+          1. Map BAR0 via syscall 83
+          2. Reset device, negotiate features
+          3. Set up controlq (queue 0) with DMA-allocated rings
+          4. Allocate command/response DMA buffers
+          5. GET_DISPLAY_INFO to discover display dimensions
+          6. RESOURCE_CREATE_2D for a BGRA resource
+          7. Allocate framebuffer DMA and ATTACH_BACKING
+          8. SET_SCANOUT to bind resource to scanout 0
+          9. Set DRIVER_OK
+        """
+        # -- Step 1: Map BAR0 --
+        val bar_result = syscall(83, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
+        if bar_result < 0:
+            return Err("MapBar failed: error {bar_result}")
+        self.bar0_virt = bar_result as u64
+        self.notif_id = grant.irq_notification_id
+        serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
+
+        # -- Step 2: Reset and negotiate features --
+        self.write_status(0)
+        self.write_status(STATUS_ACKNOWLEDGE)
+        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
+
+        # Read host features and accept them
+        val host_features = mmio_read32(self.bar0_virt + VIRTIO_PCI_HOST_FEATURES)
+        mmio_write32(self.bar0_virt + VIRTIO_PCI_GUEST_FEATURES, host_features)
+
+        # Set FEATURES_OK
+        val feat_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
+        self.write_status(feat_status)
+
+        # Verify FEATURES_OK was accepted
+        val current_status = mmio_read8(self.bar0_virt + VIRTIO_PCI_STATUS)
+        if (current_status & STATUS_FEATURES_OK) == 0:
+            self.write_status(STATUS_FAILED)
+            return Err("Feature negotiation failed")
+
+        # -- Step 3: Set up controlq (queue 0) --
+        val ctrl_result = self.setup_controlq()
+        if ctrl_result.is_err():
+            self.write_status(STATUS_FAILED)
+            return Err("Controlq setup failed")
+        serial_println("[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
+
+        # -- Step 4: Set DRIVER_OK (must be set before sending commands) --
+        val ok_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
+        self.write_status(ok_status)
+
+        # -- Step 5: Allocate command/response DMA buffers (4KB each) --
+        val cmd_dma = self.alloc_dma(4096)
+        if cmd_dma.is_err():
+            return Err("Command buffer DMA alloc failed")
+        self.cmd_buf_virt = cmd_dma.unwrap_virt()
+        self.cmd_buf_phys = cmd_dma.unwrap_phys()
+
+        val resp_dma = self.alloc_dma(4096)
+        if resp_dma.is_err():
+            return Err("Response buffer DMA alloc failed")
+        self.resp_buf_virt = resp_dma.unwrap_virt()
+        self.resp_buf_phys = resp_dma.unwrap_phys()
+        serial_println("[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
+
+        # -- Step 6: GET_DISPLAY_INFO --
+        val display_result = self.cmd_get_display_info()
+        if display_result.is_err():
+            return Err("GET_DISPLAY_INFO failed")
+        serial_println("[virtio-gpu] Display: {self.width}x{self.height}")
+
+        # -- Step 7: RESOURCE_CREATE_2D --
+        self.resource_id = self.next_resource_id
+        self.next_resource_id = self.next_resource_id + 1
+        val create_result = self.cmd_resource_create_2d(self.resource_id, self.width, self.height)
+        if create_result.is_err():
+            return Err("RESOURCE_CREATE_2D failed")
+        serial_println("[virtio-gpu] Resource {self.resource_id} created")
+
+        # -- Step 8: Allocate framebuffer and ATTACH_BACKING --
+        self.fb_size = (self.width as u64) * (self.height as u64) * 4
+        val fb_dma = self.alloc_dma(self.fb_size)
+        if fb_dma.is_err():
+            return Err("Framebuffer DMA alloc failed")
+        self.fb_virt = fb_dma.unwrap_virt()
+        self.fb_phys = fb_dma.unwrap_phys()
+        serial_println("[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
+
+        # Zero the framebuffer
+        self.clear(0x00000000)
+
+        val attach_result = self.cmd_resource_attach_backing(self.resource_id, self.fb_phys, self.fb_size)
+        if attach_result.is_err():
+            return Err("RESOURCE_ATTACH_BACKING failed")
+        serial_println("[virtio-gpu] Backing attached")
+
+        # -- Step 9: SET_SCANOUT --
+        val scanout_result = self.cmd_set_scanout(0, self.resource_id, self.width, self.height)
+        if scanout_result.is_err():
+            return Err("SET_SCANOUT failed")
+        serial_println("[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
+
+        self.initialized = true
+        serial_println("[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA")
+        Ok(true)
+
+    # ========================================================================
+    # Controlq Setup
+    # ========================================================================
+
+    me setup_controlq() -> Result<bool, text>:
+        """Set up controlq (queue 0): select, read size, allocate DMA, set PFN."""
+        # Select queue 0
+        mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_SEL, VIRTIO_GPU_CONTROLQ)
+
+        # Read max queue size
+        val max_size = mmio_read16(self.bar0_virt + VIRTIO_PCI_QUEUE_SIZE)
+        if max_size == 0:
+            return Err("Controlq not available")
+
+        # Cap to 128 entries
+        var qsize: u16 = max_size
+        if qsize > 128:
+            qsize = 128
+        self.ctrl_queue_size = qsize
+
+        # Allocate DMA memory for virtqueue rings
+        val total = virtqueue_total_size(qsize.to_u64())
+        val dma_result = self.alloc_dma(total)
+        if dma_result.is_err():
+            return Err("DMA alloc for controlq failed")
+        val ring_virt = dma_result.unwrap_virt()
+        val ring_phys = dma_result.unwrap_phys()
+
+        # Compute sub-region offsets
+        self.ctrl_desc_virt = ring_virt
+        self.ctrl_desc_phys = ring_phys
+        self.ctrl_avail_virt = ring_virt + virtqueue_desc_size(qsize.to_u64())
+        val desc_avail = virtqueue_desc_size(qsize.to_u64()) + virtqueue_avail_size(qsize.to_u64())
+        self.ctrl_used_virt = ring_virt + ((desc_avail + 4095) & ~4095)
+
+        # Initialize descriptor free list: chain each desc -> next
+        var i: u16 = 0
+        while i < qsize - 1:
+            val desc_off = self.ctrl_desc_virt + (i * 16).to_u64()
+            mmio_write16(desc_off + 14, i + 1)
+            i = i + 1
+        # Last descriptor: next = qsize (sentinel)
+        val last_off = self.ctrl_desc_virt + ((qsize - 1) * 16).to_u64()
+        mmio_write16(last_off + 14, qsize)
+
+        # Zero the avail ring header (flags=0, idx=0)
+        mmio_write16(self.ctrl_avail_virt, 0)
+        mmio_write16(self.ctrl_avail_virt + 2, 0)
+
+        # Zero the used ring header (flags=0, idx=0)
+        mmio_write16(self.ctrl_used_virt, 0)
+        mmio_write16(self.ctrl_used_virt + 2, 0)
+
+        self.ctrl_desc_idx = 0
+        self.ctrl_last_used = 0
+
+        # Tell device the queue PFN (phys >> 12)
+        val pfn = (ring_phys >> 12).to_u32()
+        mmio_write32(self.bar0_virt + VIRTIO_PCI_QUEUE_PFN, pfn)
+
+        Ok(true)
+
+    # ========================================================================
+    # DMA Allocation
+    # ========================================================================
+
+    fn alloc_dma(size: u64) -> GpuDmaAllocResult:
+        """Allocate contiguous DMA buffer via syscall 84 (AllocDma).
+
+        Syscall protocol: arg0=size, arg1=pointer to result pair (phys:u64, virt:u64).
+        Returns virt address in syscall return value, phys in result pair.
+        """
+        var result_pair: [u64; 2]
+        val result = syscall(84, size, &result_pair as u64, 0, 0, 0)
+        if result < 0:
+            return GpuDmaAllocResult(virt: 0, phys: 0, ok: false)
+        val phys_out = result_pair[0]
+        val virt_out = result as u64
+        GpuDmaAllocResult(virt: virt_out, phys: phys_out, ok: true)
+
+    # ========================================================================
+    # Register Access Helpers
+    # ========================================================================
+
+    fn write_status(status: u8):
+        """Write to the VirtIO PCI device status register."""
+        mmio_write8(self.bar0_virt + VIRTIO_PCI_STATUS, status)
+
+    fn read_isr() -> u8:
+        """Read and clear interrupt status register."""
+        mmio_read8(self.bar0_virt + VIRTIO_PCI_ISR)
+
+    # ========================================================================
+    # Command Submission (two-descriptor chain)
+    # ========================================================================
+
+    me _write_ctrl_hdr(cmd_type: u32):
+        """Write a VirtioGpuCtrlHdr (24 bytes) at the start of cmd_buf.
+
+        Layout: type(4) + flags(4) + fence_id(8) + ctx_id(4) + padding(4)
+        """
+        mmio_write32(self.cmd_buf_virt, cmd_type)       # type
+        mmio_write32(self.cmd_buf_virt + 4, 0)          # flags
+        mmio_write64(self.cmd_buf_virt + 8, 0)          # fence_id
+        mmio_write32(self.cmd_buf_virt + 16, 0)         # ctx_id
+        mmio_write32(self.cmd_buf_virt + 20, 0)         # padding
+
+    me _send_command(cmd_size: u64, resp_size: u64) -> u32:
+        """Submit a command via controlq and wait for response.
+
+        Sets up a two-descriptor chain:
+          desc[d0]: request buffer (device-readable, NEXT flag)
+          desc[d1]: response buffer (device-writable, WRITE flag)
+        Adds d0 to available ring, notifies device, polls used ring.
+
+        Returns the response type (first 4 bytes of response buffer).
+        """
+        val d0 = self.ctrl_desc_idx
+        val d1 = d0 + 1
+
+        # desc[d0]: request (device reads from cmd_buf)
+        val d0_off = self.ctrl_desc_virt + (d0 * 16).to_u64()
+        val cmd_phys_low = (self.cmd_buf_phys & 0xFFFFFFFF).to_u32()
+        val cmd_phys_high = (self.cmd_buf_phys >> 32).to_u32()
+        mmio_write32(d0_off, cmd_phys_low)              # addr low
+        mmio_write32(d0_off + 4, cmd_phys_high)         # addr high
+        mmio_write32(d0_off + 8, cmd_size.to_u32())     # len
+        val f_next = VIRTQ_DESC_F_NEXT.to_u32()
+        mmio_write32(d0_off + 12, (f_next << 16) | d1.to_u32())  # flags=NEXT | next=d1
+
+        # desc[d1]: response (device writes to resp_buf)
+        val d1_off = self.ctrl_desc_virt + (d1 * 16).to_u64()
+        val resp_phys_low = (self.resp_buf_phys & 0xFFFFFFFF).to_u32()
+        val resp_phys_high = (self.resp_buf_phys >> 32).to_u32()
+        mmio_write32(d1_off, resp_phys_low)             # addr low
+        mmio_write32(d1_off + 4, resp_phys_high)        # addr high
+        mmio_write32(d1_off + 8, resp_size.to_u32())    # len
+        val f_write = VIRTQ_DESC_F_WRITE.to_u32()
+        mmio_write32(d1_off + 12, f_write << 16)        # flags=WRITE, next=0
+
+        # Add d0 to available ring
+        val avail_idx = mmio_read16(self.ctrl_avail_virt + 2)
+        val ring_slot = self.ctrl_avail_virt + 4 + (avail_idx % self.ctrl_queue_size).to_u64() * 2
+        mmio_write16(ring_slot, d0)
+        mmio_write16(self.ctrl_avail_virt + 2, avail_idx + 1)
+
+        # Notify device (controlq = queue 0)
+        mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_GPU_CONTROLQ)
+
+        # Poll used ring for completion
+        var timeout: u64 = 10000000
+        while timeout > 0:
+            val used_idx = mmio_read16(self.ctrl_used_virt + 2)
+            if used_idx != self.ctrl_last_used:
+                self.ctrl_last_used = used_idx
+                break
+            timeout = timeout - 1
+
+        # Advance descriptor index (wrap around, 2 descriptors per command)
+        self.ctrl_desc_idx = (self.ctrl_desc_idx + 2) % self.ctrl_queue_size
+
+        # Acknowledge ISR
+        val isr = self.read_isr()
+
+        # Return response type from first 4 bytes of response buffer
+        mmio_read32(self.resp_buf_virt)
+
+    # ========================================================================
+    # GPU Commands
+    # ========================================================================
+
+    me cmd_get_display_info() -> Result<bool, text>:
+        """Send GET_DISPLAY_INFO and read display dimensions from response.
+
+        Response layout (after 24-byte header):
+          16 display entries, each 24 bytes:
+            rect: {x:u32, y:u32, width:u32, height:u32}  (16 bytes)
+            enabled: u32
+            flags: u32
+        We read the first enabled display's width and height.
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_GET_DISPLAY_INFO)
+        val resp_type = self._send_command(CTRL_HDR_SIZE, DISPLAY_INFO_RESP_SIZE)
+
+        if resp_type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO:
+            serial_println("[virtio-gpu] GET_DISPLAY_INFO error: resp=0x{resp_type}")
+            return Err("GET_DISPLAY_INFO failed (resp=0x{resp_type})")
+
+        # Scan display entries for first enabled display
+        var disp_idx: u64 = 0
+        while disp_idx < 16:
+            val entry_base = self.resp_buf_virt + CTRL_HDR_SIZE + disp_idx * 24
+            val enabled = mmio_read32(entry_base + 16)
+            if enabled != 0:
+                val w = mmio_read32(entry_base + 8)   # rect.width
+                val h = mmio_read32(entry_base + 12)  # rect.height
+                if w > 0 and h > 0:
+                    self.width = w
+                    self.height = h
+                    return Ok(true)
+            disp_idx = disp_idx + 1
+
+        # No enabled display found — use default
+        self.width = 1024
+        self.height = 768
+        serial_println("[virtio-gpu] No enabled display, using default {self.width}x{self.height}")
+        Ok(true)
+
+    me cmd_resource_create_2d(res_id: u32, w: u32, h: u32) -> Result<bool, text>:
+        """Create a 2D resource with BGRA format.
+
+        Command layout:
+          hdr(24) + resource_id(4) + format(4) + width(4) + height(4) = 40 bytes
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_CREATE_2D)
+        mmio_write32(self.cmd_buf_virt + 24, res_id)
+        mmio_write32(self.cmd_buf_virt + 28, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM)
+        mmio_write32(self.cmd_buf_virt + 32, w)
+        mmio_write32(self.cmd_buf_virt + 36, h)
+
+        val resp_type = self._send_command(RESOURCE_CREATE_SIZE, CTRL_HDR_SIZE)
+        if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
+            serial_println("[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
+            return Err("RESOURCE_CREATE_2D failed")
+        Ok(true)
+
+    me cmd_resource_attach_backing(res_id: u32, backing_phys: u64, backing_size: u64) -> Result<bool, text>:
+        """Attach a memory-backed framebuffer to a resource.
+
+        Command layout:
+          hdr(24) + resource_id(4) + nr_entries(4) = 32 bytes header
+          Followed by 1 mem_entry: addr(8) + length(4) + padding(4) = 16 bytes
+          Total = 48 bytes
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING)
+        mmio_write32(self.cmd_buf_virt + 24, res_id)
+        mmio_write32(self.cmd_buf_virt + 28, 1)     # nr_entries = 1
+
+        # mem_entry[0]
+        mmio_write64(self.cmd_buf_virt + 32, backing_phys)        # addr
+        mmio_write32(self.cmd_buf_virt + 40, backing_size.to_u32())  # length
+        mmio_write32(self.cmd_buf_virt + 44, 0)                   # padding
+
+        val resp_type = self._send_command(ATTACH_BACKING_TOTAL_SIZE, CTRL_HDR_SIZE)
+        if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
+            serial_println("[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
+            return Err("RESOURCE_ATTACH_BACKING failed")
+        Ok(true)
+
+    me cmd_set_scanout(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
+        """Bind a resource to a scanout (display output).
+
+        Command layout:
+          hdr(24) + rect(x:4,y:4,w:4,h:4) + scanout_id(4) + resource_id(4) = 48 bytes
+        """
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_SET_SCANOUT)
+        mmio_write32(self.cmd_buf_virt + 24, 0)  # rect.x
+        mmio_write32(self.cmd_buf_virt + 28, 0)  # rect.y
+        mmio_write32(self.cmd_buf_virt + 32, w)  # rect.width
+        mmio_write32(self.cmd_buf_virt + 36, h)  # rect.height
+        mmio_write32(self.cmd_buf_virt + 40, scanout_id)
+        mmio_write32(self.cmd_buf_virt + 44, res_id)
+
+        val resp_type = self._send_command(SET_SCANOUT_SIZE, CTRL_HDR_SIZE)
+        if resp_type != VIRTIO_GPU_RESP_OK_NODATA:
+            serial_println("[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
+            return Err("SET_SCANOUT failed")
+        Ok(true)
+
+    # ========================================================================
+    # Framebuffer Operations
+    # ========================================================================
+
+    me flush():
+        """Flush the framebuffer to the display.
+
+        Sends TRANSFER_TO_HOST_2D to copy framebuffer data to the resource,
+        then RESOURCE_FLUSH to update the scanout.
+        """
+        if not self.initialized:
+            return
+
+        # TRANSFER_TO_HOST_2D: copy backing store → resource
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D)
+        mmio_write32(self.cmd_buf_virt + 24, 0)             # rect.x
+        mmio_write32(self.cmd_buf_virt + 28, 0)             # rect.y
+        mmio_write32(self.cmd_buf_virt + 32, self.width)    # rect.width
+        mmio_write32(self.cmd_buf_virt + 36, self.height)   # rect.height
+        mmio_write64(self.cmd_buf_virt + 40, 0)             # offset
+        mmio_write32(self.cmd_buf_virt + 48, self.resource_id)
+        mmio_write32(self.cmd_buf_virt + 52, 0)             # padding
+        self._send_command(TRANSFER_SIZE, CTRL_HDR_SIZE)
+
+        # RESOURCE_FLUSH: signal device to update scanout
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_FLUSH)
+        mmio_write32(self.cmd_buf_virt + 24, 0)             # rect.x
+        mmio_write32(self.cmd_buf_virt + 28, 0)             # rect.y
+        mmio_write32(self.cmd_buf_virt + 32, self.width)    # rect.width
+        mmio_write32(self.cmd_buf_virt + 36, self.height)   # rect.height
+        mmio_write32(self.cmd_buf_virt + 40, self.resource_id)
+        mmio_write32(self.cmd_buf_virt + 44, 0)             # padding
+        self._send_command(FLUSH_SIZE, CTRL_HDR_SIZE)
+
+    me flush_rect(x: u32, y: u32, w: u32, h: u32):
+        """Flush a rectangular region of the framebuffer to the display.
+
+        More efficient than full flush when only a small area changed.
+        """
+        if not self.initialized:
+            return
+
+        # Clamp to display bounds
+        var rw: u32 = w
+        var rh: u32 = h
+        if x + rw > self.width:
+            rw = self.width - x
+        if y + rh > self.height:
+            rh = self.height - y
+
+        # TRANSFER_TO_HOST_2D for the region
+        val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D)
+        mmio_write32(self.cmd_buf_virt + 24, x)
+        mmio_write32(self.cmd_buf_virt + 28, y)
+        mmio_write32(self.cmd_buf_virt + 32, rw)
+        mmio_write32(self.cmd_buf_virt + 36, rh)
+        mmio_write64(self.cmd_buf_virt + 40, offset)
+        mmio_write32(self.cmd_buf_virt + 48, self.resource_id)
+        mmio_write32(self.cmd_buf_virt + 52, 0)
+        self._send_command(TRANSFER_SIZE, CTRL_HDR_SIZE)
+
+        # RESOURCE_FLUSH for the region
+        self._write_ctrl_hdr(VIRTIO_GPU_CMD_RESOURCE_FLUSH)
+        mmio_write32(self.cmd_buf_virt + 24, x)
+        mmio_write32(self.cmd_buf_virt + 28, y)
+        mmio_write32(self.cmd_buf_virt + 32, rw)
+        mmio_write32(self.cmd_buf_virt + 36, rh)
+        mmio_write32(self.cmd_buf_virt + 40, self.resource_id)
+        mmio_write32(self.cmd_buf_virt + 44, 0)
+        self._send_command(FLUSH_SIZE, CTRL_HDR_SIZE)
+
+    # ========================================================================
+    # Pixel Drawing
+    # ========================================================================
+
+    me put_pixel(x: u32, y: u32, color: u32):
+        """Write a single pixel to the framebuffer (BGRA format).
+
+        Color format: 0xAARRGGBB (alpha in high byte, blue in low byte).
+        Does not flush — call flush() or flush_rect() after drawing.
+        """
+        if x < self.width and y < self.height:
+            val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+            mmio_write32(self.fb_virt + offset, color)
+
+    me fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
+        """Fill a rectangle in the framebuffer with a solid color.
+
+        Does not flush — call flush() or flush_rect() after drawing.
+        """
+        var py: u32 = y
+        while py < y + h and py < self.height:
+            var px: u32 = x
+            while px < x + w and px < self.width:
+                val offset = ((py as u64) * (self.width as u64) + (px as u64)) * 4
+                mmio_write32(self.fb_virt + offset, color)
+                px = px + 1
+            py = py + 1
+
+    me clear(color: u32):
+        """Fill the entire framebuffer with a solid color."""
+        var y: u32 = 0
+        while y < self.height:
+            var x: u32 = 0
+            while x < self.width:
+                val offset = ((y as u64) * (self.width as u64) + (x as u64)) * 4
+                mmio_write32(self.fb_virt + offset, color)
+                x = x + 1
+            y = y + 1
+
+    me draw_hline(x: u32, y: u32, length: u32, color: u32):
+        """Draw a horizontal line."""
+        if y >= self.height:
+            return
+        var px: u32 = x
+        while px < x + length and px < self.width:
+            val offset = ((y as u64) * (self.width as u64) + (px as u64)) * 4
+            mmio_write32(self.fb_virt + offset, color)
+            px = px + 1
+
+    me draw_vline(x: u32, y: u32, length: u32, color: u32):
+        """Draw a vertical line."""
+        if x >= self.width:
+            return
+        var py: u32 = y
+        while py < y + length and py < self.height:
+            val offset = ((py as u64) * (self.width as u64) + (x as u64)) * 4
+            mmio_write32(self.fb_virt + offset, color)
+            py = py + 1
+
+    me draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
+        """Draw an unfilled rectangle (border only)."""
+        self.draw_hline(x, y, w, color)             # top
+        self.draw_hline(x, y + h - 1, w, color)    # bottom
+        self.draw_vline(x, y, h, color)             # left
+        self.draw_vline(x + w - 1, y, h, color)    # right
+
+    # ========================================================================
+    # Query
+    # ========================================================================
+
+    fn get_width() -> u32:
+        self.width
+
+    fn get_height() -> u32:
+        self.height
+
+    fn get_fb_virt() -> u64:
+        """Return framebuffer virtual address for direct pixel access."""
+        self.fb_virt
+
+    fn get_fb_phys() -> u64:
+        self.fb_phys
+
+    fn get_fb_size() -> u64:
+        self.fb_size
+
+    fn is_initialized() -> bool:
+        self.initialized

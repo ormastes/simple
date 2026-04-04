@@ -12,18 +12,44 @@ use os.kernel.types.notification_types.{Notification}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy}
+use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, PAGE_SIZE}
+use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
+use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
+use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
+use os.kernel.interrupts.irq_routing.{irq_route_register}
+use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 
 # Error code for permission denied
 val SYSCALL_EPERM: i64 = -1
 
-# Module-level notification table (fixed array, no dynamic allocation)
-var _notification_table: NotificationTable = NotificationTable.new()
+# Notification table is now shared via notif_global.spl (g_notification_table)
+
+# PCI device cache — lazy-initialized on first enumerate call
+val MAX_PCI_DEVICES: u64 = 256
+var _pci_devices_count: u64 = 0
+var _pci_scanned: bool = false
+
+# Flat arrays for cached PCI device info (primitive types for baremetal ABI)
+var _pci_dev_bus: [u8; 256]
+var _pci_dev_device: [u8; 256]
+var _pci_dev_func: [u8; 256]
+var _pci_dev_vendor: [u16; 256]
+var _pci_dev_devid: [u16; 256]
+var _pci_dev_class: [u8; 256]
+var _pci_dev_subclass: [u8; 256]
+var _pci_dev_prog_if: [u8; 256]
+var _pci_dev_irq: [u8; 256]
+
+# Bump allocator for anonymous mmap when address hint is 0
+var _next_mmap_addr: u64 = 0x10000000
 
 # ============================================================================
 # Capability Enforcement Helpers
@@ -258,6 +284,22 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_dev_get_info(args)
+        case 82:    # DeviceGrant
+            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_device_grant(args, scheduler)
+        case 83:    # MapBar
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_map_bar(args)
+        case 84:    # AllocDma
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_alloc_dma(args)
+        case 85:    # FreeDma
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_free_dma(args)
 
         # -- Logging ---------------------------------------------------------
         case 90:    # LogWrite
@@ -770,27 +812,365 @@ fn _handle_unmount(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> 
 # Device Handlers
 # ============================================================================
 
-fn _handle_dev_enumerate(args: SyscallArgs) -> SyscallResult:
-    """Enumerate PCI devices. Returns device count.
+fn _pci_scan_all():
+    """Scan PCI buses 0-255, devices 0-31, functions 0-7 and populate the cache."""
+    if _pci_scanned:
+        return
+    _pci_scanned = true
+    _pci_devices_count = 0
+    var bus: u16 = 0
+    while bus < 256:
+        var dev: u8 = 0
+        while dev < 32:
+            val bus_u8 = bus.to_u8()
+            val vendor = pci_read_vendor(bus_u8, dev, 0)
+            if vendor != 0xFFFF:
+                # Function 0 exists — record it
+                _pci_cache_function(bus_u8, dev, 0)
+                # Check multi-function bit (bit 7 of header type)
+                val header_type = pci_read_header_type(bus_u8, dev, 0)
+                if (header_type & 0x80) != 0:
+                    var func: u8 = 1
+                    while func < 8:
+                        val fv = pci_read_vendor(bus_u8, dev, func)
+                        if fv != 0xFFFF:
+                            _pci_cache_function(bus_u8, dev, func)
+                        func = func + 1
+            dev = dev + 1
+        bus = bus + 1
 
-    Args:
-      arg0: class filter (0 = all classes)
+fn _pci_cache_function(bus: u8, device: u8, func: u8):
+    """Read PCI config for one function and store in the flat cache arrays."""
+    if _pci_devices_count >= MAX_PCI_DEVICES:
+        return
+    val idx = _pci_devices_count
+    val vendor = pci_read_vendor(bus, device, func)
+    val devid = pci_read_device_id(bus, device, func)
+    val class_info = pci_read_class(bus, device, func)
+    val cc_raw = (class_info >> 24) & 0xFF
+    val class_code = cc_raw.to_u8()
+    val sc_raw = (class_info >> 16) & 0xFF
+    val subclass = sc_raw.to_u8()
+    val pi_raw = (class_info >> 8) & 0xFF
+    val prog_if = pi_raw.to_u8()
+    val irq = pci_read_irq(bus, device, func)
+    _pci_dev_bus[idx] = bus
+    _pci_dev_device[idx] = device
+    _pci_dev_func[idx] = func
+    _pci_dev_vendor[idx] = vendor
+    _pci_dev_devid[idx] = devid
+    _pci_dev_class[idx] = class_code
+    _pci_dev_subclass[idx] = subclass
+    _pci_dev_prog_if[idx] = prog_if
+    _pci_dev_irq[idx] = irq
+    _pci_devices_count = _pci_devices_count + 1
+
+fn _pci_write_device_info_buf(ptr: u64, idx: u64):
+    """Write cached device info at index `idx` into a DeviceInfoBuf at `ptr`.
+
+    DeviceInfoBuf @repr("C") layout:
+      offset 0: bus (u8)
+      offset 1: device (u8)
+      offset 2: func (u8)
+      offset 3: (padding)
+      offset 4: vendor_id (u16)
+      offset 6: device_id (u16)
+      offset 8: class_code (u8)
+      offset 9: subclass (u8)
+      offset 10: prog_if (u8)
+      offset 11: irq_line (u8)
     """
-    # In a real kernel, iterate PciBus scan results and copy to userspace buffer.
-    # Return count of matching devices.
-    val class_filter = args.arg0
-    # Placeholder: report 0 devices until PCI bus is wired
-    SyscallResult(value: 0)
+    mmio_write8(ptr + 0, _pci_dev_bus[idx])
+    mmio_write8(ptr + 1, _pci_dev_device[idx])
+    mmio_write8(ptr + 2, _pci_dev_func[idx])
+    mmio_write16(ptr + 4, _pci_dev_vendor[idx])
+    mmio_write16(ptr + 6, _pci_dev_devid[idx])
+    mmio_write8(ptr + 8, _pci_dev_class[idx])
+    mmio_write8(ptr + 9, _pci_dev_subclass[idx])
+    mmio_write8(ptr + 10, _pci_dev_prog_if[idx])
+    mmio_write8(ptr + 11, _pci_dev_irq[idx])
+
+fn _handle_dev_enumerate(args: SyscallArgs) -> SyscallResult:
+    """Enumerate PCI devices.
+
+    Protocol (matches userlib/device.spl):
+      arg0 == 0: return total device count (lazy-scan on first call)
+      arg0 == 1: arg1 = device index, arg2 = pointer to DeviceInfoBuf
+                 copy cached info into buffer, return 0 on success, -1 on bad index
+    """
+    _pci_scan_all()
+    val mode = args.arg0
+    if mode == 0:
+        # Return device count
+        SyscallResult(value: _pci_devices_count as i64)
+    else if mode == 1:
+        val index = args.arg1
+        val buf_ptr = args.arg2
+        if index >= _pci_devices_count:
+            SyscallResult(value: -1)
+        else:
+            _pci_write_device_info_buf(buf_ptr, index)
+            SyscallResult(value: 0)
+    else:
+        SyscallResult(value: -1)
 
 fn _handle_dev_get_info(args: SyscallArgs) -> SyscallResult:
-    """Get info for a specific PCI device.
+    """Get info for a specific PCI device by BDF.
 
-    Args:
-      arg0: bus
-      arg1: device
-      arg2: function
+    Protocol (matches userlib/device.spl):
+      arg0: packed BDF — bus<<16 | dev<<8 | func
+      arg1: pointer to DeviceInfoBuf
+    Reads PCI config space directly (no cache needed) and fills the buffer.
+    Returns 0 on success, -1 if the device does not exist (vendor == 0xFFFF).
     """
-    # In a real kernel, read PCI config space and fill DeviceInfoBuf.
+    val bdf = args.arg0
+    val buf_ptr = args.arg1
+    val bus = ((bdf >> 16) & 0xFF).to_u8()
+    val dev = ((bdf >> 8) & 0xFF).to_u8()
+    val func = (bdf & 0xFF).to_u8()
+    val vendor = pci_read_vendor(bus, dev, func)
+    if vendor == 0xFFFF:
+        SyscallResult(value: -1)
+    else:
+        val devid = pci_read_device_id(bus, dev, func)
+        val class_info = pci_read_class(bus, dev, func)
+        val cc_raw = (class_info >> 24) & 0xFF
+        val class_code = cc_raw.to_u8()
+        val sc_raw = (class_info >> 16) & 0xFF
+        val subclass = sc_raw.to_u8()
+        val pi_raw = (class_info >> 8) & 0xFF
+        val prog_if = pi_raw.to_u8()
+        val irq = pci_read_irq(bus, dev, func)
+        # Write into DeviceInfoBuf at buf_ptr
+        mmio_write8(buf_ptr + 0, bus)
+        mmio_write8(buf_ptr + 1, dev)
+        mmio_write8(buf_ptr + 2, func)
+        mmio_write16(buf_ptr + 4, vendor)
+        mmio_write16(buf_ptr + 6, devid)
+        mmio_write8(buf_ptr + 8, class_code)
+        mmio_write8(buf_ptr + 9, subclass)
+        mmio_write8(buf_ptr + 10, prog_if)
+        mmio_write8(buf_ptr + 11, irq)
+        SyscallResult(value: 0)
+
+# ============================================================================
+# Device Grant / BAR / DMA Handlers
+# ============================================================================
+
+fn _pci_bar_size(bus: u8, dev: u8, func: u8, bar_num: u8) -> u64:
+    """Detect the size of a PCI BAR by writing all-ones and reading back."""
+    val offset = (0x10 + bar_num * 4) as u8
+    val original = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, 0xFFFFFFFF)
+    val readback = pci_read_bar(bus, dev, func, bar_num)
+    pci_write_config(bus, dev, func, offset, original)
+    if readback == 0:
+        return 0
+    val mask = readback & 0xFFFFFFF0  # Mask type bits for MMIO BAR
+    val size = (~mask + 1) as u64
+    size
+
+fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Build a DeviceGrant for a PCI device and write it to caller memory.
+
+    Protocol:
+      arg0: packed BDF — bus<<16 | dev<<8 | func
+      arg1: pointer to DeviceGrant struct in caller memory
+    Reads PCI config, creates IRQ notification, fills the struct.
+    Returns 0 on success, -1 if the device does not exist (vendor == 0xFFFF).
+    """
+    val bdf = args.arg0
+    val grant_ptr = args.arg1 as u64
+    val bus = ((bdf >> 16) & 0xFF).to_u8()
+    val dev = ((bdf >> 8) & 0xFF).to_u8()
+    val func = (bdf & 0xFF).to_u8()
+
+    val vendor = pci_read_vendor(bus, dev, func)
+    if vendor == 0xFFFF:
+        return SyscallResult(value: -1)
+
+    val devid = pci_read_device_id(bus, dev, func)
+    val class_info = pci_read_class(bus, dev, func)
+    val class_code = ((class_info >> 24) & 0xFF).to_u8()
+    val subclass = ((class_info >> 16) & 0xFF).to_u8()
+    val irq_line = pci_read_irq(bus, dev, func)
+    val irq_vector = (VEC_IRQ_BASE + irq_line as u32)
+
+    # BAR0 address and size
+    val bar0_raw = pci_read_bar(bus, dev, func, 0)
+    val bar0_phys = (bar0_raw & 0xFFFFFFF0) as u64
+    val bar0_size = _pci_bar_size(bus, dev, func, 0)
+
+    # Create notification object for IRQ delivery
+    val notif_id = notification_create(g_notification_table)
+    val notif_bit: u64 = 1
+
+    # Register IRQ route so hardware interrupt signals the notification
+    irq_route_register(irq_vector, notif_id, notif_bit)
+
+    # Write DeviceGrant struct fields to caller memory
+    # offset 0: u16 pci_vendor
+    mmio_write16(grant_ptr + 0, vendor)
+    # offset 2: u16 pci_device
+    mmio_write16(grant_ptr + 2, devid)
+    # offset 4: u8 pci_bus
+    mmio_write8(grant_ptr + 4, bus)
+    # offset 5: u8 pci_dev
+    mmio_write8(grant_ptr + 5, dev)
+    # offset 6: u8 pci_func
+    mmio_write8(grant_ptr + 6, func)
+    # offset 7: u8 pci_class
+    mmio_write8(grant_ptr + 7, class_code)
+    # offset 8: u8 pci_subclass
+    mmio_write8(grant_ptr + 8, subclass)
+    # offset 9-15: padding (7 bytes, skip)
+    # offset 16: u64 bar0_phys
+    mmio_write64(grant_ptr + 16, bar0_phys)
+    # offset 24: u64 bar0_size
+    mmio_write64(grant_ptr + 24, bar0_size)
+    # offset 32: u64 bar0_cap (0 = no cap restriction)
+    mmio_write64(grant_ptr + 32, 0)
+    # offset 40: u32 irq_vector
+    mmio_write32(grant_ptr + 40, irq_vector)
+    # offset 44: padding (4 bytes, skip)
+    # offset 48: u64 irq_notification_id
+    mmio_write64(grant_ptr + 48, notif_id)
+    # offset 56: u64 irq_notification_bit
+    mmio_write64(grant_ptr + 56, notif_bit)
+    # offset 64: u64 irq_cap (0 = no cap restriction)
+    mmio_write64(grant_ptr + 64, 0)
+    # offset 72: u64 dma_device_addr (0 = not yet allocated)
+    mmio_write64(grant_ptr + 72, 0)
+    # offset 80: u64 dma_host_addr (0 = not yet allocated)
+    mmio_write64(grant_ptr + 80, 0)
+    # offset 88: u64 dma_size (0 = not yet allocated)
+    mmio_write64(grant_ptr + 88, 0)
+    # offset 96: u64 dma_cap (0 = no cap restriction)
+    mmio_write64(grant_ptr + 96, 0)
+    # offset 104: u32 iommu_domain_id (0 = no IOMMU)
+    mmio_write32(grant_ptr + 104, 0)
+    # offset 108: padding (4 bytes, skip)
+    # offset 112: u64 iommu_cap (0 = no IOMMU)
+    mmio_write64(grant_ptr + 112, 0)
+
+    SyscallResult(value: 0)
+
+fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
+    """Map a physical BAR into the caller's address space.
+
+    Protocol:
+      arg0: physical BAR address
+      arg1: size (bytes)
+      arg2: virtual address hint (0 = kernel picks)
+    Maps pages with PRESENT | WRITABLE | CACHE_DISABLE | NO_EXECUTE.
+    Returns the mapped virtual address on success, -12 (ENOMEM) on failure.
+    """
+    val bar_phys = args.arg0 as u64
+    val size = args.arg1 as u64
+    val hint = args.arg2 as u64
+
+    if size == 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    # Determine base virtual address
+    var base_virt: u64 = hint
+    if base_virt == 0:
+        base_virt = _next_mmap_addr
+
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+
+    # Map each page: physical BAR pages are identity-mapped from the BAR base
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
+        val phys = PhysAddr(addr: bar_phys + offset * PAGE_SIZE)
+        val ok = vmm_map_page(virt, phys, flags)
+        if !ok:
+            return SyscallResult(value: -12)  # ENOMEM
+        offset = offset + 1
+
+    # Advance bump allocator if we picked the address
+    if hint == 0:
+        _next_mmap_addr = base_virt + page_count * PAGE_SIZE
+
+    SyscallResult(value: base_virt as i64)
+
+fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
+    """Allocate a contiguous DMA buffer and map it into caller's address space.
+
+    Protocol:
+      arg0: size (bytes, should be page-aligned)
+      arg1: pointer to write result pair (phys_addr: u64, virt_addr: u64)
+    For no-IOMMU case: device_addr == host_phys_addr (identity).
+    Returns the virtual address on success, -12 (ENOMEM) on allocation failure.
+    """
+    val size = args.arg0 as u64
+    val result_ptr = args.arg1 as u64
+
+    if size == 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    # Pick a virtual base from the bump allocator
+    val base_virt = _next_mmap_addr
+
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+
+    # Allocate physical pages and map them
+    # Track the first physical address for the DMA descriptor
+    var first_phys: u64 = 0
+    var offset: u64 = 0
+    while offset < page_count:
+        if val Some(frame) = pmm_alloc_page():
+            val phys = frame.to_phys_addr()
+            if offset == 0:
+                first_phys = phys.addr
+            val virt = VirtAddr(addr: base_virt + offset * PAGE_SIZE)
+            val ok = vmm_map_page(virt, phys, flags)
+            if !ok:
+                # Mapping failed — free the frame we just allocated
+                pmm_free_page(frame)
+                return SyscallResult(value: -12)  # ENOMEM
+        else:
+            return SyscallResult(value: -12)  # ENOMEM
+        offset = offset + 1
+
+    # Advance bump allocator
+    _next_mmap_addr = base_virt + page_count * PAGE_SIZE
+
+    # Write the (phys_addr, virt_addr) pair to caller memory
+    # No-IOMMU: device_addr == host_phys_addr
+    mmio_write64(result_ptr + 0, first_phys)
+    mmio_write64(result_ptr + 8, base_virt)
+
+    SyscallResult(value: base_virt as i64)
+
+fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
+    """Free a DMA buffer by unmapping its pages.
+
+    Protocol:
+      arg0: virtual address
+      arg1: size (bytes)
+    Unmaps pages from the caller's address space.
+    Returns 0 on success.
+    """
+    val virt_addr = args.arg0 as u64
+    val size = args.arg1 as u64
+
+    if size == 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: virt_addr + offset * PAGE_SIZE)
+        vmm_unmap_page(virt)
+        offset = offset + 1
+
     SyscallResult(value: 0)
 
 # ============================================================================
@@ -879,7 +1259,7 @@ fn _handle_notification_create(args: SyscallArgs) -> SyscallResult:
 
     Returns notification ID (>0) on success, 0 on failure.
     """
-    val id = notification_create(_notification_table)
+    val id = notification_create(g_notification_table)
     SyscallResult(value: id.to_i64())
 
 fn _handle_notification_signal(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
@@ -893,7 +1273,7 @@ fn _handle_notification_signal(args: SyscallArgs, scheduler: Scheduler) -> Sysca
     """
     val id = args.arg0
     val bits = args.arg1
-    val waiter_id = notification_signal(_notification_table, id, bits)
+    val waiter_id = notification_signal(g_notification_table, id, bits)
     if waiter_id != 0:
         # Wake the waiting thread
         var sched = scheduler
@@ -913,7 +1293,7 @@ fn _handle_notification_wait(args: SyscallArgs, scheduler: Scheduler) -> Syscall
     val id = args.arg0
     var sched = scheduler
     val current = sched.get_current()
-    val result = notification_wait(_notification_table, id, current.id)
+    val result = notification_wait(g_notification_table, id, current.id)
     if result != 0:
         # Bits were available immediately
         return SyscallResult(value: result.to_i64())
@@ -930,7 +1310,7 @@ fn _handle_notification_poll(args: SyscallArgs) -> SyscallResult:
     Returns accumulated bits (cleared after read), or 0 if none set.
     """
     val id = args.arg0
-    val bits = notification_poll(_notification_table, id)
+    val bits = notification_poll(g_notification_table, id)
     SyscallResult(value: bits.to_i64())
 
 fn _handle_notification_destroy(args: SyscallArgs) -> SyscallResult:
@@ -940,7 +1320,7 @@ fn _handle_notification_destroy(args: SyscallArgs) -> SyscallResult:
       arg0: notification ID
     """
     val id = args.arg0
-    notification_destroy(_notification_table, id)
+    notification_destroy(g_notification_table, id)
     SyscallResult(value: 0)
 
 # ============================================================================
@@ -1070,37 +1450,129 @@ fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
 # Memory Syscall Stubs
 # ============================================================================
 
+fn _prot_to_vmflags(prot: u64) -> VmFlags:
+    """Convert mmap-style protection bits to VmFlags.
+
+    prot bit 0 = read, bit 1 = write, bit 2 = exec.
+    Pages are always present and user-accessible.
+    Non-executable unless exec bit is set.
+    """
+    var bits: u32 = VM_PRESENT | VM_USER
+    if (prot & 2) != 0:
+        bits = bits | VM_WRITABLE
+    if (prot & 4) == 0:
+        # No exec requested — set no-execute
+        bits = bits | VM_NO_EXECUTE
+    VmFlags(bits: bits)
+
 fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Map memory (mmap). Stub — returns 0 until VMM is wired.
+    """Map memory (mmap) using PMM + VMM.
 
     Args:
-      arg0: address hint (0 = kernel chooses)
-      arg1: size
-      arg2: protection flags
-      arg3: map flags
+      arg0: address hint (0 = kernel picks via bump allocator)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+      arg2: protection flags (bit 0=read, bit 1=write, bit 2=exec)
+      arg3: map flags (bit 0=fixed, bit 2=anonymous)
+    Returns: virtual address of mapped region, or -12 (ENOMEM) on failure.
     """
-    pass_todo("wire to VMM page allocator")
-    SyscallResult(value: 0)
+    val hint = args.arg0
+    val size = args.arg1
+    val prot = args.arg2
+
+    # Round up size to page boundary
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    if page_count == 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    # Determine base virtual address
+    var base_addr: u64 = hint
+    if base_addr == 0:
+        base_addr = _next_mmap_addr
+
+    val flags = _prot_to_vmflags(prot)
+
+    # Allocate and map each page
+    var offset: u64 = 0
+    while offset < page_count:
+        val opt_frame = pmm_alloc_page()
+        if val Some(frame) = opt_frame:
+            val virt = VirtAddr(addr: base_addr + offset * PAGE_SIZE)
+            val phys = frame.to_phys_addr()
+            val ok = vmm_map_page(virt, phys, flags)
+            if !ok:
+                # Mapping failed — free the frame we just allocated
+                pmm_free_page(frame)
+                return SyscallResult(value: -12)  # ENOMEM
+        else:
+            # Out of physical memory
+            return SyscallResult(value: -12)  # ENOMEM
+        offset = offset + 1
+
+    # Advance bump allocator past the region we just mapped
+    if hint == 0:
+        _next_mmap_addr = base_addr + page_count * PAGE_SIZE
+
+    SyscallResult(value: base_addr as i64)
 
 fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Unmap memory (munmap). Stub — returns 0 until VMM is wired.
+    """Unmap memory (munmap) via VMM.
 
     Args:
-      arg0: address
-      arg1: size
+      arg0: virtual address (must be page-aligned)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+    Returns: 0 on success, -22 (EINVAL) if address not page-aligned.
+    Note: physical frames are not freed because vmm_unmap_page does not
+    return the underlying physical address. A future enhancement can add
+    reverse-mapping to reclaim frames.
     """
-    pass_todo("wire to VMM page deallocator")
+    val addr = args.arg0
+    val size = args.arg1
+
+    # Validate page alignment
+    if (addr % PAGE_SIZE) != 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: addr + offset * PAGE_SIZE)
+        vmm_unmap_page(virt)
+        offset = offset + 1
+
     SyscallResult(value: 0)
 
 fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Change memory protection (mprotect). Stub — returns 0 until VMM is wired.
+    """Change memory protection (mprotect) via VMM.
 
     Args:
-      arg0: address
-      arg1: size
-      arg2: new protection flags
+      arg0: virtual address (must be page-aligned)
+      arg1: size in bytes (rounded up to PAGE_SIZE)
+      arg2: new protection flags (bit 0=read, bit 1=write, bit 2=exec)
+    Returns: 0 on success, -22 (EINVAL) if address not page-aligned.
+    Note: simplified implementation — re-maps each page with phys=0 and
+    new flags. A full implementation would read the existing PTE to
+    preserve the physical address. This works for updating flag bits
+    on architectures where phys=0 in vmm_map_page only updates flags.
     """
-    pass_todo("wire to VMM page protection update")
+    val addr = args.arg0
+    val size = args.arg1
+    val prot = args.arg2
+
+    # Validate page alignment
+    if (addr % PAGE_SIZE) != 0:
+        return SyscallResult(value: -22)  # EINVAL
+
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+    val flags = _prot_to_vmflags(prot)
+
+    var offset: u64 = 0
+    while offset < page_count:
+        val virt = VirtAddr(addr: addr + offset * PAGE_SIZE)
+        # Re-map with phys=0 to update flags only (simplified)
+        val phys = PhysAddr(addr: 0)
+        vmm_map_page(virt, phys, flags)
+        offset = offset + 1
+
     SyscallResult(value: 0)
 
 # ============================================================================

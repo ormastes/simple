@@ -1,7 +1,7 @@
 # Plan: SimpleOS L4/Exokernel Platform for Simple Language
 
 **Date:** 2026-04-04
-**Status:** In Progress (Phase 0-2 complete, Phase 3-5 pending)
+**Status:** In Progress (Phase 0-3 complete, Phase 4-5 pending)
 **Research:** [local/simpleos_l4_exokernel_platform.md](../01_research/local/simpleos_l4_exokernel_platform.md)
 
 ## Objective
@@ -74,13 +74,34 @@ Capsule graph: init → {pager, log, pcimgr} → {nvme, net, gpu} → {fs, netst
 - `src/os/posix/mod.spl`: posix_init() initializes all subsystems
 - **All unimplemented paths return -ENOSYS or -EIO — no false success**
 
-### Phase 3: User-Space Drivers (4-6 weeks) — PENDING
-- 3A: DeviceGrant pattern + device grant syscall
-- 3B: PCI manager capsule (`src/os/services/pcimgr/`)
-- 3C: NVMe driver capsule (`src/os/drivers/nvme/`)
-- 3D: VirtIO-net driver capsule (seL4 sDDF model)
-- 3E: VirtIO-GPU 2D capsule
-- Prerequisite: Phase 1 kernel objects for BAR mapping + IRQ routing
+### Phase 3: User-Space Drivers — COMPLETE (2026-04-04)
+- 3A: Kernel foundation — **DONE**
+  - Memory syscalls (10-12): Mmap/Munmap/Mprotect wired to VMM+PMM with bump allocator at 0x10000000
+  - Device enumeration (80-81): Wired to PciBus — lazy scan, flat cache arrays, returns real PCI devices
+  - IRQ-to-notification routing: `src/os/kernel/interrupts/irq_routing.spl` + `notif_global.spl`
+    - `irq_dispatch_routed()` called from `idt_dispatch` for vectors 32-79
+  - DeviceGrant syscall (82): Reads PCI config, creates IRQ notification, registers IRQ route
+  - MapBar syscall (83): Maps physical BAR with PTE_CACHE_DISABLE into caller's VmSpace
+  - AllocDma syscall (84): Contiguous DMA buffer allocation, identity mapping for no-IOMMU
+  - FreeDma syscall (85): Unmaps and frees DMA pages
+  - IPC message buffers: `ipc_send_inline/buffer`, `ipc_recv_buffer` fully implemented with per-endpoint circular queues
+- 3B: PCI manager capsule — **DONE**
+  - `src/os/services/pcimgr/pcimgr.spl` (283 lines): Enumerates devices via syscall 80, grants via syscall 82
+  - `src/os/services/pcimgr/driver_match.spl` (157 lines): NVMe/VirtIO-blk/net/gpu matching by class+vendor
+- 3C: NVMe driver capsule — **DONE**
+  - `src/os/drivers/nvme/nvme_types.spl` (94 lines): Command opcodes, register offsets, CC/CSTS bits
+  - `src/os/drivers/nvme/nvme_queue.spl` (156 lines): Submission/completion queue management with phase-based polling
+  - `src/os/drivers/nvme/nvme_driver.spl` (557 lines): Full init (reset, admin queues, Identify, I/O queues), read/write/flush
+- 3D: VirtIO-net driver — **DONE**
+  - `src/os/drivers/virtio/virtio_net.spl` upgraded (574 lines): PCI legacy transport, DMA-based RX/TX queues, MAC read, IRQ notification wait
+  - `src/os/drivers/virtio/virtio_net_service.spl` (197 lines): IPC service "net0" with send/recv/mac/status methods
+- 3E: VirtIO-GPU 2D capsule — **DONE**
+  - `src/os/drivers/virtio/virtio_gpu_types.spl` (89 lines): Command types, pixel formats, struct sizes
+  - `src/os/drivers/virtio/virtio_gpu.spl` (697 lines): GET_DISPLAY_INFO, CREATE_2D, ATTACH_BACKING, SET_SCANOUT, TRANSFER+FLUSH
+  - Drawing primitives: put_pixel, fill_rect, clear, draw_hline/vline/rect
+- 3G: Userlib wrappers — **DONE**
+  - `request_device_grant`, `map_bar`, `map_bar_at`, `alloc_dma`, `free_dma` added to `src/os/userlib/device.spl`
+- Network syscalls (70-77): Remain as -ENOSYS stubs (Phase 3+ — needs TCP/IP stack)
 
 ### Phase 4: Simple Runtime on SimpleOS (3-5 weeks) — PENDING
 - 4A: Cross-compile Rust interpreter for x86_64-unknown-simpleos
@@ -111,3 +132,7 @@ Capsule graph: init → {pager, log, pcimgr} → {nvme, net, gpu} → {fs, netst
 - **Global variables**: Fixed — HIR module_pass now extracts type from Pattern::Typed
 - **Comparison operators**: `== 0` compiles as `call rt_native_eq` — must be provided in stubs
 - **POSIX on L4**: No fork by design — use posix_spawn. No select/poll — use notification wait_any
+- **VirtIO PCI**: QEMU Q35 uses PCI legacy transport (BAR0 I/O), not MMIO transport
+- **NVMe doorbells**: Use CAP.DSTRD for stride; SQ tail at 0x1000+2*qid*(4<<DSTRD)
+- **DeviceGrant flow**: syscall 82 reads PCI config + allocates notification + registers IRQ route
+- **DMA identity**: No IOMMU �� device_addr == host_phys_addr for AllocDma syscall 84

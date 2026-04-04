@@ -1,0 +1,156 @@
+# NVMe Queue Pair -- Submission/Completion Queue Management
+#
+# MDSOC: feature dimension, drivers layer
+# Manages paired submission and completion queues for NVMe communication.
+#
+# NVMe uses ring buffers with doorbell registers for producer/consumer sync:
+#   - Host writes SQEs to submission queue, rings SQ tail doorbell
+#   - Controller reads SQEs, posts CQEs to completion queue
+#   - Host reads CQEs, rings CQ head doorbell
+#   - Phase bit in CQE toggles on each wrap to distinguish new entries
+
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_write64}
+use os.drivers.nvme.nvme_types.{SQE_SIZE, CQE_SIZE}
+
+# ============================================================================
+# NVMe Queue Pair
+# ============================================================================
+
+struct NvmeQueuePair:
+    """Paired submission/completion queue for NVMe commands.
+
+    Each queue pair has its own doorbell registers for SQ tail and CQ head.
+    The phase bit in CQE status word toggles on each wrap of the CQ.
+    """
+    sq_phys: u64        # Submission queue physical address (for DMA)
+    sq_virt: u64        # Submission queue virtual address (for CPU access)
+    cq_phys: u64        # Completion queue physical address
+    cq_virt: u64        # Completion queue virtual address
+    depth: u16          # Number of entries in each queue
+    sq_tail: u16        # Next SQ slot to write (producer index)
+    cq_head: u16        # Next CQ slot to read (consumer index)
+    phase: u8           # Expected phase tag (0 or 1, toggles on CQ wrap)
+    qid: u16            # Queue pair ID (0 = admin, 1+ = I/O)
+    sq_doorbell: u64    # Virtual address of SQ tail doorbell register
+    cq_doorbell: u64    # Virtual address of CQ head doorbell register
+    next_cmd_id: u16    # Next command ID to assign
+
+impl NvmeQueuePair:
+    static fn new(qid: u16, depth: u16) -> NvmeQueuePair:
+        """Create an uninitialized queue pair. Addresses must be set before use."""
+        NvmeQueuePair(
+            sq_phys: 0,
+            sq_virt: 0,
+            cq_phys: 0,
+            cq_virt: 0,
+            depth: depth,
+            sq_tail: 0,
+            cq_head: 0,
+            phase: 1,
+            qid: qid,
+            sq_doorbell: 0,
+            cq_doorbell: 0,
+            next_cmd_id: 0
+        )
+
+    me submit_command(opcode: u8, nsid: u32, prp1: u64, prp2: u64, cdw10: u32, cdw11: u32, cdw12: u32) -> u16:
+        """Submit a command to the submission queue. Returns assigned command ID.
+
+        Builds a 64-byte SQE at the current tail position:
+          DW0: opcode[7:0] | flags[15:8] | command_id[31:16]
+          DW1: NSID
+          DW2-3: reserved
+          DW4-5: metadata pointer (unused)
+          DW6-7: PRP1 (data pointer 1)
+          DW8-9: PRP2 (data pointer 2 / PRP list)
+          DW10-15: command-specific dwords
+        """
+        val cmd_id = self.next_cmd_id
+        val tail_u64 = self.sq_tail.to_u64()
+        val entry_addr = self.sq_virt + tail_u64 * SQE_SIZE
+
+        # DW0: opcode (byte 0), flags=0 (byte 1), command_id (bytes 2-3)
+        val dw0 = opcode.to_u32() | (cmd_id.to_u32() << 16)
+        mmio_write32(entry_addr, dw0)
+        # DW1: Namespace ID
+        mmio_write32(entry_addr + 4, nsid)
+        # DW2-3: reserved
+        mmio_write32(entry_addr + 8, 0)
+        mmio_write32(entry_addr + 12, 0)
+        # DW4-5: metadata pointer (not used)
+        mmio_write64(entry_addr + 16, 0)
+        # DW6-7: PRP1
+        mmio_write64(entry_addr + 24, prp1)
+        # DW8-9: PRP2
+        mmio_write64(entry_addr + 32, prp2)
+        # DW10-15: command-specific
+        mmio_write32(entry_addr + 40, cdw10)
+        mmio_write32(entry_addr + 44, cdw11)
+        mmio_write32(entry_addr + 48, cdw12)
+        mmio_write32(entry_addr + 52, 0)
+        mmio_write32(entry_addr + 56, 0)
+        mmio_write32(entry_addr + 60, 0)
+
+        # Advance tail (wraps at depth)
+        self.sq_tail = (self.sq_tail + 1) % self.depth
+        # Ring SQ tail doorbell
+        mmio_write32(self.sq_doorbell, self.sq_tail.to_u32())
+
+        self.next_cmd_id = self.next_cmd_id + 1
+        cmd_id
+
+    me poll_completion() -> bool:
+        """Poll for one completion entry. Returns true if a new CQE was consumed.
+
+        Checks the phase bit in the CQE status word (DW3, bit 16).
+        The controller sets the phase bit to match the expected phase.
+        On each full wrap of the CQ, the expected phase toggles.
+        """
+        val head_u64 = self.cq_head.to_u64()
+        val entry_addr = self.cq_virt + head_u64 * CQE_SIZE
+        # DW3 of CQE: bits[31:17] = status, bit[16] = phase, bits[15:0] = command_id
+        val dw3 = mmio_read32(entry_addr + 12)
+        val phase_bit = (dw3 >> 16) & 1
+        val phase_u32 = self.phase.to_u32()
+        if phase_bit != phase_u32:
+            return false
+
+        # New completion found -- advance head
+        self.cq_head = (self.cq_head + 1) % self.depth
+        if self.cq_head == 0:
+            # Wrapped around -- toggle expected phase
+            if self.phase == 0:
+                self.phase = 1
+            else:
+                self.phase = 0
+
+        # Ring CQ head doorbell to tell controller we consumed this entry
+        mmio_write32(self.cq_doorbell, self.cq_head.to_u32())
+        true
+
+    me get_completion_status() -> u32:
+        """Read the status field from the most recently consumed CQE.
+
+        Must be called after poll_completion() returns true.
+        Returns the full DW3 (status + phase + command_id).
+        """
+        # The CQE we just consumed is at (cq_head - 1), handle wrap
+        var prev_head = self.cq_head
+        if prev_head == 0:
+            prev_head = self.depth
+        prev_head = prev_head - 1
+        val prev_u64 = prev_head.to_u64()
+        val entry_addr = self.cq_virt + prev_u64 * CQE_SIZE
+        mmio_read32(entry_addr + 12)
+
+    me wait_completion(timeout_polls: u32) -> bool:
+        """Spin-poll for a completion entry within timeout.
+
+        Returns true if a completion arrived, false on timeout.
+        """
+        var i: u32 = 0
+        while i < timeout_polls:
+            if self.poll_completion():
+                return true
+            i = i + 1
+        false
