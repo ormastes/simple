@@ -37,16 +37,23 @@ qemu-system-x86_64 -machine q35 -cpu qemu64 -m 512M -serial stdio -display none 
   -kernel build/os/simpleos_fullstack_32.elf
 ```
 
-## Boot Output
+## Boot Output (entry-closure build, 2026-04-05)
 
 ```
 SimpleOS x86_64 boot
 [BOOT] COM1 serial initialized at 115200 baud
-[BOOT] Heap: 200 MB bump allocator
+[BOOT] Heap: 64 MB bump allocator
 [BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)
 [BOOT] Calling spl_start()...
+
+=== SimpleOS Boot ===
+
 FAULT @ 0x0000000000000003
 ```
+
+**Progress:** `os_main()` executes and prints the boot banner via `serial_println`.
+Crash occurs at next call (`posix_init()` or `ShellApp.with_vfs()`) due to undefined
+cross-module symbols not included in the 91-file closure.
 
 ## Root Cause: Undefined Runtime Symbols
 
@@ -63,14 +70,18 @@ The linker silently resolves undefined symbols to 0x0. When `spl_start()` calls 
 
 - C boot stub: Multiboot → 32→64 bit mode switch → serial init → heap init
 - Serial output via COM1
+- **Simple code executes**: `os_main()` runs, prints boot banner
+- `serial_println` wired to C serial output (added to baremetal_stubs.c)
 - QEMU device attachment (NVMe, VirtIO-net visible on PCI bus)
 - Build system: Cranelift cross-compilation to x86_64-unknown-none
+- Entry-closure build: 91 files, 3s, 0 failures (vs 2875 files, 45s full build)
 
 ## What's Blocked
 
-- `spl_start()` crashes immediately due to 1,907 undefined symbols
-- No Simple code executes (os_main, posix_init, init_all_services, etc.)
-- NVMe/VirtIO-net/FAT32/shell/SSH never reached
+- `posix_init()` and `ShellApp.with_vfs()` crash due to cross-module symbols
+  not included in the 91-file closure (POSIX layer, terminal, UI modules)
+- NVMe/VirtIO-net/FAT32 init_all_services() not reached yet
+- Shell/SSH not reached
 
 ## Fix Options
 

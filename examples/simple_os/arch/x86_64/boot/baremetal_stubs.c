@@ -969,6 +969,13 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
  * 9c. _start — BGA init, hello world, then spl_start
  * =================================================================== */
 
+/* serial_println — called by compiled Simple code (extern fn serial_println) */
+RuntimeValue serial_println(RuntimeValue val) {
+    rt_print(val);
+    serial_puts("\r\n");
+    return NIL_VALUE;
+}
+
 extern void spl_start(void) __attribute__((weak));
 
 void _start(void)
