@@ -5,11 +5,11 @@
 #
 # STUB001: Function with params returns trivial value (params unused)   WARNING
 # STUB002: Zero-param function returns default value (possible stub)    INFO
+# STUB003: Function body is an explicit placeholder marker              ERROR
 #
 # Trivial "default" values: 0, "", false, nil, [], {}, (), Ok(nil)
 #
 # Does NOT flag:
-# - Functions already marked with pass_todo / pass_do_nothing / pass_dn
 # - extern fn declarations (no body)
 # - Single-expression constant functions returning non-default literals
 #   e.g. fn method_get() -> text: "GET"  or  fn API_KEY() -> i64: 3
@@ -86,6 +86,19 @@ fn check_stub_impl(decl_indices: [i64]) -> [StubImplWarning]:
 
         # Skip empty bodies (no stmts at all — parsed error or abstract)
         if body.len() == 0:
+            continue
+
+        # Whole-body explicit placeholder markers are hard failures unless the
+        # function is intentionally marked as a no-op by name.
+        val placeholder_expr = get_single_placeholder_expr(body)
+        if placeholder_expr >= 0:
+            warnings.push(StubImplWarning(
+                code: "STUB003",
+                severity: "ERROR",
+                message: "explicit placeholder function body",
+                hint: "replace the placeholder body with a real implementation or mark the function with an allow override",
+                fn_name: fn_name
+            ))
             continue
 
         # Check if body contains pass_todo/pass_do_nothing/pass_dn anywhere
@@ -166,6 +179,29 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
         if e >= 0:
             return e
         return -1
+
+    -1
+
+fn get_single_placeholder_expr(stmts: [i64]) -> i64:
+    """Return the placeholder expression if the whole function body is only a
+    single explicit placeholder marker. Otherwise return -1."""
+    if stmts.len() != 1:
+        return -1
+
+    val s = stmts[0]
+    if s < 0:
+        return -1
+
+    val tag = stmt_tag[s]
+    if tag != STMT_EXPR and tag != STMT_RETURN:
+        return -1
+
+    val e = stmt_expr[s]
+    if e < 0:
+        return -1
+
+    if expr_tag[e] == EXPR_PASS_TODO or expr_tag[e] == EXPR_PASS_DO_NOTHING or expr_tag[e] == EXPR_PASS_DN:
+        return e
 
     -1
 
@@ -426,4 +462,3 @@ fn expr_references_param(e: i64, params: [text]) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
-

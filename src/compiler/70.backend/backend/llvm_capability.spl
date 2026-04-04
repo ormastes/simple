@@ -429,5 +429,128 @@ fn reset_capability_cache():
     _cached_report = nil
 
 # ============================================================================
+# Cross-Target Capability Detection
+# ============================================================================
+
+fn detect_multilib() -> bool:
+    """Check if 32-bit multilib development libraries are available.
+
+    Probes for gcc-multilib or 32-bit libc on the host.
+    """
+    val os = get_host_os()
+    if os == "linux":
+        # Check for i386 CRT objects (the real requirement for 32-bit linking)
+        val (out, err, code) = shell("test -f /usr/lib/i386-linux-gnu/crt1.o -o -f /usr/lib32/crt1.o && echo ok")
+        if code == 0:
+            return true
+        # Check for gcc-multilib package
+        val (out2, err2, code2) = shell("dpkg -l gcc-multilib 2>/dev/null | grep -q '^ii' && echo ok")
+        if code2 == 0:
+            return true
+    elif os == "freebsd":
+        val (out, err, code) = shell("test -f /usr/lib32/crt1.o && echo ok")
+        return code == 0
+    false
+
+fn detect_cross_sysroot(target_prefix: text) -> text:
+    """Probe standard paths for a cross-compilation sysroot.
+
+    Returns the sysroot path if found, empty string otherwise.
+
+    target_prefix: e.g. "aarch64-linux-gnu", "arm-linux-gnueabihf", "riscv64-linux-gnu"
+    """
+    val os = get_host_os()
+    if os != "linux":
+        return ""
+
+    # Standard Debian/Ubuntu cross-sysroot locations
+    val candidates = [
+        "/usr/{target_prefix}",
+        "/usr/lib/{target_prefix}"
+    ]
+
+    for candidate in candidates:
+        val (out, err, code) = shell("test -d '{candidate}' && test -f '{candidate}/lib/libc.so.6' -o -f '{candidate}/lib/libc.a' && echo ok")
+        if code == 0:
+            return candidate
+
+    # Fallback: check if the cross-compiler itself is installed (implies sysroot)
+    val (out, err, code) = shell("command -v {target_prefix}-gcc 2>/dev/null")
+    if code == 0:
+        # Get sysroot from the cross-compiler
+        val (sysroot_out, e2, c2) = shell("{target_prefix}-gcc -print-sysroot 2>/dev/null")
+        if c2 == 0 and sysroot_out.trim() != "":
+            return sysroot_out.trim()
+
+    ""
+
+fn detect_cross_linker(target_prefix: text) -> text:
+    """Find a cross-linker by target prefix convention.
+
+    Returns the linker path if found, empty string otherwise.
+
+    target_prefix: e.g. "aarch64-linux-gnu", "arm-linux-gnueabihf", "riscv64-linux-gnu"
+    """
+    # Try prefixed linkers in order of preference
+    val candidates = [
+        "{target_prefix}-ld",
+        "{target_prefix}-ld.bfd",
+        "{target_prefix}-ld.gold"
+    ]
+
+    for candidate in candidates:
+        val path = find_tool_portable([candidate])
+        if path != "":
+            return path
+
+    # Fallback: try LLD with target flag (lld can cross-link)
+    val lld_path = find_tool_portable(["ld.lld-19", "ld.lld-18", "ld.lld-17", "ld.lld-16", "ld.lld"])
+    if lld_path != "":
+        return lld_path
+
+    ""
+
+fn generate_capability_report() -> text:
+    """Generate a comprehensive cross-target capability report.
+
+    Probes the host for all cross-compilation toolchains and summarizes
+    what's available for each target architecture.
+    """
+    val base = get_llvm_capabilities()
+    var report = base.format_report()
+
+    report = report + "\nCross-Target Capabilities\n"
+    report = report + "========================\n\n"
+
+    # Multilib (i686)
+    val has_multilib = detect_multilib()
+    report = report + "i686 multilib:      {if has_multilib: \"available\" else: \"NOT FOUND\"}\n"
+
+    # AArch64
+    val aarch64_sysroot = detect_cross_sysroot("aarch64-linux-gnu")
+    val aarch64_linker = detect_cross_linker("aarch64-linux-gnu")
+    report = report + "aarch64 sysroot:    {if aarch64_sysroot != \"\": aarch64_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "aarch64 linker:     {if aarch64_linker != \"\": aarch64_linker else: \"NOT FOUND\"}\n"
+
+    # ARMv7
+    val arm_sysroot = detect_cross_sysroot("arm-linux-gnueabihf")
+    val arm_linker = detect_cross_linker("arm-linux-gnueabihf")
+    report = report + "armv7 sysroot:      {if arm_sysroot != \"\": arm_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "armv7 linker:       {if arm_linker != \"\": arm_linker else: \"NOT FOUND\"}\n"
+
+    # RISC-V 64
+    val riscv64_sysroot = detect_cross_sysroot("riscv64-linux-gnu")
+    val riscv64_linker = detect_cross_linker("riscv64-linux-gnu")
+    report = report + "riscv64 sysroot:    {if riscv64_sysroot != \"\": riscv64_sysroot else: \"NOT FOUND\"}\n"
+    report = report + "riscv64 linker:     {if riscv64_linker != \"\": riscv64_linker else: \"NOT FOUND\"}\n"
+
+    # RISC-V 32 (baremetal)
+    val riscv32_linker = detect_cross_linker("riscv64-linux-gnu")
+    report = report + "riscv32 linker:     {if riscv32_linker != \"\": riscv32_linker else: \"NOT FOUND\"} (via riscv64 toolchain)\n"
+
+    report = report + "\n"
+    report
+
+# ============================================================================
 # Exports
 # ============================================================================

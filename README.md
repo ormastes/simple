@@ -19,7 +19,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Verification-native workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
 - **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
 - **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
-- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (query/LSP hover, VSCode highlighting/preview, Neovim inline Unicode preview with conceal).
+- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (query/LSP hover, VSCode highlighting/preview, Neovim inline Unicode preview with conceal). The autograd path is complete for the promoted torch-backed C/LLVM scope.
 - **SDN-backed textual databases**: tests, todos, dashboards, and other project metadata are stored through repo-native SDN data flows.
 - **Multiple execution paths**: interpreter, loader, SMF/module loading, and native/LLVM-oriented compilation paths coexist in one system.
 - **Baremetal-oriented build and test plumbing**: QEMU, semihosting, remote baremetal flows, and adapter-backed hardware lanes are built into the repo story.
@@ -44,19 +44,19 @@ Implemented and safe to advertise:
 - C/C++ bidirectional SFFI for the supported ABI subset: exports, imports, callback trampolines, layout verification, and round-trip proof tests
 
 Implemented, but best described with qualifiers:
-- `m{}` / `loss{}` / `nograd{}` are real and usable, but the broader DL story is still evolving
-- LLVM support is real, but some paths still depend on external LLVM tooling
+- LLVM support is strong on the stable rows (`x86_64` on `llvm-lib`/`llvm`, plus CLI `aarch64`, `riscv64`, `wasm32`, and `wasm64`), but `i686`, `armv7`, `riscv32`, and `rust-llvm` are still incomplete
 - Lean verification workflow is complete for the supported verification subset: deterministic Lean generation, proof artifact inventory, Lean/Lake checking, cache invalidation, and verification-state reporting. Contract: [doc/04_architecture/lean_verification_contract.md](doc/04_architecture/lean_verification_contract.md). Report: [doc/09_report/lean_verification_complete_2026-04-04.md](doc/09_report/lean_verification_complete_2026-04-04.md)
 - GC and no-GC runtime families: 5 public families (`common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`) with compiler boundary enforcement, interpreter warnings, and target preset mapping. Support matrix: [doc/04_architecture/runtime_family_support_matrix.md](doc/04_architecture/runtime_family_support_matrix.md)
 - Shared UI contract across web backend and TUI-web proxy (Protocol V1): shared handler, structured error model, stable element IDs, cross-surface contract suite — but this is a shared test protocol, not a full unified UI rendering layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
 Implemented with bounded scope:
+- `m{}` / `loss{}` / `nograd{}` are complete for the promoted torch-backed C/LLVM scope, including backward, detached-input failure, and `nograd{}` restore semantics. Other backends remain deferred
 - AOP provides predicate-based pointcuts (`execution`, `within`, `attr`), deterministic before/after/around advice, compile-time weaving as the default backend, and scoped runtime interception. Support matrix: [doc/05_design/aop_support_matrix.md](doc/05_design/aop_support_matrix.md)
-- VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed CPU execution remains a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
+- VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. GHDL RV32 semihost simulation is operational — compile, upload, execute, and collect results through semihosting/GDB. Mailbox-backed remote interpreter execution remains a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
 
-Experimental or partial:
-- No major distinctive feature currently belongs in this bucket without an explicit support matrix or host/tooling qualifier.
+Implemented with migration debt:
+- Anti-dummy / anti-stub enforcement now exists on the primary source and compiled CLI surfaces (`simple lint`, `simple verify quality`) and blocks placeholder bodies, tautological examples, and boolean-wrapper assertions. Legacy placeholder-heavy OS/GPU/test suites still need migration cleanup before the repo can claim universal enforcement.
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 

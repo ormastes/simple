@@ -129,7 +129,13 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     # Build llc command
     val triple = config.triple.to_text()
     val cpu = config.to_cpu_string()
-    val cmd = "{llc} --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+    var target_flags = ""
+    if triple.starts_with("riscv64"):
+        # Keep ABI and extensions aligned with the common Linux riscv64 toolchain.
+        target_flags = " -mattr=+m,+a,+f,+d,+c -target-abi=lp64d"
+    elif triple.starts_with("riscv32"):
+        target_flags = " -mattr=+m,+a,+c -target-abi=ilp32"
+    val cmd = "{llc} --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
     val (llc_out, llc_err, llc_code) = shell(cmd)
 
     # Clean up IR file
@@ -267,15 +273,22 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
         return Err("llc WASM compilation failed:\n{wasm_llc_out}")
 
     # Step 3: Link with wasm-ld
-    var ld_args = "{wasm_ld_cmd} --export=_start --stack-first"
+    var ld_args = "{wasm_ld_cmd}"
+    if triple.starts_with("wasm64"):
+        ld_args = ld_args + " -mwasm64"
+    ld_args = ld_args + " --export=_start --stack-first"
     ld_args = ld_args + " -z stack-size=1048576"
     ld_args = ld_args + " --initial-memory=4194304"
 
     # Check for WASI sysroot
     val sysroot = find_wasi_sysroot()
     if sysroot != "":
-        ld_args = ld_args + " -L{sysroot}/lib/wasm32-wasi -lc"
-        ld_args = ld_args + " {sysroot}/lib/wasm32-wasi/crt1.o"
+        val wasi_lib_dir = if triple.starts_with("wasm64") and file_exists("{sysroot}/lib/wasm64-wasi"):
+            "{sysroot}/lib/wasm64-wasi"
+        else:
+            "{sysroot}/lib/wasm32-wasi"
+        ld_args = ld_args + " -L{wasi_lib_dir} -lc"
+        ld_args = ld_args + " {wasi_lib_dir}/crt1.o"
     else:
         # Standalone mode without libc
         ld_args = ld_args + " --no-entry --export-all"
@@ -320,4 +333,3 @@ fn to_mir_opt_level(level: OptimizationLevel) -> OptLevel:
 # ============================================================================
 # Exports
 # ============================================================================
-

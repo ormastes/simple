@@ -26,21 +26,25 @@ enum LintLevel:
     Warn
     Deny
 
-# All 18 known lint names
+# All configurable lint names.
 val ALL_LINT_NAMES = [
     "primitive_api", "bare_bool", "print_in_test_spec", "todo_format",
     "sspec_no_print_based_tests", "sspec_missing_docstrings",
     "sspec_minimal_docstrings", "sspec_manual_assertions",
+    "sspec_placeholder_tests", "sspec_empty_examples",
+    "sspec_boolean_wrapper_assertions",
     "unnamed_duplicate_typed_args", "resource_leak",
     "wildcard_match", "non_exhaustive_match",
     "export_outside_init", "init_boundary_violation",
-    "bypass_with_code_files", "unknown_decorator",
+    "bypass_with_code_files", "unknown_decorator", "stub_impl",
     "unknown_attribute", "too_many_arguments"
 ]
 
-# Build the default levels dict for all 18 lint names.
+# Build the default levels dict for all configurable lint names.
 # Most are Warn; exceptions: sspec_no_print_based_tests=Deny,
-# export_outside_init=Deny, wildcard_match=Allow.
+# sspec_placeholder_tests=Deny, sspec_empty_examples=Deny,
+# sspec_boolean_wrapper_assertions=Deny, export_outside_init=Deny,
+# stub_impl=Deny, wildcard_match=Allow.
 fn build_default_levels() -> Dict<String, String>:
     var levels: Dict<String, String> = {}
     levels["primitive_api"] = "warn"
@@ -51,6 +55,9 @@ fn build_default_levels() -> Dict<String, String>:
     levels["sspec_missing_docstrings"] = "warn"
     levels["sspec_minimal_docstrings"] = "warn"
     levels["sspec_manual_assertions"] = "warn"
+    levels["sspec_placeholder_tests"] = "deny"
+    levels["sspec_empty_examples"] = "deny"
+    levels["sspec_boolean_wrapper_assertions"] = "deny"
     levels["unnamed_duplicate_typed_args"] = "warn"
     levels["resource_leak"] = "warn"
     levels["wildcard_match"] = "allow"
@@ -59,6 +66,7 @@ fn build_default_levels() -> Dict<String, String>:
     levels["init_boundary_violation"] = "warn"
     levels["bypass_with_code_files"] = "warn"
     levels["unknown_decorator"] = "warn"
+    levels["stub_impl"] = "deny"
     levels["unknown_attribute"] = "warn"
     levels["too_many_arguments"] = "warn"
     levels
@@ -274,8 +282,16 @@ fn map_lint_code_to_config_name(code: String) -> String:
         return "todo_format"
     if code == "ARG001" or code == "ARG002":
         return "too_many_arguments"
-    if code == "STUB001" or code == "STUB002":
+    if code == "STUB001" or code == "STUB002" or code == "STUB003":
         return "stub_impl"
+    if code == "SSPEC001" or code == "SSPEC002" or code == "SSPEC003":
+        return "sspec_placeholder_tests"
+    if code == "SSPEC004":
+        return "sspec_no_print_based_tests"
+    if code == "SSPEC005":
+        return "sspec_empty_examples"
+    if code == "SSPEC006":
+        return "sspec_boolean_wrapper_assertions"
     if code == "I001" or code == "I002" or code == "I003":
         return "init_boundary_violation"
     if code == "D001":
@@ -494,10 +510,26 @@ class Linter:
             "Unfold declaration in non-directory module"))
 
         # Stub implementation lints (STUB00x rules)
-        lints.push(Lint.new("STUB001", LintLevel.Warn, LintCategory.Warning,
+        lints.push(Lint.new("STUB001", LintLevel.Deny, LintCategory.Warning,
             "Function with params returns trivial value (params unused) — possible stub"))
         lints.push(Lint.new("STUB002", LintLevel.Allow, LintCategory.Warning,
             "Zero-param function returns default value — possible stub"))
+        lints.push(Lint.new("STUB003", LintLevel.Deny, LintCategory.Warning,
+            "Explicit pass_todo placeholder in production code"))
+
+        # SSpec quality lints (SSPEC00x rules)
+        lints.push(Lint.new("SSPEC001", LintLevel.Deny, LintCategory.Correctness,
+            "Tautological SSpec assertion — replace placeholder success with a real assertion"))
+        lints.push(Lint.new("SSPEC002", LintLevel.Deny, LintCategory.Correctness,
+            "Placeholder pass helper in SSpec example — use skip: or assert a real capability/result"))
+        lints.push(Lint.new("SSPEC003", LintLevel.Deny, LintCategory.Correctness,
+            "Placeholder success arm in SSpec match — assert returned data or use skip:"))
+        lints.push(Lint.new("SSPEC004", LintLevel.Deny, LintCategory.Correctness,
+            "Print-based skip placeholder in SSpec example — use skip: instead of print-and-return"))
+        lints.push(Lint.new("SSPEC005", LintLevel.Deny, LintCategory.Correctness,
+            "SSpec example has no real assertion or sanctioned skip"))
+        lints.push(Lint.new("SSPEC006", LintLevel.Deny, LintCategory.Correctness,
+            "Boolean-wrapper assertion in SSpec example — assert the concrete value directly"))
 
         # Argument count lints (ARG00x rules)
         lints.push(Lint.new("ARG001", LintLevel.Warn, LintCategory.Style,
@@ -514,6 +546,72 @@ class Linter:
 
         Linter(lints: lints, results: [], config: config)
     
+    fn lint_source(self, path: String, content: String) -> [LintResult]:
+        self.results = []
+
+        # Apply file-level attribute overrides to a child config so they don't
+        # leak between files.
+        var file_config = self.config.child()
+        file_config.apply_file_attributes(content)
+
+        # Also try to find simple.sdn relative to this file
+        val sdn_for_file = find_project_sdn(path)
+        if sdn_for_file != "":
+            val file_sdn_config = LintConfig.from_sdn_file(sdn_for_file)
+            for key in file_sdn_config.levels.keys():
+                # Only apply if not already overridden by file-level attrs
+                if not file_config.levels.contains_key(key):
+                    file_config.levels[key] = file_sdn_config.levels[key]
+
+        # Run simple pattern-based lints
+        val lines = content.split("\n")
+        var line_num = 1
+
+        for line in lines:
+            self.check_line(path, line_num, line)
+            line_num = line_num + 1
+
+        self.check_sspec_quality(path, content)
+
+        # Run shared EasyFix rules and attach as lint results
+        val shared_fixes = check_all_rules(content, path)
+        for fix in shared_fixes:
+            val rule_id = fix.id.split(":")[1]
+            val lint = Lint.new(rule_id, LintLevel.Warn, LintCategory.Warning, fix.description)
+                .with_easy_fix(fix)
+            # Extract line from first replacement
+            var fix_line = 1
+            if fix.replacements.len() > 0:
+                fix_line = fix.replacements[0].line
+            self.results.push(LintResult.new(path, fix_line, 0, lint))
+
+        # Filter and adjust results based on config
+        var filtered_results: [LintResult] = []
+        for result in self.results:
+            if should_keep_lint_result(file_config, result.lint.code):
+                # Apply config-level override (e.g. promote to Deny)
+                val adjusted_level = apply_config_level(file_config, result.lint.code, result.lint.level)
+                if adjusted_level != result.lint.level:
+                    val adjusted_lint = Lint(
+                        code: result.lint.code,
+                        level: adjusted_level,
+                        category: result.lint.category,
+                        message: result.lint.message,
+                        fix_hint: result.lint.fix_hint,
+                        easy_fix: result.lint.easy_fix
+                    )
+                    filtered_results.push(LintResult(
+                        file_path: result.file_path,
+                        line: result.line,
+                        column: result.column,
+                        lint: adjusted_lint
+                    ))
+                else:
+                    filtered_results.push(result)
+
+        self.results = filtered_results
+        self.results
+
     async fn lint_file(self, path: String) -> Result<[LintResult], String>:
         # Read file using async file I/O
         val file_content = await read_file(path)
@@ -521,66 +619,7 @@ class Linter:
             case Err(e):
                 return Err(e)
             case Ok(content):
-                # Apply file-level attribute overrides to a child config
-                # so they don't leak between files.
-                var file_config = self.config.child()
-                file_config.apply_file_attributes(content)
-
-                # Also try to find simple.sdn relative to this file
-                val sdn_for_file = find_project_sdn(path)
-                if sdn_for_file != "":
-                    val file_sdn_config = LintConfig.from_sdn_file(sdn_for_file)
-                    for key in file_sdn_config.levels.keys():
-                        # Only apply if not already overridden by file-level attrs
-                        if not file_config.levels.contains_key(key):
-                            file_config.levels[key] = file_sdn_config.levels[key]
-
-                # Run simple pattern-based lints
-                val lines = content.split("\n")
-                var line_num = 1
-
-                for line in lines:
-                    self.check_line(path, line_num, line)
-                    line_num = line_num + 1
-
-                # Run shared EasyFix rules and attach as lint results
-                val shared_fixes = check_all_rules(content, path)
-                for fix in shared_fixes:
-                    val rule_id = fix.id.split(":")[1]
-                    val lint = Lint.new(rule_id, LintLevel.Warn, LintCategory.Warning, fix.description)
-                        .with_easy_fix(fix)
-                    # Extract line from first replacement
-                    var fix_line = 1
-                    if fix.replacements.len() > 0:
-                        fix_line = fix.replacements[0].line
-                    self.results.push(LintResult.new(path, fix_line, 0, lint))
-
-                # Filter and adjust results based on config
-                var filtered_results: [LintResult] = []
-                for result in self.results:
-                    if should_keep_lint_result(file_config, result.lint.code):
-                        # Apply config-level override (e.g. promote to Deny)
-                        val adjusted_level = apply_config_level(file_config, result.lint.code, result.lint.level)
-                        if adjusted_level != result.lint.level:
-                            val adjusted_lint = Lint(
-                                code: result.lint.code,
-                                level: adjusted_level,
-                                category: result.lint.category,
-                                message: result.lint.message,
-                                fix_hint: result.lint.fix_hint,
-                                easy_fix: result.lint.easy_fix
-                            )
-                            filtered_results.push(LintResult(
-                                file_path: result.file_path,
-                                line: result.line,
-                                column: result.column,
-                                lint: adjusted_lint
-                            ))
-                        else:
-                            filtered_results.push(result)
-
-                self.results = filtered_results
-                return Ok(self.results)
+                return Ok(self.lint_source(path, content))
     
     me check_line(path: String, line_num: Int, line: String):
         val trimmed = line.trim()
@@ -623,6 +662,11 @@ class Linter:
                 self.check_unfold_declaration(path, line_num, trimmed)
 
         # These checks examine content (comments, strings) — always run
+        if not is_test_like_file(path) and trimmed.contains("pass_todo("):
+            val lint = Lint.new("STUB003", LintLevel.Deny, LintCategory.Warning,
+                "Explicit pass_todo placeholder in production code")
+                .with_fix("Replace pass_todo with a real implementation or return an explicit unsupported error")
+            self.results.push(LintResult.new(path, line_num, 0, lint))
         self.check_todo_format(path, line_num, trimmed)
         self.check_sdn_write(path, line_num, trimmed)
     
@@ -823,6 +867,148 @@ class Linter:
                 .with_fix("Import: use std.database.{db_type} (create_{db_type}_database), then use db.save()")
             self.results.push(LintResult.new(path, line_num, 0, lint))
 
+    me check_sspec_quality(path: String, content: String):
+        if not is_test_like_file(path):
+            return
+
+        val lines = content.split("\n")
+        var line_num = 1
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                line_num = line_num + 1
+                continue
+
+            val normalized = normalize_lint_line(trimmed)
+
+            val has_literal_tautology =
+                normalized.contains("expect(true).to_equal(true)") or
+                normalized.contains("expect(false).to_equal(false)") or
+                normalized.contains("expect(true).to_be(true)") or
+                normalized.contains("expect(false).to_be(false)")
+
+            if has_literal_tautology:
+                val lint = Lint.new("SSPEC001", LintLevel.Deny, LintCategory.Correctness,
+                    "Tautological assertion in spec/example")
+                    .with_fix("Assert returned data, state, or capability outcome instead of a literal boolean")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            val has_pass_helper = normalized == "pass_todo" or
+                normalized == "pass_do_nothing" or
+                normalized == "pass_dn" or
+                normalized.contains(":pass_todo") or
+                normalized.contains(":pass_do_nothing") or
+                normalized.contains(":pass_dn")
+
+            if has_pass_helper:
+                val lint = Lint.new("SSPEC002", LintLevel.Deny, LintCategory.Correctness,
+                    "Placeholder pass helper in spec/example")
+                    .with_fix("Use skip: for unsupported environments, or assert a real result")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            val is_match_arm = trimmed.starts_with("Ok(") or trimmed.starts_with("Err(") or
+                trimmed.starts_with("case Ok(") or trimmed.starts_with("case Err(")
+            val has_match_placeholder = has_literal_tautology or
+                normalized.contains(":pass_todo") or
+                normalized.contains(":pass_do_nothing") or
+                normalized.contains(":pass_dn")
+            val is_match_placeholder = is_match_arm and has_match_placeholder
+
+            if is_match_placeholder:
+                val lint = Lint.new("SSPEC003", LintLevel.Deny, LintCategory.Correctness,
+                    "Placeholder success/failure arm in match-based spec assertion")
+                    .with_fix("Assert concrete fields from Ok/Err, or use skip: before the match")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            if is_boolean_wrapper_assertion(normalized):
+                val lint = Lint.new("SSPEC006", LintLevel.Deny, LintCategory.Correctness,
+                    "Boolean-wrapper assertion in spec/example")
+                    .with_fix("Assert the underlying value or capability result instead of expect(<comparison>).to_equal(true/false)")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            val has_print_skip =
+                normalized.contains("print(\"[skip]") or
+                normalized.contains("print'[skip]") or
+                normalized.contains("print\"[skip]") or
+                normalized.contains("print(\"skip:") or
+                normalized.contains("print\"skip:") or
+                normalized.contains("print'[skip]")
+
+            if has_print_skip:
+                val lint = Lint.new("SSPEC004", LintLevel.Deny, LintCategory.Correctness,
+                    "Print-based skip placeholder in spec/example")
+                    .with_fix("Use skip: for sanctioned environment skips instead of print-and-return")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            line_num = line_num + 1
+
+        self.check_sspec_example_bodies(path, lines)
+
+    me check_sspec_example_bodies(path: String, lines: [String]):
+        var i = 0
+        while i < lines.len():
+            val line = lines[i]
+            val trimmed = line.trim()
+            if not (trimmed.starts_with("it \"") or trimmed.starts_with("slow_it \"")):
+                i = i + 1
+                continue
+
+            val header_indent = indent_width(line)
+            var j = i + 1
+            var body: [String] = []
+            while j < lines.len():
+                val body_line = lines[j]
+                val body_trimmed = body_line.trim()
+                if body_trimmed != "" and not body_trimmed.starts_with("#") and indent_width(body_line) <= header_indent:
+                    break
+                body.push(body_line)
+                j = j + 1
+
+            var statements: [String] = []
+            for body_line in body:
+                val body_trimmed = body_line.trim()
+                if body_trimmed != "" and not body_trimmed.starts_with("#"):
+                    statements.push(body_trimmed)
+
+            val line_num = i + 1
+            if statements.len() == 0:
+                val lint = Lint.new("SSPEC005", LintLevel.Deny, LintCategory.Correctness,
+                    "SSpec example has no body")
+                    .with_fix("Add a real assertion or use skip: for a sanctioned skip")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+                i = j
+                continue
+
+            var has_real_assertion = false
+            var has_sanctioned_skip = false
+            for stmt in statements:
+                val normalized = normalize_lint_line(stmt)
+                val assertion_like =
+                    normalized.contains("expect(") or
+                    normalized.contains("to_equal(") or
+                    normalized.contains("to_be(") or
+                    normalized.contains("to_contain(") or
+                    normalized.contains("to_start_with(") or
+                    normalized.contains("to_end_with(") or
+                    normalized.contains("to_be_greater_than(") or
+                    normalized.contains("to_be_less_than(")
+                if assertion_like:
+                    has_real_assertion = true
+                val sanctioned_skip =
+                    normalized == "skip:" or
+                    normalized.starts_with("skip:") or
+                    normalized.contains("return\"skip:") or
+                    normalized.contains("return'skip:")
+                if sanctioned_skip:
+                    has_sanctioned_skip = true
+            if not has_real_assertion and not has_sanctioned_skip:
+                val lint = Lint.new("SSPEC005", LintLevel.Deny, LintCategory.Correctness,
+                    "SSpec example has no real assertion or sanctioned skip")
+                    .with_fix("Assert a concrete result, or use skip: when the environment legitimately cannot run the example")
+                self.results.push(LintResult.new(path, line_num, 0, lint))
+
+            i = j
+
 
 # Helper: Get parent directory from file path
 fn get_parent_directory(path: String) -> String:
@@ -852,6 +1038,57 @@ fn extract_unfold_subpackages(line: String) -> [String]:
             subpackages.push(trimmed)
 
     subpackages
+
+fn is_test_like_file(path: String) -> Bool:
+    path.ends_with("_spec.spl") or path.contains("/test/") or path.starts_with("test/")
+
+fn normalize_lint_line(line: String) -> String:
+    line.replace(" ", "").replace("\t", "")
+
+fn extract_expect_subject(normalized: String) -> String:
+    val start = normalized.find("expect(")
+    if start < 0:
+        return ""
+    val tail = normalized.slice(start + 7)
+    val end_equal = tail.find(").to_equal(")
+    if end_equal >= 0:
+        return tail.slice(0, end_equal)
+    val end_be = tail.find(").to_be(")
+    if end_be >= 0:
+        return tail.slice(0, end_be)
+    ""
+
+fn is_boolean_wrapper_assertion(normalized: String) -> Bool:
+    val compares_to_bool =
+        normalized.contains(").to_equal(true)") or
+        normalized.contains(").to_equal(false)") or
+        normalized.contains(").to_be(true)") or
+        normalized.contains(").to_be(false)")
+    if not compares_to_bool:
+        return false
+
+    val subject = extract_expect_subject(normalized)
+    if subject == "" or subject == "true" or subject == "false":
+        return false
+
+    subject.contains("==") or
+        subject.contains("!=") or
+        subject.contains(">=") or
+        subject.contains("<=") or
+        subject.contains(">") or
+        subject.contains("<")
+
+fn indent_width(line: String) -> Int:
+    var width = 0
+    for ch in line.chars():
+        if ch == " ":
+            width = width + 1
+            continue
+        if ch == "\t":
+            width = width + 4
+            continue
+        break
+    width
 
 
 async fn main() -> Int:

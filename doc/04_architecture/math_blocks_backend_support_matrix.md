@@ -13,8 +13,10 @@ The compiler pipeline is: Parser -> BlockValue -> HIR -> MIR lowering -> Backend
 - `loss{}` lowers to MIR that calls `rt_torch_autograd_backward()` after evaluating the body.
 - `nograd{}` lowers to MIR that wraps the body in `rt_torch_autograd_no_grad_begin()`/`end()` with escape-path cleanup.
 
-Since `loss{}` and `nograd{}` lower to standard extern FFI calls in MIR, any backend
-that handles extern function calls supports them.
+The promoted implementation is verified on the torch-backed C and LLVM lanes.
+Those lanes are the completion target for `loss{}` / `nograd{}`. Other
+backends may lower the syntax but remain deferred until they are wired to the
+torch autograd runtime and verified end to end.
 
 ## Support Matrix
 
@@ -27,6 +29,7 @@ that handles extern function calls supports them.
 ### Legend
 
 - **Implemented** -- Block is parsed, lowered to MIR, and the backend emits working code.
+  For `loss{}` / `nograd{}`, this means the promoted torch-backed C and LLVM lanes.
   The runtime FFI (`torch_ffi.cpp`) provides the native implementations.
 - **Deferred** -- Block parsing and MIR lowering work, but the backend does not yet
   link against the torch FFI runtime or the platform is not yet supported.

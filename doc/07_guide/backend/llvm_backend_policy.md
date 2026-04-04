@@ -5,7 +5,7 @@
 
 ## Backend Selection Precedence
 
-The Simple compiler supports three LLVM execution paths. Selection follows this precedence:
+The Simple compiler publicly supports two LLVM execution paths. Selection follows this precedence:
 
 ### 1. `llvm-lib` (Preferred Hosted Path)
 
@@ -25,14 +25,12 @@ Use when `libLLVM` is unavailable but LLVM CLI tools exist.
 - Portable across package manager installations
 - Fallback for systems where only the LLVM toolchain is installed
 
-### 3. `rust-llvm` (Bootstrap / Advanced Path)
+### `rust-llvm` (Bootstrap / Advanced Path)
 
-Use for:
-- Bootstrap compilation (Rust seed -> Simple compiler)
-- Advanced LLVM integration via inkwell
-- Future GPU-oriented expansion
+This path is intentionally **not** part of the public support matrix.
 
-This is a bootstrap-specialized path, not a primary production path.
+Use only for bootstrap experiments or seed-tooling work where the Rust-hosted LLVM stack is already available.
+Do not count it toward public backend closure, release support, or README matrix claims.
 
 ## Auto-Selection Logic
 
@@ -43,6 +41,7 @@ else                  -> cranelift (fallback: no LLVM at all)
 ```
 
 For 32-bit targets, only LLVM backends are supported (Cranelift lacks 32-bit).
+`rust-llvm` is not part of auto-selection.
 
 ## Supported LLVM Version Range
 
@@ -66,7 +65,7 @@ Version checks are centralized in `llvm_version.spl`.
 | Cross-target Linux | `llvm` or `llvm-lib` | Needs target triple support |
 | Bare-metal | `llvm` or `llvm-lib` | Needs `-none` triple |
 | WASM | `llvm` | Needs `wasm-ld` for linking |
-| Bootstrap | `rust-llvm` | Minimal dependency path |
+| Bootstrap seed tooling | `rust-llvm` | Out-of-band bootstrap path, not counted in public matrix |
 
 ## Target Support Classes
 
@@ -76,6 +75,8 @@ Each target is classified by proof level:
 - **supported**: Works with external sysroot/toolchain, documented requirements
 - **partial**: Code generation works, linking may need manual setup
 - **unsupported**: Not available for this backend
+
+The public matrix currently tracks only `llvm-lib` and `llvm` rows. If a workflow requires Rust-hosted LLVM bootstrap, that is documented separately and must not be treated as public backend closure.
 
 See `llvm_support_matrix.spl` for the machine-readable matrix.
 
@@ -93,3 +94,7 @@ When a backend is unavailable, the compiler must emit actionable diagnostics:
 - List which targets are available given the current toolchain
 
 See `llvm_capability.spl` for the capability report implementation.
+
+## rust-llvm Exclusion
+
+Per [ADR: rust-llvm Exclusion](../../04_architecture/adr_rust_llvm_exclusion.md), the Rust bootstrap LLVM path (`src/compiler_rust/`) is formally excluded from the public LLVM backend family. It is a development-only bootstrap tool, not a production backend. The public support matrix contains only `llvm-lib` and `llvm` (CLI) columns.

@@ -46,6 +46,14 @@ pub enum LintName {
     SSpecMinimalDocstrings,
     /// Manual pass/fail tracking instead of expect()
     SSpecManualAssertions,
+    /// Tautology or placeholder-success patterns in SSpec examples
+    SSpecPlaceholderTests,
+    /// `it` / `slow_it` body has no real assertion or sanctioned skip
+    SSpecEmptyExamples,
+    /// `expect(<comparison>).to_equal(true/false)` style wrappers
+    SSpecBooleanWrapperAssertions,
+    /// Explicit placeholder implementation body in production code
+    StubImpl,
     /// Positional arguments for parameters that share a type with other parameters
     UnnamedDuplicateTypedArgs,
     /// Resource types not properly closed within scope
@@ -80,6 +88,10 @@ impl LintName {
             LintName::SSpecMissingDocstrings => "sspec_missing_docstrings",
             LintName::SSpecMinimalDocstrings => "sspec_minimal_docstrings",
             LintName::SSpecManualAssertions => "sspec_manual_assertions",
+            LintName::SSpecPlaceholderTests => "sspec_placeholder_tests",
+            LintName::SSpecEmptyExamples => "sspec_empty_examples",
+            LintName::SSpecBooleanWrapperAssertions => "sspec_boolean_wrapper_assertions",
+            LintName::StubImpl => "stub_impl",
             LintName::UnnamedDuplicateTypedArgs => "unnamed_duplicate_typed_args",
             LintName::ResourceLeak => "resource_leak",
             LintName::WildcardMatch => "wildcard_match",
@@ -105,6 +117,10 @@ impl LintName {
             "sspec_missing_docstrings" => Some(LintName::SSpecMissingDocstrings),
             "sspec_minimal_docstrings" => Some(LintName::SSpecMinimalDocstrings),
             "sspec_manual_assertions" => Some(LintName::SSpecManualAssertions),
+            "sspec_placeholder_tests" => Some(LintName::SSpecPlaceholderTests),
+            "sspec_empty_examples" => Some(LintName::SSpecEmptyExamples),
+            "sspec_boolean_wrapper_assertions" => Some(LintName::SSpecBooleanWrapperAssertions),
+            "stub_impl" => Some(LintName::StubImpl),
             "unnamed_duplicate_typed_args" => Some(LintName::UnnamedDuplicateTypedArgs),
             "resource_leak" => Some(LintName::ResourceLeak),
             "wildcard_match" => Some(LintName::WildcardMatch),
@@ -136,6 +152,10 @@ impl LintName {
             LintName::SSpecMissingDocstrings => LintLevel::Warn,
             LintName::SSpecMinimalDocstrings => LintLevel::Warn, // Info level not supported, use Warn
             LintName::SSpecManualAssertions => LintLevel::Warn,
+            LintName::SSpecPlaceholderTests => LintLevel::Deny,
+            LintName::SSpecEmptyExamples => LintLevel::Deny,
+            LintName::SSpecBooleanWrapperAssertions => LintLevel::Deny,
+            LintName::StubImpl => LintLevel::Deny,
             LintName::UnnamedDuplicateTypedArgs => LintLevel::Warn,
             LintName::ResourceLeak => LintLevel::Warn,
             LintName::WildcardMatch => LintLevel::Allow,
@@ -399,6 +419,10 @@ See also: .claude/skills/todo.md for full format specification
             LintName::SSpecMissingDocstrings => "Lint: sspec_missing_docstrings\nLevel: warn\n\nWarns when describe/context/it blocks lack docstrings.".to_string(),
             LintName::SSpecMinimalDocstrings => "Lint: sspec_minimal_docstrings\nLevel: warn\n\nWarns when test files have minimal documentation.".to_string(),
             LintName::SSpecManualAssertions => "Lint: sspec_manual_assertions\nLevel: warn\n\nDetects manual pass/fail tracking instead of expect() assertions.".to_string(),
+            LintName::SSpecPlaceholderTests => "Lint: sspec_placeholder_tests\nLevel: deny\n\nDetects tautological assertions, placeholder pass helpers, and fake match-arm success in SSpec files.".to_string(),
+            LintName::SSpecEmptyExamples => "Lint: sspec_empty_examples\nLevel: deny\n\nDetects SSpec examples that have no real assertion or sanctioned skip.".to_string(),
+            LintName::SSpecBooleanWrapperAssertions => "Lint: sspec_boolean_wrapper_assertions\nLevel: deny\n\nDetects boolean-wrapper assertions like expect(a != b).to_equal(true).".to_string(),
+            LintName::StubImpl => "Lint: stub_impl\nLevel: deny\n\nDetects explicit placeholder implementation bodies in production code.".to_string(),
             LintName::UnnamedDuplicateTypedArgs => r#"Lint: unnamed_duplicate_typed_args
 Level: warn (default)
 
@@ -777,6 +801,10 @@ Group related parameters into a struct:
             LintName::SSpecMissingDocstrings,
             LintName::SSpecMinimalDocstrings,
             LintName::SSpecManualAssertions,
+            LintName::SSpecPlaceholderTests,
+            LintName::SSpecEmptyExamples,
+            LintName::SSpecBooleanWrapperAssertions,
+            LintName::StubImpl,
             LintName::UnnamedDuplicateTypedArgs,
             LintName::ResourceLeak,
             LintName::WildcardMatch,

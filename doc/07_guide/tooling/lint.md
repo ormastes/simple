@@ -38,8 +38,15 @@ Deep analysis using the arena-based AST. Runs during compilation.
 | COLL007 | Collection | HIGH | Array rebuild to pop last — use `.pop()` |
 | COLL008 | Collection | MEDIUM | Unbounded global `.push()` with no reset |
 | DTYP001 | Type Safety | WARNING | Positional args sharing type — use named args |
-| STUB001 | Stub Impl | WARNING | Function with params returns trivial value, params unused |
+| STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
 | STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
+| STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
+| SSPEC001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
+| SSPEC002 | Test Quality | ERROR | Placeholder pass helper (`pass_todo`, `pass_do_nothing`, `pass_dn`) in spec/example |
+| SSPEC003 | Test Quality | ERROR | Placeholder match-arm success/failure assertion in spec/example |
+| SSPEC004 | Test Quality | ERROR | Print-based skip placeholder in spec/example |
+| SSPEC005 | Test Quality | ERROR | Example has no real assertion or sanctioned skip |
+| SSPEC006 | Test Quality | ERROR | Boolean-wrapper assertion such as `expect(a != b).to_equal(true)` |
 
 ### 2. Text-Scanning EasyFix Rules (`src/compiler/90.tools/fix/`)
 
@@ -82,7 +89,8 @@ Combined pattern-based + EasyFix pipeline with severity control.
 | Database (D) | D001 | Direct database file writes |
 | TODO (T) | T001-T004 | TODO/FIXME format compliance |
 | Import (I) | I001-I003 | Unfold declarations, missing __init__.spl |
-| Stub (STUB) | STUB001-STUB002 | Trivial/dummy implementations |
+| Stub (STUB) | STUB001-STUB003 | Trivial/dummy implementations |
+| SSpec quality (SSPEC) | SSPEC001-SSPEC006 | Tautology and placeholder-success checks in test/spec files |
 | Arguments (ARG) | ARG001-ARG002 | Too many function parameters |
 
 ---
@@ -148,11 +156,11 @@ fn create_user(info: UserInfo, manager: text, office: text):
 
 ---
 
-## Stub Implementation Lint (STUB001/STUB002)
+## Stub Implementation Lint (STUB001-STUB003)
 
 Detects functions with trivial/dummy implementations that may be unintentional stubs.
 
-### STUB001: Trivial Return with Unused Parameters (WARNING)
+### STUB001: Trivial Return with Unused Parameters (ERROR)
 
 Fires when a function has parameters but its body is a single trivial expression that doesn't reference any of them.
 
@@ -187,6 +195,103 @@ fn method_get() -> text: "GET"
 
 # NOT flagged — true is not a default value
 fn is_enabled() -> bool: true
+```
+
+### STUB003: Explicit Placeholder Function Body In Production Code (ERROR)
+
+Fires when non-test source uses a single whole-function placeholder body such as
+`pass_todo(...)`, `pass_do_nothing`, or `pass_dn`.
+
+```simple
+fn not_done(port: i64) -> i64:
+    pass_todo("implement driver")
+```
+
+```simple
+fn noop_handler(event: text):
+    pass_do_nothing
+```
+
+---
+
+## SSpec Placeholder Quality Lints (SSPEC001-SSPEC006)
+
+These lints only apply to test/spec files and are deny-by-default. Their job is
+to stop fake success signals from being counted as proof.
+
+### SSPEC001: Tautological Literal Assertion (ERROR)
+
+Fires on literal-success assertions such as:
+
+```simple
+expect(true).to_equal(true)
+expect(false).to_equal(false)
+```
+
+Use a real assertion against returned data, state, or capability status instead.
+
+### SSPEC002: Placeholder Pass Helper In Example (ERROR)
+
+Fires when a spec/example body contains:
+
+```simple
+pass_todo
+pass_do_nothing
+pass_dn
+```
+
+For environment/tooling gaps, use `skip:` or assert an explicit `skip:` /
+`blocked:` capability result.
+
+### SSPEC003: Placeholder Match-Arm Success (ERROR)
+
+Fires on match-arm placeholders such as:
+
+```simple
+case Ok(_): expect(true).to_equal(true)
+case Err(_): pass_do_nothing
+```
+
+Match arms must assert concrete fields or messages, not a literal-success stand-in.
+
+### SSPEC004: Print-Based Skip Placeholder (ERROR)
+
+Fires on print-and-return skip placeholders such as:
+
+```simple
+it "prints skip and returns":
+    print "[skip] env unavailable"
+    return
+```
+
+Use `skip:` for sanctioned environment skips instead of pretending the example passed.
+
+### SSPEC005: No Real Assertion Or Sanctioned Skip (ERROR)
+
+Fires when an `it` or `slow_it` body has no real assertion and no sanctioned `skip:`.
+
+```simple
+it "just calls helper":
+    run_check()
+```
+
+Examples must either assert a concrete result or use `skip:` when the environment legitimately cannot execute them.
+
+### SSPEC006: Boolean-Wrapper Assertion (ERROR)
+
+Fires when a spec wraps a comparison inside `expect(...)` and then compares that
+boolean to `true` or `false`.
+
+```simple
+expect(code != 0).to_equal(true)
+expect(result_count > 1).to_be(true)
+```
+
+Assert the underlying value directly instead:
+
+```simple
+expect(code).to_be_greater_than(0)
+expect(result_count).to_be_greater_than(1)
 ```
 
 ### What is NOT Flagged
@@ -258,6 +363,9 @@ wildcard_match = "allow"
 | `sspec_missing_docstrings` | warn | Missing docstrings in describe/context |
 | `sspec_minimal_docstrings` | warn | Too few docstrings in test files |
 | `sspec_manual_assertions` | warn | Manual pass/fail instead of expect() |
+| `sspec_placeholder_tests` | **deny** | Tautology / pass-helper placeholder assertions |
+| `sspec_empty_examples` | **deny** | `it`/`slow_it` with no real assertion or skip |
+| `sspec_boolean_wrapper_assertions` | **deny** | `expect(<comparison>).to_equal(true/false)` |
 | `unnamed_duplicate_typed_args` | warn | Same-typed params without names |
 | `resource_leak` | warn | Unclosed resources |
 | `wildcard_match` | allow | Wildcard `_` in match |
@@ -268,6 +376,7 @@ wildcard_match = "allow"
 | `unknown_decorator` | warn | Unknown `@decorator` |
 | `unknown_attribute` | warn | Unknown `#[attribute]` |
 | `too_many_arguments` | warn | Functions with >7 params |
+| `stub_impl` | **deny** | Trivial or explicit placeholder implementation bodies |
 
 ### File-Level Overrides
 

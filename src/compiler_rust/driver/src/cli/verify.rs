@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use crate::cli::code_quality::run_verify_quality;
 use crate::cli::gen_lean::{known_verification_files, run_gen_lean};
 
 /// Run the verify command.
@@ -22,6 +23,7 @@ pub fn run_verify(args: &[String], _gc_log: bool, _gc_off: bool) -> i32 {
         "regenerate" => cmd_regenerate(),
         "check" => cmd_check(),
         "list" => cmd_list(),
+        "quality" => cmd_quality(args),
         "help" | "--help" | "-h" => {
             print_verify_help();
             0
@@ -44,12 +46,14 @@ fn print_verify_help() {
     eprintln!("  regenerate    Regenerate Lean files from verification models");
     eprintln!("  check         Check Lean artifacts and fail on any sorry");
     eprintln!("  list          List verification artifacts");
+    eprintln!("  quality       Audit anti-dummy / anti-stub quality in src/ and test/");
     eprintln!("  help          Show this help message");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  simple verify status");
     eprintln!("  simple verify regenerate");
     eprintln!("  simple verify check");
+    eprintln!("  simple verify quality --all");
 }
 
 fn cmd_status() -> i32 {
@@ -106,6 +110,10 @@ fn cmd_list() -> i32 {
     println!();
     println!("Total artifacts: {}", files.len());
     0
+}
+
+fn cmd_quality(args: &[String]) -> i32 {
+    run_verify_quality(&args[2..])
 }
 
 fn check_lean_installed() -> bool {

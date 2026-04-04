@@ -6,14 +6,15 @@
 
 ## Summary
 
-Math blocks autograd moves from **"Implemented with scope limits"** to **"Implemented" (autograd scope)**.
+Math blocks autograd is **implemented for the promoted torch-backed backend scope**.
 
 The compiler now provides:
 - `m{}` math expression blocks with operator overloading for tensor types
 - `loss{}` blocks with automatic backward pass (calls `rt_torch_autograd_backward`)
 - `nograd{}` blocks with gradient suppression (begin/end with escape-path cleanup)
 - Function-level `no_grad(callback)` API across all three runtime families
-- Full Parser -> HIR -> MIR lowering -> C/LLVM codegen -> FFI runtime pipeline
+- Parser -> HIR -> MIR lowering -> C/LLVM codegen -> FFI runtime pipeline for the promoted torch-backed lanes
+- MIR rejection for `loss{}` bodies that lower to no value
 
 ## Implementation
 
@@ -73,11 +74,11 @@ The compiler now provides:
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `test/feature/usage/math_blocks_spec.spl` | 21 | m{} evaluation, operator precedence, nested blocks |
-| `test/feature/usage/loss_nograd_blocks_spec.spl` | 33 | loss{}/nograd{} parsing, lowering, parity across variants |
-| `test/feature/usage/math_autograd_runtime_spec.spl` | 11 | Real autograd semantics: backward, gradient flow, no_grad suppression |
+| `test/feature/usage/math_blocks_spec.spl` | 28 | m{} evaluation, operator precedence, nested blocks |
+| `test/feature/usage/loss_nograd_blocks_spec.spl` | 27 | loss{}/nograd{} parsing, lowering, rendering parity |
+| `test/feature/usage/math_autograd_runtime_spec.spl` | 9 | Real autograd semantics: backward, gradient flow, detached negative case, no_grad escape cleanup |
 
-**Total: 65 tests** covering the full math blocks autograd pipeline.
+**Total: 64 tests** covering the promoted math blocks autograd pipeline.
 
 ## Known Limitations
 

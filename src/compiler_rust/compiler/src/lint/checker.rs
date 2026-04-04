@@ -283,6 +283,8 @@ impl LintChecker {
                 self.check_sspec_manual_assertions(items);
             }
 
+            self.check_source_backed_quality_patterns(&source_file);
+
             // Check TODO format
             self.check_todo_format(&source_file);
 
@@ -1302,6 +1304,298 @@ impl LintChecker {
 
         for item in items {
             check_node(self, item);
+        }
+    }
+
+    fn check_source_backed_quality_patterns(&mut self, source_file: &std::path::Path) {
+        let source = match std::fs::read_to_string(source_file) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if Self::is_test_like_path(source_file) {
+            self.check_sspec_placeholder_patterns(&source);
+            self.check_sspec_example_bodies_from_source(&source);
+        } else {
+            self.check_stub_placeholder_bodies(&source);
+        }
+    }
+
+    fn is_test_like_path(source_file: &std::path::Path) -> bool {
+        let path = source_file.to_string_lossy();
+        path.ends_with("_spec.spl") || path.ends_with("_test.spl") || path.contains("/test/")
+    }
+
+    fn normalize_quality_line(line: &str) -> String {
+        line.replace([' ', '\t'], "")
+    }
+
+    fn extract_expect_subject(normalized: &str) -> Option<&str> {
+        let start = normalized.find("expect(")?;
+        let tail = &normalized[start + 7..];
+        if let Some(end) = tail.find(").to_equal(") {
+            return Some(&tail[..end]);
+        }
+        if let Some(end) = tail.find(").to_be(") {
+            return Some(&tail[..end]);
+        }
+        None
+    }
+
+    fn is_boolean_wrapper_assertion(normalized: &str) -> bool {
+        let compares_to_bool = normalized.contains(").to_equal(true)")
+            || normalized.contains(").to_equal(false)")
+            || normalized.contains(").to_be(true)")
+            || normalized.contains(").to_be(false)");
+        if !compares_to_bool {
+            return false;
+        }
+
+        let subject = match Self::extract_expect_subject(normalized) {
+            Some(subject) if !subject.is_empty() && subject != "true" && subject != "false" => subject,
+            _ => return false,
+        };
+
+        subject.contains("==")
+            || subject.contains("!=")
+            || subject.contains(">=")
+            || subject.contains("<=")
+            || subject.contains('>')
+            || subject.contains('<')
+    }
+
+    fn indent_width(line: &str) -> usize {
+        let mut width = 0usize;
+        for ch in line.chars() {
+            if ch == ' ' {
+                width += 1;
+                continue;
+            }
+            if ch == '\t' {
+                width += 4;
+                continue;
+            }
+            break;
+        }
+        width
+    }
+
+    fn is_assertion_like(normalized: &str) -> bool {
+        normalized.contains("expect(")
+            || normalized.contains("to_equal(")
+            || normalized.contains("to_be(")
+            || normalized.contains("to_contain(")
+            || normalized.contains("to_start_with(")
+            || normalized.contains("to_end_with(")
+            || normalized.contains("to_be_greater_than(")
+            || normalized.contains("to_be_less_than(")
+    }
+
+    fn is_sanctioned_skip(normalized: &str) -> bool {
+        normalized == "skip:"
+            || normalized.starts_with("skip:")
+            || normalized.contains("return\"skip:")
+            || normalized.contains("return'skip:")
+    }
+
+    fn is_placeholder_stmt(normalized: &str) -> bool {
+        normalized == "pass_todo"
+            || normalized == "pass_do_nothing"
+            || normalized == "pass_dn"
+            || normalized.starts_with("pass_todo(")
+            || normalized.starts_with("pass_do_nothing(")
+            || normalized.starts_with("pass_dn(")
+    }
+
+    fn check_sspec_placeholder_patterns(&mut self, source: &str) {
+        for (idx, line) in source.lines().enumerate() {
+            let line_num = idx + 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let normalized = Self::normalize_quality_line(trimmed);
+            let has_literal_tautology = normalized.contains("expect(true).to_equal(true)")
+                || normalized.contains("expect(false).to_equal(false)")
+                || normalized.contains("expect(true).to_be(true)")
+                || normalized.contains("expect(false).to_be(false)");
+            if has_literal_tautology {
+                self.emit(
+                    LintName::SSpecPlaceholderTests,
+                    Span::new(0, 0, line_num, 1),
+                    "tautological assertion in spec/example".to_string(),
+                    Some("assert returned data, state, or capability outcome instead of a literal boolean".to_string()),
+                );
+            }
+
+            let has_pass_helper = normalized == "pass_todo"
+                || normalized == "pass_do_nothing"
+                || normalized == "pass_dn"
+                || normalized.contains(":pass_todo")
+                || normalized.contains(":pass_do_nothing")
+                || normalized.contains(":pass_dn");
+            if has_pass_helper {
+                self.emit(
+                    LintName::SSpecPlaceholderTests,
+                    Span::new(0, 0, line_num, 1),
+                    "placeholder pass helper in spec/example".to_string(),
+                    Some("use skip: for unsupported environments, or assert a real result".to_string()),
+                );
+            }
+
+            let is_match_arm = trimmed.starts_with("Ok(")
+                || trimmed.starts_with("Err(")
+                || trimmed.starts_with("case Ok(")
+                || trimmed.starts_with("case Err(");
+            if is_match_arm && (has_literal_tautology || has_pass_helper) {
+                self.emit(
+                    LintName::SSpecPlaceholderTests,
+                    Span::new(0, 0, line_num, 1),
+                    "placeholder success/failure arm in match-based spec assertion".to_string(),
+                    Some("assert concrete fields from Ok/Err, or use skip: before the match".to_string()),
+                );
+            }
+
+            let has_print_skip = normalized.contains("print(\"[skip]")
+                || normalized.contains("print\"[skip]")
+                || normalized.contains("print'[skip]")
+                || normalized.contains("print(\"skip:")
+                || normalized.contains("print\"skip:");
+            if has_print_skip {
+                self.emit(
+                    LintName::SSpecNoPrintBasedTests,
+                    Span::new(0, 0, line_num, 1),
+                    "print-based skip placeholder in spec/example".to_string(),
+                    Some("use skip: for sanctioned environment skips instead of print-and-return".to_string()),
+                );
+            }
+
+            if Self::is_boolean_wrapper_assertion(&normalized) {
+                self.emit(
+                    LintName::SSpecBooleanWrapperAssertions,
+                    Span::new(0, 0, line_num, 1),
+                    "boolean-wrapper assertion in spec/example".to_string(),
+                    Some("assert the underlying value or capability result directly".to_string()),
+                );
+            }
+        }
+    }
+
+    fn check_sspec_example_bodies_from_source(&mut self, source: &str) {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim();
+            if !(trimmed.starts_with("it \"") || trimmed.starts_with("slow_it \"")) {
+                i += 1;
+                continue;
+            }
+
+            let header_indent = Self::indent_width(line);
+            let mut j = i + 1;
+            let mut body: Vec<&str> = Vec::new();
+            while j < lines.len() {
+                let body_line = lines[j];
+                let body_trimmed = body_line.trim();
+                if !body_trimmed.is_empty()
+                    && !body_trimmed.starts_with('#')
+                    && Self::indent_width(body_line) <= header_indent
+                {
+                    break;
+                }
+                body.push(body_line);
+                j += 1;
+            }
+
+            let statements: Vec<&str> = body
+                .iter()
+                .copied()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect();
+
+            let line_num = i + 1;
+            if statements.is_empty() {
+                self.emit(
+                    LintName::SSpecEmptyExamples,
+                    Span::new(0, 0, line_num, 1),
+                    "SSpec example has no body".to_string(),
+                    Some("add a real assertion or use skip: for a sanctioned skip".to_string()),
+                );
+                i = j;
+                continue;
+            }
+
+            let has_real_assertion = statements
+                .iter()
+                .any(|stmt| Self::is_assertion_like(&Self::normalize_quality_line(stmt)));
+            let has_sanctioned_skip = statements
+                .iter()
+                .any(|stmt| Self::is_sanctioned_skip(&Self::normalize_quality_line(stmt)));
+            if !has_real_assertion && !has_sanctioned_skip {
+                self.emit(
+                    LintName::SSpecEmptyExamples,
+                    Span::new(0, 0, line_num, 1),
+                    "SSpec example has no real assertion or sanctioned skip".to_string(),
+                    Some("assert a concrete result, or use skip: when the environment legitimately cannot run the example".to_string()),
+                );
+            }
+
+            i = j;
+        }
+    }
+
+    fn check_stub_placeholder_bodies(&mut self, source: &str) {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim();
+            let is_fn_header = trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("me ")
+                || trimmed.starts_with("pub me ");
+            if !is_fn_header {
+                i += 1;
+                continue;
+            }
+
+            let header_indent = Self::indent_width(line);
+            let mut j = i + 1;
+            let mut body: Vec<&str> = Vec::new();
+            while j < lines.len() {
+                let body_line = lines[j];
+                let body_trimmed = body_line.trim();
+                if !body_trimmed.is_empty()
+                    && !body_trimmed.starts_with('#')
+                    && Self::indent_width(body_line) <= header_indent
+                {
+                    break;
+                }
+                body.push(body_line);
+                j += 1;
+            }
+
+            let statements: Vec<String> = body
+                .iter()
+                .copied()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(Self::normalize_quality_line)
+                .collect();
+
+            if statements.len() == 1 && Self::is_placeholder_stmt(&statements[0]) {
+                self.emit(
+                    LintName::StubImpl,
+                    Span::new(0, 0, i + 1, 1),
+                    "explicit placeholder function body".to_string(),
+                    Some("replace the placeholder body with a real implementation or suppress stub_impl explicitly".to_string()),
+                );
+            }
+
+            i = j;
         }
     }
 

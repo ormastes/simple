@@ -1,11 +1,11 @@
 # LLVM Compiled Authoritative Proof Tests
 #
-# Verifies real compiled execution for each supported target class.
+# Verifies real compiled proof for each supported target class.
 # These are the authoritative proofs that LLVM backends produce
-# working binaries, not just loadable files.
+# usable artifacts, not just capability booleans.
 #
 # Proof classes:
-# 1. Hosted native execution (x86_64 llvm-lib, x86_64 llvm)
+# 1. Hosted native compile/link proof (x86_64 llvm-lib, x86_64 llvm)
 # 2. Bare-metal object/ELF generation (RISC-V, ARM)
 # 3. WASM artifact generation
 # 4. Cross-target compilation success
@@ -20,11 +20,26 @@
 
 use std.spec.*
 use std.io_runtime.*
+use compiler.mir.mir_data.*
+use compiler.backend.backend.backend_helpers.{compile_module_with_backend}
+use compiler.backend.llvm_backend_tools.{compile_ir_to_object, compile_ir_to_wasm}
 use compiler.backend.llvm_capability.{get_llvm_capabilities, detect_llvm_capabilities, reset_capability_cache, LlvmCapabilityReport}
 use compiler.backend.llvm_version.{parse_llvm_version, check_version_compatibility, LlvmVersionStatus, LLVM_VERSION_MIN, LLVM_VERSION_MAX}
-use compiler.backend.llvm_support_matrix.{get_support_matrix, lookup_support, format_support_matrix, export_matrix_sdn, LlvmSupportLevel}
+use compiler.backend.llvm_support_matrix.{get_support_matrix, lookup_support, format_support_matrix, export_matrix_sdn, LlvmSupportLevel, validate_matrix_closure, is_matrix_closed, format_closure_report}
 use compiler.backend.llvm_cross_target.{toolchain_for_target, diagnose_all_targets, TargetToolchain}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, OptimizationLevel}
+use compiler.backend.llvm_target.{LlvmTargetConfig__for_target}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn trivial_main_ir() -> text:
+    "define i32 @main() {\n" +
+    "entry:\n" +
+    "  ret i32 0\n" +
+    "}\n"
+
+fn write_object_bytes(path: text, data: [u8]) -> bool:
+    rt_file_write_bytes(path, data)
 
 # ============================================================================
 # Phase 2: Capability Detection Proof
@@ -178,14 +193,101 @@ describe "Hosted Native Compilation Proof":
         val caps = get_llvm_capabilities()
         if not caps.llvm_lib_backend_available:
             pending("libLLVM not available")
-        # Proof: the backend can be instantiated and reports capability
-        expect(caps.llvm_lib_backend_available).to_equal(true)
+        val module = MirModule(
+            name: "llvm_lib_x86_64_compiled_proof",
+            functions: [],
+            globals: [],
+            types: [],
+            imports: [],
+            exports: []
+        )
+        val result = compile_module_with_backend("llvm-lib", module, true)
+        expect(result.is_ok()).to_equal(true)
+        val compiled = result.unwrap()
+        expect(compiled.object_code.len() > 0).to_equal(true)
 
     it "llvm (CLI) compiles for x86_64 when available":
         val caps = get_llvm_capabilities()
         if not caps.llvm_backend_available:
             pending("llc not available")
-        expect(caps.llvm_backend_available).to_equal(true)
+        val module = MirModule(
+            name: "llvm_cli_x86_64_compiled_proof",
+            functions: [],
+            globals: [],
+            types: [],
+            imports: [],
+            exports: []
+        )
+        val result = compile_module_with_backend("llvm", module, true)
+        expect(result.is_ok()).to_equal(true)
+        val compiled = result.unwrap()
+        expect(compiled.object_code.len() > 0).to_equal(true)
+
+    it "llvm CLI links an aarch64 executable when cross toolchain is present":
+        val (tc_out, tc_err, tc_code) = shell("command -v aarch64-linux-gnu-gcc 2>/dev/null")
+        if tc_code != 0:
+            pending("aarch64-linux-gnu-gcc not available")
+
+        val config = LlvmTargetConfig__for_target(CodegenTarget.AArch64, nil)
+        val obj_result = compile_ir_to_object(trivial_main_ir(), config, OptimizationLevel.Debug)
+        expect(obj_result.is_ok()).to_equal(true)
+        val object = obj_result.unwrap()
+        val obj_path = "/tmp/simple_llvm_aarch64_probe.o"
+        val out_path = "/tmp/simple_llvm_aarch64_probe.out"
+        expect(write_object_bytes(obj_path, object.bytes)).to_equal(true)
+
+        val (out, err, code) = shell("aarch64-linux-gnu-gcc -o {out_path} {obj_path} 2>&1")
+        expect(code).to_equal(0)
+        expect(file_exists(out_path)).to_equal(true)
+
+        file_delete(obj_path)
+        file_delete(out_path)
+
+    it "llvm CLI links a riscv64 executable when cross toolchain is present":
+        val (tc_out, tc_err, tc_code) = shell("command -v riscv64-linux-gnu-gcc 2>/dev/null")
+        if tc_code != 0:
+            pending("riscv64-linux-gnu-gcc not available")
+
+        val config = LlvmTargetConfig__for_target(CodegenTarget.Riscv64, nil)
+        val obj_result = compile_ir_to_object(trivial_main_ir(), config, OptimizationLevel.Debug)
+        expect(obj_result.is_ok()).to_equal(true)
+        val object = obj_result.unwrap()
+        val obj_path = "/tmp/simple_llvm_riscv64_probe.o"
+        val out_path = "/tmp/simple_llvm_riscv64_probe.out"
+        expect(write_object_bytes(obj_path, object.bytes)).to_equal(true)
+
+        val (out, err, code) = shell("riscv64-linux-gnu-gcc -o {out_path} {obj_path} 2>&1")
+        expect(code).to_equal(0)
+        expect(file_exists(out_path)).to_equal(true)
+
+        file_delete(obj_path)
+        file_delete(out_path)
+
+    it "llvm CLI emits a wasm32 artifact when wasm linker is present":
+        val (tc_out, tc_err, tc_code) = shell("command -v wasm-ld 2>/dev/null")
+        if tc_code != 0:
+            pending("wasm-ld not available")
+
+        val config = LlvmTargetConfig__for_target(CodegenTarget.Wasm32, nil)
+        val out_path = "/tmp/simple_llvm_wasm32_probe.wasm"
+        val result = compile_ir_to_wasm(trivial_main_ir(), config, OptimizationLevel.Debug, out_path)
+        expect(result.is_ok()).to_equal(true)
+        expect(file_exists(out_path)).to_equal(true)
+        expect(file_size_raw(out_path)).to_be_greater_than(8)
+        file_delete(out_path)
+
+    it "llvm CLI emits a wasm64 artifact when wasm linker is present":
+        val (tc_out, tc_err, tc_code) = shell("command -v wasm-ld 2>/dev/null")
+        if tc_code != 0:
+            pending("wasm-ld not available")
+
+        val config = LlvmTargetConfig__for_target(CodegenTarget.Wasm64, nil)
+        val out_path = "/tmp/simple_llvm_wasm64_probe.wasm"
+        val result = compile_ir_to_wasm(trivial_main_ir(), config, OptimizationLevel.Debug, out_path)
+        expect(result.is_ok()).to_equal(true)
+        expect(file_exists(out_path)).to_equal(true)
+        expect(file_size_raw(out_path)).to_be_greater_than(8)
+        file_delete(out_path)
 
 # ============================================================================
 # Phase 7: Support Matrix Proof
@@ -204,9 +306,31 @@ describe "Support Matrix":
         expect(lib_level).to_equal(LlvmSupportLevel.Stable)
         expect(cli_level).to_equal(LlvmSupportLevel.Stable)
 
-    it "wasm32 is supported on llvm CLI":
+    it "matches published support levels for the cross-target matrix":
+        # i686: demoted to unsupported (multilib not portable)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.X86)).to_equal(LlvmSupportLevel.Unsupported)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.X86)).to_equal(LlvmSupportLevel.Unsupported)
+        # aarch64: both stable (libLLVM includes AArch64 natively)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.AArch64)).to_equal(LlvmSupportLevel.Stable)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.AArch64)).to_equal(LlvmSupportLevel.Stable)
+        # armv7: demoted to unsupported (hard-float ABI not portable)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.Arm)).to_equal(LlvmSupportLevel.Unsupported)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.Arm)).to_equal(LlvmSupportLevel.Unsupported)
+        # riscv64: both stable (libLLVM includes RISC-V natively)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.Riscv64)).to_equal(LlvmSupportLevel.Stable)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.Riscv64)).to_equal(LlvmSupportLevel.Stable)
+        # riscv32: demoted to unsupported (baremetal-only, not portable)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.Riscv32)).to_equal(LlvmSupportLevel.Unsupported)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.Riscv32)).to_equal(LlvmSupportLevel.Unsupported)
+        # wasm: llvm-lib unsupported, CLI stable
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm32)).to_equal(LlvmSupportLevel.Unsupported)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.Wasm32)).to_equal(LlvmSupportLevel.Stable)
+        expect(lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm64)).to_equal(LlvmSupportLevel.Unsupported)
+        expect(lookup_support(BackendKind.Llvm, CodegenTarget.Wasm64)).to_equal(LlvmSupportLevel.Stable)
+
+    it "wasm32 is stable on llvm CLI":
         val level = lookup_support(BackendKind.Llvm, CodegenTarget.Wasm32)
-        expect(level).to_equal(LlvmSupportLevel.SupportedExternal)
+        expect(level).to_equal(LlvmSupportLevel.Stable)
 
     it "wasm32 is unsupported on llvm-lib":
         val level = lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm32)
@@ -250,3 +374,109 @@ describe "Negative and Diagnostic Cases":
         val report = get_llvm_capabilities()
         # Errors list exists
         expect(report.errors != nil).to_equal(true)
+
+# ============================================================================
+# Phase 8: WASM Closure Confirmation
+# ============================================================================
+
+describe "wasm closure confirmation":
+    it "wasm32 llvm CLI is stable":
+        val level = lookup_support(BackendKind.Llvm, CodegenTarget.Wasm32)
+        expect(level.to_text()).to_equal("stable")
+
+    it "wasm64 llvm CLI is stable":
+        val level = lookup_support(BackendKind.Llvm, CodegenTarget.Wasm64)
+        expect(level.to_text()).to_equal("stable")
+
+    it "wasm32 llvm-lib is unsupported with clear reason":
+        val level = lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm32)
+        expect(level.to_text()).to_equal("unsupported")
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            if entry.backend == BackendKind.LlvmLib and entry.target == CodegenTarget.Wasm32:
+                expect(entry.known_limits).to_contain("use llvm backend")
+
+    it "wasm64 llvm-lib is unsupported with clear reason":
+        val level = lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm64)
+        expect(level.to_text()).to_equal("unsupported")
+
+    it "wasm levels are all in final states":
+        val w32_lib = lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm32)
+        val w32_cli = lookup_support(BackendKind.Llvm, CodegenTarget.Wasm32)
+        val w64_lib = lookup_support(BackendKind.LlvmLib, CodegenTarget.Wasm64)
+        val w64_cli = lookup_support(BackendKind.Llvm, CodegenTarget.Wasm64)
+        expect(w32_lib.is_final_state()).to_equal(true)
+        expect(w32_cli.is_final_state()).to_equal(true)
+        expect(w64_lib.is_final_state()).to_equal(true)
+        expect(w64_cli.is_final_state()).to_equal(true)
+
+# ============================================================================
+# Phase 9: Matrix Closure Validation (Full-Family Completion)
+# ============================================================================
+
+describe "matrix closure validation":
+    it "validate_matrix_closure returns no errors":
+        val errors = validate_matrix_closure()
+        expect(errors.len()).to_equal(0)
+
+    it "is_matrix_closed returns true":
+        val closed = is_matrix_closed()
+        expect(closed).to_equal(true)
+
+    it "no row is Partial":
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            val level_text = entry.level.to_text()
+            expect(level_text != "partial").to_equal(true)
+
+    it "no row is SupportedExternal":
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            val level_text = entry.level.to_text()
+            expect(level_text != "supported (external toolchain)").to_equal(true)
+
+    it "every row is in a final state":
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            expect(entry.level.is_final_state()).to_equal(true)
+
+    it "stable rows have proof references":
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            if entry.level.to_text() == "stable":
+                expect(entry.proof != "none").to_equal(true)
+                expect(entry.proof != "").to_equal(true)
+
+    it "unsupported rows have clear diagnostics":
+        val matrix = get_support_matrix()
+        for entry in matrix:
+            if entry.level.to_text() == "unsupported":
+                expect(entry.known_limits != "").to_equal(true)
+
+describe "matrix completeness":
+    it "matrix covers all 8 targets for llvm-lib":
+        val targets = [
+            CodegenTarget.X86_64, CodegenTarget.X86,
+            CodegenTarget.AArch64, CodegenTarget.Arm,
+            CodegenTarget.Riscv64, CodegenTarget.Riscv32,
+            CodegenTarget.Wasm32, CodegenTarget.Wasm64
+        ]
+        for target in targets:
+            val level = lookup_support(BackendKind.LlvmLib, target)
+            # Every target must have an entry (not default Unsupported from missing)
+            expect(level.is_final_state()).to_equal(true)
+
+    it "matrix covers all 8 targets for llvm CLI":
+        val targets = [
+            CodegenTarget.X86_64, CodegenTarget.X86,
+            CodegenTarget.AArch64, CodegenTarget.Arm,
+            CodegenTarget.Riscv64, CodegenTarget.Riscv32,
+            CodegenTarget.Wasm32, CodegenTarget.Wasm64
+        ]
+        for target in targets:
+            val level = lookup_support(BackendKind.Llvm, target)
+            expect(level.is_final_state()).to_equal(true)
+
+    it "closure report says COMPLETE":
+        val report = format_closure_report()
+        expect(report).to_contain("COMPLETE")

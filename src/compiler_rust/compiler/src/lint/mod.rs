@@ -26,6 +26,9 @@ pub use types::{LintLevel, LintName};
 mod tests {
     use super::*;
     use simple_parser::Parser;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse_code(code: &str) -> simple_parser::ast::Module {
         let mut parser = Parser::new(code);
@@ -46,6 +49,21 @@ mod tests {
         let mut checker = LintChecker::with_config(config);
         checker.check_module(&module.items);
         checker.take_diagnostics()
+    }
+
+    fn check_code_in_file(filename: &str, code: &str) -> Vec<LintDiagnostic> {
+        let module = parse_code(code);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("simple_lint_{}_{}", unique, filename));
+        fs::write(&path, code).expect("write temp lint file");
+        let mut checker = LintChecker::new().with_source_file(Some(path.clone()));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+        let _ = fs::remove_file(path);
+        diagnostics
     }
 
     #[test]
@@ -118,6 +136,88 @@ pub fn set_active(active: bool):
 "#;
         let diagnostics = check_code(code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::BareBool));
+    }
+
+    #[test]
+    fn test_sspec_placeholder_tautology_detected() {
+        let code = r#"
+describe "demo":
+    it "uses fake success":
+        expect(true).to_equal(true)
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecPlaceholderTests));
+    }
+
+    #[test]
+    fn test_sspec_print_skip_detected() {
+        let code = r#"
+describe "demo":
+    it "prints skip":
+        print "[skip] env unavailable"
+        return
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecNoPrintBasedTests));
+    }
+
+    #[test]
+    fn test_sspec_empty_example_detected() {
+        let code = r#"
+describe "demo":
+    it "just calls helper":
+        run_check()
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SSpecEmptyExamples));
+    }
+
+    #[test]
+    fn test_sspec_boolean_wrapper_detected() {
+        let code = r#"
+describe "demo":
+    it "wraps comparison":
+        expect(code != 0).to_equal(true)
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.lint == LintName::SSpecBooleanWrapperAssertions));
+    }
+
+    #[test]
+    fn test_stub_placeholder_body_detected() {
+        let code = r#"
+fn not_done(port: i64) -> i64:
+    pass_todo("implement driver")
+"#;
+        let diagnostics = check_code_in_file("demo.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::StubImpl));
+    }
+
+    #[test]
+    fn test_allow_suppresses_sspec_placeholder_tests() {
+        let code = r#"
+#[allow(sspec_placeholder_tests)]
+describe "demo":
+    it "uses fake success":
+        expect(true).to_equal(true)
+"#;
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::SSpecPlaceholderTests));
+    }
+
+    #[test]
+    fn test_allow_suppresses_stub_impl() {
+        let code = r#"
+#[allow(stub_impl)]
+fn not_done(port: i64) -> i64:
+    pass_todo("implement driver")
+"#;
+        let diagnostics = check_code_in_file("demo.spl", code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::StubImpl));
     }
 
     #[test]

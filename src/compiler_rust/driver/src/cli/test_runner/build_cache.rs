@@ -3,7 +3,9 @@
 //! Provides hash-based caching of compiled test files (SMF and native binaries)
 //! to avoid recompilation when source hasn't changed.
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -15,9 +17,18 @@ use simple_compiler::linker::NativeBinaryOptions;
 const CACHE_DIR: &str = "target/test_cache";
 
 /// Build cache for test compilation artifacts.
+///
+/// Uses interior mutability (`RefCell`) for hash and content caches so that
+/// methods can populate them through `&self` references without requiring
+/// callers to hold `&mut self`.
 pub struct BuildCache {
     cache_dir: PathBuf,
     force_rebuild: bool,
+    /// Per-path hash cache — avoids re-reading + re-hashing the same file.
+    hash_cache: RefCell<HashMap<PathBuf, u64>>,
+    /// Per-path content cache — lets compile_test_to_native reuse the bytes
+    /// that source_hash already read instead of reading the file a second time.
+    content_cache: RefCell<HashMap<PathBuf, Vec<u8>>>,
 }
 
 impl BuildCache {
@@ -30,22 +41,35 @@ impl BuildCache {
         Self {
             cache_dir,
             force_rebuild,
+            hash_cache: RefCell::new(HashMap::new()),
+            content_cache: RefCell::new(HashMap::new()),
         }
     }
 
-    /// Compute a hash for the source file content.
-    fn source_hash(path: &Path) -> Option<u64> {
+    /// Compute a hash for the source file content (cached).
+    ///
+    /// The first call for a given path reads the file and stores both the
+    /// hash and the raw bytes.  Subsequent calls return the cached hash
+    /// without any I/O.
+    fn source_hash(&self, path: &Path) -> Option<u64> {
+        // Fast path: already computed
+        if let Some(&h) = self.hash_cache.borrow().get(path) {
+            return Some(h);
+        }
+        // Slow path: read, hash, cache
         let content = fs::read(path).ok()?;
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
-        // Include the path in the hash to avoid collisions between files with identical content
         path.hash(&mut hasher);
-        Some(hasher.finish())
+        let hash = hasher.finish();
+        self.hash_cache.borrow_mut().insert(path.to_path_buf(), hash);
+        self.content_cache.borrow_mut().insert(path.to_path_buf(), content);
+        Some(hash)
     }
 
     /// Get the cached artifact path for a source file with given extension.
     fn artifact_path(&self, source: &Path, ext: &str) -> Option<PathBuf> {
-        let hash = Self::source_hash(source)?;
+        let hash = self.source_hash(source)?;
         Some(self.cache_dir.join(format!("{:016x}.{}", hash, ext)))
     }
 
@@ -92,8 +116,19 @@ impl BuildCache {
             return Ok(output);
         }
 
-        let source_content =
-            fs::read_to_string(source).map_err(|e| format!("Failed to read {}: {}", source.display(), e))?;
+        // Reuse file bytes already read by source_hash() when possible,
+        // falling back to a fresh read only if the cache was not populated.
+        let source_content = {
+            let cache = self.content_cache.borrow();
+            if let Some(bytes) = cache.get(source) {
+                String::from_utf8(bytes.clone())
+                    .map_err(|e| format!("Invalid UTF-8 in {}: {}", source.display(), e))?
+            } else {
+                drop(cache);
+                fs::read_to_string(source)
+                    .map_err(|e| format!("Failed to read {}: {}", source.display(), e))?
+            }
+        };
 
         let mut pipeline = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler pipeline: {}", e))?;
 

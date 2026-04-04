@@ -103,6 +103,7 @@ pub fn print_help() {
     eprintln!("  simple verify regenerate           Regenerate Lean files from verification models");
     eprintln!("  simple verify check                Check all proof obligations and fail on sorry");
     eprintln!("  simple verify list                 List verification files and their state");
+    eprintln!("  simple verify quality [--all] [file ...]  Audit anti-dummy / anti-stub quality");
     eprintln!();
     eprintln!("Dashboard & Metrics:");
     eprintln!("  simple dashboard                   Show project metrics dashboard");

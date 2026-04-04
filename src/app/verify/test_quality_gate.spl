@@ -1,0 +1,213 @@
+# Test quality and stub-implementation verify gate.
+#
+# Audits test/spec files for placeholder-success patterns and source files for
+# stub implementations using the existing linter. This is intended for the
+# app-level `simple verify` workflow, where current changes should fail fast
+# and full-project audits should produce actionable cleanup reports.
+
+use app.io.mod.{dir_walk, file_exists, file_read, file_write, dir_create_all}
+use compiler.tools.lint.main.{Linter}
+
+struct QualityFinding:
+    level: text
+    subject: text
+    message: text
+
+struct QualityReport:
+    scope: text
+    scanned_test_files: i64
+    scanned_source_files: i64
+    findings: [QualityFinding]
+    failures: i64
+    warnings: i64
+    passes: i64
+    status: text
+
+fn make_quality_finding(level: text, subject: text, message: text) -> QualityFinding:
+    QualityFinding(level: level, subject: subject, message: message)
+
+fn count_quality_findings(findings: [QualityFinding], level: text) -> i64:
+    var count = 0
+    for finding in findings:
+        if finding.level == level:
+            count = count + 1
+    count
+
+fn quality_overall_status(findings: [QualityFinding]) -> text:
+    if count_quality_findings(findings, "FAIL") > 0:
+        return "FAIL"
+    if count_quality_findings(findings, "WARN") > 0:
+        return "WARN"
+    "PASS"
+
+fn build_quality_report(scope: text, scanned_test_files: i64, scanned_source_files: i64, findings: [QualityFinding]) -> QualityReport:
+    QualityReport(
+        scope: scope,
+        scanned_test_files: scanned_test_files,
+        scanned_source_files: scanned_source_files,
+        findings: findings,
+        failures: count_quality_findings(findings, "FAIL"),
+        warnings: count_quality_findings(findings, "WARN"),
+        passes: count_quality_findings(findings, "PASS"),
+        status: quality_overall_status(findings)
+    )
+
+fn push_unique_path(paths: [text], value: text) -> [text]:
+    if value == "":
+        return paths
+    for existing in paths:
+        if existing == value:
+            return paths
+    var out = paths
+    out.push(value)
+    out
+
+fn is_test_quality_file(path: text) -> bool:
+    if not path.starts_with("test/"):
+        return false
+    if not path.ends_with(".spl"):
+        return false
+    path.ends_with("_spec.spl") or path.ends_with("_test.spl")
+
+fn is_source_quality_file(path: text) -> bool:
+    path.starts_with("src/") and path.ends_with(".spl")
+
+fn collect_test_quality_files(scope_files: [text], full_project: bool) -> [text]:
+    var files: [text] = []
+    if full_project:
+        if file_exists("test"):
+            for path in dir_walk("test"):
+                if is_test_quality_file(path):
+                    files = push_unique_path(files, path)
+        return files
+
+    for path in scope_files:
+        if is_test_quality_file(path):
+            files = push_unique_path(files, path)
+    files
+
+fn collect_source_quality_files(scope_files: [text], full_project: bool) -> [text]:
+    var files: [text] = []
+    if full_project:
+        if file_exists("src"):
+            for path in dir_walk("src"):
+                if is_source_quality_file(path):
+                    files = push_unique_path(files, path)
+        return files
+
+    for path in scope_files:
+        if is_source_quality_file(path):
+            files = push_unique_path(files, path)
+    files
+
+fn has_quality_suppression(content: text, lint_name: text) -> bool:
+    content.contains("@allow({lint_name})") or content.contains("@warn({lint_name})")
+
+fn append_lint_findings(findings: [QualityFinding], path: text, content: text, lint_codes: [text], suppression_lint: text) -> [QualityFinding]:
+    var out = findings
+    if has_quality_suppression(content, suppression_lint):
+        out.push(make_quality_finding(
+            "FAIL",
+            path,
+            "Local suppression for {suppression_lint} hides anti-dummy / anti-stub enforcement"
+        ))
+
+    val linter = Linter.new()
+    val results = linter.lint_source(path, content)
+    for result in results:
+        if lint_codes.contains(result.lint.code):
+            out.push(make_quality_finding(
+                "FAIL",
+                "{path}:{result.line}",
+                "[{result.lint.code}] {result.lint.message}"
+            ))
+    out
+
+fn build_test_quality_verify_report(scope: text, scope_files: [text], full_project: bool) -> QualityReport:
+    val test_files = collect_test_quality_files(scope_files, full_project)
+    val source_files = collect_source_quality_files(scope_files, full_project)
+    var findings: [QualityFinding] = []
+
+    if test_files.len() == 0 and source_files.len() == 0:
+        findings.push(make_quality_finding("PASS", scope, "No test/spec or source files in verify scope; anti-dummy / anti-stub gate skipped"))
+        return build_quality_report(scope, 0, 0, findings)
+
+    for path in test_files:
+        val content = file_read(path)
+        if content == "":
+            findings.push(make_quality_finding("FAIL", path, "Could not read test/spec file"))
+        else:
+            findings = append_lint_findings(
+                findings,
+                path,
+                content,
+                ["SSPEC001", "SSPEC002", "SSPEC003"],
+                "sspec_placeholder_tests"
+            )
+            findings = append_lint_findings(
+                findings,
+                path,
+                content,
+                ["SSPEC004"],
+                "sspec_no_print_based_tests"
+            )
+            findings = append_lint_findings(
+                findings,
+                path,
+                content,
+                ["SSPEC005"],
+                "sspec_empty_examples"
+            )
+            findings = append_lint_findings(
+                findings,
+                path,
+                content,
+                ["SSPEC006"],
+                "sspec_boolean_wrapper_assertions"
+            )
+
+    for path in source_files:
+        val content = file_read(path)
+        if content == "":
+            findings.push(make_quality_finding("FAIL", path, "Could not read source file"))
+        else:
+            findings = append_lint_findings(findings, path, content, ["STUB001", "STUB003"], "stub_impl")
+
+    if findings.len() == 0:
+        findings.push(make_quality_finding(
+            "PASS",
+            scope,
+            "No placeholder-test or stub-implementation findings in verify scope"
+        ))
+
+    build_quality_report(scope, test_files.len() as i64, source_files.len() as i64, findings)
+
+fn render_test_quality_verify_report(report: QualityReport) -> text:
+    var out = "Anti-Dummy / Anti-Stub Verify Report\n"
+    out = out + "===================================\n"
+    out = out + "Scope: {report.scope}\n"
+    out = out + "Scanned test/spec files: {report.scanned_test_files}\n"
+    out = out + "Scanned source files: {report.scanned_source_files}\n"
+    out = out + "STATUS: {report.status}\n"
+    out = out + "Summary: {report.failures} fail, {report.warnings} warn, {report.passes} pass\n"
+
+    if report.findings.len() > 0:
+        out = out + "\nFindings:\n"
+        for finding in report.findings:
+            out = out + "- [{finding.level}] {finding.subject}: {finding.message}\n"
+    out
+
+fn write_test_quality_verify_report(report: QualityReport, report_dir: text) -> text:
+    if report_dir == "":
+        return ""
+    if not dir_create_all(report_dir):
+        return ""
+    val path = "{report_dir}/anti_dummy_stub_verify_latest.md"
+    val content = render_test_quality_verify_report(report)
+    if file_write(path, content):
+        path
+    else:
+        ""
+
+export QualityFinding, QualityReport
+export build_test_quality_verify_report, render_test_quality_verify_report, write_test_quality_verify_report

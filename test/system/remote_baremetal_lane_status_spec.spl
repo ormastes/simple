@@ -86,6 +86,19 @@ describe "LaneDescriptor":
         )
         expect(lane.is_authoritative()).to_equal(false)
 
+    it "treats host-aware lanes as authoritative when the lane contract is satisfied":
+        val lane = LaneDescriptor(
+            lane_id: "host_lane",
+            target_arch: "arm32",
+            adapter_kind: AdapterKind.trace32,
+            proof_class: ProofClass.compiled,
+            primary_result_channel: ResultChannelKind.debugger_console,
+            fallback_result_channel: Some(ResultChannelKind.register_readback),
+            authoritative_spec_path: "test/system/t32_terminal_power_remote_spec.spl",
+            status: LaneStatus.host_aware
+        )
+        expect(lane.is_authoritative()).to_equal(true)
+
 
 # ============================================================================
 # CapabilityReport
@@ -163,17 +176,17 @@ describe "ResultVerifier":
 # ============================================================================
 
 describe "LaneRegistry":
-    it "contains exactly 10 lanes":
+    it "contains exactly 11 lanes":
         val registry = LaneRegistry.default()
-        expect(registry.all().len()).to_equal(10)
+        expect(registry.all().len()).to_equal(11)
 
     it "has 3 stable lanes":
         val registry = LaneRegistry.default()
         expect(registry.stable_lanes().len()).to_equal(3)
 
-    it "has 3 host-aware lanes":
+    it "has 4 host-aware lanes":
         val registry = LaneRegistry.default()
-        expect(registry.host_aware_lanes().len()).to_equal(3)
+        expect(registry.host_aware_lanes().len()).to_equal(4)
 
     it "has 2 transport-only lanes":
         val registry = LaneRegistry.default()
@@ -183,6 +196,10 @@ describe "LaneRegistry":
         val registry = LaneRegistry.default()
         expect(registry.in_progress_lanes().len()).to_equal(2)
 
+    it "has 7 authoritative lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.authoritative_lanes().len()).to_equal(7)
+
     it "finds lanes by id":
         val registry = LaneRegistry.default()
         val lane = registry.find("qemu_rv32_semihost")
@@ -190,9 +207,42 @@ describe "LaneRegistry":
             Some(l): expect(l.lane_id).to_equal("qemu_rv32_semihost")
             nil: expect(false).to_equal(true)
 
+    it "uses the x86_64 boot spec for the direct boot lane":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("x86_64_direct_boot")
+        match lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.stable)
+                expect(l.authoritative_spec_path).to_equal("test/qemu/os/boot/x86_64_boot_qemu_spec.spl")
+                expect(l.is_authoritative()).to_equal(true)
+            nil: expect(false).to_equal(true)
+
     it "returns nil for unknown lanes":
         val registry = LaneRegistry.default()
         val lane = registry.find("nonexistent")
+        expect(lane).to_be_nil()
+
+    it "looks up ghdl_rv32_semihost as host_aware":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("ghdl_rv32_semihost")
+        match lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.host_aware)
+                expect(l.is_authoritative()).to_equal(true)
+            nil: expect(false).to_equal(true)
+
+    it "looks up ghdl_rv32_mailbox as in_progress":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("ghdl_rv32_mailbox")
+        match lane:
+            Some(l):
+                expect(l.status).to_equal(LaneStatus.in_progress)
+                expect(l.is_authoritative()).to_equal(false)
+            nil: expect(false).to_equal(true)
+
+    it "returns nil for removed ghdl_rv32_sim":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("ghdl_rv32_sim")
         expect(lane).to_be_nil()
 
 
@@ -206,16 +256,20 @@ describe "LaneStatusReporter":
         val report = reporter.report_text()
         expect(report).to_contain("Stable Lanes")
         expect(report).to_contain("Host-Aware")
+        expect(report).to_contain("stable and host-aware lanes are authoritative")
 
     it "generates markdown report":
         val reporter = LaneStatusReporter.new()
         val report = reporter.generate_matrix_markdown()
         expect(report).to_contain("| Lane ID |")
+        expect(report).to_contain("| Authoritative |")
+        expect(report).to_contain("- **Authoritative**: 7 lanes (stable + host-aware)")
 
     it "generates SDN report":
         val reporter = LaneStatusReporter.new()
         val report = reporter.report_sdn()
         expect(report).to_contain("[lane_matrix]")
+        expect(report).to_contain("authoritative =")
 
 
 # ============================================================================

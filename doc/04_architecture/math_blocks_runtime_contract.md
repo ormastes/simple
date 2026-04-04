@@ -42,9 +42,10 @@ The block:
 - The body result must be a scalar tensor (0-d) or reducible to scalar for backward
 - At least one tensor in the computation graph must have `requires_grad = true`
 
-**Error behavior:**
-- If the result is not gradient-capable, the torch runtime raises an error at the `backward()` call
-- Non-differentiable values (plain scalars, integers) produce a runtime error
+**Negative/unsupported behavior:**
+- Detached or non-differentiable inputs are treated as intentionally outside autograd tracking; they do not invalidate the block contract.
+- `loss{}` bodies that lower to no value are rejected during MIR lowering.
+- Backends that do not wire the torch autograd runtime remain deferred or unsupported for `loss{}` / `nograd{}`.
 
 **MIR lowering:**
 ```
