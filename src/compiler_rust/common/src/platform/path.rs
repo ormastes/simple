@@ -7,9 +7,24 @@ pub fn join(base: impl AsRef<Path>, part: impl AsRef<Path>) -> PathBuf {
     base.as_ref().join(part)
 }
 
-/// Get the absolute path.
+/// Get the absolute path — avoids libc::realpath which segfaults in
+/// self-hosted Cranelift binaries.
 pub fn absolute(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
-    std::fs::canonicalize(path)
+    let p = path.as_ref();
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+    let mut out = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Ok(out)
 }
 
 /// Get the parent directory.

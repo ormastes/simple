@@ -18,11 +18,9 @@ use std::time::{Duration, Instant};
 /// absolute-path resolution when the stdlib call fails or when running
 /// in a self-hosted context.
 fn safe_canonicalize(path: &Path) -> PathBuf {
-    // Try stdlib first (works in Rust-seed binary)
-    if let Ok(p) = std::fs::canonicalize(path) {
-        return p;
-    }
-    // Fallback: make absolute and normalize components
+    // Do NOT call std::fs::canonicalize — it uses libc::realpath which
+    // segfaults in self-hosted Cranelift-compiled binaries.
+    // Manual absolute-path resolution instead:
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1790,26 +1788,50 @@ int main(int argc, char** argv) {
         }
 
         // Scan for mangled _start → create defsym alias.
-        // Filter candidates by target arch to avoid x86 _start winning on riscv64 builds.
+        // Priority: 1) entry file's _start, 2) arch-matched, 3) fallback.
         {
             let has_boot = !boot_objects.is_empty();
             let mut best_start: Option<String> = None;
             let mut fallback_start: Option<String> = None;
-            for obj in object_paths {
-                if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    for line in stdout.lines() {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 3 {
-                            let sym = parts[2];
-                            if sym.ends_with("___start") && sym != "_start" {
-                                let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
-                                if neg_match { continue; }
-                                let pos_match = arch_filters.iter().any(|f| sym.contains(f));
-                                if pos_match {
-                                    best_start = Some(sym.to_string());
-                                } else if fallback_start.is_none() {
-                                    fallback_start = Some(sym.to_string());
+
+            // Priority 1: entry file's _start — always wins over arch heuristics.
+            // Compute expected mangled symbol from entry file path.
+            if let Some(ref entry) = self.entry_file {
+                let entry_str = entry.to_string_lossy();
+                let stem = entry_str.trim_start_matches('/').trim_end_matches(".spl");
+                let expected = format!("{}___start", stem.replace('/', "__"));
+                'entry_search: for obj in object_paths {
+                    if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        for line in stdout.lines() {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 3 && parts[2] == expected {
+                                best_start = Some(expected);
+                                break 'entry_search;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Priority 2/3: arch-matched or fallback (only if entry file didn't have _start)
+            if best_start.is_none() {
+                for obj in object_paths {
+                    if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        for line in stdout.lines() {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 3 {
+                                let sym = parts[2];
+                                if sym.ends_with("___start") && sym != "_start" {
+                                    let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
+                                    if neg_match { continue; }
+                                    let pos_match = arch_filters.iter().any(|f| sym.contains(f));
+                                    if pos_match {
+                                        best_start = Some(sym.to_string());
+                                    } else if fallback_start.is_none() {
+                                        fallback_start = Some(sym.to_string());
+                                    }
                                 }
                             }
                         }
@@ -4087,6 +4109,16 @@ fn resolve_import_name(
         }
     }
 
+    // Try re-export with first segment stripped (handles --source prefix stripping)
+    if use_segments.len() > 1 {
+        let stripped_prefix = use_segments[1..].join("__");
+        if let Some(module_re_exports) = re_exports.get(&stripped_prefix) {
+            if let Some(actual_mangled) = module_re_exports.get(func_name) {
+                return Some(actual_mangled.clone());
+            }
+        }
+    }
+
     // Fallback: return the first candidate
     Some(candidates[0].clone())
 }
@@ -4113,15 +4145,33 @@ fn collect_imported_names_flat(target: &simple_parser::ast::ImportTarget) -> Vec
 /// Example: mangled "src__app__io__cli_ops__cli_get_args" with use path
 /// ["app", "io", "cli_ops"] → matches because "app", "io", "cli_ops" appear
 /// in order as parts of the mangled name (split by "__").
+///
+/// Also handles `--source` prefix stripping: e.g., `use os.kernel.arch...`
+/// produces segments ["os", "kernel", "arch", ...] but `--source src/os`
+/// strips "os" from mangled names → "kernel__arch__...". If the full match
+/// fails, retries with the first segment skipped.
 fn mangled_matches_use_path(mangled: &str, use_segments: &[&str]) -> bool {
     let parts: Vec<&str> = mangled.split("__").collect();
+    // Try with all segments first
+    if subsequence_match_parts(&parts, use_segments) {
+        return true;
+    }
+    // Try skipping the first segment (handles --source path prefix stripping)
+    if use_segments.len() > 1 {
+        return subsequence_match_parts(&parts, &use_segments[1..]);
+    }
+    false
+}
+
+/// Helper: check if `segments` appear as a subsequence in `parts`.
+fn subsequence_match_parts(parts: &[&str], segments: &[&str]) -> bool {
     let mut seg_idx = 0;
-    for part in &parts {
-        if seg_idx < use_segments.len() && *part == use_segments[seg_idx] {
+    for part in parts {
+        if seg_idx < segments.len() && *part == segments[seg_idx] {
             seg_idx += 1;
         }
     }
-    seg_idx == use_segments.len()
+    seg_idx == segments.len()
 }
 
 /// Extract variable name from a Let statement's pattern.

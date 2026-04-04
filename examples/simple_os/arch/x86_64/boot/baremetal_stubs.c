@@ -805,9 +805,113 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;
+        case 80: { /* DevEnumerate — PCI bus scan via direct port I/O */
+            extern int64_t _pci_enumerate(uint64_t, uint64_t, uint64_t);
+            return _pci_enumerate(a0, a1, a2);
+        }
         default:
             return -38; /* ENOSYS */
     }
+}
+
+/* ===================================================================
+ * PCI enumeration via direct port I/O (syscall 80 handler)
+ *
+ * Mode 0 (a0=0): Count PCI devices. Returns device count.
+ * Mode 1 (a0=1): Get device info at index a1 into DeviceInfoBuf at a2.
+ *                 DeviceInfoBuf layout (from device_mem_types.spl):
+ *                   offset 0:  u8  bus
+ *                   offset 1:  u8  device
+ *                   offset 2:  u8  func
+ *                   offset 3:  u8  padding
+ *                   offset 4:  u16 vendor_id
+ *                   offset 6:  u16 device_id
+ *                   offset 8:  u8  class_code
+ *                   offset 9:  u8  subclass
+ *                   offset 10: u8  prog_if
+ *                   offset 11: u8  header_type
+ *                   offset 12: u8  irq_line
+ * =================================================================== */
+
+/* Cached PCI device list (scanned once on first call) */
+#define MAX_PCI_CACHED 64
+static struct { uint8_t bus, dev, func; uint16_t vendor, devid; uint8_t cls, sub, progif, htype, irq; } _pci_cache[MAX_PCI_CACHED];
+static int _pci_cache_count = -1; /* -1 = not scanned yet */
+
+static void _pci_scan(void)
+{
+    _pci_cache_count = 0;
+    for (int bus = 0; bus < 256 && _pci_cache_count < MAX_PCI_CACHED; bus++) {
+        for (int dev = 0; dev < 32 && _pci_cache_count < MAX_PCI_CACHED; dev++) {
+            /* Read vendor ID at bus:dev.0 */
+            uint32_t addr = 0x80000000 | ((uint32_t)bus << 16) | ((uint32_t)dev << 11);
+            outl(0xCF8, addr);
+            uint32_t reg0 = inl(0xCFC);
+            uint16_t vendor = (uint16_t)(reg0 & 0xFFFF);
+            if (vendor == 0xFFFF || vendor == 0) continue;
+
+            uint16_t devid = (uint16_t)(reg0 >> 16);
+
+            /* Read class/subclass/prog_if at offset 0x08 */
+            outl(0xCF8, addr | 0x08);
+            uint32_t reg2 = inl(0xCFC);
+            uint8_t cls = (uint8_t)(reg2 >> 24);
+            uint8_t sub = (uint8_t)(reg2 >> 16);
+            uint8_t progif = (uint8_t)(reg2 >> 8);
+
+            /* Read header type at offset 0x0C */
+            outl(0xCF8, addr | 0x0C);
+            uint32_t reg3 = inl(0xCFC);
+            uint8_t htype = (uint8_t)(reg3 >> 16);
+
+            /* Read IRQ line at offset 0x3C */
+            outl(0xCF8, addr | 0x3C);
+            uint32_t regF = inl(0xCFC);
+            uint8_t irq = (uint8_t)(regF & 0xFF);
+
+            int i = _pci_cache_count++;
+            _pci_cache[i].bus = (uint8_t)bus;
+            _pci_cache[i].dev = (uint8_t)dev;
+            _pci_cache[i].func = 0;
+            _pci_cache[i].vendor = vendor;
+            _pci_cache[i].devid = devid;
+            _pci_cache[i].cls = cls;
+            _pci_cache[i].sub = sub;
+            _pci_cache[i].progif = progif;
+            _pci_cache[i].htype = htype;
+            _pci_cache[i].irq = irq;
+        }
+    }
+}
+
+int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+
+    if (mode == 0) {
+        /* Mode 0: return device count */
+        return (int64_t)_pci_cache_count;
+    }
+    if (mode == 1) {
+        /* Mode 1: fill DeviceInfoBuf at buf_addr for device[index] */
+        if ((int)index >= _pci_cache_count) return -22; /* EINVAL */
+        uint8_t *buf = (uint8_t *)(uintptr_t)buf_addr;
+        if (!buf) return -14; /* EFAULT */
+        int i = (int)index;
+        buf[0] = _pci_cache[i].bus;
+        buf[1] = _pci_cache[i].dev;
+        buf[2] = _pci_cache[i].func;
+        buf[3] = 0; /* padding */
+        *(uint16_t *)(buf + 4) = _pci_cache[i].vendor;
+        *(uint16_t *)(buf + 6) = _pci_cache[i].devid;
+        buf[8] = _pci_cache[i].cls;
+        buf[9] = _pci_cache[i].sub;
+        buf[10] = _pci_cache[i].progif;
+        buf[11] = _pci_cache[i].htype;
+        buf[12] = _pci_cache[i].irq;
+        return 0;
+    }
+    return -38; /* ENOSYS */
 }
 
 /* Also provide the unmangled name for direct extern fn calls */
@@ -3137,48 +3241,47 @@ S1(rt_closure_bind)
 #if defined(__x86_64__) || defined(__i386__)
 /* --- Port I/O: real x86 implementations --- */
 
-/* Port I/O and MMIO: Cranelift passes TAGGED RuntimeValues (integer << 3).
- * Must DECODE_INT arguments and ENCODE_INT return values.
- * Fix: 2026-04-05 — PCI enumeration found 0 devices because port address
- * 0xCF8 was passed as tagged 0x67C0, causing garbage I/O. */
+/* Port I/O: Cranelift passes RAW (untagged) i64 for extern fn args.
+ * PCI enumeration uses kernel syscall 80 (not port I/O), so these
+ * are only called for serial I/O and direct hardware access. */
 
 RuntimeValue rt_port_outb_real(RuntimeValue port, RuntimeValue val)
 {
-    outb((uint16_t)DECODE_INT(port), (uint8_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outb((uint16_t)(uint64_t)port, (uint8_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_outw_real(RuntimeValue port, RuntimeValue val)
 {
-    outw((uint16_t)DECODE_INT(port), (uint16_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outw((uint16_t)(uint64_t)port, (uint16_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_outl_real(RuntimeValue port, RuntimeValue val)
 {
-    outl((uint16_t)DECODE_INT(port), (uint32_t)DECODE_INT(val));
-    return NIL_VALUE;
+    outl((uint16_t)(uint64_t)port, (uint32_t)(uint64_t)val);
+    return 0;
 }
 
 RuntimeValue rt_port_inb_real(RuntimeValue port)
 {
-    return ENCODE_INT((int64_t)(uint64_t)inb((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inb((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_inw_real(RuntimeValue port)
 {
-    return ENCODE_INT((int64_t)(uint64_t)inw((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inw((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_inl_real(RuntimeValue port)
 {
-    return ENCODE_INT((int64_t)(uint64_t)inl((uint16_t)DECODE_INT(port)));
+    return (RuntimeValue)(uint64_t)inl((uint16_t)(uint64_t)port);
 }
 
 RuntimeValue rt_port_io_wait_real(void)
 {
     io_wait();
-    return NIL_VALUE;
+    return 0;
 }
 
 /* Expose as the primary symbols (linker sees these).
@@ -3205,58 +3308,51 @@ RuntimeValue rt_port_io_wait(void) {
     return rt_port_io_wait_real();
 }
 
-/* --- MMIO: real x86_64 implementations (DECODE_INT for tagged args) --- */
+/* --- MMIO: real x86_64 implementations (raw i64 args) --- */
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint8_t *)a);
+    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint16_t *)a);
+    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint32_t *)a);
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    return ENCODE_INT((int64_t)*(volatile uint64_t *)a);
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
 }
 
 RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    *(volatile uint8_t *)a = (uint8_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
 {
     uintptr_t a = (uintptr_t)DECODE_INT(addr);
     *(volatile uint16_t *)a = (uint16_t)DECODE_INT(val);
-    return NIL_VALUE;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    *(volatile uint32_t *)a = (uint32_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
 {
-    uintptr_t a = (uintptr_t)DECODE_INT(addr);
-    *(volatile uint64_t *)a = (uint64_t)DECODE_INT(val);
-    return NIL_VALUE;
+    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val;
+    return 0;
 }
 
 RuntimeValue rt_mmio_read_u8(RuntimeValue a) { return rt_mmio_read_u8_real(a); }

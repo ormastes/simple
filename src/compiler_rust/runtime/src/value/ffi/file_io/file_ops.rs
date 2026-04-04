@@ -30,24 +30,29 @@ pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64
         Err(_) => return RuntimeValue::NIL,
     };
 
-    match std::fs::canonicalize(path_str) {
-        Ok(canonical) => {
-            let canonical_str = canonical.to_string_lossy();
-            let bytes = canonical_str.as_bytes();
-            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
-        }
-        Err(_) => {
-            // If canonicalize fails, try to make it absolute without resolving symlinks
+    // Avoid std::fs::canonicalize (libc::realpath segfaults in self-hosted binaries).
+    // Make absolute and normalize . / .. components instead.
+    {
+        let p = std::path::Path::new(path_str);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
             match std::env::current_dir() {
-                Ok(cwd) => {
-                    let absolute = cwd.join(path_str);
-                    let absolute_str = absolute.to_string_lossy();
-                    let bytes = absolute_str.as_bytes();
-                    rt_string_new(bytes.as_ptr(), bytes.len() as u64)
-                }
-                Err(_) => RuntimeValue::NIL,
+                Ok(cwd) => cwd.join(p),
+                Err(_) => return RuntimeValue::NIL,
+            }
+        };
+        let mut out = std::path::PathBuf::new();
+        for comp in abs.components() {
+            match comp {
+                std::path::Component::ParentDir => { out.pop(); }
+                std::path::Component::CurDir => {}
+                c => out.push(c),
             }
         }
+        let canonical_str = out.to_string_lossy();
+        let bytes = canonical_str.as_bytes();
+        rt_string_new(bytes.as_ptr(), bytes.len() as u64)
     }
 }
 
