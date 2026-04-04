@@ -289,8 +289,11 @@ fn collect_free_vars_recursive(expr: &Expr, vars: &mut HashSet<String>) {
         }
         Expr::FString { parts, .. } => {
             for part in parts {
-                if let FStringPart::Expr(e) = part {
-                    collect_free_vars_recursive(e, vars);
+                match part {
+                    FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => {
+                        collect_free_vars_recursive(e, vars);
+                    }
+                    _ => {}
                 }
             }
         }

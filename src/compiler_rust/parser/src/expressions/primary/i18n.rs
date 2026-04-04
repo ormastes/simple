@@ -123,6 +123,21 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                FStringToken::ExprWithFormat(expr_str, format_spec) => {
+                    let mut sub_parser = Parser::new_expression(expr_str);
+                    match sub_parser.parse_expression() {
+                        Ok(expr) => {
+                            if sub_parser.is_at_end() || matches!(sub_parser.current.kind, TokenKind::Eof) {
+                                result_parts.push(FStringPart::ExprWithFormat(expr, format_spec.clone()));
+                            } else {
+                                result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                            }
+                        }
+                        Err(_) => {
+                            result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                        }
+                    }
+                }
             }
         }
         Ok(result_parts)

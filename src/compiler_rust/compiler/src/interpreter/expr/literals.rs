@@ -150,6 +150,11 @@ pub(super) fn eval_literal_expr(
                             .unwrap_or_else(|| v.to_display_string());
                         out.push_str(&display);
                     }
+                    FStringPart::ExprWithFormat(e, spec) => {
+                        let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                        let display = format_value_with_spec_interp(&v, spec);
+                        out.push_str(&display);
+                    }
                 }
             }
             Ok(Some(Value::Str(out)))
@@ -183,6 +188,15 @@ pub(super) fn eval_literal_expr(
                                 // For complex expressions, evaluate inline
                                 let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
                                 default_template.push_str(&v.to_display_string());
+                            }
+                        }
+                        FStringPart::ExprWithFormat(e, spec) => {
+                            if let Expr::Identifier(id) = e {
+                                default_template.push_str(&format!("{{{}:{}}}", id, spec));
+                            } else {
+                                let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                                let formatted = format_value_with_spec_interp(&v, spec);
+                                default_template.push_str(&formatted);
                             }
                         }
                     }
@@ -293,6 +307,231 @@ pub(super) fn eval_literal_expr(
             ))
         }
         _ => Ok(None),
+    }
+}
+
+/// Format a Value using a Python-style format specifier (interpreter mode).
+///
+/// Supports: `.Nf` (float precision), `0Nd` (zero-padded int), `>N`/`<N`/`^N` (alignment),
+/// `.N%` (percentage), `x`/`X` (hex), `o` (octal), `b` (binary), `e`/`E` (scientific).
+fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
+    let chars: Vec<char> = spec.chars().collect();
+    let len = chars.len();
+    if len == 0 {
+        return v.to_display_string();
+    }
+
+    // Parse format spec: [[fill]align][sign][#][0][width][grouping][.precision][type]
+    let mut pos = 0;
+    let mut fill = ' ';
+    let mut align = '\0';
+    let mut _sign = '\0';
+    let mut alt_form = false;
+    let mut zero_pad = false;
+    let mut width: Option<usize> = None;
+    let mut _grouping = '\0';
+    let mut precision: Option<usize> = None;
+    let mut type_code = '\0';
+
+    // [fill]align
+    if len >= 2 && matches!(chars[1], '<' | '>' | '^' | '=') {
+        fill = chars[0];
+        align = chars[1];
+        pos = 2;
+    } else if len >= 1 && matches!(chars[0], '<' | '>' | '^' | '=') {
+        align = chars[0];
+        pos = 1;
+    }
+
+    // Sign
+    if pos < len && matches!(chars[pos], '+' | '-' | ' ') {
+        _sign = chars[pos];
+        pos += 1;
+    }
+
+    // Alt form '#'
+    if pos < len && chars[pos] == '#' {
+        alt_form = true;
+        pos += 1;
+    }
+
+    // Zero pad
+    if pos < len && chars[pos] == '0' {
+        zero_pad = true;
+        pos += 1;
+    }
+
+    // Width
+    let width_start = pos;
+    while pos < len && chars[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    if pos > width_start {
+        let w: String = chars[width_start..pos].iter().collect();
+        width = w.parse().ok();
+    }
+
+    // Grouping
+    if pos < len && matches!(chars[pos], ',' | '_') {
+        _grouping = chars[pos];
+        pos += 1;
+    }
+
+    // Precision
+    if pos < len && chars[pos] == '.' {
+        pos += 1;
+        let prec_start = pos;
+        while pos < len && chars[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos > prec_start {
+            let p: String = chars[prec_start..pos].iter().collect();
+            precision = p.parse().ok();
+        } else {
+            precision = Some(0);
+        }
+    }
+
+    // Type code
+    if pos < len {
+        type_code = chars[pos];
+    }
+
+    // Format the raw value
+    let raw = match type_code {
+        'f' | 'F' => {
+            let f = match v {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => v.to_display_string().parse::<f64>().unwrap_or(0.0),
+            };
+            let prec = precision.unwrap_or(6);
+            format!("{:.prec$}", f, prec = prec)
+        }
+        'e' | 'E' => {
+            let f = match v {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => v.to_display_string().parse::<f64>().unwrap_or(0.0),
+            };
+            let prec = precision.unwrap_or(6);
+            if type_code == 'E' {
+                format!("{:.prec$E}", f, prec = prec)
+            } else {
+                format!("{:.prec$e}", f, prec = prec)
+            }
+        }
+        'd' => {
+            let i = match v {
+                Value::Int(i) => *i,
+                Value::Float(f) => *f as i64,
+                _ => v.to_display_string().parse::<i64>().unwrap_or(0),
+            };
+            format!("{}", i)
+        }
+        'x' | 'X' => {
+            let i = match v {
+                Value::Int(i) => *i,
+                _ => v.to_display_string().parse::<i64>().unwrap_or(0),
+            };
+            let result = if type_code == 'X' {
+                format!("{:X}", i)
+            } else {
+                format!("{:x}", i)
+            };
+            if alt_form {
+                let prefix = if type_code == 'X' { "0X" } else { "0x" };
+                format!("{}{}", prefix, result)
+            } else {
+                result
+            }
+        }
+        'o' => {
+            let i = match v {
+                Value::Int(i) => *i,
+                _ => v.to_display_string().parse::<i64>().unwrap_or(0),
+            };
+            let result = format!("{:o}", i);
+            if alt_form { format!("0o{}", result) } else { result }
+        }
+        'b' => {
+            let i = match v {
+                Value::Int(i) => *i,
+                _ => v.to_display_string().parse::<i64>().unwrap_or(0),
+            };
+            let result = format!("{:b}", i);
+            if alt_form { format!("0b{}", result) } else { result }
+        }
+        '%' => {
+            let f = match v {
+                Value::Float(f) => *f,
+                Value::Int(i) => *i as f64,
+                _ => v.to_display_string().parse::<f64>().unwrap_or(0.0),
+            };
+            let prec = precision.unwrap_or(6);
+            format!("{:.prec$}%", f * 100.0, prec = prec)
+        }
+        _ => {
+            // Default: string representation, with precision as max length
+            let s = v.to_display_string();
+            if let Some(prec) = precision {
+                if s.len() > prec { s[..prec].to_string() } else { s }
+            } else {
+                s
+            }
+        }
+    };
+
+    // Apply width/alignment
+    if let Some(w) = width {
+        let current_len = raw.chars().count();
+        if current_len < w {
+            let padding = w - current_len;
+            let fill_char = if zero_pad && align == '\0' { '0' } else { fill };
+            let effective_align = if align != '\0' {
+                align
+            } else if zero_pad {
+                '>'
+            } else {
+                '<'
+            };
+            match effective_align {
+                '>' => {
+                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    if fill_char == '0' && (raw.starts_with('+') || raw.starts_with('-')) {
+                        let (sign, rest) = raw.split_at(1);
+                        format!("{}{}{}", sign, pad, rest)
+                    } else {
+                        format!("{}{}", pad, raw)
+                    }
+                }
+                '<' => {
+                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    format!("{}{}", raw, pad)
+                }
+                '^' => {
+                    let left_pad = padding / 2;
+                    let right_pad = padding - left_pad;
+                    let left: String = std::iter::repeat(fill_char).take(left_pad).collect();
+                    let right: String = std::iter::repeat(fill_char).take(right_pad).collect();
+                    format!("{}{}{}", left, raw, right)
+                }
+                '=' => {
+                    let pad: String = std::iter::repeat(fill_char).take(padding).collect();
+                    if raw.starts_with('+') || raw.starts_with('-') {
+                        let (sign, rest) = raw.split_at(1);
+                        format!("{}{}{}", sign, pad, rest)
+                    } else {
+                        format!("{}{}", pad, raw)
+                    }
+                }
+                _ => raw,
+            }
+        } else {
+            raw
+        }
+    } else {
+        raw
     }
 }
 

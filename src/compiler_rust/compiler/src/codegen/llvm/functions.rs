@@ -1297,6 +1297,31 @@ impl LlvmBackend {
                                 .left()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
+                        FStringPart::ExprWithFormat(vreg, format_spec) => {
+                            let value_format_fn = module.get_function("rt_value_format_string").unwrap_or_else(|| {
+                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                                module.add_function("rt_value_format_string", fn_type, None)
+                            });
+                            let val = self.get_vreg(vreg, vreg_map)?;
+                            let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                            // Create format spec string constant
+                            let spec_val = self.context.const_string(format_spec.as_bytes(), false);
+                            let spec_global = module.add_global(spec_val.get_type(), None, "fmtspec");
+                            spec_global.set_initializer(&spec_val);
+                            spec_global.set_constant(true);
+                            spec_global.set_linkage(inkwell::module::Linkage::Private);
+                            let spec_ptr = spec_global.as_pointer_value();
+                            let spec_ptr_int = builder
+                                .build_ptr_to_int(spec_ptr, i64_type, "fmtspec_ptr_int")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
+                            let spec_len = i64_type.const_int(format_spec.len() as u64, false);
+                            let call = builder
+                                .build_call(value_format_fn, &[coerced.into(), spec_ptr_int.into(), spec_len.into()], "fmt_str")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_format_string", &e))?;
+                            call.try_as_basic_value()
+                                .left()
+                                .unwrap_or_else(|| i64_type.const_int(0, false).into())
+                        }
                     };
 
                     let concat_call = builder

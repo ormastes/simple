@@ -30,6 +30,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 
 Implemented and safe to advertise:
 - SSpec, SDoctest, coverage, traceability checks, and generated spec docs
+- Language-level mock policy: system test mock ban, HAL-only and custom pattern modes
 - Self-hosted staged compiler, interpreter, and loader architecture
 - MDSOC manifests and architecture-focused project structure
 - Parser-friendly macros with validation and hygiene
@@ -703,6 +704,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 **Development:**
 - [Build Guide](doc/07_guide/build.md) - Building Simple and common workflows
 - [Testing Guide](doc/07_guide/testing/testing.md) - Test runner behavior and flags
+- [Mock Policy Guide](doc/07_guide/testing/mock_policy_system_test_ban.md) - System test mock ban and test level enforcement
 - [Coverage Guide](doc/07_guide/testing/coverage.md) - Coverage, SDoctest, and enforcement
 - [MCP Tooling Guide](doc/07_guide/tooling/mcp.md) - MCP registration and usage
 

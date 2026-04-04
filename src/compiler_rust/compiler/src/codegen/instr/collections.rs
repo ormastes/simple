@@ -454,6 +454,15 @@ pub(crate) fn compile_fstring_format<M: Module>(
                 let call = adapted_call(builder, to_str_ref, &[val]);
                 builder.inst_results(call)[0]
             }
+            FStringPart::ExprWithFormat(vreg, format_spec) => {
+                // Convert expression value to formatted string using format specifier
+                let val = ctx.vreg_values[vreg];
+                let (fmt_ptr, fmt_len) = create_stack_string(builder, format_spec);
+                let fmt_id = ctx.runtime_funcs["rt_value_format_string"];
+                let fmt_ref = ctx.module.declare_func_in_func(fmt_id, builder.func);
+                let call = adapted_call(builder, fmt_ref, &[val, fmt_ptr, fmt_len]);
+                builder.inst_results(call)[0]
+            }
         };
 
         let concat_call = adapted_call(builder, string_concat_ref, &[result, part_str]);

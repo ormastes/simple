@@ -188,7 +188,7 @@ pub(crate) fn pattern_matches(
                     for part in parts {
                         match part {
                             FStringPart::Literal(s) => pattern_str.push_str(s),
-                            FStringPart::Expr(_) => {
+                            FStringPart::Expr(_) | FStringPart::ExprWithFormat(_, _) => {
                                 // FStrings with expressions cannot be used as patterns
                                 return Ok(false);
                             }

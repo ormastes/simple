@@ -7,7 +7,11 @@ impl TypeChecker {
             Expr::FString { parts, .. } => {
                 use simple_parser::ast::FStringPart;
                 for part in parts {
-                    if let FStringPart::Expr(e) = part {
+                    let e_opt = match part {
+                        FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => Some(e),
+                        _ => None,
+                    };
+                    if let Some(e) = e_opt {
                         // For template strings, allow undefined identifiers in placeholders
                         // This enables template.with {...} pattern where placeholders are
                         // names, not variable references

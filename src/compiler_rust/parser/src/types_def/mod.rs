@@ -433,7 +433,7 @@ impl<'a> Parser<'a> {
                     .iter()
                     .filter_map(|p| match p {
                         FStringToken::Literal(s) => Some(s.clone()),
-                        FStringToken::Expr(_) => None, // Skip interpolated expressions
+                        FStringToken::Expr(_) | FStringToken::ExprWithFormat(_, _) => None, // Skip interpolated expressions
                     })
                     .collect();
                 doc_comment = Some(DocComment { content });
@@ -634,7 +634,7 @@ impl<'a> Parser<'a> {
                     .iter()
                     .filter_map(|p| match p {
                         FStringToken::Literal(s) => Some(s.clone()),
-                        FStringToken::Expr(_) => None, // Skip interpolated expressions
+                        FStringToken::Expr(_) | FStringToken::ExprWithFormat(_, _) => None, // Skip interpolated expressions
                     })
                     .collect();
                 doc_comment = Some(DocComment { content });

@@ -374,6 +374,45 @@ Semantic highlighting should be enabled by default. If not:
    - Better for complex queries
    - Less interruption during typing
 
+## Math Block Rendering
+
+Simple supports three math block types with full syntax highlighting:
+`m{}`, `loss{}`, and `nograd{}`.
+
+```simple
+val result = m{ x^2 + y^2 }
+val sigmoid = loss{ frac(1, 1 + exp(-x)) }
+val init = nograd{ sqrt(frac(6, fan_in + fan_out)) }
+```
+
+**Syntax highlighting** covers:
+- Block delimiters (`m{`, `loss{`, `nograd{`) as keywords
+- Nested braces (e.g., `m{ \frac{10}{2} }` highlights correctly)
+- Math functions: `sin`, `cos`, `tan`, `tanh`, `exp`, `log`, `sqrt`, `abs`, `frac`, `sum`, `product`, `integral`, `dot`, `softmax`, `relu`, `sigmoid`
+- Greek letters: `alpha`, `beta`, `gamma`, `theta`, `sigma`, `omega`, etc.
+- Math operators: `^`, `@`, `.+`, `.-`, `.*`, `./`, `.^`, `'`, `..`
+- LaTeX commands: `\frac`, `\sqrt`, `\sum`, `\exp`, `\pi`, etc.
+- Constants: `pi`, `e`, `infinity`, `partial`, `nabla`
+
+**LSP hover** shows rendered math (LaTeX, Unicode, Markdown) when hovering over math blocks.
+
+**Commands:**
+- `Simple: Toggle Math Preview` — toggle math preview panel
+- `Simple: Toggle Inline Render` — toggle inline rendering
+
+## Test CodeLens (Gutter Arrows)
+
+The extension shows "▶ Run" CodeLens buttons above test blocks in `.spl` files:
+
+| Block | CodeLens |
+|-------|----------|
+| `describe "...":` | ▶ Run File |
+| `context "...":` | ▶ Run Test |
+| `it "...":` | ▶ Run Test |
+| `""" sdoctest:` | ▶ Run Doctest |
+
+Clicking a CodeLens runs the test via `bin/simple test` in the integrated terminal.
+
 ## Features in Detail
 
 ### Semantic Tokens

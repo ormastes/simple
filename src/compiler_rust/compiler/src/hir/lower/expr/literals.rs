@@ -88,6 +88,13 @@ impl Lowerer {
                             default_template.push_str("{...}");
                         }
                     }
+                    ast::FStringPart::ExprWithFormat(e, spec) => {
+                        if let Expr::Identifier(id) = e {
+                            default_template.push_str(&format!("{{{}:{}}}", id, spec));
+                        } else {
+                            default_template.push_str(&format!("{{...:{}}}", spec));
+                        }
+                    }
                 }
             }
             default_template
@@ -131,7 +138,7 @@ impl Lowerer {
         // If so, convert it to a plain string
         let mut all_literal = true;
         for part in parts {
-            if let ast::FStringPart::Expr(_) = part {
+            if matches!(part, ast::FStringPart::Expr(_) | ast::FStringPart::ExprWithFormat(_, _)) {
                 all_literal = false;
                 break;
             }
@@ -183,6 +190,24 @@ impl Lowerer {
                             },
                             ty: TypeId::STRING,
                         }
+                    };
+                    string_parts.push(string_expr);
+                }
+                ast::FStringPart::ExprWithFormat(e, format_spec) => {
+                    // Lower the expression
+                    let expr_hir = self.lower_expr(e, ctx)?;
+
+                    // Always use format function (format spec applies to all types)
+                    let format_spec_expr = HirExpr {
+                        kind: HirExprKind::String(format_spec.clone()),
+                        ty: TypeId::STRING,
+                    };
+                    let string_expr = HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_value_format_string".to_string(),
+                            args: vec![expr_hir, format_spec_expr],
+                        },
+                        ty: TypeId::STRING,
                     };
                     string_parts.push(string_expr);
                 }

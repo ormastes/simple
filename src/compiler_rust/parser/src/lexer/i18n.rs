@@ -35,7 +35,7 @@ impl<'a> super::Lexer<'a> {
                             .into_iter()
                             .map(|p| match p {
                                 FStringToken::Literal(s) => s,
-                                FStringToken::Expr(_) => unreachable!(),
+                                FStringToken::Expr(_) | FStringToken::ExprWithFormat(_, _) => unreachable!(),
                             })
                             .collect::<String>();
                         return TokenKind::I18nString { name, default_text };
@@ -143,7 +143,7 @@ impl<'a> super::Lexer<'a> {
                                 .into_iter()
                                 .map(|p| match p {
                                     FStringToken::Literal(s) => s,
-                                    FStringToken::Expr(_) => unreachable!(),
+                                    FStringToken::Expr(_) | FStringToken::ExprWithFormat(_, _) => unreachable!(),
                                 })
                                 .collect::<String>();
                             return TokenKind::I18nString { name, default_text };

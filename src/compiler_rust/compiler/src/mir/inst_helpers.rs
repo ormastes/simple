@@ -322,7 +322,7 @@ impl MirInst {
                 for part in parts {
                     match part {
                         FStringPart::Literal(_) => {}
-                        FStringPart::Expr(reg) => v.push(*reg),
+                        FStringPart::Expr(reg) | FStringPart::ExprWithFormat(reg, _) => v.push(*reg),
                     }
                 }
                 v

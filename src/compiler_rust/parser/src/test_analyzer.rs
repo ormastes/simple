@@ -292,6 +292,7 @@ fn extract_string(expr: &Expr) -> Option<String> {
                 match part {
                     crate::ast::FStringPart::Literal(s) => result.push_str(s),
                     crate::ast::FStringPart::Expr(_) => result.push_str("{...}"),
+                    crate::ast::FStringPart::ExprWithFormat(_, spec) => result.push_str(&format!("{{...:{}}}", spec)),
                 }
             }
             Some(result)

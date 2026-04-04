@@ -7,7 +7,8 @@ Neovim plugin for the [Simple programming language](https://github.com/nicholasg
 - **Filetype detection** for `.spl` files with proper indent and comment settings
 - **LSP integration** with auto-detection of the Simple language server (`src/app/lsp/`)
 - **Tree-sitter support** with registration and query path management (`src/compiler/parser/treesitter/queries/`)
-- **Math block rendering** with conceal for `m{ ... }` syntax, inline Unicode preview, and LSP hover (LaTeX + Unicode)
+- **Math block rendering** with conceal for `m{}`, `loss{}`, and `nograd{}` syntax, inline Unicode preview, and LSP hover (LaTeX + Unicode)
+- **Test lens** with "▶ Run" virtual text beside `describe`/`it`/`context`/`sdoctest` blocks
 - **Brief view** for code overview (fold to signatures only)
 - **User commands** for testing, building, linting, and formatting
 - **Health checks** via `:checkhealth simple`
@@ -116,26 +117,52 @@ When `keymaps.enabled = true`, the following keymaps are set for Simple files
 
 ## Math Block Rendering
 
-Simple supports math blocks with the `m{ ... }` syntax:
+Simple supports three math block types: `m{}`, `loss{}`, and `nograd{}`:
 
 ```simple
 val result = m{ x^2 + y^2 }
-val gradient = m{ d/dx (x^2) }
+val sigmoid = loss{ frac(1, 1 + exp(-x)) }
+val init = nograd{ sqrt(frac(6, fan_in + fan_out)) }
 ```
 
 Math rendering works at two levels:
 
 1. **LSP hover** (primary): The LSP server at `src/app/lsp/handlers/hover.spl` detects
-   `m{ }` blocks and renders them using `src/lib/math_repr.spl`:
-   - `render_latex_raw()` -- raw LaTeX output (`$$x^{2} + y^{2}$$`)
-   - `to_pretty()` -- Unicode pretty text (`x² + y²`)
-   - `to_md()` -- LaTeX markdown (`$x^{2} + y^{2}$`)
+   math blocks and renders them using `src/lib/math_repr.spl`:
+   - `render_latex_raw()` -- raw LaTeX output (`$$\frac{1}{1 + \exp(-x)}$$`)
+   - `to_pretty()` -- Unicode pretty text (`(1)/(1 + exp(-x))`)
+   - `to_md()` -- LaTeX markdown (`$\frac{1}{1 + \exp(-x)}$`)
    - MathJax SVG rendering via `src/lib/mathjax.spl` (requires Node.js)
 
-2. **Inline conceal** (supplementary): With `math.conceal = true`, the `m{` and `}`
-   delimiters are concealed, the interior is highlighted with `SimpleMathBlock`, and
-   a Unicode preview is shown as virtual text at end-of-line (e.g., `x² + y²`).
+2. **Inline conceal** (supplementary): With `math.conceal = true`, block delimiters are
+   concealed with indicators (∂ math, ℒ loss, ∅ nograd), the interior is highlighted
+   with `SimpleMathBlock`, and a Unicode preview is shown as virtual text at end-of-line.
    Hovering over a math block shows the original source in a floating window.
+
+**Inline Unicode rendering** converts structured expressions:
+
+| Expression | Renders As |
+|------------|------------|
+| `frac(1, 2)` | `(1)/(2)` |
+| `sqrt(x)` | `√(x)` |
+| `x^2` | `x²` |
+| `alpha + beta` | `α + β` |
+| `sum(i, 0..n) i` | `∑(i=0..n) i` |
+| `int(x, 0..1) x` | `∫(x=0..1) x` |
+| `A'` | `Aᵀ` |
+| `a .* b` | `a ⊙ b` |
+| `\frac{a}{b}` | `(a)/(b)` |
+
+## Test Lens
+
+When editing `.spl` files, virtual text "▶ Run" indicators appear beside test blocks:
+
+- `describe "...":`  → **▶ Run File**
+- `it "...":`        → **▶ Run Test**
+- `context "...":`   → **▶ Run Test**
+- `""" sdoctest:`    → **▶ Run Doctest**
+
+Use `:SimpleMathToggle` to toggle math rendering, or call `require("simple.test_lens").toggle()` for test lens.
 
 ## Tree-sitter Queries
 

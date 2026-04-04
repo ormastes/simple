@@ -202,10 +202,11 @@ impl I18nExtractor {
                 let template_vars: Vec<String> = parts
                     .iter()
                     .filter_map(|p| {
-                        if let FStringPart::Expr(Expr::Identifier(id)) = p {
-                            Some(id.clone())
-                        } else {
-                            None
+                        match p {
+                            FStringPart::Expr(Expr::Identifier(id)) | FStringPart::ExprWithFormat(Expr::Identifier(id), _) => {
+                                Some(id.clone())
+                            }
+                            _ => None,
                         }
                     })
                     .collect();
@@ -220,6 +221,13 @@ impl I18nExtractor {
                                 format!("{{{}}}", id)
                             } else {
                                 "{...}".to_string()
+                            }
+                        }
+                        FStringPart::ExprWithFormat(expr, spec) => {
+                            if let Expr::Identifier(id) = expr {
+                                format!("{{{}:{}}}", id, spec)
+                            } else {
+                                format!("{{...:{}}}", spec)
                             }
                         }
                     })
@@ -292,8 +300,11 @@ impl I18nExtractor {
             }
             Expr::FString { parts, .. } => {
                 for part in parts {
-                    if let FStringPart::Expr(e) = part {
-                        self.visit_expr(e);
+                    match part {
+                        FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => {
+                            self.visit_expr(e);
+                        }
+                        _ => {}
                     }
                 }
             }

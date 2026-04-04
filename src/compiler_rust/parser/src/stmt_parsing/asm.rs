@@ -286,6 +286,7 @@ impl<'a> Parser<'a> {
                         match part {
                             FStringPart::Literal(s) => text.push_str(s),
                             FStringPart::Expr(e) => text.push_str(&format!("{:?}", e)),
+                            FStringPart::ExprWithFormat(e, spec) => text.push_str(&format!("{:?}:{}", e, spec)),
                         }
                     }
                     instructions.push(text);
@@ -375,6 +376,11 @@ impl<'a> Parser<'a> {
                     match part {
                         crate::token::FStringToken::Literal(s) => text.push_str(s),
                         crate::token::FStringToken::Expr(e) => text.push_str(e),
+                        crate::token::FStringToken::ExprWithFormat(e, spec) => {
+                            text.push_str(e);
+                            text.push(':');
+                            text.push_str(spec);
+                        }
                     }
                 }
                 self.advance();

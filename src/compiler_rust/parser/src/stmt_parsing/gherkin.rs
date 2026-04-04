@@ -169,7 +169,7 @@ impl<'a> Parser<'a> {
             for token in tokens {
                 match token {
                     crate::token::FStringToken::Literal(lit) => s.push_str(lit),
-                    crate::token::FStringToken::Expr(_) => {
+                    crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                         return Err(ParseError::unexpected_token(
                             "plain string",
                             "string with interpolation",
@@ -217,7 +217,7 @@ impl<'a> Parser<'a> {
                 for token in tokens {
                     match token {
                         crate::token::FStringToken::Literal(lit) => s.push_str(lit),
-                        crate::token::FStringToken::Expr(_) => {
+                        crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                             return Err(ParseError::unexpected_token(
                                 "plain string",
                                 "string with interpolation",
@@ -286,7 +286,7 @@ impl<'a> Parser<'a> {
                 for token in tokens {
                     match token {
                         crate::token::FStringToken::Literal(lit) => s.push_str(lit),
-                        crate::token::FStringToken::Expr(_) => {
+                        crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                             return Err(ParseError::unexpected_token(
                                 "plain string",
                                 "string with interpolation",

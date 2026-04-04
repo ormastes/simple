@@ -450,8 +450,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // F-strings need string interpolation
         Expr::FString { parts, .. } => {
             for part in parts {
-                if let simple_parser::ast::FStringPart::Expr(e) = part {
-                    analyze_expr(e, reasons);
+                match part {
+                    simple_parser::ast::FStringPart::Expr(e) | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                        analyze_expr(e, reasons);
+                    }
+                    _ => {}
                 }
             }
             add_reason(reasons, FallbackReason::StringOps);
@@ -464,8 +467,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         Expr::I18nTemplate { parts, args, .. } => {
             for part in parts {
-                if let simple_parser::ast::FStringPart::Expr(e) = part {
-                    analyze_expr(e, reasons);
+                match part {
+                    simple_parser::ast::FStringPart::Expr(e) | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                        analyze_expr(e, reasons);
+                    }
+                    _ => {}
                 }
             }
             for (_, value) in args {

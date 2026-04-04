@@ -289,7 +289,8 @@ impl TypeChecker {
                 for part in parts {
                     match part {
                         simple_parser::ast::FStringPart::Literal(text) => out.push_str(text),
-                        simple_parser::ast::FStringPart::Expr(_) => return None,
+                        simple_parser::ast::FStringPart::Expr(_)
+                        | simple_parser::ast::FStringPart::ExprWithFormat(_, _) => return None,
                     }
                 }
                 Some(ConstValue::Str(out))
@@ -467,7 +468,8 @@ impl TypeChecker {
                 for part in parts {
                     match part {
                         simple_parser::ast::FStringPart::Literal(s) => out.push_str(s),
-                        simple_parser::ast::FStringPart::Expr(_) => return None,
+                        simple_parser::ast::FStringPart::Expr(_)
+                        | simple_parser::ast::FStringPart::ExprWithFormat(_, _) => return None,
                     }
                 }
                 Some(out)

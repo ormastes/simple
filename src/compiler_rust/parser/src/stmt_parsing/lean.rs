@@ -46,7 +46,7 @@ impl<'a> Parser<'a> {
                 for part in parts {
                     match part {
                         crate::token::FStringToken::Literal(s) => path.push_str(s),
-                        crate::token::FStringToken::Expr(_) => {
+                        crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                             return Err(ParseError::syntax_error_with_span(
                                 "import path cannot contain interpolated expressions",
                                 self.current.span,
@@ -148,7 +148,7 @@ impl<'a> Parser<'a> {
                 for part in parts {
                     match part {
                         crate::token::FStringToken::Literal(s) => value.push_str(s),
-                        crate::token::FStringToken::Expr(_) => {
+                        crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                             return Err(ParseError::syntax_error_with_span(
                                 "lean hint cannot contain interpolated expressions",
                                 self.current.span,
@@ -291,7 +291,7 @@ impl<'a> Parser<'a> {
                     for part in parts {
                         match part {
                             crate::token::FStringToken::Literal(s) => value.push_str(s),
-                            crate::token::FStringToken::Expr(_) => {
+                            crate::token::FStringToken::Expr(_) | crate::token::FStringToken::ExprWithFormat(_, _) => {
                                 return Err(ParseError::syntax_error_with_span(
                                     "calc justification cannot contain interpolated expressions",
                                     self.current.span,
