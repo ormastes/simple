@@ -1085,6 +1085,56 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
  * 9d. _start — serial init, then spl_start
  * =================================================================== */
 
+/* ===================================================================
+ * Additional runtime stubs for OS boot path (PCI, VFS, NVMe)
+ * =================================================================== */
+RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
+RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
+RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
+RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return ENCODE_INT(0); }
+RuntimeValue rt_dict_keys(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
+RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
+RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
+RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
+RuntimeValue rt_file_read_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_file_read_text_rv(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_file_write_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_append_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_open(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_close(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_remove(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_find(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_get_size(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_file_canonicalize(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_hash(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_read_lines(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_write_file(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_cli_file_exists(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_execute(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_process_exists(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_is_running(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_run_with_limits(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a;(void)b;(void)c;(void)d; return NIL_VALUE; }
+RuntimeValue rt_process_spawn_async(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_cli_print(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_cli_println(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
+RuntimeValue rt_profiler_record_call(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_profiler_record_return(RuntimeValue a) { (void)a; return NIL_VALUE; }
+
 /* serial_println — called by compiled Simple code (extern fn serial_println) */
 RuntimeValue serial_println(RuntimeValue val) {
     rt_print(val);
