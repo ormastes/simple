@@ -61,6 +61,30 @@ fn ansi_bg_rgb(r: i32, g: i32, b: i32) -> text:
     return bg_rgb(r, g, b)
 
 # =========================================================================
+# Helpers
+# =========================================================================
+
+fn _to_chars(s: text) -> [text]:
+    """Split a string into a list of single characters.
+
+    Uses .split("") which splits by character, avoiding the
+    .len() vs [i] byte/char mismatch in the interpreter.
+    """
+    if s == "":
+        return []
+    val parts = s.split("")
+    # .split("") may include empty strings at start/end — filter them
+    var result: [text] = []
+    for p in parts:
+        if p != "":
+            result = result + [p]
+    return result
+
+fn _char_count(s: text) -> i32:
+    """Count characters (not bytes) in s."""
+    return _to_chars(s).len()
+
+# =========================================================================
 # Screen Buffer
 # =========================================================================
 
@@ -86,33 +110,41 @@ class Screen:
         return Screen.new(self.width, self.height)
 
     fn put_text(row: i32, col: i32, text_content: text) -> Screen:
-        """Write text at row,col position (0-based)."""
+        """Write text at row,col position (0-based).
+
+        Uses _to_chars() to avoid .len() vs [i] byte/char mismatch.
+        """
         if row < 0 or row >= self.height:
             return self
         if col < 0 or col >= self.width:
             return self
 
         var new_buffer = self.buffer
-        val line = new_buffer[row]
+        val line_chars = _to_chars(new_buffer[row])
+        val text_chars = _to_chars(text_content)
 
-        # Build new line with text inserted
-        var new_line = ""
-        var char_idx = 0
-        var text_idx = 0
-        val text_len = text_content.len()
-
-        while char_idx < self.width:
-            if char_idx >= col and text_idx < text_len:
-                # Insert character from text_content
-                new_line = "{new_line}{text_content[text_idx]}"
-                text_idx = text_idx + 1
-            elif char_idx < line.len():
-                new_line = "{new_line}{line[char_idx]}"
+        # Build prefix from original line up to col
+        var prefix = ""
+        var i = 0
+        while i < col:
+            if i < line_chars.len():
+                prefix = "{prefix}{line_chars[i]}"
             else:
-                new_line = "{new_line} "
-            char_idx = char_idx + 1
+                prefix = "{prefix} "
+            i = i + 1
 
-        new_buffer[row] = new_line
+        # Splice text_content in, then fill remainder
+        val after_col = col + text_chars.len()
+        var suffix = ""
+        var j = after_col
+        while j < self.width:
+            if j < line_chars.len():
+                suffix = "{suffix}{line_chars[j]}"
+            else:
+                suffix = "{suffix} "
+            j = j + 1
+
+        new_buffer[row] = "{prefix}{text_content}{suffix}"
         return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn put_styled(row: i32, col: i32, text_content: text, style: text) -> Screen:
