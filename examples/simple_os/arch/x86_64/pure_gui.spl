@@ -1,23 +1,17 @@
-# Pure Simple GUI — single-file, zero imports
+# Pure Simple GUI — BGA framebuffer on x86_64 QEMU
 #
-# Proves Pure Simple code can drive BGA framebuffer on x86_64 QEMU.
-# All logic in one file. Only extern fn calls to C runtime.
-# Rendering uses C helpers (rt_gui_fill, rt_gui_hline) to avoid
-# Cranelift closure-pointer codegen issues with same-file function calls.
+# Proves Simple code can drive the display. BGA init done in Simple
+# via extern fn port I/O, rendering delegated to C helper to avoid
+# Cranelift stack frame issues with many sequential extern fn calls.
 
-extern fn rt_cli()
 extern fn rt_port_outw(port: u64, value: u64)
 extern fn rt_port_inw(port: u64) -> u64
 extern fn rt_port_outl(port: u64, value: u64)
 extern fn rt_port_inl(port: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
 extern fn rt_port_inb(port: u64) -> u64
-extern fn rt_mmio_write_u32(addr: u64, value: u64)
 extern fn rt_gui_set_fb(addr: u64, width: u64)
-extern fn rt_gui_hline(y: u64, x: u64, count: u64, color: u64)
-extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64)
-
-var fb_addr: u64 = 0xFD000000
+extern fn rt_gui_render_desktop(unused1: u64, unused2: u64)
 
 fn bga_wr(idx: u64, val: u64):
     rt_port_outw(0x01CE, idx)
@@ -33,10 +27,6 @@ fn pci_wr(bus: u64, dev: u64, fn_: u64, off: u64, val: u64):
     rt_port_outl(0x0CF8, a)
     rt_port_outl(0x0CFC, val)
 
-fn pci_enable_mem(bus: u64, dev: u64, fn_: u64):
-    val cmd = pci_rd(bus, dev, fn_, 0x04)
-    pci_wr(bus, dev, fn_, 0x04, cmd | 0x06)
-
 fn find_fb() -> u64:
     var d: u64 = 0
     while d < 32:
@@ -44,7 +34,9 @@ fn find_fb() -> u64:
         if v != 0xFFFF and v != 0:
             val c = pci_rd(0, d, 0, 8)
             if ((c >> 24) & 0xFF) == 3 and ((c >> 16) & 0xFF) == 0:
-                pci_enable_mem(0, d, 0)
+                # Enable PCI Memory Space + Bus Master
+                val cmd = pci_rd(0, d, 0, 0x04)
+                pci_wr(0, d, 0, 0x04, cmd | 0x06)
                 val b = pci_rd(0, d, 0, 0x10)
                 val addr = b & 0xFFFFFFF0
                 if addr != 0:
@@ -52,21 +44,12 @@ fn find_fb() -> u64:
         d = d + 1
     0xFD000000
 
-fn init_display():
-    bga_wr(4, 0)
-    bga_wr(1, 1024)
-    bga_wr(2, 768)
-    bga_wr(3, 32)
-    bga_wr(4, 0x41)
-    fb_addr = find_fb()
-    rt_gui_set_fb(fb_addr, 1024)
-
 fn sputc(c: u64):
     while (rt_port_inb(0x3FD) & 0x20) == 0:
         pass_dn
     rt_port_outb(0x3F8, c)
 
-fn sprint(s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64):
+fn sputs(s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64):
     if s0 != 0: sputc(s0)
     if s1 != 0: sputc(s1)
     if s2 != 0: sputc(s2)
@@ -77,70 +60,28 @@ fn sprint(s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64
     if s7 != 0: sputc(s7)
 
 fn _start():
-    rt_cli()
-
     # [GUI] init
-    sprint(91, 71, 85, 73, 93, 32, 105, 110)
-    sprint(105, 116, 13, 10, 0, 0, 0, 0)
+    sputs(91, 71, 85, 73, 93, 32, 105, 110)
+    sputs(105, 116, 13, 10, 0, 0, 0, 0)
 
-    init_display()
+    # Program BGA framebuffer: 1024x768x32
+    bga_wr(4, 0)
+    bga_wr(1, 1024)
+    bga_wr(2, 768)
+    bga_wr(3, 32)
+    bga_wr(4, 0x41)
+
+    # Find framebuffer address via PCI BAR
+    val fb = find_fb()
+    rt_gui_set_fb(fb, 1024)
 
     # [GUI] draw
-    sprint(91, 71, 85, 73, 93, 32, 100, 114)
-    sprint(97, 119, 13, 10, 0, 0, 0, 0)
+    sputs(91, 71, 85, 73, 93, 32, 100, 114)
+    sputs(97, 119, 13, 10, 0, 0, 0, 0)
 
-    # rt_gui_fill4(xy, wh, color, 0) where xy = (x<<32)|y, wh = (w<<32)|h
-
-    # Title bar (top, 1024x28 at 0,0)
-    rt_gui_fill4(0 << 32 | 0, 1024 << 32 | 28, 0x001E1E2E, 0)
-
-    # Taskbar (bottom, 1024x32 at 0,736)
-    rt_gui_fill4(0 << 32 | 736, 1024 << 32 | 32, 0x001E1E2E, 0)
-
-    # Dock icons (20x20 each)
-    rt_gui_fill4(10 << 32 | 742, 20 << 32 | 20, 0x003498DB, 0)
-    rt_gui_fill4(36 << 32 | 742, 20 << 32 | 20, 0x0027AE60, 0)
-    rt_gui_fill4(62 << 32 | 742, 20 << 32 | 20, 0x00E74C3C, 0)
-    rt_gui_fill4(88 << 32 | 742, 20 << 32 | 20, 0x00F39C12, 0)
-    rt_gui_fill4(114 << 32 | 742, 20 << 32 | 20, 0x009B59B6, 0)
-
-    # Clock area
-    rt_gui_fill4(944 << 32 | 742, 70 << 32 | 20, 0x002C2C3E, 0)
-
-    sprint(91, 71, 85, 73, 93, 32, 116, 98)
-    sprint(13, 10, 0, 0, 0, 0, 0, 0)
-
-    # Window title bar (blue, 300x24)
-    rt_gui_fill4(200 << 32 | 100, 300 << 32 | 24, 0x00007ACC, 0)
-
-    # Close button (red, 16x16)
-    rt_gui_fill4(484 << 32 | 104, 16 << 32 | 16, 0x00E74C3C, 0)
-
-    # Window body (white, 300x200)
-    rt_gui_fill4(200 << 32 | 124, 300 << 32 | 200, 0x00FFFFFF, 0)
-
-    sprint(91, 71, 85, 73, 93, 32, 119, 105)
-    sprint(110, 13, 10, 0, 0, 0, 0, 0)
-
-    # "Hello World!" text placeholder
-    rt_gui_fill4(230 << 32 | 170, 180 << 32 | 14, 0x00333333, 0)
-
-    # RGB blocks
-    rt_gui_fill4(230 << 32 | 210, 100 << 32 | 40, 0x00FF4444, 0)
-    rt_gui_fill4(350 << 32 | 210, 100 << 32 | 40, 0x0044CC44, 0)
-    rt_gui_fill4(470 << 32 | 210, 100 << 32 | 40, 0x004488FF, 0)
-
-    # Text lines
-    rt_gui_fill4(230 << 32 | 270, 300 << 32 | 2, 0x00666666, 0)
-    rt_gui_fill4(230 << 32 | 282, 250 << 32 | 2, 0x00666666, 0)
-    rt_gui_fill4(230 << 32 | 294, 280 << 32 | 2, 0x00666666, 0)
-
-    # Button
-    rt_gui_fill4(230 << 32 | 320, 120 << 32 | 32, 0x003498DB, 0)
-
-    # Status bar (300x20)
-    rt_gui_fill4(200 << 32 | 304, 300 << 32 | 20, 0x00E0E0E0, 0)
+    # Render full desktop in C (avoids Cranelift stack issues)
+    rt_gui_render_desktop(0, 0)
 
     # [GUI] done
-    sprint(91, 71, 85, 73, 93, 32, 100, 111)
-    sprint(110, 101, 13, 10, 0, 0, 0, 0)
+    sputs(91, 71, 85, 73, 93, 32, 100, 111)
+    sputs(110, 101, 13, 10, 0, 0, 0, 0)

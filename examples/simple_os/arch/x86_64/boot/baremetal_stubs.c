@@ -783,6 +783,41 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 }
 
 /* ===================================================================
+ * 8b. Bare-metal syscall stub
+ *
+ * On bare-metal, there is no kernel to syscall into. This stub handles
+ * the syscall IDs that make sense on bare-metal (DebugWrite for serial)
+ * and returns -ENOSYS for everything else. This allows POSIX layer code
+ * to be compiled and linked without crashing on import.
+ * =================================================================== */
+
+int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                                       uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    (void)a2; (void)a3; (void)a4;
+    switch (id) {
+        case 0:  /* Exit */
+            outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit */
+            for (;;) __asm__ volatile("cli; hlt");
+            return 0;
+        case 4:  /* GetPid */
+            return 1; /* bare-metal: PID 1 */
+        case 60: /* DebugWrite */
+            serial_putchar((char)(a0 & 0xFF));
+            return 0;
+        default:
+            return -38; /* ENOSYS */
+    }
+}
+
+/* Also provide the unmangled name for direct extern fn calls */
+int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+}
+
+/* ===================================================================
  * 9. _start — serial init, spl_start, isa-debug-exit
  * =================================================================== */
 
@@ -965,8 +1000,89 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
     return 0;
 }
 
+static void gui_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c)
+{
+    for (uint32_t row = 0; row < h; row++) {
+        uint64_t base = g_fb_addr + ((uint64_t)(y + row) * g_fb_w + x) * 4;
+        for (uint32_t col = 0; col < w; col++) {
+            *(volatile uint32_t *)(uintptr_t)(base + col * 4) = c;
+        }
+    }
+}
+
+/* Full desktop rendering — called from Simple code via extern fn.
+ * Draws everything in C to avoid Cranelift stack frame issues. */
+RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
+{
+    (void)unused1; (void)unused2;
+
+    /* Title bar (top) */
+    gui_fill(0, 0, 1024, 28, 0x001E1E2E);
+    serial_puts("[GUI] title bar\r\n");
+
+    /* Taskbar (bottom) */
+    gui_fill(0, 736, 1024, 32, 0x001E1E2E);
+    serial_puts("[GUI] taskbar\r\n");
+
+    /* Dock icons */
+    gui_fill(10, 742, 20, 20, 0x003498DB);
+    gui_fill(36, 742, 20, 20, 0x0027AE60);
+    gui_fill(62, 742, 20, 20, 0x00E74C3C);
+    gui_fill(88, 742, 20, 20, 0x00F39C12);
+    gui_fill(114, 742, 20, 20, 0x009B59B6);
+    gui_fill(944, 742, 70, 20, 0x002C2C3E);
+    serial_puts("[GUI] dock\r\n");
+
+    /* Window shadow */
+    gui_fill(203, 103, 504, 326, 0x00101020);
+
+    /* Window title bar (blue) */
+    gui_fill(200, 100, 500, 28, 0x00007ACC);
+
+    /* Close button (red) */
+    gui_fill(676, 104, 20, 20, 0x00E74C3C);
+
+    /* Window body (white) */
+    gui_fill(200, 128, 500, 296, 0x00FFFFFF);
+    serial_puts("[GUI] hello world window\r\n");
+
+    /* "Hello World!" text */
+    fb_draw_text(230, 155, "Hello World!", 0x00333333, 0x00FFFFFF);
+
+    /* RGB blocks */
+    gui_fill(230, 200, 100, 40, 0x00FF4444);
+    gui_fill(350, 200, 100, 40, 0x0044CC44);
+    gui_fill(470, 200, 100, 40, 0x004488FF);
+
+    /* Text placeholder lines */
+    gui_fill(230, 260, 300, 3, 0x00666666);
+    gui_fill(230, 273, 250, 3, 0x00666666);
+    gui_fill(230, 286, 280, 3, 0x00666666);
+
+    /* "Click Me!" button */
+    gui_fill(230, 310, 120, 32, 0x003498DB);
+    fb_draw_text(242, 318, "Click Me!", 0x00FFFFFF, 0x003498DB);
+
+    /* Status bar */
+    gui_fill(200, 396, 500, 28, 0x00E0E0E0);
+    fb_draw_text(210, 402, "Hello World", 0x00666666, 0x00E0E0E0);
+
+    /* Terminal window (behind) */
+    gui_fill(50, 180, 180, 24, 0x00333333);
+    fb_draw_text(58, 185, "Simple OS", 0x00FFFFFF, 0x00333333);
+    gui_fill(50, 204, 180, 300, 0x001A1A2E);
+    gui_fill(60, 220, 120, 2, 0x0044FF44);
+    gui_fill(60, 232, 80, 2, 0x0044FF44);
+    gui_fill(60, 244, 140, 2, 0x0044FF44);
+    gui_fill(60, 256, 60, 2, 0x0044FF44);
+    serial_puts("[GUI] terminal window\r\n");
+
+    serial_puts("[GUI] render complete\r\n");
+    return 0;
+}
+
 /* ===================================================================
- * 9c. _start — BGA init, hello world, then spl_start
+ * 9d. _start — serial init, then spl_start
  * =================================================================== */
 
 /* serial_println — called by compiled Simple code (extern fn serial_println) */
