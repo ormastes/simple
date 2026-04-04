@@ -52,6 +52,50 @@ var _pci_dev_irq: [u8; 256]
 var _next_mmap_addr: u64 = 0x10000000
 
 # ============================================================================
+# Architecture-Aware Security Boundaries
+# ============================================================================
+# Kernel/userspace boundary — addresses at or above this are kernel-only.
+# PCI MMIO floor — physical addresses below this are likely RAM, not devices.
+
+@cfg(x86_64)
+val KERNEL_SPACE_START: u64 = 0xFFFF800000000000
+@cfg(x86_64)
+val PCI_MMIO_FLOOR: u64 = 0x80000000
+
+@cfg(x86)
+val KERNEL_SPACE_START: u64 = 0xC0000000
+@cfg(x86)
+val PCI_MMIO_FLOOR: u64 = 0x80000000
+
+@cfg(arm64)
+val KERNEL_SPACE_START: u64 = 0xFFFF000000000000
+@cfg(arm64)
+val PCI_MMIO_FLOOR: u64 = 0x40000000
+
+@cfg(arm32)
+val KERNEL_SPACE_START: u64 = 0xC0000000
+@cfg(arm32)
+val PCI_MMIO_FLOOR: u64 = 0x40000000
+
+@cfg(riscv64)
+val KERNEL_SPACE_START: u64 = 0xFFFFFFC000000000
+@cfg(riscv64)
+val PCI_MMIO_FLOOR: u64 = 0x40000000
+
+@cfg(riscv32)
+val KERNEL_SPACE_START: u64 = 0xC0000000
+@cfg(riscv32)
+val PCI_MMIO_FLOOR: u64 = 0x40000000
+
+fn _is_kernel_addr(addr: u64) -> bool:
+    """Check if an address is in kernel space (unsafe for userspace syscalls)."""
+    addr >= KERNEL_SPACE_START
+
+fn _is_userspace_ptr(ptr: u64) -> bool:
+    """Validate a pointer is non-null and in userspace."""
+    ptr != 0 and ptr < KERNEL_SPACE_START
+
+# ============================================================================
 # Capability Enforcement Helpers
 # ============================================================================
 
@@ -983,7 +1027,7 @@ fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
     val grant_ptr = args.arg1 as u64
 
     # Validate grant_ptr is in userspace (not kernel address space)
-    if grant_ptr >= 0xFFFF800000000000 or grant_ptr == 0:
+    if not _is_userspace_ptr(grant_ptr):
         return SyscallResult(value: -14)  # EFAULT: bad address
 
     val bus = ((bdf >> 16) & 0xFF).to_u8()
@@ -1070,7 +1114,7 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
     Maps pages with PRESENT | WRITABLE | CACHE_DISABLE | NO_EXECUTE.
     Returns the mapped virtual address on success, -12 (ENOMEM) on failure.
 
-    Safety: Rejects addresses below 0x80000000 (likely RAM, not device MMIO).
+    Safety: Rejects addresses below PCI_MMIO_FLOOR (likely RAM, not device MMIO).
     Rejects sizes above 256MB. Hint addresses must be in userspace range.
     """
     val bar_phys = args.arg0 as u64
@@ -1081,12 +1125,11 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
         return SyscallResult(value: -22)  # EINVAL: empty or >256MB
 
     # Reject mapping physical RAM — BARs live above the PCI MMIO window
-    # On QEMU Q35: PCI MMIO starts at ~0x80000000, PCI ECAM at 0xB0000000
-    if bar_phys < 0x80000000:
+    if bar_phys < PCI_MMIO_FLOOR:
         return SyscallResult(value: -1)  # EPERM: not a device MMIO address
 
-    # Reject kernel-space hint addresses (above 0xFFFF800000000000 on x86_64)
-    if hint != 0 and hint >= 0xFFFF800000000000:
+    # Reject kernel-space hint addresses
+    if hint != 0 and _is_kernel_addr(hint):
         return SyscallResult(value: -1)  # EPERM: kernel address
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
@@ -1132,7 +1175,7 @@ fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
         return SyscallResult(value: -22)  # EINVAL: empty or >64MB
 
     # Validate result_ptr is in userspace (not kernel address space)
-    if result_ptr >= 0xFFFF800000000000 or result_ptr == 0:
+    if not _is_userspace_ptr(result_ptr):
         return SyscallResult(value: -14)  # EFAULT: bad address
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
@@ -1189,7 +1232,7 @@ fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
         return SyscallResult(value: -22)  # EINVAL
 
     # Reject kernel-space or null addresses
-    if virt_addr == 0 or virt_addr >= 0xFFFF800000000000:
+    if not _is_userspace_ptr(virt_addr):
         return SyscallResult(value: -1)  # EPERM
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
@@ -1520,7 +1563,7 @@ fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         return SyscallResult(value: -22)  # EINVAL
 
     # Reject kernel-space hint addresses
-    if hint != 0 and hint >= 0xFFFF800000000000:
+    if hint != 0 and _is_kernel_addr(hint):
         return SyscallResult(value: -1)  # EPERM: kernel address
 
     # Determine base virtual address
@@ -1574,7 +1617,7 @@ fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
         return SyscallResult(value: -22)  # EINVAL
 
     # Reject kernel-space addresses
-    if addr >= 0xFFFF800000000000 or addr == 0:
+    if addr == 0 or _is_kernel_addr(addr):
         return SyscallResult(value: -1)  # EPERM
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
@@ -1609,7 +1652,7 @@ fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
         return SyscallResult(value: -22)  # EINVAL
 
     # Reject kernel-space addresses
-    if addr >= 0xFFFF800000000000:
+    if _is_kernel_addr(addr):
         return SyscallResult(value: -1)  # EPERM
 
     # Cannot safely implement mprotect without vmm_read_pte() to read the
