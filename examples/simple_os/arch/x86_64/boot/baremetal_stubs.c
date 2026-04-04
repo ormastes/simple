@@ -921,7 +921,46 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
 }
 
 /* ===================================================================
- * 9b. _start — BGA init, hello world, then spl_start
+ * 9b. Framebuffer rendering helpers for Pure Simple GUI
+ *
+ * These are called via extern fn from pure_gui.spl.
+ * Cranelift passes RAW (untagged) u64 values for all args.
+ * =================================================================== */
+
+static uint64_t g_fb_addr = 0xFD000000;
+static uint64_t g_fb_w = 1024;
+
+RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
+{
+    g_fb_addr = (uint64_t)addr;
+    g_fb_w = (uint64_t)w;
+    return 0;
+}
+
+RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, RuntimeValue color)
+{
+    uint64_t base = g_fb_addr + ((uint64_t)y * g_fb_w + (uint64_t)x) * 4;
+    uint32_t c = (uint32_t)(uint64_t)color;
+    for (uint64_t i = 0; i < (uint64_t)count; i++) {
+        *(volatile uint32_t *)(uintptr_t)(base + i * 4) = c;
+    }
+    return 0;
+}
+
+RuntimeValue rt_gui_fill(RuntimeValue x, RuntimeValue y, RuntimeValue w, RuntimeValue h, RuntimeValue color)
+{
+    uint32_t c = (uint32_t)(uint64_t)color;
+    for (uint64_t row = 0; row < (uint64_t)h; row++) {
+        uint64_t base = g_fb_addr + (((uint64_t)y + row) * g_fb_w + (uint64_t)x) * 4;
+        for (uint64_t col = 0; col < (uint64_t)w; col++) {
+            *(volatile uint32_t *)(uintptr_t)(base + col * 4) = c;
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 9c. _start — BGA init, hello world, then spl_start
  * =================================================================== */
 
 extern void spl_start(void) __attribute__((weak));

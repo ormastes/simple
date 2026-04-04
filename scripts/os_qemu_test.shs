@@ -52,13 +52,19 @@ fi
 # Build kernel (unless --skip-build or compiler absent)
 # ---------------------------------------------------------------------------
 if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$REPO_ROOT/bin/simple" ]; then
-    echo "[test] Building kernel..."
+    echo "[test] Building kernel (Multiboot path for QEMU -kernel)..."
     mkdir -p "$REPO_ROOT/build/os"
+    # Add llvm-objcopy to PATH for ELF64→ELF32 conversion (needed for QEMU -kernel)
+    for p in /opt/homebrew/opt/llvm@18/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+        [ -d "$p" ] && PATH="$p:$PATH"
+    done
+    export PATH
     "$REPO_ROOT/bin/simple" native-build \
-        --entry src/os/kernel/boot/kernel_entry.spl \
+        --entry examples/simple_os/arch/x86_64/test_entry.spl \
         --target x86_64-unknown-none \
         -o "$KERNEL" \
-        --linker-script src/os/kernel/arch/x86_64/linker.ld 2>&1
+        --linker-script examples/simple_os/arch/x86_64/linker.ld \
+        --source examples/simple_os --source src/os 2>&1
     BUILD_RC=$?
     if [ "$BUILD_RC" -ne 0 ]; then
         echo "FAIL: Kernel build failed (exit $BUILD_RC)"
@@ -93,13 +99,17 @@ QEMU_ARGS="-machine q35 -cpu qemu64 -m 128M \
 
 if [ -n "$TIMEOUT_CMD" ]; then
     $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-x86_64 $QEMU_ARGS 2>/dev/null
+    QEMU_EXIT=$?
 else
-    # No timeout command available — run QEMU directly.
-    # The kernel should halt or exit via isa-debug-exit.
-    qemu-system-x86_64 $QEMU_ARGS 2>/dev/null
+    # No timeout command — use background process + sleep + kill
+    qemu-system-x86_64 $QEMU_ARGS 2>/dev/null &
+    QEMU_PID=$!
+    sleep "$TIMEOUT_SEC"
+    kill "$QEMU_PID" 2>/dev/null
+    wait "$QEMU_PID" 2>/dev/null
+    QEMU_EXIT=$?
 fi
 
-QEMU_EXIT=$?
 echo "[test] QEMU exited with code: $QEMU_EXIT"
 
 # ---------------------------------------------------------------------------

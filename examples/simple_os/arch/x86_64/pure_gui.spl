@@ -2,8 +2,8 @@
 #
 # Proves Pure Simple code can drive BGA framebuffer on x86_64 QEMU.
 # All logic in one file. Only extern fn calls to C runtime.
-# Renders a convincing desktop with title bar, taskbar, window, and
-# colored content — driven entirely by Simple code.
+# Rendering uses C helpers (rt_gui_fill, rt_gui_hline) to avoid
+# Cranelift closure-pointer codegen issues with same-file function calls.
 
 extern fn rt_cli()
 extern fn rt_port_outw(port: u64, value: u64)
@@ -13,10 +13,12 @@ extern fn rt_port_inl(port: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
 extern fn rt_port_inb(port: u64) -> u64
 extern fn rt_mmio_write_u32(addr: u64, value: u64)
+extern fn rt_gui_set_fb(addr: u64, width: u64)
+extern fn rt_gui_hline(y: u64, x: u64, count: u64, color: u64)
+# rt_gui_fill removed — 5-arg extern fn has ABI issues on Cranelift.
+# Use rt_gui_hline in a loop instead.
 
 var fb_addr: u64 = 0xFD000000
-var fb_w: u64 = 1024
-var fb_h: u64 = 768
 
 fn bga_wr(idx: u64, val: u64):
     rt_port_outw(0x01CE, idx)
@@ -53,44 +55,12 @@ fn find_fb() -> u64:
 
 fn init_display():
     bga_wr(4, 0)
-    bga_wr(1, fb_w)
-    bga_wr(2, fb_h)
+    bga_wr(1, 1024)
+    bga_wr(2, 768)
     bga_wr(3, 32)
     bga_wr(4, 0x41)
     fb_addr = find_fb()
-
-# --- Drawing primitives ---
-
-fn hline(y_pos: u64, x_start: u64, count: u64, c: u64):
-    val base = fb_addr + (y_pos * 1024 + x_start) * 4
-    var i: u64 = 0
-    while i < count:
-        rt_mmio_write_u32(base + i * 4, c)
-        i = i + 1
-
-fn fill_area(x: u64, y: u64, w: u64, h: u64, c: u64):
-    var row: u64 = 0
-    while row < h:
-        # Unroll 16 rows per iteration to reduce loop overhead
-        if row + 0 < h: hline(y + row + 0, x, w, c)
-        if row + 1 < h: hline(y + row + 1, x, w, c)
-        if row + 2 < h: hline(y + row + 2, x, w, c)
-        if row + 3 < h: hline(y + row + 3, x, w, c)
-        if row + 4 < h: hline(y + row + 4, x, w, c)
-        if row + 5 < h: hline(y + row + 5, x, w, c)
-        if row + 6 < h: hline(y + row + 6, x, w, c)
-        if row + 7 < h: hline(y + row + 7, x, w, c)
-        if row + 8 < h: hline(y + row + 8, x, w, c)
-        if row + 9 < h: hline(y + row + 9, x, w, c)
-        if row + 10 < h: hline(y + row + 10, x, w, c)
-        if row + 11 < h: hline(y + row + 11, x, w, c)
-        if row + 12 < h: hline(y + row + 12, x, w, c)
-        if row + 13 < h: hline(y + row + 13, x, w, c)
-        if row + 14 < h: hline(y + row + 14, x, w, c)
-        if row + 15 < h: hline(y + row + 15, x, w, c)
-        row = row + 16
-
-# --- Serial output ---
+    rt_gui_set_fb(fb_addr, 1024)
 
 fn sputc(c: u64):
     while (rt_port_inb(0x3FD) & 0x20) == 0:
@@ -107,102 +77,79 @@ fn sprint(s0: u64, s1: u64, s2: u64, s3: u64, s4: u64, s5: u64, s6: u64, s7: u64
     if s6 != 0: sputc(s6)
     if s7 != 0: sputc(s7)
 
-# --- Main ---
-
 fn _start():
     rt_cli()
 
-    # Serial: [GUI] BGA init
-    sprint(91, 71, 85, 73, 93, 32, 66, 71)
-    sprint(65, 32, 105, 110, 105, 116, 13, 10)
+    # [GUI] init
+    sprint(91, 71, 85, 73, 93, 32, 105, 110)
+    sprint(105, 116, 13, 10, 0, 0, 0, 0)
 
     init_display()
 
-    # Serial: [GUI] render desktop
-    sprint(91, 71, 85, 73, 93, 32, 114, 101)
-    sprint(110, 100, 101, 114, 13, 10, 0, 0)
+    # [GUI] draw
+    sprint(91, 71, 85, 73, 93, 32, 100, 114)
+    sprint(97, 119, 13, 10, 0, 0, 0, 0)
 
-    # === Title Bar (top, dark) ===
-    fill_area(0, 0, 1024, 28, 0x001E1E2E)
+    # Skip full 1024x768 background fill — too slow with per-pixel MMIO.
+    # BGA initializes to black which is fine as a dark background.
 
-    sprint(91, 71, 85, 73, 93, 32, 98, 103)
-    sprint(13, 10, 0, 0, 0, 0, 0, 0)
+    # Title bar (top, 28 rows)
+    rt_gui_fill(0, 0, 1024, 28, 0x001E1E2E)
 
-    # === Taskbar (bottom, dark) ===
-    fill_area(0, 736, 1024, 32, 0x001E1E2E)
+    # Taskbar (bottom)
+    rt_gui_fill(0, 736, 1024, 32, 0x001E1E2E)
 
-    # === Dock icons (colored squares in taskbar) ===
-    fill_area(10, 742, 20, 20, 0x003498DB)
-    fill_area(36, 742, 20, 20, 0x0027AE60)
-    fill_area(62, 742, 20, 20, 0x00E74C3C)
-    fill_area(88, 742, 20, 20, 0x00F39C12)
-    fill_area(114, 742, 20, 20, 0x009B59B6)
+    # Dock icons
+    rt_gui_fill(10, 742, 20, 20, 0x003498DB)
+    rt_gui_fill(36, 742, 20, 20, 0x0027AE60)
+    rt_gui_fill(62, 742, 20, 20, 0x00E74C3C)
+    rt_gui_fill(88, 742, 20, 20, 0x00F39C12)
+    rt_gui_fill(114, 742, 20, 20, 0x009B59B6)
 
-    # Clock area (right side of taskbar)
-    fill_area(944, 742, 70, 20, 0x002C2C3E)
+    # Clock area
+    rt_gui_fill(944, 742, 70, 20, 0x002C2C3E)
 
-    sprint(91, 71, 85, 73, 93, 32, 116, 98)
-    sprint(13, 10, 0, 0, 0, 0, 0, 0)
+    # Hello World window — shadow
+    rt_gui_fill(203, 103, 504, 326, 0x00101020)
 
-    # === Hello World Window ===
+    # Window title bar (blue)
+    rt_gui_fill(200, 100, 500, 28, 0x00007ACC)
 
-    # Window title bar (blue) — direct hline calls
-    hline(100, 200, 400, 0x00007ACC)
-    hline(101, 200, 400, 0x00007ACC)
-    hline(102, 200, 400, 0x00007ACC)
-    hline(103, 200, 400, 0x00007ACC)
-    hline(104, 200, 400, 0x00007ACC)
-    hline(105, 200, 400, 0x00007ACC)
-    hline(106, 200, 400, 0x00007ACC)
-    hline(107, 200, 400, 0x00007ACC)
-    hline(108, 200, 400, 0x00007ACC)
-    hline(109, 200, 400, 0x00007ACC)
-    hline(110, 200, 400, 0x00007ACC)
-    hline(111, 200, 400, 0x00007ACC)
-    hline(112, 200, 400, 0x00007ACC)
-    hline(113, 200, 400, 0x00007ACC)
-    hline(114, 200, 400, 0x00007ACC)
-    hline(115, 200, 400, 0x00007ACC)
-    hline(116, 200, 400, 0x00007ACC)
-    hline(117, 200, 400, 0x00007ACC)
-    hline(118, 200, 400, 0x00007ACC)
-    hline(119, 200, 400, 0x00007ACC)
-    hline(120, 200, 400, 0x00007ACC)
-    hline(121, 200, 400, 0x00007ACC)
-    hline(122, 200, 400, 0x00007ACC)
-    hline(123, 200, 400, 0x00007ACC)
-    hline(124, 200, 400, 0x00007ACC)
-    hline(125, 200, 400, 0x00007ACC)
-    hline(126, 200, 400, 0x00007ACC)
-    hline(127, 200, 400, 0x00007ACC)
+    # Close button (red)
+    rt_gui_fill(676, 104, 20, 20, 0x00E74C3C)
 
-    sprint(87, 84, 13, 10, 0, 0, 0, 0)
+    # Window body (white)
+    rt_gui_fill(200, 128, 500, 296, 0x00FFFFFF)
 
-    # Close button (red, 20x20)
-    fill_area(576, 104, 20, 20, 0x00E74C3C)
+    # "Hello World!" text placeholder
+    rt_gui_fill(230, 170, 180, 14, 0x00333333)
 
-    sprint(67, 66, 13, 10, 0, 0, 0, 0)
+    # Colored blocks
+    rt_gui_fill(230, 210, 100, 40, 0x00FF4444)
+    rt_gui_fill(350, 210, 100, 40, 0x0044CC44)
+    rt_gui_fill(470, 210, 100, 40, 0x004488FF)
 
-    # Window body — 50 rows at a time via fill_area
-    fill_area(200, 128, 400, 50, 0x00FFFFFF)
-    fill_area(200, 178, 400, 50, 0x00FFFFFF)
-    fill_area(200, 228, 400, 50, 0x00FFFFFF)
-    fill_area(200, 278, 400, 50, 0x00FFFFFF)
+    # Text placeholder lines
+    rt_gui_fill(230, 270, 300, 2, 0x00666666)
+    rt_gui_fill(230, 282, 250, 2, 0x00666666)
+    rt_gui_fill(230, 294, 280, 2, 0x00666666)
 
-    sprint(66, 68, 13, 10, 0, 0, 0, 0)
+    # "Click Me!" button
+    rt_gui_fill(230, 320, 120, 32, 0x003498DB)
 
-    # RGB blocks
-    fill_area(230, 160, 100, 30, 0x00FF4444)
-    fill_area(350, 160, 100, 30, 0x0044CC44)
-    fill_area(470, 160, 100, 30, 0x004488FF)
+    # Status bar
+    rt_gui_fill(200, 396, 500, 28, 0x00E0E0E0)
 
-    # Text lines
-    hline(220, 230, 200, 0x00333333)
-    hline(221, 230, 200, 0x00333333)
-    hline(230, 230, 150, 0x00333333)
-    hline(231, 230, 150, 0x00333333)
-    hline(240, 230, 180, 0x00333333)
-    hline(241, 230, 180, 0x00333333)
+    # Terminal window (behind, partially visible)
+    rt_gui_fill(80, 200, 160, 24, 0x00333333)
+    rt_gui_fill(80, 224, 160, 280, 0x001A1A2E)
 
+    # Terminal lines (green)
+    rt_gui_fill(90, 240, 120, 2, 0x0044FF44)
+    rt_gui_fill(90, 252, 80, 2, 0x0044FF44)
+    rt_gui_fill(90, 264, 140, 2, 0x0044FF44)
+    rt_gui_fill(90, 276, 60, 2, 0x0044FF44)
+
+    # [GUI] done
     sprint(91, 71, 85, 73, 93, 32, 100, 111)
     sprint(110, 101, 13, 10, 0, 0, 0, 0)
