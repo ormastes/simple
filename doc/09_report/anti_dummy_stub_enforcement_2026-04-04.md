@@ -1,7 +1,8 @@
 # Anti-Dummy / Anti-Stub Enforcement Report
 
 **Date:** 2026-04-04  
-**Status:** Implemented on primary CLI surfaces, with migration debt still open
+**Updated:** 2026-04-04 (P2 T32 hardware specs cleaned)  
+**Status:** Implemented on all active public-facing surfaces
 
 ## What Was Added
 
@@ -57,6 +58,38 @@ Passed:
 - mutation-style verification has not yet been added
 - some source-entry wrappers still have their own interpreter-path issues, but the installed compiled CLI path is now closed
 
+## Public-Surface Cleanup
+
+The following public-facing proof surfaces now pass the compiled quality gate:
+
+- `test/integration/sffi/direction_a_c_roundtrip_spec.spl`
+- `test/integration/sffi/direction_a_cpp_roundtrip_spec.spl`
+- `test/integration/sffi/direction_b_import_roundtrip_spec.spl`
+- `test/integration/sffi/callback_roundtrip_spec.spl`
+- `test/integration/sffi/layout_verification_roundtrip_spec.spl`
+- `test/system/sffi_bidirectional_interop_spec.spl`
+- `test/integration/t32_hw/22_action_list_invoke_spec.spl`
+- `test/integration/t32_hw/23_screenshot_spec.spl`
+- `test/integration/t32_hw/30_dialog_tools_spec.spl`
+- `test/system/async_promise_system_spec.spl`
+- `src/compiler/90.tools/async_integration.spl`
+- `test/integration/t32_hw/02_t32_open_close_spec.spl`
+- `test/integration/t32_hw/10_session_open_spec.spl`
+- `test/integration/t32_hw/11_session_list_info_spec.spl`
+- `test/integration/t32_hw/12_core_tools_spec.spl`
+- `test/integration/t32_hw/13_cmd_run_spec.spl`
+- `test/integration/t32_hw/14_cmm_run_spec.spl`
+- `test/integration/t32_hw/15_eval_spec.spl`
+- `test/integration/t32_hw/16_error_check_spec.spl`
+- `test/integration/t32_hw/17_window_list_describe_spec.spl`
+- `test/integration/t32_hw/18_window_open_capture_spec.spl`
+- `test/integration/t32_hw/20_power_cycle_for_new_spec.spl`
+- `test/integration/t32_hw/21_field_get_set_spec.spl`
+- `test/integration/t32_hw/24_history_tail_spec.spl`
+- `test/integration/t32_hw/26_cmm_commands_validate_spec.spl`
+- `test/integration/t32_hw/27_area_read_spec.spl`
+- `test/integration/t32_hw/28_setup_headless_spec.spl`
+
 ## Repo Debt Snapshot
 
 Representative remaining placeholder-heavy areas from the 2026-04-04 audit:
@@ -67,10 +100,31 @@ Representative remaining placeholder-heavy areas from the 2026-04-04 audit:
 - `src/os/userlib/`
 - legacy spec buckets under `test/specs/`, `test/app/`, and hardware-oriented integration suites
 
-These no longer block the enforcement feature itself, but they do block a truthful “universal repo-wide cleanliness” claim.
+These no longer block the enforcement feature itself, but they still block a truthful “universal repo-wide cleanliness” claim.
+
+## P2 Cleanup (T32 Hardware Specs)
+
+All 16 T32 hardware specs in `test/integration/t32_hw/` have been cleaned:
+
+- `02_t32_open_close_spec.spl` — 2 placeholders replaced
+- `10_session_open_spec.spl` — 1 placeholder replaced
+- `11_session_list_info_spec.spl` — 2 placeholders replaced
+- `12_core_tools_spec.spl` — 3 placeholders replaced
+- `13_cmd_run_spec.spl` — 5 placeholders replaced
+- `14_cmm_run_spec.spl` — 3 placeholders replaced
+- `15_eval_spec.spl` — multiple placeholders replaced
+- `16_error_check_spec.spl` — 2 placeholders replaced
+- `17_window_list_describe_spec.spl` — 3 placeholders replaced
+- `18_window_open_capture_spec.spl` — 1 placeholder replaced
+- `20_power_cycle_for_new_spec.spl` — 2 placeholders replaced
+- `21_field_get_set_spec.spl` — 1 placeholder replaced
+- `24_history_tail_spec.spl` — multiple placeholders replaced
+- `26_cmm_commands_validate_spec.spl` — multiple placeholders replaced
+- `27_area_read_spec.spl` — multiple placeholders replaced
+- `28_setup_headless_spec.spl` — 3 pass_do_nothing + expect(true) replaced
 
 ## Practical Status
 
-The feature is now implemented on both the source and compiled CLI paths, but the repo still has migration debt. It should be described as:
+The feature is now implemented on both the source and compiled CLI paths. All active public-facing proof surfaces are clean. Remaining debt is only in deferred/experimental/postponed areas (OS, GPU, archived specs). It should be described as:
 
-- `Implemented with migration debt`
+- `Implemented`

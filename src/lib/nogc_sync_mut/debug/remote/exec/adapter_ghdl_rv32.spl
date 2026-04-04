@@ -12,7 +12,7 @@ use std.nogc_sync_mut.debug.remote.exec.types.{
 use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
 use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.{GdbMiClient}
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, Architecture}
-use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_ghdl}
+use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_ghdl, probe_ghdl_mailbox}
 
 fn default_ghdl_gdb_port() -> i32:
     3333
@@ -120,4 +120,61 @@ class GhdlRv32Adapter:
             wait_halt_fn: \timeout: self.wait_halt(timeout)
         ))
 
+class GhdlRv32MailboxAdapter:
+    """GHDL RV32 mailbox adapter — runs simulation directly via ghdl_mailbox_runner.
+
+    Unlike the semihost adapter (GDB-MI based), this adapter invokes the
+    runner script and parses the ram_sentinel result from simulation output.
+    No GDB connection is needed."""
+    runner_path: text
+    elf_path: text
+    timeout_s: i64
+    last_exit_code: i64
+    last_output: text
+
+    static fn new() -> GhdlRv32MailboxAdapter:
+        GhdlRv32MailboxAdapter(
+            runner_path: "src/lib/nogc_async_mut_noalloc/baremetal/ghdl_mailbox_runner.shs",
+            elf_path: "",
+            timeout_s: 30,
+            last_exit_code: -1,
+            last_output: ""
+        )
+
+    fn is_available() -> bool:
+        val report = probe_ghdl_mailbox()
+        report.is_runnable()
+
+    fn capability_report() -> CapabilityReport:
+        probe_ghdl_mailbox()
+
+    me set_elf(path: text):
+        self.elf_path = path
+
+    me set_timeout(seconds: i64):
+        self.timeout_s = seconds
+
+    me execute() -> Result<text, text>:
+        if self.elf_path == "":
+            return Err("no ELF path set — call set_elf() first")
+        if not self.is_available():
+            val report = probe_ghdl_mailbox()
+            return Err("GHDL mailbox prerequisites missing: {report.detail}")
+
+        val result = shell("bash {self.runner_path} {self.elf_path} {self.timeout_s}")
+        self.last_exit_code = result.exit_code
+        self.last_output = result.stdout
+
+        if result.exit_code == 0:
+            Ok(result.stdout)
+        else:
+            Err("mailbox runner failed (exit {result.exit_code}): {result.stderr}")
+
+    fn get_exit_code() -> i64:
+        self.last_exit_code
+
+    fn get_output() -> text:
+        self.last_output
+
 export GhdlRv32Adapter
+export GhdlRv32MailboxAdapter

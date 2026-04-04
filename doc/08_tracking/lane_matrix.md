@@ -15,18 +15,18 @@
 | stm32h7_openocd | arm32 | openocd_gdb | compiled | **host_aware** | yes | register_readback | ram_sentinel | `test/integration/remote_jit/stm32h7_composite_runner_spec.spl` |
 | stm32h7_trace32 | arm32 | trace32 | compiled | **host_aware** | yes | debugger_console | register_readback | `test/system/t32_terminal_power_remote_spec.spl` |
 | ghdl_rv32_semihost | riscv32 | ghdl_sim | compiled | **host_aware** | yes | semihost_text | exit_code | `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` |
-| ghdl_rv32_mailbox | riscv32 | ghdl_sim | compiled | **in_progress** | no | ram_sentinel | register_readback | `test/integration/remote_jit/ghdl_rv32_composite_runner_spec.spl` |
+| ghdl_rv32_mailbox | riscv32 | ghdl_sim | compiled | **host_aware** | yes | ram_sentinel | register_readback | `test/feature/baremetal/ghdl_riscv32_mailbox_spec.spl` |
 | fpga_jtag_zedboard | arm32 | openocd_gdb | structural | **in_progress** | no | register_readback | — | *(none — quarantined)* |
 | rv32_raw_injected | riscv32 | qemu_gdb | structural | transport_only | no | register_readback | — | `test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl` |
 | baremetal_runtime_check | riscv32 | qemu_gdb | interpreter | transport_only | no | exit_code | — | `test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl` |
 
 ## Classification Summary
 
-- **Authoritative (7):** Stable + host-aware lanes
+- **Authoritative (8):** Stable + host-aware lanes
 - **Stable (3):** QEMU RV32 semihost, QEMU ARM semihost, x86_64 direct boot
-- **Host-aware (4):** CH32V307 via wlink, STM32H7 via OpenOCD, STM32H7 via TRACE32, GHDL RV32 semihost
+- **Host-aware (5):** CH32V307 via wlink, STM32H7 via OpenOCD, STM32H7 via TRACE32, GHDL RV32 semihost, GHDL RV32 mailbox
 - **Transport-only (2):** RV32 raw injected regression, baremetal runtime check
-- **In-progress (2):** GHDL RV32 mailbox, ZedBoard/FPGA JTAG
+- **In-progress (1):** ZedBoard/FPGA JTAG
 
 ## Lane Definitions
 
@@ -45,7 +45,8 @@ Lanes that skip cleanly when prerequisites are missing:
 - **ch32v307_wlink**: CH32V307 RISC-V MCU via WCH-Link USB probe. Requires `wlink` CLI and physical board.
 - **stm32h7_openocd**: STM32H7 Cortex-M7 via OpenOCD + ST-Link. Requires `openocd`, `gdb`, and physical board.
 - **stm32h7_trace32**: STM32H7 Cortex-M7 via Lauterbach TRACE32. Requires T32 installation and license.
-- **ghdl_rv32_semihost**: GHDL VHDL simulation of RV32 with semihosting. Requires `ghdl`, `clang`, `ld.lld`, `llvm-objcopy`. Implemented with bounded scope — semihost/GDB-backed execution is validated; mailbox transport is a separate lane.
+- **ghdl_rv32_semihost**: GHDL VHDL simulation of RV32 with semihosting. Requires `ghdl`, `clang`, `ld.lld`, `llvm-objcopy`. Implemented with bounded scope — semihost/GDB-backed execution is validated.
+- **ghdl_rv32_mailbox**: GHDL VHDL simulation of RV32 with MMIO mailbox transport. Requires same toolchain as semihost. Debugger-independent — uses memory-mapped registers at 0x80FF0000 instead of ARM semihosting traps, with ram_sentinel at 0x80008000 for result collection.
 
 ### Transport-Only Lanes
 
@@ -58,7 +59,6 @@ Verify debugger plumbing, not authoritative workload execution:
 
 Not yet promoted to supported status:
 
-- **ghdl_rv32_mailbox**: GHDL VHDL simulation of RV32 with mailbox MMIO transport. Deferred — requires mailbox protocol, testbench driver, and target-side runtime binding.
 - **fpga_jtag_zedboard**: ZedBoard Zynq-7020 FPGA via JTAG. **Quarantined** — no authoritative compiled execution proof exists. Will remain in-progress until JTAG chain + upload/run/result proof is established, or will be explicitly excluded.
 
 ## Capability Detection
@@ -83,7 +83,7 @@ All lanes produce canonical `ResultPacket` objects:
 | semihost_text | QEMU, GHDL | ARM/RISC-V semihosting output capture |
 | exit_code | x86_64, runtime check | Process exit code |
 | register_readback | CH32, STM32, FPGA, raw injected | Read return register after halt |
-| ram_sentinel | CH32 (fallback), STM32 (fallback) | Read known RAM address for result |
+| ram_sentinel | CH32 (fallback), STM32 (fallback), GHDL mailbox (primary) | Read known RAM address for result |
 | debugger_console | TRACE32 | Parse debugger output for result |
 
 ## Recommended Public Classification
@@ -92,6 +92,5 @@ After completion of all phases:
 
 - **Stable reference lanes:** QEMU RV32, QEMU ARM, x86_64 baremetal
 - **Host-aware supported:** CH32V307, STM32H7/OpenOCD, STM32H7/TRACE32
-- **Host-aware simulation:** GHDL RV32 semihost (implemented with bounded scope)
-- **In-progress simulation:** GHDL RV32 mailbox (deferred — mailbox protocol not yet implemented)
+- **Host-aware simulation:** GHDL RV32 semihost (semihosting-backed), GHDL RV32 mailbox (MMIO-backed, debugger-independent)
 - **Excluded:** ZedBoard/FPGA (quarantined until real execution proof)

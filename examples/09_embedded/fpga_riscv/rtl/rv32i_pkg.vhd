@@ -35,4 +35,29 @@ package rv32i_pkg is
     constant SYS_WRITEC  : std_logic_vector(31 downto 0) := x"00000003";
     constant SYS_WRITE0  : std_logic_vector(31 downto 0) := x"00000004";
     constant SYS_EXIT    : std_logic_vector(31 downto 0) := x"00000018";
+
+    -- Mailbox MMIO base address and register offsets
+    constant MB_BASE_ADDR    : std_logic_vector(31 downto 0) := x"80FF0000";
+    constant MB_OFF_CMD      : integer := 16#00#;
+    constant MB_OFF_ARG0     : integer := 16#04#;
+    constant MB_OFF_ARG1     : integer := 16#08#;
+    constant MB_OFF_STATUS   : integer := 16#0C#;
+    constant MB_OFF_RESULT   : integer := 16#10#;
+    constant MB_OFF_SEQ_ID   : integer := 16#14#;
+    constant MB_OFF_TRIGGER  : integer := 16#18#;
+
+    -- Mailbox command codes
+    constant MB_CMD_PUTC   : std_logic_vector(31 downto 0) := x"00000001";
+    constant MB_CMD_EXIT   : std_logic_vector(31 downto 0) := x"00000002";
+    constant MB_CMD_RESULT : std_logic_vector(31 downto 0) := x"00000003";
+
+    -- Mailbox sentinel address (in RAM, word index = 0x8000/4 = 0x2000)
+    constant MB_SENTINEL_ADDR : std_logic_vector(31 downto 0) := x"80008000";
+
+    -- Mailbox sentinel value prefixes
+    constant MB_SENTINEL_SUCCESS : std_logic_vector(31 downto 0) := x"CAFE0000";
+    constant MB_SENTINEL_TIMEOUT : std_logic_vector(31 downto 0) := x"DEAD0000";
+
+    -- Mailbox trigger magic value
+    constant MB_TRIGGER_MAGIC : std_logic_vector(31 downto 0) := x"0000DEAD";
 end package rv32i_pkg;

@@ -482,20 +482,35 @@ impl<'a> Lexer<'a> {
                 }
             }
             '\'' => {
-                // Check if this is a label: 'identifier (tick + alpha/underscore)
+                // Disambiguate: character literal 'x', label 'ident, or raw string 'text'
                 if let Some(next_ch) = self.peek() {
                     if next_ch.is_alphabetic() || next_ch == '_' {
-                        // Scan label: consume identifier chars
-                        let mut label = String::new();
-                        while let Some(ch) = self.peek() {
-                            if ch.is_alphanumeric() || ch == '_' {
-                                label.push(ch);
-                                self.advance();
-                            } else {
-                                break;
+                        // Peek further: if pattern is 'X' (single char + closing quote),
+                        // it's a character literal.  Otherwise it's a label ('loop, 'outer).
+                        let after = self.peek_ahead(1);
+                        if after == Some('\'') {
+                            // Character literal: 'a', 'Z', '_'
+                            // Consume the char and closing quote, emit as single-char string
+                            let char_val = next_ch;
+                            self.advance(); // consume the char
+                            self.advance(); // consume closing '
+                            TokenKind::RawString(char_val.to_string())
+                        } else {
+                            // Label: 'identifier (tick-prefixed, no closing quote)
+                            let mut label = String::new();
+                            while let Some(ch) = self.peek() {
+                                if ch.is_alphanumeric() || ch == '_' {
+                                    label.push(ch);
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
                             }
+                            TokenKind::Label(label)
                         }
-                        TokenKind::Label(label)
+                    } else if next_ch == '\\' {
+                        // Escape sequence char literal: '\n', '\t', etc.
+                        self.scan_raw_string()
                     } else {
                         self.scan_raw_string() // Single quotes are raw strings
                     }

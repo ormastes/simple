@@ -1,5 +1,41 @@
 #!/bin/sh
-# Unified MCP launcher delegation — see tools/mcp-launcher/
+# Direct MCP launcher — bypasses node for debugging
+# Original: exec node "${SCRIPT_DIR}/../../tools/mcp-launcher/bin/mcp-launch.js" --server=t32-lsp-mcp "$@"
 SELF="$0"; while [ -L "$SELF" ]; do DIR="$(cd "$(dirname "$SELF")" && pwd)"; SELF="$(readlink "$SELF")"; case "$SELF" in /*) ;; *) SELF="${DIR}/${SELF}" ;; esac; done
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-exec node "${SCRIPT_DIR}/../../tools/mcp-launcher/bin/mcp-launch.js" --server=t32-lsp-mcp "$@"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Resolve runtime (same fallback chain as node launcher)
+RUNTIME=""
+for candidate in \
+    "${REPO_ROOT}/bin/simple" \
+    "${REPO_ROOT}/bin/release/simple" \
+    "${REPO_ROOT}/src/compiler_rust/target/release/simple" \
+    "${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; do
+    if [ -x "$candidate" ] || [ -L "$candidate" ]; then
+        RUNTIME="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
+        break
+    fi
+done
+if [ -z "$RUNTIME" ]; then
+    RUNTIME="$(command -v simple 2>/dev/null || true)"
+fi
+if [ -z "$RUNTIME" ]; then
+    echo "error: no Simple runtime found" >&2
+    exit 1
+fi
+
+ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/claude_frontend.spl"
+
+export SIMPLE_LIB="${SIMPLE_LIB:-${REPO_ROOT}/examples/10_tooling/trace32_tools}"
+export SIMPLE_BINARY="${SIMPLE_BINARY:-${RUNTIME}}"
+export SIMPLE_RUNTIME="${SIMPLE_RUNTIME:-${RUNTIME}}"
+export SIMPLE_LOG="${SIMPLE_LOG:-error}"
+export RUST_LOG="${RUST_LOG:-error}"
+export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-86400}"
+export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-512}"
+export T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
+export T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
+
+cd "${REPO_ROOT}"
+exec "$RUNTIME" "$ENTRY" "$@" 2>/dev/null
