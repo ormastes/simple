@@ -6,16 +6,14 @@
 #
 # Boot sequence:
 # 1. Initialize POSIX compatibility layer
-# 2. Initialize all services (storage, network, display)
-# 3. Report service status
-# 4. Start background daemons (SSH if network available)
-# 5. Launch interactive shell (foreground, blocks)
+# 2. Initialize all services (storage, network)
+# 3. Start service IPC ports (cooperative mode)
+# 4. Run cooperative main loop: VFS poll + netstack poll + shell input
 
 use os.kernel.boot.init_services.{init_all_services, services_storage_ready, services_network_ready}
-use os.services.vfs.vfs_init.{vfs_service_start, g_vfs}
-use os.services.netstack.netstack_init.{net_service_start, net_is_ready}
+use os.services.vfs.vfs_init.{vfs_service_init_port, vfs_service_poll, g_vfs}
+use os.services.netstack.netstack_init.{net_service_init_port, net_service_poll, net_is_ready}
 use os.apps.shell.shell_app.{ShellApp}
-use os.apps.sshd.sshd.{SshDaemon}
 use os.posix.mod.{posix_init}
 
 extern fn serial_println(msg: text)
@@ -29,18 +27,20 @@ fn os_main():
 
     Called once from kernel_entry after hardware initialization
     (GDT, IDT, page tables, scheduler, IPC) is complete.
-    Initializes user-space services and launches the shell.
+
+    Uses cooperative scheduling: a single main loop polls VFS IPC,
+    netstack frames/IPC, and shell input each iteration. This avoids
+    needing a preemptive task scheduler for service loops.
     """
     serial_println("")
     serial_println("=== SimpleOS Boot ===")
     serial_println("")
 
     # Step 1: Initialize POSIX compatibility layer
-    # Sets up FD table (stdin/stdout/stderr), async I/O pool, signals
     posix_init()
     serial_println("[boot] POSIX layer initialized")
 
-    # Step 2: Initialize all services (storage, network, display)
+    # Step 2: Initialize all services (storage, network)
     init_all_services()
 
     # Step 3: Report service status
@@ -55,29 +55,48 @@ fn os_main():
     else:
         serial_println("[boot] Network: FAILED (continuing without network)")
 
+    # Step 4: Start service IPC ports (non-blocking init)
+    if services_storage_ready():
+        vfs_service_init_port()
+        serial_println("[boot] VFS IPC service port initialized")
+
+    if services_network_ready():
+        net_service_init_port()
+        serial_println("[boot] Netstack IPC service port initialized")
+
     serial_println("")
-    serial_println("[boot] All services initialized")
-    serial_println("[boot] Starting applications...")
+    serial_println("[boot] All services ready")
+    serial_println("[boot] Entering cooperative main loop")
     serial_println("")
 
-    # NOTE: In a real OS, these would be spawned as separate tasks via
-    # the scheduler. For now, we run the shell as the foreground task.
-    # VFS service runs via notification-based IPC (no dedicated loop needed
-    # when shell calls VFS synchronously).
-
-    # Step 4: Start SSH daemon if network is ready
-    # (In a real OS this would be a background task)
-    if net_is_ready():
-        serial_println("[boot] SSH daemon would start on port 22")
-        # var sshd = SshDaemon.new(22)
-        # sshd.start()  # Would block -- needs task spawning
-
-    # Step 5: Launch interactive shell (foreground, blocks)
-    serial_println("[boot] Launching shell...")
-    serial_println("")
+    # Step 5: Create shell (foreground application)
     var shell = ShellApp.with_vfs(g_vfs)
-    shell.run()
+    shell.show_prompt()
 
-    # Shell exited
+    # Step 6: Cooperative main loop
+    # Each iteration:
+    #   a) Poll VFS service for IPC requests
+    #   b) Poll netstack for frames + IPC
+    #   c) Check shell for input + process command
+    # This runs all services in a single thread without a scheduler.
+    var running = true
+    while running:
+        # Poll VFS service (handles file open/read/write IPC from POSIX layer)
+        if services_storage_ready():
+            vfs_service_poll()
+
+        # Poll network stack (handles frames + socket IPC)
+        if services_network_ready():
+            net_service_poll()
+
+        # Poll shell for input (non-blocking check)
+        # ShellApp.run() blocks — for cooperative mode, we need
+        # to check if input is available and process one command
+        val has_input = shell.check_input()
+        if has_input:
+            val should_continue = shell.process_pending()
+            if not should_continue:
+                running = false
+
     serial_println("")
     serial_println("[boot] Shell exited. Halting.")

@@ -5,7 +5,7 @@
 # input event delivery for remote app processes.
 #
 # The WM service serializes/deserializes window protocol messages and
-# delegates to the Compositor for actual window operations.
+# returns WmAction structs that the shell applies to its compositor.
 #
 # Wire protocol:
 #   Request:  method (u32) | flags (u32) | payload (bytes)
@@ -483,26 +483,48 @@ impl WmService:
                 updated = updated.push(entry)
         self.window_owners = updated
 
-    me remove_all_windows_for_port(port: u64):
-        """Remove all windows owned by a disconnected port.
+    me remove_all_windows_for_port(port: u64) -> [u64]:
+        """Remove all ownership entries for a disconnected port.
 
-        Called when an app crashes or disconnects. Destroys all its
-        windows from the compositor and removes ownership entries.
+        Returns the list of window IDs that were owned by the port.
+        The caller (shell) is responsible for destroying these windows
+        on its compositor.
         """
         var to_destroy: [u64] = []
         for entry in self.window_owners:
             if entry.owner_port == port:
                 to_destroy = to_destroy.push(entry.window_id)
-
-        for wid in to_destroy:
-            self.compositor.destroy_window(wid)
-            serial_println("[wm-service] Cleaned up window {wid} for disconnected port {port}")
+                serial_println("[wm-service] Cleaned up ownership of window {entry.window_id} for disconnected port {port}")
 
         var remaining: [WindowOwner] = []
         for entry in self.window_owners:
             if entry.owner_port != port:
                 remaining = remaining.push(entry)
         self.window_owners = remaining
+        to_destroy
+
+    # -- Shell Integration (called by DesktopShell after applying actions) ----
+
+    me register_window_owner(window_id: u64, owner_port: u64):
+        """Register ownership of a window after the shell creates it.
+
+        Called by the shell after it calls compositor.create_remote_window()
+        and obtains the window_id.
+        """
+        self.window_owners = self.window_owners.push(WindowOwner(
+            window_id: window_id,
+            owner_port: owner_port
+        ))
+
+    fn send_create_reply(dst_port: u64, window_id: u64):
+        """Send a successful create-window reply with the new window ID.
+
+        Called by the shell after creating the window on its compositor.
+        """
+        var buf: [u8] = []
+        _push_i32(buf, WM_STATUS_OK)
+        _push_u64(buf, window_id)
+        _ipc_send(dst_port, self.port_id, buf)
 
     # -- Reply Helpers -------------------------------------------------------
 

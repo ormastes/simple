@@ -16,7 +16,7 @@ use common.ui.builder.{
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
-use os.services.wm.wm_service.{WmService}
+use os.services.wm.wm_service.{WmService, WmAction}
 use os.services.launcher.launcher.{launcher_shortcut_dispatch}
 
 extern fn serial_println(msg: text)
@@ -75,7 +75,7 @@ impl DesktopShell:
         val taskbar_tree = _build_taskbar_tree([], "00:00")
         val session = new_session(taskbar_tree)
 
-        val wm = WmService.new(compositor)
+        val wm = WmService.new()
 
         DesktopShell(
             compositor: compositor,
@@ -229,12 +229,65 @@ impl DesktopShell:
                     return
                 idx = idx + 1
 
+    me apply_wm_action(action: WmAction):
+        """Apply a WmAction to the shell's compositor.
+
+        The WM service parses IPC messages into WmAction structs.
+        This method applies them to the single compositor instance
+        owned by the shell, ensuring consistent state.
+        """
+        match action.kind:
+            "create_window":
+                val wid = self.compositor.create_remote_window(
+                    action.title, action.x, action.y,
+                    action.width, action.height, action.owner_port)
+                # Track ownership in the WM service
+                self.wm.register_window_owner(wid, action.owner_port)
+                # Send reply with window_id back to the app
+                self.wm.send_create_reply(action.src_port, wid)
+                serial_println("[shell] Created window {wid} for port {action.src_port}: '{action.title}'")
+            "destroy_window":
+                self.compositor.destroy_window(action.window_id)
+                self.wm.remove_owner(action.window_id)
+                self.wm.send_status_reply(action.src_port, 0)
+                serial_println("[shell] Destroyed window {action.window_id}")
+            "focus":
+                self.compositor.focus_window(action.window_id)
+                self.wm.send_status_reply(action.src_port, 0)
+            "resize":
+                self.compositor.resize_window(action.window_id, action.width, action.height)
+                self.wm.send_status_reply(action.src_port, 0)
+            "move":
+                self.compositor.move_window(action.window_id, action.x, action.y)
+                self.wm.send_status_reply(action.src_port, 0)
+            "set_title":
+                self.compositor.set_window_title(action.window_id, action.title)
+                self.wm.send_status_reply(action.src_port, 0)
+            "minimize":
+                self.compositor.minimize_window(action.window_id)
+                self.wm.send_status_reply(action.src_port, 0)
+            "maximize":
+                self.compositor.maximize_window(action.window_id)
+                self.wm.send_status_reply(action.src_port, 0)
+            "restore":
+                self.compositor.restore_window(action.window_id)
+                self.wm.send_status_reply(action.src_port, 0)
+            "update_tree":
+                val tree = _build_remote_tree(action.window_id, action.content)
+                self.compositor.update_window_tree(action.window_id, tree)
+                self.wm.send_status_reply(action.src_port, 0)
+                serial_println("[shell] Applied tree update for window {action.window_id}")
+            _:
+                pass_dn
+
     me run():
         """Main desktop shell loop.
 
         Wraps the compositor loop but also updates taskbar.
         Checks for global Ctrl+Alt shortcuts after each input poll.
         Polls the WM service for remote app window requests each frame.
+        The shell applies WmActions to its own compositor, ensuring a
+        single source of truth for compositor state.
         """
         self.compositor.running = true
         while self.compositor.running:
@@ -247,14 +300,21 @@ impl DesktopShell:
 
             # Check for Ctrl+Alt global shortcuts
             val shortcut_key = self.compositor.consume_pending_shortcut()
+            val ctrl_alt = "Ctrl+Alt"
             if shortcut_key != "":
-                me handle_shortcut("Ctrl+Alt", shortcut_key)
+                me handle_shortcut(ctrl_alt, shortcut_key)
 
-            # Poll WM service for remote window management IPC requests
-            self.wm.poll_once()
+            # Process one WM IPC request if available
+            val action = self.wm.poll_once()
+            if action != nil:
+                me apply_wm_action(action)
 
             # Deliver any pending input events to remote app windows
-            self.wm.deliver_pending_remote_events()
+            val remote_events = self.compositor.consume_remote_events()
+            for event in remote_events:
+                val owner = self.wm.find_owner(event.window_id)
+                if owner > 0:
+                    self.wm.send_input_to_port(owner, event)
 
             me update_taskbar()
             self.compositor.render_all()
@@ -386,3 +446,22 @@ fn _default_shortcuts() -> [KeyboardShortcut]:
         KeyboardShortcut(modifier: "Ctrl+Alt", key: "h", action: "launch_Hello World"),
         KeyboardShortcut(modifier: "Ctrl+Alt", key: "t", action: "launch_Terminal")
     ]
+
+# ============================================================================
+# Remote Window Tree Builder
+# ============================================================================
+
+fn _build_remote_tree(window_id: u64, content: text) -> UITree:
+    """Build a widget tree for a remote window's content update.
+
+    Creates a simple panel with text content and a status bar,
+    matching the layout that was previously built inside WmService.
+    """
+    val wid_str = "{window_id}"
+    val root = column("remote_{wid_str}", [
+        panel("remote_content_{wid_str}", "", [
+            text_widget("remote_text_{wid_str}", content)
+        ]),
+        statusbar("remote_status_{wid_str}", "Remote window {wid_str}", "Updated")
+    ])
+    build_tree_with_title(root, "Window {wid_str}", "dark")

@@ -1,0 +1,152 @@
+# OS SSH Integration Test
+#
+# Tests: SSH daemon internals -- Ed25519, packet codec, auth, channel table
+# QEMU scenario: x64-full-stack
+#
+# These tests exercise the SSH subsystem's internal components without
+# making real TCP connections. This validates:
+#   - Ed25519 self-test (RFC 8032 test vectors)
+#   - SSH binary packet encode/decode round-trip
+#   - SSH auth: password accept and reject
+#   - SSH auth: publickey rejected (disabled by default)
+#   - SSH channel table open/close lifecycle
+#   - SshDaemon construction
+#
+# This test runs as a baremetal OS entry point, not under the SSpec harness.
+
+use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, ssh_put_u32, ssh_put_text}
+use os.apps.sshd.ssh_auth.{SshUserDb, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, SSH_MSG_USERAUTH_REQUEST}
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET}
+use os.apps.sshd.sshd.{SshDaemon}
+use os.posix.mod.{posix_init}
+use os.userlib.syscall_raw.{syscall}
+
+extern fn serial_println(msg: text)
+extern fn rt_exit(code: i32)
+
+val ISA_DEBUG_EXIT_PORT: u64 = 0xf4
+
+var _pass_count: u32 = 0
+var _fail_count: u32 = 0
+
+fn _assert(condition: bool, name: text):
+    if condition:
+        serial_println("[TEST PASS] {name}")
+        _pass_count = _pass_count + 1
+    else:
+        serial_println("[TEST FAIL: {name}]")
+        _fail_count = _fail_count + 1
+
+fn _report():
+    serial_println("")
+    serial_println("SSH tests: {_pass_count} passed, {_fail_count} failed")
+    if _fail_count == 0:
+        serial_println("[ALL TESTS PASSED]")
+    else:
+        serial_println("[TESTS FAILED: {_fail_count}]")
+    syscall(ISA_DEBUG_EXIT_PORT, 0, 0, 0, 0, 0)
+
+fn os_ssh_test():
+    """Entry point for SSH daemon component tests."""
+    serial_println("=== OS SSH Integration Test ===")
+    serial_println("")
+
+    posix_init()
+
+    # ---- Test 1: Ed25519 self-test passes ----
+    val self_test = ed25519_self_test()
+    _assert(self_test.is_ok(), "Ed25519 self-test passes (RFC 8032 vectors)")
+    if self_test.is_err():
+        serial_println("[ERROR] Ed25519 self-test: {self_test.unwrap_err()}")
+
+    # ---- Test 2: Ed25519 keypair generation ----
+    val seed = random_bytes(32)
+    val keypair = ed25519_keypair_from_seed(seed)
+    _assert(keypair.0.len() == 64, "Ed25519 keypair private key is 64 bytes")
+    _assert(keypair.1.len() == 32, "Ed25519 keypair public key is 32 bytes")
+
+    # ---- Test 3: SSH packet encode/decode round-trip ----
+    var test_payload: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]  # 5-byte payload
+    val encoded = ssh_packet_build(test_payload, 0)
+    _assert(encoded.len() > 5, "SSH packet encoded (len={encoded.len()})")
+    val decoded_result = ssh_packet_read(encoded, 0)
+    if decoded_result.is_ok():
+        val pair = decoded_result.unwrap()
+        val pkt = pair.0
+        _assert(pkt.payload.len() == 5, "Decoded payload length matches (len={pkt.payload.len()})")
+        _assert(pkt.payload[0] == 0x14, "Decoded payload first byte matches (0x{pkt.payload[0]})")
+    else:
+        _assert(false, "Decoded payload length matches (decode failed: {decoded_result.unwrap_err()})")
+
+    # ---- Test 4: SSH packet with empty payload ----
+    var empty_payload: [u8] = []
+    val empty_encoded = ssh_packet_build(empty_payload, 1)
+    val empty_decoded = ssh_packet_read(empty_encoded, 0)
+    _assert(empty_decoded.is_ok(), "Empty payload packet round-trips")
+
+    # ---- Test 5: SSH auth -- password accept ----
+    var db = SshUserDb.new()
+    db.add_user("root", "simpleos")
+    db.add_user("user", "password")
+    _assert(db.authenticate_password("root", "simpleos"), "Auth: root/simpleos accepted")
+
+    # ---- Test 6: SSH auth -- wrong password rejected ----
+    _assert(not db.authenticate_password("root", "wrongpass"), "Auth: root/wrongpass rejected")
+
+    # ---- Test 7: SSH auth -- unknown user rejected ----
+    _assert(not db.authenticate_password("nobody", "anything"), "Auth: unknown user rejected")
+
+    # ---- Test 8: SSH auth -- publickey not authorized (no keys added) ----
+    var fake_key: [u8] = [0x00, 0x01, 0x02, 0x03]
+    _assert(not db.authenticate_key("root", fake_key), "Auth: publickey rejected (no keys)")
+
+    # ---- Test 9: SSH auth success message ----
+    val success_msg = ssh_build_auth_success()
+    _assert(success_msg.len() == 1, "AUTH_SUCCESS message is 1 byte")
+    _assert(success_msg[0] == 52, "AUTH_SUCCESS message type is 52")
+
+    # ---- Test 10: SSH auth failure message ----
+    val failure_msg = ssh_build_auth_failure(["password"], false)
+    _assert(failure_msg.len() > 1, "AUTH_FAILURE message has content")
+    _assert(failure_msg[0] == 51, "AUTH_FAILURE message type is 51")
+
+    # ---- Test 11: Channel table open/close ----
+    var channels = ChannelTable.new()
+    val ch_id = channels.open(ChannelType.Session, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(ch_id == 0, "First channel ID is 0")
+    val ch2_id = channels.open(ChannelType.Session, 1, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(ch2_id == 1, "Second channel ID is 1")
+
+    # ---- Test 12: Channel lookup ----
+    val found = channels.find(ch_id)
+    _assert(found != nil, "Channel 0 found in table")
+
+    # ---- Test 13: SshDaemon construction ----
+    val daemon = SshDaemon.new(22)
+    _assert(daemon.port == 22, "SshDaemon port is 22")
+    _assert(not daemon.is_running(), "SshDaemon not running before start()")
+    _assert(daemon.session_count() == 0, "SshDaemon has 0 sessions initially")
+
+    # ---- Test 14: USERAUTH_REQUEST parsing ----
+    # Build a fake password auth request
+    var auth_payload: [u8] = []
+    auth_payload.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(auth_payload, "testuser")
+    ssh_put_text(auth_payload, "ssh-connection")
+    ssh_put_text(auth_payload, "password")
+    auth_payload.push(0)  # FALSE (no password change)
+    ssh_put_text(auth_payload, "secret123")
+    val parsed = ssh_parse_auth_request(auth_payload)
+    if parsed.is_ok():
+        val req = parsed.unwrap()
+        _assert(req.username == "testuser", "Parsed auth request username")
+        _assert(req.method == "password", "Parsed auth request method")
+        _assert(req.password == "secret123", "Parsed auth request password")
+    else:
+        _assert(false, "Parsed auth request username (parse failed)")
+        _assert(false, "Parsed auth request method (parse failed)")
+        _assert(false, "Parsed auth request password (parse failed)")
+
+    _report()

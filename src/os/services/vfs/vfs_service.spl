@@ -92,7 +92,16 @@ impl VfsService:
         )
 
     me start():
-        """Create IPC port and start service loop."""
+        """Create IPC port and start blocking service loop."""
+        self.init_port()
+        self.run_loop()
+
+    me init_port():
+        """Create IPC port without entering the blocking loop.
+
+        Call this instead of start() when using cooperative scheduling
+        (os_main calls poll_once() in a shared main loop).
+        """
         val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
         if port < 0:
             serial_println("[vfs-service] Failed to create IPC port (error {port})")
@@ -100,19 +109,36 @@ impl VfsService:
         self.port_id = port.to_u64()
         self.running = true
         serial_println("[vfs-service] Listening on IPC port {self.port_id}")
-        self.run_loop()
 
     me run_loop():
-        """Main service loop: receive IPC, dispatch, reply."""
+        """Main service loop: blocking receive, dispatch, reply. Blocks forever.
+
+        Uses IpcRecv with timeout=-1 (infinite wait). For dedicated task mode.
+        """
         while self.running:
-            # Receive IPC message -- blocks until message arrives
-            # syscall 21 = IpcRecv: returns message buffer pointer or negative error
-            val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+            # arg1 = -1 means block until message arrives (cast via to_u64)
+            val timeout_blocking: u64 = 0xFFFFFFFFFFFFFFFF  # -1 as unsigned
+            val msg_raw = syscall(SYS_IPC_RECV, self.port_id, timeout_blocking, 0, 0, 0)
             if msg_raw < 0:
-                serial_println("[vfs-service] IPC recv error: {msg_raw}")
-                continue
+                continue  # Error — retry
             self.request_count = self.request_count + 1
             self.dispatch_message(msg_raw.to_u64())
+
+    me poll_once():
+        """Process one IPC request if available (non-blocking).
+
+        Uses IpcRecv with timeout=0: kernel returns -EAGAIN immediately
+        if no message is pending (syscall.spl line 627-629).
+        Call from the cooperative main loop in os_main.spl.
+        """
+        if not self.running:
+            return
+        # arg1 = 0 means non-blocking: returns -11 (EAGAIN) if no message
+        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+        if msg_raw < 0:
+            return  # EAGAIN or error — no message pending
+        self.request_count = self.request_count + 1
+        self.dispatch_message(msg_raw.to_u64())
 
     me dispatch_message(msg_addr: u64):
         """Parse an IPC message and dispatch to the appropriate handler.

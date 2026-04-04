@@ -2,7 +2,17 @@
 # Build a FAT32 disk image for SimpleOS QEMU testing.
 # Usage: sh scripts/make_os_disk.shs [size_mb] [output_path]
 #
-# Creates a FAT32-formatted disk image with test files.
+# Creates a FAT32-formatted disk image with test fixture files.
+# Required by QEMU scenarios: x64-nvme-fat32, x64-full-stack
+#
+# Fixture files (used by test/system/os_*_spec.spl):
+#   hello.txt    — "Hello from SimpleOS!\n"  (storage read test)
+#   numbers.txt  — "1\n2\n3\n4\n5\n"        (multi-line read test)
+#   hello.spl    — Simple source file        (cat test)
+#   config.sdn   — SDN config fixture        (config read test)
+#   testdir/     — empty directory            (readdir/mkdir test)
+#
+# Tool priority: mtools (mcopy/mmd) > loop mount (Linux) > skip
 
 SIZE_MB="${1:-64}"
 OUTPUT="${2:-build/os/fat32.img}"
@@ -15,36 +25,85 @@ dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null
 echo "[make_os_disk] Created ${SIZE_MB}MB image: $OUTPUT"
 
 # Format as FAT32 (use mkfs.fat or mformat)
+FORMATTED=0
 if command -v mkfs.fat >/dev/null 2>&1; then
     mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
-    echo "[make_os_disk] Formatted as FAT32"
+    echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
+    FORMATTED=1
 elif command -v mformat >/dev/null 2>&1; then
     mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
-    echo "[make_os_disk] Formatted as FAT32 (mtools)"
+    echo "[make_os_disk] Formatted as FAT32 (mformat)"
+    FORMATTED=1
 else
     echo "[make_os_disk] WARNING: No mkfs.fat or mformat found"
     echo "[make_os_disk] Image created but not formatted"
     exit 0
 fi
 
-# Copy test files using mtools (if available)
-if command -v mcopy >/dev/null 2>&1; then
-    echo "Hello from SimpleOS!" > /tmp/hello.txt
-    mcopy -i "$OUTPUT" /tmp/hello.txt ::hello.txt
-    echo "[make_os_disk] Added hello.txt"
-    rm -f /tmp/hello.txt
+# ============================================================================
+# Write test fixture files to image
+# ============================================================================
 
-    # Create a minimal hello.spl
-    cat > /tmp/hello.spl << 'SPLEOF'
+# Prepare fixture content in temp directory
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+echo "Hello from SimpleOS!" > "$TMPDIR/hello.txt"
+
+printf "1\n2\n3\n4\n5\n" > "$TMPDIR/numbers.txt"
+
+cat > "$TMPDIR/hello.spl" << 'SPLEOF'
 # Hello World for SimpleOS
 fn main():
     print("Hello from SimpleOS!")
 SPLEOF
-    mcopy -i "$OUTPUT" /tmp/hello.spl ::hello.spl
-    echo "[make_os_disk] Added hello.spl"
-    rm -f /tmp/hello.spl
+
+cat > "$TMPDIR/config.sdn" << 'SDNEOF'
+hostname: "simpleos"
+version: "0.1.0"
+boot_mode: "serial"
+SDNEOF
+
+# Method 1: mtools (works on macOS and Linux without root)
+if command -v mcopy >/dev/null 2>&1; then
+    mcopy -i "$OUTPUT" "$TMPDIR/hello.txt"   ::hello.txt
+    mcopy -i "$OUTPUT" "$TMPDIR/numbers.txt" ::numbers.txt
+    mcopy -i "$OUTPUT" "$TMPDIR/hello.spl"   ::hello.spl
+    mcopy -i "$OUTPUT" "$TMPDIR/config.sdn"  ::config.sdn
+    echo "[make_os_disk] Added fixture files (mtools)"
+
+    # Create test directories
+    mmd -i "$OUTPUT" ::testdir 2>/dev/null || true
+    echo "[make_os_disk] Added testdir/"
+
+# Method 2: loop mount (Linux only, requires root or sudo)
+elif [ "$(uname -s)" = "Linux" ]; then
+    MOUNTDIR="$(mktemp -d)"
+    if mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
+        cp "$TMPDIR/hello.txt"   "$MOUNTDIR/hello.txt"
+        cp "$TMPDIR/numbers.txt" "$MOUNTDIR/numbers.txt"
+        cp "$TMPDIR/hello.spl"   "$MOUNTDIR/hello.spl"
+        cp "$TMPDIR/config.sdn"  "$MOUNTDIR/config.sdn"
+        mkdir -p "$MOUNTDIR/testdir"
+        sync
+        umount "$MOUNTDIR"
+        echo "[make_os_disk] Added fixture files (loop mount)"
+    elif sudo mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
+        sudo cp "$TMPDIR/hello.txt"   "$MOUNTDIR/hello.txt"
+        sudo cp "$TMPDIR/numbers.txt" "$MOUNTDIR/numbers.txt"
+        sudo cp "$TMPDIR/hello.spl"   "$MOUNTDIR/hello.spl"
+        sudo cp "$TMPDIR/config.sdn"  "$MOUNTDIR/config.sdn"
+        sudo mkdir -p "$MOUNTDIR/testdir"
+        sudo sync
+        sudo umount "$MOUNTDIR"
+        echo "[make_os_disk] Added fixture files (sudo loop mount)"
+    else
+        echo "[make_os_disk] WARNING: loop mount failed -- no fixture files added"
+    fi
+    rmdir "$MOUNTDIR" 2>/dev/null || true
 else
-    echo "[make_os_disk] mtools not found -- no test files added"
+    echo "[make_os_disk] WARNING: No mtools and not Linux -- no fixture files added"
+    echo "[make_os_disk] Install mtools: brew install mtools (macOS) / apt install mtools (Linux)"
 fi
 
 echo "[make_os_disk] Done: $OUTPUT"

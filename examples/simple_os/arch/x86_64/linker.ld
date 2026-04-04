@@ -18,7 +18,7 @@
  *   .heap       - Dynamic memory allocation
  */
 
-ENTRY(_start)
+ENTRY(_entry32)
 
 SECTIONS
 {

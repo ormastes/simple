@@ -172,35 +172,76 @@ impl NetstackService:
     me run_loop():
         """Main event loop: process incoming frames and IPC requests.
 
-        On each iteration:
-          1. Poll for incoming Ethernet frames (non-blocking)
-          2. Poll for IPC requests (non-blocking)
-          3. Flush TCP send buffers
-          4. Check TCP retransmission timers
-          5. Check TIME_WAIT expiry
-          6. Age ARP table entries
+        Busy-polls frames and IPC in a tight loop. For dedicated task mode.
+        For cooperative scheduling, use init_port() + poll_once() instead.
+
+        Note: This is a polling loop, not a blocking-wait loop, because
+        the netstack must continuously poll for incoming Ethernet frames
+        (there's no IRQ-driven notification in the cooperative path).
         """
         while self.running:
-            self.tick_count = self.tick_count + 1
+            self.poll_once()
 
-            # 1. Process incoming Ethernet frames
-            self.process_incoming_frames()
+    me init_port():
+        """Initialize IPC port without entering the blocking loop.
 
-            # 2. Process IPC requests from applications
-            self.process_ipc_requests()
+        Call this instead of start() when using cooperative scheduling
+        (os_main calls poll_once() in a shared main loop).
+        """
+        val mac_bytes = self.driver.mac_address()
+        self.local_mac = EthAddress.from_driver_mac(mac_bytes)
+        serial_println("[netstack] MAC={self.local_mac.to_text()}")
+        serial_println("[netstack] IP={self.local_ip.to_text()}")
 
-            # 3. Flush pending TCP data
-            self.flush_tcp_connections()
+        val gw = Ipv4Address.from_bytes(DEFAULT_GW_A, DEFAULT_GW_B, DEFAULT_GW_C, DEFAULT_GW_D)
+        self.routing.set_default(gw)
+        self.routing.add_route(
+            Ipv4Address.from_bytes(DEFAULT_IP_A, DEFAULT_IP_B, DEFAULT_IP_C, 0),
+            self.subnet_mask, gw, self.local_ip
+        )
+        serial_println("[netstack] Default gateway={gw.to_text()}")
 
-            # 4. Check TCP retransmission timers
-            self.check_tcp_timers()
+        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        if port < 0:
+            serial_println("[netstack] Failed to create IPC port: {port}")
+            return
+        self.port_id = port.to_u64()
+        self.running = true
+        serial_println("[netstack] Service ready on IPC port {self.port_id}")
 
-            # 5. Check TIME_WAIT expiry and clean up closed connections
-            self.cleanup_connections()
+    me poll_once():
+        """Run one iteration of the event loop (non-blocking).
 
-            # 6. Age ARP entries periodically (every 100 ticks)
-            if self.tick_count % 100 == 0:
-                self.arp_table.age_entries(1)
+        Call this from a cooperative main loop. Processes:
+          1. Incoming Ethernet frames (non-blocking poll)
+          2. IPC requests from applications (non-blocking)
+          3. TCP send buffer flush
+          4. TCP retransmission timers
+          5. TIME_WAIT expiry cleanup
+          6. ARP table aging (every 100 ticks)
+        """
+        if not self.running:
+            return
+        self.tick_count = self.tick_count + 1
+
+        # 1. Process incoming Ethernet frames
+        self.process_incoming_frames()
+
+        # 2. Process IPC requests from applications
+        self.process_ipc_requests()
+
+        # 3. Flush pending TCP data
+        self.flush_tcp_connections()
+
+        # 4. Check TCP retransmission timers
+        self.check_tcp_timers()
+
+        # 5. Check TIME_WAIT expiry and clean up closed connections
+        self.cleanup_connections()
+
+        # 6. Age ARP entries periodically (every 100 ticks)
+        if self.tick_count % 100 == 0:
+            self.arp_table.age_entries(1)
 
     # ========================================================================
     # Frame Processing
@@ -521,14 +562,12 @@ impl NetstackService:
     me process_ipc_requests():
         """Poll for and process IPC requests from applications.
 
-        Non-blocking: if no message is pending, returns immediately.
+        Non-blocking: arg1=0 means timeout=0, kernel returns -EAGAIN
+        immediately if no message pending (syscall.spl lines 627-629).
         """
-        # Non-blocking IPC receive (using timeout 0 or poll variant)
-        # Syscall 21 with port_id -- simplified as blocking here
-        # In a real implementation, WaitAny would multiplex frame + IPC
         val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
         if msg_raw < 0:
-            return  # No message or error
+            return  # EAGAIN (-11) or error — no message pending
 
         self._dispatch_ipc(msg_raw.to_u64())
 
