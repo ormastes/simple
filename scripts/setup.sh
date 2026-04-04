@@ -107,12 +107,13 @@ fi
 
 release_dir="${repo_root}/bin/release"
 
-# Prefer the live Rust build outputs when they exist. Those binaries are rebuilt
-# alongside the current source tree, while bin/release/<triple>/simple can be a
-# stale deployed artifact. FreeBSD also has a checked-in seed at bin/freebsd/simple.
+# Prefer the self-hosted bootstrap binary when it exists (pure Simple, no Rust seed).
+# Fall back to Rust build outputs only if no self-hosted binary is available.
 preferred_runtime=""
 if [ "${os}" != "windows" ]; then
-  if [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/src/compiler_rust/target/release/simple" ]; then
+  if [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/build/bootstrap/stage2_full/simple" ]; then
+    preferred_runtime="${repo_root}/build/bootstrap/stage2_full/simple"
+  elif [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/src/compiler_rust/target/release/simple" ]; then
     preferred_runtime="${repo_root}/src/compiler_rust/target/release/simple"
   elif [ "${os}" = "${host_runtime_os}" ] && [ -x "${repo_root}/src/compiler_rust/target/bootstrap/simple" ]; then
     preferred_runtime="${repo_root}/src/compiler_rust/target/bootstrap/simple"

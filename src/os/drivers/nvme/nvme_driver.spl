@@ -186,6 +186,106 @@ impl NvmeDriver:
         serial_println("NVMe: initialization complete")
         Result.Ok(true)
 
+    me init_baremetal(bar0_virt_addr: i64, dma_buf_addr: i64) -> Result<bool, text>:
+        """Initialize NVMe controller on baremetal (no DeviceGrant needed).
+
+        Uses raw BAR0 virtual address and DMA buffer from C heap.
+        No IRQ notifications — uses polling only.
+        """
+        self.bar0_virt = bar0_virt_addr
+        self.notif_id = 0  # No IRQ on baremetal, polling only
+        serial_println("[nvme] BAR0 at 0x{bar0_virt_addr}")
+
+        # Read CAP register
+        val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
+        val dstrd = ((cap / 4294967296) & 0x0F).to_u32()
+        self.db_stride = dstrd
+        val mqes = (cap & 0xFFFF).to_u16()
+        serial_println("[nvme] CAP: DSTRD={dstrd}, MQES={mqes}")
+
+        # Disable controller
+        val disable_result = self.disable_controller()
+        if disable_result.is_err():
+            return disable_result
+
+        # Allocate admin queue DMA via syscall 84
+        val admin_sq_size = 32 * 64  # ADMIN_QUEUE_DEPTH * SQE_SIZE = 2048
+        val admin_cq_size = 32 * 16  # ADMIN_QUEUE_DEPTH * CQE_SIZE = 512
+        val sq_dma = syscall(84, admin_sq_size, 0, 0, 0, 0)
+        if sq_dma < 0:
+            return Result.Err("[nvme] failed to allocate admin SQ DMA")
+        val cq_dma = syscall(84, admin_cq_size, 0, 0, 0, 0)
+        if cq_dma < 0:
+            return Result.Err("[nvme] failed to allocate admin CQ DMA")
+
+        # Set admin queue addresses (on baremetal: virt == phys)
+        self.admin_queue.sq_virt = sq_dma
+        self.admin_queue.sq_phys = sq_dma
+        self.admin_queue.cq_virt = cq_dma
+        self.admin_queue.cq_phys = cq_dma
+
+        # Zero the queue memory
+        self.zero_memory(sq_dma, admin_sq_size)
+        self.zero_memory(cq_dma, admin_cq_size)
+
+        # Set doorbell addresses (BAR0 + 0x1000 + qid*stride)
+        val db_offset = 0x1000
+        self.admin_queue.sq_doorbell = self.bar0_virt + db_offset
+        self.admin_queue.cq_doorbell = self.bar0_virt + db_offset + 4
+
+        # Configure AQA, ASQ, ACQ registers
+        val aqa = (31 << 16) | 31  # 32-1 entries each
+        mmio_write32(self.bar0_virt + NVME_REG_AQA, aqa)
+        mmio_write32(self.bar0_virt + NVME_REG_ASQ, sq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ASQ + 4, (sq_dma / 4294967296) & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ACQ, cq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + NVME_REG_ACQ + 4, (cq_dma / 4294967296) & 0xFFFFFFFF)
+        serial_println("[nvme] Admin queues configured")
+
+        # Enable controller
+        val enable_result = self.enable_controller()
+        if enable_result.is_err():
+            return enable_result
+
+        serial_println("[nvme] Controller enabled, running Identify...")
+
+        # Identify Controller
+        val ident_result = self.identify_controller()
+        if ident_result.is_err():
+            serial_println("[nvme] Identify failed — continuing anyway")
+
+        # Identify Namespace 1
+        val ns_result = self.identify_namespace()
+        if ns_result.is_err():
+            serial_println("[nvme] Namespace identify failed — using defaults")
+
+        # Create I/O queues
+        val io_sq_size = 64 * 64  # IO_QUEUE_DEPTH * SQE_SIZE
+        val io_cq_size = 64 * 16  # IO_QUEUE_DEPTH * CQE_SIZE
+        val io_sq_dma = syscall(84, io_sq_size, 0, 0, 0, 0)
+        val io_cq_dma = syscall(84, io_cq_size, 0, 0, 0, 0)
+        if io_sq_dma > 0 and io_cq_dma > 0:
+            self.io_queue.sq_virt = io_sq_dma
+            self.io_queue.sq_phys = io_sq_dma
+            self.io_queue.cq_virt = io_cq_dma
+            self.io_queue.cq_phys = io_cq_dma
+            self.zero_memory(io_sq_dma, io_sq_size)
+            self.zero_memory(io_cq_dma, io_cq_size)
+            val io_db_offset = 0x1000 + 2 * 4  # qid=1, stride=4
+            self.io_queue.sq_doorbell = self.bar0_virt + io_db_offset
+            self.io_queue.cq_doorbell = self.bar0_virt + io_db_offset + 4
+
+            val cq_result = self.create_io_completion_queue()
+            val sq_result = self.create_io_submission_queue()
+            if cq_result.is_ok() and sq_result.is_ok():
+                serial_println("[nvme] I/O queues created")
+            else:
+                serial_println("[nvme] I/O queue creation failed — read/write unavailable")
+
+        self.initialized = true
+        serial_println("[nvme] Baremetal initialization complete")
+        Result.Ok(true)
+
     # ========================================================================
     # Controller Enable / Disable
     # ========================================================================

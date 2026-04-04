@@ -158,13 +158,25 @@ fn vfs_boot_init() -> bool:
         return false
     serial_println("[vfs-init] DMA buffer allocated")
 
-    # Step 5: Initialize NVMe driver directly with BAR0 + DMA addresses
-    # For now, just report success — full NVMe init requires more wiring
-    serial_println("[vfs-init] NVMe hardware ready (BAR0 + DMA allocated)")
-    serial_println("[vfs-init] NVMe driver init requires more baremetal stubs — skipping")
-    # TODO: Call NvmeDriver.init_baremetal(bar0_virt, dma_buf) when available
+    # Step 5: Initialize NVMe driver with raw BAR0 + DMA
+    serial_println("[vfs-init] Attempting NVMe controller init...")
+    g_nvme = NvmeDriver.new()
+    val nvme_result = g_nvme.init_baremetal(bar0_virt, dma_buf)
+    if nvme_result.is_err():
+        serial_println("[vfs-init] NVMe init failed — VFS unavailable")
+        return false
 
-    # Step 5: Create FAT32 driver on top of NVMe adapter
+    serial_println("[vfs-init] NVMe controller initialized!")
+
+    # Step 6: Initialize NVMe block adapter with DMA bounce buffer
+    g_adapter = NvmeBlockAdapter.new(g_nvme)
+    val adapter_result = g_adapter.init_bounce_buffer()
+    if adapter_result.is_err():
+        serial_println("[vfs-init] NVMe adapter init failed")
+        return false
+    serial_println("[vfs-init] NVMe block adapter ready")
+
+    # Step 6: Create FAT32 driver on top of NVMe adapter
     var fat32 = Fat32Driver.new(g_adapter)
 
     # Step 6: Mount FAT32 at "/" via VfsManager

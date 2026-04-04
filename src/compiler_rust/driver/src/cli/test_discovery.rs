@@ -18,7 +18,6 @@ pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
 pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files: bool) -> Vec<PathBuf> {
     let mut tests = Vec::new();
 
-    eprintln!("[discover] dir={:?} is_dir={} exists={}", dir, dir.is_dir(), dir.exists());
     if !dir.is_dir() {
         if is_test_file(dir) || (include_skip_files && is_skip_test_file(dir)) {
             tests.push(dir.to_path_buf());
@@ -27,21 +26,8 @@ pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files
     }
 
     // Walk directory recursively
-    match std::fs::read_dir(dir) {
-        Err(e) => { eprintln!("[discover] read_dir({:?}) FAILED: {}", dir, e); }
-        Ok(_) => {}
-    }
     if let Ok(entries) = std::fs::read_dir(dir) {
-        let all_entries: Vec<_> = entries.collect();
-        eprintln!("[discover] read_dir returned {} entries, ok={}", all_entries.len(),
-            all_entries.iter().filter(|e| e.is_ok()).count());
-        for e in &all_entries {
-            match e {
-                Ok(entry) => eprintln!("[discover]   ok: {:?}", entry.path()),
-                Err(err) => eprintln!("[discover]   err: {}", err),
-            }
-        }
-        for entry in all_entries.into_iter().filter_map(|e| e.ok()) {
+        for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
 
             if path.is_dir() {
