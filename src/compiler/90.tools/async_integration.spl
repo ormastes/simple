@@ -24,7 +24,38 @@ fn mir_type_to_async_type(mir_type: MirType) -> text:
 
     Used for generating runtime calls with correct type parameters.
     """
-    pass_todo("STUB-012: map MirType to async runtime type names")
+    match mir_type.kind:
+        case MirTypeKind.I8: "i8"
+        case MirTypeKind.I16: "i16"
+        case MirTypeKind.I32: "i32"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.U8: "u8"
+        case MirTypeKind.U16: "u16"
+        case MirTypeKind.U32: "u32"
+        case MirTypeKind.U64: "u64"
+        case MirTypeKind.F32: "f32"
+        case MirTypeKind.F64: "f64"
+        case MirTypeKind.Bool: "bool"
+        case MirTypeKind.Char: "char"
+        case MirTypeKind.Unit: "unit"
+        case MirTypeKind.Promise(inner): "Promise<{mir_type_to_async_type(inner)}>"
+        case MirTypeKind.Generator(yield_ty, return_ty):
+            "Generator<{mir_type_to_async_type(yield_ty)}, {mir_type_to_async_type(return_ty)}>"
+        case MirTypeKind.ActorType(message_ty):
+            "Actor<{mir_type_to_async_type(message_ty)}>"
+        case MirTypeKind.Ptr(_, _): "ptr"
+        case MirTypeKind.Ref(_, _): "ref"
+        case MirTypeKind.FuncPtr(_): "fn"
+        case MirTypeKind.Array(_, _): "array"
+        case MirTypeKind.Slice(_): "slice"
+        case MirTypeKind.Tuple(_): "tuple"
+        case MirTypeKind.Struct(symbol): "struct#{symbol.id}"
+        case MirTypeKind.Enum(symbol): "enum#{symbol.id}"
+        case MirTypeKind.Union(_): "union"
+        case MirTypeKind.Never: "never"
+        case MirTypeKind.Opaque(name): "opaque:{name}"
+        case _:
+            "value"
 
 # ============================================================================
 # Async Instruction Info
@@ -39,12 +70,50 @@ struct AsyncInstInfo:
     result_type: text       # Result type for codegen
     is_suspend_point: bool  # Whether this is a suspension point
 
-fn get_async_inst_info(inst: MirInstKind) -> i64:
+fn get_async_inst_info(inst: MirInstKind) -> has_AsyncInstInfo:
     """Get async info for a MIR instruction.
 
-    Returns 0 for non-async instructions (stub).
+    Returns nil for non-async instructions.
     """
-    pass_todo("STUB-012: return AsyncInstInfo for async MIR instructions")
+    match inst:
+        case CreatePromise(_, _, result_type):
+            AsyncInstInfo(
+                runtime_fn: "Promise.new",
+                result_type: mir_type_to_async_type(result_type),
+                is_suspend_point: false
+            )
+        case Await(_, _):
+            AsyncInstInfo(
+                runtime_fn: "Future.poll",
+                result_type: "await_result",
+                is_suspend_point: true
+            )
+        case Yield(_):
+            AsyncInstInfo(
+                runtime_fn: "Generator.yield",
+                result_type: "yield_result",
+                is_suspend_point: true
+            )
+        case Spawn(_, _, _):
+            AsyncInstInfo(
+                runtime_fn: "Executor.spawn",
+                result_type: "task_handle",
+                is_suspend_point: false
+            )
+        case Send(_, _):
+            AsyncInstInfo(
+                runtime_fn: "Actor.send",
+                result_type: "unit",
+                is_suspend_point: false
+            )
+        case Receive(_, _):
+            AsyncInstInfo(
+                runtime_fn: "Actor.receive",
+                result_type: "message",
+                is_suspend_point: true
+            )
+        case _:
+            nil
 
 # ============================================================================
 # Async Function Analysis
@@ -211,8 +280,8 @@ class AsyncIntegration:
         """Analyze all functions in a module for async patterns."""
         for _for_item_0 in module.functions:
             val name = _for_item_0[0]
-            val body = _for_item_0[1]
-            val info = analyze_async_function(body)
+            val func = _for_item_0[1]
+            val info = analyze_async_function(MirBody.from_function(func))
             if info.has_await or info.has_yield:
                 self.analyzed_functions[name] = info
 
@@ -249,9 +318,19 @@ class AsyncIntegration:
 
 fn process_async_mir(modules: Dict<text, MirModule>) -> Dict<text, AsyncStateMachine>:
     """Process MIR modules and generate async state machines."""
-    pass_todo("STUB-012: wire MIR async processing — iterate modules, run analyze_async_function")
+    var machines: Dict<text, AsyncStateMachine> = {}
+    for _for_item_3 in modules:
+        val _module_name = _for_item_3[0]
+        val module = _for_item_3[1]
+        val integration = AsyncIntegration.create()
+        integration.analyze_module(module)
+        integration.generate_state_machines()
+        for _for_item_4 in integration.state_machines:
+            val fn_name = _for_item_4[0]
+            val machine = _for_item_4[1]
+            machines[fn_name] = machine
+    machines
 
 # ============================================================================
 # Exports
 # ============================================================================
-

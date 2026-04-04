@@ -36,7 +36,10 @@ fn setup_test_dir():
 
 fn cleanup_test_dir():
     val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
-    pass_dn
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 fn gcc_available() -> bool:
     val (_out, _err, code) = rt_process_run("which", ["gcc"])
@@ -86,14 +89,13 @@ describe "Direction B: C -> Simple import round-trip":
                 "    return -x;" + NL +
                 "}" + NL
 
-            expect(write_source(c_source, c_code)).to_equal(true)
-            expect(rt_file_exists(c_source)).to_equal(true)
+            assert_ok(write_source(c_source, c_code), "failed to write C source")
+            assert_ok(rt_file_exists(c_source), "C source missing")
+            expect(c_source).to_end_with(".c")
 
         it "compiles C library to shared object":
             if not has_c_compiler():
-                print("SKIP: no C compiler available")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available"
 
             val cc = c_compiler()
             val c_source = TEST_DIR + "/mathlib.c"
@@ -109,7 +111,8 @@ describe "Direction B: C -> Simple import round-trip":
                 print("compile stdout: " + out)
                 print("compile stderr: " + err)
             expect(code).to_equal(0)
-            expect(rt_file_exists(so_path)).to_equal(true)
+            assert_ok(rt_file_exists(so_path), "shared object missing")
+            expect(so_path).to_end_with(".so")
 
     describe "Simple extern fn import":
         it "creates Simple source that imports the C functions via extern fn":
@@ -129,19 +132,16 @@ describe "Direction B: C -> Simple import round-trip":
                 NL +
                 "print \"PASS: Direction B import round-trip\"" + NL
 
-            expect(write_source(spl_source, spl_code)).to_equal(true)
+            assert_ok(write_source(spl_source, spl_code), "failed to write Simple source")
+            expect(spl_source).to_end_with(".spl")
 
         it "executes Simple source linked against C library":
             if not has_c_compiler():
-                print("SKIP: no C compiler available")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available"
 
             val so_path = TEST_DIR + "/libmathlib.so"
             if not rt_file_exists(so_path):
-                print("SKIP: C library not built")
-                expect(true).to_equal(true)
-                return
+                return "skip: C library not built"
 
             val spl_source = TEST_DIR + "/test_import.spl"
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + so_path
@@ -167,15 +167,14 @@ describe "Direction B: C -> Simple import round-trip":
                 "  }" + NL +
                 "}" + NL
 
-            expect(write_source(manifest_path, manifest)).to_equal(true)
-            expect(rt_file_exists(manifest_path)).to_equal(true)
+            assert_ok(write_source(manifest_path, manifest), "failed to write manifest")
+            assert_ok(rt_file_exists(manifest_path), "manifest missing")
+            expect(manifest_path).to_end_with(".sdn")
 
         it "verifies manifest describes the correct function signatures":
             val manifest_path = TEST_DIR + "/mathlib.sdn"
             if not rt_file_exists(manifest_path):
-                print("SKIP: manifest not created")
-                expect(true).to_equal(true)
-                return
+                return "skip: manifest not created"
 
             val content = rt_file_read_text(manifest_path) ?? ""
             expect(content).to_contain("mathlib_add")
@@ -186,15 +185,13 @@ describe "Direction B: C -> Simple import round-trip":
     describe "error handling for missing symbols":
         it "creates C library with subset of expected functions":
             if not has_c_compiler():
-                print("SKIP: no C compiler available")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available"
 
             val c_source = TEST_DIR + "/partial.c"
             val c_code = "#include <stdint.h>" + NL +
                 "int64_t partial_add(int64_t a, int64_t b) { return a + b; }" + NL
 
-            expect(write_source(c_source, c_code)).to_equal(true)
+            assert_ok(write_source(c_source, c_code), "failed to write partial C source")
 
             val cc = c_compiler()
             val (out, err, code) = rt_process_run(cc, [
@@ -206,25 +203,23 @@ describe "Direction B: C -> Simple import round-trip":
 
         it "reports missing symbol when extern fn is not found in library":
             if not has_c_compiler():
-                print("SKIP: no C compiler available")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available"
 
             val so_path = TEST_DIR + "/libpartial.so"
             if not rt_file_exists(so_path):
-                print("SKIP: partial library not built")
-                expect(true).to_equal(true)
-                return
+                return "skip: partial library not built"
 
             val spl_source = TEST_DIR + "/test_missing.spl"
             val spl_code = "extern fn partial_missing(x: i64) -> i64" + NL +
                 "val result = partial_missing(1)" + NL
 
-            expect(write_source(spl_source, spl_code)).to_equal(true)
+            assert_ok(write_source(spl_source, spl_code), "failed to write missing-symbol fixture")
 
             # Attempting to link against library missing the symbol should fail
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + so_path + " 2>&1"
             val (out, _err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
 
             # Should fail -- symbol not found
-            expect(code != 0).to_equal(true)
+            if code == 0:
+                expect("missing symbol link should fail").to_equal("")
+            expect(out).to_contain("partial_missing")

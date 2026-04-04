@@ -242,6 +242,9 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     if local_count > 0:
         env_push_frame(local_count)
     env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
     var pi: i64 = 0
     for pname in param_names:
         var pval = val_make_nil()
@@ -290,6 +293,50 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         if had_explicit_return == false:
             last_val = val_make_array(yielded)
 
+    # Run defer/errdefer at this depth (mirrors eval_block pattern)
+    val saved_returning = eval_returning
+    val saved_had_error = eval_had_error
+    eval_returning = false
+    eval_had_error = false
+
+    # Run defer (always)
+    var di = eval_defer_eids.len() - 1
+    while di >= 0:
+        if eval_defer_depths[di] == my_depth:
+            eval_expr(eval_defer_eids[di])
+            eval_defer_eids[di] = -1
+            eval_defer_depths[di] = -1
+        di = di - 1
+
+    # Run errdefer (only on error)
+    if saved_had_error:
+        var edi = eval_errdefer_eids.len() - 1
+        while edi >= 0:
+            if eval_errdefer_depths[edi] == my_depth:
+                eval_expr(eval_errdefer_eids[edi])
+                eval_errdefer_eids[edi] = -1
+                eval_errdefer_depths[edi] = -1
+            edi = edi - 1
+    else:
+        var edi2 = eval_errdefer_eids.len() - 1
+        while edi2 >= 0:
+            if eval_errdefer_depths[edi2] == my_depth:
+                eval_errdefer_eids[edi2] = -1
+                eval_errdefer_depths[edi2] = -1
+            edi2 = edi2 - 1
+
+    eval_returning = saved_returning
+    eval_had_error = saved_had_error
+
+    # Trim tombstones
+    while eval_defer_eids.len() > 0 and eval_defer_eids[eval_defer_eids.len() - 1] == -1:
+        eval_defer_eids.pop()
+        eval_defer_depths.pop()
+    while eval_errdefer_eids.len() > 0 and eval_errdefer_eids[eval_errdefer_eids.len() - 1] == -1:
+        eval_errdefer_eids.pop()
+        eval_errdefer_depths.pop()
+
+    eval_defer_depth = eval_defer_depth - 1
     env_pop_scope()
     if local_count > 0:
         env_pop_frame()

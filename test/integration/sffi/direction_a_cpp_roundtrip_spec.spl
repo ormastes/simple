@@ -39,7 +39,10 @@ fn setup_test_dir():
 
 fn cleanup_test_dir():
     val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
-    pass_dn
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 fn gpp_available() -> bool:
     val (_out, _err, code) = rt_process_run("which", ["g++"])
@@ -73,27 +76,27 @@ describe "Direction A: Simple -> C++ round-trip":
             val output_path = TEST_DIR + "/libcalculator.so"
 
             val result = aot_shared_library(source_path, output_path)
-            expect(result.is_success()).to_equal(true)
-            expect(rt_file_exists(output_path)).to_equal(true)
+            assert_ok(result.is_success(), "shared library build failed")
+            assert_ok(rt_file_exists(output_path), "shared library output missing")
+            expect(output_path).to_end_with(".so")
 
         it "generates both C and C++ headers":
             val source_path = FIXTURE_DIR + "/calculator.spl"
 
             val result = generate_headers(source_path, TEST_DIR, "calculator", true, true)
-            expect(result.is_success()).to_equal(true)
+            assert_ok(result.is_success(), "header generation failed")
 
             val h_path = TEST_DIR + "/calculator.h"
             val hpp_path = TEST_DIR + "/calculator.hpp"
-            expect(rt_file_exists(h_path)).to_equal(true)
-            expect(rt_file_exists(hpp_path)).to_equal(true)
+            assert_ok(rt_file_exists(h_path), "generated C header missing")
+            assert_ok(rt_file_exists(hpp_path), "generated C++ header missing")
+            expect(hpp_path).to_end_with(".hpp")
 
     describe "C++ header content":
         it "wraps types in spl namespace":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
-                print("SKIP: C++ header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: C++ header not generated"
 
             val header = rt_file_read_text(hpp_path) ?? ""
             expect(header).to_contain("namespace spl")
@@ -102,9 +105,7 @@ describe "Direction A: Simple -> C++ round-trip":
         it "includes RAII Library class":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
-                print("SKIP: C++ header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: C++ header not generated"
 
             val header = rt_file_read_text(hpp_path) ?? ""
             expect(header).to_contain("class Library")
@@ -114,9 +115,7 @@ describe "Direction A: Simple -> C++ round-trip":
         it "declares move-only semantics for Calculator":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
-                print("SKIP: C++ header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: C++ header not generated"
 
             val header = rt_file_read_text(hpp_path) ?? ""
             expect(header).to_contain("Calculator(const Calculator&) = delete;")
@@ -126,9 +125,7 @@ describe "Direction A: Simple -> C++ round-trip":
         it "includes static_assert for layout verification":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
-                print("SKIP: C++ header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: C++ header not generated"
 
             val header = rt_file_read_text(hpp_path) ?? ""
             expect(header).to_contain("static_assert")
@@ -136,9 +133,7 @@ describe "Direction A: Simple -> C++ round-trip":
         it "includes underlying C header":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
-                print("SKIP: C++ header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: C++ header not generated"
 
             val header = rt_file_read_text(hpp_path) ?? ""
             expect(header).to_contain("#include \"calculator.h\"")
@@ -146,9 +141,7 @@ describe "Direction A: Simple -> C++ round-trip":
     describe "C++ consumer compilation and execution":
         it "compiles C++ test program against generated headers":
             if not has_cpp_compiler():
-                print("SKIP: no C++ compiler available (g++/c++)")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C++ compiler available (g++/c++)"
 
             val cxx = cpp_compiler()
             val cpp_source = FIXTURE_DIR + "/test_calculator.cpp"
@@ -168,19 +161,15 @@ describe "Direction A: Simple -> C++ round-trip":
                 print("g++ stdout: " + out)
                 print("g++ stderr: " + err)
             expect(code).to_equal(0)
-            expect(rt_file_exists(output_bin)).to_equal(true)
+            assert_ok(rt_file_exists(output_bin), "C++ output binary missing")
 
         it "executes C++ test program and verifies PASS output":
             if not has_cpp_compiler():
-                print("SKIP: no C++ compiler available (g++/c++)")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C++ compiler available (g++/c++)"
 
             val output_bin = TEST_DIR + "/test_calculator_cpp"
             if not rt_file_exists(output_bin):
-                print("SKIP: test binary not built (previous test failed)")
-                expect(true).to_equal(true)
-                return
+                return "skip: test binary not built"
 
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
             val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
@@ -197,15 +186,11 @@ describe "Direction A: Simple -> C++ round-trip":
             # calc1 is moved into calc2, then only calc2's destructor fires.
             # If double-free occurred, the test program would segfault.
             if not has_cpp_compiler():
-                print("SKIP: no C++ compiler available")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C++ compiler available"
 
             val output_bin = TEST_DIR + "/test_calculator_cpp"
             if not rt_file_exists(output_bin):
-                print("SKIP: test binary not built")
-                expect(true).to_equal(true)
-                return
+                return "skip: test binary not built"
 
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
             val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])

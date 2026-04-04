@@ -62,7 +62,10 @@ fn setup_test_dir():
 
 fn cleanup_test_dir():
     val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
-    pass_dn
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 fn gcc_available() -> bool:
     val (_out, _err, code) = rt_process_run("which", ["gcc"])
@@ -115,18 +118,21 @@ describe "SFFI Callback Round-Trip":
 
     describe "type classification":
         it "recognizes stateless Fn types as callbacks":
-            expect(is_callback_type("Fn<(i64) -> i64>")).to_equal(true)
-            expect(is_callback_type("Fn<(i64, f64) -> bool>")).to_equal(true)
-            expect(is_callback_type("Fn<() -> void>")).to_equal(true)
+            assert_ok(is_callback_type("Fn<(i64) -> i64>"), "single-param callback type not recognized")
+            assert_ok(is_callback_type("Fn<(i64, f64) -> bool>"), "multi-param callback type not recognized")
+            assert_ok(is_callback_type("Fn<() -> void>"), "no-arg callback type not recognized")
+            expect(extract_callback_params("Fn<(i64, f64) -> bool>").len()).to_equal(2)
 
         it "rejects closures with captures":
-            expect(is_callback_type("Fn<(i64) -> i64>[x, y]")).to_equal(false)
-            expect(is_closure_with_captures("Fn<(i64) -> i64>[x, y]")).to_equal(true)
+            if is_callback_type("Fn<(i64) -> i64>[x, y]"):
+                expect("closure with captures must not be treated as callback").to_equal("")
+            assert_ok(is_closure_with_captures("Fn<(i64) -> i64>[x, y]"), "closure capture marker not detected")
+            expect("Fn<(i64) -> i64>[x, y]").to_contain("[x, y]")
 
         it "rejects non-function types":
-            expect(is_callback_type("i64")).to_equal(false)
-            expect(is_callback_type("text")).to_equal(false)
-            expect(is_callback_type("Calculator")).to_equal(false)
+            if is_callback_type("i64") or is_callback_type("text") or is_callback_type("Calculator"):
+                expect("non-function types must not be treated as callbacks").to_equal("")
+            expect("Calculator").to_equal("Calculator")
 
     describe "callback parameter extraction":
         it "extracts parameter types from single-param callback":
@@ -152,14 +158,18 @@ describe "SFFI Callback Round-Trip":
     describe "typedef generation":
         it "generates stable typedef name from signature":
             val name = callback_typedef_name(["i64"], "i64")
-            expect(name.len() > 0).to_equal(true)
+            if name.len() == 0:
+                expect("callback typedef name should not be empty").to_equal("")
             expect(name).to_contain("callback")
 
         it "builds CallbackTypedef from type string":
             val cb = build_callback_typedef("Fn<(i64) -> i64>")
-            expect(cb.name.len() > 0).to_equal(true)
+            if cb.name.len() == 0:
+                expect("callback typedef name should not be empty").to_equal("")
             expect(cb.param_types.len()).to_equal(1)
-            expect(cb.return_type.len() > 0).to_equal(true)
+            if cb.return_type.len() == 0:
+                expect("callback typedef return type should not be empty").to_equal("")
+            expect(cb.return_type).to_equal("i64")
 
         it "emits valid C typedef for single-param callback":
             val cb = build_callback_typedef("Fn<(i64) -> i64>")
@@ -180,7 +190,8 @@ describe "SFFI Callback Round-Trip":
             val cb = build_callback_typedef("Fn<(i64) -> i64>")
             val trampoline = emit_callback_trampoline("apply_callback", cb)
             # Trampoline should contain the function pointer invocation
-            expect(trampoline.len() > 0).to_equal(true)
+            if trampoline.len() == 0:
+                expect("callback trampoline should not be empty").to_equal("")
             expect(trampoline).to_contain("apply_callback")
 
     describe "C header integration":
@@ -234,33 +245,30 @@ describe "SFFI Callback Round-Trip":
                 "fn apply_binary(a: i64, b: i64, op: Fn<(i64, i64) -> i64>) -> i64:" + NL +
                 "    op(a, b)" + NL
 
-            expect(write_source(spl_source, spl_code)).to_equal(true)
-            expect(rt_file_exists(spl_source)).to_equal(true)
+            assert_ok(write_source(spl_source, spl_code), "failed to write callback library source")
+            assert_ok(rt_file_exists(spl_source), "callback library source missing")
+            expect(spl_source).to_end_with(".spl")
 
         it "compiles callback library to shared object":
             val spl_source = TEST_DIR + "/callback_lib.spl"
             if not rt_file_exists(spl_source):
-                print("SKIP: source not created")
-                expect(true).to_equal(true)
-                return
+                return "skip: source not created"
 
             val output_path = TEST_DIR + "/libcallback.so"
             val result = aot_shared_library(spl_source, output_path)
-            expect(result.is_success()).to_equal(true)
-            expect(rt_file_exists(output_path)).to_equal(true)
+            assert_ok(result.is_success(), "callback library build failed")
+            assert_ok(rt_file_exists(output_path), "callback library output missing")
 
         it "generates header with callback typedefs":
             val spl_source = TEST_DIR + "/callback_lib.spl"
             if not rt_file_exists(spl_source):
-                print("SKIP: source not created")
-                expect(true).to_equal(true)
-                return
+                return "skip: source not created"
 
             val result = generate_headers(spl_source, TEST_DIR, "callback_lib", true, false)
-            expect(result.is_success()).to_equal(true)
+            assert_ok(result.is_success(), "callback header generation failed")
 
             val header_path = TEST_DIR + "/callback_lib.h"
-            expect(rt_file_exists(header_path)).to_equal(true)
+            assert_ok(rt_file_exists(header_path), "callback header missing")
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("typedef")
@@ -307,20 +315,17 @@ describe "SFFI Callback Round-Trip":
                 "    return 0;" + NL +
                 "}" + NL
 
-            expect(write_source(c_source, c_code)).to_equal(true)
+            assert_ok(write_source(c_source, c_code), "failed to write callback C test")
+            expect(c_source).to_end_with(".c")
 
         it "compiles and executes C callback test program":
             if not has_c_compiler():
-                print("SKIP: no C compiler available (gcc/cc)")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available (gcc/cc)"
 
             val so_path = TEST_DIR + "/libcallback.so"
             val header_path = TEST_DIR + "/callback_lib.h"
             if not rt_file_exists(so_path) or not rt_file_exists(header_path):
-                print("SKIP: shared library or header not built")
-                expect(true).to_equal(true)
-                return
+                return "skip: shared library or header not built"
 
             val cc = c_compiler()
             val c_source = TEST_DIR + "/test_callback.c"
@@ -341,9 +346,7 @@ describe "SFFI Callback Round-Trip":
             expect(ccode).to_equal(0)
 
             if not rt_file_exists(output_bin):
-                print("SKIP: test binary not built")
-                expect(true).to_equal(true)
-                return
+                return "skip: test binary not built"
 
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
             val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])

@@ -100,23 +100,22 @@ Per [ADR](../04_architecture/adr_rust_llvm_exclusion.md): formally excluded from
 
 ## Support Matrix (Final)
 
-| Target   | llvm-lib                   | llvm (CLI)                 |
-|----------|----------------------------|----------------------------|
-| x86_64   | stable                     | stable                     |
-| i686     | partial                    | partial                    |
-| aarch64  | supported (external)       | stable                     |
-| armv7    | supported (external)       | supported (external)       |
-| riscv64  | supported (external)       | stable                     |
-| riscv32  | partial                    | partial                    |
-| wasm32   | unsupported                | stable                     |
-| wasm64   | unsupported                | stable                     |
+| Target   | llvm-lib       | llvm (CLI)     |
+|----------|----------------|----------------|
+| x86_64   | stable         | stable         |
+| i686     | unsupported    | unsupported    |
+| aarch64  | stable         | stable         |
+| armv7    | unsupported    | unsupported    |
+| riscv64  | stable         | stable         |
+| riscv32  | unsupported    | unsupported    |
+| wasm32   | unsupported    | stable         |
+| wasm64   | unsupported    | stable         |
 
-The table above is the truth source for public LLVM support. Rows marked
-`partial` or `supported (external)` are intentionally not promoted to `stable`
-just because the backend exists; they still depend on external toolchain or
-manual setup in the current repo state. The promoted CLI stable rows are
-backed by artifact-generation or cross-link proof in
-`test/integration/compiler/llvm_compiled_proof_spec.spl`.
+The table above is the truth source for public LLVM support. The public matrix
+now has no `partial` or `supported (external)` rows. Each row is either
+`stable` with authoritative proof or `unsupported` with deterministic
+diagnostics. `rust-llvm` remains a bootstrap-only seed path and is not part of
+this public matrix.
 
 ## Verification Checklist
 

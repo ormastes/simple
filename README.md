@@ -44,7 +44,7 @@ Implemented and safe to advertise:
 - C/C++ bidirectional SFFI for the supported ABI subset: exports, imports, callback trampolines, layout verification, and round-trip proof tests
 
 Implemented, but best described with qualifiers:
-- LLVM support is strong on the stable rows (`x86_64` on `llvm-lib`/`llvm`, plus CLI `aarch64`, `riscv64`, `wasm32`, and `wasm64`), but `i686`, `armv7`, `riscv32`, and `rust-llvm` are still incomplete
+- LLVM full-family closure is complete for the declared public matrix: every `llvm-lib` and `llvm` backend row is now explicitly `stable` or `unsupported`, with no ambiguous middle states. `rust-llvm` remains a bootstrap-only seed path outside the public family claim
 - Lean verification workflow is complete for the supported verification subset: deterministic Lean generation, proof artifact inventory, Lean/Lake checking, cache invalidation, and verification-state reporting. Contract: [doc/04_architecture/lean_verification_contract.md](doc/04_architecture/lean_verification_contract.md). Report: [doc/09_report/lean_verification_complete_2026-04-04.md](doc/09_report/lean_verification_complete_2026-04-04.md)
 - GC and no-GC runtime families: 5 public families (`common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`) with compiler boundary enforcement, interpreter warnings, and target preset mapping. Support matrix: [doc/04_architecture/runtime_family_support_matrix.md](doc/04_architecture/runtime_family_support_matrix.md)
 - Shared UI contract across web backend and TUI-web proxy (Protocol V1): shared handler, structured error model, stable element IDs, cross-surface contract suite — but this is a shared test protocol, not a full unified UI rendering layer

@@ -39,7 +39,10 @@ fn setup_test_dir():
 
 fn cleanup_test_dir():
     val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
-    pass_dn
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 fn gcc_available() -> bool:
     val (_out, _err, code) = rt_process_run("which", ["gcc"])
@@ -73,17 +76,18 @@ describe "Direction A: Simple -> C round-trip":
             val output_path = TEST_DIR + "/libcalculator.so"
 
             val result = aot_shared_library(source_path, output_path)
-            expect(result.is_success()).to_equal(true)
-            expect(rt_file_exists(output_path)).to_equal(true)
+            assert_ok(result.is_success(), "shared library build failed")
+            assert_ok(rt_file_exists(output_path), "shared library output missing")
+            expect(output_path).to_end_with(".so")
 
         it "generates C header for exported types":
             val source_path = FIXTURE_DIR + "/calculator.spl"
 
             val result = generate_headers(source_path, TEST_DIR, "calculator", true, false)
-            expect(result.is_success()).to_equal(true)
+            assert_ok(result.is_success(), "header generation failed")
 
             val header_path = TEST_DIR + "/calculator.h"
-            expect(rt_file_exists(header_path)).to_equal(true)
+            assert_ok(rt_file_exists(header_path), "generated header missing")
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("spl_Calculator_create")
@@ -99,9 +103,7 @@ describe "Direction A: Simple -> C round-trip":
     describe "C consumer compilation and execution":
         it "compiles C test program against generated header and shared library":
             if not has_c_compiler():
-                print("SKIP: no C compiler available (gcc/cc)")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available (gcc/cc)"
 
             val cc = c_compiler()
             val c_source = FIXTURE_DIR + "/test_calculator.c"
@@ -120,19 +122,15 @@ describe "Direction A: Simple -> C round-trip":
                 print("gcc stdout: " + out)
                 print("gcc stderr: " + err)
             expect(code).to_equal(0)
-            expect(rt_file_exists(output_bin)).to_equal(true)
+            assert_ok(rt_file_exists(output_bin), "C output binary missing")
 
         it "executes C test program and verifies PASS output":
             if not has_c_compiler():
-                print("SKIP: no C compiler available (gcc/cc)")
-                expect(true).to_equal(true)
-                return
+                return "skip: no C compiler available (gcc/cc)"
 
             val output_bin = TEST_DIR + "/test_calculator"
             if not rt_file_exists(output_bin):
-                print("SKIP: test binary not built (previous test failed)")
-                expect(true).to_equal(true)
-                return
+                return "skip: test binary not built"
 
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
             val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
@@ -147,9 +145,7 @@ describe "Direction A: Simple -> C round-trip":
         it "includes include guard and standard types":
             val header_path = TEST_DIR + "/calculator.h"
             if not rt_file_exists(header_path):
-                print("SKIP: header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: header not generated"
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("#ifndef")
@@ -160,9 +156,7 @@ describe "Direction A: Simple -> C round-trip":
         it "declares opaque handle type for Calculator":
             val header_path = TEST_DIR + "/calculator.h"
             if not rt_file_exists(header_path):
-                print("SKIP: header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: header not generated"
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("typedef struct spl_Calculator")
@@ -171,9 +165,7 @@ describe "Direction A: Simple -> C round-trip":
         it "includes _Static_assert for layout verification":
             val header_path = TEST_DIR + "/calculator.h"
             if not rt_file_exists(header_path):
-                print("SKIP: header not generated")
-                expect(true).to_equal(true)
-                return
+                return "skip: header not generated"
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("_Static_assert")

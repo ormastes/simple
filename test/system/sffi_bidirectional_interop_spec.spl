@@ -274,7 +274,10 @@ fn write_source(path: text, content: text) -> bool:
 
 fn cleanup_path(path: text):
     val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + path])
-    pass_dn
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 
 describe "SFFI Bidirectional Class Interop":
@@ -382,12 +385,12 @@ describe "SFFI Bidirectional Class Interop":
                 "fn add_numbers(a: i32, b: i32) -> i32:" + NL +
                 "    a + b"
 
-            expect(write_source(source_path, source)).to_equal(true)
+            assert_ok(write_source(source_path, source), "failed to write SFFI driver header fixture")
 
             val result = generate_headers(source_path, output_dir, "gpio_driver", true, true)
-            expect(result.is_success()).to_equal(true)
-            expect(rt_file_exists(header_path)).to_equal(true)
-            expect(rt_file_exists(cpp_header_path)).to_equal(true)
+            assert_ok(result.is_success(), "driver header generation failed")
+            assert_ok(rt_file_exists(header_path), "generated C header missing")
+            assert_ok(rt_file_exists(cpp_header_path), "generated C++ header missing")
 
             val header = rt_file_read_text(header_path) ?? ""
             expect(header).to_contain("typedef struct spl_GpioRegister* spl_GpioRegister_t;")
@@ -422,11 +425,12 @@ describe "SFFI Bidirectional Class Interop":
                 "fn add_numbers(a: i32, b: i32) -> i32:" + NL +
                 "    a + b"
 
-            expect(write_source(source_path, source)).to_equal(true)
+            assert_ok(write_source(source_path, source), "failed to write shared-library fixture")
+            expect(source_path).to_end_with(".spl")
 
             val result = aot_shared_library(source_path, output_path)
-            expect(result.is_success()).to_equal(true)
-            expect(rt_file_exists(output_path)).to_equal(true)
+            assert_ok(result.is_success(), "public shared-library build failed")
+            assert_ok(rt_file_exists(output_path), "shared-library output missing")
 
             rt_file_delete(source_path)
             rt_file_delete(output_path)
@@ -507,10 +511,12 @@ describe "SFFI Bidirectional Class Interop":
             val link_flags = apply_shared_link_flags([])
             val output_path = shared_lib_output_path("mylib")
 
-            expect(flags.output_extension.len() > 0).to_equal(true)
-            expect(compile_flags.contains("-DSPL_SHARED_LIBRARY")).to_equal(true)
-            expect(link_flags.len() > 0).to_equal(true)
-            expect(output_path.ends_with(flags.output_extension)).to_equal(true)
+            if flags.output_extension.len() == 0:
+                expect("shared library output extension should not be empty").to_equal("")
+            if not compile_flags.contains("-DSPL_SHARED_LIBRARY"):
+                expect("shared compile flags should define SPL_SHARED_LIBRARY").to_equal("")
+            expect(link_flags.len()).to_be_greater_than(0)
+            expect(output_path).to_end_with(flags.output_extension)
 
         it "emits guarded lifecycle definitions and auto-init hooks for shared libraries":
             val translator = MirToC.create("test.sffi")
