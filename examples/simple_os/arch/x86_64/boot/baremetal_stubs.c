@@ -946,6 +946,25 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
             ((uint64_t)_pci_cache[i].irq << 24)
         );
     }
+    if (mode == 4) {
+        /* Mode 4: return single field for device[index].
+         * buf_addr = field selector:
+         *   0=bus, 1=device, 2=func, 3=class, 4=subclass, 5=vendor, 6=devid, 7=irq
+         */
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        switch ((int)buf_addr) {
+            case 0: return (int64_t)_pci_cache[i].bus;
+            case 1: return (int64_t)_pci_cache[i].dev;
+            case 2: return (int64_t)_pci_cache[i].func;
+            case 3: return (int64_t)_pci_cache[i].cls;
+            case 4: return (int64_t)_pci_cache[i].sub;
+            case 5: return (int64_t)_pci_cache[i].vendor;
+            case 6: return (int64_t)_pci_cache[i].devid;
+            case 7: return (int64_t)_pci_cache[i].irq;
+            default: return -22;
+        }
+    }
     return -38; /* ENOSYS */
 }
 
@@ -1330,6 +1349,23 @@ void _start(void)
             serial_puts(" device="); serial_puthex(_pci_cache[i].devid);
             serial_puts(" class="); serial_puthex(_pci_cache[i].cls);
             serial_puts("."); serial_puthex(_pci_cache[i].sub);
+            serial_puts("\r\n");
+        }
+    }
+
+    /* Debug: read VGA BAR0 directly from C */
+    {
+        uint32_t vga_addr = 0x80000000 | (1 << 11) | 0x10; /* bus 0, dev 1, offset 0x10 */
+        outl(0xCF8, vga_addr);
+        uint32_t bar0 = inl(0xCFC);
+        serial_puts("[BOOT] VGA BAR0 (C direct): ");
+        serial_hex((uint64_t)bar0);
+        serial_puts("\r\n");
+        /* Set as fallback if Simple code can't read it */
+        if (bar0 & 0xFFFFFFF0) {
+            g_fb_addr = (uint64_t)(bar0 & 0xFFFFFFF0);
+            serial_puts("[BOOT] Fallback fb addr: ");
+            serial_hex(g_fb_addr);
             serial_puts("\r\n");
         }
     }

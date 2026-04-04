@@ -8,10 +8,11 @@
 // gains access to `rt_cranelift_*` functions, enabling self-hosted
 // compilation (Stage 3 bootstrap).
 
-// Re-export both crates so their #[no_mangle] extern "C" functions
+// Re-export all crates so their #[no_mangle] extern "C" functions
 // are included in the static library.
 pub use simple_compiler;
 pub use simple_runtime;
+pub use simple_driver;
 
 use std::path::PathBuf;
 
@@ -1390,3 +1391,35 @@ noop_stubs!(
     rt_vk_kernel_launch,
     rt_vk_kernel_launch_1d
 );
+
+// ============================================================================
+// Test runner FFI — allows self-hosted binaries to run tests via the Rust
+// test runner from simple-driver.
+// ============================================================================
+
+/// Run the full test suite.  Called from Simple code as:
+///   extern fn rt_run_tests(args: [text], gc_log: i64, gc_off: i64) -> i64
+#[no_mangle]
+pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> i64 {
+    let args_vec = extract_rt_string_array(args);
+    let mut options = simple_driver::cli::test_runner::parse_test_args(&args_vec);
+    options.gc_log = gc_log != 0;
+    options.gc_off = gc_off != 0;
+
+    if options.watch {
+        match simple_driver::cli::test_runner::watch_tests(options) {
+            Ok(()) => 0,
+            Err(e) => { eprintln!("error: {}", e); 1 }
+        }
+    } else {
+        let format = options.format;
+        let is_mgmt = options.list_runs || options.cleanup_runs || options.prune_runs.is_some();
+        println!("Simple Test Runner v0.9.5");
+        println!();
+        let result = simple_driver::cli::test_runner::run_tests(options);
+        if !is_mgmt {
+            simple_driver::cli::test_output::print_summary(&result, format);
+        }
+        if result.success() { 0 } else { 1 }
+    }
+}

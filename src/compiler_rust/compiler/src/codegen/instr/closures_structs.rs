@@ -251,6 +251,19 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     .or_else(|| ctx.import_map.get(&dunder_storage))
                     .map(|s| s.as_str());
 
+                // Try: Type_dot_method (sanitized dot variant, used in cross-compiled targets)
+                if resolved_name.is_none() {
+                    let dot_storage = format!("{}_dot_{}", type_name, method);
+                    resolved_name = ctx
+                        .use_map
+                        .get(&dot_storage)
+                        .or_else(|| ctx.import_map.get(&dot_storage))
+                        .map(|s| s.as_str());
+                    if resolved_name.is_some() {
+                        dunder_storage = dot_storage;
+                    }
+                }
+
                 // Try: lowercase_type_method (Simple convention)
                 if resolved_name.is_none() {
                     type_prefixed_storage = format!("{}_{}", type_name.to_lowercase(), method);
