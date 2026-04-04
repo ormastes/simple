@@ -653,6 +653,7 @@ impl<'a> Parser<'a> {
             TokenKind::Pass => self.parse_pass(),
             TokenKind::Skip => self.parse_skip(),
             TokenKind::Defer => self.parse_defer(),
+            TokenKind::Errdefer => self.parse_errdefer(),
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),
@@ -899,6 +900,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Fn
                 | TokenKind::Me
                 | TokenKind::Defer
+                | TokenKind::Errdefer
                 | TokenKind::Assert
                 | TokenKind::Assume
                 | TokenKind::Use

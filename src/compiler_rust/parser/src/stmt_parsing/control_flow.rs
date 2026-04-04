@@ -980,6 +980,42 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse an errdefer statement for error-conditional cleanup
+    ///
+    /// # Syntax
+    /// ```simple
+    /// errdefer expr             # Single expression
+    /// errdefer:                 # Block form
+    ///     statements
+    /// ```
+    ///
+    /// Like `defer`, but only runs when the enclosing scope exits with an error.
+    pub(crate) fn parse_errdefer(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Errdefer)?;
+
+        // Check if this is block form (errdefer:) or expression form (errdefer expr)
+        let body = if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+            let block = self.parse_block()?;
+            DeferBody::Block(block)
+        } else {
+            // Parse single expression
+            let expr = self.parse_expression()?;
+            DeferBody::Expr(expr)
+        };
+
+        Ok(Node::ErrDefer(ErrDeferStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            body,
+        }))
+    }
+
     /// Parse `when COND: ... else: ...` conditional compilation block.
     /// Desugars to an if/else at the module level.
     /// The caller has already verified the `when` identifier is present.

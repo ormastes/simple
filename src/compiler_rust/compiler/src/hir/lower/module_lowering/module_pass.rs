@@ -448,6 +448,7 @@ impl Lowerer {
                 | Node::Skip(_)
                 | Node::Guard(_)
                 | Node::Defer(_)
+                | Node::ErrDefer(_)
                 | Node::InlineAsm(_)
                 | Node::Newtype(_)
                 | Node::Extend(_) => {}

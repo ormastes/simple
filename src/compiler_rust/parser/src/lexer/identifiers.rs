@@ -121,6 +121,7 @@ impl<'a> super::Lexer<'a> {
                 }
             }
             "defer" => TokenKind::Defer,
+            "errdefer" => TokenKind::Errdefer,
             "skip" => {
                 // Contextual keyword: only treat as keyword if NOT followed by '('
                 // This allows: fn skip(...) and obj.skip(...)

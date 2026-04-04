@@ -29,7 +29,9 @@ use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
 use compiler.core.tokens.{TOK_KW_BITFIELD}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE, TOK_AT}
+use compiler.core.tokens.{TOK_KW_AND}
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
+use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_string_lit, expr_int_lit}
 use compiler.core.ast.{stmt_expr_stmt}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
@@ -39,7 +41,8 @@ use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd}
+use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_derives}
+use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
@@ -315,6 +318,138 @@ fn parse_extern_fn_decl() -> i64:
         ret_type = parser_parse_type()
 
     decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, 0)
+
+# ===== @derive Implementation Generator =====
+
+fn generate_derive_impls(struct_idx: i64, traits: [text]):
+    """Generate impl blocks for @derive(Trait1, Trait2, ...) on a struct/class."""
+    val sname = decl_get_name(struct_idx)
+    val fnames = decl_get_fields(struct_idx)
+    val nfields = fnames.len()
+
+    # Resolve struct type tag for method signatures
+    val type_id = named_type_find(sname)
+    var stype_tag: i64 = 0
+    if type_id >= 0:
+        stype_tag = TYPE_NAMED_BASE + type_id
+    else:
+        stype_tag = TYPE_ANY
+
+    var derive_method_ids: [i64] = []
+
+    for ti in 0..traits.len():
+        val trait_name = traits[ti]
+
+        if trait_name == "Eq":
+            # fn __eq__(self, other: T) -> bool:
+            #     self.f0 == other.f0 and self.f1 == other.f1 and ...
+            var eq_expr: i64 = -1
+            for fi in 0..nfields:
+                val fname = fnames[fi]
+                val self_e = expr_ident("self", 0)
+                val self_f = expr_field_access(self_e, fname, 0)
+                val other_e = expr_ident("other", 0)
+                val other_f = expr_field_access(other_e, fname, 0)
+                val cmp = expr_binary(TOK_EQ, self_f, other_f, 0)
+                if eq_expr < 0:
+                    eq_expr = cmp
+                else:
+                    eq_expr = expr_binary(TOK_KW_AND, eq_expr, cmp, 0)
+            # Handle zero-field struct: always equal
+            if eq_expr < 0:
+                eq_expr = expr_bool_lit(1, 0)
+            val eq_body_stmt = stmt_expr_stmt(eq_expr, 0)
+            var eq_body: [i64] = []
+            eq_body.push(eq_body_stmt)
+            var eq_pnames: [text] = ["self", "other"]
+            var eq_ptypes: [i64] = [stype_tag, stype_tag]
+            var eq_tparams: [text] = []
+            val eq_m = decl_fn("__eq__", eq_pnames, eq_ptypes, TYPE_BOOL, eq_body, 0, eq_tparams, 0)
+            derive_method_ids.push(eq_m)
+
+        elif trait_name == "Hash":
+            # fn __hash__(self) -> i64:
+            #     var h: i64 = 0
+            #     h = h * 31 + self.f0.__hash__()  (or hash via XOR)
+            # Simplified: XOR all field hashes with prime multiplier
+            var hash_expr: i64 = expr_int_lit(0, 0)
+            for fi in 0..nfields:
+                val fname = fnames[fi]
+                val self_e = expr_ident("self", 0)
+                val self_f = expr_field_access(self_e, fname, 0)
+                # self.field.__hash__() -- method call
+                var hash_args: [i64] = []
+                val field_hash = expr_method_call(self_f, "__hash__", hash_args, 0)
+                # h * 31 + field_hash
+                val mul_31 = expr_int_lit(31, 0)
+                val h_mul = expr_binary(TOK_STAR, hash_expr, mul_31, 0)
+                hash_expr = expr_binary(TOK_PLUS, h_mul, field_hash, 0)
+            val hash_body_stmt = stmt_expr_stmt(hash_expr, 0)
+            var hash_body: [i64] = []
+            hash_body.push(hash_body_stmt)
+            var hash_pnames: [text] = ["self"]
+            var hash_ptypes: [i64] = [stype_tag]
+            var hash_tparams: [text] = []
+            val hash_m = decl_fn("__hash__", hash_pnames, hash_ptypes, TYPE_I64, hash_body, 0, hash_tparams, 0)
+            derive_method_ids.push(hash_m)
+
+        elif trait_name == "Debug":
+            # fn to_string(self) -> text:
+            #     "ClassName(f0: " + self.f0.to_string() + ", f1: " + self.f1.to_string() + ")"
+            var dbg_expr: i64 = expr_string_lit(sname + "(", 0)
+            for fi in 0..nfields:
+                val fname = fnames[fi]
+                if fi > 0:
+                    val comma_e = expr_string_lit(", ", 0)
+                    dbg_expr = expr_binary(TOK_PLUS, dbg_expr, comma_e, 0)
+                val label_e = expr_string_lit(fname + ": ", 0)
+                dbg_expr = expr_binary(TOK_PLUS, dbg_expr, label_e, 0)
+                val self_e = expr_ident("self", 0)
+                val self_f = expr_field_access(self_e, fname, 0)
+                var ts_args: [i64] = []
+                val field_str = expr_method_call(self_f, "to_string", ts_args, 0)
+                dbg_expr = expr_binary(TOK_PLUS, dbg_expr, field_str, 0)
+            val close_e = expr_string_lit(")", 0)
+            dbg_expr = expr_binary(TOK_PLUS, dbg_expr, close_e, 0)
+            val dbg_body_stmt = stmt_expr_stmt(dbg_expr, 0)
+            var dbg_body: [i64] = []
+            dbg_body.push(dbg_body_stmt)
+            var dbg_pnames: [text] = ["self"]
+            var dbg_ptypes: [i64] = [stype_tag]
+            var dbg_tparams: [text] = []
+            val dbg_m = decl_fn("to_string", dbg_pnames, dbg_ptypes, TYPE_TEXT, dbg_body, 0, dbg_tparams, 0)
+            derive_method_ids.push(dbg_m)
+
+        elif trait_name == "Display":
+            # Same as Debug for Display — generates to_string
+            var disp_expr: i64 = expr_string_lit(sname + "(", 0)
+            for fi in 0..nfields:
+                val fname = fnames[fi]
+                if fi > 0:
+                    val comma_e = expr_string_lit(", ", 0)
+                    disp_expr = expr_binary(TOK_PLUS, disp_expr, comma_e, 0)
+                val label_e = expr_string_lit(fname + ": ", 0)
+                disp_expr = expr_binary(TOK_PLUS, disp_expr, label_e, 0)
+                val self_e = expr_ident("self", 0)
+                val self_f = expr_field_access(self_e, fname, 0)
+                var ts_args: [i64] = []
+                val field_str = expr_method_call(self_f, "to_string", ts_args, 0)
+                disp_expr = expr_binary(TOK_PLUS, disp_expr, field_str, 0)
+            val close_e = expr_string_lit(")", 0)
+            disp_expr = expr_binary(TOK_PLUS, disp_expr, close_e, 0)
+            val disp_body_stmt = stmt_expr_stmt(disp_expr, 0)
+            var disp_body: [i64] = []
+            disp_body.push(disp_body_stmt)
+            var disp_pnames: [text] = ["self"]
+            var disp_ptypes: [i64] = [stype_tag]
+            var disp_tparams: [text] = []
+            val disp_m = decl_fn("to_string", disp_pnames, disp_ptypes, TYPE_TEXT, disp_body, 0, disp_tparams, 0)
+            derive_method_ids.push(disp_m)
+
+    # Create impl block for all derived methods
+    if derive_method_ids.len() > 0:
+        val derive_impl = decl_impl_block(sname, derive_method_ids, 0)
+        module_add_decl(derive_impl)
 
 # ===== Struct/Class Declarations =====
 
@@ -602,12 +737,14 @@ fn parse_module_body():
             val ce_d = parse_ce_decl()
             module_add_decl(ce_d)
         elif par_kind_get() == TOK_AT:
-            # Decorator: @gpu_kernel, @simd, @bounds(...), etc.
+            # Decorator: @gpu_kernel, @simd, @bounds(...), @derive(Eq, Hash, Debug), etc.
             parser_advance()
             var decorator_name = ""
             if par_kind_get() == TOK_IDENT:
                 decorator_name = par_text_get()
                 parser_advance()
+            # Parse parenthesized arguments, collecting ident names for @derive
+            var derive_traits: [text] = []
             if par_kind_get() == TOK_LPAREN:
                 parser_advance()
                 for dec_j in 0..100:
@@ -615,7 +752,16 @@ fn parse_module_body():
                     val dec_end2: bool = par_kind_get() == TOK_EOF
                     if dec_end1 or dec_end2:
                         break
-                    parser_advance()
+                    if decorator_name == "derive":
+                        if par_kind_get() == TOK_IDENT:
+                            derive_traits.push(par_text_get())
+                            parser_advance()
+                            if par_kind_get() == TOK_COMMA:
+                                parser_advance()
+                        else:
+                            parser_advance()
+                    else:
+                        parser_advance()
                 parser_expect(TOK_RPAREN)
             parser_skip_newlines_and_semicolons()
             if decorator_name == "gpu_kernel":
@@ -628,6 +774,15 @@ fn parse_module_body():
                     val d = parse_fn_decl(0)
                     decl_is_simd[d] = 1
                     module_add_decl(d)
+            elif decorator_name == "derive":
+                val is_class: bool = par_kind_get() == TOK_KW_CLASS
+                val is_struct: bool = par_kind_get() == TOK_KW_STRUCT
+                if is_class or is_struct:
+                    val d = parse_struct_decl()
+                    decl_derives[d] = derive_traits
+                    module_add_decl(d)
+                    # Generate derived trait method implementations
+                    generate_derive_impls(d, derive_traits)
         elif par_kind_get() == TOK_KW_NEWTYPE:
             # newtype Meters = i64 -- wrapper struct with single 'value' field
             # For numeric inner types, auto-derives __add__, __sub__, __mul__, __div__, __eq__, __lt__, __gt__

@@ -80,6 +80,7 @@ pub enum Node {
     Pass(PassStmt),
     Skip(SkipStmt),
     Defer(DeferStmt),
+    ErrDefer(ErrDeferStmt),
     /// Guard clause: `? condition -> result` or `? else -> result`
     /// Desugars to early return if condition is true
     Guard(GuardStmt),

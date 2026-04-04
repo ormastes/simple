@@ -165,6 +165,24 @@ impl PrettyPrinter {
                     }
                 }
             }
+            Node::ErrDefer(d) => {
+                self.write_indent();
+                self.write("errdefer ");
+                match &d.body {
+                    DeferBody::Expr(expr) => {
+                        self.print_expr(expr);
+                        self.output.push('\n');
+                    }
+                    DeferBody::Block(block) => {
+                        self.output.push_str(":\n");
+                        self.indent_inc();
+                        for stmt in &block.statements {
+                            self.print_node(stmt);
+                        }
+                        self.indent_dec();
+                    }
+                }
+            }
             Node::Assert(a) => {
                 self.write_indent();
                 self.write("assert ");

@@ -489,6 +489,18 @@ impl Lowerer {
                 Ok(vec![HirStmt::Defer { body: body_stmts }])
             }
 
+            Node::ErrDefer(errdefer_stmt) => {
+                let body_stmts = match &errdefer_stmt.body {
+                    simple_parser::ast::DeferBody::Expr(e) => {
+                        vec![HirStmt::Expr(self.lower_expr(e, ctx)?)]
+                    }
+                    simple_parser::ast::DeferBody::Block(b) => self.lower_block(b, ctx)?,
+                };
+                // Reuse HirStmt::Defer for now — errdefer semantics (error-conditional)
+                // will be distinguished in MIR lowering phase.
+                Ok(vec![HirStmt::Defer { body: body_stmts }])
+            }
+
             // With statement: with resource as name: body
             // Desugars to: __enter__/__exit__ protocol
             Node::With(with_stmt) => {

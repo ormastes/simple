@@ -241,6 +241,7 @@ impl TypeChecker {
                 | Node::Skip(_)
                 | Node::Guard(_)
                 | Node::Defer(_)
+                | Node::ErrDefer(_)
                 | Node::ClassAlias(_)
                 | Node::FunctionAlias(_) => {
                     // Statement nodes at module level are checked in second pass

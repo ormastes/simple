@@ -1793,6 +1793,31 @@ impl LintChecker {
                         }
                     }
                 }
+                Node::ErrDefer(errdefer_stmt) => {
+                    // Check if errdefer closes a resource (same logic as defer)
+                    match &errdefer_stmt.body {
+                        simple_parser::ast::DeferBody::Expr(expr) => {
+                            if let Expr::MethodCall { receiver, method, .. } = expr {
+                                if method == "close" {
+                                    if let Expr::Identifier(name) = &**receiver {
+                                        scope.mark_deferred(name);
+                                    }
+                                }
+                            }
+                        }
+                        simple_parser::ast::DeferBody::Block(block) => {
+                            for stmt in &block.statements {
+                                if let Node::Expression(Expr::MethodCall { receiver, method, .. }) = stmt {
+                                    if method == "close" {
+                                        if let Expr::Identifier(name) = &**receiver {
+                                            scope.mark_deferred(name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Node::With(with_stmt) => {
                     // Resources in with statements are automatically closed
                     // So we don't track them as potential leaks

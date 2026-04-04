@@ -1251,6 +1251,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Skip(_)
             | Node::Guard(_)
             | Node::Defer(_)
+            | Node::ErrDefer(_)
             | Node::Mixin(_)
             | Node::InlineAsm(_)
             | Node::Newtype(_)

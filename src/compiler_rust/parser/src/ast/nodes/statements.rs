@@ -224,6 +224,17 @@ pub enum DeferBody {
     Block(Block),
 }
 
+/// Error-conditional deferred execution: `errdefer expr` or `errdefer: block`
+///
+/// Like `defer`, but only runs when the enclosing scope exits with an error.
+/// On success exit, errdefer bodies are discarded without running.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrDeferStmt {
+    pub span: Span,
+    /// The deferred action - either a single expression or a block
+    pub body: DeferBody,
+}
+
 /// Guard clause statement: `? condition -> result` or `? else -> result`
 /// Desugars to early return if condition is true.
 ///

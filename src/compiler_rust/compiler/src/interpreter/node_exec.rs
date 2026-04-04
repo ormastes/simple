@@ -267,6 +267,13 @@ pub(crate) fn exec_node(
             queue_tail_injection(block);
             Ok(Control::Next)
         }
+        Node::ErrDefer(_errdefer_stmt) => {
+            // Errdefer: only runs when scope exits with error.
+            // In the Rust bootstrap interpreter, errdefer is registered but
+            // error-conditional execution is handled by the Simple self-hosted compiler.
+            // For bootstrap, treat as no-op (the self-hosted interpreter has full support).
+            Ok(Control::Next)
+        }
         Node::Guard(guard_stmt) => {
             // Guard clause: ? condition -> result
             // If condition is Some and true, or if condition is None (else), return the result
