@@ -28,6 +28,11 @@ use compiler.semantics.const_eval.{eval_static_assert, ConstEvalError}
 use compiler.semantics.comptime_checker.{comptime_checker_reset, comptime_checker_get_warnings, comptime_check_call, comptime_check_extern_call, comptime_format_report}
 use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.common.config.*
+use compiler.frontend.core.aop.{weave_function, weavingconfig_all_rules, WeavingConfig, MirBlockInfo, InstructionInfo}
+use compiler.mir.mir_aop_injection.{extract_mir_block_info, apply_weaving_result}
+use compiler.mdsoc.weaving.weaving_config.{weavingconfig_from_hir_advices}
+use compiler.frontend.core.aop_conflict_detect.{detect_advice_conflicts}
+use compiler.frontend.core.aop_predicate_parser.{validate_predicate, validate_advice_form}
 use compiler.types.type_system.effect_pass.{run_effect_pass}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -708,6 +713,9 @@ class CompilerDriver:
         # Optimize MIR (speed optimization for JIT)
         self.optimize_mir(optimizationconfig_speed())
 
+        # AOP weaving (after optimization, before codegen)
+        self.weave_aop()
+
         # JIT compile
         var pipeline = CodegenPipeline.jit()
         var last_compiled: CompiledModule? = nil
@@ -795,6 +803,11 @@ class CompilerDriver:
         val opt_config = self.get_optimization_config()
         self.optimize_mir(opt_config)
         log_phase("aot:optimize_mir:done")
+
+        # AOP weaving (after optimization, before codegen)
+        log_phase("aot:weave_aop:start")
+        self.weave_aop()
+        log_phase("aot:weave_aop:done")
 
         # Determine output file
         val output = self.ctx.options.output_file ?? "a.out"
@@ -945,6 +958,68 @@ class CompilerDriver:
             val optimized = optimize_mir_module(mir_module, config)
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = optimized
+
+    # --------------------------------------------------------------------------
+    # AOP Weaving
+    # --------------------------------------------------------------------------
+
+    me weave_aop():
+        """Apply AOP weaving to all MIR modules using advice from HIR modules."""
+        # Collect all AOP advices from HIR modules
+        var all_advices: [HirAopAdvice] = []
+        for name in self.ctx.hir_modules.keys():
+            val hir_mod = self.ctx.hir_modules[name]
+            for advice in hir_mod.aop_advices:
+                all_advices.push(advice)
+
+        if all_advices.len() == 0:
+            log_debug("AOP weaving: no advice declarations found, skipping")
+            return
+
+        # Validate predicates and advice forms
+        for advice in all_advices:
+            val pred_err = validate_predicate(advice.predicate_text)
+            if pred_err.len() > 0:
+                self.ctx.errors.push("[AOP] {pred_err} in advice '{advice.advice_function}'")
+            val form_err = validate_advice_form(advice.form)
+            if form_err.len() > 0:
+                self.ctx.errors.push("[AOP] {form_err} in advice '{advice.advice_function}'")
+
+        # Build weaving config from collected advices
+        val config = weavingconfig_from_hir_advices(all_advices)
+        if not config.enabled:
+            return
+
+        val all_rules = weavingconfig_all_rules(config)
+        val rule_count = all_rules.len()
+        log_debug("AOP weaving: {rule_count} rules across {self.ctx.mir_modules.keys().len()} modules")
+
+        # Detect advice conflicts (E1504, E1506)
+        val conflicts = detect_advice_conflicts(all_rules)
+        for conflict in conflicts:
+            if conflict.is_error():
+                self.ctx.errors.push("[AOP] {conflict.message}")
+            elif conflict.is_warning():
+                self.ctx.warnings.push("[AOP] {conflict.message}")
+
+        # Weave each MIR function
+        for mod_name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[mod_name]
+            for func in mir_module.functions:
+                # Extract block info for AOP matching
+                val blocks = extract_mir_block_info(func.blocks)
+                # Run weaving analysis
+                val result = weave_function(config, func.name, mod_name, [], [], blocks)
+                # Apply advice insertions to MIR
+                if result.advices_inserted > 0:
+                    val woven_func = apply_weaving_result(func, result)
+                    mir_module.functions[func.name] = woven_func
+                # Report diagnostics
+                for diag in result.diagnostics:
+                    if diag.is_error():
+                        self.ctx.errors.push("[AOP] {diag.message}")
+                    elif diag.is_warning():
+                        self.ctx.warnings.push("[AOP] {diag.message}")
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""

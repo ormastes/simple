@@ -358,8 +358,14 @@ fn sort_matched_by_priority(items: [MatchedAdvice]) -> [MatchedAdvice]:
             if j_pri > b_pri:
                 best_idx = j
             elif j_pri == b_pri:
-                if remaining[j].specificity > remaining[best_idx].specificity:
+                val j_spec = remaining[j].specificity
+                val b_spec = remaining[best_idx].specificity
+                if j_spec > b_spec:
                     best_idx = j
+                elif j_spec == b_spec:
+                    # Lexicographic tiebreaker on advice function name for determinism
+                    if remaining[j].advice_function < remaining[best_idx].advice_function:
+                        best_idx = j
         sorted.push(remaining[best_idx])
         var new_remaining: [MatchedAdvice] = []
         for k in range(0, remaining.len()):
@@ -441,13 +447,17 @@ fn match_advice_for_join_point(config: WeavingConfig, join_point: JoinPoint) -> 
                 form: rule.form, priority: rule.priority,
                 specificity: predicate_specificity(rule.predicate_text)))
 
-    # Warn about ambiguous ordering
+    # Warn about ambiguous ordering (same priority + specificity)
     if matched.len() > 1:
         var found_ambiguous = false
         for i in range(0, matched.len() - 1):
             if not found_ambiguous:
-                if matched[i].priority == matched[i + 1].priority:
-                    var diag = WeavingDiagnostic.warning("Ambiguous advice ordering at priority {matched[i].priority}")
+                val same_pri = matched[i].priority == matched[i + 1].priority
+                val same_spec = matched[i].specificity == matched[i + 1].specificity
+                if same_pri and same_spec:
+                    val fn_a = matched[i].advice_function
+                    val fn_b = matched[i + 1].advice_function
+                    var diag = WeavingDiagnostic.warning("E1504: ambiguous advice ordering — '{fn_a}' and '{fn_b}' have same priority {matched[i].priority} and specificity; resolved by lexicographic name order. Add explicit priorities to clarify intent.")
                     diag = diag.with_location(join_point.context.function_name)
                     diagnostics.push(diag)
                     found_ambiguous = true

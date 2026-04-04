@@ -165,10 +165,11 @@ The compiler has two GcMode systems that are **not connected to directory-based 
 - **Impact**: Confusing for developers. Import conflicts if both are used in the same file.
 - **Fix**: Rename `barriers.spl`'s enum to `GcStrategy` or `BarrierMode` to distinguish from the family-level GcMode.
 
-### Gap 8: No target preset maps to family (Agent 5 -- Target Presets)
+### Gap 8: No target preset maps to family (Agent 5 -- Target Presets) -- **RESOLVED**
 - **Problem**: `BaremetalConfig` sets `alloc_allowed: false` but does not set GcMode or restrict module resolution to `nogc_async_mut_noalloc`.
 - **Impact**: A baremetal build could import from any family directory.
 - **Fix**: Wire `BaremetalConfig` to set `gc_off: true` and restrict module loader search to `nogc_async_mut_noalloc` + `common` only.
+- **Resolution**: Added `TargetPreset` enum to `baremetal.spl` with `Baremetal`, `Hosted`, `EmbeddedWithHeap` variants. Added `allowed_families` field to both `CompileOptions` and `ModuleResolver`. Module resolver's lib subdirectory search now filters by `allowed_families` when non-empty. See Section 6 for full mapping table.
 
 ### Gap 9: `nogc_async_immut` exports only a version function (Agent 4 -- Stdlib)
 - **Problem**: The root `__init__.spl` exports only `nogc_async_immut_version`. No data structure types are re-exported.
@@ -236,7 +237,7 @@ Three families are **not implemented**: `gc_sync_immut`, `gc_sync_mut`, `nogc_sy
 
 The `gc_off` flag in `CompileOptions` provides a global no-GC switch but does NOT map to a specific family. There are no presets for hosted no-GC targets (i.e., no preset says "use `nogc_sync_mut` as default family").
 
-**Gap**: Target presets should explicitly set the default family for module resolution, not just `alloc_allowed`.
+**Resolved**: Target presets now explicitly set the default family via `TargetPreset.allowed_families()` and `CompileOptions.allowed_families`. See Section 6.
 
 ### Decision 5: What counts as "complete" for weakest families?
 
@@ -254,6 +255,76 @@ The `gc_off` flag in `CompileOptions` provides a global no-GC switch but does NO
 **For `gc_sync_immut` and `nogc_sync_immut`** (not implemented, no tests):
 - **Decision**: Mark as "deferred" and do not create directories. No code or tests reference them.
 - **Rationale**: The existing 6 families cover all current use cases. Adding sync+immutable variants provides marginal value since `common` already serves as the pure/immutable foundation.
+
+---
+
+## Section 6: Target Preset to Runtime Family Mapping
+
+> Added 2026-04-04 by Agent 5 (Target Presets & Baremetal Mapping).
+
+### 6.1 Preset Definitions
+
+Target presets are defined in `src/compiler/80.driver/build/baremetal.spl` as the `TargetPreset` enum.
+Each preset specifies:
+- `allowed_families`: Which runtime families the module resolver may search
+- `gc_off`: Whether GC is disabled
+- `alloc_allowed`: Whether heap allocation is permitted
+
+### 6.2 Preset-to-Family Mapping Table
+
+| Preset | `gc_off` | `alloc_allowed` | Allowed Families | Use Case |
+|--------|----------|-----------------|-----------------|----------|
+| `Baremetal` | true | false | `nogc_async_mut_noalloc`, `common` | ARM/x86/RISC-V bare-metal, QEMU |
+| `EmbeddedWithHeap` | true | true | `nogc_async_mut_noalloc`, `nogc_sync_mut`, `nogc_async_mut`, `common` | Embedded with malloc/arena |
+| `Hosted` | false | true | *(all families)* | Linux, macOS, Windows desktop/server |
+
+### 6.3 Fallback Chain per Preset
+
+**Baremetal** (most restrictive):
+```
+nogc_async_mut_noalloc → common → (reject)
+```
+
+**EmbeddedWithHeap**:
+```
+nogc_async_mut_noalloc → nogc_sync_mut → nogc_async_mut → common → (reject)
+```
+
+**Hosted** (no restriction, uses default search order):
+```
+nogc_async_mut → nogc_async_immut → nogc_sync_mut → common → gc_async_mut → nogc_async_mut_noalloc
+```
+
+### 6.4 How Family Restriction Works
+
+1. `BaremetalConfig.compile_options()` returns a `CompileOptions` with `allowed_families` set via `TargetPreset.apply_to_compile_options()`.
+2. The caller passes `CompileOptions.allowed_families` to `ModuleResolver.with_allowed_families()`.
+3. In `resolution.spl`, the lib subdirectory search loop (`lib/*/`) skips any subdirectory not in `allowed_families` (when the list is non-empty).
+4. Empty `allowed_families` means no restriction (backward-compatible default).
+
+### 6.5 How to Override the Default Family
+
+To restrict families manually (without a preset):
+```simple
+var opts = CompileOptions.default()
+opts.allowed_families = ["nogc_sync_mut", "common"]
+```
+
+To create a resolver with family restriction:
+```simple
+val resolver = ModuleResolver.new(project_root, source_root)
+    .with_allowed_families(["nogc_async_mut_noalloc", "common"])
+```
+
+### 6.6 Implementation Files
+
+| File | Change |
+|------|--------|
+| `src/compiler/00.common/driver_core_types.spl` | Added `allowed_families: [text]` to `CompileOptions`, `is_family_allowed()` method |
+| `src/compiler/80.driver/build/baremetal.spl` | Added `TargetPreset` enum, `apply_to_compile_options()`, `BaremetalConfig.compile_options()` |
+| `src/compiler/99.loader/module_resolver/types.spl` | Added `allowed_families: [text]` to `ModuleResolver`, `with_allowed_families()` |
+| `src/compiler/99.loader/module_resolver/resolution.spl` | Added family filtering in lib subdirectory search loop |
+| `test/unit/compiler/target_presets_spec.spl` | Added family mapping tests |
 
 ---
 
