@@ -41,10 +41,12 @@ Implemented and safe to advertise:
 - Watch mode and auto-build support
 - mmap-backed loader support and executable-memory plumbing
 - Baremetal build/test plumbing and host-aware remote baremetal flows
+- C/C++ bidirectional SFFI for the supported ABI subset: exports, imports, callback trampolines, layout verification, and round-trip proof tests
 
 Implemented, but best described with qualifiers:
 - `m{}` / `loss{}` / `nograd{}` are real and usable, but the broader DL story is still evolving
 - LLVM support is real, but some paths still depend on external LLVM tooling
+- Lean verification workflow is complete for the supported verification subset: deterministic Lean generation, proof artifact inventory, Lean/Lake checking, cache invalidation, and verification-state reporting. Contract: [doc/04_architecture/lean_verification_contract.md](doc/04_architecture/lean_verification_contract.md). Report: [doc/09_report/lean_verification_complete_2026-04-04.md](doc/09_report/lean_verification_complete_2026-04-04.md)
 - GC and no-GC runtime families: 5 public families (`common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`) with compiler boundary enforcement, interpreter warnings, and target preset mapping. Support matrix: [doc/04_architecture/runtime_family_support_matrix.md](doc/04_architecture/runtime_family_support_matrix.md)
 - Shared UI contract across web backend and TUI-web proxy (Protocol V1): shared handler, structured error model, stable element IDs, cross-surface contract suite — but this is a shared test protocol, not a full unified UI rendering layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
@@ -54,8 +56,7 @@ Implemented with bounded scope:
 - VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed CPU execution remains a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
 
 Experimental or partial:
-- C/C++ bidirectional interop has substantial SFFI infrastructure including class-level plugin imports, callback trampolines for safe function-pointer bridging, and SFFI lint rules (SFFI006 callback ownership). Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
-- Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
+- No major distinctive feature currently belongs in this bucket without an explicit support matrix or host/tooling qualifier.
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
 
