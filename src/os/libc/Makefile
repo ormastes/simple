@@ -18,7 +18,7 @@ ASFLAGS = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib
 
 C_SRCS  = simpleos_libc.c simpleos_math.c
-ASM_SRCS = simpleos_crt0.S
+ASM_SRCS = simpleos_crt0.S simpleos_syscall.S
 
 C_OBJS  = $(C_SRCS:.c=.o)
 ASM_OBJS = $(ASM_SRCS:.S=.o)

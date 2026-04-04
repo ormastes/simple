@@ -22,26 +22,12 @@
  * 1. Syscall interface
  * ==================================================================== */
 
-static inline int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
-                                        int64_t a2, int64_t a3, int64_t a4) {
-    int64_t result;
-    __asm__ volatile(
-        "movq %1, %%rax\n\t"
-        "movq %2, %%rdi\n\t"
-        "movq %3, %%rsi\n\t"
-        "movq %4, %%rdx\n\t"
-        "movq %5, %%r10\n\t"
-        "movq %6, %%r8\n\t"
-        "syscall\n\t"
-        "movq %%rax, %0"
-        : "=r"(result)
-        : "r"(id), "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(a4)
-        : "rax", "rdi", "rsi", "rdx", "r10", "r8",
-          "rcx", "r11",   /* clobbered by syscall instruction */
-          "memory"
-    );
-    return result;
-}
+/*
+ * Syscall trampoline — implemented in simpleos_syscall.S (x86_64 assembly).
+ * Uses: rax=id, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4; result in rax.
+ */
+extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
+                                 int64_t a2, int64_t a3, int64_t a4);
 
 /* ====================================================================
  * 2. Errno

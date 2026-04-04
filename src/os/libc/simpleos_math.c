@@ -5,7 +5,7 @@
  * No libm dependency — all implemented from scratch.
  */
 
-#include "simpleos_libc.h"
+/* Function prototypes match simpleos_libc.h declarations */
 
 double fabs(double x) {
     return x < 0.0 ? -x : x;
