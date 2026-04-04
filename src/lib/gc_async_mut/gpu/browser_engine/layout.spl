@@ -7,6 +7,7 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
     default_style, resolve_style}
+use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
 
 # =========================================================================
 # Layout Box
@@ -250,19 +251,18 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
 # =========================================================================
 
 fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
-    """Lay out a text node. Estimates width from character count,
-    height from a single line (font_size approximation)."""
-    val text_len = node.text_content.len()
-    # Rough estimate: 8px per character at default font size
-    val char_width = 8
-    val line_height = 20
-    val text_w = text_len * char_width
+    """Lay out a text node using bitmap font metrics from text_layout."""
+    val font_size = node.style.font_size
+    val metrics = measure_text(node.text_content, font_size)
+    val char_w = text_char_width(font_size)
+    val line_h = text_line_height(font_size)
+    val text_w = metrics.width
     val wrapped_lines = if container.content_width > 0:
         (text_w + container.content_width - 1) / container.content_width
     else:
         1
     val actual_lines = if wrapped_lines < 1: 1 else: wrapped_lines
-    val h = actual_lines * line_height
+    val h = actual_lines * line_h
     val w = if text_w < container.content_width: text_w else: container.content_width
 
     return BeLayoutBox(
@@ -272,3 +272,25 @@ fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
         content_width: w, content_height: h,
         node: node, children: []
     )
+
+# =========================================================================
+# Hit Testing
+# =========================================================================
+
+fn hit_test(layout: BeLayoutBox, x: i32, y: i32) -> text:
+    """Walk the layout tree and find the deepest box containing (x, y).
+
+    Returns the DOM node's id, or "" if no box contains the point.
+    Children are checked first so deeper (visually-on-top) nodes win.
+    """
+    # Check children first (deeper = higher priority)
+    for child in layout.children:
+        val result = hit_test(child, x, y)
+        if result != "":
+            return result
+
+    # Check this box
+    if x >= layout.x and x < layout.x + layout.width and y >= layout.y and y < layout.y + layout.height:
+        return layout.node.id
+
+    return ""

@@ -1,0 +1,587 @@
+# Window Manager Service — IPC server for multi-process window management
+#
+# Runs inside the compositor process. Creates a named IPC port "compositor"
+# and handles window creation, destruction, focus, resize, move, and
+# input event delivery for remote app processes.
+#
+# The WM service serializes/deserializes window protocol messages and
+# delegates to the Compositor for actual window operations.
+#
+# Wire protocol:
+#   Request:  method (u32) | flags (u32) | payload (bytes)
+#   Response: status (i32) | payload (bytes)
+#
+# Payload encoding per method:
+#   COMP_CREATE_WINDOW:  title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+#   COMP_DESTROY_WINDOW: window_id(u64)
+#   COMP_UPDATE_TREE:    window_id(u64) | tree_data(bytes)
+#   COMP_FOCUS:          window_id(u64)
+#   COMP_RESIZE:         window_id(u64) | width(i32) | height(i32)
+#   COMP_MOVE:           window_id(u64) | x(i32) | y(i32)
+#   COMP_SET_TITLE:      window_id(u64) | title_len(u32) | title(bytes)
+#   COMP_MINIMIZE:       window_id(u64)
+#   COMP_MAXIMIZE:       window_id(u64)
+#   COMP_RESTORE:        window_id(u64)
+#
+# Response for COMP_CREATE_WINDOW:
+#   status(i32) | window_id(u64)
+
+use os.compositor.compositor.{Compositor, WindowSurface}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
+use os.userlib.syscall_raw.{syscall}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
+
+extern fn serial_println(msg: text)
+
+# Syscall numbers
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_IPC_SEND: u64 = 23
+
+# Named port identifier for compositor discovery
+val WM_PORT_NAME: text = "compositor"
+
+# Maximum windows the WM will track
+val WM_MAX_WINDOWS: i32 = 256
+
+# Response status codes
+val STATUS_OK: i32 = 0
+val STATUS_ERR: i32 = -1
+val STATUS_INVALID: i32 = -3
+
+# ============================================================================
+# Window Owner Entry — maps window_id to the owning app's reply port
+# ============================================================================
+
+struct WindowOwner:
+    """Tracks which IPC port owns a given window."""
+    window_id: u64
+    owner_port: u64
+
+# ============================================================================
+# Window Manager Service
+# ============================================================================
+
+class WmService:
+    """IPC server for multi-process window management.
+
+    Runs inside the compositor process. Creates a named IPC port "compositor"
+    and dispatches incoming requests to the Compositor for window operations.
+
+    Responsibilities:
+      - Deserialize IPC messages into window protocol structs
+      - Delegate to Compositor for create/destroy/move/resize/focus
+      - Track window ownership (window_id -> owner app's reply port)
+      - Deliver input events, close requests, and focus changes to apps
+    """
+    compositor: Compositor
+    port_id: u64
+    window_owners: [WindowOwner]
+    max_windows: i32
+    initialized: bool
+    running: bool
+    request_count: u64
+
+impl WmService:
+    static fn new(compositor: Compositor) -> WmService:
+        """Create a new WM service wrapping the given compositor."""
+        WmService(
+            compositor: compositor,
+            port_id: 0,
+            window_owners: [],
+            max_windows: WM_MAX_WINDOWS,
+            initialized: false,
+            running: false,
+            request_count: 0
+        )
+
+    # -- Lifecycle -----------------------------------------------------------
+
+    me init() -> bool:
+        """Create named IPC port "compositor" and prepare for requests.
+
+        Returns true on success, false if port creation fails.
+        """
+        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        if port < 0:
+            serial_println("[wm-service] Failed to create IPC port (error {port})")
+            return false
+        self.port_id = port.to_u64()
+        self.initialized = true
+        serial_println("[wm-service] Listening on IPC port {self.port_id} as '{WM_PORT_NAME}'")
+        true
+
+    me run_loop():
+        """Main service loop: receive IPC messages and dispatch.
+
+        Blocks on IPC recv, processes each message, sends reply.
+        Call init() before run_loop().
+        """
+        if not self.initialized:
+            serial_println("[wm-service] Cannot run: not initialized")
+            return
+        self.running = true
+        serial_println("[wm-service] Service loop started")
+        while self.running:
+            # Receive IPC message -- blocks until message arrives
+            val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+            if msg_raw < 0:
+                serial_println("[wm-service] IPC recv error: {msg_raw}")
+                continue
+            self.request_count = self.request_count + 1
+            self.dispatch_message(msg_raw.to_u64())
+
+    me poll_once():
+        """Non-blocking poll: process one message if available.
+
+        Used when the WM service is integrated into the compositor's
+        main loop rather than running in its own thread.
+        Returns without blocking if no message is pending.
+        """
+        if not self.initialized:
+            return
+        # Non-blocking recv: timeout = 0
+        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+        if msg_raw > 0:
+            self.request_count = self.request_count + 1
+            self.dispatch_message(msg_raw.to_u64())
+
+    me stop():
+        """Signal the service loop to exit."""
+        self.running = false
+        serial_println("[wm-service] Stopped after {self.request_count} requests")
+
+    # -- Message Dispatch ----------------------------------------------------
+
+    me dispatch_message(msg_addr: u64):
+        """Parse an IPC message header and dispatch to the appropriate handler.
+
+        IPC message layout: src_port(8) | dst_port(8) | method(4) | flags(4) | payload_len(4) | cap_count(4)
+        Payload starts at msg_addr + 32.
+        """
+        val src_port = _read_u64(msg_addr)
+        val method = _read_u32(msg_addr + 16)
+        val payload_len = _read_u32(msg_addr + 24)
+        val payload_addr = msg_addr + 32
+
+        match method:
+            COMP_CREATE_WINDOW:
+                self.handle_create_window(src_port, payload_addr, payload_len)
+            COMP_DESTROY_WINDOW:
+                self.handle_destroy_window(src_port, payload_addr, payload_len)
+            COMP_UPDATE_TREE:
+                self.handle_update_tree(src_port, payload_addr, payload_len)
+            COMP_FOCUS:
+                self.handle_focus(src_port, payload_addr, payload_len)
+            COMP_RESIZE:
+                self.handle_resize(src_port, payload_addr, payload_len)
+            COMP_MOVE:
+                self.handle_move(src_port, payload_addr, payload_len)
+            COMP_SET_TITLE:
+                self.handle_set_title(src_port, payload_addr, payload_len)
+            COMP_MINIMIZE:
+                self.handle_minimize(src_port, payload_addr, payload_len)
+            COMP_MAXIMIZE:
+                self.handle_maximize(src_port, payload_addr, payload_len)
+            COMP_RESTORE:
+                self.handle_restore(src_port, payload_addr, payload_len)
+            _:
+                serial_println("[wm-service] Unknown method {method} from port {src_port}")
+                self.send_error_reply(src_port, STATUS_INVALID, "unknown compositor method")
+
+    # -- Request Handlers ----------------------------------------------------
+
+    me handle_create_window(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_CREATE_WINDOW: create window and track ownership.
+
+        Payload: title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
+        Response: status(i32) | window_id(u64)
+        """
+        if self.window_owners.len() >= self.max_windows:
+            serial_println("[wm-service] Max windows reached, rejecting create")
+            self.send_create_response(src_port, 0, WM_STATUS_NO_SPACE)
+            return
+
+        # Parse title
+        val title_len = _read_u32(payload_addr)
+        val title = _read_text(payload_addr + 4, title_len)
+        val fields_offset = 4 + title_len.to_u64()
+
+        # Parse position and size
+        val x = _read_i32(payload_addr + fields_offset)
+        val y = _read_i32(payload_addr + fields_offset + 4)
+        val w = _read_i32(payload_addr + fields_offset + 8)
+        val h = _read_i32(payload_addr + fields_offset + 12)
+
+        # Create the remote window via compositor
+        val window_id = self.compositor.create_remote_window(title, x, y, w, h, src_port)
+
+        if window_id > 0:
+            # Track ownership
+            self.window_owners = self.window_owners.push(WindowOwner(
+                window_id: window_id,
+                owner_port: src_port
+            ))
+            serial_println("[wm-service] Created window {window_id} for port {src_port}: '{title}' ({w}x{h})")
+            self.send_create_response(src_port, window_id, WM_STATUS_OK)
+        else:
+            serial_println("[wm-service] Failed to create window for port {src_port}")
+            self.send_create_response(src_port, 0, WM_STATUS_ERROR)
+
+    me handle_destroy_window(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_DESTROY_WINDOW: destroy window and remove ownership.
+
+        Payload: window_id(u64)
+        """
+        val window_id = _read_u64(payload_addr)
+
+        # Verify ownership
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            serial_println("[wm-service] Destroy denied: port {src_port} does not own window {window_id}")
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.destroy_window(window_id)
+        self.remove_owner(window_id)
+        serial_println("[wm-service] Destroyed window {window_id}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_update_tree(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_UPDATE_TREE: update the widget tree for a window.
+
+        Payload: window_id(u64) | tree_data(bytes)
+        Tree deserialization is not yet implemented -- requires a widget
+        serialization format.
+        """
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+        # Tree update requires widget tree serialization/deserialization
+        pass_todo("widget tree deserialization for remote update")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_focus(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_FOCUS: bring a window to focus.
+
+        Payload: window_id(u64)
+        """
+        val window_id = _read_u64(payload_addr)
+        self.compositor.focus_window(window_id)
+        serial_println("[wm-service] Focused window {window_id}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_resize(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_RESIZE: resize a window.
+
+        Payload: window_id(u64) | width(i32) | height(i32)
+        """
+        val window_id = _read_u64(payload_addr)
+        val width = _read_i32(payload_addr + 8)
+        val height = _read_i32(payload_addr + 12)
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.resize_window(window_id, width, height)
+        serial_println("[wm-service] Resized window {window_id} to {width}x{height}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_move(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_MOVE: move a window.
+
+        Payload: window_id(u64) | x(i32) | y(i32)
+        """
+        val window_id = _read_u64(payload_addr)
+        val x = _read_i32(payload_addr + 8)
+        val y = _read_i32(payload_addr + 12)
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.move_window(window_id, x, y)
+        serial_println("[wm-service] Moved window {window_id} to ({x}, {y})")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_set_title(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_SET_TITLE: change window title.
+
+        Payload: window_id(u64) | title_len(u32) | title(bytes)
+        """
+        val window_id = _read_u64(payload_addr)
+        val title_len = _read_u32(payload_addr + 8)
+        val title = _read_text(payload_addr + 12, title_len)
+
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.set_window_title(window_id, title)
+        serial_println("[wm-service] Set title of window {window_id} to '{title}'")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_minimize(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_MINIMIZE: minimize (hide) a window.
+
+        Payload: window_id(u64)
+        """
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.minimize_window(window_id)
+        serial_println("[wm-service] Minimized window {window_id}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_maximize(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_MAXIMIZE: maximize a window to fill the screen.
+
+        Payload: window_id(u64)
+        """
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.maximize_window(window_id)
+        serial_println("[wm-service] Maximized window {window_id}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    me handle_restore(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Handle COMP_RESTORE: restore a window from minimized/maximized.
+
+        Payload: window_id(u64)
+        """
+        val window_id = _read_u64(payload_addr)
+        val owner = self.find_owner(window_id)
+        if owner == 0 or owner != src_port:
+            self.send_status_reply(src_port, STATUS_ERR)
+            return
+
+        self.compositor.restore_window(window_id)
+        serial_println("[wm-service] Restored window {window_id}")
+        self.send_status_reply(src_port, STATUS_OK)
+
+    # -- Outbound Event Delivery ---------------------------------------------
+
+    me send_input_to_owner(window_id: u64, event: WmInputEvent):
+        """Send an input event to the app that owns this window via IPC.
+
+        Called by the compositor when a remote window receives input.
+        Encodes the WmInputEvent as:
+          method(u32=COMP_INPUT_EVENT) | window_id(u64) | event_type(u32) |
+          key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32)
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+
+        var buf: [u8] = []
+        # Method header
+        _push_u32(buf, COMP_INPUT_EVENT)
+        # Event payload
+        _push_u64(buf, event.window_id)
+        _push_u32(buf, event.event_type)
+        _push_u32(buf, event.key_code)
+        _push_i32(buf, event.mouse_x)
+        _push_i32(buf, event.mouse_y)
+        _push_u32(buf, event.modifiers)
+        _ipc_send(owner, self.port_id, buf)
+
+    me send_close_request(window_id: u64):
+        """Send a close request to the app that owns this window.
+
+        Called when the user clicks the close button or presses Alt+F4
+        on a remote window. The app should clean up and respond with
+        COMP_DESTROY_WINDOW.
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+
+        var buf: [u8] = []
+        _push_u32(buf, COMP_CLOSE_REQUEST)
+        _push_u64(buf, window_id)
+        _ipc_send(owner, self.port_id, buf)
+        serial_println("[wm-service] Sent close request for window {window_id} to port {owner}")
+
+    me send_focus_changed(window_id: u64, focused: bool):
+        """Notify the app that a window gained or lost focus.
+
+        Sent when the compositor changes focus between windows, so apps
+        can update their visual state (e.g., cursor blink, selection highlight).
+        """
+        val owner = self.find_owner(window_id)
+        if owner == 0:
+            return
+
+        var buf: [u8] = []
+        _push_u32(buf, COMP_FOCUS_CHANGED)
+        _push_u64(buf, window_id)
+        val focused_byte: u8 = if focused: 1 else: 0
+        buf.push(focused_byte)
+        _ipc_send(owner, self.port_id, buf)
+
+    me deliver_pending_remote_events():
+        """Poll the compositor for pending remote events and deliver them.
+
+        Called from the main loop. Drains the compositor's pending_remote_events
+        list and sends each event to the owning app via IPC.
+        """
+        val events = self.compositor.consume_remote_events()
+        for event in events:
+            self.send_input_to_owner(event.window_id, event)
+
+    # -- Ownership Tracking --------------------------------------------------
+
+    fn find_owner(window_id: u64) -> u64:
+        """Look up the owner port for a window. Returns 0 if not found."""
+        for entry in self.window_owners:
+            if entry.window_id == window_id:
+                return entry.owner_port
+        0
+
+    me remove_owner(window_id: u64):
+        """Remove ownership tracking for a window."""
+        var updated: [WindowOwner] = []
+        for entry in self.window_owners:
+            if entry.window_id != window_id:
+                updated = updated.push(entry)
+        self.window_owners = updated
+
+    me remove_all_windows_for_port(port: u64):
+        """Remove all windows owned by a disconnected port.
+
+        Called when an app crashes or disconnects. Destroys all its
+        windows from the compositor and removes ownership entries.
+        """
+        var to_destroy: [u64] = []
+        for entry in self.window_owners:
+            if entry.owner_port == port:
+                to_destroy = to_destroy.push(entry.window_id)
+
+        for wid in to_destroy:
+            self.compositor.destroy_window(wid)
+            serial_println("[wm-service] Cleaned up window {wid} for disconnected port {port}")
+
+        var remaining: [WindowOwner] = []
+        for entry in self.window_owners:
+            if entry.owner_port != port:
+                remaining = remaining.push(entry)
+        self.window_owners = remaining
+
+    # -- Reply Helpers -------------------------------------------------------
+
+    fn send_create_response(dst_port: u64, window_id: u64, status: i32):
+        """Send a COMP_CREATE_WINDOW response: status(i32) | window_id(u64)."""
+        var buf: [u8] = []
+        _push_i32(buf, status)
+        _push_u64(buf, window_id)
+        _ipc_send(dst_port, self.port_id, buf)
+
+    fn send_status_reply(dst_port: u64, status: i32):
+        """Send a simple status-only reply."""
+        var buf: [u8] = []
+        _push_i32(buf, status)
+        _ipc_send(dst_port, self.port_id, buf)
+
+    fn send_error_reply(dst_port: u64, status: i32, msg: text):
+        """Send an error reply with status + error message."""
+        var buf: [u8] = []
+        _push_i32(buf, status)
+        for ch in msg:
+            buf.push(ch.to_u8())
+        _ipc_send(dst_port, self.port_id, buf)
+
+    # -- Queries -------------------------------------------------------------
+
+    fn stats() -> text:
+        """Return service statistics as text."""
+        "WmService: port={self.port_id}, windows={self.window_owners.len()}, requests={self.request_count}, running={self.running}"
+
+    fn is_initialized() -> bool:
+        self.initialized
+
+# ============================================================================
+# Memory Access Helpers
+# ============================================================================
+
+extern fn mmio_read8(addr: u64) -> u8
+extern fn mmio_read16(addr: u64) -> u16
+extern fn mmio_read32(addr: u64) -> u32
+extern fn mmio_read64(addr: u64) -> u64
+
+fn _read_u8(addr: u64) -> u8:
+    mmio_read8(addr)
+
+fn _read_u32(addr: u64) -> u32:
+    mmio_read32(addr)
+
+fn _read_u64(addr: u64) -> u64:
+    mmio_read64(addr)
+
+fn _read_i32(addr: u64) -> i32:
+    mmio_read32(addr).to_i32()
+
+fn _read_text(addr: u64, len: u32) -> text:
+    """Read a text string from memory."""
+    var result = ""
+    var i: u32 = 0
+    while i < len:
+        val ch = mmio_read8(addr + i.to_u64())
+        if ch == 0:
+            return result
+        result = result + ch.to_char()
+        i = i + 1
+    result
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_u32(buf: [u8], val: u32):
+    buf.push((val & 0xFF).to_u8())
+    buf.push(((val >> 8) & 0xFF).to_u8())
+    buf.push(((val >> 16) & 0xFF).to_u8())
+    buf.push(((val >> 24) & 0xFF).to_u8())
+
+fn _push_i32(buf: [u8], val: i32):
+    val u = val.to_u32()
+    buf.push((u & 0xFF).to_u8())
+    buf.push(((u >> 8) & 0xFF).to_u8())
+    buf.push(((u >> 16) & 0xFF).to_u8())
+    buf.push(((u >> 24) & 0xFF).to_u8())
+
+fn _push_u64(buf: [u8], val: u64):
+    buf.push((val & 0xFF).to_u8())
+    buf.push(((val >> 8) & 0xFF).to_u8())
+    buf.push(((val >> 16) & 0xFF).to_u8())
+    buf.push(((val >> 24) & 0xFF).to_u8())
+    buf.push(((val >> 32) & 0xFF).to_u8())
+    buf.push(((val >> 40) & 0xFF).to_u8())
+    buf.push(((val >> 48) & 0xFF).to_u8())
+    buf.push(((val >> 56) & 0xFF).to_u8())
+
+# ============================================================================
+# IPC Send Helper
+# ============================================================================
+
+fn _ipc_send(dst_port: u64, src_port: u64, data: [u8]):
+    """Send reply data via IPC syscall.
+
+    Encodes the data into a buffer and issues syscall 23 (IpcSend).
+    """
+    extern fn unsafe_addr_of(ref: any) -> u64
+    val data_ptr = unsafe_addr_of(data)
+    val data_len = data.len().to_u64()
+    syscall(23, dst_port, src_port, data_ptr, data_len, 0)

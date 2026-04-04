@@ -13,7 +13,7 @@ use os.apps.sshd.ssh_packet.{SshPacket, ssh_packet_read, ssh_packet_build, ssh_p
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{SshKexState, SshSessionKeys, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, ssh_kex_generate_keypair, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_derive_keys, ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys}
 use os.apps.sshd.ssh_cipher.{SshCipher}
-use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, ssh_build_userauth_pk_ok, ssh_verify_pubkey_signature}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, MAX_AUTH_ATTEMPTS, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner}
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.ssh_pty.{SshPty}
 
@@ -178,8 +178,8 @@ impl SshSession:
         # Compute shared secret
         val shared_secret = ssh_kex_compute_shared(server_private, client_public)
 
-        # Build host key blob: string "ssh-ed25519" + string public_key_data
-        # We use our Curve25519 key as a simplified "host key"
+        # Build host key blob: string "hmac-sha256@simpleos" + string public_key_data
+        # Custom algorithm — uses HMAC-SHA-256 for signing (not Ed25519)
         val host_key_blob = _build_host_key_blob(self.host_public_key)
 
         # Compute exchange hash
@@ -199,12 +199,10 @@ impl SshSession:
             self.session_id = exchange_hash
 
         # Sign the exchange hash with our host key
-        # Simple signature: SHA-256(host_private || exchange_hash)
-        # (A real implementation would use Ed25519, but we use a HMAC-like approach
-        # with our Curve25519 private key for simplicity)
+        # Uses HMAC-SHA-256(host_private, exchange_hash) — proper MAC construction
         val signature = _sign_exchange_hash(self.host_private_key, exchange_hash)
 
-        # Build signature blob: string "ssh-ed25519" + string signature_data
+        # Build signature blob: string "hmac-sha256@simpleos" + string signature_data
         val sig_blob = _build_signature_blob(signature)
 
         # Send KEX_ECDH_REPLY
@@ -276,7 +274,7 @@ impl SshSession:
             val r = ssh_parse_auth_request(payload)
             if r.is_err():
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["password", "publickey"], false)
+                val fail = ssh_build_auth_failure(["password"], false)
                 self.send_packet(fail)
                 continue
 
@@ -284,7 +282,8 @@ impl SshSession:
 
             if req.method == "none":
                 # "none" method: always fail, but tell client which methods are available
-                val fail = ssh_build_auth_failure(["password", "publickey"], false)
+                # Only password is offered (publickey disabled — no signature scheme)
+                val fail = ssh_build_auth_failure(["password"], false)
                 self.send_packet(fail)
                 attempts = attempts + 1
 
@@ -297,25 +296,30 @@ impl SshSession:
                     return
                 else:
                     attempts = attempts + 1
-                    val fail = ssh_build_auth_failure(["password", "publickey"], false)
+                    val fail = ssh_build_auth_failure(["password"], false)
                     self.send_packet(fail)
 
             elif req.method == "publickey":
-                if self.user_db.authenticate_key(req.username, req.key_blob):
-                    self.authenticated_user = req.username
-                    val success = ssh_build_auth_success()
-                    self.send_packet(success)
-                    self.state = SessionState.Interactive
-                    return
-                else:
-                    attempts = attempts + 1
-                    val fail = ssh_build_auth_failure(["password", "publickey"], false)
-                    self.send_packet(fail)
+                # Public key authentication is DISABLED.
+                #
+                # Reason: SimpleOS has Curve25519 (DH key agreement) but NOT
+                # Ed25519 (digital signatures). Without a signature scheme,
+                # there is no way to verify that the client possesses the
+                # private key corresponding to the offered public key.
+                # Accepting publickey auth without proper signature verification
+                # would be an authentication bypass — anyone who knows a user's
+                # public key (which is public by definition) could authenticate.
+                #
+                # To enable publickey auth, implement Ed25519 signing/verification
+                # (requires Edwards-form Curve25519 arithmetic + SHA-512).
+                attempts = attempts + 1
+                val fail = ssh_build_auth_failure(["password"], false)
+                self.send_packet(fail)
 
             else:
                 # Unknown method
                 attempts = attempts + 1
-                val fail = ssh_build_auth_failure(["password", "publickey"], false)
+                val fail = ssh_build_auth_failure(["password"], false)
                 self.send_packet(fail)
 
         # Too many failed attempts
@@ -770,36 +774,36 @@ impl SshSession:
 fn _build_host_key_blob(public_key: [u8]) -> [u8]:
     """Build SSH host key blob: string key_type + string key_data.
 
-    Format for ssh-ed25519 (we use Curve25519 key as simplified substitute):
-      string "ssh-ed25519"
-      string public_key (32 bytes)
+    Uses hmac-sha256@simpleos as the host key algorithm. This is a custom
+    algorithm — standard SSH clients will not recognize it. SimpleOS does
+    NOT claim Ed25519 compliance (Curve25519 is DH, not a signing scheme).
+
+    For interoperability with standard clients, Ed25519 support would need
+    to be implemented (requires Edwards-form curve arithmetic + SHA-512).
+
+    Format:
+      string "hmac-sha256@simpleos"
+      string public_key (32 bytes, Curve25519 point)
     """
     var blob: [u8] = []
-    ssh_put_text(blob, "ssh-ed25519")
+    ssh_put_text(blob, "hmac-sha256@simpleos")
     ssh_put_string(blob, public_key)
     blob
 
 fn _sign_exchange_hash(host_private: [u8], exchange_hash: [u8]) -> [u8]:
     """Sign the exchange hash with the host private key.
 
-    Uses SHA-256(private_key || exchange_hash) as a simplified signature.
-    A real implementation would use Ed25519 signing, but since we have
-    Curve25519 (not Ed25519) available, we use an HMAC-like construction.
+    Uses HMAC-SHA-256(host_private, exchange_hash) — a proper MAC
+    construction that is not vulnerable to length-extension attacks.
+
+    This is NOT Ed25519 and will not interoperate with standard SSH
+    clients. For that, full Ed25519 signing is needed (pass_todo).
     """
-    var input: [u8] = []
-    var i: u64 = 0
-    while i < host_private.len():
-        input.push(host_private[i])
-        i = i + 1
-    i = 0
-    while i < exchange_hash.len():
-        input.push(exchange_hash[i])
-        i = i + 1
-    sha256(input)
+    sha256_hmac(host_private, exchange_hash)
 
 fn _build_signature_blob(signature: [u8]) -> [u8]:
     """Build SSH signature blob: string sig_type + string sig_data."""
     var blob: [u8] = []
-    ssh_put_text(blob, "ssh-ed25519")
+    ssh_put_text(blob, "hmac-sha256@simpleos")
     ssh_put_string(blob, signature)
     blob

@@ -370,6 +370,10 @@ static void fmt_hex(fmt_state *st, uint64_t v, int upper, int width, int zero_pa
     for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
 }
 
+/* Float formatting helper — implemented in simpleos_printf_float.c */
+extern int _fmt_float(char *buf, size_t max, double val, char spec,
+                       int width, int prec);
+
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap) {
     fmt_state st;
     st.buf = str;
@@ -386,7 +390,7 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list ap) {
         /* Flags */
         int left_align = 0;
         int zero_pad = 0;
-        while (*fmt == '-' || *fmt == '0') {
+        while (*fmt == '-' || *fmt == '0' || *fmt == '+' || *fmt == ' ') {
             if (*fmt == '-') left_align = 1;
             if (*fmt == '0') zero_pad = 1;
             fmt++;
@@ -395,9 +399,30 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list ap) {
 
         /* Width */
         int width = 0;
-        while (*fmt >= '0' && *fmt <= '9') {
-            width = width * 10 + (*fmt - '0');
+        if (*fmt == '*') {
+            width = va_arg(ap, int);
             fmt++;
+        } else {
+            while (*fmt >= '0' && *fmt <= '9') {
+                width = width * 10 + (*fmt - '0');
+                fmt++;
+            }
+        }
+
+        /* Precision */
+        int prec = -1; /* -1 = not specified */
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            if (*fmt == '*') {
+                prec = va_arg(ap, int);
+                fmt++;
+            } else {
+                while (*fmt >= '0' && *fmt <= '9') {
+                    prec = prec * 10 + (*fmt - '0');
+                    fmt++;
+                }
+            }
         }
 
         /* Length modifier */
@@ -432,13 +457,14 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list ap) {
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
+            int slen = (int)strlen(s);
+            /* Precision limits string length for %s */
+            if (prec >= 0 && slen > prec) slen = prec;
             if (!left_align) {
-                int slen = (int)strlen(s);
                 for (int i = slen; i < width; i++) fmt_putc(&st, ' ');
             }
-            fmt_puts(&st, s);
+            for (int i = 0; i < slen; i++) fmt_putc(&st, s[i]);
             if (left_align) {
-                int slen = (int)strlen(s);
                 for (int i = slen; i < width; i++) fmt_putc(&st, ' ');
             }
             break;
@@ -446,6 +472,22 @@ int vsnprintf(char *str, size_t size, const char *fmt, va_list ap) {
         case 'c': {
             char c = (char)va_arg(ap, int);
             fmt_putc(&st, c);
+            break;
+        }
+        case 'f': case 'e': case 'E': case 'g': case 'G': {
+            double v = va_arg(ap, double);
+            char fbuf[80];
+            int flen = _fmt_float(fbuf, sizeof(fbuf), v, *fmt, 0, prec);
+            if (flen > (int)sizeof(fbuf) - 1) flen = (int)sizeof(fbuf) - 1;
+            /* Width padding */
+            if (!left_align) {
+                for (int i = flen; i < width; i++)
+                    fmt_putc(&st, zero_pad ? '0' : ' ');
+            }
+            for (int i = 0; i < flen; i++) fmt_putc(&st, fbuf[i]);
+            if (left_align) {
+                for (int i = flen; i < width; i++) fmt_putc(&st, ' ');
+            }
             break;
         }
         case '%':
@@ -534,22 +576,6 @@ int getpid(void) {
 }
 
 /* ====================================================================
- * 10. Environment and time (stubs)
+ * 10. Time — full implementation in simpleos_time.c
+ *     Environment — full implementation in simpleos_process.c
  * ==================================================================== */
-
-char *getenv(const char *name) {
-    (void)name;
-    return NULL;  /* No environment in SimpleOS yet */
-}
-
-int setenv(const char *name, const char *value, int overwrite) {
-    (void)name; (void)value; (void)overwrite;
-    errno = ENOSYS;
-    return -1;
-}
-
-time_t time(time_t *tloc) {
-    /* No real-time clock syscall yet — return 0 */
-    if (tloc) *tloc = 0;
-    return 0;
-}

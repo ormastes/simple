@@ -132,97 +132,41 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
     return cmds
 
 # =========================================================================
-# Paint Execution (2D Engine Integration)
+# Paint -> RenderScene Bridge
 # =========================================================================
 
-fn execute_paint(engine: Engine2D, commands: [PaintCommand]):
-    """Execute a list of paint commands using the 2D engine.
+fn paint_commands_to_scene(commands: [PaintCommand], viewport_w: i32, viewport_h: i32) -> RenderScene:
+    """Convert paint commands to a RenderScene for the render_scene executor.
 
-    Each command maps to one or more 2D engine draw calls:
-      - rect  -> engine.fill_rect()
-      - text  -> engine.draw_text()
-      - border -> engine.stroke_rect()
+    Maps PaintCommand kinds to SceneCommand factory calls:
+      - rect     -> scene_fill_rect
+      - text     -> scene_text
+      - border   -> scene_stroke_rect
+      - gradient -> scene_gradient_rect
     """
+    var scene_cmds: [SceneCommand] = []
     for cmd in commands:
         match cmd.kind:
             "rect" =>
-                engine.fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color)
+                val argb_color = rgba_to_argb(cmd.color)
+                scene_cmds = scene_cmds + [scene_fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color)]
             "text" =>
-                engine.draw_text(cmd.x, cmd.y, cmd.text_val, cmd.font_size, cmd.color)
+                val argb_color = rgba_to_argb(cmd.color)
+                scene_cmds = scene_cmds + [scene_text(cmd.x, cmd.y, cmd.text_val, argb_color, cmd.font_size)]
             "border" =>
-                engine.stroke_rect(
-                    cmd.x, cmd.y, cmd.width, cmd.height,
-                    cmd.border_width, cmd.border_color
-                )
+                val argb_color = rgba_to_argb(cmd.border_color)
+                scene_cmds = scene_cmds + [scene_stroke_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_width)]
+            "gradient" =>
+                val c1 = rgba_to_argb(cmd.color)
+                val c2 = rgba_to_argb(cmd.border_color)
+                scene_cmds = scene_cmds + [scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2)]
+            "image" =>
+                pass_dn  # images not yet supported in paint commands
             _ =>
                 pass_dn
+    render_scene(scene_cmds, viewport_w, viewport_h)
 
-fn paint_tree(engine: Engine2D, layout: BeLayoutBox):
-    """Convenience: generate paint commands from layout tree and execute them."""
+fn paint_tree_to_scene(layout: BeLayoutBox, viewport_w: i32, viewport_h: i32) -> RenderScene:
+    """Convenience: generate paint commands from layout tree and convert to scene."""
     val commands = generate_paint_list(layout)
-    execute_paint(engine, commands)
-
-# =========================================================================
-# Engine2D Facade (forward-declared interface)
-# =========================================================================
-# The 2D engine will live at std.gc_async_mut.gpu.engine2d.engine
-# and provide these methods. For now we declare the interface here
-# so paint.spl compiles independently.
-
-class Engine2D:
-    """2D rendering engine facade.
-
-    Provides basic drawing primitives used by the paint system.
-    This is a placeholder that will be replaced by the real engine2d
-    module import once it exists.
-    """
-    width: i32
-    height: i32
-    pixels: [u32]
-
-    static fn create(w: i32, h: i32) -> Engine2D:
-        var px: [u32] = []
-        var i = 0
-        val total = w * h
-        while i < total:
-            px = px + [0x00000000]
-            i = i + 1
-        return Engine2D(width: w, height: h, pixels: px)
-
-    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
-        """Fill a rectangle with a solid color."""
-        var row = y
-        while row < y + h and row < self.height:
-            if row >= 0:
-                var col = x
-                while col < x + w and col < self.width:
-                    if col >= 0:
-                        val idx = row * self.width + col
-                        self.pixels[idx] = color
-                    col = col + 1
-            row = row + 1
-
-    me draw_text(x: i32, y: i32, content: text, font_size: i32, color: u32):
-        """Draw text at a position. In this placeholder, renders as a colored rect."""
-        val char_w = font_size / 2
-        val text_w = content.len() * char_w
-        self.fill_rect(x, y, text_w, font_size, color)
-
-    me stroke_rect(x: i32, y: i32, w: i32, h: i32, stroke_w: i32, color: u32):
-        """Draw a rectangle outline (border)."""
-        # Top edge
-        self.fill_rect(x, y, w, stroke_w, color)
-        # Bottom edge
-        self.fill_rect(x, y + h - stroke_w, w, stroke_w, color)
-        # Left edge
-        self.fill_rect(x, y, stroke_w, h, color)
-        # Right edge
-        self.fill_rect(x + w - stroke_w, y, stroke_w, h, color)
-
-    me clear(color: u32):
-        """Fill the entire canvas with a color."""
-        self.fill_rect(0, 0, self.width, self.height, color)
-
-    fn get_pixels() -> [u32]:
-        """Return the pixel buffer."""
-        return self.pixels
+    paint_commands_to_scene(commands, viewport_w, viewport_h)

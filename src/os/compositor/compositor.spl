@@ -19,6 +19,7 @@ use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseEvent}
 use os.compositor.decorations.{draw_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
 use os.compositor.cursor.{CursorState, default_cursor_state, draw_cursor}
 use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
+use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
 
 # ============================================================================
 # Window Surface
@@ -29,6 +30,10 @@ struct WindowSurface:
 
     Each surface has its own UISession containing the widget tree,
     plus position/size and rendering state.
+
+    owner_port: IPC port of the owning application.
+      0 = local in-process window (UI dispatched directly to UISession)
+      >0 = remote app's IPC port (input queued for IPC delivery)
     """
     id: u64
     title: text
@@ -39,6 +44,19 @@ struct WindowSurface:
     visible: bool
     session: UISession
     dirty: bool
+    owner_port: u64
+
+# ============================================================================
+# Pre-maximize saved geometry — for restore after maximize
+# ============================================================================
+
+struct SavedGeometry:
+    """Saved window geometry before maximize, used to restore."""
+    window_id: u64
+    x: i32
+    y: i32
+    width: i32
+    height: i32
 
 # ============================================================================
 # Compositor
@@ -67,6 +85,9 @@ class Compositor:
     drag_offset_x: i32
     drag_offset_y: i32
     pending_shortcut_key: text
+    pending_remote_events: [WmInputEvent]
+    saved_geometries: [SavedGeometry]
+    taskbar_height: i32
 
 impl Compositor:
 
@@ -97,7 +118,10 @@ impl Compositor:
             drag_window_id: 0,
             drag_offset_x: 0,
             drag_offset_y: 0,
-            pending_shortcut_key: ""
+            pending_shortcut_key: "",
+            pending_remote_events: [],
+            saved_geometries: [],
+            taskbar_height: 32
         )
 
     # -- Window Management ---------------------------------------------------
@@ -125,7 +149,8 @@ impl Compositor:
             height: h,
             visible: true,
             session: session,
-            dirty: true
+            dirty: true,
+            owner_port: 0
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -148,7 +173,8 @@ impl Compositor:
             height: h,
             visible: true,
             session: session,
-            dirty: true
+            dirty: true,
+            owner_port: 0
         )
 
         self.surfaces = self.surfaces.push(surface)
@@ -201,7 +227,8 @@ impl Compositor:
                     x: new_x, y: new_y,
                     width: s.width, height: s.height,
                     visible: s.visible, session: s.session,
-                    dirty: true
+                    dirty: true,
+                    owner_port: s.owner_port
                 ))
             else:
                 updated = updated.push(s)
@@ -217,11 +244,204 @@ impl Compositor:
                     x: s.x, y: s.y,
                     width: new_w, height: new_h,
                     visible: s.visible, session: s.session,
-                    dirty: true
+                    dirty: true,
+                    owner_port: s.owner_port
                 ))
             else:
                 updated = updated.push(s)
         self.surfaces = updated
+
+    me create_remote_window(title: text, x: i32, y: i32, w: i32, h: i32, owner_port: u64) -> u64:
+        """Create a new window surface owned by a remote app process.
+
+        The owner_port identifies the IPC port of the owning application.
+        Input events for this window will be queued in pending_remote_events
+        instead of dispatched directly to the UISession.
+        """
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val root = column("win_{id}_root", [
+            text_widget("win_{id}_content", "")
+        ])
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+
+        val surface = WindowSurface(
+            id: id,
+            title: title,
+            x: x,
+            y: y,
+            width: w,
+            height: h,
+            visible: true,
+            session: session,
+            dirty: true,
+            owner_port: owner_port
+        )
+
+        self.surfaces = self.surfaces.push(surface)
+        self.focused_idx = self.surfaces.len() - 1
+        return id
+
+    me lower_window(id: u64):
+        """Send a window to the back of the Z-order.
+
+        The window becomes the backmost surface but remains visible.
+        """
+        var target_idx: i32 = -1
+        var idx: i32 = 0
+        for s in self.surfaces:
+            if s.id == id:
+                target_idx = idx
+            idx = idx + 1
+
+        if target_idx < 0:
+            return
+
+        # Move target to index 0 (backmost Z-order)
+        val target = self.surfaces[target_idx]
+        var reordered: [WindowSurface] = [target]
+        for s in self.surfaces:
+            if s.id != id:
+                reordered = reordered.push(s)
+        self.surfaces = reordered
+
+        # Adjust focused index
+        if self.focused_idx == target_idx:
+            # Lowered the focused window — focus the new topmost
+            if self.surfaces.len() > 1:
+                self.focused_idx = self.surfaces.len() - 1
+            else:
+                self.focused_idx = 0
+        elif self.focused_idx > target_idx:
+            # Focused window moved down one slot
+            self.focused_idx = self.focused_idx - 1
+
+    me minimize_window(id: u64):
+        """Minimize a window (hide it).
+
+        Sets visible=false. The window remains in the surface list
+        and can be restored later.
+        """
+        var updated: [WindowSurface] = []
+        for s in self.surfaces:
+            if s.id == id:
+                updated = updated.push(WindowSurface(
+                    id: s.id, title: s.title,
+                    x: s.x, y: s.y,
+                    width: s.width, height: s.height,
+                    visible: false, session: s.session,
+                    dirty: true,
+                    owner_port: s.owner_port
+                ))
+            else:
+                updated = updated.push(s)
+        self.surfaces = updated
+
+    me maximize_window(id: u64):
+        """Maximize a window to fill the screen (minus taskbar).
+
+        Saves the current geometry so it can be restored later.
+        """
+        # Find current geometry and save it
+        for s in self.surfaces:
+            if s.id == id:
+                # Save geometry before maximizing
+                val saved = SavedGeometry(
+                    window_id: id,
+                    x: s.x,
+                    y: s.y,
+                    width: s.width,
+                    height: s.height
+                )
+                # Replace existing saved geometry for this window
+                var new_saved: [SavedGeometry] = []
+                for g in self.saved_geometries:
+                    if g.window_id != id:
+                        new_saved = new_saved.push(g)
+                new_saved = new_saved.push(saved)
+                self.saved_geometries = new_saved
+
+        # Resize to full screen minus taskbar
+        val max_w = self.screen_width
+        val max_h = self.screen_height - self.taskbar_height
+        me move_window(id, 0, 0)
+        me resize_window(id, max_w, max_h)
+
+    me restore_window(id: u64):
+        """Restore a window from minimized or maximized state.
+
+        If the window was maximized, restores to its pre-maximize geometry.
+        If the window was minimized (hidden), makes it visible again.
+        """
+        # Check if we have saved geometry (was maximized)
+        var found_geo: SavedGeometry? = nil
+        for g in self.saved_geometries:
+            if g.window_id == id:
+                found_geo = g
+
+        if found_geo != nil:
+            val geo = found_geo
+            me move_window(id, geo.x, geo.y)
+            me resize_window(id, geo.width, geo.height)
+            # Remove saved geometry
+            var remaining: [SavedGeometry] = []
+            for g in self.saved_geometries:
+                if g.window_id != id:
+                    remaining = remaining.push(g)
+            self.saved_geometries = remaining
+        else:
+            # Was minimized — just make visible
+            var updated: [WindowSurface] = []
+            for s in self.surfaces:
+                if s.id == id:
+                    updated = updated.push(WindowSurface(
+                        id: s.id, title: s.title,
+                        x: s.x, y: s.y,
+                        width: s.width, height: s.height,
+                        visible: true, session: s.session,
+                        dirty: true,
+                        owner_port: s.owner_port
+                    ))
+                else:
+                    updated = updated.push(s)
+            self.surfaces = updated
+
+    me set_window_title(id: u64, new_title: text):
+        """Change the title of a window."""
+        var updated: [WindowSurface] = []
+        for s in self.surfaces:
+            if s.id == id:
+                updated = updated.push(WindowSurface(
+                    id: s.id, title: new_title,
+                    x: s.x, y: s.y,
+                    width: s.width, height: s.height,
+                    visible: s.visible, session: s.session,
+                    dirty: true,
+                    owner_port: s.owner_port
+                ))
+            else:
+                updated = updated.push(s)
+        self.surfaces = updated
+
+    me consume_remote_events() -> [WmInputEvent]:
+        """Drain and return all pending remote input events.
+
+        Called by the WM service to collect events that need to be
+        delivered to remote app processes via IPC.
+        """
+        val events = self.pending_remote_events
+        self.pending_remote_events = []
+        events
+
+    me queue_remote_event(event: WmInputEvent):
+        """Queue an input event for a remote window.
+
+        Used internally when input is directed at a window with
+        owner_port > 0.
+        """
+        self.pending_remote_events = self.pending_remote_events.push(event)
 
     # -- Queries -------------------------------------------------------------
 
@@ -335,6 +555,19 @@ impl Compositor:
 
         # Route to focused window
         if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+            val focused = self.surfaces[self.focused_idx]
+
+            # Remote window: queue event for IPC delivery
+            if focused.owner_port > 0:
+                val key_char = self.keyboard.key_to_char(key)
+                var key_code: u32 = 0
+                if key_char != nil:
+                    key_code = key_char.to_u32()
+                val remote_event = wm_input_event(focused.id, WM_EVENT_KEY_PRESS, key_code, 0, 0)
+                me queue_remote_event(remote_event)
+                return
+
+            # Local window: dispatch to UISession directly
             val ui_event = _key_to_ui_event(self.keyboard, key)
             if ui_event != nil:
                 self.surfaces[self.focused_idx].session.dispatch(ui_event)
@@ -348,7 +581,8 @@ impl Compositor:
                             x: s.x, y: s.y,
                             width: s.width, height: s.height,
                             visible: s.visible, session: s.session,
-                            dirty: true
+                            dirty: true,
+                            owner_port: s.owner_port
                         ))
                     else:
                         updated = updated.push(s)
@@ -444,7 +678,8 @@ impl Compositor:
                     x: s.x, y: s.y,
                     width: s.width, height: s.height,
                     visible: not s.visible, session: s.session,
-                    dirty: true
+                    dirty: true,
+                    owner_port: s.owner_port
                 ))
             else:
                 updated = updated.push(s)

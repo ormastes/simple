@@ -1,0 +1,423 @@
+@allow(primitive_api)
+# Baremetal 2D Backend — renders through FramebufferDriver
+#
+# This backend bridges Engine2D to the OS framebuffer driver,
+# converting between packed u32 ARGB colors and the Color struct.
+# Used for OS-level rendering where Engine2D is desired but
+# only the framebuffer hardware is available.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+#
+#   var fb = FramebufferDriver.from_boot_info(boot_fb)
+#   var backend = BaremetalBackend.create(fb)
+#   var engine = Engine2D(backend: backend, w: 800, h: 600)
+
+use std.gpu.engine2d.backend.{RenderBackend}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+
+# ============================================================================
+# Color Conversion
+# ============================================================================
+
+fn argb_to_color(argb: u32) -> Color:
+    """Convert packed u32 ARGB (0xAARRGGBB) to Color struct."""
+    val a = ((argb >> 24) & 0xFF).to_u8()
+    val r = ((argb >> 16) & 0xFF).to_u8()
+    val g = ((argb >> 8) & 0xFF).to_u8()
+    val b = (argb & 0xFF).to_u8()
+    Color(r: r, g: g, b: b, a: a)
+
+# ============================================================================
+# Baremetal Backend
+# ============================================================================
+
+class BaremetalBackend:
+    """RenderBackend implementation that delegates to FramebufferDriver.
+
+    Converts all Engine2D drawing calls into FramebufferDriver operations.
+    The framebuffer driver handles double buffering and MMIO writes.
+    """
+    fb: FramebufferDriver
+    w: i32
+    h: i32
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+    initialized: bool
+
+    static fn create(fb: FramebufferDriver) -> BaremetalBackend:
+        """Create a baremetal backend wrapping an initialized FramebufferDriver."""
+        val fw = fb.width.to_i32()
+        val fh = fb.height.to_i32()
+        BaremetalBackend(
+            fb: fb,
+            w: fw,
+            h: fh,
+            clip_x: 0,
+            clip_y: 0,
+            clip_w: fw,
+            clip_h: fh,
+            clip_enabled: false,
+            initialized: true
+        )
+
+impl RenderBackend for BaremetalBackend:
+
+    fn name() -> text:
+        "baremetal"
+
+    fn init(width: i32, height: i32) -> bool:
+        # BaremetalBackend is initialized via create() with an existing FB.
+        # This method updates the cached dimensions.
+        self.w = width
+        self.h = height
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        true
+
+    fn shutdown():
+        self.initialized = false
+
+    me clear(color: u32):
+        val c = argb_to_color(color)
+        self.fb.clear(c)
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a rectangle outline."""
+        val c = argb_to_color(color)
+        # Top edge
+        _bm_hline(self, x, y, w, c)
+        # Bottom edge
+        _bm_hline(self, x, y + h - 1, w, c)
+        # Left edge
+        _bm_vline(self, x, y, h, c)
+        # Right edge
+        _bm_vline(self, x + w - 1, y, h, c)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Draw a filled rectangle, delegating to fb.fill_rect with clipping."""
+        # Apply clipping
+        var cx = x
+        var cy = y
+        var cw = w
+        var ch = h
+        if self.clip_enabled:
+            if cx < self.clip_x:
+                cw = cw - (self.clip_x - cx)
+                cx = self.clip_x
+            if cy < self.clip_y:
+                ch = ch - (self.clip_y - cy)
+                cy = self.clip_y
+            if cx + cw > self.clip_x + self.clip_w:
+                cw = self.clip_x + self.clip_w - cx
+            if cy + ch > self.clip_y + self.clip_h:
+                ch = self.clip_y + self.clip_h - cy
+        if cw <= 0 or ch <= 0:
+            return
+        val c = argb_to_color(color)
+        self.fb.fill_rect(cx.to_u32(), cy.to_u32(), cw.to_u32(), ch.to_u32(), c)
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        """Draw a line using Bresenham via put_pixel."""
+        val c = argb_to_color(color)
+        if thickness <= 1:
+            _bm_bresenham(self, x1, y1, x2, y2, c)
+        else:
+            val half = thickness / 2
+            var offset = -half
+            var adx = x2 - x1
+            if adx < 0:
+                adx = -adx
+            var ady = y2 - y1
+            if ady < 0:
+                ady = -ady
+            while offset <= half:
+                if adx >= ady:
+                    _bm_bresenham(self, x1, y1 + offset, x2, y2 + offset, c)
+                else:
+                    _bm_bresenham(self, x1 + offset, y1, x2 + offset, y2, c)
+                offset = offset + 1
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw circle outline using midpoint algorithm via fb.put_pixel."""
+        val c = argb_to_color(color)
+        var px = r
+        var py = 0
+        var d = 1 - r
+        while px >= py:
+            _bm_put(self, cx + px, cy + py, c)
+            _bm_put(self, cx - px, cy + py, c)
+            _bm_put(self, cx + px, cy - py, c)
+            _bm_put(self, cx - px, cy - py, c)
+            _bm_put(self, cx + py, cy + px, c)
+            _bm_put(self, cx - py, cy + px, c)
+            _bm_put(self, cx + py, cy - px, c)
+            _bm_put(self, cx - py, cy - px, c)
+            py = py + 1
+            if d <= 0:
+                d = d + 2 * py + 1
+            else:
+                px = px - 1
+                d = d + 2 * py - 2 * px + 1
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        """Draw filled circle using scanline fill via put_pixel."""
+        val c = argb_to_color(color)
+        var px = r
+        var py = 0
+        var d = 1 - r
+        while px >= py:
+            _bm_hline(self, cx - px, cy + py, 2 * px + 1, c)
+            _bm_hline(self, cx - px, cy - py, 2 * px + 1, c)
+            _bm_hline(self, cx - py, cy + px, 2 * py + 1, c)
+            _bm_hline(self, cx - py, cy - px, 2 * py + 1, c)
+            py = py + 1
+            if d <= 0:
+                d = d + 2 * py + 1
+            else:
+                px = px - 1
+                d = d + 2 * py - 2 * px + 1
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        """Draw a rounded rectangle outline."""
+        val c = argb_to_color(color)
+        var r = radius
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        _bm_hline(self, x + r, y, w - 2 * r, c)
+        _bm_hline(self, x + r, y + h - 1, w - 2 * r, c)
+        _bm_vline(self, x, y + r, h - 2 * r, c)
+        _bm_vline(self, x + w - 1, y + r, h - 2 * r, c)
+        _bm_corner_arc(self, x + r, y + r, r, c, -1, -1)
+        _bm_corner_arc(self, x + w - 1 - r, y + r, r, c, 1, -1)
+        _bm_corner_arc(self, x + r, y + h - 1 - r, r, c, -1, 1)
+        _bm_corner_arc(self, x + w - 1 - r, y + h - 1 - r, r, c, 1, 1)
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        """Draw a filled triangle using scanline fill."""
+        val c = argb_to_color(color)
+        # Sort by y
+        var vx1 = x1
+        var vy1 = y1
+        var vx2 = x2
+        var vy2 = y2
+        var vx3 = x3
+        var vy3 = y3
+        if vy1 > vy2:
+            var tx = vx1
+            var ty = vy1
+            vx1 = vx2
+            vy1 = vy2
+            vx2 = tx
+            vy2 = ty
+        if vy2 > vy3:
+            var tx = vx2
+            var ty = vy2
+            vx2 = vx3
+            vy2 = vy3
+            vx3 = tx
+            vy3 = ty
+        if vy1 > vy2:
+            var tx = vx1
+            var ty = vy1
+            vx1 = vx2
+            vy1 = vy2
+            vx2 = tx
+            vy2 = ty
+
+        # Upper half
+        var y = vy1
+        while y <= vy2:
+            val xa = _bm_edge_x(vx1, vy1, vx3, vy3, y)
+            val xb = _bm_edge_x(vx1, vy1, vx2, vy2, y)
+            var left = xa
+            var right = xb
+            if left > right:
+                left = xb
+                right = xa
+            _bm_hline(self, left, y, right - left + 1, c)
+            y = y + 1
+        # Lower half
+        y = vy2 + 1
+        while y <= vy3:
+            val xa = _bm_edge_x(vx1, vy1, vx3, vy3, y)
+            val xb = _bm_edge_x(vx2, vy2, vx3, vy3, y)
+            var left = xa
+            var right = xb
+            if left > right:
+                left = xb
+                right = xa
+            _bm_hline(self, left, y, right - left + 1, c)
+            y = y + 1
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        """Draw a rectangle with vertical gradient."""
+        if h <= 0:
+            return
+        var row = 0
+        while row < h:
+            val t_num = row
+            val t_den = h - 1
+            # Interpolate each channel
+            val tr = ((top_color >> 16) & 0xFF).to_i32()
+            val tg = ((top_color >> 8) & 0xFF).to_i32()
+            val tb = (top_color & 0xFF).to_i32()
+            val ta = ((top_color >> 24) & 0xFF).to_i32()
+            val br = ((bottom_color >> 16) & 0xFF).to_i32()
+            val bg_ch = ((bottom_color >> 8) & 0xFF).to_i32()
+            val bb = (bottom_color & 0xFF).to_i32()
+            val ba = ((bottom_color >> 24) & 0xFF).to_i32()
+            var ir = tr + (br - tr) * t_num / t_den
+            var ig = tg + (bg_ch - tg) * t_num / t_den
+            var ib = tb + (bb - tb) * t_num / t_den
+            var ia = ta + (ba - ta) * t_num / t_den
+            if t_den == 0:
+                ir = tr
+                ig = tg
+                ib = tb
+                ia = ta
+            val c = Color(r: ir.to_u8(), g: ig.to_u8(), b: ib.to_u8(), a: ia.to_u8())
+            _bm_hline(self, x, y + row, w, c)
+            row = row + 1
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        """Draw text using the framebuffer's built-in 8x16 font."""
+        val fg = argb_to_color(color)
+        val bg = Color(r: 0, g: 0, b: 0, a: 0)  # Transparent background
+        self.fb.draw_text(x.to_u32(), y.to_u32(), text_val, fg, bg)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        """Blit a pixel array to the framebuffer."""
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx < pixels.len():
+                    val c = argb_to_color(pixels[src_idx])
+                    val px = (x + col).to_u32()
+                    val py = (y + row).to_u32()
+                    self.fb.put_pixel(px, py, c)
+                col = col + 1
+            row = row + 1
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+
+    me present():
+        """Flush the back buffer to the hardware framebuffer."""
+        self.fb.swap_buffers()
+
+    fn read_pixels() -> [u32]:
+        """Return a copy of the framebuffer's back buffer."""
+        # Return the back buffer directly — it is a [u32] array
+        var copy: [u32] = []
+        val total = self.w * self.h
+        var i = 0
+        while i < total:
+            copy.push(self.fb.back_buffer[i])
+            i = i + 1
+        copy
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _bm_put(backend: BaremetalBackend, x: i32, y: i32, color: Color):
+    """Set a pixel with bounds and clip checking."""
+    if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
+        return
+    if backend.clip_enabled:
+        if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
+            y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
+            return
+    backend.fb.put_pixel(x.to_u32(), y.to_u32(), color)
+
+fn _bm_hline(backend: BaremetalBackend, x: i32, y: i32, length: i32, color: Color):
+    """Draw a horizontal line."""
+    var i = 0
+    while i < length:
+        _bm_put(backend, x + i, y, color)
+        i = i + 1
+
+fn _bm_vline(backend: BaremetalBackend, x: i32, y: i32, length: i32, color: Color):
+    """Draw a vertical line."""
+    var i = 0
+    while i < length:
+        _bm_put(backend, x, y + i, color)
+        i = i + 1
+
+fn _bm_bresenham(backend: BaremetalBackend, x1: i32, y1: i32, x2: i32, y2: i32, color: Color):
+    """Bresenham line drawing."""
+    var dx = x2 - x1
+    var dy = y2 - y1
+    var sx: i32 = 1
+    var sy: i32 = 1
+    if dx < 0:
+        dx = -dx
+        sx = -1
+    if dy < 0:
+        dy = -dy
+        sy = -1
+    var err = dx - dy
+    var cx = x1
+    var cy = y1
+    while true:
+        _bm_put(backend, cx, cy, color)
+        if cx == x2 and cy == y2:
+            return
+        val e2 = 2 * err
+        if e2 > -dy:
+            err = err - dy
+            cx = cx + sx
+        if e2 < dx:
+            err = err + dx
+            cy = cy + sy
+
+fn _bm_corner_arc(backend: BaremetalBackend, cx: i32, cy: i32, r: i32, color: Color, sx: i32, sy: i32):
+    """Draw a quarter-circle arc for rounded rectangles."""
+    var px = r
+    var py = 0
+    var d = 1 - r
+    while px >= py:
+        _bm_put(backend, cx + px * sx, cy + py * sy, color)
+        _bm_put(backend, cx + py * sx, cy + px * sy, color)
+        py = py + 1
+        if d <= 0:
+            d = d + 2 * py + 1
+        else:
+            px = px - 1
+            d = d + 2 * py - 2 * px + 1
+
+fn _bm_edge_x(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) -> i32:
+    """Compute x coordinate on edge from (x1,y1)-(x2,y2) at scanline y."""
+    val dy = y2 - y1
+    if dy == 0:
+        return x1
+    x1 + (x2 - x1) * (y - y1) / dy
