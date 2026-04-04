@@ -1134,11 +1134,6 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
     g_fb_addr = (uint64_t)addr;
     g_fb_w = (uint64_t)w;
-    serial_puts("[GUI] set_fb addr=");
-    serial_hex(g_fb_addr);
-    serial_puts(" w=");
-    serial_hex(g_fb_w);
-    serial_puts("\r\n");
     return 0;
 }
 
@@ -1353,20 +1348,13 @@ void _start(void)
         }
     }
 
-    /* Debug: read VGA BAR0 directly from C */
+    /* Read VGA BAR0 and set framebuffer address (PCI bus 0, dev 1, BAR0 at offset 0x10) */
     {
-        uint32_t vga_addr = 0x80000000 | (1 << 11) | 0x10; /* bus 0, dev 1, offset 0x10 */
+        uint32_t vga_addr = 0x80000000 | (1 << 11) | 0x10;
         outl(0xCF8, vga_addr);
         uint32_t bar0 = inl(0xCFC);
-        serial_puts("[BOOT] VGA BAR0 (C direct): ");
-        serial_hex((uint64_t)bar0);
-        serial_puts("\r\n");
-        /* Set as fallback if Simple code can't read it */
         if (bar0 & 0xFFFFFFF0) {
             g_fb_addr = (uint64_t)(bar0 & 0xFFFFFFF0);
-            serial_puts("[BOOT] Fallback fb addr: ");
-            serial_hex(g_fb_addr);
-            serial_puts("\r\n");
         }
     }
 
@@ -3221,6 +3209,22 @@ RuntimeValue rt_panic(RuntimeValue msg)
     /* Halt the system */
     for (;;) __asm__ volatile("hlt");
     return NIL_VALUE; /* unreachable */
+}
+
+/* rt_function_not_found — called when cross-module method resolution fails.
+ * Prints the unresolved function name to serial and returns NIL.
+ * The Cranelift backend calls this with (name_ptr, name_len) when a method
+ * cannot be resolved at compile time. */
+RuntimeValue rt_function_not_found(RuntimeValue name_ptr, RuntimeValue name_len)
+{
+    serial_puts("[WARN] unresolved fn: ");
+    if (name_ptr) {
+        const char *p = (const char *)(uintptr_t)name_ptr;
+        int64_t len = (int64_t)name_len;
+        for (int64_t i = 0; i < len && i < 128; i++) serial_putchar(p[i]);
+    }
+    serial_puts("\r\n");
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_assert(RuntimeValue cond)

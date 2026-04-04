@@ -1402,7 +1402,9 @@ noop_stubs!(
 #[no_mangle]
 pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> i64 {
     let args_vec = extract_rt_string_array(args);
+    eprintln!("[rt_run_tests] args: {:?}", args_vec);
     let mut options = simple_driver::cli::test_runner::parse_test_args(&args_vec);
+    eprintln!("[rt_run_tests] path: {:?}", options.path);
     options.gc_log = gc_log != 0;
     options.gc_off = gc_off != 0;
 

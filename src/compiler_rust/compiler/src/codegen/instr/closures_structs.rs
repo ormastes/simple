@@ -427,6 +427,14 @@ fn try_compile_builtin_method_call<M: Module>(
         }
     }
 
+    // Numeric type conversion methods — in the tagged RuntimeValue ABI,
+    // all integers are i64 so conversions are identity (masking for narrowing).
+    // This handles to_u8, to_u16, to_u32, to_u64, to_i8, to_i16, to_i32, to_i64, to_f32, to_f64.
+    if method.starts_with("to_u") || method.starts_with("to_i") || method.starts_with("to_f") {
+        // All numeric conversions are identity ops in the tagged value ABI
+        return Ok(Some(receiver_val));
+    }
+
     // Map method names to runtime functions
     let runtime_func = match method {
         // String methods
