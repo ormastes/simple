@@ -17,6 +17,7 @@ use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, CompiledModule}
 use compiler.backend.c_backend_translate_ops.*
+use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_error_type_definitions, emit_error_converting_wrapper}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
 from hir_definitions import {HirField}
 from hir_types import {HirType}
@@ -682,6 +683,15 @@ class MirToC:
         self.builder.emit_raw(r"// @export(" + "\"C\"" + r") ABI Wrappers")
         self.builder.emit_raw(r"// ================================================================")
         self.builder.emit_blank()
+
+        # Emit error type infrastructure if any export returns Result<T,E>
+        var has_result_exports = false
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c and is_result_type(func.signature.return_type):
+                has_result_exports = true
+        if has_result_exports:
+            self.builder.emit_raw(emit_error_type_definitions())
 
         # Emit function wrappers
         for _sym in module.functions.keys():
