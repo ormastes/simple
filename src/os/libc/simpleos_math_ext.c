@@ -229,6 +229,9 @@ double log(double x) {
     if (x < 0.0)  return _make_double(0x7FF8000000000000ULL); /* NaN */
     if (x == 0.0) return -_make_double(0x7FF0000000000000ULL); /* -inf */
     if (x != x)   return x; /* NaN */
+    /* +inf → +inf */
+    { double_bits ib; ib.f = x;
+      if ((ib.u & 0x7FFFFFFFFFFFFFFFULL) == 0x7FF0000000000000ULL) return x; }
 
     /* Argument reduction: x = m * 2^e where 1 <= m < 2
      * log(x) = e * ln(2) + log(m) */

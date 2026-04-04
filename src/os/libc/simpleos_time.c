@@ -226,11 +226,13 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
         if (*fmt) fmt++;
     }
 
-    /* Null-terminate */
-    if (pos < max)
+    /* Null-terminate and check for truncation */
+    if (pos < max) {
         s[pos] = '\0';
-    else if (max > 0)
+        return pos;  /* Success: return number of bytes written (excluding NUL) */
+    }
+    /* Buffer too small — POSIX requires return 0 */
+    if (max > 0)
         s[max - 1] = '\0';
-
-    return pos;
+    return 0;
 }

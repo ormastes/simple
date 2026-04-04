@@ -11,6 +11,7 @@
 #include "include/math.h"
 #include "include/string.h"
 #include <stddef.h>
+#include <stdint.h>
 
 /* ====================================================================
  * Internal: format a double into a buffer
@@ -114,15 +115,16 @@ int _fmt_float(char *buf, size_t max, double val, char spec, int width, int prec
         goto pad_and_done;
     }
 
-    /* Infinity check via comparison */
-    if (val > 1e308) {
-        pos += _fputs(buf, max, pos, is_upper ? "INF" : "inf");
-        goto pad_and_done;
-    }
-    if (val < -1e308) {
-        pos += _fput(buf, max, pos, '-');
-        pos += _fputs(buf, max, pos, is_upper ? "INF" : "inf");
-        goto pad_and_done;
+    /* Infinity check via IEEE 754 bit pattern (exponent=0x7FF, mantissa=0) */
+    {
+        union { double d; uint64_t u; } ub;
+        ub.d = val;
+        uint64_t abs_bits = ub.u & 0x7FFFFFFFFFFFFFFFULL;
+        if (abs_bits == 0x7FF0000000000000ULL) {
+            if (ub.u >> 63) pos += _fput(buf, max, pos, '-');
+            pos += _fputs(buf, max, pos, is_upper ? "INF" : "inf");
+            goto pad_and_done;
+        }
     }
 
     /* Handle sign */
