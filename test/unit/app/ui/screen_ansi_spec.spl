@@ -2,26 +2,76 @@
 # Screen ANSI Style Splice Regression Tests
 #
 # Verifies that put_text / put_styled correctly handle ANSI escape
-# sequences across splice boundaries.  Covers:
-#   - Compound RESET+STYLE tokens in prefix (the exact bug path)
-#   - Style restore for suffix tokens that inherited contextually
-#   - Trailing RESET to prevent cross-row style leak
-#   - Visible-width stability across repeated overwrites
-#   - Plain text contiguity (.contains() works)
+# sequences across splice boundaries.  Each test checks the ANSI
+# style active at specific visual columns — not just "somewhere in
+# the line" — to guard the exact splice logic.
 
 use app.ui.tui.screen.{Screen}
 use app.ui.render.ansi.{BOLD, CYAN, DIM, RESET}
 
 # =========================================================================
-# Helpers
+# Helpers — column-level style inspection
 # =========================================================================
 
-fn has_escape(s: text, esc: text) -> bool:
-    """Check if line contains a specific ANSI escape sequence."""
-    s.contains(esc)
+fn _to_chars(s: text) -> [text]:
+    if s == "":
+        return []
+    val parts = s.split("")
+    var result: [text] = []
+    for p in parts:
+        if p != "":
+            result = result + [p]
+    return result
+
+fn style_at_col(line: text, col: i32) -> text:
+    """Return the ANSI style escape active at visual column `col`.
+
+    Walks the line character-by-character, tracking escape state.
+    Returns the last style-setting escape seen before column `col`,
+    or "" if unstyled.  A RESET clears the tracked style.
+    """
+    val chars = _to_chars(line)
+    var style = ""
+    var vis = 0
+    var in_esc = false
+    var pending = ""
+    for ch in chars:
+        if ch == "\u{001b}":
+            in_esc = true
+            pending = "{pending}{ch}"
+        elif in_esc:
+            pending = "{pending}{ch}"
+            if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch):
+                in_esc = false
+                if pending.contains("\u{001b}[0m") or pending.contains("\u{001b}[m"):
+                    style = ""
+                else:
+                    style = pending
+                pending = ""
+        else:
+            if vis == col:
+                return style
+            vis = vis + 1
+    return style
+
+fn char_at_col(line: text, col: i32) -> text:
+    """Return the visible character at visual column `col`."""
+    val chars = _to_chars(line)
+    var vis = 0
+    var in_esc = false
+    for ch in chars:
+        if ch == "\u{001b}":
+            in_esc = true
+        elif in_esc:
+            if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch):
+                in_esc = false
+        else:
+            if vis == col:
+                return ch
+            vis = vis + 1
+    return ""
 
 fn visible_width(s: text) -> i32:
-    """Count visible (non-ANSI) characters in s."""
     var w = 0
     var in_esc = false
     val parts = s.split("")
@@ -37,110 +87,147 @@ fn visible_width(s: text) -> i32:
             w = w + 1
     w
 
+fn ends_with_reset(s: text) -> bool:
+    """Check that the line ends with a RESET escape (possibly with
+    trailing whitespace) so style does not leak to the next row."""
+    # Find the last ESC[0m — everything after it must be spaces or empty
+    val marker = "\u{001b}[0m"
+    if not s.contains(marker):
+        return false
+    val parts = s.split(marker)
+    val tail = parts[parts.len() - 1]
+    val tail_chars = _to_chars(tail)
+    for ch in tail_chars:
+        if ch != " " and ch != "":
+            return false
+    true
+
 # =========================================================================
 # Tests
 # =========================================================================
 
-describe "Screen.put_text ANSI style handling":
+describe "Screen.put_text ANSI style splice":
 
     describe "compound RESET+STYLE prefix tokens":
-        # This is the exact bug path: put_styled(0,0,"AB",BOLD) then
-        # put_styled(0,2,"CD",CYAN) creates a token "\e[0m\e[36mC" at
-        # col 2.  The prefix scan must parse both escapes left-to-right
-        # to correctly determine prefix_active = CYAN (not "").
+        # Bug path: put_styled(0,0,"AB",BOLD) then put_styled(0,2,"CD",CYAN)
+        # creates token "\e[0m\e[36mC" at col 2.  A naive prefix scan sees
+        # the RESET and concludes prefix_active="", missing the CYAN.  The
+        # fix parses all escapes left-to-right via _scan_token_style.
 
-        it "preserves CYAN when overwriting after compound prefix token":
+        it "col 0 is BOLD, col 2 is CYAN, col 4 is unstyled after overwrite":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "AB", BOLD)
             s = s.put_styled(0, 2, "CD", CYAN)
             s = s.put_text(0, 4, "X")
             val line = s.buffer[0]
-            expect has_escape(line, "\u{001b}[36m") to_equal(true)
+            # col 0: A with BOLD
+            expect style_at_col(line, 0) to_equal(BOLD)
+            expect char_at_col(line, 0) to_equal("A")
+            # col 2: C with CYAN (compound token parsed correctly)
+            expect style_at_col(line, 2).contains("\u{001b}[36m") to_equal(true)
+            expect char_at_col(line, 2) to_equal("C")
+            # col 4: X should be unstyled (gap RESET cleared prefix CYAN)
+            expect style_at_col(line, 4) to_equal("")
+            expect char_at_col(line, 4) to_equal("X")
 
-        it "preserves BOLD when overwriting after compound prefix token":
-            var s = Screen.new(10, 1)
-            s = s.put_styled(0, 0, "AB", BOLD)
-            s = s.put_styled(0, 2, "CD", CYAN)
-            s = s.put_text(0, 4, "X")
-            val line = s.buffer[0]
-            expect has_escape(line, "\u{001b}[1m") to_equal(true)
-
-        it "restores CYAN for suffix after mid-block overwrite with compound prefix":
+        it "mid-block overwrite inside CYAN preserves CYAN for suffix":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "AB", BOLD)
             s = s.put_styled(0, 2, "CDEF", CYAN)
             s = s.put_text(0, 3, "X")
             val line = s.buffer[0]
-            # "EF" should still be CYAN
-            expect has_escape(line, "\u{001b}[36m") to_equal(true)
+            # col 2: C with CYAN (prefix, unchanged)
+            expect style_at_col(line, 2).contains("\u{001b}[36m") to_equal(true)
+            # col 4: E should still be CYAN (suffix style restored)
+            expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
+            expect char_at_col(line, 4) to_equal("E")
 
-    describe "suffix style restore":
-        # When the overwritten range contains the style-setting escape
-        # that suffix tokens depend on, put_text must re-emit that style.
+    describe "suffix style restore across block boundary":
 
-        it "restores CYAN when overwriting across styled block boundary":
+        it "keeps CYAN on suffix B after overwriting across BOLD/CYAN boundary":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "AAA", BOLD)
             s = s.put_styled(0, 3, "BBB", CYAN)
             s = s.put_text(0, 2, "XX")
             val line = s.buffer[0]
-            # "B" at col 4 should still be CYAN
-            expect has_escape(line, "\u{001b}[36m") to_equal(true)
+            # col 0: A still BOLD
+            expect style_at_col(line, 0) to_equal(BOLD)
+            # col 2: X (overwrite) should be unstyled
+            expect char_at_col(line, 2) to_equal("X")
+            expect style_at_col(line, 2) to_equal("")
+            # col 4: B should be CYAN (style restored for suffix)
+            expect char_at_col(line, 4) to_equal("B")
+            expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
 
-        it "restores CYAN when overwriting first char of styled block":
+        it "restores CYAN when overwriting the first char of a CYAN block":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 3, "HELLO", CYAN)
             s = s.put_text(0, 3, "X")
             val line = s.buffer[0]
-            # "ELLO" should still be CYAN
-            expect has_escape(line, "\u{001b}[36m") to_equal(true)
+            # col 3: X is the overwrite — unstyled
+            expect char_at_col(line, 3) to_equal("X")
+            # col 4: E should still be CYAN
+            expect char_at_col(line, 4) to_equal("E")
+            expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
 
-    describe "partial overwrite preserves inherited style":
-        # Overwriting inside a styled block should not kill the style
-        # for remaining characters.
+    describe "partial overwrite inside styled block":
 
-        it "keeps BOLD for suffix when overwriting inside BOLD block":
+        it "suffix keeps BOLD, overwritten char does not":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "ABCDE", BOLD)
             s = s.put_text(0, 2, "X")
             val line = s.buffer[0]
-            # "CDE" should still be BOLD
-            expect has_escape(line, "\u{001b}[1m") to_equal(true)
-            # "X" should NOT be BOLD (gap RESET protects it)
-            # i.e. the BOLD does not bleed uninterrupted through X
-            expect line.contains("\u{001b}[1mABXCDE") to_equal(false)
+            # col 0: A is BOLD (prefix)
+            expect style_at_col(line, 0) to_equal(BOLD)
+            # col 2: X is overwrite — should NOT be BOLD
+            expect char_at_col(line, 2) to_equal("X")
+            expect style_at_col(line, 2) to_equal("")
+            # col 3: C should still be BOLD (suffix style restored)
+            expect char_at_col(line, 3) to_equal("C")
+            expect style_at_col(line, 3) to_equal(BOLD)
+            # col 4: D should still be BOLD
+            expect style_at_col(line, 4) to_equal(BOLD)
 
-    describe "RESET not lost when overwriting past styled block end":
+    describe "RESET not lost past styled block end":
 
-        it "prevents BOLD from bleeding into plain overwrite":
+        it "BOLD does not bleed into plain overwrite at boundary":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "AB", BOLD)
             s = s.put_text(0, 2, "XY")
             val line = s.buffer[0]
-            # BOLD should NOT bleed into XY
-            expect line.contains("\u{001b}[1mABXY") to_equal(false)
-            # Line should contain a RESET
-            expect has_escape(line, "\u{001b}[0m") to_equal(true)
+            # col 0: A is BOLD
+            expect style_at_col(line, 0) to_equal(BOLD)
+            # col 2: X must be unstyled
+            expect char_at_col(line, 2) to_equal("X")
+            expect style_at_col(line, 2) to_equal("")
+            # col 3: Y must be unstyled
+            expect style_at_col(line, 3) to_equal("")
 
     describe "cross-row style leak prevention":
 
-        it "appends trailing RESET after full-width styled overwrite":
+        it "row ends with RESET after full-width styled write + partial overwrite":
             var s = Screen.new(5, 2)
             s = s.put_styled(0, 0, "ABCDE", BOLD)
             s = s.put_text(0, 3, "X")
-            val line = s.buffer[0]
-            expect has_escape(line, "\u{001b}[0m") to_equal(true)
+            expect ends_with_reset(s.buffer[0]) to_equal(true)
 
-        it "appends trailing RESET after end-of-line styled write":
+        it "row ends with RESET after end-of-line styled write + overwrite":
             var s = Screen.new(10, 2)
             s = s.put_styled(0, 7, "ABC", CYAN)
             s = s.put_text(0, 8, "X")
-            val line = s.buffer[0]
-            expect has_escape(line, "\u{001b}[0m") to_equal(true)
+            expect ends_with_reset(s.buffer[0]) to_equal(true)
+
+        it "row 1 is not affected by row 0 style":
+            var s = Screen.new(5, 2)
+            s = s.put_styled(0, 0, "HELLO", BOLD)
+            s = s.put_text(0, 2, "X")
+            s = s.put_text(1, 0, "plain")
+            # row 1 col 0 should be unstyled
+            expect style_at_col(s.buffer[1], 0) to_equal("")
 
     describe "visible width stability":
 
-        it "maintains visible width after repeated overlapping writes":
+        it "stable after 5 overlapping writes":
             var s = Screen.new(10, 1)
             s = s.put_styled(0, 0, "ABCDE", BOLD)
             s = s.put_text(0, 1, "X")
@@ -149,7 +236,7 @@ describe "Screen.put_text ANSI style handling":
             s = s.put_text(0, 7, "W")
             expect visible_width(s.buffer[0]) to_equal(10)
 
-        it "maintains visible width after three styled blocks":
+        it "stable after three styled blocks + gap overwrite":
             var s = Screen.new(20, 1)
             s = s.put_styled(0, 0, "AAA", BOLD)
             s = s.put_styled(0, 5, "BBB", CYAN)
@@ -157,17 +244,50 @@ describe "Screen.put_text ANSI style handling":
             s = s.put_text(0, 3, "X")
             expect visible_width(s.buffer[0]) to_equal(20)
 
-    describe "plain text contiguity":
+    describe "round-trip stability":
+        # Write styled content, overwrite, then overwrite again.
+        # The second overwrite reads back a line that already has
+        # splice-generated ANSI — it must remain correct.
 
-        it "keeps plain text contiguous for .contains() checks":
-            var s = Screen.new(20, 3)
+        it "two successive overwrites on same row produce correct styles":
+            var s = Screen.new(10, 1)
+            s = s.put_styled(0, 0, "ABCDE", BOLD)
+            s = s.put_styled(0, 5, "FGHIJ", CYAN)
+            # First overwrite: plain X at col 3
+            s = s.put_text(0, 3, "X")
+            # Second overwrite: plain Y at col 7 (reads the spliced line)
+            s = s.put_text(0, 7, "Y")
+            val line = s.buffer[0]
+            # col 0: BOLD A
+            expect style_at_col(line, 0) to_equal(BOLD)
+            # col 3: X unstyled
+            expect char_at_col(line, 3) to_equal("X")
+            expect style_at_col(line, 3) to_equal("")
+            # col 4: D still BOLD (suffix restored from first overwrite)
+            expect style_at_col(line, 4) to_equal(BOLD)
+            # col 5: F still CYAN
+            expect style_at_col(line, 5).contains("\u{001b}[36m") to_equal(true)
+            # col 7: Y unstyled
+            expect char_at_col(line, 7) to_equal("Y")
+            expect style_at_col(line, 7) to_equal("")
+            # col 8: I still CYAN (suffix restored from second overwrite)
+            expect style_at_col(line, 8).contains("\u{001b}[36m") to_equal(true)
+            # visible width must be 10
+            expect visible_width(line) to_equal(10)
+            # line must end with RESET
+            expect ends_with_reset(line) to_equal(true)
+
+    describe "plain text and styled text contiguity":
+
+        it "plain text is contiguous for .contains()":
+            var s = Screen.new(20, 1)
             s = s.put_text(0, 0, "Hello")
             s = s.put_text(0, 10, "World")
             expect s.buffer[0].contains("Hello") to_equal(true)
             expect s.buffer[0].contains("World") to_equal(true)
 
-        it "keeps styled text contiguous within put_styled call":
-            var s = Screen.new(20, 3)
+        it "styled text is contiguous within a single put_styled":
+            var s = Screen.new(20, 1)
             s = s.put_styled(0, 0, "Bold", BOLD)
             s = s.put_styled(0, 10, "Cyan", CYAN)
             expect s.buffer[0].contains("Bold") to_equal(true)
@@ -175,8 +295,13 @@ describe "Screen.put_text ANSI style handling":
 
     describe "Unicode box drawing":
 
-        it "renders box corners without crash":
+        it "draw_box renders corners and borders at correct positions":
             var s = Screen.new(20, 5)
             s = s.draw_box(0, 0, 20, 5, "Test")
-            expect s.buffer[0].contains("\u{250c}") to_equal(true)
-            expect s.buffer[4].contains("\u{2514}") to_equal(true)
+            expect char_at_col(s.buffer[0], 0) to_equal("\u{250c}")
+            expect char_at_col(s.buffer[0], 19) to_equal("\u{2510}")
+            expect char_at_col(s.buffer[4], 0) to_equal("\u{2514}")
+            expect char_at_col(s.buffer[4], 19) to_equal("\u{2518}")
+            # Sides
+            expect char_at_col(s.buffer[2], 0) to_equal("\u{2502}")
+            expect char_at_col(s.buffer[2], 19) to_equal("\u{2502}")
