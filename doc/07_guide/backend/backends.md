@@ -285,7 +285,7 @@ Lower is better for all metrics. LLVM produces the fastest and smallest binaries
 | Issue | Cause | Fix |
 |-------|-------|-----|
 | Backend not found | Not installed | `bin/simple build --list-backends` to check |
-| LLVM version mismatch | Wrong LLVM version | Install LLVM 15-17 |
+| LLVM version mismatch | Wrong LLVM version | Install LLVM 16-19 (see `llvm_backend_policy.md`) |
 | Cranelift codegen error | Unsupported instruction | Try `--backend=llvm` |
 | C++ compilation failure | Missing headers | Install C++20-capable compiler |
 | Slow debug builds | Using LLVM for debug | Use `--backend=cranelift` for debug |
@@ -295,6 +295,7 @@ Lower is better for all metrics. LLVM produces the fastest and smallest binaries
 
 ## Related Documentation
 
+- **LLVM backend policy**: `doc/07_guide/backend/llvm_backend_policy.md`
 - GPU backends: `doc/07_guide/apps/gpu.md`
 - Bare-metal targets: `doc/07_guide/backend/baremetal.md`
 - Vulkan backend: `doc/07_guide/backend/vulkan.md`
