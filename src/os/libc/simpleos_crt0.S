@@ -28,9 +28,17 @@ _start:
     /* Align stack to 16 bytes (ABI requirement) */
     and     rsp, -16
 
-    /* Call main(argc=0, argv=NULL) */
+    /* Initialize C++ constructors and libc (.init_array) */
+    call    __libc_init_array
+
+    /* Set environ to NULL (no initial environment from kernel yet) */
+    lea     rdi, [rip + environ]
+    mov     qword ptr [rdi], 0
+
+    /* Call main(argc=0, argv=NULL, envp=NULL) */
     xor     edi, edi            /* argc = 0 */
     xor     esi, esi            /* argv = NULL */
+    xor     edx, edx            /* envp = NULL */
     call    main
 
     /* Exit with main's return value */
@@ -50,3 +58,4 @@ _start:
  */
 .weak __bss_start
 .weak __bss_end
+.weak environ

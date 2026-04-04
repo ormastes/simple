@@ -1,0 +1,903 @@
+# Ed25519 — Pure Simple Digital Signatures (RFC 8032)
+#
+# Implements Ed25519 signing and verification for SimpleOS.
+# No SFFI/Rust FFI — pure Simple language, suitable for baremetal.
+#
+# Uses the twisted Edwards curve: -x^2 + y^2 = 1 + d*x^2*y^2
+# where d = -121665/121666 mod p, p = 2^255 - 19.
+#
+# Reuses Fe25519 field arithmetic from curve25519.spl.
+# Requires SHA-512 from sha512.spl.
+#
+# Reference: RFC 8032 (Edwards-Curve Digital Signature Algorithm)
+# Reference: HWCD08 (Twisted Edwards Curves Revisited)
+
+use os.crypto.curve25519.{Fe25519, fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert, fe_reduce, fe_from_bytes, fe_to_bytes}
+use os.crypto.sha512.{sha512}
+
+# ============================================================================
+# Extended Point on Ed25519
+# ============================================================================
+
+struct EdPoint:
+    """Point on the Ed25519 Edwards curve in extended coordinates (X, Y, Z, T).
+
+    Represents the affine point (X/Z, Y/Z) with T = X*Y/Z.
+    """
+    x: Fe25519
+    y: Fe25519
+    z: Fe25519
+    t: Fe25519
+
+# ============================================================================
+# Field Helpers (supplementing curve25519.spl)
+# ============================================================================
+
+fn fe_neg(a: Fe25519) -> Fe25519:
+    """Negate a field element: -a mod p."""
+    fe_sub(fe_zero(), a)
+
+fn fe_is_negative(a: Fe25519) -> bool:
+    """Check if the field element is "negative" (low bit of canonical form is 1)."""
+    val bytes = fe_to_bytes(a)
+    (bytes[0] & 1) == 1
+
+fn fe_pow2252m3(u: Fe25519) -> Fe25519:
+    """Compute u^(2^252 - 3) mod p.
+
+    This is u^((p+3)/8 - 1) which is useful for square root computation.
+    (p+3)/8 = 2^252 - 2, so u^((p+3)/8) = u * u^(2^252-3).
+    Uses the same addition-chain structure as fe_invert.
+    """
+    # z^2
+    var z2 = fe_sq(u)
+
+    # z^(2^2) = z^4
+    var t = fe_sq(z2)
+    # z^(2^3) = z^8
+    t = fe_sq(t)
+
+    # z^9 = z^8 * z
+    var z9 = fe_mul(t, u)
+    # z^11 = z^9 * z^2
+    var z11 = fe_mul(z9, z2)
+
+    # z^22
+    t = fe_sq(z11)
+    # z^31 = z^22 * z^9
+    var z_2_5_0 = fe_mul(t, z9)
+
+    # z^(2^10 - 1)
+    t = fe_sq(z_2_5_0)
+    var i: u64 = 1
+    while i < 5:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = fe_mul(t, z_2_5_0)
+
+    # z^(2^20 - 1)
+    t = fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^40 - 1)
+    t = fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_20_0)
+
+    # z^(2^50 - 1)
+    i = 0
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^100 - 1)
+    t = fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = fe_mul(t, z_2_50_0)
+
+    # z^(2^200 - 1)
+    t = fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_100_0)
+
+    # z^(2^250 - 1)
+    i = 0
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_50_0)
+
+    # z^(2^252 - 4)
+    t = fe_sq(t)
+    t = fe_sq(t)
+
+    # z^(2^252 - 3) = z^(2^252 - 4) * z
+    fe_mul(t, u)
+
+fn fe_sqrt(u: Fe25519) -> Fe25519:
+    """Compute the square root of u mod p, if it exists.
+
+    Uses u^((p+3)/8) with adjustment by sqrt(-1) if needed.
+    For p = 2^255 - 19, (p+3)/8 = 2^252 - 2.
+
+    Returns a root r such that r^2 = u. If u is not a quadratic residue,
+    the result is unspecified (caller should verify r^2 == u).
+    """
+    # r = u^((p+3)/8) = u * u^(2^252 - 3)
+    val r_base = fe_mul(u, fe_pow2252m3(u))
+
+    # Check: r^2 == u?
+    val r_sq = fe_sq(r_base)
+    val check = fe_sub(r_sq, u)
+    val check_reduced = fe_reduce(check)
+
+    # If r^2 == u, we're done
+    if check_reduced.l0 == 0:
+        if check_reduced.l1 == 0:
+            if check_reduced.l2 == 0:
+                if check_reduced.l3 == 0:
+                    if check_reduced.l4 == 0:
+                        return r_base
+
+    # Otherwise try r * sqrt(-1)
+    # sqrt(-1) = 2^((p-1)/4) mod p
+    # We compute sqrt(-1) via the pow chain
+    val sqrt_m1 = _fe_sqrt_m1()
+    val r_adj = fe_mul(r_base, sqrt_m1)
+
+    r_adj
+
+fn _fe_sqrt_m1() -> Fe25519:
+    """Compute sqrt(-1) mod p = 2^((p-1)/4) mod p.
+
+    p-1 = 2^255 - 20, so (p-1)/4 = 2^253 - 5.
+    We compute 2^(2^253 - 5) mod p.
+
+    sqrt(-1) = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
+    """
+    # Precomputed sqrt(-1) as bytes (little-endian)
+    var bytes: [u8] = [
+        0xb0, 0xa0, 0x0e, 0x4a, 0x27, 0x1b, 0xee, 0xc4,
+        0x78, 0xe4, 0x2f, 0xad, 0x06, 0x18, 0x43, 0x2f,
+        0xa7, 0xd7, 0xfb, 0x3d, 0x99, 0x00, 0x4d, 0x2b,
+        0x0b, 0xdf, 0xc1, 0x4f, 0x80, 0x24, 0x83, 0x2b
+    ]
+    fe_from_bytes(bytes)
+
+# ============================================================================
+# Curve Constant d
+# ============================================================================
+
+fn _ed25519_d() -> Fe25519:
+    """Compute d = -121665/121666 mod p = -121665 * inv(121666) mod p.
+
+    d = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
+    """
+    # Precomputed d as bytes (little-endian)
+    var bytes: [u8] = [
+        0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
+        0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
+        0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
+        0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
+    ]
+    fe_from_bytes(bytes)
+
+fn _ed25519_2d() -> Fe25519:
+    """Compute 2*d mod p. Used in point addition formulas."""
+    val d = _ed25519_d()
+    fe_add(d, d)
+
+# ============================================================================
+# Ed25519 Base Point B
+# ============================================================================
+
+fn _ed25519_base_point() -> EdPoint:
+    """Return the Ed25519 base point B.
+
+    B has y = 4/5 mod p, and x is the positive (even) square root.
+
+    By = 0x6666666666666666666666666666666666666666666666666666666666666658
+    Bx = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
+    """
+    # Bx in little-endian
+    var bx_bytes: [u8] = [
+        0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
+        0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
+        0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
+        0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21
+    ]
+    # By in little-endian
+    var by_bytes: [u8] = [
+        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66
+    ]
+    val bx = fe_from_bytes(bx_bytes)
+    val by = fe_from_bytes(by_bytes)
+    EdPoint(
+        x: bx,
+        y: by,
+        z: fe_one(),
+        t: fe_mul(bx, by)
+    )
+
+# ============================================================================
+# Extended Coordinate Point Operations (HWCD08)
+# ============================================================================
+
+fn ed_point_identity() -> EdPoint:
+    """Return the neutral element (identity point): (0, 1, 1, 0)."""
+    EdPoint(x: fe_zero(), y: fe_one(), z: fe_one(), t: fe_zero())
+
+fn ed_point_add(p1: EdPoint, p2: EdPoint) -> EdPoint:
+    """Add two points in extended coordinates.
+
+    Uses unified addition formula from HWCD08 for twisted Edwards curve
+    -x^2 + y^2 = 1 + d*x^2*y^2 (a = -1).
+
+    A = X1*X2, B = Y1*Y2, C = T1*d*T2, D = Z1*Z2
+    E = (X1+Y1)*(X2+Y2) - A - B
+    F = D - C, G = D + C, H = B + A  (+ because a=-1: B - a*A = B+A)
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    """
+    val d = _ed25519_d()
+
+    val a = fe_mul(p1.x, p2.x)
+    val b = fe_mul(p1.y, p2.y)
+    val c = fe_mul(fe_mul(p1.t, p2.t), d)
+    val dd = fe_mul(p1.z, p2.z)
+
+    val x1_plus_y1 = fe_add(p1.x, p1.y)
+    val x2_plus_y2 = fe_add(p2.x, p2.y)
+    val e = fe_sub(fe_sub(fe_mul(x1_plus_y1, x2_plus_y2), a), b)
+
+    val f = fe_sub(dd, c)
+    val g = fe_add(dd, c)
+    val h = fe_add(b, a)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+fn ed_point_double(p1: EdPoint) -> EdPoint:
+    """Double a point in extended coordinates.
+
+    Uses dedicated doubling formula from HWCD08 for a = -1:
+    A = X1^2, B = Y1^2, C = 2*Z1^2
+    D = -A (since a = -1), E = (X1+Y1)^2 - A - B
+    G = D + B, F = G - C, H = D - B
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    """
+    val a = fe_sq(p1.x)
+    val b = fe_sq(p1.y)
+    val c = fe_add(fe_sq(p1.z), fe_sq(p1.z))
+
+    val d = fe_neg(a)
+    val x_plus_y = fe_add(p1.x, p1.y)
+    val e = fe_sub(fe_sub(fe_sq(x_plus_y), a), b)
+
+    val g = fe_add(d, b)
+    val f = fe_sub(g, c)
+    val h = fe_sub(d, b)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
+    """Scalar multiplication: scalar * P using double-and-add.
+
+    scalar: 32-byte little-endian scalar.
+    Iterates from the highest bit down to bit 0.
+    """
+    var result = ed_point_identity()
+    var q = p
+
+    # Process all 256 bits, from bit 0 up, using double-and-add
+    # (Process low to high: for each bit, if set add current Q, then double Q)
+    var byte_idx: u64 = 0
+    while byte_idx < 32:
+        val byte_val = scalar[byte_idx]
+        var bit: u64 = 0
+        while bit < 8:
+            if ((byte_val.to_u64() >> bit) & 1) == 1:
+                result = ed_point_add(result, q)
+            q = ed_point_double(q)
+            bit = bit + 1
+        byte_idx = byte_idx + 1
+
+    result
+
+# ============================================================================
+# Point Encoding / Decoding (RFC 8032 section 5.1.2)
+# ============================================================================
+
+fn ed_point_encode(p: EdPoint) -> [u8]:
+    """Encode a point to 32 bytes.
+
+    Encoding: y-coordinate in little-endian, with top bit of last byte
+    set to the sign (low bit) of the x-coordinate.
+    """
+    val z_inv = fe_invert(p.z)
+    val x = fe_mul(p.x, z_inv)
+    val y = fe_mul(p.y, z_inv)
+
+    var encoded = fe_to_bytes(y)
+
+    # Set top bit of last byte to the sign of x
+    if fe_is_negative(x):
+        encoded[31] = encoded[31] | 0x80
+
+    encoded
+
+fn ed_point_decode(bytes: [u8]) -> EdPoint:
+    """Decode a 32-byte encoding to a point on the curve.
+
+    Extracts y from the low 255 bits, recovers x from the curve equation,
+    and uses the top bit to select the sign of x.
+
+    Returns the decoded point. If the encoding is invalid (not on curve),
+    the result is unspecified.
+    """
+    # Extract sign bit of x from top bit of last byte
+    val x_sign: u64 = (bytes[31].to_u64() >> 7) & 1
+
+    # Clear top bit to get y
+    var y_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        y_bytes.push(bytes[i])
+        i = i + 1
+    y_bytes[31] = y_bytes[31] & 0x7F
+
+    val y = fe_from_bytes(y_bytes)
+
+    # Recover x from curve equation: -x^2 + y^2 = 1 + d*x^2*y^2
+    # x^2 = (y^2 - 1) / (d*y^2 + 1)
+    val y_sq = fe_sq(y)
+    val d = _ed25519_d()
+
+    val u = fe_sub(y_sq, fe_one())         # u = y^2 - 1
+    val v = fe_add(fe_mul(d, y_sq), fe_one())  # v = d*y^2 + 1
+
+    # x = sqrt(u/v) = u * v^3 * (u * v^7)^((p-5)/8)
+    # Or equivalently: x^2 = u * v^(-1), then x = sqrt(u * v^(-1))
+    # We use: x = u * v^3 * (u * v^7)^((p-5)/8)
+    # Since (p-5)/8 = 2^252 - 3
+    val v_sq = fe_sq(v)
+    val v_cubed = fe_mul(v_sq, v)
+    val v4 = fe_sq(v_sq)
+    val v7 = fe_mul(v4, v_cubed)
+    val uv7 = fe_mul(u, v7)
+
+    # (u * v^7)^(2^252 - 3)
+    val uv7_pow = fe_pow2252m3(uv7)
+
+    # x = u * v^3 * (u * v^7)^(2^252 - 3)
+    var x = fe_mul(fe_mul(u, v_cubed), uv7_pow)
+
+    # Verify: v * x^2 == u?
+    val vx2 = fe_mul(v, fe_sq(x))
+    val check = fe_reduce(fe_sub(vx2, u))
+
+    if check.l0 != 0:
+        # Try v * x^2 == -u (need to multiply x by sqrt(-1))
+        val sqrt_m1 = _fe_sqrt_m1()
+        x = fe_mul(x, sqrt_m1)
+    else:
+        if check.l1 != 0:
+            val sqrt_m1 = _fe_sqrt_m1()
+            x = fe_mul(x, sqrt_m1)
+        else:
+            if check.l2 != 0:
+                val sqrt_m1 = _fe_sqrt_m1()
+                x = fe_mul(x, sqrt_m1)
+            else:
+                if check.l3 != 0:
+                    val sqrt_m1 = _fe_sqrt_m1()
+                    x = fe_mul(x, sqrt_m1)
+                else:
+                    if check.l4 != 0:
+                        val sqrt_m1 = _fe_sqrt_m1()
+                        x = fe_mul(x, sqrt_m1)
+
+    # Adjust sign of x to match the encoded sign bit
+    if fe_is_negative(x) != (x_sign == 1):
+        x = fe_neg(x)
+
+    val t = fe_mul(x, y)
+    EdPoint(x: x, y: y, z: fe_one(), t: t)
+
+# ============================================================================
+# Scalar Arithmetic modulo L (Ed25519 Group Order)
+# ============================================================================
+#
+# L = 2^252 + 27742317777372353535851937790883648493
+# In hex: L = 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed
+#
+# We represent scalars as arrays of 8 u32 limbs in little-endian order.
+# For 64-byte (512-bit) intermediates, we use 16 u32 limbs.
+
+# L as 8 u32 limbs (little-endian)
+fn _sc_L() -> [u32]:
+    """Return the group order L as 8 u32 limbs (little-endian)."""
+    var l: [u32] = []
+    l.push(0x5cf5d3ed)  # limb 0 (lowest)
+    l.push(0x5812631a)  # limb 1
+    l.push(0xa2f79cd6)  # limb 2
+    l.push(0x14def9de)  # limb 3
+    l.push(0x00000000)  # limb 4
+    l.push(0x00000000)  # limb 5
+    l.push(0x00000000)  # limb 6
+    l.push(0x10000000)  # limb 7 (bit 252)
+    l
+
+fn _bytes_to_limbs32(b: [u8], count: u64) -> [u32]:
+    """Convert byte array to u32 limbs (little-endian), reading 'count' bytes."""
+    var limbs: [u32] = []
+    var i: u64 = 0
+    while i < count:
+        val idx = i * 4
+        var val_u32: u32 = 0
+        if idx < b.len():
+            val_u32 = val_u32 | b[idx].to_u32()
+        if (idx + 1) < b.len():
+            val_u32 = val_u32 | (b[idx + 1].to_u32() << 8)
+        if (idx + 2) < b.len():
+            val_u32 = val_u32 | (b[idx + 2].to_u32() << 16)
+        if (idx + 3) < b.len():
+            val_u32 = val_u32 | (b[idx + 3].to_u32() << 24)
+        limbs.push(val_u32)
+        i = i + 1
+    limbs
+
+fn _limbs32_to_bytes(limbs: [u32], byte_count: u64) -> [u8]:
+    """Convert u32 limbs (little-endian) to byte array."""
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < byte_count:
+        val limb_idx = i / 4
+        val byte_idx = i % 4
+        var byte_val: u8 = 0
+        if limb_idx < limbs.len():
+            byte_val = ((limbs[limb_idx].to_u64() >> (byte_idx * 8)) & 0xFF).to_u8()
+        result.push(byte_val)
+        i = i + 1
+    result
+
+fn _sc_sub_L(a: [u32]) -> [u32]:
+    """Subtract L from a (8 limbs). Returns result and sets borrow.
+    If borrow is set, a < L so the subtraction underflowed.
+    Returns a pair: (result_limbs, borrow).
+    We encode this as 9 limbs where limb[8] is the borrow flag.
+    """
+    val l = _sc_L()
+    var result: [u32] = []
+    var borrow: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val ai: u64 = a[i].to_u64()
+        val li: u64 = l[i].to_u64()
+        val diff: u64 = ai - li - borrow
+        result.push((diff & 0xFFFFFFFF).to_u32())
+        # Borrow if diff underflowed (bit 32 set in two's complement)
+        if ai < (li + borrow):
+            borrow = 1
+        else:
+            borrow = 0
+        i = i + 1
+    # Append borrow flag as 9th limb
+    result.push(borrow.to_u32())
+    result
+
+fn sc_reduce(s: [u8]) -> [u8]:
+    """Reduce a 64-byte scalar modulo L to 32 bytes.
+
+    Input: 64 bytes (512 bits), output: 32 bytes (< L).
+    Uses schoolbook reduction by repeatedly subtracting L * 2^k.
+    """
+    # Load 64 bytes into 16 u32 limbs
+    var limbs = _bytes_to_limbs32(s, 16)
+
+    # Barrett-like reduction: we reduce from the top down.
+    # L ~ 2^252, so we need to reduce the upper portion.
+    #
+    # Simple approach: interpret as a big number, then do schoolbook
+    # modular reduction. We'll use the fact that for any value v < 2^512,
+    # we can reduce mod L by repeated subtraction.
+    #
+    # More efficient: split into low 252 bits and high bits, multiply high
+    # part by appropriate constant, and reduce.
+    #
+    # For simplicity, we use the classic Barrett reduction approach:
+    # q = floor(x / L), r = x - q * L
+    #
+    # We implement a simpler iterative approach since this is not
+    # performance-critical (called once per sign/verify).
+
+    # Convert to a wide representation and reduce step by step.
+    # Process from the top: for each bit from 511 down to 252,
+    # if the bit is set, subtract L shifted to that position.
+
+    # We'll work with 16 u32 limbs (512 bits)
+    var bit: u64 = 511
+    val l = _sc_L()
+
+    while bit >= 252:
+        # Check if bit is set
+        val limb_idx = bit / 32
+        val bit_idx = bit % 32
+        val is_set = (limbs[limb_idx].to_u64() >> bit_idx) & 1
+
+        if is_set == 1:
+            # Subtract L << (bit - 252) from limbs
+            val shift = bit - 252
+            val word_shift = shift / 32
+            val bit_shift = shift % 32
+
+            var borrow: u64 = 0
+            var j: u64 = 0
+            while j < 9:
+                val target = j + word_shift
+                if target < 16:
+                    # Get the shifted L limb value
+                    var l_val: u64 = 0
+                    if j < 8:
+                        l_val = l[j].to_u64() << bit_shift
+                    # Add carry from previous limb shift
+                    if bit_shift > 0:
+                        if j > 0:
+                            if (j - 1) < 8:
+                                l_val = l_val | (l[j - 1].to_u64() >> (32 - bit_shift))
+                    val cur: u64 = limbs[target].to_u64()
+                    val sub_val = (l_val & 0xFFFFFFFF) + borrow
+                    if cur >= sub_val:
+                        limbs[target] = (cur - sub_val).to_u32()
+                        borrow = 0
+                    else:
+                        limbs[target] = ((cur + 0x100000000) - sub_val).to_u32()
+                        borrow = 1
+                j = j + 1
+
+        if bit == 252:
+            # Prevent underflow when decrementing at 252
+            break
+        bit = bit - 1
+
+    # Now limbs[0..7] holds a value < 2*L (approximately).
+    # Do a final conditional subtraction.
+    var low8: [u32] = []
+    var k: u64 = 0
+    while k < 8:
+        low8.push(limbs[k])
+        k = k + 1
+
+    val sub_result = _sc_sub_L(low8)
+    # If borrow (limb[8]) is 0, the subtraction was valid (a >= L), use the result
+    # If borrow is 1, a < L, keep the original
+    if sub_result[8] == 0:
+        # a >= L, use subtracted result
+        var final_limbs: [u32] = []
+        k = 0
+        while k < 8:
+            final_limbs.push(sub_result[k])
+            k = k + 1
+        return _limbs32_to_bytes(final_limbs, 32)
+
+    _limbs32_to_bytes(low8, 32)
+
+fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
+    """Compute (a * b + c) mod L, where a, b, c are 32-byte scalars.
+
+    Returns 32-byte result.
+    Uses schoolbook multiplication to produce a 64-byte product, adds c,
+    then reduces modulo L.
+    """
+    # Load a, b, c as 8 u32 limbs each
+    val a = _bytes_to_limbs32(a_bytes, 8)
+    val b = _bytes_to_limbs32(b_bytes, 8)
+    val c = _bytes_to_limbs32(c_bytes, 8)
+
+    # Schoolbook multiply a * b into 16 u64 accumulators
+    var product: [u64] = []
+    var i: u64 = 0
+    while i < 16:
+        product.push(0)
+        i = i + 1
+
+    i = 0
+    while i < 8:
+        var carry: u64 = 0
+        var j: u64 = 0
+        while j < 8:
+            val idx = i + j
+            val mul_val: u64 = a[i].to_u64() * b[j].to_u64()
+            val sum: u64 = product[idx] + mul_val + carry
+            product[idx] = sum & 0xFFFFFFFF
+            carry = sum >> 32
+            j = j + 1
+        product[i + 8] = product[i + 8] + carry
+        i = i + 1
+
+    # Add c to the product
+    var add_carry: u64 = 0
+    i = 0
+    while i < 8:
+        val sum: u64 = product[i] + c[i].to_u64() + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+    # Propagate carry through upper limbs
+    while add_carry > 0:
+        if i >= 16:
+            break
+        val sum: u64 = product[i] + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+
+    # Convert product to 64 bytes and reduce mod L
+    var prod_bytes: [u8] = []
+    i = 0
+    while i < 16:
+        val limb = product[i]
+        prod_bytes.push((limb & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 8) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 16) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 24) & 0xFF).to_u8())
+        i = i + 1
+
+    sc_reduce(prod_bytes)
+
+# ============================================================================
+# Ed25519 Scalar Clamping
+# ============================================================================
+
+fn _ed25519_clamp(h: [u8]) -> [u8]:
+    """Clamp the lower 32 bytes of SHA-512 output per Ed25519 spec.
+
+    Clear bits 0, 1, 2 of first byte.
+    Clear bit 255 (top bit of byte 31).
+    Set bit 254 of byte 31.
+    """
+    var clamped: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        clamped.push(h[i])
+        i = i + 1
+
+    clamped[0] = clamped[0] & 0xF8       # Clear bottom 3 bits
+    clamped[31] = clamped[31] & 0x7F      # Clear top bit (bit 255)
+    clamped[31] = clamped[31] | 0x40      # Set bit 254
+    clamped
+
+# ============================================================================
+# SHA-512 mod L helper
+# ============================================================================
+
+fn _sha512_modl(data: [u8]) -> [u8]:
+    """Compute SHA-512(data) then reduce the 64-byte result modulo L.
+
+    Returns 32-byte scalar.
+    """
+    val hash = sha512(data)
+    sc_reduce(hash)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
+    """Derive (private_key, public_key) from 32-byte seed.
+
+    private_key = seed (32 bytes, stored as-is)
+    public_key = A encoded (32 bytes)
+
+    Per RFC 8032 section 5.1.5:
+    1. h = SHA-512(seed)
+    2. a = clamp(h[0..32])
+    3. A = a * B
+    """
+    val h = sha512(seed)
+
+    # Extract and clamp the scalar
+    var h_low: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        h_low.push(h[i])
+        i = i + 1
+    val a = _ed25519_clamp(h_low)
+
+    # Compute public key A = a * B
+    val base = _ed25519_base_point()
+    val big_a = ed_scalar_mul(a, base)
+    val public_key = ed_point_encode(big_a)
+
+    (seed, public_key)
+
+fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    """Sign a message with Ed25519. Returns 64-byte signature (R || S).
+
+    Per RFC 8032 section 5.1.6:
+    1. h = SHA-512(seed)
+    2. a = clamp(h[0..32]), prefix = h[32..64]
+    3. r = SHA-512(prefix || message) mod L
+    4. R = r * B
+    5. S = (r + SHA-512(R || A || message) * a) mod L
+    6. signature = R_encoded || S_encoded
+    """
+    val h = sha512(private_seed)
+
+    # Extract scalar a and nonce prefix
+    var h_low: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        h_low.push(h[i])
+        i = i + 1
+    val a = _ed25519_clamp(h_low)
+
+    var prefix: [u8] = []
+    i = 32
+    while i < 64:
+        prefix.push(h[i])
+        i = i + 1
+
+    # r = SHA-512(prefix || message) mod L
+    var r_input: [u8] = []
+    i = 0
+    while i < prefix.len():
+        r_input.push(prefix[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        r_input.push(message[i])
+        i = i + 1
+    val r = _sha512_modl(r_input)
+
+    # R = r * B
+    val base = _ed25519_base_point()
+    val big_r = ed_scalar_mul(r, base)
+    val r_encoded = ed_point_encode(big_r)
+
+    # k = SHA-512(R || A || message) mod L
+    var k_input: [u8] = []
+    i = 0
+    while i < 32:
+        k_input.push(r_encoded[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _sha512_modl(k_input)
+
+    # S = (r + k * a) mod L
+    val s = sc_muladd(k, a, r)
+
+    # Signature = R || S (64 bytes)
+    var signature: [u8] = []
+    i = 0
+    while i < 32:
+        signature.push(r_encoded[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        signature.push(s[i])
+        i = i + 1
+
+    signature
+
+fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an Ed25519 signature.
+
+    Per RFC 8032 section 5.1.7:
+    1. Split signature into R (32 bytes) and S (32 bytes)
+    2. Decode R and A (public key)
+    3. k = SHA-512(R || A || message) mod L
+    4. Check: S * B == R + k * A
+
+    Returns true if signature is valid.
+    """
+    if signature.len() != 64:
+        return false
+    if public_key.len() != 32:
+        return false
+
+    # Split signature into R and S
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r_bytes.push(signature[i])
+        i = i + 1
+    while i < 64:
+        s_bytes.push(signature[i])
+        i = i + 1
+
+    # Check S < L (reject malleable signatures)
+    if _sc_is_geq_L(s_bytes):
+        return false
+
+    # Decode R and A
+    val big_r = ed_point_decode(r_bytes)
+    val big_a = ed_point_decode(public_key)
+
+    # k = SHA-512(R || A || message) mod L
+    var k_input: [u8] = []
+    i = 0
+    while i < 32:
+        k_input.push(r_bytes[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _sha512_modl(k_input)
+
+    # Compute S * B
+    val base = _ed25519_base_point()
+    val sb = ed_scalar_mul(s_bytes, base)
+
+    # Compute R + k * A
+    val ka = ed_scalar_mul(k, big_a)
+    val rhs = ed_point_add(big_r, ka)
+
+    # Compare S*B == R + k*A by encoding both and checking equality
+    val lhs_enc = ed_point_encode(sb)
+    val rhs_enc = ed_point_encode(rhs)
+
+    _bytes_equal(lhs_enc, rhs_enc)
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _sc_is_geq_L(s: [u8]) -> bool:
+    """Check if a 32-byte scalar s >= L.
+
+    Used to reject non-canonical S values in verification.
+    """
+    val limbs = _bytes_to_limbs32(s, 8)
+    val sub = _sc_sub_L(limbs)
+    # If borrow (limb[8]) is 0, s >= L
+    sub[8] == 0
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Constant-time comparison of two byte arrays."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0

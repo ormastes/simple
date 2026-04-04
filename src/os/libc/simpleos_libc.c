@@ -52,6 +52,7 @@ static uint8_t *heap_base = NULL;
 static size_t   heap_used = 0;
 static size_t   heap_size = 0;
 
+__attribute__((weak))
 void *malloc(size_t size) {
     if (size == 0) return NULL;
 
@@ -95,11 +96,13 @@ void *malloc(size_t size) {
     return ptr;
 }
 
+__attribute__((weak))
 void free(void *ptr) {
     /* Bump allocator — no individual free (sufficient for compiler bootstrapping) */
     (void)ptr;
 }
 
+__attribute__((weak))
 void *calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
     void *p = malloc(total);
@@ -107,6 +110,7 @@ void *calloc(size_t nmemb, size_t size) {
     return p;
 }
 
+__attribute__((weak))
 void *realloc(void *ptr, size_t size) {
     if (!ptr) return malloc(size);
     if (size == 0) { free(ptr); return NULL; }

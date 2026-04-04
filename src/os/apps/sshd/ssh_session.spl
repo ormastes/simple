@@ -7,7 +7,7 @@
 # The session reads/writes via socket FDs using the POSIX socket API.
 
 use os.posix.socket_compat.{posix_send_bytes, posix_recv_bytes, posix_close_socket}
-use os.crypto.sha256.{sha256}
+use os.crypto.ed25519.{ed25519_sign}
 use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_packet.{SshPacket, ssh_packet_read, ssh_packet_build, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_get_u32, ssh_get_string}
 use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_VERSION_STRING, SSH_MSG_KEXINIT, SSH_MSG_NEWKEYS, SSH_MSG_DISCONNECT, SSH_MSG_IGNORE, SSH_MSG_SERVICE_REQUEST, SSH_MSG_SERVICE_ACCEPT, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
@@ -178,8 +178,7 @@ impl SshSession:
         # Compute shared secret
         val shared_secret = ssh_kex_compute_shared(server_private, client_public)
 
-        # Build host key blob: string "hmac-sha256@simpleos" + string public_key_data
-        # Custom algorithm — uses HMAC-SHA-256 for signing (not Ed25519)
+        # Build host key blob: string "ssh-ed25519" + string public_key_data
         val host_key_blob = _build_host_key_blob(self.host_public_key)
 
         # Compute exchange hash
@@ -198,11 +197,10 @@ impl SshSession:
         if self.session_id.len() == 0:
             self.session_id = exchange_hash
 
-        # Sign the exchange hash with our host key
-        # Uses HMAC-SHA-256(host_private, exchange_hash) — proper MAC construction
-        val signature = _sign_exchange_hash(self.host_private_key, exchange_hash)
+        # Sign the exchange hash with our Ed25519 host key (RFC 8032)
+        val signature = _sign_exchange_hash(self.host_private_key, self.host_public_key, exchange_hash)
 
-        # Build signature blob: string "hmac-sha256@simpleos" + string signature_data
+        # Build signature blob: string "ssh-ed25519" + string signature_data
         val sig_blob = _build_signature_blob(signature)
 
         # Send KEX_ECDH_REPLY
@@ -772,38 +770,34 @@ impl SshSession:
 # ============================================================================
 
 fn _build_host_key_blob(public_key: [u8]) -> [u8]:
-    """Build SSH host key blob: string key_type + string key_data.
-
-    Uses hmac-sha256@simpleos as the host key algorithm. This is a custom
-    algorithm — standard SSH clients will not recognize it. SimpleOS does
-    NOT claim Ed25519 compliance (Curve25519 is DH, not a signing scheme).
-
-    For interoperability with standard clients, Ed25519 support would need
-    to be implemented (requires Edwards-form curve arithmetic + SHA-512).
+    """Build SSH host key blob per RFC 8709.
 
     Format:
-      string "hmac-sha256@simpleos"
-      string public_key (32 bytes, Curve25519 point)
+      string "ssh-ed25519"
+      string public_key (32 bytes, Ed25519 public key)
     """
     var blob: [u8] = []
-    ssh_put_text(blob, "hmac-sha256@simpleos")
+    ssh_put_text(blob, "ssh-ed25519")
     ssh_put_string(blob, public_key)
     blob
 
-fn _sign_exchange_hash(host_private: [u8], exchange_hash: [u8]) -> [u8]:
-    """Sign the exchange hash with the host private key.
+fn _sign_exchange_hash(host_private_seed: [u8], host_public_key: [u8], exchange_hash: [u8]) -> [u8]:
+    """Sign the exchange hash with the host's Ed25519 private key.
 
-    Uses HMAC-SHA-256(host_private, exchange_hash) — a proper MAC
-    construction that is not vulnerable to length-extension attacks.
-
-    This is NOT Ed25519 and will not interoperate with standard SSH
-    clients. For that, full Ed25519 signing is needed (pass_todo).
+    Uses proper Ed25519 signing per RFC 8032.
+    host_private_seed is the 32-byte seed, host_public_key is the 32-byte
+    encoded public key.
     """
-    sha256_hmac(host_private, exchange_hash)
+    ed25519_sign(host_private_seed, host_public_key, exchange_hash)
 
 fn _build_signature_blob(signature: [u8]) -> [u8]:
-    """Build SSH signature blob: string sig_type + string sig_data."""
+    """Build SSH signature blob per RFC 8709.
+
+    Format:
+      string "ssh-ed25519"
+      string signature (64 bytes, Ed25519 signature)
+    """
     var blob: [u8] = []
-    ssh_put_text(blob, "hmac-sha256@simpleos")
+    ssh_put_text(blob, "ssh-ed25519")
     ssh_put_string(blob, signature)
     blob
