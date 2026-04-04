@@ -84,6 +84,36 @@ fn _char_count(s: text) -> i32:
     """Count characters (not bytes) in s."""
     return _to_chars(s).len()
 
+fn _scan_token_style(tok: text, current_style: text) -> (text, bool):
+    """Parse all ANSI escapes in a token and return (new_active_style, had_reset).
+
+    Processes escapes left-to-right so a RESET followed by a new style
+    correctly yields the new style (not empty).
+    """
+    var style = current_style
+    var had_reset = false
+    val parts = tok.split("\u{001b}")
+    var pi = 1
+    while pi < parts.len():
+        val body = parts[pi]
+        if body.starts_with("[0m") or body.starts_with("[m"):
+            had_reset = true
+            style = ""
+        elif body.starts_with("["):
+            var esc = "\u{001b}["
+            var found = false
+            val cs = _to_chars(body)
+            var ci = 1
+            while ci < cs.len() and not found:
+                esc = "{esc}{cs[ci]}"
+                if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(cs[ci]):
+                    found = true
+                ci = ci + 1
+            if found:
+                style = esc
+        pi = pi + 1
+    return (style, had_reset)
+
 fn _visible_width(s: text) -> i32:
     """Count visible (non-ANSI) characters in s."""
     var width = 0
@@ -195,50 +225,23 @@ class Screen:
         #    before the suffix so tokens that inherited contextually
         #    keep their style.
         var lost_reset = false
-        var style_entering_suffix = ""
         var scan_style = ""
-        # Start from the style that the prefix leaves active
+        # Scan prefix tokens to find active style at end of prefix
         var k = 0
         while k < col and k < line_tokens.len():
-            val tok = line_tokens[k]
-            if tok.contains("\u{001b}["):
-                if (tok.contains("\u{001b}[0m") or tok.contains("\u{001b}[m")):
-                    scan_style = ""
-                else:
-                    # Extract escape from token
-                    val idx = tok.split("\u{001b}")
-                    if idx.len() > 1:
-                        scan_style = "\u{001b}{idx[1]}"
+            val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
+            scan_style = new_s
             k = k + 1
         val prefix_active = scan_style
-        # Scan the overwritten range — process all ANSI escapes in order
-        # within each token (a token may contain RESET followed by a new style)
+        # Scan the overwritten range
         k = col
         while k < after_col and k < line_tokens.len():
-            val tok = line_tokens[k]
-            val esc_parts = tok.split("\u{001b}")
-            var pi = 1
-            while pi < esc_parts.len():
-                val esc_body = esc_parts[pi]
-                if esc_body.starts_with("[0m") or esc_body.starts_with("[m"):
-                    lost_reset = true
-                    scan_style = ""
-                elif esc_body.starts_with("["):
-                    # Extract the full escape: "[" + params + terminator
-                    var esc_str = "\u{001b}["
-                    var found_term = false
-                    val esc_chars = _to_chars(esc_body)
-                    var ci = 1
-                    while ci < esc_chars.len() and not found_term:
-                        esc_str = "{esc_str}{esc_chars[ci]}"
-                        if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(esc_chars[ci]):
-                            found_term = true
-                        ci = ci + 1
-                    if found_term:
-                        scan_style = esc_str
-                pi = pi + 1
+            val (new_s, had_r) = _scan_token_style(line_tokens[k], scan_style)
+            if had_r:
+                lost_reset = true
+            scan_style = new_s
             k = k + 1
-        style_entering_suffix = scan_style
+        val style_entering_suffix = scan_style
 
         # Gap: only emit RESET if the prefix has an active style
         # AND the overwritten range lost a RESET (or we're inserting
