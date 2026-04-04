@@ -1,0 +1,176 @@
+#!/bin/sh
+# Cross-compile LLVM/Clang for SimpleOS x86_64
+#
+# Prerequisites:
+#   - LLVM source at $LLVM_SRC (default: ~/llvm-project)
+#   - Host clang (for cross-compilation)
+#   - CMake, ninja
+#   - SimpleOS libc built (src/os/libc/libsimpleos_c.a)
+#
+# Usage:
+#   sh src/os/port/llvm/build.shs              # all stages
+#   sh src/os/port/llvm/build.shs host-tools   # stage 1 only
+#   sh src/os/port/llvm/build.shs cross        # stage 2 only
+#   sh src/os/port/llvm/build.shs compiler-rt  # stage 3 only
+#
+# Output: build/os/llvm/ with clang, lld, compiler-rt
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+BUILD_DIR="$REPO_ROOT/build/os/llvm"
+SYSROOT="$REPO_ROOT/build/os/sysroot"
+LIBC_DIR="$REPO_ROOT/src/os/libc"
+TOOLCHAIN="$REPO_ROOT/src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
+
+# Validate prerequisites
+check_prereqs() {
+    for tool in cmake ninja clang clang++; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "[llvm] ERROR: Required tool not found: $tool"
+            exit 1
+        fi
+    done
+    if [ ! -d "$LLVM_SRC/llvm" ]; then
+        echo "[llvm] ERROR: LLVM source not found at $LLVM_SRC"
+        echo "[llvm] Set LLVM_SRC to point to your llvm-project checkout."
+        echo "[llvm] Example: LLVM_SRC=~/llvm-project sh $0"
+        exit 1
+    fi
+}
+
+# Ensure libc is built (needed by cross-compile sysroot)
+ensure_libc() {
+    if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
+        echo "[llvm] Building SimpleOS libc..."
+        (cd "$LIBC_DIR" && make)
+    fi
+}
+
+# Stage 1: Build host LLVM tools (tblgen, etc.)
+# These run on the host during cross-compilation
+stage1_host_tools() {
+    echo "[llvm] Stage 1: Building host tools..."
+    mkdir -p "$BUILD_DIR/host-tools"
+    cmake -G Ninja \
+        -S "$LLVM_SRC/llvm" \
+        -B "$BUILD_DIR/host-tools" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_TARGETS_TO_BUILD="X86" \
+        -DLLVM_ENABLE_PROJECTS="clang" \
+        -DLLVM_BUILD_UTILS=ON \
+        -DLLVM_BUILD_TOOLS=OFF \
+        -DLLVM_INCLUDE_TESTS=OFF \
+        -DLLVM_INCLUDE_BENCHMARKS=OFF \
+        -DLLVM_INCLUDE_EXAMPLES=OFF
+    ninja -C "$BUILD_DIR/host-tools" llvm-tblgen clang-tblgen
+    echo "[llvm] Stage 1 complete: host tblgen tools built"
+}
+
+# Stage 2: Cross-compile LLVM + Clang + LLD for SimpleOS
+stage2_cross_llvm() {
+    echo "[llvm] Stage 2: Cross-compiling LLVM for SimpleOS..."
+
+    # Ensure sysroot exists before cross-compile
+    if [ ! -d "$SYSROOT/lib" ]; then
+        echo "[llvm] Building sysroot first..."
+        sh "$SCRIPT_DIR/sysroot.shs"
+    fi
+
+    # Verify host tools are available
+    if [ ! -f "$BUILD_DIR/host-tools/bin/llvm-tblgen" ]; then
+        echo "[llvm] ERROR: Host tools not built. Run: sh $0 host-tools"
+        exit 1
+    fi
+
+    mkdir -p "$BUILD_DIR/cross"
+    cmake -G Ninja \
+        -S "$LLVM_SRC/llvm" \
+        -B "$BUILD_DIR/cross" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLLVM_TABLEGEN="$BUILD_DIR/host-tools/bin/llvm-tblgen" \
+        -DCLANG_TABLEGEN="$BUILD_DIR/host-tools/bin/clang-tblgen" \
+        -DLLVM_TARGETS_TO_BUILD="X86" \
+        -DLLVM_ENABLE_PROJECTS="clang;lld" \
+        -DLLVM_DEFAULT_TARGET_TRIPLE="x86_64-unknown-simpleos" \
+        -DLLVM_HOST_TRIPLE="x86_64-unknown-simpleos" \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DLLVM_BUILD_LLVM_DYLIB=OFF \
+        -DLLVM_INCLUDE_TESTS=OFF \
+        -DLLVM_INCLUDE_BENCHMARKS=OFF \
+        -DLLVM_INCLUDE_EXAMPLES=OFF \
+        -DLLVM_ENABLE_THREADS=OFF \
+        -DLLVM_ENABLE_ZLIB=OFF \
+        -DLLVM_ENABLE_ZSTD=OFF \
+        -DLLVM_ENABLE_TERMINFO=OFF \
+        -DLLVM_ENABLE_LIBXML2=OFF \
+        -DLLVM_ENABLE_LIBEDIT=OFF
+    ninja -C "$BUILD_DIR/cross" clang lld
+    echo "[llvm] Stage 2 complete: cross-compiled clang and lld"
+}
+
+# Stage 3: Build compiler-rt builtins for SimpleOS
+stage3_compiler_rt() {
+    echo "[llvm] Stage 3: Building compiler-rt builtins..."
+
+    if [ ! -d "$LLVM_SRC/compiler-rt" ]; then
+        echo "[llvm] ERROR: compiler-rt source not found at $LLVM_SRC/compiler-rt"
+        exit 1
+    fi
+
+    mkdir -p "$BUILD_DIR/compiler-rt"
+    cmake -G Ninja \
+        -S "$LLVM_SRC/compiler-rt" \
+        -B "$BUILD_DIR/compiler-rt" \
+        -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCOMPILER_RT_BUILD_BUILTINS=ON \
+        -DCOMPILER_RT_BUILTINS_ONLY=ON \
+        -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE="x86_64-unknown-simpleos" \
+        -DCMAKE_C_COMPILER_TARGET="x86_64-unknown-simpleos" \
+        -DCOMPILER_RT_BAREMETAL_BUILD=ON \
+        -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+        -DCOMPILER_RT_BUILD_XRAY=OFF \
+        -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+        -DCOMPILER_RT_BUILD_PROFILE=OFF
+    ninja -C "$BUILD_DIR/compiler-rt"
+    echo "[llvm] Stage 3 complete: compiler-rt builtins built"
+
+    # Copy builtins into sysroot if it exists
+    if [ -d "$SYSROOT/lib" ]; then
+        find "$BUILD_DIR/compiler-rt" -name "*.a" -exec cp {} "$SYSROOT/lib/" \;
+        echo "[llvm] Copied compiler-rt builtins to sysroot"
+    fi
+}
+
+# Main dispatch
+check_prereqs
+ensure_libc
+
+case "${1:-all}" in
+    host-tools)
+        stage1_host_tools
+        ;;
+    cross)
+        stage2_cross_llvm
+        ;;
+    compiler-rt)
+        stage3_compiler_rt
+        ;;
+    all)
+        stage1_host_tools
+        stage2_cross_llvm
+        stage3_compiler_rt
+        echo "[llvm] Full build complete. Output: $BUILD_DIR/"
+        echo "[llvm]   host-tools: $BUILD_DIR/host-tools/bin/"
+        echo "[llvm]   cross:      $BUILD_DIR/cross/bin/"
+        echo "[llvm]   builtins:   $BUILD_DIR/compiler-rt/"
+        ;;
+    *)
+        echo "Usage: $0 {all|host-tools|cross|compiler-rt}"
+        exit 1
+        ;;
+esac

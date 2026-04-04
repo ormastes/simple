@@ -186,7 +186,156 @@ fn main():
     check_prerequisites()
 
     val args = cli.args()
+
+    # Dispatch to cross-build mode if requested
+    if args.len() > 0 and args[0] == "--cross":
+        val cross_args = args.slice(1, args.len())
+        cross_build_main(cross_args)
+        return
+
     val config = parse_args(args)
     clone_or_update_source(config)
     build_llvm(config)
     print "=== Build finished successfully ==="
+
+# ===========================================================================
+# Cross-compilation orchestrator (Phase 4A-4C)
+#
+# Drives the 3-stage cross-compile pipeline that produces LLVM/Clang
+# binaries that run ON SimpleOS.
+#
+# Usage:
+#   bin/simple run src/os/port/llvm/build.spl -- --cross
+#   bin/simple run src/os/port/llvm/build.spl -- --cross --stage host-tools
+#   bin/simple run src/os/port/llvm/build.spl -- --cross --status
+# ===========================================================================
+
+val CROSS_STAGES: [text] = ["host-tools", "cross", "compiler-rt"]
+
+class CrossBuildConfig:
+    llvm_src: text          # Path to llvm-project source
+    build_dir: text         # Build output directory
+    sysroot_dir: text       # Sysroot output directory
+    target_triple: text     # Target triple (x86_64-unknown-simpleos)
+
+impl CrossBuildConfig:
+    static fn default() -> CrossBuildConfig:
+        CrossBuildConfig(
+            llvm_src: "{process.env("HOME")}/llvm-project",
+            build_dir: "build/os/llvm",
+            sysroot_dir: "build/os/sysroot",
+            target_triple: "x86_64-unknown-simpleos"
+        )
+
+fn cross_build_status() -> text:
+    """Check current cross-build status."""
+    var status = "LLVM Cross-Build Status:\n"
+
+    if fs.dir_exists("build/os/llvm/host-tools/bin"):
+        status = status + "  host-tools:  BUILT\n"
+    else:
+        status = status + "  host-tools:  NOT BUILT\n"
+
+    if fs.dir_exists("build/os/llvm/cross/bin"):
+        status = status + "  cross-clang: BUILT\n"
+    else:
+        status = status + "  cross-clang: NOT BUILT\n"
+
+    if fs.exists("build/os/sysroot/lib/libsimpleos_c.a"):
+        status = status + "  sysroot:     READY\n"
+    else:
+        status = status + "  sysroot:     NOT READY\n"
+
+    var rt_found = false
+    if fs.dir_exists("build/os/llvm/compiler-rt"):
+        status = status + "  compiler-rt: BUILT\n"
+        rt_found = true
+
+    if not rt_found:
+        status = status + "  compiler-rt: NOT BUILT\n"
+
+    status
+
+fn cross_build_sysroot() -> bool:
+    """Build sysroot (libc headers + libraries + linker script)."""
+    print "[cross] Building sysroot..."
+    val result = process.run("sh", ["src/os/port/llvm/sysroot.shs"])
+    if result.exit_code != 0:
+        print "[cross] Sysroot build failed:"
+        print result.stderr
+        return false
+    print "[cross] Sysroot ready"
+    true
+
+fn cross_build_stage(stage: text) -> bool:
+    """Run a single cross-build stage via build.shs."""
+    print "[cross] Running stage: {stage}"
+    val result = process.run("sh", ["src/os/port/llvm/build.shs", stage])
+    if result.exit_code != 0:
+        print "[cross] Stage '{stage}' failed:"
+        print result.stderr
+        return false
+    print "[cross] Stage '{stage}' complete"
+    true
+
+fn cross_build_all(config: CrossBuildConfig) -> bool:
+    """Run full cross-build pipeline: sysroot -> host-tools -> cross -> compiler-rt."""
+    print "[cross] Starting LLVM cross-build for SimpleOS"
+    print "[cross] Source:  {config.llvm_src}"
+    print "[cross] Target:  {config.target_triple}"
+    print "[cross] Build:   {config.build_dir}"
+    print "[cross] Sysroot: {config.sysroot_dir}"
+
+    # Step 1: Build sysroot (libc needed by cross-compile)
+    if not cross_build_sysroot():
+        return false
+
+    # Step 2-4: Run each LLVM build stage
+    for stage in CROSS_STAGES:
+        if not cross_build_stage(stage):
+            print "[cross] Build failed at stage: {stage}"
+            return false
+
+    print "[cross] Full LLVM cross-build complete!"
+    print cross_build_status()
+    true
+
+fn cross_build_main(args: [text]):
+    """Entry point for cross-build mode."""
+    print "=== SimpleOS LLVM Cross-Build ==="
+
+    # Parse cross-build args
+    var stage = ""
+    var show_status = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--stage":
+            i = i + 1
+            stage = args[i]
+        else if arg == "--status":
+            show_status = true
+        i = i + 1
+
+    if show_status:
+        print cross_build_status()
+        return
+
+    if stage != "":
+        if stage == "sysroot":
+            val ok = cross_build_sysroot()
+            if not ok:
+                process.exit(1)
+        else:
+            val ok = cross_build_stage(stage)
+            if not ok:
+                process.exit(1)
+        return
+
+    # Full build
+    val config = CrossBuildConfig.default()
+    val ok = cross_build_all(config)
+    if not ok:
+        process.exit(1)
+    print "=== Cross-build finished successfully ==="

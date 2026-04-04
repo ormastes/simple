@@ -1,0 +1,217 @@
+# LLVM/Clang Smoke Test for SimpleOS
+#
+# Verifies that the cross-compiled clang can compile and link a simple
+# C program targeting SimpleOS.
+#
+# Usage:
+#   bin/simple run src/os/port/llvm/test_smoke.spl
+#   bin/simple test src/os/port/llvm/test_smoke.spl
+
+use std.fs
+use std.process
+use std.spec
+
+val BUILD_DIR = "build/os/smoke"
+val SYSROOT = "build/os/sysroot"
+val LINKER_SCRIPT = "build/os/sysroot/share/simpleos/simpleos.ld"
+
+fn ensure_build_dir():
+    if not fs.dir_exists(BUILD_DIR):
+        fs.mkdir_p(BUILD_DIR)
+
+fn write_test_source(name: text, source: text) -> text:
+    """Write a C source file and return its path."""
+    val path = "{BUILD_DIR}/{name}.c"
+    fs.write_text(path, source)
+    path
+
+fn compile_for_simpleos(source_path: text, output: text) -> process.CommandResult:
+    """Compile a C file for SimpleOS using host clang with SimpleOS target."""
+    process.run("clang", [
+        "--target=x86_64-unknown-simpleos",
+        "--sysroot={SYSROOT}",
+        "-ffreestanding",
+        "-nostdlib",
+        "-fno-builtin",
+        "-I{SYSROOT}/include",
+        "-c",
+        source_path,
+        "-o", output,
+    ])
+
+fn link_for_simpleos(objects: [text], output: text) -> process.CommandResult:
+    """Link object files into a SimpleOS ELF binary."""
+    var args = [
+        "-flavor", "gnu",
+        "-T", LINKER_SCRIPT,
+        "-L{SYSROOT}/lib",
+        "-lsimpleos_c",
+        "-o", output,
+    ]
+    for obj in objects:
+        args = [obj] + args
+    process.run("ld.lld", args)
+
+# ===========================================================================
+# Smoke tests
+# ===========================================================================
+
+fn test_sysroot_exists() -> bool:
+    """Test: sysroot has expected layout."""
+    print "[smoke] Checking sysroot layout..."
+    var ok = true
+
+    if not fs.exists("{SYSROOT}/include/simpleos_libc.h"):
+        print "[smoke] FAIL: missing include/simpleos_libc.h"
+        ok = false
+
+    if not fs.exists("{SYSROOT}/lib/libsimpleos_c.a"):
+        print "[smoke] FAIL: missing lib/libsimpleos_c.a"
+        ok = false
+
+    if not fs.exists("{SYSROOT}/share/simpleos/simpleos.ld"):
+        print "[smoke] FAIL: missing share/simpleos/simpleos.ld"
+        ok = false
+
+    if ok:
+        print "[smoke] PASS: sysroot layout"
+    ok
+
+fn test_compile_empty() -> bool:
+    """Test: clang can compile an empty translation unit."""
+    print "[smoke] Compiling empty translation unit..."
+    ensure_build_dir()
+
+    val src = write_test_source("empty", "/* empty */\n")
+    val result = compile_for_simpleos(src, "{BUILD_DIR}/empty.o")
+
+    if result.exit_code != 0:
+        print "[smoke] FAIL: empty compile failed"
+        print result.stderr
+        return false
+
+    if not fs.exists("{BUILD_DIR}/empty.o"):
+        print "[smoke] FAIL: output object not produced"
+        return false
+
+    print "[smoke] PASS: empty compile"
+    true
+
+fn test_compile_hello() -> bool:
+    """Test: clang can compile a hello-world with libc shim."""
+    print "[smoke] Compiling hello world..."
+    ensure_build_dir()
+
+    val source = "#include <simpleos_libc.h>\n" +
+        "int main(void) {\n" +
+        "    printf(\"Hello from Clang on SimpleOS!\\n\");\n" +
+        "    return 0;\n" +
+        "}\n"
+    val src = write_test_source("hello", source)
+    val result = compile_for_simpleos(src, "{BUILD_DIR}/hello.o")
+
+    if result.exit_code != 0:
+        print "[smoke] FAIL: hello compile failed"
+        print result.stderr
+        return false
+
+    print "[smoke] PASS: hello compile"
+    true
+
+fn test_compile_math() -> bool:
+    """Test: clang can compile code using math functions."""
+    print "[smoke] Compiling math test..."
+    ensure_build_dir()
+
+    val source = "#include <simpleos_libc.h>\n" +
+        "int main(void) {\n" +
+        "    double x = sqrt(2.0);\n" +
+        "    printf(\"sqrt(2) = %f\\n\", x);\n" +
+        "    return 0;\n" +
+        "}\n"
+    val src = write_test_source("math_test", source)
+    val result = compile_for_simpleos(src, "{BUILD_DIR}/math_test.o")
+
+    if result.exit_code != 0:
+        print "[smoke] FAIL: math compile failed"
+        print result.stderr
+        return false
+
+    print "[smoke] PASS: math compile"
+    true
+
+fn test_link_hello() -> bool:
+    """Test: lld can link a compiled object into an ELF binary."""
+    print "[smoke] Linking hello binary..."
+    ensure_build_dir()
+
+    # Compile first
+    val source = "#include <simpleos_libc.h>\n" +
+        "void _start(void) {\n" +
+        "    printf(\"Hello!\\n\");\n" +
+        "    exit(0);\n" +
+        "}\n"
+    val src = write_test_source("link_test", source)
+    val compile_result = compile_for_simpleos(src, "{BUILD_DIR}/link_test.o")
+    if compile_result.exit_code != 0:
+        print "[smoke] FAIL: compile step failed"
+        print compile_result.stderr
+        return false
+
+    val link_result = link_for_simpleos(
+        ["{BUILD_DIR}/link_test.o"],
+        "{BUILD_DIR}/link_test"
+    )
+    if link_result.exit_code != 0:
+        print "[smoke] FAIL: link step failed"
+        print link_result.stderr
+        return false
+
+    if not fs.exists("{BUILD_DIR}/link_test"):
+        print "[smoke] FAIL: linked binary not produced"
+        return false
+
+    # Verify it is an ELF file
+    val file_result = process.run("file", ["{BUILD_DIR}/link_test"])
+    if not file_result.stdout.contains("ELF"):
+        print "[smoke] FAIL: output is not ELF format"
+        return false
+
+    print "[smoke] PASS: link hello"
+    true
+
+# ===========================================================================
+# Runner
+# ===========================================================================
+
+fn llvm_smoke_test_all() -> bool:
+    """Run all LLVM smoke tests. Returns true if all pass."""
+    print "=== LLVM/Clang Smoke Tests for SimpleOS ==="
+    var passed = 0
+    var failed = 0
+
+    val tests = [
+        ("sysroot layout", test_sysroot_exists),
+        ("empty compile",  test_compile_empty),
+        ("hello compile",  test_compile_hello),
+        ("math compile",   test_compile_math),
+        ("link hello",     test_link_hello),
+    ]
+
+    for entry in tests:
+        val name = entry.0
+        val test_fn = entry.1
+        if test_fn():
+            passed = passed + 1
+        else:
+            failed = failed + 1
+
+    print ""
+    print "=== Results: {passed} passed, {failed} failed ==="
+
+    failed == 0
+
+fn main():
+    val ok = llvm_smoke_test_all()
+    if not ok:
+        process.exit(1)

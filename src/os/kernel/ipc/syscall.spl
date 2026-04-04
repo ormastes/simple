@@ -24,6 +24,8 @@ use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pc
 use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
+use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, RES_NOTIFICATION, RES_IRQ_ROUTE}
+use os.kernel.ipc.capability.{CapabilityManager}
 
 val MAX_BINARY_PATH_LEN: u64 = 256
 
@@ -187,7 +189,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
     match args.id:
         # -- Process ---------------------------------------------------------
         case 0:     # Exit (always allowed)
-            _handle_exit(args, scheduler)
+            _handle_exit(args, scheduler, ipc)
         case 1:     # Yield (always allowed)
             _handle_yield(scheduler)
         case 2:     # Spawn
@@ -359,7 +361,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 82:    # DeviceGrant
             if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
-            _handle_device_grant(args, scheduler)
+            _handle_device_grant(args, scheduler, caller)
         case 83:    # MapBar
             if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
                 return SyscallResult(value: SYSCALL_EPERM)
@@ -395,11 +397,28 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
 # Process Syscall Handlers
 # ============================================================================
 
-fn _handle_exit(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
-    """Exit the current task with the given exit code."""
+fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Exit the current task with the given exit code.
+
+    Performs full resource cleanup before marking the task as zombie:
+      1. Clean up kernel resources (notifications, IRQ routes, DMA, BAR mappings)
+      2. Revoke all capabilities granted to the task
+      3. Mark the task as zombie in the scheduler
+    """
     val code = args.arg0
     var sched = scheduler
+    val exiting_task = sched.get_current()
+
+    # Step 1: Clean up kernel resources tracked by task_cleanup
+    task_cleanup(exiting_task.id)
+
+    # Step 2: Revoke all capabilities held by this task
+    var ipc_mgr = ipc
+    ipc_mgr.cap_manager.revoke_all_for_task(exiting_task)
+
+    # Step 3: Mark as zombie in scheduler
     sched.exit_task(code.to_i32())
+
     # exit_task does not return to the caller; the scheduler picks next task.
     # This result is never seen by the exiting task.
     SyscallResult(value: 0)
@@ -1049,13 +1068,15 @@ fn _pci_bar_size(bus: u8, dev: u8, func: u8, bar_num: u8) -> u64:
     val size = (~mask + 1) as u64
     size
 
-fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler, caller: TaskId) -> SyscallResult:
     """Build a DeviceGrant for a PCI device and write it to caller memory.
 
     Protocol:
       arg0: packed BDF — bus<<16 | dev<<8 | func
       arg1: pointer to DeviceGrant struct in caller memory
     Reads PCI config, creates IRQ notification, fills the struct.
+    Registers the notification and IRQ route as task resources so they
+    are cleaned up when the task exits.
     Returns 0 on success, -1 if the device does not exist (vendor == 0xFFFF).
     """
     val bdf = args.arg0
@@ -1093,6 +1114,10 @@ fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
 
     # Register IRQ route so hardware interrupt signals the notification
     irq_route_register(irq_vector, notif_id, notif_bit)
+
+    # Register resources for cleanup when the calling task exits
+    task_register_resource(caller.id, RES_NOTIFICATION, notif_id, 0)
+    task_register_resource(caller.id, RES_IRQ_ROUTE, irq_vector as u64, 0)
 
     # Write DeviceGrant struct fields to caller memory
     # offset 0: u16 pci_vendor

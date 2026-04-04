@@ -1,0 +1,118 @@
+#!/bin/sh
+# Package SimpleOS sysroot for LLVM/Clang/Rust cross-compilation
+#
+# Layout:
+#   sysroot/
+#     include/              — C headers (simpleos_libc.h)
+#     lib/                  — Static libraries (libsimpleos_c.a, crt0.o, compiler-rt)
+#     lib/clang/<ver>/lib/  — Clang resource dir (compiler-rt builtins)
+#     share/simpleos/       — Linker scripts
+#
+# Usage:
+#   sh src/os/port/llvm/sysroot.shs
+#
+# Output: build/os/sysroot/
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SYSROOT="$REPO_ROOT/build/os/sysroot"
+LIBC_DIR="$REPO_ROOT/src/os/libc"
+LLVM_BUILD="$REPO_ROOT/build/os/llvm"
+
+echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
+
+# Create layout
+mkdir -p "$SYSROOT/include"
+mkdir -p "$SYSROOT/lib"
+mkdir -p "$SYSROOT/share/simpleos"
+
+# -- Headers ----------------------------------------------------------------
+
+cp "$LIBC_DIR/simpleos_libc.h" "$SYSROOT/include/"
+echo "[sysroot] Installed headers"
+
+# -- Libc -------------------------------------------------------------------
+
+if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
+    echo "[sysroot] Building SimpleOS libc..."
+    (cd "$LIBC_DIR" && make)
+fi
+
+cp "$LIBC_DIR/libsimpleos_c.a" "$SYSROOT/lib/"
+echo "[sysroot] Installed libsimpleos_c.a"
+
+# -- CRT objects ------------------------------------------------------------
+
+if [ -f "$LIBC_DIR/simpleos_crt0.o" ]; then
+    cp "$LIBC_DIR/simpleos_crt0.o" "$SYSROOT/lib/crt0.o"
+    echo "[sysroot] Installed crt0.o"
+else
+    echo "[sysroot] WARNING: simpleos_crt0.o not found — build libc first"
+fi
+
+# -- Compiler-rt builtins (if available) ------------------------------------
+
+if [ -d "$LLVM_BUILD/compiler-rt" ]; then
+    find "$LLVM_BUILD/compiler-rt" -name "*.a" -exec cp {} "$SYSROOT/lib/" \;
+    echo "[sysroot] Installed compiler-rt builtins"
+else
+    echo "[sysroot] NOTE: compiler-rt not yet built — run build.shs compiler-rt later"
+fi
+
+# -- Linker script ----------------------------------------------------------
+
+cat > "$SYSROOT/share/simpleos/simpleos.ld" << 'LDEOF'
+/* SimpleOS x86_64 userspace linker script
+ *
+ * Text starts at 0x10000000 — matches kernel bump allocator base.
+ * Static linking only (no GOT/PLT).
+ */
+ENTRY(_start)
+
+SECTIONS {
+    . = 0x10000000;
+
+    .text : {
+        *(.text.entry)
+        *(.text .text.*)
+    }
+
+    . = ALIGN(4096);
+    .rodata : {
+        *(.rodata .rodata.*)
+    }
+
+    . = ALIGN(4096);
+    .data : {
+        *(.data .data.*)
+    }
+
+    . = ALIGN(4096);
+    .bss : {
+        __bss_start = .;
+        *(.bss .bss.*)
+        *(COMMON)
+        __bss_end = .;
+    }
+
+    _end = .;
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note .note.*)
+        *(.eh_frame)
+        *(.eh_frame_hdr)
+    }
+}
+LDEOF
+echo "[sysroot] Installed linker script"
+
+# -- Summary ----------------------------------------------------------------
+
+echo "[sysroot] Sysroot ready: $SYSROOT"
+echo "[sysroot] Contents:"
+ls -la "$SYSROOT/include/" 2>/dev/null || true
+ls -la "$SYSROOT/lib/"     2>/dev/null || true
+ls -la "$SYSROOT/share/simpleos/" 2>/dev/null || true

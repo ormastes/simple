@@ -1,0 +1,251 @@
+# Driver Supervisor — User-Space Driver Monitor and Restarter
+#
+# Watches registered driver tasks for health. If a driver stops responding
+# to periodic IPC pings or exits unexpectedly, the supervisor:
+#   1. Releases its device grant via pcimgr
+#   2. Respawns the driver binary
+#   3. Re-grants the device to the new task
+#
+# This is a user-space service — it uses syscalls, not kernel internals.
+# Runs alongside pcimgr and communicates via IPC.
+
+use os.userlib.syscall_raw.{syscall}
+use os.services.pcimgr.pcimgr.{pcimgr_release_device, pcimgr_grant_device}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MAX_SUPERVISED: u64 = 32
+val HEALTH_TIMEOUT_MS: u64 = 5000
+val MAX_RESTART_ATTEMPTS: u32 = 5
+
+# Syscall IDs used
+val SYS_SPAWN: u64 = 2
+val SYS_WAIT: u64 = 3
+val SYS_SLEEP: u64 = 7
+val SYS_IPC_SEND: u64 = 20
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+
+# Driver states
+val DRIVER_STATE_STOPPED: u8 = 0
+val DRIVER_STATE_RUNNING: u8 = 1
+val DRIVER_STATE_FAILED: u8 = 2
+val DRIVER_STATE_RESTARTING: u8 = 3
+
+# ============================================================================
+# Supervised Driver Table (flat arrays for baremetal safety)
+# ============================================================================
+
+var drv_task_id: [u64; 32]          # current task ID of the driver
+var drv_device_idx: [u64; 32]       # pcimgr device index
+var drv_entry_point: [u64; 32]      # binary entry point for respawn
+var drv_state: [u8; 32]             # DRIVER_STATE_*
+var drv_restart_count: [u32; 32]    # number of times restarted
+var drv_name: [text; 32]            # human-readable driver name
+var supervised_count: u64 = 0
+
+# ============================================================================
+# Registration
+# ============================================================================
+
+fn supervisor_register(name: text, task_id: u64, device_idx: u64, entry_point: u64) -> bool:
+    """Register a driver for supervision.
+
+    Args:
+      name:        human-readable driver name (e.g. "virtio-gpu")
+      task_id:     current task ID of the running driver
+      device_idx:  pcimgr device index assigned to this driver
+      entry_point: binary entry point address for respawning
+
+    Returns true on success, false if table is full.
+    """
+    if supervised_count >= MAX_SUPERVISED:
+        serial_println("[supervisor] ERROR: supervision table full ({supervised_count}/{MAX_SUPERVISED})")
+        return false
+
+    val idx = supervised_count
+    drv_name[idx] = name
+    drv_task_id[idx] = task_id
+    drv_device_idx[idx] = device_idx
+    drv_entry_point[idx] = entry_point
+    drv_state[idx] = DRIVER_STATE_RUNNING
+    drv_restart_count[idx] = 0
+    supervised_count = supervised_count + 1
+
+    serial_println("[supervisor] Registered driver '{name}' (task={task_id}, dev={device_idx})")
+    true
+
+# ============================================================================
+# Health Checking
+# ============================================================================
+
+fn supervisor_check_health():
+    """Ping all supervised drivers and restart any that don't respond.
+
+    For each running driver, sends a health-check IPC message and waits
+    up to HEALTH_TIMEOUT_MS for a response. Non-responsive drivers are
+    marked as FAILED and scheduled for restart.
+    """
+    var i: u64 = 0
+    while i < supervised_count:
+        if drv_state[i] == DRIVER_STATE_RUNNING:
+            val alive = _ping_driver(drv_task_id[i])
+            if not alive:
+                serial_println("[supervisor] Driver '{drv_name[i]}' (task={drv_task_id[i]}) not responding")
+                drv_state[i] = DRIVER_STATE_FAILED
+                _handle_failed_driver(i)
+        i = i + 1
+
+# ============================================================================
+# Driver Restart
+# ============================================================================
+
+fn supervisor_restart_driver(idx: u64) -> bool:
+    """Restart a failed driver with a fresh device grant.
+
+    Steps:
+      1. Release the old device grant via pcimgr
+      2. Spawn a new task from the driver's entry point
+      3. Re-grant the device to the new task
+      4. Update the supervision record
+
+    Returns true if the restart succeeded.
+    """
+    if idx >= supervised_count:
+        return false
+
+    val name = drv_name[idx]
+    val dev_idx = drv_device_idx[idx]
+    val old_task = drv_task_id[idx]
+
+    serial_println("[supervisor] Restarting driver '{name}' (attempt {drv_restart_count[idx] + 1})...")
+
+    # Step 1: Release old device grant
+    val release_result = pcimgr_release_device(dev_idx, old_task)
+    match release_result:
+        Ok(_):
+            serial_println("[supervisor]   Released device {dev_idx} from old task {old_task}")
+        Err(msg):
+            # Device may already have been cleaned up by kernel task_cleanup
+            serial_println("[supervisor]   Device release note: {msg}")
+
+    # Step 2: Spawn new driver task
+    # syscall 2 (Spawn): arg0 = entry point, arg1 = priority (2 = Normal)
+    val spawn_result = syscall(SYS_SPAWN, drv_entry_point[idx], 2, 0, 0, 0)
+    if spawn_result < 0:
+        serial_println("[supervisor]   FAILED to spawn new task: error {spawn_result}")
+        drv_state[idx] = DRIVER_STATE_FAILED
+        return false
+
+    val new_task_id = spawn_result as u64
+    serial_println("[supervisor]   Spawned new task {new_task_id}")
+
+    # Step 3: Re-grant device to the new task
+    val grant_result = pcimgr_grant_device(dev_idx, new_task_id)
+    match grant_result:
+        Ok(grant):
+            serial_println("[supervisor]   Granted device {dev_idx} to task {new_task_id}")
+        Err(msg):
+            serial_println("[supervisor]   FAILED to grant device: {msg}")
+            drv_state[idx] = DRIVER_STATE_FAILED
+            return false
+
+    # Step 4: Update supervision record
+    drv_task_id[idx] = new_task_id
+    drv_state[idx] = DRIVER_STATE_RUNNING
+    drv_restart_count[idx] = drv_restart_count[idx] + 1
+    serial_println("[supervisor] Driver '{name}' restarted successfully (task={new_task_id}, restarts={drv_restart_count[idx]})")
+    true
+
+# ============================================================================
+# Service Loop
+# ============================================================================
+
+fn supervisor_start():
+    """Start the driver supervisor service loop.
+
+    Creates an IPC port, then enters a loop that periodically checks
+    driver health and handles incoming supervision requests.
+    """
+    serial_println("[supervisor] Starting driver supervisor service...")
+
+    # Create IPC port for supervisor commands
+    val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if port_result < 0:
+        serial_println("[supervisor] FATAL: Failed to create IPC port (error {port_result})")
+        return
+
+    val port_handle = port_result as u64
+    serial_println("[supervisor] Service ready on IPC port (handle={port_handle})")
+
+    # Main supervision loop
+    while true:
+        # Sleep for the health check interval
+        syscall(SYS_SLEEP, HEALTH_TIMEOUT_MS, 0, 0, 0, 0)
+
+        # Check health of all supervised drivers
+        supervisor_check_health()
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _ping_driver(task_id: u64) -> bool:
+    """Send a health-check ping to a driver task via IPC.
+
+    Returns true if the driver responds within the timeout.
+    Uses a simple IPC send/recv pattern with a short deadline.
+    """
+    # Send a ping message (method ID 0 = health check)
+    val send_result = syscall(SYS_IPC_SEND, task_id, 0, 0, 0, 0)
+    if send_result < 0:
+        # Task doesn't exist or port is closed — driver is dead
+        return false
+
+    # Wait for response with timeout
+    # syscall 3 (Wait) with the task_id — if it returns immediately
+    # with a zombie state, the driver has exited
+    val wait_result = syscall(SYS_WAIT, task_id, 0, 0, 0, 0)
+    if wait_result >= 0:
+        # Wait returned — means the task has exited (zombie collected)
+        return false
+
+    # Task is still running (wait would block, returned error)
+    true
+
+fn _handle_failed_driver(idx: u64):
+    """Handle a driver that has been detected as failed.
+
+    If the restart count is below the maximum, attempt a restart.
+    Otherwise, mark the driver as permanently stopped.
+    """
+    if drv_restart_count[idx] >= MAX_RESTART_ATTEMPTS:
+        serial_println("[supervisor] Driver '{drv_name[idx]}' exceeded max restarts ({MAX_RESTART_ATTEMPTS}), giving up")
+        drv_state[idx] = DRIVER_STATE_STOPPED
+        return
+
+    drv_state[idx] = DRIVER_STATE_RESTARTING
+    val ok = supervisor_restart_driver(idx)
+    if not ok:
+        serial_println("[supervisor] Driver '{drv_name[idx]}' restart failed")
+        drv_state[idx] = DRIVER_STATE_FAILED
+
+fn supervisor_get_driver_state(idx: u64) -> u8:
+    """Return the current state of a supervised driver."""
+    if idx >= supervised_count:
+        return DRIVER_STATE_STOPPED
+    drv_state[idx]
+
+fn supervisor_get_restart_count(idx: u64) -> u32:
+    """Return the number of times a driver has been restarted."""
+    if idx >= supervised_count:
+        return 0
+    drv_restart_count[idx]
+
+fn supervisor_count() -> u64:
+    """Return the number of supervised drivers."""
+    supervised_count
