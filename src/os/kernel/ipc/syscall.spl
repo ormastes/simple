@@ -8,14 +8,40 @@ use os.kernel.types.syscall_types.{SyscallId, SyscallArgs, SyscallResult, Signal
 use os.kernel.types.task_types.{TaskId, TaskState, TaskPriority, BlockReason}
 use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.types.notification_types.{Notification}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture}
 
 val MAX_BINARY_PATH_LEN: u64 = 256
+
+# Error code for permission denied
+val SYSCALL_EPERM: i64 = -1
+
+# Module-level notification table (fixed array, no dynamic allocation)
+var _notification_table: NotificationTable = NotificationTable.new()
+
+# ============================================================================
+# Capability Enforcement Helpers
+# ============================================================================
+
+fn _cap_check(ipc: IpcManager, task: TaskId, kind: CapabilityKind) -> bool:
+    """Check if a task holds a capability of the required kind.
+
+    Defaults to ALLOW if the task has no explicit capability record yet
+    (backward compatible — tasks without pledge/unveil restrictions pass).
+    """
+    var ipc_mgr = ipc
+    ipc_mgr.cap_check(task, kind)
+
+fn _cap_check_file(ipc: IpcManager, task: TaskId, path: text, perm: text) -> bool:
+    """Check file access capability including unveil path restrictions."""
+    var ipc_mgr = ipc
+    ipc_mgr.cap_manager.check_file_access(task, path, perm)
 
 @cfg(riscv64)
 fn _current_exec_arch() -> Architecture:
@@ -51,67 +77,186 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
     The entry stub has already saved the user context into the current
     task's TCB. Arguments are passed in registers per the SyscallArgs layout.
 
+    Capability enforcement: each syscall group checks the calling task's
+    capabilities before dispatching. If the check fails, EPERM (-1) is
+    returned immediately. Tasks without explicit pledge/unveil restrictions
+    default to ALLOW for backward compatibility.
+
     Returns SyscallResult with value >= 0 on success, < 0 on error.
     """
+    # Resolve the calling task for capability checks
+    var sched_for_cap = scheduler
+    val caller = sched_for_cap.get_current()
+
     match args.id:
         # -- Process ---------------------------------------------------------
-        case 0:     # Exit
+        case 0:     # Exit (always allowed)
             _handle_exit(args, scheduler)
-        case 1:     # Yield
+        case 1:     # Yield (always allowed)
             _handle_yield(scheduler)
         case 2:     # Spawn
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spawn(args, scheduler)
-        case 3:     # Wait
+        case 3:     # Wait (always allowed — waiting for own children)
             _handle_wait(args, scheduler)
-        case 4:     # GetPid
+        case 4:     # GetPid (always allowed)
             _handle_getpid(scheduler)
         case 13:    # SpawnBinary
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSpawn):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_spawn_binary(args, scheduler, klog)
+
+        # -- Memory ----------------------------------------------------------
+        case 10:    # Mmap
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_memory_map(args, scheduler)
+        case 11:    # Munmap
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_memory_unmap(args, scheduler)
+        case 12:    # Mprotect
+            if not _cap_check(ipc, caller, CapabilityKind.Mmio(base: 0, size: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_memory_protect(args, scheduler)
 
         # -- IPC -------------------------------------------------------------
         case 20:    # IpcSend
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_ipc_send(args, scheduler, ipc)
         case 21:    # IpcRecv
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_ipc_recv(args, scheduler, ipc)
         case 22:    # IpcCreatePort
+            if not _cap_check(ipc, caller, CapabilityKind.IpcListen(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_ipc_create_port(args, scheduler, ipc)
         case 23:    # IpcConnect
+            if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_ipc_connect(args, ipc)
 
+        # -- Notification (L4-style async events) ----------------------------
+        case 24:    # NotificationCreate
+            _handle_notification_create(args)
+        case 25:    # NotificationSignal
+            _handle_notification_signal(args, scheduler)
+        case 26:    # NotificationWait
+            _handle_notification_wait(args, scheduler)
+        case 27:    # NotificationPoll
+            _handle_notification_poll(args)
+        case 28:    # NotificationDestroy
+            _handle_notification_destroy(args)
+
+        # -- File (routed to VFS via IPC) ------------------------------------
+        case 30:    # Open
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_open(args, scheduler, ipc)
+        case 31:    # Read
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_read(args, scheduler, ipc)
+        case 32:    # Write
+            if not _cap_check(ipc, caller, CapabilityKind.FileWrite(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_write(args, scheduler, ipc)
+        case 33:    # Close
+            _handle_file_close(args, scheduler, ipc)
+        case 34:    # Stat
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_stat(args, scheduler, ipc)
+        case 35:    # Mkdir
+            if not _cap_check(ipc, caller, CapabilityKind.FileCreate(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_mkdir(args, scheduler, ipc)
+        case 36:    # Readdir
+            if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_file_readdir(args, scheduler, ipc)
+        case 37:    # Mount
+            if not _cap_check(ipc, caller, CapabilityKind.SystemMount):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_mount(args, scheduler, ipc)
+        case 38:    # Unmount
+            if not _cap_check(ipc, caller, CapabilityKind.SystemMount):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_unmount(args, scheduler, ipc)
+
         # -- Security --------------------------------------------------------
-        case 40:    # Pledge
+        case 40:    # Pledge (always allowed — self-restriction)
             _handle_pledge(args, scheduler, ipc)
-        case 41:    # Unveil
+        case 41:    # Unveil (always allowed — self-restriction)
             _handle_unveil(args, scheduler, ipc)
         case 42:    # CapGrant
             _handle_cap_grant(args, scheduler, ipc)
 
         # -- Process (extended) ----------------------------------------------
-        case 5:     # ListTasks
+        case 5:     # ListTasks (always allowed)
             _handle_list_tasks(scheduler)
-        case 6:     # GetTaskInfo
+        case 6:     # GetTaskInfo (always allowed)
             _handle_get_task_info(args, scheduler)
         case 7:     # Signal
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSignal(target: args.arg0)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_signal(args, scheduler)
         case 8:     # SetPriority
+            if not _cap_check(ipc, caller, CapabilityKind.ProcessSignal(target: args.arg0)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_set_priority(args, scheduler)
-        case 9:     # GetParentPid
+        case 9:     # GetParentPid (always allowed)
             _handle_get_parent_pid(scheduler)
 
-        # -- File (routed to VFS via IPC) ------------------------------------
-        case 37:    # Mount
-            _handle_mount(args, scheduler, ipc)
-        case 38:    # Unmount
-            _handle_unmount(args, scheduler, ipc)
-
         # -- Debug -----------------------------------------------------------
-        case 60:    # DebugWrite
+        case 60:    # DebugWrite (always allowed)
             _handle_debug_write(args)
+
+        # -- Network ---------------------------------------------------------
+        case 70:    # NetSocket
+            if not _cap_check(ipc, caller, CapabilityKind.NetConnect(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_socket(args)
+        case 71:    # NetBind
+            if not _cap_check(ipc, caller, CapabilityKind.NetListen(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_bind(args)
+        case 72:    # NetListen
+            if not _cap_check(ipc, caller, CapabilityKind.NetListen(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_listen(args)
+        case 73:    # NetConnect
+            if not _cap_check(ipc, caller, CapabilityKind.NetConnect(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_connect(args)
+        case 74:    # NetAccept
+            if not _cap_check(ipc, caller, CapabilityKind.NetListen(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_accept(args)
+        case 75:    # NetSendTo
+            if not _cap_check(ipc, caller, CapabilityKind.NetConnect(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_send_to(args)
+        case 76:    # NetRecvFrom
+            if not _cap_check(ipc, caller, CapabilityKind.NetConnect(port: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_recv_from(args)
+        case 77:    # NetIfConfig
+            if not _cap_check(ipc, caller, CapabilityKind.NetRaw):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_net_if_config(args)
 
         # -- Device ----------------------------------------------------------
         case 80:    # DevEnumerate
+            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dev_enumerate(args)
         case 81:    # DevGetInfo
+            if not _cap_check(ipc, caller, CapabilityKind.PortIO(base: 0, count: 0)):
+                return SyscallResult(value: SYSCALL_EPERM)
             _handle_dev_get_info(args)
 
         # -- Logging ---------------------------------------------------------
@@ -724,6 +869,289 @@ fn _handle_set_hostname(args: SyscallArgs) -> SyscallResult:
     """
     # In a real kernel, copy from userspace.
     SyscallResult(value: 0)
+
+# ============================================================================
+# Notification Syscall Handlers
+# ============================================================================
+
+fn _handle_notification_create(args: SyscallArgs) -> SyscallResult:
+    """Create a new notification object.
+
+    Returns notification ID (>0) on success, 0 on failure.
+    """
+    val id = notification_create(_notification_table)
+    SyscallResult(value: id.to_i64())
+
+fn _handle_notification_signal(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Signal a notification with the given bits.
+
+    Args:
+      arg0: notification ID
+      arg1: bits to OR into the notification word
+
+    If a thread was waiting, it is unblocked via the scheduler.
+    """
+    val id = args.arg0
+    val bits = args.arg1
+    val waiter_id = notification_signal(_notification_table, id, bits)
+    if waiter_id != 0:
+        # Wake the waiting thread
+        var sched = scheduler
+        val waiter = TaskId(id: waiter_id)
+        sched.unblock_task(waiter)
+    SyscallResult(value: 0)
+
+fn _handle_notification_wait(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Wait for notification bits.
+
+    Args:
+      arg0: notification ID
+
+    If bits are already set, returns them immediately. Otherwise blocks
+    the calling thread until signaled.
+    """
+    val id = args.arg0
+    var sched = scheduler
+    val current = sched.get_current()
+    val result = notification_wait(_notification_table, id, current.id)
+    if result != 0:
+        # Bits were available immediately
+        return SyscallResult(value: result.to_i64())
+    # No bits — block the caller
+    sched.block_task(current, BlockReason.Notification(id: id))
+    SyscallResult(value: 0)
+
+fn _handle_notification_poll(args: SyscallArgs) -> SyscallResult:
+    """Non-blocking poll for notification bits.
+
+    Args:
+      arg0: notification ID
+
+    Returns accumulated bits (cleared after read), or 0 if none set.
+    """
+    val id = args.arg0
+    val bits = notification_poll(_notification_table, id)
+    SyscallResult(value: bits.to_i64())
+
+fn _handle_notification_destroy(args: SyscallArgs) -> SyscallResult:
+    """Destroy a notification object.
+
+    Args:
+      arg0: notification ID
+    """
+    val id = args.arg0
+    notification_destroy(_notification_table, id)
+    SyscallResult(value: 0)
+
+# ============================================================================
+# File Syscall Stubs (routed to VFS via IPC)
+# ============================================================================
+
+fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Open a file. Routed to VFS service via IPC.
+
+    Args:
+      arg0: path pointer (userspace)
+      arg1: path length
+      arg2: flags
+    """
+    # Route to VFS service via IPC method 1 (OPEN)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 1,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Read from a file descriptor. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 2,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Write to a file descriptor. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 3,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_close(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Close a file descriptor. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 4,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Stat a file. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 5,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Create a directory. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 6,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Read directory entries. Routed to VFS service via IPC."""
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 7,
+        flags: 0,
+        payload_len: 0,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+# ============================================================================
+# Memory Syscall Stubs
+# ============================================================================
+
+fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Map memory (mmap). Stub — returns 0 until VMM is wired.
+
+    Args:
+      arg0: address hint (0 = kernel chooses)
+      arg1: size
+      arg2: protection flags
+      arg3: map flags
+    """
+    pass_todo("wire to VMM page allocator")
+    SyscallResult(value: 0)
+
+fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Unmap memory (munmap). Stub — returns 0 until VMM is wired.
+
+    Args:
+      arg0: address
+      arg1: size
+    """
+    pass_todo("wire to VMM page deallocator")
+    SyscallResult(value: 0)
+
+fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Change memory protection (mprotect). Stub — returns 0 until VMM is wired.
+
+    Args:
+      arg0: address
+      arg1: size
+      arg2: new protection flags
+    """
+    pass_todo("wire to VMM page protection update")
+    SyscallResult(value: 0)
+
+# ============================================================================
+# Network Syscall Stubs
+# ============================================================================
+
+fn _handle_net_socket(args: SyscallArgs) -> SyscallResult:
+    """Create a network socket. Stub — returns -ENOSYS until net stack is wired.
+
+    Args:
+      arg0: domain (AF_INET=2, AF_INET6=10)
+      arg1: type (SOCK_STREAM=1, SOCK_DGRAM=2)
+      arg2: protocol
+    """
+    pass_todo("wire to network stack socket creation")
+    SyscallResult(value: -38)  # ENOSYS
+
+fn _handle_net_bind(args: SyscallArgs) -> SyscallResult:
+    """Bind a socket to an address. Stub."""
+    pass_todo("wire to network stack bind")
+    SyscallResult(value: -38)
+
+fn _handle_net_listen(args: SyscallArgs) -> SyscallResult:
+    """Listen on a socket. Stub."""
+    pass_todo("wire to network stack listen")
+    SyscallResult(value: -38)
+
+fn _handle_net_connect(args: SyscallArgs) -> SyscallResult:
+    """Connect a socket. Stub."""
+    pass_todo("wire to network stack connect")
+    SyscallResult(value: -38)
+
+fn _handle_net_accept(args: SyscallArgs) -> SyscallResult:
+    """Accept a connection on a socket. Stub."""
+    pass_todo("wire to network stack accept")
+    SyscallResult(value: -38)
+
+fn _handle_net_send_to(args: SyscallArgs) -> SyscallResult:
+    """Send data to a socket. Stub."""
+    pass_todo("wire to network stack sendto")
+    SyscallResult(value: -38)
+
+fn _handle_net_recv_from(args: SyscallArgs) -> SyscallResult:
+    """Receive data from a socket. Stub."""
+    pass_todo("wire to network stack recvfrom")
+    SyscallResult(value: -38)
+
+fn _handle_net_if_config(args: SyscallArgs) -> SyscallResult:
+    """Get/set network interface configuration. Stub."""
+    pass_todo("wire to network stack ifconfig")
+    SyscallResult(value: -38)
 
 # ============================================================================
 # Helper Functions

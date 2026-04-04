@@ -1,0 +1,58 @@
+# POSIX File I/O — sync wrappers over async IPC
+#
+# These functions provide the standard POSIX file I/O API.
+# Internally they use async_io.spl for non-blocking IPC to the VFS service.
+
+use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOSYS}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_types, fd_flags, fd_offsets, FD_TYPE_FILE, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END}
+use os.posix.async_io.{sync_read, sync_write}
+
+fn posix_open(path: text, flags: u32, mode: u32) -> i32:
+    """Open a file. Returns FD on success, -errno on error.
+
+    Sends open request to VFS service via IPC, allocates FD on success.
+    """
+    val fd = fd_alloc()
+    if fd < 0:
+        return fd  # -EMFILE
+    # Connect to VFS and send open request
+    pass_todo("IPC to VFS: open(path, flags, mode)")
+    val ipc_port: u64 = 0  # TODO: from VFS response
+    fd_set(fd, FD_TYPE_FILE, flags, ipc_port)
+    fd
+
+fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
+    """Read from a file descriptor. Returns bytes read or -errno."""
+    sync_read(fd, buf, count)
+
+fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
+    """Write to a file descriptor. Returns bytes written or -errno."""
+    sync_write(fd, buf, count)
+
+fn posix_close(fd: i32) -> i32:
+    """Close a file descriptor."""
+    fd_close(fd)
+
+fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
+    """Reposition file offset. Returns new offset or -errno."""
+    if not fd_is_valid(fd):
+        return 0 - EBADF as i64
+    val idx: u64 = fd as u64
+    match whence:
+        SEEK_SET:
+            fd_offsets[idx] = offset as u64
+        SEEK_CUR:
+            fd_offsets[idx] = (fd_offsets[idx] as i64 + offset) as u64
+        SEEK_END:
+            pass_todo("get file size from VFS to compute SEEK_END")
+        _:
+            return 0 - EINVAL as i64
+    fd_offsets[idx] as i64
+
+fn posix_dup(fd: i32) -> i32:
+    """Duplicate a file descriptor."""
+    fd_dup(fd)
+
+fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
+    """Duplicate fd to specific number."""
+    fd_dup2(old_fd, new_fd)

@@ -1,0 +1,189 @@
+# Notification Objects — L4-style Async Event Signaling
+#
+# Lightweight notification mechanism using 64-bit bitmasks.
+# Each notification object holds accumulated event bits and an optional
+# waiter thread. When bits are signaled while a thread is waiting,
+# the waiter is woken with the accumulated bits.
+#
+# Semantics (L4 style):
+#   - signal: atomically OR bits into word; wake waiter if present
+#   - wait:   if bits non-zero, return and clear; else block thread
+#   - poll:   return bits and clear, never blocks
+#
+# Uses a fixed-size table (no dynamic allocation) for baremetal safety.
+
+use os.kernel.types.notification_types.{Notification}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val MAX_NOTIFICATIONS: u64 = 64
+
+# ============================================================================
+# Notification Table (fixed array)
+# ============================================================================
+
+struct NotificationSlot:
+    """A slot in the notification table.
+
+    `active` indicates whether this slot is in use.
+    """
+    active: bool
+    notif: Notification
+
+struct NotificationTable:
+    """Fixed-size table of notification objects.
+
+    Slots are allocated linearly. IDs are 1-based (0 = failure/invalid).
+    """
+    slots: [NotificationSlot]
+    count: u64
+
+impl NotificationTable:
+    static fn new() -> NotificationTable:
+        """Create an empty notification table with pre-allocated slots."""
+        var slots: [NotificationSlot] = []
+        var i: u64 = 0
+        while i < MAX_NOTIFICATIONS:
+            slots.push(NotificationSlot(
+                active: false,
+                notif: Notification(id: 0, bits: 0, waiter_id: 0)
+            ))
+            i = i + 1
+        NotificationTable(slots: slots, count: 0)
+
+# ============================================================================
+# Notification Operations
+# ============================================================================
+
+fn notification_create(table: NotificationTable) -> u64:
+    """Allocate a new notification object.
+
+    Returns the notification ID (1-based), or 0 on failure (table full).
+    """
+    var tbl = table
+    var i: u64 = 0
+    while i < MAX_NOTIFICATIONS:
+        if not tbl.slots[i].active:
+            val id = i + 1  # 1-based IDs
+            var slot = tbl.slots[i]
+            slot.active = true
+            slot.notif = Notification(id: id, bits: 0, waiter_id: 0)
+            tbl.slots[i] = slot
+            tbl.count = tbl.count + 1
+            return id
+        i = i + 1
+    0  # Table full
+
+fn notification_signal(table: NotificationTable, id: u64, bits: u64) -> u64:
+    """Signal a notification by ORing bits into the notification word.
+
+    If a thread is waiting, wakes it with the accumulated bits and clears
+    the word. Returns the waiter thread ID that should be unblocked
+    (0 = no waiter to wake).
+
+    The caller (syscall dispatcher) is responsible for actually unblocking
+    the thread via the scheduler.
+    """
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return 0
+    val idx = id - 1
+    var tbl = table
+    var slot = tbl.slots[idx]
+    if not slot.active:
+        return 0
+
+    # Atomically OR new bits
+    slot.notif.bits = slot.notif.bits | bits
+
+    # If a thread is waiting, wake it
+    val waiter = slot.notif.waiter_id
+    if waiter != 0:
+        # Clear bits and waiter — the waiter receives the accumulated value
+        # via the syscall return path (stored before clearing)
+        slot.notif.bits = 0
+        slot.notif.waiter_id = 0
+        tbl.slots[idx] = slot
+        return waiter
+
+    tbl.slots[idx] = slot
+    0  # No waiter
+
+fn notification_wait(table: NotificationTable, id: u64, thread_id: u64) -> u64:
+    """Wait for notification bits.
+
+    If bits are already non-zero, returns them immediately and clears.
+    If bits are zero, registers the thread as a waiter and returns 0.
+    The caller must block the thread when 0 is returned.
+
+    Returns:
+      > 0: accumulated bits (immediate wakeup, bits cleared)
+      0: thread registered as waiter, must be blocked by caller
+    """
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return 0
+    val idx = id - 1
+    var tbl = table
+    var slot = tbl.slots[idx]
+    if not slot.active:
+        return 0
+
+    # If bits are non-zero, return them immediately
+    if slot.notif.bits != 0:
+        val accumulated = slot.notif.bits
+        slot.notif.bits = 0
+        tbl.slots[idx] = slot
+        return accumulated
+
+    # No bits — register as waiter
+    slot.notif.waiter_id = thread_id
+    tbl.slots[idx] = slot
+    0  # Caller must block the thread
+
+fn notification_poll(table: NotificationTable, id: u64) -> u64:
+    """Non-blocking poll: return accumulated bits and clear.
+
+    Never blocks. Returns 0 if no bits are set or the ID is invalid.
+    """
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return 0
+    val idx = id - 1
+    var tbl = table
+    var slot = tbl.slots[idx]
+    if not slot.active:
+        return 0
+
+    val accumulated = slot.notif.bits
+    slot.notif.bits = 0
+    tbl.slots[idx] = slot
+    accumulated
+
+fn notification_destroy(table: NotificationTable, id: u64):
+    """Free a notification slot.
+
+    If a thread is waiting, it is NOT automatically unblocked.
+    The caller should ensure no threads are waiting before destroying.
+    """
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return
+    val idx = id - 1
+    var tbl = table
+    var slot = tbl.slots[idx]
+    if not slot.active:
+        return
+    slot.active = false
+    slot.notif = Notification(id: 0, bits: 0, waiter_id: 0)
+    tbl.slots[idx] = slot
+    if tbl.count > 0:
+        tbl.count = tbl.count - 1
+
+fn notification_get_bits(table: NotificationTable, id: u64) -> u64:
+    """Read current bits without clearing (for diagnostics)."""
+    if id == 0 or id > MAX_NOTIFICATIONS:
+        return 0
+    val idx = id - 1
+    val slot = table.slots[idx]
+    if not slot.active:
+        return 0
+    slot.notif.bits

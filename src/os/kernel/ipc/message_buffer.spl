@@ -1,0 +1,161 @@
+# IPC Message Buffer — shared-memory zero-copy message passing
+#
+# L4-style IPC: sender writes to buffer, kernel transfers page mapping
+# to receiver's address space. No data copying for large messages.
+#
+# Small messages (≤ 64 bytes) use inline registers (fast path).
+# Large messages use shared buffer pages (slow path, zero-copy).
+#
+# All fields use primitive types for baremetal ABI safety.
+
+use os.kernel.types.bitfield.{bits_get, bits_set}
+
+# Buffer pool configuration
+val MAX_BUFFERS: u64 = 256
+val BUFFER_PAGE_SIZE: u64 = 4096
+
+# Buffer states
+val BUF_FREE: u8 = 0
+val BUF_ALLOCATED: u8 = 1
+val BUF_SENDING: u8 = 2
+val BUF_RECEIVED: u8 = 3
+
+# Message header layout (first 32 bytes of buffer page)
+# [0:3]   method_id: u32
+# [4:5]   cap_count: u16
+# [6:7]   flags: u16
+# [8:11]  payload_len: u32
+# [12:15] sender_badge: u32
+# [16:23] sender_endpoint: u64
+# [24:31] reserved
+
+val MSG_HDR_METHOD: u64 = 0
+val MSG_HDR_CAP_COUNT: u64 = 4
+val MSG_HDR_FLAGS: u64 = 6
+val MSG_HDR_PAYLOAD_LEN: u64 = 8
+val MSG_HDR_BADGE: u64 = 12
+val MSG_HDR_ENDPOINT: u64 = 16
+val MSG_HDR_SIZE: u64 = 32
+
+# Inline message (register-based fast path, no buffer needed)
+val MAX_INLINE_PAYLOAD: u64 = 64
+
+struct InlineMessage:
+    method_id: u32
+    cap_count: u16
+    flags: u16
+    payload_len: u32
+    badge: u32
+    # Up to 64 bytes of inline payload (8 x u64 registers)
+    r0: u64
+    r1: u64
+    r2: u64
+    r3: u64
+    r4: u64
+    r5: u64
+    r6: u64
+    r7: u64
+
+# Buffer descriptor
+struct MessageBufferDesc:
+    phys_addr: u64    # physical page address
+    state: u8         # BUF_FREE, BUF_ALLOCATED, etc.
+    owner_thread: u64 # thread that allocated this buffer
+    msg_len: u64      # current message length (header + payload)
+
+# Buffer pool — fixed array, no heap allocation
+var buffer_pool_phys: [u64; 256]    # physical addresses
+var buffer_pool_state: [u8; 256]    # states
+var buffer_pool_owner: [u64; 256]   # owners
+var buffer_pool_msglen: [u64; 256]  # message lengths
+var buffer_pool_count: u64 = 0
+
+fn msg_buffer_init(pool_phys_start: u64, pool_page_count: u64):
+    """Initialize the message buffer pool from a physical memory region.
+
+    Each buffer is one 4KB page. The pool_phys_start must be page-aligned.
+    """
+    var count: u64 = pool_page_count
+    if count > MAX_BUFFERS:
+        count = MAX_BUFFERS
+    var i: u64 = 0
+    while i < count:
+        buffer_pool_phys[i] = pool_phys_start + i * BUFFER_PAGE_SIZE
+        buffer_pool_state[i] = BUF_FREE
+        buffer_pool_owner[i] = 0
+        buffer_pool_msglen[i] = 0
+        i = i + 1
+    buffer_pool_count = count
+
+fn msg_buffer_alloc(thread_id: u64) -> u64:
+    """Allocate a message buffer for a thread. Returns buffer index, or MAX_BUFFERS on failure."""
+    var i: u64 = 0
+    while i < buffer_pool_count:
+        if buffer_pool_state[i] == BUF_FREE:
+            buffer_pool_state[i] = BUF_ALLOCATED
+            buffer_pool_owner[i] = thread_id
+            buffer_pool_msglen[i] = 0
+            return i
+        i = i + 1
+    MAX_BUFFERS
+
+fn msg_buffer_free(buf_idx: u64):
+    """Free a message buffer back to the pool."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_FREE
+        buffer_pool_owner[buf_idx] = 0
+        buffer_pool_msglen[buf_idx] = 0
+
+fn msg_buffer_phys(buf_idx: u64) -> u64:
+    """Get the physical address of a buffer page."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_phys[buf_idx]
+    else:
+        0
+
+fn msg_buffer_set_sending(buf_idx: u64, msg_len: u64):
+    """Mark buffer as containing a message ready to send."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_SENDING
+        buffer_pool_msglen[buf_idx] = msg_len
+
+fn msg_buffer_set_received(buf_idx: u64):
+    """Mark buffer as received by the destination thread."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_state[buf_idx] = BUF_RECEIVED
+
+fn msg_buffer_get_len(buf_idx: u64) -> u64:
+    """Get the message length in a buffer."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_msglen[buf_idx]
+    else:
+        0
+
+fn msg_buffer_is_owned_by(buf_idx: u64, thread_id: u64) -> bool:
+    """Check if a buffer is owned by a specific thread."""
+    if buf_idx < buffer_pool_count:
+        buffer_pool_owner[buf_idx] == thread_id
+    else:
+        false
+
+# ===========================================================================
+# IPC Send/Recv with buffer transfer
+# ===========================================================================
+
+fn ipc_send_inline(endpoint_id: u64, msg: InlineMessage) -> u64:
+    """Send an inline message (≤ 64 bytes payload). Returns 0 on success."""
+    pass_todo("wire to endpoint send_waiters/recv_waiters")
+
+fn ipc_send_buffer(endpoint_id: u64, buf_idx: u64) -> u64:
+    """Send a buffered message. Transfers buffer ownership to receiver.
+    Returns 0 on success, error code on failure."""
+    if buf_idx >= buffer_pool_count:
+        return 1  # invalid buffer
+    if buffer_pool_state[buf_idx] != BUF_SENDING:
+        return 2  # buffer not in sending state
+    pass_todo("transfer buffer to endpoint receiver, remap page")
+
+fn ipc_recv_buffer(endpoint_id: u64, thread_id: u64) -> u64:
+    """Receive a buffered message. Returns buffer index, or MAX_BUFFERS if no message.
+    Blocks the thread if no message is available."""
+    pass_todo("check endpoint recv_waiters, block if empty")

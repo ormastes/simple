@@ -1,0 +1,79 @@
+# POSIX Signal Compatibility — basic signal handling
+#
+# SimpleOS has signal/kill syscalls. This layer adds handler registration.
+# No fork-based signal delivery — signals are delivered at next scheduling point.
+
+use os.posix.errno.{EINVAL, ESRCH}
+
+# Standard signal numbers
+val SIGHUP: i32 = 1
+val SIGINT: i32 = 2
+val SIGQUIT: i32 = 3
+val SIGKILL: i32 = 9
+val SIGTERM: i32 = 15
+val SIGSTOP: i32 = 19
+val SIGCONT: i32 = 18
+val SIGCHLD: i32 = 17
+val SIGUSR1: i32 = 10
+val SIGUSR2: i32 = 12
+
+# Signal dispositions
+val SIG_DFL: u64 = 0  # default action
+val SIG_IGN: u64 = 1  # ignore
+
+val MAX_SIGNALS: u64 = 32
+
+# Per-process signal handler table
+# handler_addr = 0 → default, handler_addr = 1 → ignore, else → user fn pointer
+var signal_handlers: [u64; 32]
+var signal_mask: u64 = 0       # blocked signal bitmask
+var signal_pending: u64 = 0    # pending signal bitmask
+
+fn signal_init():
+    """Initialize signal handling for a process."""
+    var i: u64 = 0
+    while i < MAX_SIGNALS:
+        signal_handlers[i] = SIG_DFL
+        i = i + 1
+    signal_mask = 0
+    signal_pending = 0
+
+fn posix_signal(signum: i32, handler: u64) -> u64:
+    """Register a signal handler. Returns previous handler.
+
+    handler = SIG_DFL (0) for default, SIG_IGN (1) to ignore,
+    or a function pointer for a user handler.
+    """
+    if signum < 1 or signum >= MAX_SIGNALS as i32:
+        return SIG_DFL
+    # SIGKILL and SIGSTOP cannot be caught
+    if signum == SIGKILL or signum == SIGSTOP:
+        return SIG_DFL
+    val idx: u64 = signum as u64
+    val prev = signal_handlers[idx]
+    signal_handlers[idx] = handler
+    prev
+
+fn posix_kill(pid: u64, signum: i32) -> i32:
+    """Send a signal to a process. Returns 0 on success, -errno on error."""
+    if signum < 1 or signum >= MAX_SIGNALS as i32:
+        return 0 - EINVAL
+    pass_todo("IPC to kernel: signal(pid, signum)")
+    0
+
+fn signal_deliver_pending():
+    """Check and deliver pending signals. Called at scheduling points."""
+    var sig: u64 = 1
+    while sig < MAX_SIGNALS:
+        val bit: u64 = 1 << sig
+        if (signal_pending & bit) != 0 and (signal_mask & bit) == 0:
+            # Signal is pending and not blocked
+            signal_pending = signal_pending & ~bit  # clear pending
+            val handler = signal_handlers[sig]
+            if handler == SIG_IGN:
+                pass_dn  # ignore
+            elif handler == SIG_DFL:
+                pass_todo("default action for signal (term, stop, etc.)")
+            else:
+                pass_todo("call user handler at address 'handler' with sig as arg")
+        sig = sig + 1
