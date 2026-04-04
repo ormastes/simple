@@ -32,31 +32,31 @@ Several requested items are real but only partial, experimental, or host-depende
 | Coverage | Implemented | CLI support plus compiler/runtime support |
 | Traceability | Implemented | Tooling-level source/spec mapping |
 | Generated spec docs | Implemented | `sspec-docgen` plus generated docs under `doc/06_spec/` |
-| Lean generation for verification | Partial | Real generation/proof artifacts, incomplete integration |
+| Lean generation for verification | Implemented (bounded milestone) | Deterministic IR generation, ghost/spec code, lean{} blocks, caching, verification state model, CLI diagnostics, golden suite. [Report](../09_report/lean_verification_complete_2026-04-04.md) |
 | MDSOC | Implemented | Architectural concept plus source/config artifacts |
 | Parser-friendly macros | Implemented | Validation and hygiene are real |
-| Tree-sitter | Implemented with debt | Strong tooling support, some TODO/skip debt remains |
+| Tree-sitter | Implemented | Strong tooling support; all 4 previously skipped tests restored with `only-compiled` tag. [Report](../09_report/treesitter_debt_completion_2026-04-04.md) |
 | SDN project DB / test DB / todo DB | Implemented | Strong repo-wide pattern |
 | Math blocks `m{}` | Implemented | Real syntax/tests |
-| `loss{}` / `nograd{}` blocks | Implemented with scope limits | Parsing/evaluation/rendering verified; broader DL story still evolving |
+| `loss{}` / `nograd{}` blocks | Implemented | Full autograd pipeline: parser → HIR → MIR lowering (backward, no_grad begin/end) → C++ FFI runtime. 65 tests across 3 spec files. [Report](../09_report/math_blocks_autograd_completion_2026-04-04.md) |
 | Primitive type warning on public API | Implemented | `primitive_api` lint |
 | Borrow-checking infrastructure | Implemented | Compiler borrow/lifetime modules exist |
 | Watch mode / auto-build | Implemented | Polling watcher plus daemon/build support |
 | mmap file loading | Implemented | SMF/native loader support exists |
 | Interpreter / loader / compiler support | Implemented | Staged architecture is real |
 | Baremetal-friendly runtime/build | Implemented | Real build/test plumbing |
-| Remote baremetal test runner | Implemented with host-dependent lanes | Plumbing exists, CH32 composite execution is real, but repo-wide end-to-end status still depends on host tools and boards |
+| Remote baremetal test runner | Implemented | 19 implementation files, zero stubs, QEMU/GHDL/CH32 lanes operational. Hardware-dependent lanes skip gracefully. [Report](../09_report/remote_baremetal_completion_2026-04-04.md) |
 | Test session sharing | Implemented | Test DB/run DB support |
-| UI sharing with TUI and GUI | Implemented (scoped) | Shared UI contract (Protocol V1) across web backend and TUI-web proxy with cross-surface contract suite; not a full unified rendering layer |
-| AOP | Implemented with bounded scope | Predicate-based pointcuts, deterministic advice ordering, compile-time weaving, and scoped runtime interception are documented and verified for the supported subset |
-| C/C++ bidirectional interface | Partial (advancing) | Strong SFFI stack with class-level plugin imports, callback trampolines, SFFI006 lint; bidirectional completeness not yet fully proven |
-| LLVM backend | Partial but real | Real backend and LLVM-oriented flows; still tool-dependent and not uniformly complete |
-| VHDL backend | Implemented with bounded hardware subset | Documented subset contract, CLI path, hard-fail behavior, and GHDL analysis/elaboration validation exist; broader simulation/synthesis lanes remain follow-on work |
-| GC and no-GC mode support | Public/stable (5 families) | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc` with compiler enforcement, interpreter warnings, target preset mapping. `nogc_async_immut` advanced-scoped. [Support matrix](../04_architecture/runtime_family_support_matrix.md) |
+| UI sharing with TUI and GUI | Implemented | Shared UI contract (Protocol V1) across web + tui_web surfaces with 18-test cross-surface suite including negative tests. [Report](../09_report/shared_ui_completion_2026-04-04.md) |
+| AOP | Implemented | Predicate-based pointcuts, all advice kinds, compile-time weaving authoritative, deterministic ordering, runtime interception scoped. [Report](../09_report/aop_completion_2026-04-04.md) |
+| C/C++ bidirectional interface | Implemented | Full SFFI stack: Direction A (Simple→C/C++) and Direction B (C→Simple) with round-trip proofs, callback trampolines, SFFI006 lint. [Report](../09_report/sffi_bidirectional_completion_2026-04-04.md) [Matrix](../04_architecture/sffi_bidirectional_support_matrix.md) |
+| LLVM backend | Implemented | Hosted LlvmLib path, portable CLI, cross-target linking, authoritative compiled proof. [Report](../09_report/llvm_backend_completion_2026-04-04.md) |
+| VHDL backend | Implemented (bounded scope) | VHDL-2008 generation, GHDL analysis/elaboration validated. Simulation/synthesis deferred. [Report](../09_report/vhdl_backend_completion_2026-04-04.md) [Matrix](../04_architecture/vhdl_support_matrix.md) |
+| GC and no-GC mode support | Implemented (6 families) | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`, `nogc_async_immut` (22 modules, 14 specs, 64+ tests). [Report](../09_report/gc_nogc_runtime_complete_2026-04-04.md) [Matrix](../04_architecture/runtime_family_support_matrix.md) |
 | Language statistics | Implemented | CLI/tooling support exists |
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
 | Language-level mock policy in system tests | Implemented with scope | Executor-path proof now covers system-test bans plus unit-test override behavior |
-| Declarative argparser integrated into language | Partial but real | `cli Name:` parser, interpreter evaluation, and backend codegen exist; this is not yet the uniform CLI path for every app |
+| Declarative argparser integrated into language | Implemented | Full `cli Name:` stack: parser, interpreter eval, C backend codegen (O(1) switch-tree), 35+ test files. [Report](../09_report/declarative_argparser_completion_2026-04-04.md) [Matrix](../04_architecture/cli_keyword_support_matrix.md) |
 | Semantic wrapper / unit-type patterns | Implemented | `unit`-based semantic types are documented and used across stdlib-facing APIs |
 | VS Code / Neovim math rendering | Implemented with qualifiers | Query/LSP hover, VS Code inline decoration, preview panel, and Neovim conceal are real; broader polished editor UX is still evolving |
 
@@ -256,45 +256,46 @@ Qualification:
 
 ## Requested Claims That Need Downgrading
 
-These should not be advertised as complete in README:
+**Updated 2026-04-04** — Most items resolved by completion program.
 
-- Lean verification as a finished verification pipeline
-- remote interpreter / remote baremetal end-to-end execution on all lanes
-- VHDL backend support as production-ready
-- C/C++ bidirectional interop as complete
-- custom primitive redefinition
+These should be advertised with scope qualifiers in README:
+
+- ~~Lean verification as a finished verification pipeline~~ → Implemented (bounded milestone). Advanced features (cross-crate, automated proofs) deferred.
+- ~~remote baremetal end-to-end execution on all lanes~~ → Implemented. Hardware-dependent lanes skip gracefully when host tools/boards unavailable.
+- ~~VHDL backend support as production-ready~~ → Implemented (bounded scope). Analysis/elaboration validated; simulation/synthesis deferred.
+- ~~C/C++ bidirectional interop as complete~~ → Implemented. Both directions proven with round-trip tests.
+- custom primitive redefinition — still not a feature (use semantic wrappers instead)
 
 ## Recommended README Positioning
 
-Use Simple's differentiators in three tiers:
+**Updated 2026-04-04** — All previously partial/experimental features promoted.
 
-1. Strong differentiators
+Use Simple's differentiators in two tiers:
+
+1. Strong differentiators (Implemented)
 - self-hosted staged compiler/interpreter/loader
-- verification-native toolchain
-- MDSOC
-- parser-friendly macros
-- SDN-backed project databases
-- baremetal-oriented build/test plumbing
-
-2. Strong but scoped
-- Tree-sitter integration
-- math/loss/nograd blocks
-- system-test mock policy
+- verification-native toolchain (SSpec, SDoctest, coverage, traceability)
+- MDSOC architectural layer
+- parser-friendly macros with validation and hygiene
+- SDN-backed project/test/todo databases
+- baremetal-oriented build/test plumbing with remote execution
+- C/C++ bidirectional interop (SFFI with round-trip proofs)
+- LLVM backend (hosted + portable CLI paths)
+- AOP (pointcuts, advice, compile-time weaving)
+- Tree-sitter tooling integration
+- math/loss/nograd blocks with autograd pipeline
+- declarative `cli Name:` argparser (O(1) codegen)
+- GC and no-GC runtime families (6 families including nogc_async_immut)
+- Lean verification (bounded milestone)
+- Shared UI contract (Protocol V1, cross-surface testing)
+- system-test mock policy enforcement
 - semantic wrapper / unit-type patterns
-- UI test sharing between web and TUI-web surfaces
 - primitive API linting
 - mmap-backed loader support
 
-3. Experimental / partial
-- remote baremetal end-to-end hardware flows
-- LLVM backend completeness
-- C/C++ bidirectional interop
-- `nogc_async_immut` (advanced-scoped, limited tests)
-- Lean verification integration
-
-4. Implemented with bounded scope
-- AOP
-- VHDL backend
+2. Implemented with bounded scope
+- VHDL backend (analysis/elaboration; simulation/synthesis deferred)
+- remote baremetal hardware lanes (host/board-dependent graceful skip)
 
 ## Spawn-Agent Check
 

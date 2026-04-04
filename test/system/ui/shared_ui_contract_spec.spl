@@ -11,7 +11,7 @@ Covers:
   - Tree / Read: element retrieval, stable node identity, text visibility
   - Actions: click, type, submit, event dispatch
   - Focus / State: focus movement, enabled/disabled, selection state
-  - Errors: invalid selector, unsupported action, stale session
+  - Errors: invalid selector, unsupported action, stale session (post-stop)
   - Protocol: version header, structured error model, ready endpoint
   - Session: lifecycle, read-after-write consistency
 
@@ -538,6 +538,52 @@ describe "Shared UI Contract — Errors":
 
         stop_ui_server(wpid)
         stop_ui_server(tpid)
+
+    slow_it "stale session returns connection error after server stop":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        # Verify servers are alive first
+        val web_ready = test_get("127.0.0.1", wp, "/api/test/ready")
+        match web_ready:
+            Ok(b):
+                val ready = extract_field(b, "ready")
+                expect ready to_equal "true"
+            Err(e):
+                expect e to_equal ""
+        val tui_ready = test_get("127.0.0.1", tp, "/api/test/ready")
+        match tui_ready:
+            Ok(b):
+                val ready = extract_field(b, "ready")
+                expect ready to_equal "true"
+            Err(e):
+                expect e to_equal ""
+
+        # Stop both servers — sessions are now stale
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+        # Requests to stopped servers must fail with connection error
+        val web_stale = test_get("127.0.0.1", wp, "/api/test/ready")
+        match web_stale:
+            Ok(b):
+                # Should not succeed — server is stopped
+                expect "connection should have failed" to_equal ""
+            Err(e):
+                # Connection error is expected for a stale/dead session
+                expect e.length() to_be_greater_than 0
+
+        val tui_stale = test_get("127.0.0.1", tp, "/api/test/ready")
+        match tui_stale:
+            Ok(b):
+                expect "connection should have failed" to_equal ""
+            Err(e):
+                expect e.length() to_be_greater_than 0
 
 # ============================================================================
 # 7. Read-After-Write Consistency
