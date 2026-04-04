@@ -1,0 +1,414 @@
+# Error Conversion Support for SFFI Exported Functions
+#
+# Converts Simple Result<T,E> return types to C-style error out-parameters
+# for @export("C") functions. When a function returns Result<T, E>, the
+# generated C wrapper uses: T func_name(args..., spl_error_t** err_out)
+#
+# This module provides:
+# - SplErrorABI: naming constants for the error type infrastructure
+# - Result type detection and decomposition
+# - C code emission for error type definitions and converting wrappers
+# - ResultTypeMapping for type_mapper integration
+
+use compiler.mir.mir_data.*
+use compiler.backend.c_type_mapper.{CTypeMapper}
+
+# ============================================================================
+# Error ABI Configuration
+# ============================================================================
+
+class SplErrorABI:
+    """The opaque error handle type and helper function names used in C headers."""
+    error_type_name: text     # "spl_error_t"
+    message_fn_name: text     # "spl_error_message"
+    free_fn_name: text        # "spl_error_free"
+    last_error_fn_name: text  # "spl_last_error"
+
+fn default_error_abi() -> SplErrorABI:
+    """Return the default error ABI names."""
+    SplErrorABI(
+        error_type_name: "spl_error_t",
+        message_fn_name: "spl_error_message",
+        free_fn_name: "spl_error_free",
+        last_error_fn_name: "spl_last_error"
+    )
+
+# ============================================================================
+# Result Type Mapping
+# ============================================================================
+
+class ResultTypeMapping:
+    """Decomposed Result<T,E> type with C representations."""
+    ok_c_type: text       # C type for the success value (e.g. "int64_t")
+    err_c_type: text      # C type for the error value (e.g. "const char*")
+    ok_type_name: text    # Original Simple type name (e.g. "i64")
+    err_type_name: text   # Original Simple error type name (e.g. "Error")
+    is_void_ok: bool      # True when success type is Unit/void
+
+# ============================================================================
+# Result Type Detection
+# ============================================================================
+
+fn is_result_type(ty: MirType) -> bool:
+    """Check if a MIR type represents Result<T,E>.
+
+    Result types appear as Opaque("Result<...>") in MIR because they
+    are generic types that the backend sees as opaque names.
+    """
+    match ty.kind:
+        case Opaque(name):
+            name.starts_with("Result<") or name == "Result"
+        case _:
+            false
+
+fn is_result_type_name(type_name: text) -> bool:
+    """Check if a type name string represents Result<T,E>."""
+    type_name.starts_with("Result<") or type_name == "Result"
+
+fn extract_result_ok_type(type_name: text) -> text:
+    """Extract the success type from a Result<T,E> type name.
+
+    "Result<i64, Error>" -> "i64"
+    "Result<text, text>" -> "text"
+    """
+    if not type_name.starts_with("Result<"):
+        return "void"
+
+    # Strip "Result<" prefix and ">" suffix
+    val inner = type_name.replace("Result<", "").replace(">", "")
+
+    # Split on ", " to get [ok_type, err_type]
+    val parts = inner.split(", ")
+    if parts.len() >= 1:
+        return parts[0].trim()
+
+    "void"
+
+fn extract_result_err_type(type_name: text) -> text:
+    """Extract the error type from a Result<T,E> type name.
+
+    "Result<i64, Error>" -> "Error"
+    "Result<text, text>" -> "text"
+    """
+    if not type_name.starts_with("Result<"):
+        return "Error"
+
+    # Strip "Result<" prefix and ">" suffix
+    val inner = type_name.replace("Result<", "").replace(">", "")
+
+    # Split on ", " to get [ok_type, err_type]
+    val parts = inner.split(", ")
+    if parts.len() >= 2:
+        return parts[1].trim()
+
+    "Error"
+
+fn map_result_type(type_name: text) -> ResultTypeMapping:
+    """Decompose a Result<T,E> type name into C type mappings.
+
+    Maps the ok type and error type to their C equivalents using
+    standard primitive-to-C mappings.
+    """
+    val ok_name = extract_result_ok_type(type_name)
+    val err_name = extract_result_err_type(type_name)
+    val ok_c = _simple_type_to_c(ok_name)
+    val err_c = _simple_type_to_c(err_name)
+    val is_void = ok_name == "Unit" or ok_name == "unit" or ok_name == "()"
+
+    ResultTypeMapping(
+        ok_c_type: if is_void: "void" else: ok_c,
+        err_c_type: err_c,
+        ok_type_name: ok_name,
+        err_type_name: err_name,
+        is_void_ok: is_void
+    )
+
+# ============================================================================
+# C Code Emission - Error Type Infrastructure
+# ============================================================================
+
+fn emit_error_type_definitions() -> text:
+    """Generate C code for the error type infrastructure.
+
+    Emits:
+    - spl_error_t struct definition
+    - Thread-local last-error storage
+    - spl_error_message(), spl_error_free(), spl_last_error() functions
+    - Internal _spl_set_last_error() helper
+    """
+    var lines: [text] = []
+
+    lines.push(r"// ================================================================")
+    lines.push(r"// SFFI Error Type Infrastructure")
+    lines.push(r"// ================================================================")
+    lines.push(r"")
+    lines.push(r"#include <stdlib.h>")
+    lines.push(r"#include <string.h>")
+    lines.push(r"")
+    lines.push(r"typedef struct spl_error_t spl_error_t;")
+    lines.push(r"struct spl_error_t {")
+    lines.push(r"    const char* message;")
+    lines.push(r"    int32_t code;")
+    lines.push(r"};")
+    lines.push(r"")
+    lines.push(r"static __thread spl_error_t* _spl_last_error = NULL;")
+    lines.push(r"")
+    lines.push(r"static const char* spl_error_message(const spl_error_t* err) {")
+    lines.push(r"    return err ? err->message : " + "\"\"" + r";")
+    lines.push(r"}")
+    lines.push(r"")
+    lines.push(r"static void spl_error_free(spl_error_t* err) {")
+    lines.push(r"    if (err) {")
+    lines.push(r"        free((void*)err->message);")
+    lines.push(r"        free(err);")
+    lines.push(r"    }")
+    lines.push(r"}")
+    lines.push(r"")
+    lines.push(r"static spl_error_t* spl_last_error(void) {")
+    lines.push(r"    spl_error_t* e = _spl_last_error;")
+    lines.push(r"    _spl_last_error = NULL;")
+    lines.push(r"    return e;")
+    lines.push(r"}")
+    lines.push(r"")
+    lines.push(r"static void _spl_set_last_error(const char* msg, int32_t code) {")
+    lines.push(r"    if (_spl_last_error) {")
+    lines.push(r"        spl_error_free(_spl_last_error);")
+    lines.push(r"    }")
+    lines.push(r"    spl_error_t* err = (spl_error_t*)malloc(sizeof(spl_error_t));")
+    lines.push(r"    if (err) {")
+    lines.push(r"        size_t len = strlen(msg);")
+    lines.push(r"        char* buf = (char*)malloc(len + 1);")
+    lines.push(r"        if (buf) {")
+    lines.push(r"            memcpy(buf, msg, len + 1);")
+    lines.push(r"            err->message = buf;")
+    lines.push(r"        } else {")
+    lines.push(r"            err->message = " + "\"\"" + r";")
+    lines.push(r"        }")
+    lines.push(r"        err->code = code;")
+    lines.push(r"    }")
+    lines.push(r"    _spl_last_error = err;")
+    lines.push(r"}")
+    lines.push(r"")
+
+    lines.join("\n")
+
+# ============================================================================
+# C Code Emission - Error Converting Wrapper Body
+# ============================================================================
+
+fn emit_error_converting_wrapper(export_name: text, internal_name: text, ok_c_type: text, params_str: text, args_str: text, is_void_ok: bool) -> text:
+    """Generate a complete extern "C" wrapper for a Result-returning function.
+
+    The wrapper calls the internal function, inspects the result tag,
+    and either returns the ok value or sets the thread-local error
+    and writes to the err_out parameter.
+
+    The internal function's Result is laid out as a tagged union:
+      { int64_t tag; union { T ok_value; struct { const char* msg; int32_t code; } err; } data; }
+    Tag 0 = Ok, Tag 1 = Err.
+    """
+    var lines: [text] = []
+
+    # Build param list with err_out appended
+    val full_params = if params_str == "void":
+        r"spl_error_t** err_out"
+    else:
+        params_str + r", spl_error_t** err_out"
+
+    val wrapper_ret_ty = if is_void_ok: "void" else: ok_c_type
+
+    lines.push(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + export_name + r"(" + full_params + r") {")
+
+    # Call the internal function — result is a tagged union struct
+    lines.push(r"    auto _result = " + internal_name + r"(" + args_str + r");")
+
+    # Check the tag: 0 = Ok, 1 = Err
+    lines.push(r"    if (_result.tag == 0) {")
+    lines.push(r"        if (err_out) *err_out = NULL;")
+    if is_void_ok:
+        lines.push(r"        return;")
+    else:
+        lines.push(r"        return _result.data.ok_value;")
+    lines.push(r"    } else {")
+    lines.push(r"        const char* _msg = _result.data.err.msg ? _result.data.err.msg : " + "\"unknown error\"" + r";")
+    lines.push(r"        int32_t _code = _result.data.err.code;")
+    lines.push(r"        _spl_set_last_error(_msg, _code);")
+    lines.push(r"        if (err_out) *err_out = spl_last_error();")
+    if is_void_ok:
+        lines.push(r"        return;")
+    else:
+        lines.push(r"        " + ok_c_type + r" _zero = {0};")
+        lines.push(r"        return _zero;")
+    lines.push(r"    }")
+    lines.push(r"}")
+    lines.push(r"")
+
+    lines.join("\n")
+
+fn emit_error_converting_method_wrapper(export_name: text, internal_name: text, ok_c_type: text, wrapper_params: [text], forward_args: [text], is_void_ok: bool) -> text:
+    """Generate an error-converting wrapper for a Result-returning class method.
+
+    Same as emit_error_converting_wrapper but takes pre-built param/arg lists
+    that already include the self handle parameter.
+    """
+    var params_with_err: [text] = []
+    var pi = 0
+    while pi < wrapper_params.len():
+        params_with_err.push(wrapper_params[pi])
+        pi = pi + 1
+    params_with_err.push(r"spl_error_t** err_out")
+
+    val params_str = params_with_err.join(", ")
+    val args_str = forward_args.join(", ")
+
+    emit_error_converting_wrapper(export_name, internal_name, ok_c_type, params_str, args_str, is_void_ok)
+
+# ============================================================================
+# C Header Emission Helpers
+# ============================================================================
+
+fn emit_error_type_header_declarations() -> [text]:
+    """Generate C header declarations for the error type infrastructure.
+
+    Returns lines to be inserted into the header preamble, including:
+    - Forward declaration of spl_error_t
+    - Function declarations for error management
+    """
+    var lines: [text] = []
+    lines.push(r"/* SFFI Error type */")
+    lines.push(r"typedef struct spl_error_t spl_error_t;")
+    lines.push(r"const char* spl_error_message(const spl_error_t* err);")
+    lines.push(r"void spl_error_free(spl_error_t* err);")
+    lines.push(r"spl_error_t* spl_last_error(void);")
+    lines.push(r"")
+    lines
+
+fn emit_result_function_declaration(export_name: text, ok_c_type: text, params: [text], is_void_ok: bool) -> text:
+    """Generate a C header function declaration for a Result-returning export.
+
+    Instead of returning Result<T,E>, declares: T fn(args..., spl_error_t** err_out);
+    """
+    var decl_params: [text] = []
+    var pi = 0
+    while pi < params.len():
+        decl_params.push(params[pi])
+        pi = pi + 1
+    decl_params.push(r"spl_error_t** err_out")
+
+    val ret_ty = if is_void_ok: "void" else: ok_c_type
+    val params_str = decl_params.join(", ")
+    ret_ty + " " + export_name + "(" + params_str + ");"
+
+# ============================================================================
+# C++ Wrapper Emission Helpers
+# ============================================================================
+
+fn emit_cpp_error_method_wrapper(method_name: text, c_fn_name: text, ok_cpp_type: text, cpp_params: [text], c_args: [text], is_void_ok: bool) -> [text]:
+    """Generate a C++ method wrapper that converts spl_error_t to exception.
+
+    For Result-returning methods in the C++ wrapper class, generates:
+      T method_name(args...) {
+          spl_error_t* err = nullptr;
+          T result = c_fn_name(handle_, args..., &err);
+          if (err) {
+              std::string msg = spl_error_message(err);
+              spl_error_free(err);
+              throw std::runtime_error(msg);
+          }
+          return result;
+      }
+    """
+    var lines: [text] = []
+    val ret_ty = if is_void_ok: "void" else: ok_cpp_type
+    val params_str = cpp_params.join(", ")
+
+    # Build the C call args with &err appended
+    var call_args: [text] = []
+    var ai = 0
+    while ai < c_args.len():
+        call_args.push(c_args[ai])
+        ai = ai + 1
+    call_args.push(r"&err")
+    val call_args_str = call_args.join(", ")
+
+    lines.push(ret_ty + " " + method_name + "(" + params_str + ") {")
+    lines.push(r"    spl_error_t* err = nullptr;")
+    if is_void_ok:
+        lines.push(r"    " + c_fn_name + "(" + call_args_str + ");")
+    else:
+        lines.push(r"    " + ret_ty + " result = " + c_fn_name + "(" + call_args_str + ");")
+    lines.push(r"    if (err) {")
+    lines.push(r"        std::string msg = spl_error_message(err);")
+    lines.push(r"        spl_error_free(err);")
+    lines.push(r"        throw std::runtime_error(msg);")
+    lines.push(r"    }")
+    if not is_void_ok:
+        lines.push(r"    return result;")
+    lines.push(r"}")
+    lines.push(r"")
+    lines
+
+fn emit_cpp_error_free_function_wrapper(cpp_name: text, c_fn_name: text, ok_cpp_type: text, cpp_params: [text], c_args: [text], is_void_ok: bool) -> [text]:
+    """Generate a C++ free function wrapper that converts spl_error_t to exception.
+
+    Same as emit_cpp_error_method_wrapper but for standalone functions with
+    'inline' prefix.
+    """
+    var lines: [text] = []
+    val ret_ty = if is_void_ok: "void" else: ok_cpp_type
+    val params_str = cpp_params.join(", ")
+
+    var call_args: [text] = []
+    var ai = 0
+    while ai < c_args.len():
+        call_args.push(c_args[ai])
+        ai = ai + 1
+    call_args.push(r"&err")
+    val call_args_str = call_args.join(", ")
+
+    lines.push(r"inline " + ret_ty + " " + cpp_name + "(" + params_str + ") {")
+    lines.push(r"    spl_error_t* err = nullptr;")
+    if is_void_ok:
+        lines.push(r"    " + c_fn_name + "(" + call_args_str + ");")
+    else:
+        lines.push(r"    " + ret_ty + " result = " + c_fn_name + "(" + call_args_str + ");")
+    lines.push(r"    if (err) {")
+    lines.push(r"        std::string msg = spl_error_message(err);")
+    lines.push(r"        spl_error_free(err);")
+    lines.push(r"        throw std::runtime_error(msg);")
+    lines.push(r"    }")
+    if not is_void_ok:
+        lines.push(r"    return result;")
+    lines.push(r"}")
+    lines.push(r"")
+    lines
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _simple_type_to_c(type_name: text) -> text:
+    """Map a Simple type name to C type string for Result decomposition."""
+    match type_name:
+        case "i64": "int64_t"
+        case "i32": "int32_t"
+        case "i16": "int16_t"
+        case "i8": "int8_t"
+        case "u64": "uint64_t"
+        case "u32": "uint32_t"
+        case "u16": "uint16_t"
+        case "u8": "uint8_t"
+        case "f64": "double"
+        case "f32": "float"
+        case "bool": "int64_t"
+        case "text": "const char*"
+        case "Text": "const char*"
+        case "str": "const char*"
+        case "Unit": "void"
+        case "unit": "void"
+        case "()": "void"
+        case _: "void*"
+
+# ============================================================================
+# Export
+# ============================================================================

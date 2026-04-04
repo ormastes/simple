@@ -87,6 +87,22 @@
 
 ---
 
+## Limitation ID: LIM-RTFAM-009
+**Severity:** Medium
+**Component:** Tests — `test/unit/compiler/semantics/gc_boundary_enforcement_spec.spl`, `test/integration/runtime_family_spec.spl`, `test/unit/compiler/interpreter/gc_parity_spec.spl`, `test/unit/compiler/target_presets_spec.spl`
+**Description:** All 112 runtime family tests (across the 4 files listed above) are structural-only in interpreter mode. The test runner loads and parses each file, confirming structural validity, but `it` block bodies do NOT execute — assertions are never evaluated. All tests pass green in interpreter mode regardless of whether the logic is correct. The local helper functions replicate logic from the real compiler modules (`gc_config.spl`, `gc_boundary_check.spl`, `baremetal.spl`, `module_loader.spl`) but divergence between helpers and real code cannot be detected in interpreter mode.
+**Impact:** False-green test results. A regression in the real compiler modules would not be caught by these tests when run in interpreter mode. Any developer relying on `bin/simple test` output for these files as a correctness signal is misled.
+**Workaround:** Run the 4 files in compiled mode for authoritative proof:
+```
+bin/simple test --compiled test/unit/compiler/semantics/gc_boundary_enforcement_spec.spl
+bin/simple test --compiled test/integration/runtime_family_spec.spl
+bin/simple test --compiled test/unit/compiler/interpreter/gc_parity_spec.spl
+bin/simple test --compiled test/unit/compiler/target_presets_spec.spl
+```
+**Fix plan:** Once compiled-mode test execution is stable in CI, add these 4 files to the compiled-mode test suite. Long-term: restructure to import real modules directly (requires compiler pipeline available at test time).
+
+---
+
 ## Summary Table
 
 | ID | Severity | Component | Short description |
@@ -99,3 +115,4 @@
 | LIM-RTFAM-006 | Medium | Runtime | No runtime GC boundary guard against FFI/dynamic-dispatch violations |
 | LIM-RTFAM-007 | Low | Compiler | `alloc_checker` legacy fallback may miss heap allocation in non-standard paths |
 | LIM-RTFAM-008 | Low | CLI | `TargetPreset` enum not exposed as a CLI flag |
+| LIM-RTFAM-009 | Medium | Tests | All 112 runtime family tests are structural-only in interpreter mode; assertions never execute |
