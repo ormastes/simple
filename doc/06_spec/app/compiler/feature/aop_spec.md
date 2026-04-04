@@ -1,6 +1,7 @@
 # Aspect-Oriented Programming (AOP) Specification
 
-**Feature ID:** #AOP-001 to #AOP-020 | **Category:** Language | **Status:** In Progress
+**Feature ID:** #AOP-001 to #AOP-020 | **Category:** Language | **Status:** Complete (bounded scope)  
+**Support Matrix:** [doc/05_design/aop_support_matrix.md](../../../../05_design/aop_support_matrix.md)
 
 _Source: `test/feature/usage/aop_spec.spl`_
 

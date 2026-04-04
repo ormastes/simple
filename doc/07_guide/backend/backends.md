@@ -1,7 +1,7 @@
 # Compiler Backends
 
 **Version:** 0.5.0
-**Status:** Production (Cranelift, C++20), Development (LLVM, Native, VHDL)
+**Status:** Production (Cranelift, C++20), Development (LLVM, Native), Supported (VHDL)
 
 ---
 
@@ -19,7 +19,7 @@ Simple supports multiple compiler backends. Each backend translates MIR (Mid-lev
 | **C++20** | Production | Portable, bootstrap | C++ source |
 | **LLVM** | Development | Optimized release builds | Native binary |
 | **Native** | Development | Direct machine code | Native binary |
-| **VHDL** | Experimental | Hardware synthesis | VHDL source |
+| **VHDL** | Supported | Hardware synthesis (bounded subset) | VHDL-2008 source |
 
 ### Cranelift
 
@@ -68,14 +68,16 @@ bin/simple build --backend=native
 
 ### VHDL
 
-Hardware description language output for FPGA synthesis.
+Synthesizable VHDL-2008 output for a documented hardware-oriented Simple subset. Validated through GHDL analysis/elaboration.
 
 ```bash
-bin/simple build --backend=vhdl --target=fpga
+bin/simple compile --backend=vhdl source.spl    # Produces source.vhd
+bin/simple compile --backend=vhdl source.spl -o out.vhd
 ```
 
-**Strengths:** Direct hardware synthesis from Simple source.
-**Limitations:** Experimental, limited language feature support.
+**Strengths:** Direct hardware synthesis from Simple source, strict fail-fast on unsupported constructs, compile-time constraint verification (width, CDC, combinational loops, latch inference).
+**Limitations:** Restricted to a documented hardware subset (integers, booleans, records, enums, processes). No floating-point, dynamic allocation, or general polymorphism. Simulation-backed execution is a follow-on milestone.
+**References:** [Subset Contract](../../04_architecture/vhdl_hardware_subset_contract.md) | [Support Matrix](../../04_architecture/vhdl_support_matrix.md)
 
 ---
 

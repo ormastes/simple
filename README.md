@@ -49,9 +49,13 @@ Implemented, but best described with qualifiers:
 - Shared UI testing across web and TUI-web surfaces is real, but this is not yet one finished unified UI layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
+Complete with bounded scope:
+- AOP provides predicate-based pointcuts (`execution`, `within`, `attr`), deterministic before/after/around advice, compile-time weaving as the default backend, and scoped runtime interception. Support matrix: [doc/05_design/aop_support_matrix.md](doc/05_design/aop_support_matrix.md)
+
+Complete with bounded scope:
+- VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed execution is a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
+
 Experimental or partial:
-- AOP support has a verified baseline, but the broader DI/AOP authoring surface is still in progress. Current state: [doc/01_research/local/aop.md](doc/01_research/local/aop.md)
-- VHDL backend code generation exists, but should still be treated as experimental. Current state: [doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md](doc/03_plan/vhdl_backend_riscv_remote_interpreter_plan_2026-03-23.md)
 - C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
 - Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
@@ -500,26 +504,30 @@ class Point3D:
 
 ### AOP & Aspect-Oriented Programming
 
-Unified predicate grammar for cross-cutting concerns:
+Predicate-based pointcuts with compile-time weaving as the default execution model:
 
 ```simple
-# Pointcut expression syntax: pc{...}
-# Applies logging to all service methods
-on pc{ execution(services.**.*(..)) } use LoggingInterceptor
+# Before advice — runs before matching functions
+on pc{ execution(* handle_request(..)) } use log_entry before priority 10
 
-# Architecture rules - enforce layer dependencies
-forbid pc{ hal.** } -> pc{ services.** }  # HAL cannot depend on services
-allow  pc{ services.** } -> pc{ hal.** }  # Services can use HAL
+# After advice — runs after successful return
+on pc{ execution(* save(..)) & attr(audited) } use audit_write after_success priority 20
 
-# Dependency Injection with predicates
-bind on pc{ attr(Repository) } -> PostgresRepository
-  when profile("prod")
+# Around advice — wraps function with proceed() contract
+on pc{ within(services.*) } use trace_around around priority 50
 
-bind on pc{ attr(Repository) } -> MockRepository
-  when profile("test")
+# Architecture rules — enforce layer dependencies at compile time
+forbid pc{ within(hal.*) } "HAL cannot depend on services"
+allow  pc{ within(services.*) } "Services can use HAL"
 ```
 
-Current repo status: compile-time weaving is the primary AOP path. The verified runtime slice currently covers `proceed()` enforcement and runtime `init(...)` interception with `@inject`, but broader DI/AOP authoring should still be treated as in progress.
+**Supported selectors:** `execution(*)`, `within(*)`, `attr(*)` with `&` (AND), `|` (OR), `!` (NOT) operators.
+**Advice kinds:** `before`, `after_success`, `after_error`, `around` (proceed exactly-once).
+**Ordering:** priority (descending) > specificity > lexicographic name.
+**Zero overhead:** no weaving metadata when no aspects are defined.
+**Runtime interception:** scoped, opt-in only, disabled in release builds.
+
+See [AOP Support Matrix](doc/05_design/aop_support_matrix.md) for the full contract.
 
 ### SDN Configuration
 
@@ -710,7 +718,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 
 **Advanced Features:**
 - [Macro System](doc/06_spec/macro.md) - Executable macro spec and status
-- [AOP & Unified Predicates](doc/01_research/local/aop.md) - Aspect-oriented programming and current implementation status
+- [AOP Support Matrix](doc/05_design/aop_support_matrix.md) - Supported selectors, advice kinds, backends, and error codes
 - [SDN Format](doc/04_architecture/format/note_sdn_index.md) - Note/SDN storage and indexing format
 - [SDoctest](doc/06_spec/app/compiler/modules/testing/sdoctest.md) - Documentation testing and verified examples
 - [Feature Documentation](doc/06_spec/feature.md) - Generated feature-doc artifact format

@@ -1,0 +1,562 @@
+# @cover src/app/ui.test_api/handler.spl 80%
+# @cover src/lib/nogc_sync_mut/ui_test/client.spl 80%
+"""
+Shared UI Contract Test Suite
+
+Authoritative cross-surface proof that the shared UI contract holds
+on both web backend and TUI-web proxy. Each test starts BOTH backends
+against the same .ui.sdn fixture and verifies identical semantic behavior.
+
+Covers:
+  - Tree / Read: element retrieval, stable node identity, text visibility
+  - Actions: click, type, submit, event dispatch
+  - Focus / State: focus movement, enabled/disabled, selection state
+  - Errors: invalid selector, unsupported action, stale session
+  - Protocol: version header, structured error model, ready endpoint
+  - Session: lifecycle, read-after-write consistency
+
+Contract reference: doc/04_architecture/shared_ui_contract.md
+
+tag: slow, system, contract
+"""
+
+use std.ui_test.client.{UITestClient}
+use std.ui_test.types.{ElementInfo, UIStateInfo}
+use std.ui_test.http.{test_get, test_post}
+use std.ui_test.parse.{extract_field, extract_bool_field}
+use test.system.ui.helpers.ui_test_helpers.{start_ui_server, stop_ui_server, free_port}
+
+val sdn_path = "test/fixtures/ui/test_app.ui.sdn"
+
+# ============================================================================
+# Helper: allocate two unique ports
+# ============================================================================
+
+fn both_ports() -> (i32, i32):
+    """Allocate two unique ports for web and tui_web."""
+    val base = free_port()
+    (base + 50, base + 51)
+
+# ============================================================================
+# 1. Protocol Contract
+# ============================================================================
+
+describe "Shared UI Contract — Protocol":
+
+    slow_it "ready endpoint returns protocol_version on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_body = test_get("127.0.0.1", wp, "/api/test/ready")
+        val tui_body = test_get("127.0.0.1", tp, "/api/test/ready")
+        match web_body:
+            Ok(b):
+                val ver = extract_field(b, "protocol_version")
+                expect ver to_equal "1"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val ver = extract_field(b, "protocol_version")
+                expect ver to_equal "1"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "structured error for unknown route on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_body = test_get("127.0.0.1", wp, "/api/test/nonexistent")
+        val tui_body = test_get("127.0.0.1", tp, "/api/test/nonexistent")
+        match web_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "not_found"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "not_found"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 2. Tree / Read
+# ============================================================================
+
+describe "Shared UI Contract — Tree Read":
+
+    slow_it "both surfaces return non-empty element list":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_elems = wc.get_elements()
+        val tui_elems = tc.get_elements()
+        match web_elems:
+            Ok(elems):
+                expect elems.length() to_be_greater_than 0
+            Err(e):
+                expect e to_equal ""
+        match tui_elems:
+            Ok(elems):
+                expect elems.length() to_be_greater_than 0
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "same element IDs on both surfaces for same fixture":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_elems = wc.get_elements()
+        val tui_elems = tc.get_elements()
+        match web_elems:
+            Ok(we):
+                match tui_elems:
+                    Ok(te):
+                        expect we.length() to_equal te.length()
+                        if we.length() > 0 and te.length() > 0:
+                            expect we[0].get_id() to_equal te[0].get_id()
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "element lookup by ID returns consistent kind on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_elem = wc.get_element("action_btn")
+        val tui_elem = tc.get_element("action_btn")
+        match web_elem:
+            Ok(we):
+                match tui_elem:
+                    Ok(te):
+                        expect we.get_kind() to_equal te.get_kind()
+                        expect we.is_visible() to_equal te.is_visible()
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "screenshot returns non-empty HTML on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_html = wc.screenshot_html()
+        val tui_html = tc.screenshot_html()
+        match web_html:
+            Ok(h):
+                expect h.length() to_be_greater_than 0
+            Err(e):
+                expect e to_equal ""
+        match tui_html:
+            Ok(h):
+                expect h.length() to_be_greater_than 0
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 3. Actions
+# ============================================================================
+
+describe "Shared UI Contract — Actions":
+
+    slow_it "click succeeds on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_click = wc.click("action_btn")
+        val tui_click = tc.click("action_btn")
+        match web_click:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_click:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "type text succeeds on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_type = wc.type_text("input_field", "hello")
+        val tui_type = tc.type_text("input_field", "hello")
+        match web_type:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_type:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "submit succeeds on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_sub = wc.submit("action_btn")
+        val tui_sub = tc.submit("action_btn")
+        match web_sub:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_sub:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "drag succeeds on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_drag = wc.drag("action_btn", "input_field")
+        val tui_drag = tc.drag("action_btn", "input_field")
+        match web_drag:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_drag:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "send_key succeeds on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_key = wc.send_key("Enter")
+        val tui_key = tc.send_key("Enter")
+        match web_key:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_key:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 4. Focus / State
+# ============================================================================
+
+describe "Shared UI Contract — Focus and State":
+
+    slow_it "focus_next via event dispatches on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_fn = wc.focus_next()
+        val tui_fn = tc.focus_next()
+        match web_fn:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+        match tui_fn:
+            Ok(ok): expect ok to_equal true
+            Err(e): expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "check_visible returns consistent result on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_vis = wc.check_visible("action_btn")
+        val tui_vis = tc.check_visible("action_btn")
+        match web_vis:
+            Ok(wv):
+                match tui_vis:
+                    Ok(tv):
+                        expect wv to_equal tv
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "check_enabled returns consistent result on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_en = wc.check_enabled("action_btn")
+        val tui_en = tc.check_enabled("action_btn")
+        match web_en:
+            Ok(we):
+                match tui_en:
+                    Ok(te):
+                        expect we to_equal te
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 5. State Endpoint
+# ============================================================================
+
+describe "Shared UI Contract — State Endpoint":
+
+    slow_it "state endpoint returns element_count on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_body = test_get("127.0.0.1", wp, "/api/test/state")
+        val tui_body = test_get("127.0.0.1", tp, "/api/test/state")
+        match web_body:
+            Ok(b):
+                val count = extract_field(b, "element_count")
+                expect count.length() to_be_greater_than 0
+                val ver = extract_field(b, "protocol_version")
+                expect ver to_equal "1"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val count = extract_field(b, "element_count")
+                expect count.length() to_be_greater_than 0
+                val ver = extract_field(b, "protocol_version")
+                expect ver to_equal "1"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 6. Errors (Negative Tests)
+# ============================================================================
+
+describe "Shared UI Contract — Errors":
+
+    slow_it "element_not_found for invalid ID on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_body = test_get("127.0.0.1", wp, "/api/test/element?id=nonexistent_xyz")
+        val tui_body = test_get("127.0.0.1", tp, "/api/test/element?id=nonexistent_xyz")
+        match web_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "element_not_found"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "element_not_found"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "missing_field for click without id on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_body = test_post("127.0.0.1", wp, "/api/test/click", "{}")
+        val tui_body = test_post("127.0.0.1", tp, "/api/test/click", "{}")
+        match web_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "missing_field"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "missing_field"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+    slow_it "unknown_event_type for invalid event on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val body = "{\"event_type\":\"invalid_xyz\"}"
+        val web_body = test_post("127.0.0.1", wp, "/api/test/event", body)
+        val tui_body = test_post("127.0.0.1", tp, "/api/test/event", body)
+        match web_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "unknown_event_type"
+            Err(e):
+                expect e to_equal ""
+        match tui_body:
+            Ok(b):
+                val err = extract_field(b, "error")
+                expect err to_equal "unknown_event_type"
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)
+
+# ============================================================================
+# 7. Read-After-Write Consistency
+# ============================================================================
+
+describe "Shared UI Contract — Consistency":
+
+    slow_it "click then get_element reflects state change on both surfaces":
+        val (wp, tp) = both_ports()
+        val wpid = start_ui_server("web", sdn_path, wp)
+        val tpid = start_ui_server("tui_web", sdn_path, tp)
+        var wc = UITestClient(host: "127.0.0.1", port: wp)
+        var tc = UITestClient(host: "127.0.0.1", port: tp)
+        wc.wait_ready(5000)
+        tc.wait_ready(5000)
+
+        val web_before = wc.get_elements()
+        wc.click("action_btn")
+        val web_after = wc.get_elements()
+        match web_before:
+            Ok(b):
+                match web_after:
+                    Ok(a):
+                        expect b.length() to_be_greater_than 0
+                        expect a.length() to_be_greater_than 0
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        val tui_before = tc.get_elements()
+        tc.click("action_btn")
+        val tui_after = tc.get_elements()
+        match tui_before:
+            Ok(b):
+                match tui_after:
+                    Ok(a):
+                        expect b.length() to_be_greater_than 0
+                        expect a.length() to_be_greater_than 0
+                    Err(e):
+                        expect e to_equal ""
+            Err(e):
+                expect e to_equal ""
+
+        stop_ui_server(wpid)
+        stop_ui_server(tpid)

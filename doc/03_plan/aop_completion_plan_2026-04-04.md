@@ -1,8 +1,11 @@
 # AOP Completion Plan
 
 **Date:** 2026-04-04  
-**Status:** Draft  
-**Scope:** Complete the AOP implementation so it moves from a verified baseline plus partial authoring surface to a finished, evidence-backed feature.
+**Status:** Implemented  
+**Implemented:** 2026-04-04  
+**Scope:** Complete the AOP implementation so it moves from a verified baseline plus partial authoring surface to a finished, evidence-backed feature.  
+**Support Matrix:** [doc/05_design/aop_support_matrix.md](../05_design/aop_support_matrix.md)  
+**Machine-Readable:** [src/compiler/85.mdsoc/aop_support_matrix.sdn](../../src/compiler/85.mdsoc/aop_support_matrix.sdn)
 
 ## 1. Current Classification
 
