@@ -1946,49 +1946,76 @@ RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback)
     return NIL_VALUE;
 }
 
-/* --- File I/O --- */
-S1(rt_file_read)
-S2(rt_file_write)
-S1(rt_file_exists)
-S1(rt_file_delete)
-S2(rt_file_append)
-S1(rt_file_size)
-S2(rt_file_copy)
-S2(rt_file_move)
-S2(rt_file_rename)
-S1(rt_file_is_dir)
-S1(rt_file_is_file)
-S1(rt_file_read_bytes)
-S2(rt_file_write_bytes)
-S1(rt_file_stat)
-S1(rt_file_realpath)
+/* ---- Trap stubs: these should NEVER silently return 0 on baremetal ----
+ * Instead of masking failures, print the function name and halt.
+ * This makes it immediately obvious when kernel code accidentally
+ * uses a hosted-only API path.
+ */
+#define TRAP_STUB_RET(n, nargs) \
+    RuntimeValue n(TRAP_ARGS_##nargs) { \
+        TRAP_SUPPRESS_##nargs \
+        serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
+        for (;;) { __asm__ volatile("hlt"); } \
+        return 0; \
+    }
+#define TRAP_STUB_VOID(n, nargs) \
+    void n(TRAP_ARGS_##nargs) { \
+        TRAP_SUPPRESS_##nargs \
+        serial_puts("[TRAP] " #n " called on baremetal -- halting\r\n"); \
+        for (;;) { __asm__ volatile("hlt"); } \
+    }
+#define TRAP_ARGS_0   void
+#define TRAP_ARGS_1   RuntimeValue _a
+#define TRAP_ARGS_2   RuntimeValue _a, RuntimeValue _b
+#define TRAP_ARGS_3   RuntimeValue _a, RuntimeValue _b, RuntimeValue _c
+#define TRAP_SUPPRESS_0
+#define TRAP_SUPPRESS_1  (void)_a;
+#define TRAP_SUPPRESS_2  (void)_a; (void)_b;
+#define TRAP_SUPPRESS_3  (void)_a; (void)_b; (void)_c;
 
-/* --- Directory I/O --- */
-S1(rt_dir_list)
-S1(rt_dir_create)
-S1(rt_dir_create_all)
-S1(rt_dir_exists)
-S1(rt_dir_remove)
-S1(rt_dir_remove_all)
-S0(rt_dir_cwd)
-S1(rt_dir_chdir)
-S0(rt_dir_home)
-S0(rt_dir_temp)
+/* --- File I/O (no filesystem on baremetal) --- */
+TRAP_STUB_RET(rt_file_read, 1)
+TRAP_STUB_RET(rt_file_write, 2)
+TRAP_STUB_RET(rt_file_exists, 1)
+TRAP_STUB_RET(rt_file_delete, 1)
+TRAP_STUB_RET(rt_file_append, 2)
+TRAP_STUB_RET(rt_file_size, 1)
+TRAP_STUB_RET(rt_file_copy, 2)
+TRAP_STUB_RET(rt_file_move, 2)
+TRAP_STUB_RET(rt_file_rename, 2)
+TRAP_STUB_RET(rt_file_is_dir, 1)
+TRAP_STUB_RET(rt_file_is_file, 1)
+TRAP_STUB_RET(rt_file_read_bytes, 1)
+TRAP_STUB_RET(rt_file_write_bytes, 2)
+TRAP_STUB_RET(rt_file_stat, 1)
+TRAP_STUB_RET(rt_file_realpath, 1)
 
-/* --- Process --- */
-S2(rt_process_run)
-S3(rt_process_run_timeout)
-S1(rt_process_spawn)
-S1(rt_process_kill)
-S1(rt_process_wait)
-S0(rt_process_pid)
-S1(rt_cli_get_args)
-S0(rt_cli_args)
-S0(rt_exit_code)
-S1(rt_exit)
-S1(rt_env_get)
-S2(rt_env_set)
-S0(rt_env_all)
+/* --- Directory I/O (no filesystem on baremetal) --- */
+TRAP_STUB_RET(rt_dir_list, 1)
+TRAP_STUB_RET(rt_dir_create, 1)
+TRAP_STUB_RET(rt_dir_create_all, 1)
+TRAP_STUB_RET(rt_dir_exists, 1)
+TRAP_STUB_RET(rt_dir_remove, 1)
+TRAP_STUB_RET(rt_dir_remove_all, 1)
+TRAP_STUB_RET(rt_dir_cwd, 0)
+TRAP_STUB_RET(rt_dir_chdir, 1)
+TRAP_STUB_RET(rt_dir_home, 0)
+TRAP_STUB_RET(rt_dir_temp, 0)
+
+/* --- Process (no OS on baremetal) --- */
+TRAP_STUB_RET(rt_process_run, 2)
+TRAP_STUB_RET(rt_process_run_timeout, 3)
+TRAP_STUB_RET(rt_process_spawn, 1)
+TRAP_STUB_RET(rt_process_kill, 1)
+TRAP_STUB_RET(rt_process_wait, 1)
+TRAP_STUB_RET(rt_process_pid, 0)
+TRAP_STUB_RET(rt_cli_get_args, 1)
+TRAP_STUB_RET(rt_cli_args, 0)
+TRAP_STUB_RET(rt_exit_code, 0)
+TRAP_STUB_RET(rt_exit, 1)
+TRAP_STUB_RET(rt_env_get, 1)
+TRAP_STUB_RET(rt_env_set, 2)
+TRAP_STUB_RET(rt_env_all, 0)
 
 /* --- Math --- */
 S1(rt_math_sqrt)
@@ -2032,26 +2059,26 @@ S1(rt_sleep_ms)
 S1(rt_timer_create)
 S1(rt_timer_cancel)
 
-/* --- Network --- */
-S2(rt_net_connect)
-S1(rt_net_listen)
-S2(rt_net_send)
-S1(rt_net_recv)
-S1(rt_net_close)
-S2(rt_net_bind)
-S1(rt_net_accept)
-S2(rt_net_set_timeout)
-S1(rt_net_get_addr)
+/* --- Network (no network stack on baremetal) --- */
+TRAP_STUB_RET(rt_net_connect, 2)
+TRAP_STUB_RET(rt_net_listen, 1)
+TRAP_STUB_RET(rt_net_send, 2)
+TRAP_STUB_RET(rt_net_recv, 1)
+TRAP_STUB_RET(rt_net_close, 1)
+TRAP_STUB_RET(rt_net_bind, 2)
+TRAP_STUB_RET(rt_net_accept, 1)
+TRAP_STUB_RET(rt_net_set_timeout, 2)
+TRAP_STUB_RET(rt_net_get_addr, 1)
 
-/* --- HTTP --- */
-S2(rt_http_get)
-S3(rt_http_post)
-S3(rt_http_put)
-S3(rt_http_patch)
-S2(rt_http_delete)
-S2(rt_http_request)
-S3(rt_http_request_full)
-S2(rt_http_set_header)
+/* --- HTTP (no network stack on baremetal) --- */
+TRAP_STUB_RET(rt_http_get, 2)
+TRAP_STUB_RET(rt_http_post, 3)
+TRAP_STUB_RET(rt_http_put, 3)
+TRAP_STUB_RET(rt_http_patch, 3)
+TRAP_STUB_RET(rt_http_delete, 2)
+TRAP_STUB_RET(rt_http_request, 2)
+TRAP_STUB_RET(rt_http_request_full, 3)
+TRAP_STUB_RET(rt_http_set_header, 2)
 
 /* --- JSON --- */
 S1(rt_json_parse)
@@ -2238,33 +2265,33 @@ S0(rt_gc_stats)
 
 /* rt_typeof already implemented above in type introspection section */
 
-/* --- Threading (no-ops on bare metal) --- */
-S1(rt_thread_create)
-S1(rt_thread_join)
-S0(rt_thread_yield)
-S0(rt_thread_current)
-S1(rt_thread_sleep)
-S0(rt_mutex_new)
-S1(rt_mutex_lock)
-S1(rt_mutex_unlock)
-S1(rt_mutex_try_lock)
-S0(rt_condvar_new)
-S1(rt_condvar_wait)
-S1(rt_condvar_notify)
-S1(rt_condvar_notify_all)
+/* --- Threading (no scheduler on bare metal) --- */
+TRAP_STUB_RET(rt_thread_create, 1)
+TRAP_STUB_RET(rt_thread_join, 1)
+S0(rt_thread_yield)     /* yield is safe as no-op (single-threaded) */
+S0(rt_thread_current)   /* current thread ID — 0 is acceptable */
+S1(rt_thread_sleep)     /* sleep — returns immediately, acceptable */
+TRAP_STUB_RET(rt_mutex_new, 0)
+TRAP_STUB_RET(rt_mutex_lock, 1)
+TRAP_STUB_RET(rt_mutex_unlock, 1)
+TRAP_STUB_RET(rt_mutex_try_lock, 1)
+TRAP_STUB_RET(rt_condvar_new, 0)
+TRAP_STUB_RET(rt_condvar_wait, 1)
+TRAP_STUB_RET(rt_condvar_notify, 1)
+TRAP_STUB_RET(rt_condvar_notify_all, 1)
 
-/* --- Channels (no-ops on bare metal) --- */
-S0(rt_channel_new)
-S2(rt_channel_send)
-S1(rt_channel_recv)
-S1(rt_channel_try_recv)
-S1(rt_channel_close)
+/* --- Channels (no IPC on bare metal) --- */
+TRAP_STUB_RET(rt_channel_new, 0)
+TRAP_STUB_RET(rt_channel_send, 2)
+TRAP_STUB_RET(rt_channel_recv, 1)
+TRAP_STUB_RET(rt_channel_try_recv, 1)
+TRAP_STUB_RET(rt_channel_close, 1)
 
-/* --- Async (no-ops on bare metal) --- */
-S1(rt_async_spawn)
-S1(rt_async_await)
-S0(rt_async_yield)
-S2(rt_async_select)
+/* --- Async (no async runtime on bare metal) --- */
+TRAP_STUB_RET(rt_async_spawn, 1)
+TRAP_STUB_RET(rt_async_await, 1)
+S0(rt_async_yield)     /* yield is safe as no-op (single-threaded) */
+TRAP_STUB_RET(rt_async_select, 2)
 
 /* --- Encoding --- */
 S1(rt_base64_encode)

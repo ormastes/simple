@@ -1,7 +1,7 @@
 # TODO List
 
-**Generated:** 2026-03-28
-**Total:** 3 items | **Open:** 3 | **Blocked:** 0 | **Stale:** 0
+**Generated:** 2026-04-04
+**Total:** 6 items | **Open:** 6 | **Blocked:** 0 | **Stale:** 0
 **Database:** `doc/todo/todo_db.sdn`
 
 ## Statistics
@@ -10,7 +10,7 @@
 
 | Area | Count | P0 | P1 | P2 | P3 | Blocked |
 |------|-------|----|----|----|----|---------|
-| parser | 3 | 0 | 0 | 2 | 1 | 0 |
+| parser | 6 | 0 | 0 | 4 | 2 | 0 |
 
 ### By Priority
 
@@ -18,23 +18,31 @@
 |----------|-------|------|---------|-------|
 | P0 (critical) | 0 | 0 | 0 | 0 |
 | P1 (high) | 0 | 0 | 0 | 0 |
-| P2 (medium) | 2 | 2 | 0 | 0 |
-| P3 (low) | 1 | 1 | 0 | 0 |
+| P2 (medium) | 4 | 4 | 0 | 0 |
+| P3 (low) | 2 | 2 | 0 | 0 |
 
-## P2 Medium Priority TODOs (2)
+## P2 Medium Priority TODOs (4)
 
 ### parser
 
-- **#0** [parser][P2] Add support for generic type aliases
+- **#3** [parser][P2] Add support for generic type aliases
   - File: `./src/compiler_rust/lib/std/src/core/array_ops.spl:492`
   - Status: open
 
-- **#2** [parser][P2] Add support for export * syntax
+- **#5** [parser][P2] Add support for export * syntax
   - File: `./src/compiler_rust/lib/std/src/mcp/lsp/__init__.spl:4`
   - Status: open
 
+- **#6** [parser][P2] Add support for generic type aliases
+  - File: `./tools/mcp-registry/native/simple-bootstrap-0.9.5-linux-x86_64/src/compiler_rust/lib/std/src/core/array_ops.spl:492`
+  - Status: open
 
-## P3 Low Priority TODOs (1)
+- **#8** [parser][P2] Add support for export * syntax
+  - File: `./tools/mcp-registry/native/simple-bootstrap-0.9.5-linux-x86_64/src/compiler_rust/lib/std/src/mcp/lsp/__init__.spl:4`
+  - Status: open
+
+
+## P3 Low Priority TODOs (2)
 
 *See database for details.*
 

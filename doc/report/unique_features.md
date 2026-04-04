@@ -57,7 +57,7 @@ Several requested items are real but only partial, experimental, or host-depende
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
 | Language-level ban on mocks in system tests | Not verified | Policy docs say “no mocks”, but hard enforcement was not confirmed |
 | Declarative argparser integrated into language | Partial but real | `cli Name:` parser, interpreter evaluation, and backend codegen exist; this is not yet the uniform CLI path for every app |
-| Easy custom primitive type support | Unproven README claim | Nearby custom literal/suffix mechanisms exist, but the stronger “easy custom primitive type” claim still needs dedicated docs/tests |
+| Semantic wrapper / unit-type patterns | Implemented | `unit`-based semantic types are documented and used across stdlib-facing APIs |
 | VS Code / Neovim rendering for math/loss blocks | Unproven README claim | Editor tooling exists, but a polished integrated rendering feature should not be marketed without dedicated evidence |
 
 ## Evidence By Area
@@ -200,11 +200,14 @@ Implemented:
 - primitive API lint: `src/compiler/35.semantics/lint/primitive_api.spl`
 - borrow graph: `src/compiler/55.borrow/borrow_check/borrow_graph.spl`
 - lifetime support: `src/compiler/55.borrow/borrow_check/lifetime.spl`
+- semantic wrapper / unit-type guidance: `doc/07_guide/language/type_system.md`
+- semantic wrapper rollout evidence: `doc/09_report/misc/primitive_api_project_closure.md`
 
 Qualification:
 
 - a completed polished borrowing user guide was not verified
 - “limited scope borrowing and its guide document and generated spec” is too strong as a README claim
+- the repo evidence is for `unit`-style semantic wrappers, not built-in primitive redefinition
 
 ### 11. UI Sharing and UI Testing
 

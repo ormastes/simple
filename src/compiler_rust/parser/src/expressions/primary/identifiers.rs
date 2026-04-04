@@ -109,8 +109,8 @@ impl<'a> Parser<'a> {
             TokenKind::Not => self.parse_keyword_identifier("not"),
             TokenKind::In => self.parse_keyword_identifier("in"),
             TokenKind::Is => self.parse_keyword_identifier("is"),
-            // Allow 'tensor' and 'union' as identifiers
-            TokenKind::Tensor => self.parse_keyword_identifier("tensor"),
+            // Allow 'union' as identifier
+            // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
             TokenKind::Union => self.parse_keyword_identifier("union"),
             // Allow control flow keywords as identifiers in expression contexts
             // Simple uses these as variable names (e.g., `var continue = true; while continue:`)

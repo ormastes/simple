@@ -541,7 +541,7 @@ impl<'a> Parser<'a> {
             TokenKind::Sync => self.parse_keyword_as_pattern("Sync"),
             TokenKind::Async => self.parse_keyword_as_pattern("Async"),
             TokenKind::Slice => self.parse_keyword_as_pattern("Slice"),
-            TokenKind::Tensor => self.parse_keyword_as_pattern("Tensor"),
+            // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
             TokenKind::Grid => self.parse_keyword_as_pattern("Grid"),
             TokenKind::Flat => self.parse_keyword_as_pattern("Flat"),
             TokenKind::Shared => self.parse_keyword_as_pattern("Shared"),

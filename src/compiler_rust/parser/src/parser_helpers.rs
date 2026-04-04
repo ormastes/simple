@@ -710,7 +710,7 @@ impl<'a> Parser<'a> {
             TokenKind::Union => "union".to_string(),
             TokenKind::Onto => "onto".to_string(),
             TokenKind::Auto => "auto".to_string(),
-            TokenKind::Tensor => "tensor".to_string(),
+            // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
             TokenKind::Grid => "grid".to_string(),
             TokenKind::Match => "match".to_string(),
             TokenKind::Or => "or".to_string(),
@@ -848,7 +848,7 @@ impl<'a> Parser<'a> {
             TokenKind::Default => "default", // Allow "default" (contextual keyword)
             // Allow math keywords in paths/exports
             TokenKind::Slice => "Slice",
-            TokenKind::Tensor => "Tensor",
+            // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
             TokenKind::Grid => "Grid",
             TokenKind::Flat => "Flat",
             // Allow additional keywords in module paths
@@ -1012,7 +1012,7 @@ impl<'a> Parser<'a> {
             TokenKind::Mock => "mock",
             // Allow math keywords as method names (e.g., arr.slice(0, 5))
             TokenKind::Slice => "slice",
-            TokenKind::Tensor => "tensor",
+            // Note: 'tensor' is no longer a keyword — it's a regular identifier (BUG-004 fix)
             TokenKind::Grid => "grid",
             TokenKind::Flat => "flat",
             // Allow Gherkin keywords as method names

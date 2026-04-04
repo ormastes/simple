@@ -236,6 +236,55 @@ end
 ---                 partial -> ∂, nabla -> ∇, forall -> ∀, exists -> ∃
 ---   Operators:    times -> ×, cdot -> ·, pm -> ±, leq -> ≤, geq -> ≥,
 ---                 neq -> ≠, approx -> ≈, implies -> ⇒, to -> →
+--- Find the matching closing delimiter for a balanced group.
+--- Returns (inner, rest) where `inner` is the content between delimiters
+--- and `rest` is everything after the closing delimiter.
+--- @param s string input starting AFTER the opening delimiter
+--- @param open string opening character (e.g. "(", "{", "[")
+--- @param close string closing character (e.g. ")", "}", "]")
+--- @return string|nil inner content, or nil if unbalanced
+--- @return string rest remaining string after close
+local function match_balanced(s, open, close)
+  local depth = 1
+  for i = 1, #s do
+    local ch = s:sub(i, i)
+    if ch == open then
+      depth = depth + 1
+    elseif ch == close then
+      depth = depth - 1
+      if depth == 0 then
+        return s:sub(1, i - 1), s:sub(i + 1)
+      end
+    end
+  end
+  return nil, s
+end
+
+--- Split a balanced argument list on top-level commas.
+--- e.g. "1 + 2, frac(3, 4)" → {"1 + 2", "frac(3, 4)"}
+--- @param s string
+--- @return string[]
+local function split_args(s)
+  local args = {}
+  local depth_p, depth_b, depth_c = 0, 0, 0
+  local start = 1
+  for i = 1, #s do
+    local ch = s:sub(i, i)
+    if ch == "(" then depth_p = depth_p + 1
+    elseif ch == ")" then depth_p = depth_p - 1
+    elseif ch == "[" then depth_b = depth_b + 1
+    elseif ch == "]" then depth_b = depth_b - 1
+    elseif ch == "{" then depth_c = depth_c + 1
+    elseif ch == "}" then depth_c = depth_c - 1
+    elseif ch == "," and depth_p == 0 and depth_b == 0 and depth_c == 0 then
+      table.insert(args, vim.trim(s:sub(start, i - 1)))
+      start = i + 1
+    end
+  end
+  table.insert(args, vim.trim(s:sub(start)))
+  return args
+end
+
 local function to_pretty_lua(content)
   local s = content
 
@@ -246,6 +295,117 @@ local function to_pretty_lua(content)
     ["n"] = "ⁿ", ["i"] = "ⁱ", ["x"] = "ˣ",
     ["+"] = "⁺", ["-"] = "⁻", ["("] = "⁽", [")"] = "⁾",
   }
+
+  -- ── Structured function rewriting (before flat substitutions) ──
+
+  -- frac(numer, denom) → (numer)/(denom)
+  -- Handles nested calls via balanced matching
+  local max_iter = 20
+  for _ = 1, max_iter do
+    local pos = s:find("%f[%a]frac%s*%(")
+    if not pos then break end
+    local after_open = s:sub(s:find("%(", pos) + 1)
+    local inner, rest = match_balanced(after_open, "(", ")")
+    if inner then
+      local parts = split_args(inner)
+      if #parts >= 2 then
+        local numer = to_pretty_lua(vim.trim(parts[1]))
+        local denom = to_pretty_lua(vim.trim(parts[2]))
+        s = s:sub(1, pos - 1) .. "(" .. numer .. ")/(" .. denom .. ")" .. rest
+      else
+        break
+      end
+    else
+      break
+    end
+  end
+
+  -- \frac{numer}{denom} → (numer)/(denom)  (LaTeX style)
+  for _ = 1, max_iter do
+    local pos = s:find("\\frac%s*{")
+    if not pos then break end
+    local after_open = s:sub(s:find("{", pos) + 1)
+    local numer, rest1 = match_balanced(after_open, "{", "}")
+    if numer and rest1 then
+      -- expect another {
+      local brace = rest1:find("{")
+      if brace then
+        local after_open2 = rest1:sub(brace + 1)
+        local denom, rest2 = match_balanced(after_open2, "{", "}")
+        if denom then
+          local pretty_n = to_pretty_lua(vim.trim(numer))
+          local pretty_d = to_pretty_lua(vim.trim(denom))
+          s = s:sub(1, pos - 1) .. "(" .. pretty_n .. ")/(" .. pretty_d .. ")" .. rest2
+        else break end
+      else break end
+    else break end
+  end
+
+  -- sqrt(expr) → √(expr)
+  for _ = 1, max_iter do
+    local pos = s:find("%f[%a]sqrt%s*%(")
+    if not pos then break end
+    local paren_pos = s:find("%(", pos)
+    local after_open = s:sub(paren_pos + 1)
+    local inner, rest = match_balanced(after_open, "(", ")")
+    if inner then
+      s = s:sub(1, pos - 1) .. "√(" .. to_pretty_lua(vim.trim(inner)) .. ")" .. rest
+    else break end
+  end
+
+  -- \sqrt{expr} → √(expr)  (LaTeX style)
+  for _ = 1, max_iter do
+    local pos = s:find("\\sqrt%s*{")
+    if not pos then break end
+    local brace_pos = s:find("{", pos)
+    local after_open = s:sub(brace_pos + 1)
+    local inner, rest = match_balanced(after_open, "{", "}")
+    if inner then
+      s = s:sub(1, pos - 1) .. "√(" .. to_pretty_lua(vim.trim(inner)) .. ")" .. rest
+    else break end
+  end
+
+  -- sum(var, from..to) body → ∑_{var=from}^{to} body
+  s = s:gsub("%f[%a]sum%s*%((.-)%)%s*", function(params)
+    local parts = split_args(params)
+    if #parts >= 2 then
+      local var_name = vim.trim(parts[1])
+      local range = vim.trim(parts[2])
+      local lo, hi = range:match("(.-)%.%.(.+)")
+      if lo and hi then
+        return "∑(" .. var_name .. "=" .. lo .. ".." .. hi .. ") "
+      end
+    end
+    return "∑(" .. params .. ") "
+  end)
+
+  -- integral / int binder → ∫
+  s = s:gsub("%f[%a]int%s*%((.-)%)%s*", function(params)
+    local parts = split_args(params)
+    if #parts >= 2 then
+      local var_name = vim.trim(parts[1])
+      local range = vim.trim(parts[2])
+      local lo, hi = range:match("(.-)%.%.(.+)")
+      if lo and hi then
+        return "∫(" .. var_name .. "=" .. lo .. ".." .. hi .. ") "
+      end
+    end
+    return "∫(" .. params .. ") "
+  end)
+
+  -- product binder → ∏
+  s = s:gsub("%f[%a]product%s*%((.-)%)%s*", function(params)
+    local parts = split_args(params)
+    if #parts >= 2 then
+      local var_name = vim.trim(parts[1])
+      local range = vim.trim(parts[2])
+      local lo, hi = range:match("(.-)%.%.(.+)")
+      if lo and hi then
+        return "∏(" .. var_name .. "=" .. lo .. ".." .. hi .. ") "
+      end
+    end
+    return "∏(" .. params .. ") "
+  end)
 
   -- Replace ^{...} groups and ^X single characters with superscripts
   s = s:gsub("%^{([^}]+)}", function(inner)
@@ -267,9 +427,8 @@ local function to_pretty_lua(content)
     s = s:gsub("%f[%a]" .. name .. "%f[^%a]", sym)
   end
 
-  -- Math symbols (matches src/lib/unicode_math.spl math_sym)
+  -- Math symbols
   local syms = {
-    sqrt = "√", sum = "∑", product = "∏", integral = "∫",
     infinity = "∞", forall = "∀", exists = "∃",
     emptyset = "∅", degree = "°",
   }
@@ -281,21 +440,48 @@ local function to_pretty_lua(content)
   local ops = {
     times = "×", cdot = "·", pm = "±",
     leq = "≤", geq = "≥", neq = "≠", approx = "≈", equiv = "≡",
-    implies = "⇒", iff = "⇔", to = "→",
+    implies = "⇒", iff = "⇔", ["to"] = "→",
   }
   for name, sym in pairs(ops) do
     s = s:gsub("%f[%a]" .. name .. "%f[^%a]", sym)
   end
 
-  -- Explicit * → · (multiplication dot)
-  s = s:gsub("%s*%*%s*", "·")
-  -- Matrix multiply @ → ⊗
-  s = s:gsub("%s*@%s*", "⊗")
-  -- Broadcast operators: .+ .- .* ./ → ⊕ ⊖ ⊙ ⊘ (element-wise)
+  -- LaTeX backslash commands remaining after structured rewriting
+  s = s:gsub("\\pi%f[^%a]", "π")
+  s = s:gsub("\\exp%f[^%a]", "exp")
+  s = s:gsub("\\ln%f[^%a]", "ln")
+  s = s:gsub("\\log%f[^%a]", "log")
+  s = s:gsub("\\sin%f[^%a]", "sin")
+  s = s:gsub("\\cos%f[^%a]", "cos")
+  s = s:gsub("\\tan%f[^%a]", "tan")
+  s = s:gsub("\\infty%f[^%a]", "∞")
+  s = s:gsub("\\cdot%f[^%a]", "·")
+  s = s:gsub("\\times%f[^%a]", "×")
+  s = s:gsub("\\pm%f[^%a]", "±")
+  s = s:gsub("\\leq%f[^%a]", "≤")
+  s = s:gsub("\\geq%f[^%a]", "≥")
+  s = s:gsub("\\neq%f[^%a]", "≠")
+  s = s:gsub("\\approx%f[^%a]", "≈")
+  s = s:gsub("\\partial%f[^%a]", "∂")
+  s = s:gsub("\\nabla%f[^%a]", "∇")
+  s = s:gsub("\\forall%f[^%a]", "∀")
+  s = s:gsub("\\exists%f[^%a]", "∃")
+
+  -- Transpose: x' → xᵀ
+  s = s:gsub("([%w%)%]])%s*'", "%1ᵀ")
+
+  -- Broadcast operators MUST come before scalar * substitution
+  -- .+ .- .* ./ .^ → ⊕ ⊖ ⊙ ⊘ ⊛ (element-wise)
   s = s:gsub("%.%+", "⊕")
   s = s:gsub("%.%-", "⊖")
   s = s:gsub("%.%*", "⊙")
   s = s:gsub("%.%/", "⊘")
+  s = s:gsub("%.%^", "⊛")
+
+  -- Explicit * → · (multiplication dot)
+  s = s:gsub("%s*%*%s*", "·")
+  -- Matrix multiply @ → ⊗
+  s = s:gsub("%s*@%s*", "⊗")
 
   return s
 end

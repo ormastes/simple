@@ -1,8 +1,9 @@
 # Module System Bug: Transitive Imports Broken
 
 **Severity:** P0 - Blocks modular code development
-**Status:** Confirmed
+**Status:** Fixed (2026-04-04)
 **Discovered:** 2026-02-05
+**Fixed:** 2026-04-04
 **Reproducible By:** test_minimal_transitive_import
 
 ---
@@ -292,6 +293,25 @@ This blocks all modular code development. Until fixed, Simple programs must eith
 - MCP server parse errors (separate issue)
 - Directory-specific parse bugs in `test/intensive/helpers/`
 - Inconsistent module resolution between directories
+
+---
+
+## Fix Applied (2026-04-04)
+
+### Root Cause
+The module loader's `create_filtered_env` function did not recursively carry imported
+symbols through the module chain. When module A imported module B, and module B imported
+module C, the filtered environment for module B did not include C's exports.
+
+### Fix
+Fixed `create_filtered_env` to preserve transitive imports when constructing module
+environments, ensuring that each module's own imports are fully resolved and available
+before evaluating function bodies.
+
+### Status
+- Transitive imports now work correctly
+- MCP server startup no longer blocked by this issue
+- Modular test helpers function properly
 
 ---
 

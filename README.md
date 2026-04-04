@@ -35,7 +35,7 @@ Implemented and safe to advertise:
 - Parser-friendly macros with validation and hygiene
 - Tree-sitter outline/query tooling
 - SDN-backed project, test, and todo databases
-- Primitive public API linting
+- Primitive-public-API linting and semantic wrapper/unit-type patterns
 - Borrow-checking infrastructure
 - Watch mode and auto-build support
 - mmap-backed loader support and executable-memory plumbing

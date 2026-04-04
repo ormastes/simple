@@ -1,8 +1,9 @@
 # Bug: skip_it causes interpreter exit code 1
 
-**Status:** Identified  
+**Status:** Fixed (2026-04-04)  
 **Severity:** Medium
 **Discovered:** 2026-01-30
+**Fixed:** 2026-04-04
 
 ## Summary
 
@@ -39,9 +40,10 @@ The `skip_it` function (defined in `src/lib/std/src/spec/dsl.spl:154`) creates a
 2. Or comment out `skip_it` tests temporarily
 3. Or remove `skip_it` tests from affected files
 
-## Fix Needed
+## Fix Applied (2026-04-04)
 
-Investigate why skipped tests cause non-zero exit codes. Possible causes:
-- Skip tracking state not cleaned up properly
-- Assertion in test framework expecting no skipped tests
-- GC issue with skipped test closures
+The test framework's finalization logic was updated to treat skipped tests as non-failures.
+Previously, the skip tracking state was not properly accounted for in the exit code
+calculation, causing any file with `skip_it` blocks to exit with code 1 even when all
+non-skipped tests passed. The fix ensures skipped tests are reported but do not affect
+the process exit code.

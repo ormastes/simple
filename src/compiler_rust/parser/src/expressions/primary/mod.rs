@@ -257,10 +257,17 @@ impl<'a> Parser<'a> {
             | TokenKind::Match
             | TokenKind::Dollar => self.parse_primary_control(),
             TokenKind::Grid => self.parse_primary_math(),
-            // Tensor is context-sensitive: if followed by an identifier (tensor literal: `tensor K: Float [...]`),
-            // parse as math. Otherwise treat as a regular identifier (variable named `tensor`).
-            TokenKind::Tensor if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) => self.parse_primary_math(),
-            TokenKind::Tensor => self.parse_primary_identifier(),
+            // Tensor literal syntax: `tensor K: Float [d=2, h=3]`
+            // "tensor" is a regular identifier (not a keyword), so we detect the
+            // tensor-literal pattern here: identifier "tensor" followed by another
+            // identifier (the tensor name).  All other uses of "tensor" (variable,
+            // parameter, field access) fall through to parse_primary_identifier().
+            TokenKind::Identifier { ref name, .. }
+                if name == "tensor"
+                    && matches!(self.peek_next().kind, TokenKind::Identifier { .. }) =>
+            {
+                self.parse_tensor_literal_from_ident()
+            }
             TokenKind::At => {
                 // FFI call prefix: @rt_function_name
                 // No ambiguity: decorators only appear before declarations, not in expressions

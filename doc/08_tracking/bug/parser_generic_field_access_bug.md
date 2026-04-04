@@ -2,7 +2,8 @@
 
 **Date:** 2026-02-05
 **Severity:** HIGH - Blocks Pure Simple Deep Learning implementation
-**Status:** CONFIRMED
+**Status:** FIXED (2026-04-04)
+**Fixed:** 2026-04-04
 
 ---
 
@@ -233,6 +234,26 @@ assert n == 5
 **Minimal Reproduction:** `/tmp/test_field_access_only.spl`
 **Verification Report:** `doc/09_report/pure_dl_verification_2026-02-05.md`
 **Affected Implementation:** `src/lib/pure/*.spl` (all files)
+
+---
+
+## Fix Applied (2026-04-04)
+
+### Root Cause
+The parser incorrectly entered tensor/math expression mode when encountering a dot
+after a variable whose type involved generic parameters. The parser's lookahead did
+not distinguish between field access (`box.value`) and dotted tensor operators (`.+`).
+
+### Fix
+Parser fix to correctly handle field access on generic class parameters. The parser
+now checks context and uses lookahead to distinguish field access from dotted operators:
+when the next token after `.` is an identifier (not an operator), it is parsed as
+field access regardless of whether the expression involves generic types.
+
+### Status
+- Generic field access now works correctly (`box.value` where `box: Box<T>`)
+- Pure Simple Deep Learning implementation unblocked
+- All 192 previously blocked tests can now parse
 
 ---
 

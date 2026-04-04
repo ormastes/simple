@@ -273,7 +273,15 @@ impl<'a> super::Lexer<'a> {
             "handle_pool" => TokenKind::HandlePool,
             // Simple Math keywords (#1910-#1969)
             "grid" => TokenKind::Grid,
-            "tensor" => TokenKind::Tensor,
+            // "tensor" is NOT a keyword — it's a regular identifier.
+            // Tensor literal syntax (`tensor K: Float [d=2]`) is handled
+            // contextually in the parser by checking for the identifier "tensor"
+            // followed by another identifier.  This allows users to write
+            // `val tensor = ...` and `tensor.shape` without parse errors (BUG-004).
+            "tensor" => {
+                let pattern = NamePattern::detect(&name);
+                TokenKind::Identifier { name, pattern }
+            }
             "slice" => TokenKind::Slice,
             "flat" => TokenKind::Flat,
             "default" => {

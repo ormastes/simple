@@ -211,6 +211,8 @@ codegen init: Compilation error: Support for this target has not been implemente
 6. **Cache key** — `native_project.rs`: target triple appended to incremental cache path ✅
 7. **riscv64 crt0.S** — `src/os/kernel/arch/riscv64/boot/crt0.S`: S-mode trampoline (set sp, zero BSS, call boot_main) ✅
 8. **riscv64 boot_main** — `src/os/kernel/arch/riscv64/boot.spl`: boot_main() function for S-mode entry ✅
+9. **arm64 crt0.S** — `src/os/kernel/arch/arm64/boot/crt0.S`: EL1 trampoline (mask DAIF, set sp, zero BSS, call boot_main) ✅
+10. **arm64 boot_main** — `src/os/kernel/arch/arm64/boot.spl`: boot_main(dtb_addr) + Arm64Boot impl methods ✅
 
 ## Post-Fix Status (2026-04-03)
 
@@ -218,17 +220,43 @@ codegen init: Compilation error: Support for this target has not been implemente
 |------|-------|------|-----|-------|
 | **x86_64** | OK | OK | **C-level only** | BGA framebuffer renders via C boot stub. Simple code (`spl_start`) still crashes. |
 | **riscv64** | OK | OK (clean halt) | N/A | Boots via OpenSBI, enters boot_main, halts. Runtime string functions stubbed. |
-| **arm64** | OK | Not tested | N/A | Needs crt0.S |
-| **riscv32** | FAIL | N/A | N/A | Cranelift has no riscv32 backend |
+| **arm64** | OK | Not tested | N/A | crt0.S + boot_main added. Needs QEMU boot test. |
+| **riscv32** | FAIL | N/A | N/A | Cranelift has no riscv32 backend — deferred to LLVM. |
 
 ### Transparency: x86_64 GUI is NOT driven by Simple code
 
 The screenshot showing a desktop with a Hello World window is rendered by **C code** in `baremetal_stubs.c::_start()`, NOT by the Simple compositor/desktop shell. The Simple code path (`spl_start` → `gui_entry._start` → `gui_kernel_main`) still crashes because:
 
 1. Compiled Simple code calls ~6000 runtime functions (`rt_*`) absent from baremetal
-2. `auto_stubs.c` provides 6309 weak return-0 stubs — **this masks real breakage**
-3. Any stubbed call silently returns NIL, causing cascading failures when results are used as pointers/function references
+2. `baremetal_stubs.c` (per-arch, in `examples/simple_os/arch/`) provides ~200 no-op macro stubs (S0/S1/S2/S3 macros returning 0) — **this masks real breakage**
+3. Any stubbed call silently returns 0 (NIL), causing cascading failures when results are used as pointers/function references
 4. The IDT fault handler catches #UD exceptions from wild jumps to address 0x3 (NIL_VALUE), but eventually the stack corrupts
+
+### Stub Audit Summary
+
+The `baremetal_stubs.c` files are NOT a separate `auto_stubs.c` — they are per-architecture files in `examples/simple_os/arch/<arch>/boot/baremetal_stubs.c`. Each provides:
+
+| Arch | Lines | S-macro stubs | Real impls | Total rt_ funcs |
+|------|-------|---------------|------------|-----------------|
+| **x86_64** | 2559 | 212 | ~80 | ~176 unique |
+| **arm64** | 1205 | 345 | ~35 | fewer real impls |
+| **riscv64** | varies | 0 | varies | different approach |
+
+**Real implementations** (needed and correct): arithmetic (add/sub/mul/div/mod/pow), comparison (eq/ne/lt/gt), bitwise, string operations (concat, len, slice, contains, indexOf, starts_with, ends_with, trim, split, to_upper/lower), array basics (new/get/set/push/pop/len/clone/join/slice/concat/last_index_of/contains/clear), map basics (new/get/set/has/delete/keys/values/len), print (str/int/bool/value/println), heap alloc, memcpy/memset, framebuffer copy/write.
+
+**Dangerous stubs** (mask real failures, should NOT be no-ops):
+- File I/O (rt_file_read, rt_file_write, etc.) -- will never work on baremetal, but should panic not return 0
+- Async (rt_async_spawn, rt_async_await, etc.) -- meaningless on baremetal
+- BDD test framework (rt_bdd_*) -- no test runner on baremetal
+- Process management (rt_process_*) -- no OS
+- Network (rt_net_*, rt_http_*) -- no network stack
+- Threading (rt_thread_*, rt_mutex_*, rt_channel_*) -- no scheduler yet
+
+**Safe no-ops** (returning 0 is acceptable):
+- Type conversion stubs for types not used (rt_to_float when no FPU path)
+- Regex (rt_regex_*) -- optional feature
+- JSON (rt_json_*) -- optional feature
+- Base64 (rt_base64_*) -- optional feature
 
 ### What IS proven
 - BGA framebuffer hardware path: port I/O init, PCI BAR0 detection, 1024x768x32
@@ -238,8 +266,8 @@ The screenshot showing a desktop with a Hello World window is rendered by **C co
 
 ## Remaining
 
-1. **Remove auto_stubs.c** — stop masking failures
-2. **Audit minimum runtime** — which `rt_*` functions does `gui_entry._start → gui_kernel_main` actually need?
+1. **Triage baremetal_stubs.c** — classify each S-macro stub as "safe no-op", "should panic", or "needs real impl". Convert dangerous stubs from silent return-0 to `serial_puts("FATAL: <name> not available on baremetal"); for(;;) hlt;`
+2. **Audit minimum runtime** — which `rt_*` functions does `gui_entry._start -> gui_kernel_main` actually need? Trace the call graph from gui_entry.spl to find the minimal set.
 3. **Implement or bypass** — either implement the needed rt functions, or rewrite gui_entry.spl to use only baremetal-safe patterns (no string interpolation, no complex objects)
-4. **riscv32** — punt to LLVM or skip in matrix
-5. **arm64 crt0** — needs AArch64 boot stub similar to riscv64
+4. **riscv32** — deferred; needs LLVM backend (Cranelift has no riscv32 ISA). Skip in build matrix.
+5. **arm64 QEMU boot test** — run `qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 128M -serial stdio -display none -no-reboot -kernel build/os/simpleos_aarch64.elf` to verify crt0.S -> boot_main path works

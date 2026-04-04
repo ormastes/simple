@@ -3,6 +3,7 @@
 # Extended with resource-limited execution support
 
 use spec.registry.{ExampleGroup, Example, Hook, MockMode, get_all_groups}
+use spec.mock.{mock_policy_init, mock_policy_disable, mock_policy_init_hal_only, mock_policy_reset}
 use spec.runner.filter.{TestFilter}
 use spec.runtime.{Runtime, ExampleState}
 use spec.progress.{init_progress, reset_progress}
@@ -10,7 +11,7 @@ use core.time.{Timer}
 use concurrency.resource_limits.{ResourceLimits, LimitViolation, LimitedResult}
 use concurrency.threads.{spawn_limited, LimitedThreadHandle}
 
-# FFI declarations for mock policy
+# FFI declarations for mock policy (Rust-side enforcement)
 extern fn __mock_policy_init_all() -> ()
 extern fn __mock_policy_init_hal_only() -> ()
 extern fn __mock_policy_disable() -> ()
@@ -164,8 +165,8 @@ impl ExecutionResults:
         return self.passed_count() as f64 / self.total_count() as f64
 
     fn all_passed() -> bool:
-        """Check if all tests passed."""
-        return self.failed_count() == 0 and self.pending_count() == 0
+        """Check if all non-skipped tests passed (skipped/pending tests do not count as failures)."""
+        return self.failed_count() == 0
 
     fn has_failures() -> bool:
         """Check if there are any failures."""
@@ -263,16 +264,22 @@ impl TestExecutor:
             hook_block()
 
     fn init_mock_policy_for_mode(mode: MockMode):
-        """Initialize mock policy based on the mode."""
+        """Initialize mock policy on both Simple-side and Rust-side."""
+        # Simple-side: sets _mock_policy_mode checked by Mock.new()/Spy.new()/Stub.new()
+        # Rust-side (FFI): sets atomic flags checked by compiled-mode runtime
         match mode:
             case MockMode.All:
+                mock_policy_reset()
                 __mock_policy_init_all()
             case MockMode.HalOnly:
+                mock_policy_init_hal_only()
                 __mock_policy_init_hal_only()
             case MockMode.Disabled:
+                mock_policy_disable()
                 __mock_policy_disable()
             case MockMode.Custom:
                 # Custom mode requires patterns, fall back to all for now
+                mock_policy_reset()
                 __mock_policy_init_all()
 
     fn execute_example(example: Example, group: ExampleGroup) -> TestResult:
@@ -289,8 +296,14 @@ impl TestExecutor:
             result.mark_pending()
             return result
 
-        # Determine mock mode: example-specific, group-inherited, or default
-        val mock_mode = example.mock_mode
+        # Determine mock mode: explicit example override wins, else inherit from group
+        val mock_mode = match example.mock_mode:
+            case Some(mode):
+                # Example has explicit override — use it (even if All)
+                mode
+            case _:
+                # No override — inherit from group hierarchy
+                group.get_effective_mock_mode()
 
         # Initialize mock policy for this test
         self.init_mock_policy_for_mode(mock_mode)

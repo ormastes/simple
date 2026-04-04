@@ -7,13 +7,20 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_primary_math(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind {
             TokenKind::Grid => self.parse_grid_literal(),
-            TokenKind::Tensor => self.parse_tensor_literal(),
             _ => Err(ParseError::unexpected_token(
                 "math literal",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
         }
+    }
+
+    /// Parse a tensor literal when "tensor" has been recognised as a contextual
+    /// keyword (it is lexed as a regular identifier).  Called from
+    /// `parse_primary` when the current token is `Identifier("tensor")` and the
+    /// next token is also an identifier (the tensor name).
+    pub(super) fn parse_tensor_literal_from_ident(&mut self) -> Result<Expr, ParseError> {
+        self.parse_tensor_literal()
     }
 
     // ========================================================================
@@ -209,13 +216,17 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Indent)?;
 
         // Parse mode: slice or flat
-        let mode = if self.check_ident("slice") {
+        // Note: slice, flat, default are keyword tokens (TokenKind::Slice, etc.)
+        // so we must check for both the keyword token AND identifier form.
+        let mode = if self.check(&TokenKind::Slice) || self.check_ident("slice") {
             // Slice mode
             let slices = self.parse_tensor_slices()?;
             TensorMode::Slice(slices)
-        } else if self.check_ident("default") || self.check_ident("flat") {
+        } else if self.check(&TokenKind::Default) || self.check_ident("default")
+            || self.check(&TokenKind::Flat) || self.check_ident("flat")
+        {
             // Flat mode
-            let default_val = if self.check_ident("default") {
+            let default_val = if self.check(&TokenKind::Default) || self.check_ident("default") {
                 self.advance(); // consume 'default'
                 self.expect(&TokenKind::Colon)?;
                 let val = self.parse_expression()?;
@@ -268,7 +279,7 @@ impl<'a> Parser<'a> {
 
         let mut slices = Vec::new();
 
-        while self.check_ident("slice") {
+        while self.check(&TokenKind::Slice) || self.check_ident("slice") {
             self.advance(); // consume 'slice'
 
             // Parse dim_name=value
@@ -302,7 +313,7 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Indent)?;
 
             // Check if nested slices or grid rows
-            let content = if self.check_ident("slice") {
+            let content = if self.check(&TokenKind::Slice) || self.check_ident("slice") {
                 let nested = self.parse_tensor_slices()?;
                 TensorSliceContent::NestedSlices(nested)
             } else {

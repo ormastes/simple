@@ -6,61 +6,62 @@
 > MCP: production-ready (`src/app/mcp/`, 6 MCP servers in `.mcp.json`)
 > See `doc/06_spec/generated/feature.md` for current feature status.
 
-**Status:** Partially Stale — review individual items
+**Status:** Partially Updated (2026-04-04) — several items now IMPLEMENTED
 **Timeline:** TBD based on priorities
 
 ## Developer Tooling
 
 ### 1. Language Server Protocol (LSP)
 
-**Priority:** Medium  
-**Estimated:** 40 hours
+**Status:** IMPLEMENTED (Production-Ready)  
+**Completed:** 2026 Q1
 
-**Features:**
-- Syntax highlighting
-- Auto-completion
-- Go to definition
-- Find references
-- Hover documentation
-- Error diagnostics
+LSP is fully implemented and production-ready:
+- `src/lib/nogc_sync_mut/lsp/` — LSP protocol implementation
+- `src/app/lsp/` — LSP server application
+- MCP bridge: `bin/simple_lsp_mcp_server` (LSP via MCP)
+
+**Features (all implemented):**
+- Syntax highlighting ✅
+- Auto-completion ✅
+- Go to definition ✅
+- Find references ✅
+- Hover documentation ✅
+- Error diagnostics ✅
+- Document highlights ✅
+- Symbol search ✅
+- Type information ✅
+- Signature help ✅
 
 **Editor Support:**
-- VS Code extension
-- Neovim plugin
-- Generic LSP support (Emacs, Sublime, etc.)
-
-**Dependencies:**
-- Parser complete ✅
-- Type checker complete
-- AST traversal utilities
-
-**See Also:** Industry LSP implementations (rust-analyzer, TypeScript LSP)
+- VS Code extension ✅
+- Neovim plugin ✅
+- Generic LSP support (Emacs, Sublime, etc.) ✅
 
 ---
 
 ### 2. Debugger (DAP)
 
-**Priority:** Medium  
-**Estimated:** 50 hours
+**Status:** IMPLEMENTED (Production-Ready)  
+**Completed:** 2026 Q1
 
-**Features:**
-- Breakpoints
-- Step through code
-- Variable inspection
-- Call stack visualization
-- Conditional breakpoints
+DAP is fully implemented and production-ready:
+- `src/lib/nogc_sync_mut/dap/` — DAP protocol implementation
+- `src/app/dap/` — DAP server application
 
-**Protocol:** Debug Adapter Protocol (DAP)
+**Features (all implemented):**
+- Breakpoints ✅
+- Step through code ✅
+- Variable inspection ✅
+- Call stack visualization ✅
+- Conditional breakpoints ✅
+- Data breakpoints ✅
+- Function breakpoints ✅
 
 **Integration:**
-- VS Code debugger
-- Neovim debugger (nvim-dap)
-- Generic DAP support
-
-**Dependencies:**
-- Interpreter complete
-- Runtime introspection
-- Source map generation
+- VS Code debugger ✅
+- Neovim debugger (nvim-dap) ✅
+- Generic DAP support ✅
 
 ---
 
@@ -68,21 +69,23 @@
 
 ### 3. Model Context Protocol (MCP) for LLMs
 
-**Priority:** High  
-**Estimated:** 20 hours
+**Status:** IMPLEMENTED (Production-Ready, 6 MCP Servers)  
+**Completed:** 2026 Q1
 
-**Goal:** Optimize Simple for LLM code generation and assistance
+MCP is fully implemented with 6 production servers (see `.mcp.json`):
+- `simple-mcp` — Full compiler MCP (~100 tools)
+- `simple-lsp-mcp` — LSP via MCP bridge (11 tools)
+- `t32-mcp` — TRACE32 debugger MCP
+- `t32-lsp-mcp` — TRACE32 CMM LSP via MCP
 
-**Features:**
-- Context pack generator (implemented in #405)
-- AST/IR export (implemented in #403)
-- Structured diagnostics (implemented in #404)
-- Contract blocks (in progress #400)
-- Capability-based imports (#401)
+**Features (all implemented):**
+- Context pack generator ✅ (implemented in #405)
+- AST/IR export ✅ (implemented in #403)
+- Structured diagnostics ✅ (implemented in #404)
+- Contract blocks ✅ (implemented in #400)
+- Capability-based imports ✅ (#401)
 
 **Already Planned:** See `doc/plans/llm_friendly.md`
-
-**Status:** Core features being implemented
 
 ---
 
@@ -241,7 +244,11 @@ app = Gui():
 
 ### 8. Test Infrastructure Enhancements
 
-**Status:** Partially complete (BDD, Doctest)
+**Status:** BDD and Doctest IMPLEMENTED; additional test types pending
+
+**Implemented:**
+- BDD framework (SSpec) ✅ — `src/lib/nogc_sync_mut/spec/`
+- Doctest framework ✅
 
 **Remaining:**
 - Property-based testing (#406)
@@ -290,11 +297,11 @@ app = Gui():
 
 | Feature | Priority | Effort | Value | Dependencies |
 |---------|----------|--------|-------|--------------|
-| MCP/LLM | High | 20h | High | In progress |
-| LSP | Medium | 40h | High | Parser ✅ |
+| MCP/LLM | ~~High~~ | ~~20h~~ | High | **DONE** ✅ |
+| LSP | ~~Medium~~ | ~~40h~~ | High | **DONE** ✅ |
 | Conventions | Medium | 15h | High | Spec update |
 | TUI Framework | Medium | 30h | Medium | stdlib I/O |
-| DAP Debugger | Medium | 50h | Medium | Interpreter |
+| DAP Debugger | ~~Medium~~ | ~~50h~~ | Medium | **DONE** ✅ |
 | Package Registry | Medium | 60h | High | Package manager ✅ |
 | Web Framework | Low | 100h+ | Medium | Many deps |
 | GUI Framework | Low | 150h+ | Low | Many deps |
@@ -304,9 +311,9 @@ app = Gui():
 ## Recommendation
 
 **Immediate Focus:**
-1. Complete LLM-friendly features (#400-410)
-2. Complete BDD/Doctest frameworks
-3. LSP implementation (high value, moderate effort)
+1. ~~Complete LLM-friendly features (#400-410)~~ — **DONE** ✅
+2. ~~Complete BDD/Doctest frameworks~~ — **DONE** ✅
+3. ~~LSP implementation~~ — **DONE** ✅
 4. Convention documentation
 
 **Medium-term:**
