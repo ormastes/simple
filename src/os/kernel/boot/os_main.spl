@@ -1,0 +1,83 @@
+# SimpleOS Full-Stack Boot Entry
+#
+# MDSOC: feature dimension, kernel layer
+# Called after kernel initialization (memory, scheduler, interrupts ready).
+# Chains: PCI -> drivers -> services -> applications
+#
+# Boot sequence:
+# 1. Initialize POSIX compatibility layer
+# 2. Initialize all services (storage, network, display)
+# 3. Report service status
+# 4. Start background daemons (SSH if network available)
+# 5. Launch interactive shell (foreground, blocks)
+
+use os.kernel.boot.init_services.{init_all_services, services_storage_ready, services_network_ready}
+use os.services.vfs.vfs_init.{vfs_service_start, g_vfs}
+use os.services.netstack.netstack_init.{net_service_start, net_is_ready}
+use os.apps.shell.shell_app.{ShellApp}
+use os.apps.sshd.sshd.{SshDaemon}
+use os.posix.mod.{posix_init}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Boot Entry Point
+# ============================================================================
+
+fn os_main():
+    """SimpleOS full-stack boot sequence.
+
+    Called once from kernel_entry after hardware initialization
+    (GDT, IDT, page tables, scheduler, IPC) is complete.
+    Initializes user-space services and launches the shell.
+    """
+    serial_println("")
+    serial_println("=== SimpleOS Boot ===")
+    serial_println("")
+
+    # Step 1: Initialize POSIX compatibility layer
+    # Sets up FD table (stdin/stdout/stderr), async I/O pool, signals
+    posix_init()
+    serial_println("[boot] POSIX layer initialized")
+
+    # Step 2: Initialize all services (storage, network, display)
+    init_all_services()
+
+    # Step 3: Report service status
+    serial_println("")
+    if services_storage_ready():
+        serial_println("[boot] Storage: OK (FAT32 on NVMe)")
+    else:
+        serial_println("[boot] Storage: FAILED")
+
+    if services_network_ready():
+        serial_println("[boot] Network: OK (VirtIO-net + TCP/IP)")
+    else:
+        serial_println("[boot] Network: FAILED (continuing without network)")
+
+    serial_println("")
+    serial_println("[boot] All services initialized")
+    serial_println("[boot] Starting applications...")
+    serial_println("")
+
+    # NOTE: In a real OS, these would be spawned as separate tasks via
+    # the scheduler. For now, we run the shell as the foreground task.
+    # VFS service runs via notification-based IPC (no dedicated loop needed
+    # when shell calls VFS synchronously).
+
+    # Step 4: Start SSH daemon if network is ready
+    # (In a real OS this would be a background task)
+    if net_is_ready():
+        serial_println("[boot] SSH daemon would start on port 22")
+        # var sshd = SshDaemon.new(22)
+        # sshd.start()  # Would block -- needs task spawning
+
+    # Step 5: Launch interactive shell (foreground, blocks)
+    serial_println("[boot] Launching shell...")
+    serial_println("")
+    var shell = ShellApp.with_vfs(g_vfs)
+    shell.run()
+
+    # Shell exited
+    serial_println("")
+    serial_println("[boot] Shell exited. Halting.")

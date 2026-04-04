@@ -10,6 +10,7 @@
 # 6. VFS service starts listening on IPC port "vfs"
 
 use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.services.vfs.vfs_service.{VfsService}
 use os.services.fat32.fat32.{Fat32Driver, BlockDevice}
 use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_grant_device}
@@ -21,18 +22,7 @@ use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64}
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
 
-# VFS IPC method IDs (must match kernel file syscall routing)
-val VFS_METHOD_OPEN: u32 = 1
-val VFS_METHOD_READ: u32 = 2
-val VFS_METHOD_WRITE: u32 = 3
-val VFS_METHOD_CLOSE: u32 = 4
-val VFS_METHOD_STAT: u32 = 5
-val VFS_METHOD_MKDIR: u32 = 6
-val VFS_METHOD_READDIR: u32 = 7
-
 # Syscall numbers
-val SYS_IPC_RECV: u64 = 21
-val SYS_IPC_CREATE_PORT: u64 = 22
 val SYS_ALLOC_DMA: u64 = 84
 
 # DMA page size for sector I/O buffers
@@ -194,31 +184,13 @@ fn vfs_boot_init() -> bool:
 # ============================================================================
 
 fn vfs_service_start():
-    """Start VFS IPC service loop. Call after vfs_boot_init()."""
+    """Start the VFS IPC service loop."""
     if not g_vfs_initialized:
         serial_println("[vfs] Cannot start service -- not initialized")
         return
 
-    # Create IPC port for "vfs" service
-    val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
-    if port < 0:
-        serial_println("[vfs] Failed to create IPC port (error {port})")
-        return
-    serial_println("[vfs] Service listening on IPC port (handle={port})")
-
-    val port_handle = port.to_u64()
-
-    # Service loop -- block on IPC recv, dispatch file operations
-    while true:
-        val msg = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
-        if msg < 0:
-            serial_println("[vfs] IPC recv error: {msg}")
-            continue
-
-        # IPC message parsing will be wired when the kernel IPC message
-        # framing layer is finalized. For now log receipt and continue.
-        serial_println("[vfs] Received file request (raw={msg})")
-        pass_dn
+    var service = VfsService.new(g_vfs)
+    service.start()
 
 # ============================================================================
 # Query Helpers

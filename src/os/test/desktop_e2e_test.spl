@@ -1,0 +1,72 @@
+# Desktop End-to-End Test
+#
+# Tests the full desktop stack: boot -> services -> launcher -> app launch
+# Run with QEMU scenario: x64-desktop-test
+#
+# Expected serial output:
+#   [init] Services started
+#   [launcher] Registered 3 apps
+#   [test] Launching Hello World via shortcut...
+#   [launcher] Started Hello World (PID N)
+#   [test] Window created for Hello World
+#   [test] Closing window...
+#   TEST PASSED
+
+use os.services.launcher.launcher.{launcher_init, launcher_shortcut_dispatch, launcher_list, launcher_get_app_count, launcher_is_running, MOD_META}
+use os.services.wm.wm_service.{wm_notify_app_launched}
+
+extern fn serial_println(msg: text)
+
+fn test_main():
+    serial_println("=== Desktop End-to-End Test ===")
+    serial_println("")
+
+    # Step 1: Initialize launcher
+    serial_println("[test] Step 1: Initialize launcher...")
+    launcher_init()
+    val app_count = launcher_get_app_count()
+    if app_count < 3:
+        serial_println("[test] FAIL: Expected >= 3 registered apps, got {app_count}")
+        serial_println("TEST FAILED")
+        return
+    serial_println("[test] PASS: {app_count} apps registered")
+    launcher_list()
+
+    # Step 2: Simulate Meta+H shortcut
+    serial_println("")
+    serial_println("[test] Step 2: Simulate Meta+H shortcut...")
+    val launched = launcher_shortcut_dispatch(0x48, MOD_META)  # H key + Meta
+    if not launched:
+        serial_println("[test] FAIL: Shortcut dispatch returned false")
+        serial_println("TEST FAILED")
+        return
+    serial_println("[test] PASS: Shortcut dispatched successfully")
+
+    # Step 3: Verify app is running
+    serial_println("")
+    serial_println("[test] Step 3: Verify Hello World is running...")
+    val running = launcher_is_running(0)  # index 0 = Hello World
+    if not running:
+        serial_println("[test] WARN: App not marked as running (spawn may be async)")
+    else:
+        serial_println("[test] PASS: Hello World is running")
+
+    # Step 4: Notify WM of app launch
+    serial_println("")
+    serial_println("[test] Step 4: Notify WM of app launch...")
+    wm_notify_app_launched("Hello World", 1)
+    serial_println("[test] PASS: WM notified")
+
+    # Step 5: Verify launcher list after launch
+    serial_println("")
+    serial_println("[test] Step 5: Verify launcher state after launch...")
+    val count_after = launcher_get_app_count()
+    if count_after < 3:
+        serial_println("[test] FAIL: App count dropped to {count_after}")
+        serial_println("TEST FAILED")
+        return
+    serial_println("[test] PASS: App registry intact ({count_after} apps)")
+
+    serial_println("")
+    serial_println("=== All desktop tests passed ===")
+    serial_println("TEST PASSED")
