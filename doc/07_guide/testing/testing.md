@@ -731,13 +731,18 @@ simple test --screenshot-output doc/spec/image/custom
 
 ## UI System Testing
 
-Test TUI and Web UI backends programmatically in headless environments (CI, containers, SSH) by serving them on web ports and using the `UITestClient` library.
+Shared UI contract testing across the **web backend** and **TUI-web proxy** surfaces. Both backends implement the same HTTP-based test API protocol (Protocol Version 1), allowing a single test suite to verify identical semantic behavior on both surfaces.
+
+**Contract reference:** [`doc/04_architecture/shared_ui_contract.md`](../../04_architecture/shared_ui_contract.md)
+
+**Supported shared surfaces:** web backend (`ui.web`), TUI-web proxy (`ui.tui_web`).
+**Not part of shared claim:** native TUI, Electron, Tauri, headless (different transport/protocol).
 
 For screenshot-backed UI verification, the test runner writes captures to `doc/spec/image` by default. Specs can reference those paths through `**Screenshots:**` or `**Artifacts:**` metadata so generated markdown includes links to the captured evidence.
 
 ### Architecture
 
-Both the **web backend** (`ui.web`) and the **TUI web proxy** (`ui.tui_web`) expose a shared Test API over HTTP on localhost. The TUI web proxy renders the TUI Screen buffer as terminal-emulator-style HTML (`<pre>` with ANSI colors mapped to CSS spans).
+Both the **web backend** (`ui.web`) and the **TUI web proxy** (`ui.tui_web`) expose a shared Test API over HTTP on localhost. Both use the same `handle_test_request` handler from `app.ui.test_api`, ensuring protocol-level parity. The TUI web proxy renders the TUI Screen buffer as terminal-emulator-style HTML (`<pre>` with ANSI colors mapped to CSS spans).
 
 ```
 System Test (SSpec)
@@ -771,19 +776,24 @@ client.wait_ready(5000)?
 # Actions
 client.click("btn_ok")?                          # Click widget
 client.type_text("search_input", "query")?       # Type into input
+client.submit("form_dialog")?                    # Submit form/dialog
 client.drag("item_1", "target")?                  # Drag between widgets
 client.send_key("enter")?                         # Send key event
+client.focus_next()?                              # Move focus forward
+client.focus_prev()?                              # Move focus backward
 
 # Queries
 val elem = client.get_element("btn_ok")?          # Widget state + props
 val all = client.get_elements()?                   # All widgets
-val state = client.get_state()?                    # UI mode, focus, title
+val state = client.get_state()?                    # UI mode, focus, title, element_count
 val html = client.screenshot_html()?               # Full HTML snapshot
 
 # Assertions (convenience)
 client.check_text("status", "Saved")?             # Check text content
 client.check_visible("sidebar")?                   # Check visibility
 client.check_focused("search_input")?              # Check focus
+client.check_enabled("btn_ok")?                   # Check enabled state
+client.check_selected("checkbox_1")?              # Check selection state
 client.check_exists("nav_tabs")?                   # Check existence
 
 # Waiting
