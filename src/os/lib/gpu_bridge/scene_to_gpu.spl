@@ -1,0 +1,409 @@
+# GPU Backend Bridge -- scene graph to VirtIO-GPU rendering
+#
+# Converts abstract render_scene SceneCommands into concrete VirtIO-GPU
+# framebuffer operations. Used by the compositor when GPU acceleration
+# is available instead of the software framebuffer path.
+#
+# Rendering pipeline:
+#   RenderScene (SceneCommand list)
+#     -> GpuBridge (this module)
+#       -> VirtioGpuDriver (pixel writes + flush)
+#
+# Fallback: when GPU is not available, the compositor uses the existing
+# FramebufferDriver path directly.
+
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use common.render_scene.scene.{SceneCommand, RenderScene, argb_alpha, argb_red, argb_green, argb_blue, argb}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Clip rectangle for clip_push / clip_pop tracking
+# ============================================================================
+
+struct GpuClipRect:
+    """Axis-aligned clip bounds used by the GPU bridge."""
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+# ============================================================================
+# GPU Bridge
+# ============================================================================
+
+struct GpuBridge:
+    """Adapter from render_scene scene graphs to VirtIO-GPU driver.
+
+    Holds a reference to the VirtIO-GPU driver and maintains a clip
+    stack for clip_push/clip_pop commands.
+    """
+    gpu: VirtioGpuDriver
+    width: u32
+    height: u32
+    initialized: bool
+    clip_stack: [GpuClipRect]
+
+impl GpuBridge:
+
+    static fn new(gpu: VirtioGpuDriver) -> GpuBridge:
+        """Create a GPU bridge wrapping an initialized VirtIO-GPU driver."""
+        GpuBridge(
+            gpu: gpu,
+            width: gpu.get_width(),
+            height: gpu.get_height(),
+            initialized: gpu.is_initialized(),
+            clip_stack: []
+        )
+
+    fn is_available() -> bool:
+        """Return true if the underlying GPU driver is ready."""
+        self.initialized
+
+    # ========================================================================
+    # Scene Rendering
+    # ========================================================================
+
+    me render_scene(scene: RenderScene):
+        """Render a full RenderScene to the GPU framebuffer.
+
+        Walks the command list and dispatches each SceneCommand to the
+        appropriate GPU operation. Automatically flushes when done.
+        """
+        if not self.initialized:
+            serial_println("[gpu-bridge] GPU not available, skipping render")
+            return
+
+        for cmd in scene.commands:
+            me dispatch_command(cmd)
+
+        me flush()
+
+    me dispatch_command(cmd: SceneCommand):
+        """Dispatch a single SceneCommand to the appropriate GPU operation."""
+        if cmd.kind == "fill_rect":
+            me render_fill_rect(cmd)
+        elif cmd.kind == "stroke_rect":
+            me render_stroke_rect(cmd)
+        elif cmd.kind == "line":
+            me render_line(cmd)
+        elif cmd.kind == "circle_filled":
+            me render_circle_filled(cmd)
+        elif cmd.kind == "circle":
+            me render_circle(cmd)
+        elif cmd.kind == "rounded_rect":
+            me render_rounded_rect(cmd)
+        elif cmd.kind == "gradient_rect":
+            me render_gradient_rect(cmd)
+        elif cmd.kind == "image":
+            me render_image(cmd)
+        elif cmd.kind == "text":
+            me render_text_placeholder(cmd)
+        elif cmd.kind == "clip_push":
+            me push_clip(cmd.x, cmd.y, cmd.width, cmd.height)
+        elif cmd.kind == "clip_pop":
+            me pop_clip()
+        else:
+            serial_println("[gpu-bridge] Unknown command kind: {cmd.kind}")
+
+    # ========================================================================
+    # Primitive Rendering
+    # ========================================================================
+
+    me render_fill_rect(cmd: SceneCommand):
+        """Render a filled rectangle, respecting the clip stack."""
+        var x = cmd.x
+        var y = cmd.y
+        var w = cmd.width
+        var h = cmd.height
+        me clip_rect(&x, &y, &w, &h)
+        if w <= 0 or h <= 0:
+            return
+        self.gpu.fill_rect(x.to_u32(), y.to_u32(), w.to_u32(), h.to_u32(), cmd.color)
+
+    me render_stroke_rect(cmd: SceneCommand):
+        """Render a stroked (outline) rectangle."""
+        var x = cmd.x
+        var y = cmd.y
+        var w = cmd.width
+        var h = cmd.height
+        val color = cmd.color
+        val sw_i32 = cmd.stroke_width
+        if sw_i32 <= 0:
+            return
+
+        val sw = sw_i32.to_u32()
+        val xu = x.to_u32()
+        val yu = y.to_u32()
+        val wu = w.to_u32()
+        val hu = h.to_u32()
+
+        # Top edge
+        self.gpu.fill_rect(xu, yu, wu, sw, color)
+        # Bottom edge
+        if hu > sw:
+            self.gpu.fill_rect(xu, yu + hu - sw, wu, sw, color)
+        # Left edge
+        if hu > sw * 2:
+            self.gpu.fill_rect(xu, yu + sw, sw, hu - sw * 2, color)
+        # Right edge
+        if wu > sw and hu > sw * 2:
+            self.gpu.fill_rect(xu + wu - sw, yu + sw, sw, hu - sw * 2, color)
+
+    me render_line(cmd: SceneCommand):
+        """Render a line using the GPU put_pixel (Bresenham).
+
+        In SceneCommand for lines: x/y = start, width/height = end point.
+        """
+        var x0 = cmd.x
+        var y0 = cmd.y
+        var x1 = cmd.width
+        var y1 = cmd.height
+        val color = cmd.color
+
+        var dx = x1 - x0
+        var dy = y1 - y0
+        if dx < 0:
+            dx = 0 - dx
+        if dy < 0:
+            dy = 0 - dy
+
+        var sx: i32 = 1
+        var sy: i32 = 1
+        if x0 > x1:
+            sx = -1
+        if y0 > y1:
+            sy = -1
+
+        var err = dx - dy
+
+        while true:
+            if x0 >= 0 and y0 >= 0:
+                self.gpu.put_pixel(x0.to_u32(), y0.to_u32(), color)
+            if x0 == x1 and y0 == y1:
+                break
+            val e2 = err * 2
+            if e2 > 0 - dy:
+                err = err - dy
+                x0 = x0 + sx
+            if e2 < dx:
+                err = err + dx
+                y0 = y0 + sy
+
+    me render_circle_filled(cmd: SceneCommand):
+        """Render a filled circle using horizontal scan lines.
+
+        In SceneCommand: x/y = center, width = radius.
+        """
+        val cx = cmd.x
+        val cy = cmd.y
+        val r = cmd.width
+        val color = cmd.color
+
+        var dy_i: i32 = 0 - r
+        while dy_i <= r:
+            # Integer approximation of horizontal half-chord
+            val dy_sq = dy_i * dy_i
+            val r_sq = r * r
+            if dy_sq <= r_sq:
+                # Approximate sqrt via scan: find largest dx where dx*dx <= r_sq - dy_sq
+                val remainder = r_sq - dy_sq
+                var dx_i: i32 = 0
+                while (dx_i + 1) * (dx_i + 1) <= remainder:
+                    dx_i = dx_i + 1
+                val line_y = cy + dy_i
+                val line_x = cx - dx_i
+                val line_w = dx_i * 2 + 1
+                if line_y >= 0 and line_w > 0:
+                    self.gpu.fill_rect(line_x.to_u32(), line_y.to_u32(), line_w.to_u32(), 1, color)
+            dy_i = dy_i + 1
+
+    me render_circle(cmd: SceneCommand):
+        """Render an outlined circle (midpoint algorithm).
+
+        In SceneCommand: x/y = center, width = radius.
+        """
+        val cx = cmd.x.to_u32()
+        val cy = cmd.y.to_u32()
+        val r = cmd.width
+        val color = cmd.color
+
+        var x_i: i32 = r
+        var y_i: i32 = 0
+        var err: i32 = 1 - r
+
+        while x_i >= y_i:
+            val xu = x_i.to_u32()
+            val yu = y_i.to_u32()
+            self.gpu.put_pixel(cx + xu, cy + yu, color)
+            self.gpu.put_pixel(cx - xu, cy + yu, color)
+            self.gpu.put_pixel(cx + xu, cy - yu, color)
+            self.gpu.put_pixel(cx - xu, cy - yu, color)
+            self.gpu.put_pixel(cx + yu, cy + xu, color)
+            self.gpu.put_pixel(cx - yu, cy + xu, color)
+            self.gpu.put_pixel(cx + yu, cy - xu, color)
+            self.gpu.put_pixel(cx - yu, cy - xu, color)
+            y_i = y_i + 1
+            if err < 0:
+                err = err + 2 * y_i + 1
+            else:
+                x_i = x_i - 1
+                err = err + 2 * (y_i - x_i) + 1
+
+    me render_rounded_rect(cmd: SceneCommand):
+        """Render a rounded rectangle as a fill_rect (corner rounding is a placeholder)."""
+        # For now, render as a plain filled rectangle.
+        # Full corner-arc rendering can be added later.
+        me render_fill_rect(cmd)
+
+    me render_gradient_rect(cmd: SceneCommand):
+        """Render a horizontal linear gradient rectangle.
+
+        Linearly interpolates color from cmd.color to cmd.color2 across width.
+        """
+        val x = cmd.x.to_u32()
+        val y = cmd.y.to_u32()
+        val w = cmd.width
+        val h = cmd.height.to_u32()
+        if w <= 0:
+            return
+
+        val r1 = argb_red(cmd.color)
+        val g1 = argb_green(cmd.color)
+        val b1 = argb_blue(cmd.color)
+        val a1 = argb_alpha(cmd.color)
+        val r2 = argb_red(cmd.color2)
+        val g2 = argb_green(cmd.color2)
+        val b2 = argb_blue(cmd.color2)
+        val a2 = argb_alpha(cmd.color2)
+
+        var col: u32 = 0
+        val wu = w.to_u32()
+        while col < wu:
+            val r = r1 + (r2 - r1) * col / wu
+            val g = g1 + (g2 - g1) * col / wu
+            val b = b1 + (b2 - b1) * col / wu
+            val a = a1 + (a2 - a1) * col / wu
+            val c = argb(a, r, g, b)
+            self.gpu.fill_rect(x + col, y, 1, h, c)
+            col = col + 1
+
+    me render_image(cmd: SceneCommand):
+        """Render an image by writing pixels directly.
+
+        The SceneCommand carries a flat ARGB pixel array in cmd.pixels
+        with dimensions cmd.pixel_width x cmd.pixel_height.
+        """
+        val px = cmd.x.to_u32()
+        val py = cmd.y.to_u32()
+        val pw = cmd.pixel_width
+        val ph = cmd.pixel_height
+        if pw <= 0 or ph <= 0:
+            return
+
+        var row: i32 = 0
+        while row < ph:
+            var col: i32 = 0
+            while col < pw:
+                val idx = row * pw + col
+                if idx < cmd.pixels.len():
+                    val color = cmd.pixels[idx]
+                    self.gpu.put_pixel(px + col.to_u32(), py + row.to_u32(), color)
+                col = col + 1
+            row = row + 1
+
+    me render_text_placeholder(cmd: SceneCommand):
+        """Placeholder text rendering -- draws a colored rectangle per character.
+
+        Each character is represented as an 8x16 block. Full glyph rendering
+        requires integration with a bitmap font module.
+        """
+        val x = cmd.x.to_u32()
+        val y = cmd.y.to_u32()
+        val color = cmd.color
+        val char_w: u32 = 8
+        val char_h: u32 = 16
+        var cx: u32 = x
+        var i: i32 = 0
+        val text_len = cmd.text_val.len()
+        while i < text_len:
+            # Draw a small filled block for each character
+            self.gpu.fill_rect(cx, y, char_w, char_h, color)
+            cx = cx + char_w
+            i = i + 1
+        pass_todo  # Integrate with bitmap font for real glyph rendering
+
+    # ========================================================================
+    # Clip Stack
+    # ========================================================================
+
+    me push_clip(x: i32, y: i32, w: i32, h: i32):
+        """Push a clip rectangle onto the stack."""
+        self.clip_stack = self.clip_stack.push(GpuClipRect(x: x, y: y, w: w, h: h))
+
+    me pop_clip():
+        """Pop the top clip rectangle from the stack."""
+        if self.clip_stack.len() > 0:
+            var new_stack: [GpuClipRect] = []
+            var i: i32 = 0
+            val last = self.clip_stack.len() - 1
+            while i < last:
+                new_stack = new_stack.push(self.clip_stack[i])
+                i = i + 1
+            self.clip_stack = new_stack
+
+    me clip_rect(x: &i32, y: &i32, w: &i32, h: &i32):
+        """Intersect a rectangle with the current clip (top of stack).
+
+        Modifies x, y, w, h in-place. If the clip stack is empty,
+        the rectangle is unchanged.
+        """
+        if self.clip_stack.len() == 0:
+            return
+        val clip = self.clip_stack[self.clip_stack.len() - 1]
+
+        var x0 = *x
+        var y0 = *y
+        var x1 = *x + *w
+        var y1 = *y + *h
+
+        if x0 < clip.x:
+            x0 = clip.x
+        if y0 < clip.y:
+            y0 = clip.y
+        if x1 > clip.x + clip.w:
+            x1 = clip.x + clip.w
+        if y1 > clip.y + clip.h:
+            y1 = clip.y + clip.h
+
+        *x = x0
+        *y = y0
+        *w = x1 - x0
+        *h = y1 - y0
+
+    # ========================================================================
+    # Direct Operations
+    # ========================================================================
+
+    me flush():
+        """Flush all pending GPU operations to the display."""
+        self.gpu.flush()
+
+    me flush_rect(x: u32, y: u32, w: u32, h: u32):
+        """Flush a rectangular damage region to the display."""
+        self.gpu.flush_rect(x, y, w, h)
+
+    me clear(color: u32):
+        """Clear the entire framebuffer."""
+        self.gpu.clear(color)
+
+# ============================================================================
+# Convenience: damage-region flush
+# ============================================================================
+
+fn gpu_bridge_render_damage(bridge: GpuBridge, x: u32, y: u32, w: u32, h: u32):
+    """Re-render and flush only the damaged rectangle region.
+
+    More efficient than a full flush when only a small area changed.
+    """
+    bridge.gpu.flush_rect(x, y, w, h)

@@ -102,9 +102,17 @@ impl WmService:
     me init() -> bool:
         """Create named IPC port "compositor" and prepare for requests.
 
+        The port is registered with the name "compositor" so remote apps
+        can discover it via SYS_IPC_CONNECT("compositor").
+
         Returns true on success, false if port creation fails.
         """
-        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        # Pass the name pointer and length so the kernel registers a named port.
+        # SYS_IPC_CREATE_PORT(name_ptr, name_len, 0, 0, 0) -> port_id
+        extern fn unsafe_addr_of(ref: any) -> u64
+        val name_ptr = unsafe_addr_of(WM_PORT_NAME)
+        val name_len = WM_PORT_NAME.len().to_u64()
+        val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, name_len, 0, 0, 0)
         if port < 0:
             serial_println("[wm-service] Failed to create IPC port (error {port})")
             return false
@@ -139,11 +147,15 @@ impl WmService:
         Used when the WM service is integrated into the compositor's
         main loop rather than running in its own thread.
         Returns without blocking if no message is pending.
+
+        SYS_IPC_RECV args: (port_id, timeout_ms, flags, 0, 0)
+        timeout_ms = 0 means non-blocking (return immediately if no message).
+        flags bit 0 = 1 means non-blocking poll.
         """
         if not self.initialized:
             return
-        # Non-blocking recv: timeout = 0
-        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
+        # Non-blocking recv: timeout = 0, flags = 1 (poll mode)
+        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 1, 0, 0)
         if msg_raw > 0:
             self.request_count = self.request_count + 1
             self.dispatch_message(msg_raw.to_u64())

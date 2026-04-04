@@ -1,0 +1,388 @@
+# Launcher Service — app registry, shortcut dispatch, and app spawning
+#
+# MDSOC: feature dimension, desktop layer
+#
+# User-space IPC service that maintains an app registry (name -> binary
+# path, icon, keyboard shortcut), launches apps on demand via posix_spawn,
+# dispatches keyboard shortcuts, and notifies the window manager when an
+# app starts.
+#
+# IPC service on port "launcher"
+# Methods:
+#   1: REGISTER — register an app (name, path, icon, shortcut)
+#   2: LAUNCH   — launch a registered app by name
+#   3: LIST     — list all registered apps
+#   4: SHORTCUT — dispatch a keyboard shortcut
+#
+# Syscalls used:
+#   22 (IpcCreatePort) — create service IPC port
+#   21 (IpcRecv)       — receive IPC messages
+#   23 (IpcSend)       — send IPC reply
+
+use os.userlib.syscall_raw.{syscall}
+use os.posix.process_compat.{posix_spawn}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# IPC Method IDs
+# ============================================================================
+
+val LAUNCHER_REGISTER: u32 = 1
+val LAUNCHER_LAUNCH: u32 = 2
+val LAUNCHER_LIST: u32 = 3
+val LAUNCHER_SHORTCUT: u32 = 4
+
+# ============================================================================
+# Syscall IDs
+# ============================================================================
+
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_IPC_SEND: u64 = 23
+
+# ============================================================================
+# App Registry (flat arrays for baremetal safety)
+# ============================================================================
+
+val MAX_APPS: u64 = 32
+
+var app_name: [text; 32]
+var app_path: [text; 32]
+var app_icon: [text; 32]
+var app_shortcut_key: [u32; 32]     # key code (USB HID / ASCII)
+var app_shortcut_mod: [u32; 32]     # modifier flags (bit 0=Meta, bit 1=Ctrl, bit 2=Alt, bit 3=Shift)
+var app_pid: [u64; 32]              # PID of running instance (0 = not running)
+var app_active: [bool; 32]          # slot in use
+var app_count: u64 = 0
+
+# ============================================================================
+# Modifier Flag Constants
+# ============================================================================
+
+val MOD_META: u32 = 1
+val MOD_CTRL: u32 = 2
+val MOD_ALT: u32 = 4
+val MOD_SHIFT: u32 = 8
+
+# Task priority for launched apps (Normal)
+val APP_PRIORITY: u8 = 2
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+fn launcher_init():
+    """Initialize launcher and register default apps."""
+    serial_println("[launcher] Initializing app launcher...")
+
+    # Clear all slots
+    var i: u64 = 0
+    while i < MAX_APPS:
+        app_name[i] = ""
+        app_path[i] = ""
+        app_icon[i] = ""
+        app_shortcut_key[i] = 0
+        app_shortcut_mod[i] = 0
+        app_pid[i] = 0
+        app_active[i] = false
+        i = i + 1
+    app_count = 0
+
+    # Register default apps
+    launcher_register("Hello World", "/apps/hello_world", "H", 0x48, MOD_META)    # Meta+H
+    launcher_register("File Manager", "/apps/file_manager", "F", 0x46, MOD_META)  # Meta+F
+    launcher_register("Terminal", "/apps/shell", ">", 0x54, MOD_META)             # Meta+T
+
+    serial_println("[launcher] Registered {app_count} default apps")
+
+# ============================================================================
+# Register / Unregister
+# ============================================================================
+
+fn launcher_register(name: text, path: text, icon: text, key: u32, modifiers: u32) -> bool:
+    """Register an app in the launcher.
+
+    Args:
+      name:      human-readable app name (e.g. "Hello World")
+      path:      path to the ELF binary (e.g. "/apps/hello_world")
+      icon:      single-character icon for dock display
+      key:       keyboard key code (USB HID / ASCII)
+      modifiers: modifier flags (MOD_META, MOD_CTRL, MOD_ALT, MOD_SHIFT)
+
+    Returns true on success, false if registry is full.
+    """
+    # Check for existing entry — update in place
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_name[i] == name:
+            app_path[i] = path
+            app_icon[i] = icon
+            app_shortcut_key[i] = key
+            app_shortcut_mod[i] = modifiers
+            serial_println("[launcher] Updated: {name} ({path})")
+            return true
+        i = i + 1
+
+    # New registration
+    if app_count >= MAX_APPS:
+        serial_println("[launcher] Registry full ({MAX_APPS} slots)")
+        return false
+
+    val idx = app_count
+    app_name[idx] = name
+    app_path[idx] = path
+    app_icon[idx] = icon
+    app_shortcut_key[idx] = key
+    app_shortcut_mod[idx] = modifiers
+    app_pid[idx] = 0
+    app_active[idx] = true
+    app_count = app_count + 1
+    serial_println("[launcher] Registered: {name} ({path})")
+    true
+
+fn launcher_unregister(name: text) -> bool:
+    """Unregister an app by name. Returns true if found and removed."""
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_name[i] == name:
+            app_active[i] = false
+            serial_println("[launcher] Unregistered: {name}")
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Launch
+# ============================================================================
+
+fn launcher_launch(name: text) -> i64:
+    """Launch an app by name.
+
+    Spawns the app binary via posix_spawn at normal priority.
+    Returns PID on success (>= 0), -1 if not found, or negative errno
+    on spawn failure.
+    """
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_name[i] == name:
+            serial_println("[launcher] Launching: {name}")
+            val pid = posix_spawn(app_path[i], APP_PRIORITY)
+            if pid >= 0:
+                app_pid[i] = pid as u64
+                serial_println("[launcher] Started {name} (PID {pid})")
+                return pid
+            else:
+                serial_println("[launcher] Failed to launch {name}: error {pid}")
+                return pid
+        i = i + 1
+    serial_println("[launcher] App not found: {name}")
+    -1
+
+fn launcher_launch_by_index(idx: u64) -> i64:
+    """Launch an app by registry index. Returns PID or -1."""
+    if idx >= app_count:
+        return -1
+    if not app_active[idx]:
+        return -1
+    launcher_launch(app_name[idx])
+
+# ============================================================================
+# Shortcut Dispatch
+# ============================================================================
+
+fn launcher_shortcut_dispatch(key: u32, modifiers: u32) -> bool:
+    """Check if a keyboard event matches any app shortcut. Launch if found.
+
+    Called by the input handler when a key event has modifier keys held.
+    Returns true if a matching shortcut was found and launch was attempted.
+    """
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_shortcut_key[i] == key and app_shortcut_mod[i] == modifiers:
+            launcher_launch(app_name[i])
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Query / Listing
+# ============================================================================
+
+fn launcher_list():
+    """Print all registered apps to serial."""
+    serial_println("[launcher] === App Registry ({app_count} entries) ===")
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i]:
+            val running = if app_pid[i] > 0: " (running, PID={app_pid[i]})" else: ""
+            val shortcut_desc = _shortcut_desc(app_shortcut_key[i], app_shortcut_mod[i])
+            serial_println("  [{i}] {app_name[i]} — {app_path[i]} [{shortcut_desc}]{running}")
+        i = i + 1
+    serial_println("[launcher] === End App Registry ===")
+
+fn launcher_get_app_count() -> u64:
+    """Return total number of registered (active) apps."""
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i]:
+            count = count + 1
+        i = i + 1
+    count
+
+fn launcher_get_app_name(idx: u64) -> text:
+    """Return app name at given index, or empty string if invalid."""
+    if idx >= app_count:
+        return ""
+    if not app_active[idx]:
+        return ""
+    app_name[idx]
+
+fn launcher_get_app_icon(idx: u64) -> text:
+    """Return app icon character at given index, or empty string if invalid."""
+    if idx >= app_count:
+        return ""
+    if not app_active[idx]:
+        return ""
+    app_icon[idx]
+
+fn launcher_get_app_path(idx: u64) -> text:
+    """Return app binary path at given index, or empty string if invalid."""
+    if idx >= app_count:
+        return ""
+    if not app_active[idx]:
+        return ""
+    app_path[idx]
+
+fn launcher_is_running(idx: u64) -> bool:
+    """Return whether the app at given index has a running instance."""
+    if idx >= app_count:
+        return false
+    if not app_active[idx]:
+        return false
+    app_pid[idx] > 0
+
+fn launcher_get_pid(idx: u64) -> u64:
+    """Return the PID of the running instance, or 0 if not running."""
+    if idx >= app_count:
+        return 0
+    if not app_active[idx]:
+        return 0
+    app_pid[idx]
+
+fn launcher_mark_exited(pid: u64):
+    """Mark an app as no longer running when its process exits.
+
+    Called by the process supervisor or wait loop when a child exits.
+    """
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_pid[i] == pid:
+            serial_println("[launcher] Process exited: {app_name[i]} (PID {pid})")
+            app_pid[i] = 0
+            return
+        i = i + 1
+
+fn launcher_find_by_name(name: text) -> i64:
+    """Find app index by name. Returns -1 if not found."""
+    var i: u64 = 0
+    while i < app_count:
+        if app_active[i] and app_name[i] == name:
+            return i as i64
+        i = i + 1
+    -1
+
+# ============================================================================
+# IPC Service Loop
+# ============================================================================
+
+fn launcher_start():
+    """Start launcher IPC service: init registry, create port, enter loop."""
+    launcher_init()
+
+    val port_result = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if port_result < 0:
+        serial_println("[launcher] FATAL: Failed to create IPC port (error {port_result})")
+        return
+
+    val port_handle = port_result as u64
+    serial_println("[launcher] Service ready on IPC port (handle={port_handle})")
+    launcher_list()
+
+    # Enter service loop
+    launcher_service_loop(port_handle)
+
+fn launcher_service_loop(port_handle: u64):
+    """Main service loop — receive IPC messages and dispatch.
+
+    IPC message layout (expected):
+      word 0: method ID (LAUNCHER_REGISTER, etc.)
+      word 1: sender task ID
+      word 2..N: method-specific arguments
+
+    Dispatch will be wired when IPC message framing is finalized
+    in the kernel IPC layer.
+    """
+    serial_println("[launcher] Entering service loop...")
+
+    while true:
+        val msg_result = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
+        if msg_result < 0:
+            serial_println("[launcher] IPC recv error: {msg_result}")
+            continue
+
+        serial_println("[launcher] Received IPC request (raw={msg_result})")
+
+        # TODO: Parse IPC message buffer to extract method ID and arguments.
+        # Expected dispatch:
+        #   LAUNCHER_REGISTER -> launcher_register(name, path, icon, key, mods)
+        #   LAUNCHER_LAUNCH   -> launcher_launch(name) -> reply with PID
+        #   LAUNCHER_LIST     -> reply with app list
+        #   LAUNCHER_SHORTCUT -> launcher_shortcut_dispatch(key, mods) -> reply
+        pass_dn
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _shortcut_desc(key: u32, mods: u32) -> text:
+    """Convert a key code + modifier flags to a human-readable description."""
+    var desc = ""
+    if (mods & MOD_META) != 0:
+        desc = desc + "Meta+"
+    if (mods & MOD_CTRL) != 0:
+        desc = desc + "Ctrl+"
+    if (mods & MOD_ALT) != 0:
+        desc = desc + "Alt+"
+    if (mods & MOD_SHIFT) != 0:
+        desc = desc + "Shift+"
+    # Key code to character (printable ASCII range)
+    if key >= 0x41 and key <= 0x5A:
+        val ch = key as u8
+        desc = desc + "{ch}"
+    else:
+        desc = desc + "0x{key}"
+    desc
+
+fn _class_name_for_mod(mods: u32) -> text:
+    """Return a short string describing modifier flags."""
+    var parts: [text] = []
+    if (mods & MOD_META) != 0:
+        parts = parts.push("Meta")
+    if (mods & MOD_CTRL) != 0:
+        parts = parts.push("Ctrl")
+    if (mods & MOD_ALT) != 0:
+        parts = parts.push("Alt")
+    if (mods & MOD_SHIFT) != 0:
+        parts = parts.push("Shift")
+    if parts.len() == 0:
+        return "none"
+    var result = ""
+    var i: u64 = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + "|"
+        result = result + parts[i]
+        i = i + 1
+    result

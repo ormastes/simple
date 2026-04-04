@@ -1,0 +1,179 @@
+# Browser-Backed Sample App — Phase 12 Validation
+#
+# Renders a simple layout through the browser-engine pipeline to verify
+# that the browser rendering library works end-to-end with the compositor.
+#
+# Pipeline: DOM construction -> CSS layout -> paint -> RenderScene -> pixels
+#
+# Layout:
+#   +---------------------+
+#   |  SimpleOS Browser    |  (heading, 24px, white on blue)
+#   +---------------------+
+#   |  This is a sample    |  (paragraph, 14px, dark gray)
+#   |  page rendered via   |
+#   |  the browser engine. |
+#   +---------------------+
+#   |  ################    |  (colored box: 200x50, green)
+#   |  ################    |
+#   +---------------------+
+#
+# MDSOC: feature dimension, apps layer
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{default_style}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
+use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
+    generate_paint_list, paint_commands_to_scene, paint_tree_to_scene}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use common.render_scene.scene.{RenderScene, SceneCommand}
+use common.render_scene.executor.{execute_scene_to_buffer}
+
+extern fn serial_println(msg: text)
+
+# =========================================================================
+# DOM Construction
+# =========================================================================
+
+fn build_sample_dom() -> BeDomNode:
+    """Build a simple DOM tree for browser engine validation.
+
+    Creates a root container with three sections:
+    1. Blue header with white heading text (24px)
+    2. Paragraph with dark gray text (14px)
+    3. Green colored box (200x50)
+    """
+    # Root container — light gray background, column layout
+    var root = BeDomNode.element("div")
+    root.set_style("background-color", "#f5f5f5")
+    root.set_style("padding", "16")
+    root.set_style("width", "400")
+    root.set_style("height", "300")
+
+    # Heading section — blue background, white text
+    var header = BeDomNode.element("div")
+    header.set_style("background-color", "#0055cc")
+    header.set_style("color", "#ffffff")
+    header.set_style("padding", "12")
+    header.set_style("font-size", "24")
+    var heading_text = BeDomNode.text("SimpleOS Browser")
+    header.add_child(heading_text)
+    root.add_child(header)
+
+    # Paragraph section — dark gray text
+    var para = BeDomNode.element("p")
+    para.set_style("padding", "10")
+    para.set_style("color", "#333333")
+    para.set_style("font-size", "14")
+    var para_text = BeDomNode.text("This is a sample page rendered via the browser engine. It validates that the DOM, layout, paint, and scene pipeline produces visible output for the compositor.")
+    para.add_child(para_text)
+    root.add_child(para)
+
+    # Colored box — green rectangle
+    var box_section = BeDomNode.element("div")
+    box_section.set_style("padding", "8")
+    var green_box = BeDomNode.element("div")
+    green_box.set_style("width", "200")
+    green_box.set_style("height", "50")
+    green_box.set_style("background-color", "#22aa44")
+    green_box.set_style("border-radius", "4")
+    box_section.add_child(green_box)
+    root.add_child(box_section)
+
+    return root
+
+# =========================================================================
+# Rendering Pipeline
+# =========================================================================
+
+fn render_sample(width: i32, height: i32) -> BeRenderResult:
+    """Render the sample DOM through the full browser engine pipeline.
+
+    Returns a BeRenderResult containing scene commands and metadata.
+    """
+    val dom = build_sample_dom()
+    var renderer = BrowserRenderer(
+        viewport_w: width,
+        viewport_h: height,
+        bg_color: 0xFFF5F5F5
+    )
+    renderer.render_dom(dom)
+
+fn render_sample_to_pixels(width: i32, height: i32) -> [u32]:
+    """Full pipeline: DOM -> layout -> paint -> scene -> pixels.
+
+    Creates the sample DOM, renders through the browser engine,
+    and rasterizes to a pixel buffer via the software executor.
+    """
+    val result = render_sample(width, height)
+    val scene = result.to_scene()
+
+    # Initialize pixel buffer with background color
+    var buffer: [u32] = []
+    var i: i32 = 0
+    while i < width * height:
+        buffer = buffer + [0xFFF5F5F5]
+        i = i + 1
+
+    execute_scene_to_buffer(scene, buffer, width, height)
+    return buffer
+
+# =========================================================================
+# Main Entry Point
+# =========================================================================
+
+fn main():
+    """Run the browser-backed sample app.
+
+    Builds a DOM tree, renders through the browser engine pipeline,
+    and reports results to serial console.
+    """
+    serial_println("[browser-sample] Starting browser-backed rendering sample...")
+
+    val width: i32 = 400
+    val height: i32 = 300
+
+    # Build DOM
+    val dom = build_sample_dom()
+    serial_println("[browser-sample] DOM tree built")
+
+    # Run layout
+    val layout = layout_tree(dom, width, height)
+    serial_println("[browser-sample] Layout computed")
+
+    # Generate paint commands
+    val commands = generate_paint_list(layout)
+    val cmd_count = commands.len()
+    serial_println("[browser-sample] Generated {cmd_count} paint commands")
+
+    # Convert to RenderScene
+    val scene = paint_commands_to_scene(commands, width, height)
+    val scene_cmd_count = scene.commands.len()
+    serial_println("[browser-sample] Scene created with {scene_cmd_count} scene commands")
+
+    # Rasterize to pixel buffer
+    var buffer: [u32] = []
+    var i: i32 = 0
+    while i < width * height:
+        buffer = buffer + [0xFFF5F5F5]
+        i = i + 1
+    execute_scene_to_buffer(scene, buffer, width, height)
+
+    val pixel_count = buffer.len()
+    serial_println("[browser-sample] Rasterized to {pixel_count} pixels ({width}x{height})")
+
+    # Verify non-trivial output: check that some pixels differ from background
+    var non_bg_count: i32 = 0
+    var j: i32 = 0
+    while j < pixel_count:
+        if buffer[j] != 0xFFF5F5F5:
+            non_bg_count = non_bg_count + 1
+        j = j + 1
+
+    serial_println("[browser-sample] Non-background pixels: {non_bg_count}")
+
+    if non_bg_count > 0:
+        serial_println("[browser-sample] Rendering complete - pipeline produced visible output")
+        serial_println("TEST PASSED")
+    else:
+        serial_println("[browser-sample] WARNING: no visible output rendered")
+        serial_println("TEST FAILED")
