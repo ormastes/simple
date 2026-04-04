@@ -1160,6 +1160,12 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
     g_fb_w = (uint64_t)w;
     /* Ensure BGA VIRT_WIDTH matches XRES so pitch = width * bpp/8 */
     bga_write(0x06, (uint16_t)(uint64_t)w);
+    /* Diagnostic: print fb address and width */
+    serial_puts("[GUI] fb_addr=0x");
+    serial_hex(g_fb_addr);
+    serial_puts(" fb_w=");
+    serial_hex(g_fb_w);
+    serial_puts("\r\n");
     return 0;
 }
 

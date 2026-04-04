@@ -2083,6 +2083,13 @@ fn generate_stub_object(
         }
     }
 
+    // Debug: check if specific libc symbols are incorrectly in the stub list
+    for check in &["_readdir_r", "_dirfd", "_fdopendir"] {
+        if needs_stub.iter().any(|s| s == check) {
+            eprintln!("[WARN] libc symbol {} is being stubbed! is_system_symbol={}", check, is_system_symbol(check));
+        }
+    }
+
     if needs_stub.is_empty() {
         // Generate a minimal empty object
         let stub_c = temp_dir.join("_stubs.c");
