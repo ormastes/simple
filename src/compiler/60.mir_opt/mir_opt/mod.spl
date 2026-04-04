@@ -24,6 +24,8 @@ use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pas
 use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
 use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_run_on_function)
 use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
+use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
+use compiler.mir_opt.mir_opt.generator_sm (create_generator_sm_pass, generator_sm_run_on_function)
 
 # ============================================================================
 # Optimization Level
@@ -193,11 +195,13 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                 OptimizationPipeline(
                     level: level,
                     passes: [
+                        "generator_state_machine",  # Transform generators before other opts
                         "dead_code_elimination",    # Initial cleanup
                         "constant_folding",         # Fold constants
                         "copy_propagation",         # Propagate copies
                         "common_subexpr_elim",      # Eliminate redundant computations
                         "inline_functions",         # Inline functions (threshold: 500 bytes)
+                        "body_outlining",           # Extract cold paths after inlining
                         "loop_invariant_motion",    # Hoist invariants
                         "collection_opt",           # Array concat -> push, hoist pure calls
                         "string_builder_opt",       # String concat in loops -> push+join
@@ -210,11 +214,13 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                 OptimizationPipeline(
                     level: level,
                     passes: [
+                        "generator_state_machine",  # Transform generators first
                         "dead_code_elimination",
                         "constant_folding",
                         "copy_propagation",
                         "common_subexpr_elim",
                         "inline_aggressive",        # Aggressive inlining (threshold: 2000 bytes)
+                        "body_outlining",           # Extract cold paths after inlining
                         "loop_invariant_motion",
                         "collection_opt",           # Array concat -> push, hoist pure calls
                         "string_builder_opt",       # String concat in loops -> push+join
@@ -304,6 +310,12 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
         case "string_builder_opt":
             var sb = create_string_builder_opt_pass()
             string_builder_opt_run_on_function(sb, func)
+        case "body_outlining":
+            var ol = create_outline_pass()
+            outline_run_on_function(ol, func)
+        case "generator_state_machine":
+            var gsm = create_generator_sm_pass()
+            generator_sm_run_on_function(gsm, func)
         case "vectorization":
             # Module-level pass, not per-function — no-op here
             func
@@ -390,6 +402,14 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
             for sym in module.functions.keys():
                 var p = create_string_builder_opt_pass()
                 result_module.functions[sym] = string_builder_opt_run_on_function(p, result_module.functions[sym])
+        case "body_outlining":
+            # Module-level pass: outlining creates new functions
+            var ol = create_outline_pass()
+            result_module = outline_run_on_module(ol, result_module)
+        case "generator_state_machine":
+            for sym in module.functions.keys():
+                var p = create_generator_sm_pass()
+                result_module.functions[sym] = generator_sm_run_on_function(p, result_module.functions[sym])
         case "vectorization":
             # Module-level pass, not per-function — no-op here
             pass_do_nothing

@@ -42,7 +42,7 @@ This plan covers three linked goals:
 Current repo state still does not satisfy all of those goals end to end:
 
 - `src/compiler/70.backend/backend/vhdl_backend.spl` no longer relies on the old unsupported-instruction comment fallbacks for the implemented MIR subset, but the backend is still not a complete end-to-end hardware flow.
-- `examples/09_embedded/vhdl/vhdl/*.spl` are builder demos, not normal Simple programs lowered through the backend.
+- `examples/09_embedded/vhdl/builder/*.spl` are builder demos, not normal Simple programs lowered through the backend.
 - `examples/09_embedded/fpga_riscv/rtl/*.vhd` is handwritten VHDL today.
 - `examples/09_embedded/fpga_riscv/test/run_test.sh` proves an assembly-to-simulation smoke path only.
 - `examples/09_embedded/fpga_riscv/rtl/tb_remote.vhd` elaborates, but its hex-loading path is unfinished and it is not wired to the remote interpreter runtime or `simple test`.
@@ -301,7 +301,7 @@ This phase is functionally complete for the current backend slice, but not fully
 
 ### Tasks
 
-- [ ] Reclassify `examples/09_embedded/vhdl/vhdl/*.spl` as builder/API demos
+- [x] Reclassify `examples/09_embedded/vhdl/builder/*.spl` as builder/API demos
 - [ ] Add backend-driven VHDL examples written as normal restricted Simple source
 - [ ] Add golden VHDL outputs for backend-generated examples
 - [ ] Run `ghdl -a` in tests for generated outputs

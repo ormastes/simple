@@ -105,16 +105,21 @@ impl MirLowering:
         maintains an internal counter so nested nograd{} blocks restore
         correctly.
 
-        Failure safety: if the body contains early-return paths (? operator,
-        explicit return), cleanup is injected before each Return terminator
-        so that no-grad state is always restored.
+        Failure safety: after body lowering, every block that can escape the
+        nograd scope is patched with a no_grad_end() call.  Escape paths are:
+        - Return terminators (from ? operator or explicit return)
+        - Goto terminators targeting blocks outside the scope (break/continue
+          to an enclosing loop)
+        Panics/aborts are unrecoverable and cannot be guarded.
         """
         # Emit call to disable gradient tracking
         val begin_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_begin")
         self.builder.emit_call(begin_fn, [], MirType.unit())
 
-        # Track completed blocks before body lowering so we can patch
-        # any Return terminators with cleanup calls afterwards.
+        # Save scope boundary: block IDs >= scope_start were created during
+        # body lowering and are "inside" the nograd scope.  A Goto whose
+        # target has id < scope_start is an escaping jump (break/continue).
+        val scope_start = self.builder.next_block_id
         val blocks_before = self.builder.blocks.len()
 
         # Lower the body
@@ -124,11 +129,10 @@ impl MirLowering:
         val end_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_end")
         self.builder.emit_call(end_fn, [], MirType.unit())
 
-        # Patch Return terminators created during body lowering.
-        # If the body contains ? or return, the MIR has blocks that jump
-        # directly to function exit — those would skip the inline cleanup
-        # above.  We insert a no_grad_end() call into each such block so
-        # that gradient state is always restored.
+        # Patch every block created during body lowering whose terminator
+        # escapes the nograd scope.  We insert a no_grad_end() call at the
+        # end of the block's instruction list (which executes just before
+        # the terminator).
         val cleanup_inst = MirInst(
             kind: MirInstKind.Call(nil, _rt_fn_operand_void("rt_torch_autograd_no_grad_end"), []),
             span: nil
@@ -138,16 +142,22 @@ impl MirLowering:
         while i < self.builder.blocks.len():
             var block = self.builder.blocks[i]
             if i >= blocks_before:
+                var needs_cleanup = false
                 match block.terminator:
                     case MirTerminator.Return(_):
-                        block = MirBlock(
-                            id: block.id,
-                            label: block.label,
-                            instructions: block.instructions.push(cleanup_inst),
-                            terminator: block.terminator
-                        )
+                        needs_cleanup = true
+                    case MirTerminator.Goto(target):
+                        if target.id < scope_start:
+                            needs_cleanup = true
                     case _:
                         pass
+                if needs_cleanup:
+                    block = MirBlock(
+                        id: block.id,
+                        label: block.label,
+                        instructions: block.instructions.push(cleanup_inst),
+                        terminator: block.terminator
+                    )
             new_blocks = new_blocks.push(block)
             i = i + 1
         self.builder.blocks = new_blocks

@@ -1,7 +1,7 @@
 # VHDL Backend Completion Plan
 
 **Date:** 2026-04-04  
-**Status:** Draft  
+**Status:** In Progress  
 **Scope:** Complete the VHDL backend so it moves from an experimental backend with a real codegen slice to a supported hardware-oriented backend with explicit subset boundaries and authoritative proof.
 
 ## 1. Current Classification

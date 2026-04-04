@@ -88,6 +88,9 @@ trait TypeMapper:
             case Tuple(elements):
                 self.map_tuple(elements)
 
+            case Union(members):
+                self.map_union(members)
+
             case Function(params, ret):
                 self.map_function(params, ret)
 
@@ -118,6 +121,20 @@ trait TypeMapper:
             for e in elements:
                 elem_types.push(self.map_type(e))
             "{{ {elem_types.join(', ')} }}"
+
+    fn map_union(members: [MirType]) -> text:
+        """Map union type (default implementation).
+
+        Union types are tagged unions: discriminant + largest member payload.
+        Default representation is a struct with tag + union body.
+        """
+        if members.length == 0:
+            "{}"  # Empty union
+        else:
+            var member_types: [text] = []
+            for m in members:
+                member_types.push(self.map_type(m))
+            "{{ i64, union {{ {member_types.join(', ')} }} }}"
 
     fn map_function(params: [MirType], ret: MirType) -> text:
         """Map function type (default implementation)."""
@@ -187,6 +204,14 @@ trait TypeMapper:
                 for e in elements:
                     elem_sizes_sum = elem_sizes_sum + self.size_of(e)
                 elem_sizes_sum
+            case Union(members):
+                # Tagged union: discriminant (8 bytes) + max member size
+                var max_member_size: i64 = 0
+                for m in members:
+                    val s = self.size_of(m)
+                    if s > max_member_size:
+                        max_member_size = s
+                8 + max_member_size
             case _:
                 error("Cannot compute size of {ty}")
 
@@ -225,6 +250,14 @@ trait TypeMapper:
                         if a > max_elem_align:
                             max_elem_align = a
                     max_elem_align
+            case Union(members):
+                # Alignment of union is max of discriminant (8) and all members
+                var max_union_align: i64 = 8
+                for m in members:
+                    val a = self.align_of(m)
+                    if a > max_union_align:
+                        max_union_align = a
+                max_union_align
             case _:
                 1  # Default alignment
 

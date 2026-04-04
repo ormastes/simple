@@ -21,7 +21,9 @@ Direct hardware programming with no OS.
 - **unified_runner.spl** - Unified QEMU runner for all architectures
 
 ## VHDL (`vhdl/`)
-Hardware description language examples:
-- **alu.spl** - Arithmetic Logic Unit
-- **counter.spl** - Counter circuit
-- **fsm.spl** - Finite State Machine
+Hardware description language examples, organized by category.
+See `vhdl/README.md` for details.
+
+- **builder/** - VhdlBuilder API demos (programmatic VHDL generation)
+- **backend/** - Backend-generated examples (`--backend=vhdl`, pending Phase 3-4)
+- **simulation/** - Simulation fixtures and testbenches

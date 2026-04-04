@@ -1,0 +1,258 @@
+"""TUI Terminal Module - Terminal abstraction for raw mode and screen control.
+
+@tag:stdlib
+@tag:tui
+
+Provides low-level terminal operations: raw mode, cursor movement,
+screen clearing, and size queries. Uses ANSI escape codes exclusively
+(no ncurses dependency).
+
+# Usage
+
+```simple
+use std.tui.terminal.*
+
+terminal_enter_raw_mode()
+terminal_clear_screen()
+terminal_move_cursor(0, 0)
+print "Hello from TUI"
+terminal_exit_raw_mode()
+```
+"""
+
+extern fn rt_stdout_write(data: text)
+extern fn rt_stdout_flush()
+extern fn rt_terminal_enable_raw_mode() -> bool
+extern fn rt_terminal_disable_raw_mode() -> bool
+extern fn rt_terminal_get_size() -> (i64, i64)
+extern fn rt_stdin_read_byte() -> i64
+
+# ============================================================================
+# Terminal Size
+# ============================================================================
+
+struct TerminalSize:
+    """Terminal dimensions in columns and rows.
+
+    Fields:
+        cols: Number of columns (width)
+        rows: Number of rows (height)
+    """
+    cols: i64
+    rows: i64
+
+fn terminal_get_size() -> TerminalSize:
+    """Query the current terminal size.
+
+    Returns:
+        TerminalSize with cols and rows.
+        Falls back to 80x24 if detection fails.
+    """
+    val size = rt_terminal_get_size()
+    val cols = size[0]
+    val rows = size[1]
+    if cols <= 0:
+        return TerminalSize(cols: 80, rows: 24)
+    TerminalSize(cols: cols, rows: rows)
+
+# ============================================================================
+# Raw Mode
+# ============================================================================
+
+fn terminal_enter_raw_mode() -> bool:
+    """Enter raw terminal mode (disable line buffering and echo).
+
+    Returns:
+        true if raw mode was successfully enabled
+    """
+    rt_terminal_enable_raw_mode()
+
+fn terminal_exit_raw_mode() -> bool:
+    """Exit raw mode and restore normal terminal settings.
+
+    Returns:
+        true if normal mode was successfully restored
+    """
+    rt_terminal_disable_raw_mode()
+
+# ============================================================================
+# Screen Operations
+# ============================================================================
+
+fn terminal_write(content: text):
+    """Write text directly to stdout without newline.
+
+    Args:
+        content: Text to write
+    """
+    rt_stdout_write(content)
+
+fn terminal_flush():
+    """Flush stdout to ensure all output is displayed."""
+    rt_stdout_flush()
+
+fn terminal_clear_screen():
+    """Clear the entire screen and move cursor to top-left."""
+    rt_stdout_write("\033[2J\033[H")
+    rt_stdout_flush()
+
+fn terminal_clear_line():
+    """Clear the current line."""
+    rt_stdout_write("\033[2K")
+
+fn terminal_clear_to_end():
+    """Clear from cursor to end of screen."""
+    rt_stdout_write("\033[J")
+
+fn terminal_clear_line_to_end():
+    """Clear from cursor to end of current line."""
+    rt_stdout_write("\033[K")
+
+# ============================================================================
+# Cursor Operations
+# ============================================================================
+
+fn terminal_move_cursor(row: i64, col: i64):
+    """Move cursor to absolute position (0-based).
+
+    Args:
+        row: Row position (0 = top)
+        col: Column position (0 = left)
+    """
+    val r = row + 1
+    val c = col + 1
+    rt_stdout_write("\033[{r};{c}H")
+
+fn terminal_move_cursor_up(n: i64):
+    """Move cursor up by n rows."""
+    if n > 0:
+        rt_stdout_write("\033[{n}A")
+
+fn terminal_move_cursor_down(n: i64):
+    """Move cursor down by n rows."""
+    if n > 0:
+        rt_stdout_write("\033[{n}B")
+
+fn terminal_move_cursor_right(n: i64):
+    """Move cursor right by n columns."""
+    if n > 0:
+        rt_stdout_write("\033[{n}C")
+
+fn terminal_move_cursor_left(n: i64):
+    """Move cursor left by n columns."""
+    if n > 0:
+        rt_stdout_write("\033[{n}D")
+
+fn terminal_hide_cursor():
+    """Hide the terminal cursor."""
+    rt_stdout_write("\033[?25l")
+
+fn terminal_show_cursor():
+    """Show the terminal cursor."""
+    rt_stdout_write("\033[?25h")
+
+fn terminal_save_cursor():
+    """Save the current cursor position."""
+    rt_stdout_write("\033[s")
+
+fn terminal_restore_cursor():
+    """Restore a previously saved cursor position."""
+    rt_stdout_write("\033[u")
+
+# ============================================================================
+# Alternate Screen Buffer
+# ============================================================================
+
+fn terminal_enter_alt_screen():
+    """Switch to the alternate screen buffer (used by full-screen TUI apps)."""
+    rt_stdout_write("\033[?1049h")
+    rt_stdout_flush()
+
+fn terminal_exit_alt_screen():
+    """Return to the main screen buffer."""
+    rt_stdout_write("\033[?1049l")
+    rt_stdout_flush()
+
+# ============================================================================
+# Input Reading
+# ============================================================================
+
+fn terminal_read_byte() -> i64:
+    """Read a single byte from stdin (blocking).
+
+    Returns:
+        Byte value (0-255), or -1 on error/EOF
+    """
+    rt_stdin_read_byte()
+
+# ============================================================================
+# Key Constants
+# ============================================================================
+
+val KEY_ESCAPE: i64 = 27
+val KEY_ENTER: i64 = 13
+val KEY_BACKSPACE: i64 = 127
+val KEY_TAB: i64 = 9
+val KEY_CTRL_C: i64 = 3
+val KEY_CTRL_D: i64 = 4
+val KEY_CTRL_Q: i64 = 17
+
+# ============================================================================
+# High-Level Rendering
+# ============================================================================
+
+fn terminal_draw_at(row: i64, col: i64, content: text):
+    """Draw text at a specific position without flushing.
+
+    Args:
+        row: Row position (0-based)
+        col: Column position (0-based)
+        content: Text to draw
+    """
+    terminal_move_cursor(row, col)
+    rt_stdout_write(content)
+
+fn terminal_draw_line(row: i64, col: i64, content: text, width: i64):
+    """Draw text at a position, padded or truncated to exact width.
+
+    Args:
+        row: Row position (0-based)
+        col: Column position (0-based)
+        content: Text to draw
+        width: Exact width to fill
+    """
+    terminal_move_cursor(row, col)
+    val content_len = len(content)
+    if content_len >= width:
+        rt_stdout_write(substring(content, 0, width))
+    else:
+        rt_stdout_write(content)
+        # Pad with spaces
+        var spaces = ""
+        var i = 0
+        val pad_count = width - content_len
+        while i < pad_count:
+            spaces = "{spaces} "
+            i = i + 1
+        rt_stdout_write(spaces)
+
+fn terminal_fill_rect(row: i64, col: i64, width: i64, height: i64, ch: text):
+    """Fill a rectangular area with a single character.
+
+    Args:
+        row: Top row (0-based)
+        col: Left column (0-based)
+        width: Width of the rectangle
+        height: Height of the rectangle
+        ch: Character to fill with (single character)
+    """
+    var line = ""
+    var j = 0
+    while j < width:
+        line = "{line}{ch}"
+        j = j + 1
+    var i = 0
+    while i < height:
+        terminal_move_cursor(row + i, col)
+        rt_stdout_write(line)
+        i = i + 1
