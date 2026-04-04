@@ -981,6 +981,11 @@ fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
     """
     val bdf = args.arg0
     val grant_ptr = args.arg1 as u64
+
+    # Validate grant_ptr is in userspace (not kernel address space)
+    if grant_ptr >= 0xFFFF800000000000 or grant_ptr == 0:
+        return SyscallResult(value: -14)  # EFAULT: bad address
+
     val bus = ((bdf >> 16) & 0xFF).to_u8()
     val dev = ((bdf >> 8) & 0xFF).to_u8()
     val func = (bdf & 0xFF).to_u8()
@@ -1064,13 +1069,25 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
       arg2: virtual address hint (0 = kernel picks)
     Maps pages with PRESENT | WRITABLE | CACHE_DISABLE | NO_EXECUTE.
     Returns the mapped virtual address on success, -12 (ENOMEM) on failure.
+
+    Safety: Rejects addresses below 0x80000000 (likely RAM, not device MMIO).
+    Rejects sizes above 256MB. Hint addresses must be in userspace range.
     """
     val bar_phys = args.arg0 as u64
     val size = args.arg1 as u64
     val hint = args.arg2 as u64
 
-    if size == 0:
-        return SyscallResult(value: -22)  # EINVAL
+    if size == 0 or size > 0x10000000:
+        return SyscallResult(value: -22)  # EINVAL: empty or >256MB
+
+    # Reject mapping physical RAM — BARs live above the PCI MMIO window
+    # On QEMU Q35: PCI MMIO starts at ~0x80000000, PCI ECAM at 0xB0000000
+    if bar_phys < 0x80000000:
+        return SyscallResult(value: -1)  # EPERM: not a device MMIO address
+
+    # Reject kernel-space hint addresses (above 0xFFFF800000000000 on x86_64)
+    if hint != 0 and hint >= 0xFFFF800000000000:
+        return SyscallResult(value: -1)  # EPERM: kernel address
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
 
@@ -1105,12 +1122,18 @@ fn _handle_alloc_dma(args: SyscallArgs) -> SyscallResult:
       arg1: pointer to write result pair (phys_addr: u64, virt_addr: u64)
     For no-IOMMU case: device_addr == host_phys_addr (identity).
     Returns the virtual address on success, -12 (ENOMEM) on allocation failure.
+
+    Safety: Rejects sizes above 64MB. Validates result_ptr is in userspace range.
     """
     val size = args.arg0 as u64
     val result_ptr = args.arg1 as u64
 
-    if size == 0:
-        return SyscallResult(value: -22)  # EINVAL
+    if size == 0 or size > 0x4000000:
+        return SyscallResult(value: -22)  # EINVAL: empty or >64MB
+
+    # Validate result_ptr is in userspace (not kernel address space)
+    if result_ptr >= 0xFFFF800000000000 or result_ptr == 0:
+        return SyscallResult(value: -14)  # EFAULT: bad address
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
 
@@ -1156,12 +1179,18 @@ fn _handle_free_dma(args: SyscallArgs) -> SyscallResult:
       arg1: size (bytes)
     Unmaps pages from the caller's address space.
     Returns 0 on success.
+
+    Safety: Rejects kernel-space addresses and zero address.
     """
     val virt_addr = args.arg0 as u64
     val size = args.arg1 as u64
 
     if size == 0:
         return SyscallResult(value: -22)  # EINVAL
+
+    # Reject kernel-space or null addresses
+    if virt_addr == 0 or virt_addr >= 0xFFFF800000000000:
+        return SyscallResult(value: -1)  # EPERM
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
 
@@ -1474,15 +1503,25 @@ fn _handle_memory_map(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
       arg2: protection flags (bit 0=read, bit 1=write, bit 2=exec)
       arg3: map flags (bit 0=fixed, bit 2=anonymous)
     Returns: virtual address of mapped region, or -12 (ENOMEM) on failure.
+
+    Safety: Rejects sizes above 256MB. Hint must be in userspace range.
     """
     val hint = args.arg0
     val size = args.arg1
     val prot = args.arg2
 
+    # Reject unreasonable sizes (>256MB)
+    if size == 0 or size > 0x10000000:
+        return SyscallResult(value: -22)  # EINVAL
+
     # Round up size to page boundary
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
     if page_count == 0:
         return SyscallResult(value: -22)  # EINVAL
+
+    # Reject kernel-space hint addresses
+    if hint != 0 and hint >= 0xFFFF800000000000:
+        return SyscallResult(value: -1)  # EPERM: kernel address
 
     # Determine base virtual address
     var base_addr: u64 = hint
@@ -1524,6 +1563,8 @@ fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
     Note: physical frames are not freed because vmm_unmap_page does not
     return the underlying physical address. A future enhancement can add
     reverse-mapping to reclaim frames.
+
+    Safety: Rejects kernel-space addresses.
     """
     val addr = args.arg0
     val size = args.arg1
@@ -1531,6 +1572,10 @@ fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
     # Validate page alignment
     if (addr % PAGE_SIZE) != 0:
         return SyscallResult(value: -22)  # EINVAL
+
+    # Reject kernel-space addresses
+    if addr >= 0xFFFF800000000000 or addr == 0:
+        return SyscallResult(value: -1)  # EPERM
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
     var offset: u64 = 0
@@ -1549,10 +1594,11 @@ fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
       arg1: size in bytes (rounded up to PAGE_SIZE)
       arg2: new protection flags (bit 0=read, bit 1=write, bit 2=exec)
     Returns: 0 on success, -22 (EINVAL) if address not page-aligned.
-    Note: simplified implementation — re-maps each page with phys=0 and
-    new flags. A full implementation would read the existing PTE to
-    preserve the physical address. This works for updating flag bits
-    on architectures where phys=0 in vmm_map_page only updates flags.
+
+    Safety note: mprotect requires reading the existing PTE to preserve the
+    physical address while updating only the permission bits. Without a
+    vmm_read_pte() function, this syscall returns -ENOSYS until the VMM
+    exposes PTE reading. Mapping phys=0 would be a privilege escalation.
     """
     val addr = args.arg0
     val size = args.arg1
@@ -1562,18 +1608,15 @@ fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
     if (addr % PAGE_SIZE) != 0:
         return SyscallResult(value: -22)  # EINVAL
 
-    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
-    val flags = _prot_to_vmflags(prot)
+    # Reject kernel-space addresses
+    if addr >= 0xFFFF800000000000:
+        return SyscallResult(value: -1)  # EPERM
 
-    var offset: u64 = 0
-    while offset < page_count:
-        val virt = VirtAddr(addr: addr + offset * PAGE_SIZE)
-        # Re-map with phys=0 to update flags only (simplified)
-        val phys = PhysAddr(addr: 0)
-        vmm_map_page(virt, phys, flags)
-        offset = offset + 1
-
-    SyscallResult(value: 0)
+    # Cannot safely implement mprotect without vmm_read_pte() to read the
+    # existing physical address from the PTE. Mapping with phys=0 would map
+    # physical page 0 (real-mode IVT) into the address space — unsafe.
+    # Return -ENOSYS until VMM exposes PTE reading.
+    SyscallResult(value: -38)  # ENOSYS
 
 # ============================================================================
 # Network Syscall Stubs
