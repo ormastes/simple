@@ -1,0 +1,313 @@
+# LLVM Backend/Target Support Matrix
+#
+# Machine-readable matrix classifying every backend-target pair.
+# Single source of truth for LLVM support claims.
+#
+# Used by:
+# - doc generation (README, support matrix docs)
+# - backend selection (reject unsupported combinations)
+# - capability reporting (show what works)
+
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget}
+
+# ============================================================================
+# Support Level
+# ============================================================================
+
+enum LlvmSupportLevel:
+    """Support classification for a backend-target combination."""
+    Stable              # Compiled authoritative proof exists
+    SupportedExternal   # Works with external sysroot/toolchain
+    Partial             # Code generation works, linking may need manual setup
+    Unsupported         # Not available
+
+impl LlvmSupportLevel:
+    fn to_text() -> text:
+        match self:
+            case Stable: "stable"
+            case SupportedExternal: "supported (external toolchain)"
+            case Partial: "partial"
+            case Unsupported: "unsupported"
+
+    fn is_usable() -> bool:
+        """Returns true if code generation can proceed (even if linking needs help)."""
+        match self:
+            case Stable | SupportedExternal | Partial: true
+            case Unsupported: false
+
+# ============================================================================
+# Matrix Entry
+# ============================================================================
+
+struct MatrixEntry:
+    """One cell in the support matrix."""
+    backend: BackendKind
+    target: CodegenTarget
+    level: LlvmSupportLevel
+    proof: text              # Proof description (test file, CI job, or "none")
+    required_tools: [text]   # External tools needed
+    known_limits: text       # Known limitations
+
+# ============================================================================
+# The Matrix
+# ============================================================================
+
+fn get_support_matrix() -> [MatrixEntry]:
+    """Return the complete backend-target support matrix.
+
+    This is the authoritative source for what combinations are supported.
+    """
+    var matrix: [MatrixEntry] = []
+
+    # -------------------------------------------------------------------------
+    # llvm-lib backend (in-process, libLLVM C API)
+    # -------------------------------------------------------------------------
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.X86_64,
+        level: LlvmSupportLevel.Stable,
+        proof: "test/integration/compiler/llvm_compiled_proof_spec.spl",
+        required_tools: ["libLLVM"],
+        known_limits: ""
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.X86,
+        level: LlvmSupportLevel.Partial,
+        proof: "test/feature/usage/llvm_backend_i686_spec.spl",
+        required_tools: ["libLLVM", "gcc-multilib"],
+        known_limits: "32-bit linking requires multilib"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.AArch64,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_aarch64_spec.spl",
+        required_tools: ["libLLVM", "aarch64-linux-gnu-gcc"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.Arm,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_arm32_spec.spl",
+        required_tools: ["libLLVM", "arm-linux-gnueabihf-gcc"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.Riscv64,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_riscv64_spec.spl",
+        required_tools: ["libLLVM", "riscv64-linux-gnu-gcc"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.Riscv32,
+        level: LlvmSupportLevel.Partial,
+        proof: "test/feature/usage/llvm_backend_riscv32_spec.spl",
+        required_tools: ["libLLVM", "riscv64-linux-gnu-gcc"],
+        known_limits: "Bare-metal only, no hosted linking"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.Wasm32,
+        level: LlvmSupportLevel.Unsupported,
+        proof: "none",
+        required_tools: [],
+        known_limits: "llvm-lib WASM emission not implemented; use llvm backend"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.LlvmLib,
+        target: CodegenTarget.Wasm64,
+        level: LlvmSupportLevel.Unsupported,
+        proof: "none",
+        required_tools: [],
+        known_limits: "llvm-lib WASM emission not implemented; use llvm backend"
+    ))
+
+    # -------------------------------------------------------------------------
+    # llvm backend (CLI: llc + opt + clang)
+    # -------------------------------------------------------------------------
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.X86_64,
+        level: LlvmSupportLevel.Stable,
+        proof: "test/integration/compiler/llvm_compiled_proof_spec.spl",
+        required_tools: ["llc"],
+        known_limits: ""
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.X86,
+        level: LlvmSupportLevel.Partial,
+        proof: "test/feature/usage/llvm_backend_i686_spec.spl",
+        required_tools: ["llc", "gcc-multilib"],
+        known_limits: "32-bit linking requires multilib"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.AArch64,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_aarch64_spec.spl",
+        required_tools: ["llc", "aarch64-linux-gnu-ld"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.Arm,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_arm32_spec.spl",
+        required_tools: ["llc", "arm-linux-gnueabihf-ld"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.Riscv64,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/feature/usage/llvm_backend_riscv64_spec.spl",
+        required_tools: ["llc", "riscv64-linux-gnu-ld"],
+        known_limits: "Cross-compilation requires sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.Riscv32,
+        level: LlvmSupportLevel.Partial,
+        proof: "test/feature/usage/llvm_backend_riscv32_spec.spl",
+        required_tools: ["llc", "riscv64-linux-gnu-ld"],
+        known_limits: "Bare-metal only, no hosted linking"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.Wasm32,
+        level: LlvmSupportLevel.SupportedExternal,
+        proof: "test/unit/compiler/backend/llvm_wasm_spec.spl",
+        required_tools: ["llc", "wasm-ld"],
+        known_limits: "Requires wasm-ld (from lld) and optionally wasi-sdk sysroot"
+    ))
+
+    matrix.push(MatrixEntry(
+        backend: BackendKind.Llvm,
+        target: CodegenTarget.Wasm64,
+        level: LlvmSupportLevel.Partial,
+        proof: "none",
+        required_tools: ["llc", "wasm-ld"],
+        known_limits: "wasm64 support in toolchains is experimental"
+    ))
+
+    matrix
+
+fn lookup_support(backend: BackendKind, target: CodegenTarget) -> LlvmSupportLevel:
+    """Look up support level for a specific backend-target combination."""
+    val matrix = get_support_matrix()
+    for entry in matrix:
+        if entry.backend == backend and entry.target == target:
+            return entry.level
+    LlvmSupportLevel.Unsupported
+
+fn is_combination_usable(backend: BackendKind, target: CodegenTarget) -> bool:
+    """Check if a backend-target combination can be used."""
+    val level = lookup_support(backend, target)
+    level.is_usable()
+
+# ============================================================================
+# Matrix Formatting
+# ============================================================================
+
+fn format_support_matrix() -> text:
+    """Format the support matrix as a human-readable table."""
+    var report = "LLVM Backend/Target Support Matrix\n"
+    report = report + "==================================\n\n"
+
+    val targets = ["x86_64", "i686", "aarch64", "armv7", "riscv64", "riscv32", "wasm32", "wasm64"]
+    val backends = [BackendKind.LlvmLib, BackendKind.Llvm]
+    val target_enums = [
+        CodegenTarget.X86_64, CodegenTarget.X86,
+        CodegenTarget.AArch64, CodegenTarget.Arm,
+        CodegenTarget.Riscv64, CodegenTarget.Riscv32,
+        CodegenTarget.Wasm32, CodegenTarget.Wasm64
+    ]
+
+    # Header
+    report = report + "| Target   | llvm-lib                   | llvm (CLI)                 |\n"
+    report = report + "|----------|----------------------------|----------------------------|\n"
+
+    var i = 0
+    while i < targets.len():
+        val target_name = targets[i]
+        val target_enum = target_enums[i]
+        val lib_level = lookup_support(BackendKind.LlvmLib, target_enum)
+        val cli_level = lookup_support(BackendKind.Llvm, target_enum)
+
+        # Pad target name to 8 chars
+        var padded = target_name
+        while padded.len() < 8:
+            padded = padded + " "
+
+        report = report + "| {padded} | {pad_level(lib_level)} | {pad_level(cli_level)} |\n"
+        i = i + 1
+
+    report = report + "\n"
+    report = report + "Legend:\n"
+    report = report + "  stable                    — compiled authoritative proof exists\n"
+    report = report + "  supported (external)      — works with external sysroot/toolchain\n"
+    report = report + "  partial                   — codegen works, linking may need setup\n"
+    report = report + "  unsupported               — not available\n"
+
+    report
+
+fn pad_level(level: LlvmSupportLevel) -> text:
+    """Pad a support level string to 26 characters for table alignment."""
+    var s = level.to_text()
+    while s.len() < 26:
+        s = s + " "
+    s
+
+# ============================================================================
+# SDN Export (machine-readable)
+# ============================================================================
+
+fn export_matrix_sdn() -> text:
+    """Export the support matrix in SDN format (Simple Data Notation).
+
+    Machine-readable format for consumption by tools and CI.
+    """
+    val matrix = get_support_matrix()
+    var sdn = "# LLVM Support Matrix (auto-generated)\n"
+    sdn = sdn + "# Date: 2026-04-04\n\n"
+    sdn = sdn + "matrix {\n"
+
+    for entry in matrix:
+        sdn = sdn + "  entry {\n"
+        sdn = sdn + "    backend: \"{entry.backend.to_text()}\"\n"
+        sdn = sdn + "    target: \"{entry.target.to_text()}\"\n"
+        sdn = sdn + "    level: \"{entry.level.to_text()}\"\n"
+        sdn = sdn + "    proof: \"{entry.proof}\"\n"
+        if entry.required_tools.len() > 0:
+            sdn = sdn + "    required_tools: [{entry.required_tools.join(\", \")}]\n"
+        if entry.known_limits != "":
+            sdn = sdn + "    known_limits: \"{entry.known_limits}\"\n"
+        sdn = sdn + "  }\n"
+
+    sdn = sdn + "}\n"
+    sdn
+
+# ============================================================================
+# Exports
+# ============================================================================

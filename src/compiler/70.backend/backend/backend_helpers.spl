@@ -6,6 +6,9 @@
 # - available_backends, gpu_backends: Backend listing
 # - compile_module_with_backend: Convenience compilation
 #
+# Uses centralized LLVM capability detection (llvm_capability.spl) instead
+# of scattered tool checks.
+#
 # Split from backend_api.spl for modularity.
 
 use compiler.mir.mir_data.*
@@ -13,6 +16,8 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
     compileerror_backend_error}
 use compiler.backend.llvm_backend.{llc_available}
 use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.llvm_capability.{get_llvm_capabilities, LlvmCapabilityReport}
+use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use std.ffi.llvm.{llvm_available}
 
 # ============================================================================
@@ -193,13 +198,9 @@ fn compile_module_with_backend(
     elif backend_name == "irtc" or backend_name == "mllvm-qemu":
         kind = BackendKind.IrTc
     elif backend_name == "auto":
-        # Prefer LlvmLib (no external tools) → Llvm (llc) → Cranelift
-        if llvm_available():
-            kind = BackendKind.LlvmLib
-        elif llc_available():
-            kind = BackendKind.Llvm
-        else:
-            kind = BackendKind.Cranelift
+        # Use centralized capability detection
+        val caps = get_llvm_capabilities()
+        kind = caps.preferred_backend()
 
     # Select build mode and optimization
     val mode = if is_release: BuildMode.Release else: BuildMode.Debug
@@ -250,13 +251,9 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     elif backend_name == "irtc" or backend_name == "mllvm-qemu":
         "irtc"
     elif backend_name == "auto":
+        val caps = get_llvm_capabilities()
         if is_release:
-            if llvm_available():
-                "llvm-lib"
-            elif llc_available():
-                "llvm"
-            else:
-                "cranelift"
+            caps.preferred_backend().to_text()
         else:
             "cranelift"
     else:

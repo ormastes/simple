@@ -1,7 +1,7 @@
 # Math Blocks Autograd Completion Plan
 
 **Date:** 2026-04-04  
-**Status:** Draft  
+**Status:** Implemented  
 **Scope:** Complete the remaining implementation work for `m{}`, `loss{}`, and `nograd{}` so the feature moves from “implemented and usable, but partial” to a finished runtime-backed feature.
 
 ## 1. Current Classification

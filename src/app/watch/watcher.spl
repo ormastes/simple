@@ -1,0 +1,92 @@
+# File Watcher - Poll-based file change detection
+#
+# Tracks modification times of .spl files and detects:
+# - New files
+# - Modified files
+# - Deleted files
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_modified_time(path: text) -> i64
+extern fn rt_dir_walk(path: text) -> [text]
+
+# A snapshot of file modification times
+struct FileSnapshot:
+    entries: [(text, i64)]
+
+fn snapshot_new() -> FileSnapshot:
+    FileSnapshot(entries: [])
+
+# Collect modification times for all files with given extension under a path
+fn collect_snapshot(path: text, ext: text) -> FileSnapshot:
+    var entries: [(text, i64)] = []
+    if not rt_file_exists(path):
+        return FileSnapshot(entries: entries)
+
+    val files = rt_dir_walk(path)
+    for file in files:
+        if file.ends_with(ext):
+            val mtime = rt_file_modified_time(file)
+            entries.push((file, mtime))
+    FileSnapshot(entries: entries)
+
+# Collect snapshots from multiple watch paths
+fn collect_multi_snapshot(paths: [text], ext: text) -> FileSnapshot:
+    var entries: [(text, i64)] = []
+    for path in paths:
+        val snap = collect_snapshot(path, ext)
+        for entry in snap.entries:
+            entries.push(entry)
+    FileSnapshot(entries: entries)
+
+# Result of comparing two snapshots
+struct ChangeSet:
+    modified: [text]
+    added: [text]
+    deleted: [text]
+
+fn changeset_empty() -> ChangeSet:
+    ChangeSet(modified: [], added: [], deleted: [])
+
+fn changeset_has_changes(cs: ChangeSet) -> bool:
+    cs.modified.len() > 0 or cs.added.len() > 0 or cs.deleted.len() > 0
+
+fn changeset_all_files(cs: ChangeSet) -> [text]:
+    var result: [text] = []
+    for f in cs.modified:
+        result.push(f)
+    for f in cs.added:
+        result.push(f)
+    for f in cs.deleted:
+        result.push(f)
+    result
+
+fn changeset_count(cs: ChangeSet) -> i64:
+    cs.modified.len() + cs.added.len() + cs.deleted.len()
+
+# Compare two snapshots and return the changes
+fn diff_snapshots(old_snap: FileSnapshot, new_snap: FileSnapshot) -> ChangeSet:
+    var modified: [text] = []
+    var added: [text] = []
+    var deleted: [text] = []
+
+    # Check for modified and added files
+    for (new_path, new_mtime) in new_snap.entries:
+        var found = false
+        for (old_path, old_mtime) in old_snap.entries:
+            if old_path == new_path:
+                found = true
+                if new_mtime != old_mtime:
+                    modified.push(new_path)
+        if not found:
+            added.push(new_path)
+
+    # Check for deleted files
+    for (old_path, old_mtime) in old_snap.entries:
+        var found = false
+        for (new_path, new_mtime) in new_snap.entries:
+            if new_path == old_path:
+                found = true
+        if not found:
+            deleted.push(old_path)
+
+    ChangeSet(modified: modified, added: added, deleted: deleted)

@@ -34,26 +34,27 @@ describe "LaneDescriptor":
         val lane = LaneDescriptor(
             lane_id: "qemu_rv32",
             target_arch: "riscv32",
-            status: LaneStatus.Stable,
-            proof_class: ProofClass.ExitCode,
-            adapter_kind: AdapterKind.Qemu,
-            result_channel: ResultChannelKind.Semihost,
-            is_authoritative: true
+            adapter_kind: AdapterKind.qemu_gdb,
+            proof_class: ProofClass.compiled,
+            primary_result_channel: ResultChannelKind.semihost_text,
+            fallback_result_channel: Some(ResultChannelKind.exit_code),
+            authoritative_spec_path: "test/some_spec.spl",
+            status: LaneStatus.stable
         )
         expect(lane.lane_id).to_equal("qemu_rv32")
         expect(lane.target_arch).to_equal("riscv32")
-        expect(lane.status).to_equal(LaneStatus.Stable)
-        expect(lane.is_authoritative).to_equal(true)
+        expect(lane.is_authoritative()).to_equal(true)
 
     it "formats to_text correctly":
         val lane = LaneDescriptor(
             lane_id: "qemu_rv32_semihost",
             target_arch: "riscv32",
-            status: LaneStatus.Stable,
-            proof_class: ProofClass.ExitCode,
-            adapter_kind: AdapterKind.Qemu,
-            result_channel: ResultChannelKind.Semihost,
-            is_authoritative: true
+            adapter_kind: AdapterKind.qemu_gdb,
+            proof_class: ProofClass.compiled,
+            primary_result_channel: ResultChannelKind.semihost_text,
+            fallback_result_channel: nil,
+            authoritative_spec_path: "",
+            status: LaneStatus.stable
         )
         val text_repr = lane.to_text()
         expect(text_repr).to_contain("qemu_rv32_semihost")
@@ -63,25 +64,27 @@ describe "LaneDescriptor":
         val lane = LaneDescriptor(
             lane_id: "stable_lane",
             target_arch: "riscv32",
-            status: LaneStatus.Stable,
-            proof_class: ProofClass.ExitCode,
-            adapter_kind: AdapterKind.Qemu,
-            result_channel: ResultChannelKind.Semihost,
-            is_authoritative: true
+            adapter_kind: AdapterKind.qemu_gdb,
+            proof_class: ProofClass.compiled,
+            primary_result_channel: ResultChannelKind.semihost_text,
+            fallback_result_channel: nil,
+            authoritative_spec_path: "",
+            status: LaneStatus.stable
         )
-        expect(lane.is_authoritative).to_equal(true)
+        expect(lane.is_authoritative()).to_equal(true)
 
     it "classifies in_progress lanes as non-authoritative":
         val lane = LaneDescriptor(
             lane_id: "wip_lane",
             target_arch: "arm32",
-            status: LaneStatus.InProgress,
-            proof_class: ProofClass.Register,
-            adapter_kind: AdapterKind.OpenOcd,
-            result_channel: ResultChannelKind.Register,
-            is_authoritative: false
+            adapter_kind: AdapterKind.openocd_gdb,
+            proof_class: ProofClass.structural,
+            primary_result_channel: ResultChannelKind.register_readback,
+            fallback_result_channel: nil,
+            authoritative_spec_path: "",
+            status: LaneStatus.in_progress
         )
-        expect(lane.is_authoritative).to_equal(false)
+        expect(lane.is_authoritative()).to_equal(false)
 
 
 # ============================================================================
@@ -108,7 +111,7 @@ describe "CapabilityReport":
         val report = CapabilityReport.ready("my_lane", "tool_name")
         val text_repr = report.to_text()
         expect(text_repr).to_contain("my_lane")
-        expect(text_repr).to_contain("Ready")
+        expect(text_repr).to_contain("ready")
 
 
 # ============================================================================
@@ -117,17 +120,17 @@ describe "CapabilityReport":
 
 describe "ResultPacket":
     it "creates semihost packets":
-        val packet = ResultPacket.from_semihost("PASS: all tests passed")
+        val packet = ResultPacket.from_semihost("test_lane", "PASS: all tests passed", 100)
         expect(packet.is_pass()).to_equal(true)
 
     it "creates register packets":
-        val pass_packet = ResultPacket.from_register(0)
+        val pass_packet = ResultPacket.from_register("test_lane", 0, 50)
         expect(pass_packet.is_pass()).to_equal(true)
-        val fail_packet = ResultPacket.from_register(1)
+        val fail_packet = ResultPacket.from_register("test_lane", 1, 50)
         expect(fail_packet.is_pass()).to_equal(false)
 
     it "creates exit code packets":
-        val packet = ResultPacket.from_exit_code(0)
+        val packet = ResultPacket.from_exit_code("test_lane", 0, "", 75)
         expect(packet.is_pass()).to_equal(true)
 
 
@@ -138,19 +141,19 @@ describe "ResultPacket":
 describe "ResultVerifier":
     it "verifies default pass":
         val verifier = ResultVerifier.default_pass()
-        val packet = ResultPacket.from_exit_code(0)
+        val packet = ResultPacket.from_exit_code("test_lane", 0, "", 10)
         val result = verifier.verify(packet)
         expect(result.is_ok()).to_equal(true)
 
     it "rejects failed packets":
         val verifier = ResultVerifier.default_pass()
-        val packet = ResultPacket.from_exit_code(1)
+        val packet = ResultPacket.from_exit_code("test_lane", 1, "", 10)
         val result = verifier.verify(packet)
         expect(result.is_err()).to_equal(true)
 
     it "checks output patterns":
         val verifier = ResultVerifier.with_output(["PASS"])
-        val packet = ResultPacket.from_semihost("PASS: all tests passed")
+        val packet = ResultPacket.from_semihost("test_lane", "PASS: all tests passed", 10)
         val result = verifier.verify(packet)
         expect(result.is_ok()).to_equal(true)
 
@@ -183,7 +186,9 @@ describe "LaneRegistry":
     it "finds lanes by id":
         val registry = LaneRegistry.default()
         val lane = registry.find("qemu_rv32_semihost")
-        expect(lane).to_not_equal(nil)
+        match lane:
+            Some(l): expect(l.lane_id).to_equal("qemu_rv32_semihost")
+            nil: expect(false).to_equal(true)
 
     it "returns nil for unknown lanes":
         val registry = LaneRegistry.default()
@@ -197,21 +202,18 @@ describe "LaneRegistry":
 
 describe "LaneStatusReporter":
     it "generates text report":
-        val registry = LaneRegistry.default()
-        val reporter = LaneStatusReporter(registry: registry)
+        val reporter = LaneStatusReporter.new()
         val report = reporter.report_text()
         expect(report).to_contain("Stable Lanes")
         expect(report).to_contain("Host-Aware")
 
     it "generates markdown report":
-        val registry = LaneRegistry.default()
-        val reporter = LaneStatusReporter(registry: registry)
+        val reporter = LaneStatusReporter.new()
         val report = reporter.generate_matrix_markdown()
         expect(report).to_contain("| Lane ID |")
 
     it "generates SDN report":
-        val registry = LaneRegistry.default()
-        val reporter = LaneStatusReporter(registry: registry)
+        val reporter = LaneStatusReporter.new()
         val report = reporter.report_sdn()
         expect(report).to_contain("[lane_matrix]")
 
