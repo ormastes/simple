@@ -1,7 +1,7 @@
 # Plan: SimpleOS L4/Exokernel Platform for Simple Language
 
 **Date:** 2026-04-04
-**Status:** In Progress (Phase 0-3 complete, Phase 4 in progress, Phase 5 pending; expanded implementation program active)
+**Status:** In Progress (Workstream C Phase 1-5 substantially complete; Workstreams A+B pending)
 **Research:** [local/simpleos_l4_exokernel_platform.md](../01_research/local/simpleos_l4_exokernel_platform.md)
 
 ## Objective
