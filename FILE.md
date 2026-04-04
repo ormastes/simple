@@ -117,23 +117,6 @@ PREFIX=/usr/local ./install.sh
 
 ---
 
-### Makefile_use_simple_command_instead
-**Migration guide from Makefile**
-
-**Purpose:** Help users migrate from `make` to `simple` commands
-
-**Content:** Command translation table:
-- `make build` → `bin/simple build`
-- `make test` → `bin/simple test`
-- `make clean` → `bin/simple build clean`
-- `make install` → `./install.sh`
-
-**History:** Makefile removed 2026-02-16, replaced with this guide.
-
-**Why removed:** Simple has built-in build system via `bin/simple build`.
-
----
-
 ## 📁 Core Directories
 
 ### bin/ (Executables & CLI)
@@ -155,11 +138,11 @@ PREFIX=/usr/local ./install.sh
 **Structure:**
 ```
 src/
-├── app/        # Applications (cli, mcp, build, test_runner)
-├── std/        # Standard library (spec, string, array, math)
-├── core/       # Core compiler (lexer, parser, mir, interpreter)
-├── compiler/   # Backend (native, JIT, cranelift)
-└── lib/        # Libraries (database)
+├── app/        # Applications (cli, build, mcp, test_runner, desugar)
+├── lib/        # Standard library (common, nogc_sync_mut, nogc_async_mut, gc_async_mut)
+├── compiler/   # Unified compiler (00.common → 99.loader, numbered layers)
+├── runtime/    # Native runtime and support libraries
+└── i18n/       # Internationalization
 ```
 
 **All code in `.spl` (Simple) files!**
@@ -200,14 +183,17 @@ test/
 ### doc/ (Documentation)
 **Purpose:** Comprehensive project documentation (2,000+ files)
 
-**Categories:**
-- guide/ - User guides, tutorials
-- spec/ - Language specifications
-- report/ - Implementation reports
-- design/ - Design documents
-- api/ - API documentation
-- architecture/ - System architecture
-- plan/ - Planning documents
+**Categories (numbered):**
+- 01_research/ - Research (local impl, domain/external)
+- 02_requirements/ - Requirements (feature, nfr, ui)
+- 03_plan/ - Plans (arch, design, sys_test, agent_tasks)
+- 04_architecture/ - Architecture (ADRs, rules, formats)
+- 05_design/ - Design documents
+- 06_spec/ - SSpec-generated specs
+- 07_guide/ - User guides, tutorials
+- 08_tracking/ - Bug, test, todo, task tracking
+- 09_report/ - Implementation reports
+- 10_metrics/ - Dashboards, coverage
 
 **See:** [doc/FILE.md](doc/FILE.md)
 
@@ -328,8 +314,7 @@ PREFIX=/usr/local ./install.sh
 ./install.sh --help
 ```
 
-**Note:** Makefile removed - use `bin/simple build` commands directly.
-See `Makefile_use_simple_command_instead` for migration guide.
+**Note:** Use `bin/simple build` commands directly (no Makefile).
 
 ---
 
