@@ -20,7 +20,7 @@
 
 ## Known Limits
 
-1. **`loss{}` and `nograd{}` autograd semantics are stubs** -- `mir_lowering_ml.spl:57-73` has placeholder comments (`# Would emit: rt_backward(...)`) but no runtime calls to autograd push/pop/backward
+1. ~~**`loss{}` and `nograd{}` autograd semantics are stubs**~~ -- **RESOLVED**: `mir_lowering_ml.spl` now emits real `rt_torch_autograd_backward` (loss) and balanced `rt_torch_autograd_no_grad_begin/end` (nograd) with failure-safe block patching for early-exit paths
 2. **Custom block codegen returns unit placeholder** -- `mir_lowering_ml.spl:39-42`: blocks return unit; actual evaluation happens via interpreter
 3. **LaTeX rendering gaps** -- no AST nodes for derivatives (`diff(f,x)`), limits (`lim(f,x,0)`), or text annotations (per `doc/09_report/2026/02/math_rendering_limitations_2026-02-01.md`)
 4. **Interpreter-mode test limitation** -- `it` block bodies do not execute; 28 passing math_blocks_spec tests confirm parse/load only
@@ -43,4 +43,4 @@
 
 ## Recommended README Wording
 
-> **Math blocks** (`m{}`, `loss{}`, `nograd{}`) -- inline DSL with `^` power, `'` transpose, implicit multiplication, broadcast operators, and `@` matrix multiply; renders to LaTeX and Unicode in VSCode and Neovim editors via LSP hover and inline decoration; `loss{}`/`nograd{}` parse and evaluate but autograd runtime wiring (auto-backward, gradient disable) is not yet connected
+> **Math blocks** (`m{}`, `loss{}`, `nograd{}`) -- inline DSL with `^` power, `'` transpose, implicit multiplication, broadcast operators, and `@` matrix multiply; renders to LaTeX and Unicode in VSCode and Neovim editors via LSP hover and inline decoration; `loss{}` triggers auto-backward on the torch autograd backend; `nograd{}` provides failure-safe gradient suppression with RAII guard and MIR-level cleanup on all exit paths

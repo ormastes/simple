@@ -806,12 +806,18 @@ client.wait_for("modal_dialog", 3000)?             # Wait for element
 |--------|------|------|-------------|
 | POST | `/api/test/click` | `{"id":"X"}` | Inject focus + enter events |
 | POST | `/api/test/type` | `{"id":"X","text":"hello"}` | Inject focus + keypress events |
+| POST | `/api/test/submit` | `{"id":"X"}` | Submit form/dialog |
 | POST | `/api/test/drag` | `{"from_id":"X","to_id":"Y"}` | Synthetic drag events |
 | POST | `/api/test/event` | `{"event_type":"key","key":"q"}` | Raw UIEvent injection |
 | GET | `/api/test/screenshot` | — | Full HTML render snapshot |
-| GET | `/api/test/element?id=X` | — | Element state JSON |
+| GET | `/api/test/element?id=X` | — | Element state JSON (id, kind, visible, focused, enabled, selected, text, props) |
 | GET | `/api/test/elements` | — | All widgets JSON array |
-| GET | `/api/test/ready` | — | `{"ready":true}` |
+| GET | `/api/test/state` | — | App state JSON (mode, focused_id, title, theme, element_count, protocol_version) |
+| GET | `/api/test/ready` | — | `{"ready":true,"protocol_version":1}` |
+
+**Error model:** All errors return `{"error":"<code>","message":"<text>"}`. Codes: `not_found`, `element_not_found`, `method_not_allowed`, `missing_field`, `unknown_event_type`.
+
+**Protocol version:** All responses include `X-UI-Protocol-Version: 1` header.
 
 ### Writing UI System Tests
 
@@ -859,11 +865,33 @@ stop_ui_server(pid)
 
 | File | Purpose |
 |------|---------|
+| `doc/04_architecture/shared_ui_contract.md` | Shared UI contract (source of truth) |
 | `src/app/ui.test_api/handler.spl` | Shared test API request handler |
-| `src/app/ui.tui_web/` | TUI web proxy backend (ANSI→HTML) |
+| `src/app/ui.test_api/json.spl` | JSON serialization for widget state |
+| `src/app/ui.web/async_server.spl` | Web backend server |
+| `src/app/ui.tui_web/server.spl` | TUI web proxy backend (ANSI→HTML) |
 | `src/lib/nogc_sync_mut/ui_test/client.spl` | UITestClient library |
 | `src/lib/nogc_sync_mut/ui_test/types.spl` | ElementInfo, UIStateInfo types |
+| `src/lib/nogc_sync_mut/ui_test/parse.spl` | JSON response parsing |
 | `test/system/ui/helpers/ui_test_helpers.spl` | Server start/stop helpers |
+| `test/system/ui/shared_ui_contract_spec.spl` | Cross-surface contract test suite |
+
+### Contract Test Suite
+
+The authoritative cross-surface proof suite is `test/system/ui/shared_ui_contract_spec.spl`. It starts BOTH web and tui_web backends against the same fixture and verifies identical behavior across 7 categories:
+
+1. **Protocol** — ready endpoint, protocol version, structured errors
+2. **Tree/Read** — elements, element IDs, kind consistency, screenshots
+3. **Actions** — click, type, submit, drag, send_key
+4. **Focus/State** — focus_next, focus_prev, visibility, enabled
+5. **State Endpoint** — element_count, protocol_version
+6. **Errors** — element_not_found, missing_field, unknown_event_type
+7. **Consistency** — read-after-write after click
+
+Run with:
+```bash
+bin/simple test test/system/ui/shared_ui_contract_spec.spl --tag slow
+```
 
 ### Security
 
