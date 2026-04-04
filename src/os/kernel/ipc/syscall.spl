@@ -54,17 +54,22 @@ var _next_mmap_addr: u64 = 0x10000000
 # ============================================================================
 # Architecture-Aware Security Boundaries
 # ============================================================================
-# KERNEL_SPACE_START — addresses at or above this are kernel-only (high half).
-# USERSPACE_BASE     — minimum valid userspace virtual address. On identity-
-#   mapped targets, kernel code/data/page tables live below this. Must match
-#   the bump allocator base (_next_mmap_addr initial value = 0x10000000).
-#   Pointers into low memory (0x0–0x0FFFFFFF) are rejected because they
-#   overlap kernel text, BSS, PMM bitmap, page tables, and boot structures.
+# KERNEL_SPACE_START — high-half kernel boundary (arch-specific). Addresses at
+#   or above this are always kernel-only.
+# NULL_GUARD_LIMIT   — reject the first page (null dereference guard). Only
+#   catches null/near-null pointers, not all kernel structures.
 # PCI_MMIO_FLOOR     — physical addresses below this are likely RAM, not MMIO.
+#
+# On identity-mapped targets (baremetal, 32-bit), user and kernel share the
+# same low address range. Full protection requires per-process VMA tracking
+# (not yet implemented). The capability system at syscall dispatch provides
+# the primary access control. These checks are a defense-in-depth layer that
+# catches null pointers and high-half kernel writes without breaking valid
+# user pointers that may legitimately be at low addresses (stack, loader
+# data, shared libraries).
 
-# Userspace starts at 256MB on all architectures — kernel and boot structures
-# occupy the first 256MB of physical/virtual address space under identity map.
-val USERSPACE_BASE: u64 = 0x10000000
+# Null-guard: reject first 4KB page (catches NULL and near-NULL dereferences)
+val NULL_GUARD_LIMIT: u64 = 0x1000
 
 @cfg(x86_64)
 val KERNEL_SPACE_START: u64 = 0xFFFF800000000000
@@ -97,22 +102,24 @@ val KERNEL_SPACE_START: u64 = 0xC0000000
 val PCI_MMIO_FLOOR: u64 = 0x40000000
 
 fn _is_kernel_addr(addr: u64) -> bool:
-    """Check if an address is in kernel space.
+    """Check if an address is in the high-half kernel region.
 
-    Catches both high-half kernel addresses (HHDM, kernel text in high half)
-    AND low identity-mapped kernel region (below USERSPACE_BASE where kernel
-    code, page tables, PMM bitmap, and boot data live).
+    Only checks the architecture-specific high-half boundary. Does NOT
+    reject all kernel memory on identity-mapped targets — that requires
+    per-process VMA tracking. Capability enforcement at syscall dispatch
+    is the primary protection layer.
     """
-    addr >= KERNEL_SPACE_START or addr < USERSPACE_BASE
+    addr >= KERNEL_SPACE_START
 
 fn _is_userspace_ptr(ptr: u64) -> bool:
-    """Validate a pointer is in the userspace range.
+    """Validate a pointer is plausibly in userspace.
 
-    Valid userspace: USERSPACE_BASE <= ptr < KERNEL_SPACE_START.
-    Rejects null, low kernel region (identity-mapped boot/kernel data),
-    and high-half kernel addresses.
+    Rejects null/near-null (below NULL_GUARD_LIMIT) and high-half kernel
+    addresses. On identity-mapped targets, low addresses that overlap
+    kernel structures are not caught here — capability enforcement and
+    future VMA tracking provide that layer.
     """
-    ptr >= USERSPACE_BASE and ptr < KERNEL_SPACE_START
+    ptr >= NULL_GUARD_LIMIT and ptr < KERNEL_SPACE_START
 
 # ============================================================================
 # Capability Enforcement Helpers
@@ -1636,7 +1643,7 @@ fn _handle_memory_unmap(args: SyscallArgs, scheduler: Scheduler) -> SyscallResul
         return SyscallResult(value: -22)  # EINVAL
 
     # Reject kernel-space addresses
-    if addr == 0 or _is_kernel_addr(addr):
+    if addr < NULL_GUARD_LIMIT or _is_kernel_addr(addr):
         return SyscallResult(value: -1)  # EPERM
 
     val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
@@ -1670,8 +1677,8 @@ fn _handle_memory_protect(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
     if (addr % PAGE_SIZE) != 0:
         return SyscallResult(value: -22)  # EINVAL
 
-    # Reject kernel-space addresses
-    if _is_kernel_addr(addr):
+    # Reject null-guard and kernel-space addresses
+    if addr < NULL_GUARD_LIMIT or _is_kernel_addr(addr):
         return SyscallResult(value: -1)  # EPERM
 
     # Cannot safely implement mprotect without vmm_read_pte() to read the
