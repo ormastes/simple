@@ -272,6 +272,7 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
             case nil: doc
 
         var methods: [FunctionOutline] = []
+        var assoc_types: [AssocTypeDeclOutline] = []
 
         while not self.check(TokenKind.Dedent) and not self.is_at_end():
             self.skip_newlines()
@@ -292,10 +293,12 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
                         self.advance()  # consume 'var'
                         methods = methods_push(methods, self.parse_function_outline(false, true, method_doc))
                     else:
-                        self.error("expected method in trait")
+                        self.error("expected method or type in trait")
                         self.synchronize()
+                case KwType:
+                    assoc_types = assoc_types.push(self.parse_assoc_type_outline())
                 case _:
-                    self.error("expected method in trait")
+                    self.error("expected method or type in trait")
                     self.synchronize()
 
         self.match_token(TokenKind.Dedent)
@@ -304,6 +307,7 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
             name: name,
             type_params: type_params,
             methods: methods,
+            assoc_types: assoc_types,
             is_public: is_public,
             doc_comment: final_doc,
             span: merge_spans(start, self.previous.span)
@@ -334,6 +338,7 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
         self.try_parse_body_docstring()
 
         var methods: [FunctionOutline] = []
+        var assoc_types: [AssocTypeDeclOutline] = []
 
         while not self.check(TokenKind.Dedent) and not self.is_at_end():
             self.skip_newlines()
@@ -364,15 +369,17 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
                         m.is_method = true
                         methods = methods_push(methods, m)
                     else:
-                        self.error("expected method in impl")
+                        self.error("expected method or type in impl")
                         self.synchronize()
                 case KwStatic:
                     self.advance()
                     val m = self.parse_function_outline(method_public, false, method_doc)
                     m.is_static = true
                     methods = methods_push(methods, m)
+                case KwType:
+                    assoc_types = assoc_types.push(self.parse_assoc_type_outline())
                 case _:
-                    self.error("expected method in impl")
+                    self.error("expected method or type in impl")
                     self.synchronize()
 
         self.match_token(TokenKind.Dedent)
@@ -381,9 +388,56 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
             type_: type_,
             trait_: trait_,
             methods: methods,
+            assoc_types: assoc_types,
             span: merge_spans(start, self.previous.span)
         )
 
+
+# ============================================================================
+# Associated Type Declarations (in traits/impls)
+# ============================================================================
+
+fn treesitter_parse_assoc_type_outline(self: TreeSitter) -> AssocTypeDeclOutline:
+        """Parse associated type declaration in trait or impl body.
+
+        Syntax:
+            type Item                   # No bounds, no default
+            type Output: Display        # With bound
+            type Index = i64            # With default / concrete type
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'type'
+
+        val name = self.parse_identifier()
+
+        # Parse optional bounds (: Trait1 + Trait2)
+        # Distinguish `type Item: Display` (bound) from just `type Item` followed by newline
+        var bounds: [TypeOutline] = []
+        if self.check(TokenKind.Colon):
+            val next = self.peek_next()
+            # Only parse bounds if what follows the colon is an identifier (type name)
+            match next:
+                case Ident:
+                    self.advance()  # consume ':'
+                    bounds = bounds.push(self.parse_type_outline())
+                    while self.match_token(TokenKind.Plus):
+                        bounds = bounds.push(self.parse_type_outline())
+                case _:
+                    pass  # Not a bound, leave colon unconsumed
+
+        # Parse optional default/concrete type (= Type)
+        var default_type: TypeOutline = nil
+        if self.match_token(TokenKind.Assign):
+            default_type = self.parse_type_outline()
+
+        self.skip_newlines()
+
+        AssocTypeDeclOutline(
+            name: name,
+            bounds: bounds,
+            default: default_type,
+            span: merge_spans(start, self.previous.span)
+        )
 
 # ============================================================================
 # Type Alias / Const / Static Assert

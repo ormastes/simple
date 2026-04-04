@@ -1,0 +1,147 @@
+# Result Channel Types
+#
+# Canonical result packet and verification for remote execution lanes.
+# Every lane produces a ResultPacket through its primary or fallback
+# channel, eliminating ad-hoc text scraping from individual specs.
+#
+# Feature ID: #RJE-016
+
+# ============================================================================
+# Result Packet
+# ============================================================================
+
+class ResultPacket:
+    """Canonical result structure that all lanes produce.
+
+    Every execution lane — semihost, exit code, RAM sentinel, register,
+    or console — normalizes its output into a ResultPacket so that
+    verification is uniform across all target adapters."""
+    success: bool
+    return_code: i64
+    output: text
+    checksum: i64
+    duration_ms: i64
+    channel: text
+    lane_id: text
+
+    fn is_pass() -> bool:
+        """True when the execution succeeded with a zero return code."""
+        self.success == true and self.return_code == 0
+
+    fn to_text() -> text:
+        """Formatted one-line summary of this result."""
+        val status = if self.is_pass(): "PASS" else: "FAIL"
+        "[{status}] lane={self.lane_id} ch={self.channel} rc={self.return_code} {self.duration_ms}ms"
+
+    static fn from_semihost(lane_id: text, output: text, duration_ms: i64) -> ResultPacket:
+        """Parse semihost output. Success if output contains no 'FAIL'."""
+        val has_fail = output.contains("FAIL")
+        val rc = if has_fail: 1 else: 0
+        ResultPacket(
+            success: has_fail == false,
+            return_code: rc,
+            output: output,
+            checksum: 0,
+            duration_ms: duration_ms,
+            channel: "semihost",
+            lane_id: lane_id
+        )
+
+    static fn from_exit_code(lane_id: text, code: i64, output: text, duration_ms: i64) -> ResultPacket:
+        """Build a result from a process exit code."""
+        ResultPacket(
+            success: code == 0,
+            return_code: code,
+            output: output,
+            checksum: 0,
+            duration_ms: duration_ms,
+            channel: "exit_code",
+            lane_id: lane_id
+        )
+
+    static fn from_register(lane_id: text, value: i64, duration_ms: i64) -> ResultPacket:
+        """Build a result from a register read. Success if value == 0."""
+        ResultPacket(
+            success: value == 0,
+            return_code: value,
+            output: "",
+            checksum: 0,
+            duration_ms: duration_ms,
+            channel: "register",
+            lane_id: lane_id
+        )
+
+    static fn from_ram_sentinel(lane_id: text, sentinel_value: i64, expected: i64, duration_ms: i64) -> ResultPacket:
+        """Build a result from a RAM sentinel comparison."""
+        val ok = sentinel_value == expected
+        val rc = if ok: 0 else: 1
+        val out = "sentinel=0x{sentinel_value} expected=0x{expected}"
+        ResultPacket(
+            success: ok,
+            return_code: rc,
+            output: out,
+            checksum: sentinel_value,
+            duration_ms: duration_ms,
+            channel: "ram_sentinel",
+            lane_id: lane_id
+        )
+
+    static fn failure(lane_id: text, reason: text) -> ResultPacket:
+        """Create a failure packet with an explanatory reason."""
+        ResultPacket(
+            success: false,
+            return_code: -1,
+            output: reason,
+            checksum: 0,
+            duration_ms: 0,
+            channel: "console",
+            lane_id: lane_id
+        )
+
+# ============================================================================
+# Result Verifier
+# ============================================================================
+
+class ResultVerifier:
+    """Verifies a ResultPacket against expected outcomes.
+
+    Construct via static helpers, then call verify() to get
+    Ok('pass') or Err('reason')."""
+    expected_return_code: i64
+    expected_output_contains: [text]
+    expected_sentinel: i64
+
+    static fn default_pass() -> ResultVerifier:
+        """Expect return_code 0, no required output patterns."""
+        ResultVerifier(
+            expected_return_code: 0,
+            expected_output_contains: [],
+            expected_sentinel: 0
+        )
+
+    static fn with_output(patterns: [text]) -> ResultVerifier:
+        """Expect return_code 0 and specific output substring patterns."""
+        ResultVerifier(
+            expected_return_code: 0,
+            expected_output_contains: patterns,
+            expected_sentinel: 0
+        )
+
+    fn verify(packet: ResultPacket) -> Result<text, text>:
+        """Verify the packet against expectations.
+
+        Returns Ok('pass') on success, Err('reason') on failure."""
+        if packet.return_code != self.expected_return_code:
+            return Err("expected return_code={self.expected_return_code}, got {packet.return_code}")
+
+        for pattern in self.expected_output_contains:
+            if packet.output.contains(pattern) == false:
+                return Err("output missing expected pattern: '{pattern}'")
+
+        if self.expected_sentinel != 0:
+            if packet.checksum != self.expected_sentinel:
+                return Err("expected sentinel=0x{self.expected_sentinel}, got 0x{packet.checksum}")
+
+        Ok("pass")
+
+export ResultPacket, ResultVerifier

@@ -14,6 +14,9 @@
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_ANY, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE}
+use compiler.core.types.{is_union_tag, union_tag_to_id}
+use compiler.core.types.{is_intersection_tag, intersection_tag_to_id}
+use compiler.core.types.{is_refinement_tag, refinement_tag_to_id}
 
 # ===== Type Checker State =====
 # Track checked values to detect infinite recursion in structural types
@@ -165,14 +168,25 @@ fn type_check_single(value_id: i64, type_tag: i64) -> bool:
                             else:
                                 if type_tag == TYPE_FN:
                                     result = actual_tag == TYPE_FN
-                                # Handle named types (structs/enums)
+                                # Handle encoded union tags
                                 else:
-                                    if type_tag >= TYPE_NAMED_BASE:
-                                        val type_id = type_tag - TYPE_NAMED_BASE
-                                        val type_name = named_type_name(type_id)
-                                        result = type_check_named(value_id, type_name)
+                                    if is_union_tag(type_tag):
+                                        val uid = union_tag_to_id(type_tag)
+                                        val members = union_type_get_members(uid)
+                                        var found: bool = false
+                                        for member in members:
+                                            if type_check_single(value_id, member):
+                                                found = true
+                                                break
+                                        result = found
+                                    # Handle named types (structs/enums)
                                     else:
-                                        result = false
+                                        if type_tag >= TYPE_NAMED_BASE:
+                                            val type_id = type_tag - TYPE_NAMED_BASE
+                                            val type_name = named_type_name(type_id)
+                                            result = type_check_named(value_id, type_name)
+                                        else:
+                                            result = false
     type_check_exit()
     result
 
@@ -403,17 +417,25 @@ fn type_check_eval_comparison_predicate(value_id: i64, predicate: text) -> bool:
 
 fn type_check(value_id: i64, type_tag: i64) -> bool:
     # Dispatch based on type tag kind
+    # Handle encoded union tags (TYPE_UNION_BASE + id)
+    if is_union_tag(type_tag):
+        val union_id = union_tag_to_id(type_tag)
+        return type_check_union(value_id, union_id)
+    # Handle encoded intersection tags (TYPE_INTERSECTION_BASE + id)
+    if is_intersection_tag(type_tag):
+        val inter_id = intersection_tag_to_id(type_tag)
+        return type_check_intersection(value_id, inter_id)
+    # Handle encoded refinement tags (TYPE_REFINEMENT_BASE + id)
+    if is_refinement_tag(type_tag):
+        val ref_id = refinement_tag_to_id(type_tag)
+        return type_check_refinement(value_id, ref_id)
+    # Legacy bare constants (no id encoded) — callers should use
+    # type_check_union/intersection/refinement directly for these
     if type_tag == TYPE_UNION:
-        # Union types need union_id, not type_tag
-        # Caller should use type_check_union directly
         return false
     if type_tag == TYPE_INTERSECTION:
-        # Intersection types need inter_id, not type_tag
-        # Caller should use type_check_intersection directly
         return false
     if type_tag == TYPE_REFINEMENT:
-        # Refinement types need ref_id, not type_tag
-        # Caller should use type_check_refinement directly
         return false
     # Regular type checking
     type_check_reset()

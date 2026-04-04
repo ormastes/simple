@@ -25,6 +25,8 @@ use compiler.traits.trait_coherence.{CoherenceError}
 use compiler.traits.trait_validation.{TraitError}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.const_eval.{eval_static_assert, ConstEvalError}
+use compiler.semantics.comptime_checker.{comptime_checker_reset, comptime_checker_get_warnings, comptime_check_call, comptime_check_extern_call, comptime_format_report}
+use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.common.config.*
 use compiler.types.type_system.effect_pass.{run_effect_pass}
 use driver_types.*
@@ -486,6 +488,41 @@ class CompilerDriver:
                         pass
             log_trace("static assertions evaluated")
 
+            # Step 2e: Comptime checker — validate const fn bodies
+            comptime_checker_reset()
+            for func_sym in resolved_module.functions.keys():
+                val func = resolved_module.functions[func_sym]
+                if func.is_const:
+                    val func_name = func.name
+                    log_trace("comptime-checking const fn '{func_name}'")
+                    # Check for extern calls in const fn body
+                    if func.is_extern:
+                        comptime_check_extern_call(func_name, func_name)
+                    # Check calls within the function body (if body has statements)
+                    for stmt in func.body.stmts:
+                        match stmt.kind:
+                            case HirStmtKind.Expr(expr):
+                                match expr.kind:
+                                    case HirExprKind.Call(callee, _, _):
+                                        match callee.kind:
+                                            case HirExprKind.Var(sym):
+                                                val callee_sym = resolved_module.symbols.get(sym)
+                                                if callee_sym.?:
+                                                    comptime_check_call(func_name, callee_sym.unwrap().name)
+                                            case _:
+                                                pass
+                                    case _:
+                                        pass
+                            case _:
+                                pass
+            val ct_warnings = comptime_checker_get_warnings()
+            for ct_warn in ct_warnings:
+                log_debug("comptime warning in {name}: {ct_warn}")
+            log_trace("comptime checking done, {ct_warnings.len()} warnings")
+
+            # Step 2f: Const-folding pass — evaluate const fn calls with constant args
+            val folded_module = run_const_fold_pass(resolved_module)
+
             # Step 3: Type checking (HM inference)
             # Type inference only runs in Check mode to surface diagnostics.
             val _run_type_check = match self.ctx.options.mode:
@@ -493,7 +530,7 @@ class CompilerDriver:
                 case _: false
             if _run_type_check:
                 var infer_ctx = HmInferContext.with_builtins()
-                infer_ctx.infer_module(resolved_module)
+                infer_ctx.infer_module(folded_module)
                 for infer_err in infer_ctx.errors:
                     self.ctx.add_error(_format_type_infer_error(infer_err))
                 # Also collect trait solver errors from the inference context
@@ -501,7 +538,7 @@ class CompilerDriver:
                     self.ctx.add_error(_format_trait_error(trait_err))
 
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
-            self.ctx.hir_modules[name] = resolved_module
+            self.ctx.hir_modules[name] = folded_module
             log_trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
 
         # Step 3b: Trait coherence checking (Check mode only)

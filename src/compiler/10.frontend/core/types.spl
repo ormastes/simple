@@ -234,7 +234,31 @@ val TYPE_GENERIC_ERASED = 23
 val TYPE_UNION = 24
 val TYPE_INTERSECTION = 25
 val TYPE_REFINEMENT = 26
+# Encoded ranges: union/intersection/refinement IDs are encoded into type tags
+# TYPE_UNION_BASE + id => specific union, TYPE_INTERSECTION_BASE + id => specific intersection, etc.
+val TYPE_UNION_BASE = 500
+val TYPE_INTERSECTION_BASE = 600
+val TYPE_REFINEMENT_BASE = 700
 val TYPE_NAMED_BASE = 1000
+
+# Helper predicates for encoded type tags
+fn is_union_tag(tag: i64) -> bool:
+    tag >= TYPE_UNION_BASE and tag < TYPE_INTERSECTION_BASE
+
+fn union_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_UNION_BASE
+
+fn is_intersection_tag(tag: i64) -> bool:
+    tag >= TYPE_INTERSECTION_BASE and tag < TYPE_REFINEMENT_BASE
+
+fn intersection_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_INTERSECTION_BASE
+
+fn is_refinement_tag(tag: i64) -> bool:
+    tag >= TYPE_REFINEMENT_BASE and tag < TYPE_NAMED_BASE
+
+fn refinement_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_REFINEMENT_BASE
 
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
@@ -297,6 +321,20 @@ fn type_tag_name(tag: i64) -> text:
         return "Intersection"
     if tag == TYPE_REFINEMENT:
         return "Refinement"
+    # Encoded union/intersection/refinement ranges
+    if is_union_tag(tag):
+        val uid = union_tag_to_id(tag)
+        val members = union_type_get_members(uid)
+        var parts: [text] = []
+        for m in members:
+            parts.push(type_tag_name(m))
+        return parts.join(" | ")
+    if is_intersection_tag(tag):
+        val iid = intersection_tag_to_id(tag)
+        return "Intersection_" + int_to_str(iid)
+    if is_refinement_tag(tag):
+        val rid = refinement_tag_to_id(tag)
+        return "Refinement_" + int_to_str(rid)
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -353,6 +391,13 @@ fn type_tag_to_c(tag: i64) -> text:
     if tag == TYPE_INTERSECTION:
         return "SplValue"
     if tag == TYPE_REFINEMENT:
+        return "SplValue"
+    # Encoded union/intersection/refinement ranges map to SplValue in C
+    if is_union_tag(tag):
+        return "SplValue"
+    if is_intersection_tag(tag):
+        return "SplValue"
+    if is_refinement_tag(tag):
         return "SplValue"
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
@@ -476,7 +521,7 @@ var union_type_members: [[i64]] = []
 fn union_type_register(member_types: [i64]) -> i64:
     val idx = union_type_members.len()
     union_type_members.push(member_types)
-    TYPE_UNION
+    TYPE_UNION_BASE + idx
 
 fn union_type_get_members(union_id: i64) -> [i64]:
     if union_id < union_type_members.len():
@@ -491,7 +536,7 @@ var intersection_type_members: [[i64]] = []
 fn intersection_type_register(member_types: [i64]) -> i64:
     val idx = intersection_type_members.len()
     intersection_type_members.push(member_types)
-    TYPE_INTERSECTION
+    TYPE_INTERSECTION_BASE + idx
 
 fn intersection_type_get_members(inter_id: i64) -> [i64]:
     if inter_id < intersection_type_members.len():
@@ -508,7 +553,7 @@ fn refinement_type_register(base_type: i64, predicate: text) -> i64:
     val idx = refinement_base_types.len()
     refinement_base_types.push(base_type)
     refinement_predicates.push(predicate)
-    TYPE_REFINEMENT
+    TYPE_REFINEMENT_BASE + idx
 
 fn refinement_type_base(ref_id: i64) -> i64:
     if ref_id < refinement_base_types.len():

@@ -581,6 +581,11 @@ impl HirLowering:
         for bound in trait_.where_clause:
             where_clause = where_clause.push(self.lower_trait_bound(bound))
 
+        # Lower associated type declarations
+        var assoc_types: [HirAssocTypeDecl] = []
+        for at in trait_.assoc_types:
+            assoc_types = assoc_types.push(self.lower_assoc_type_decl(at))
+
         # Separate methods into abstract (no body) and defaults (with body)
         var abstract_methods: [HirFunction] = []
         var defaults: [HirFunction] = []
@@ -606,6 +611,7 @@ impl HirLowering:
             supertraits: supertraits,
             defaults: defaults,
             where_clause: where_clause,
+            assoc_types: assoc_types,
             is_public: effective_public,
             doc_comment: trait_.doc_comment,
             span: trait_.span,
@@ -637,6 +643,11 @@ impl HirLowering:
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
 
+        # Lower associated type implementations
+        var assoc_type_impls: [HirAssocTypeImpl] = []
+        for at in impl_.assoc_types:
+            assoc_type_impls = assoc_type_impls.push(self.lower_assoc_type_impl(at))
+
         self.symbols.pop_scope()
 
         HirImpl(
@@ -645,7 +656,46 @@ impl HirLowering:
             type_params: type_params,
             where_clause: where_clause,
             methods: methods,
+            assoc_type_impls: assoc_type_impls,
             span: impl_.span
+        )
+
+    me lower_assoc_type_decl(at: AssocTypeDecl) -> HirAssocTypeDecl:
+        """Lower associated type declaration from trait to HIR."""
+        var bounds: [HirType] = []
+        for b in at.bounds:
+            bounds = bounds.push(self.lower_type(b))
+
+        # Lower default type if present
+        val default_type = if at.has_default:
+            Some(self.lower_type(at.default))
+        else:
+            nil
+
+        HirAssocTypeDecl(
+            name: at.name,
+            bounds: bounds,
+            default: default_type,
+            span: at.span
+        )
+
+    me lower_assoc_type_impl(at: AssocTypeDecl) -> HirAssocTypeImpl:
+        """Lower associated type implementation from impl block to HIR.
+
+        In an impl block, `type Item = i64` provides a concrete type.
+        The `default` field of AssocTypeDecl holds the concrete type.
+        """
+        val concrete = if at.has_default:
+            self.lower_type(at.default)
+        else:
+            # Missing concrete type -- report error
+            self.error("associated type '{at.name}' in impl block must have a concrete type", at.span)
+            HirType(kind: HirTypeKind.Error, span: at.span)
+
+        HirAssocTypeImpl(
+            name: at.name,
+            concrete_type: concrete,
+            span: at.span
         )
 
     me lower_const(const_: Const) -> HirConst:

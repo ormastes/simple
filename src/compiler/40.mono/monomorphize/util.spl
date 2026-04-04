@@ -233,14 +233,18 @@ fn ast_type_to_concrete(ty: Type, bindings: TypeBindings) -> ConcreteType:
             concretetype_Pointer(concrete_kind, capability, inner_ty)
 
         type_Union(types):
-            # For unions, take the first type as approximation
-            # Full union support would need a ConcreteType.Union variant
-            val _asv_0 = type as approximation
-            eprint("Warning: full union type support not yet implemented; using first _asv_0")
-            if val first = types_first(types):
-                ast_type_to_concrete(first, bindings)
-            else:
+            # Convert each union member to a ConcreteType
+            var concrete_members: [ConcreteType] = []
+            for member in types:
+                concrete_members.push(ast_type_to_concrete(member, bindings))
+            if concrete_members.len() == 0:
                 ConcreteType.Nil
+            else:
+                if concrete_members.len() == 1:
+                    # Single-member union collapses to the member itself
+                    concrete_members[0]
+                else:
+                    ConcreteType.Union(concrete_members)
 
         type_Constructor(target, _):
             # Constructor types are used for factory patterns
@@ -357,6 +361,13 @@ fn concrete_to_ast_type(concrete: ConcreteType) -> Type:
             val inner_ty = concrete_to_ast_type(inner)
             type_Pointer(ast_kind, inner_ty)
 
+        concretetype_Union(members):
+            # Convert union members back to AST types
+            var ast_members: [Type] = []
+            for member in members:
+                ast_members.push(concrete_to_ast_type(member))
+            type_Union(ast_members)
+
         concretetype_Specialized(name, _):
             # Specialized types are already monomorphized
             # Collapse to the mangled name (Simple type)
@@ -430,7 +441,7 @@ fn concrete_pointer_kind_to_ast(kind: ConcretePointerKind) -> PointerKind:
 # Function([T], U)         | Function([T], U)              | Direct
 # Optional(T)              | Optional(T)                   | Direct
 # Pointer(kind, T)         | Pointer(kind, cap, T)         | Cap derived
-# Union([T, U])            | T (first)                     | TODO: full union
+# Union([T, U])            | Union([T, U])                 | Full union support
 # Constructor(T, args)     | T (extract target)            | Factory pattern
 # Simd(lanes, T)           | Array(T)                      | SIMD as array
 # Capability(T, cap)       | T (unwrap)                    | Compile-time

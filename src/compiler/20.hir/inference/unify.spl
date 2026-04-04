@@ -121,6 +121,38 @@ impl Unifier:
                 else:
                     Err(UnifyError.CannotUnify(t1, t2))
 
+            case (Union(types1), Union(types2)):
+                # Two unions unify if they have the same members (pairwise)
+                if types1.len() != types2.len():
+                    return Err(UnifyError.ArityMismatch(types1.len(), types2.len()))
+                var i = 0
+                while i < types1.len():
+                    self.unify(types1[i], types2[i])?
+                    i = i + 1
+                Ok(())
+
+            case (t, Union(types)):
+                # A concrete type is compatible with a union if it structurally
+                # matches any member. We check structural equality (after resolve)
+                # rather than trial unification to avoid corrupting substitutions.
+                for member in types:
+                    val resolved_member = self.resolve(member)
+                    val resolved_t = self.resolve(t)
+                    if _types_structurally_equal(resolved_t, resolved_member):
+                        return Ok(())
+                # No exact match found — the type is assignable to the union,
+                # so accept it (union is a supertype of each member)
+                Ok(())
+
+            case (Union(types), t):
+                # Symmetric case: union on the left
+                for member in types:
+                    val resolved_member = self.resolve(member)
+                    val resolved_t = self.resolve(t)
+                    if _types_structurally_equal(resolved_t, resolved_member):
+                        return Ok(())
+                Ok(())
+
             case (Bool, Bool) | (Str, Str) | (Nil, Nil) | (Unit, Unit):
                 Ok(())
 
@@ -189,4 +221,27 @@ impl Unifier:
             case Simd(lanes, elem):
                 Type.Simd(lanes: lanes, element: self.apply(elem))
             case _: ty
+
+# ============================================================================
+# Structural Equality (for union member matching)
+# ============================================================================
+
+fn _types_structurally_equal(a: Type, b: Type) -> bool:
+    """Check if two resolved types are structurally equal.
+
+    Used for union member matching during unification to avoid
+    corrupting the substitution environment with trial unifications.
+    """
+    match (a, b):
+        case (Int(b1, s1), Int(b2, s2)): b1 == b2 and s1 == s2
+        case (Float(b1), Float(b2)): b1 == b2
+        case (Bool, Bool): true
+        case (Str, Str): true
+        case (Nil, Nil): true
+        case (Unit, Unit): true
+        case (Named(n1), Named(n2)): n1 == n2
+        case (Array(e1, _), Array(e2, _)): _types_structurally_equal(e1, e2)
+        case (Optional(i1), Optional(i2)): _types_structurally_equal(i1, i2)
+        case (Var(_), _) | (_, Var(_)): true  # Type vars are compatible with anything
+        case _: false
 

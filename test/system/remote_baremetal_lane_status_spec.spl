@@ -1,0 +1,240 @@
+"""
+# Remote Baremetal Lane Status System Spec
+#
+# @cover src/lib/nogc_sync_mut/debug/remote/exec/lane_registry.spl 80%
+#
+# Validates that the lane descriptor, capability report, and lane
+# registry infrastructure works correctly. This is the authoritative
+# test for the lane classification and status reporting system.
+"""
+
+use std.nogc_sync_mut.debug.remote.exec.lane_descriptor.{
+    LaneDescriptor, LaneStatus, ProofClass, AdapterKind, ResultChannelKind
+}
+use std.nogc_sync_mut.debug.remote.exec.capability_report.{
+    CapabilityReport, CapabilityStatus, probe_command
+}
+use std.nogc_sync_mut.debug.remote.exec.result_channel.{
+    ResultPacket, ResultVerifier
+}
+use std.nogc_sync_mut.debug.remote.exec.lane_registry.{
+    LaneRegistry, probe_for_lane
+}
+use std.nogc_sync_mut.debug.remote.exec.lane_status.{
+    LaneStatusReporter
+}
+
+
+# ============================================================================
+# LaneDescriptor
+# ============================================================================
+
+describe "LaneDescriptor":
+    it "creates a descriptor with all fields":
+        val lane = LaneDescriptor(
+            lane_id: "qemu_rv32",
+            target_arch: "riscv32",
+            status: LaneStatus.Stable,
+            proof_class: ProofClass.ExitCode,
+            adapter_kind: AdapterKind.Qemu,
+            result_channel: ResultChannelKind.Semihost,
+            is_authoritative: true
+        )
+        expect(lane.lane_id).to_equal("qemu_rv32")
+        expect(lane.target_arch).to_equal("riscv32")
+        expect(lane.status).to_equal(LaneStatus.Stable)
+        expect(lane.is_authoritative).to_equal(true)
+
+    it "formats to_text correctly":
+        val lane = LaneDescriptor(
+            lane_id: "qemu_rv32_semihost",
+            target_arch: "riscv32",
+            status: LaneStatus.Stable,
+            proof_class: ProofClass.ExitCode,
+            adapter_kind: AdapterKind.Qemu,
+            result_channel: ResultChannelKind.Semihost,
+            is_authoritative: true
+        )
+        val text_repr = lane.to_text()
+        expect(text_repr).to_contain("qemu_rv32_semihost")
+        expect(text_repr).to_contain("riscv32")
+
+    it "classifies stable lanes as authoritative":
+        val lane = LaneDescriptor(
+            lane_id: "stable_lane",
+            target_arch: "riscv32",
+            status: LaneStatus.Stable,
+            proof_class: ProofClass.ExitCode,
+            adapter_kind: AdapterKind.Qemu,
+            result_channel: ResultChannelKind.Semihost,
+            is_authoritative: true
+        )
+        expect(lane.is_authoritative).to_equal(true)
+
+    it "classifies in_progress lanes as non-authoritative":
+        val lane = LaneDescriptor(
+            lane_id: "wip_lane",
+            target_arch: "arm32",
+            status: LaneStatus.InProgress,
+            proof_class: ProofClass.Register,
+            adapter_kind: AdapterKind.OpenOcd,
+            result_channel: ResultChannelKind.Register,
+            is_authoritative: false
+        )
+        expect(lane.is_authoritative).to_equal(false)
+
+
+# ============================================================================
+# CapabilityReport
+# ============================================================================
+
+describe "CapabilityReport":
+    it "creates ready reports":
+        val report = CapabilityReport.ready("test_lane", "qemu-system-riscv32")
+        expect(report.is_runnable()).to_equal(true)
+        expect(report.is_acceptable()).to_equal(true)
+
+    it "creates skip_tool reports":
+        val report = CapabilityReport.skip_tool("test_lane", "missing_tool")
+        expect(report.is_runnable()).to_equal(false)
+        expect(report.is_acceptable()).to_equal(true)
+
+    it "creates failed reports":
+        val report = CapabilityReport.failed("test_lane", "critical error")
+        expect(report.is_runnable()).to_equal(false)
+        expect(report.is_acceptable()).to_equal(false)
+
+    it "formats report text":
+        val report = CapabilityReport.ready("my_lane", "tool_name")
+        val text_repr = report.to_text()
+        expect(text_repr).to_contain("my_lane")
+        expect(text_repr).to_contain("Ready")
+
+
+# ============================================================================
+# ResultPacket
+# ============================================================================
+
+describe "ResultPacket":
+    it "creates semihost packets":
+        val packet = ResultPacket.from_semihost("PASS: all tests passed")
+        expect(packet.is_pass()).to_equal(true)
+
+    it "creates register packets":
+        val pass_packet = ResultPacket.from_register(0)
+        expect(pass_packet.is_pass()).to_equal(true)
+        val fail_packet = ResultPacket.from_register(1)
+        expect(fail_packet.is_pass()).to_equal(false)
+
+    it "creates exit code packets":
+        val packet = ResultPacket.from_exit_code(0)
+        expect(packet.is_pass()).to_equal(true)
+
+
+# ============================================================================
+# ResultVerifier
+# ============================================================================
+
+describe "ResultVerifier":
+    it "verifies default pass":
+        val verifier = ResultVerifier.default_pass()
+        val packet = ResultPacket.from_exit_code(0)
+        val result = verifier.verify(packet)
+        expect(result.is_ok()).to_equal(true)
+
+    it "rejects failed packets":
+        val verifier = ResultVerifier.default_pass()
+        val packet = ResultPacket.from_exit_code(1)
+        val result = verifier.verify(packet)
+        expect(result.is_err()).to_equal(true)
+
+    it "checks output patterns":
+        val verifier = ResultVerifier.with_output(["PASS"])
+        val packet = ResultPacket.from_semihost("PASS: all tests passed")
+        val result = verifier.verify(packet)
+        expect(result.is_ok()).to_equal(true)
+
+
+# ============================================================================
+# LaneRegistry
+# ============================================================================
+
+describe "LaneRegistry":
+    it "contains exactly 10 lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.all().len()).to_equal(10)
+
+    it "has 3 stable lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.stable_lanes().len()).to_equal(3)
+
+    it "has 3 host-aware lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.host_aware_lanes().len()).to_equal(3)
+
+    it "has 2 transport-only lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.transport_only_lanes().len()).to_equal(2)
+
+    it "has 2 in-progress lanes":
+        val registry = LaneRegistry.default()
+        expect(registry.in_progress_lanes().len()).to_equal(2)
+
+    it "finds lanes by id":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("qemu_rv32_semihost")
+        expect(lane).to_not_equal(nil)
+
+    it "returns nil for unknown lanes":
+        val registry = LaneRegistry.default()
+        val lane = registry.find("nonexistent")
+        expect(lane).to_be_nil()
+
+
+# ============================================================================
+# LaneStatusReporter
+# ============================================================================
+
+describe "LaneStatusReporter":
+    it "generates text report":
+        val registry = LaneRegistry.default()
+        val reporter = LaneStatusReporter(registry: registry)
+        val report = reporter.report_text()
+        expect(report).to_contain("Stable Lanes")
+        expect(report).to_contain("Host-Aware")
+
+    it "generates markdown report":
+        val registry = LaneRegistry.default()
+        val reporter = LaneStatusReporter(registry: registry)
+        val report = reporter.generate_matrix_markdown()
+        expect(report).to_contain("| Lane ID |")
+
+    it "generates SDN report":
+        val registry = LaneRegistry.default()
+        val reporter = LaneStatusReporter(registry: registry)
+        val report = reporter.report_sdn()
+        expect(report).to_contain("[lane_matrix]")
+
+
+# ============================================================================
+# Probe infrastructure
+# ============================================================================
+
+describe "Probe infrastructure":
+    it "detects available commands":
+        val found = probe_command("ls")
+        expect(found).to_equal(true)
+
+    it "detects missing commands":
+        val found = probe_command("nonexistent_tool_xyz")
+        expect(found).to_equal(false)
+
+    slow_it "probes all lanes without crashing":
+        val registry = LaneRegistry.default()
+        val lanes = registry.all()
+        var i = 0
+        while i < lanes.len():
+            val lane = lanes[i]
+            val report = probe_for_lane(lane)
+            expect(report.is_acceptable()).to_equal(true)
+            i = i + 1
