@@ -958,15 +958,14 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Defer)?;
 
-        // Check if this is block form (defer:) or expression form (defer expr)
+        // Check if this is block form (defer:) or expression/assignment form
         let body = if self.check(&TokenKind::Colon) {
             self.advance(); // consume ':'
             let block = self.parse_block()?;
             DeferBody::Block(block)
         } else {
-            // Parse single expression
-            let expr = self.parse_expression()?;
-            DeferBody::Expr(expr)
+            // Parse expression, then check for assignment (defer x = value)
+            self.parse_defer_body()?
         };
 
         Ok(Node::Defer(DeferStmt {
@@ -985,6 +984,7 @@ impl<'a> Parser<'a> {
     /// # Syntax
     /// ```simple
     /// errdefer expr             # Single expression
+    /// errdefer x = value        # Assignment form
     /// errdefer:                 # Block form
     ///     statements
     /// ```
@@ -994,15 +994,14 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Errdefer)?;
 
-        // Check if this is block form (errdefer:) or expression form (errdefer expr)
+        // Check if this is block form (errdefer:) or expression/assignment form
         let body = if self.check(&TokenKind::Colon) {
             self.advance(); // consume ':'
             let block = self.parse_block()?;
             DeferBody::Block(block)
         } else {
-            // Parse single expression
-            let expr = self.parse_expression()?;
-            DeferBody::Expr(expr)
+            // Parse expression, then check for assignment (errdefer x = value)
+            self.parse_defer_body()?
         };
 
         Ok(Node::ErrDefer(ErrDeferStmt {
@@ -1014,6 +1013,33 @@ impl<'a> Parser<'a> {
             ),
             body,
         }))
+    }
+
+    /// Parse defer/errdefer body: either a plain expression or an assignment.
+    /// Handles `defer expr` and `defer target = value` uniformly.
+    /// Assignment form is wrapped as a single-statement Block.
+    fn parse_defer_body(&mut self) -> Result<DeferBody, ParseError> {
+        let expr = self.parse_expression()?;
+
+        // Check for assignment: defer/errdefer target = value
+        if self.check(&TokenKind::Assign) {
+            let assign_span = self.current.span;
+            self.advance(); // consume '='
+            let value = self.parse_expression()?;
+            // Wrap as a Block containing one assignment Node
+            let assign_node = Node::Assignment(AssignmentStmt {
+                span: assign_span,
+                target: expr,
+                op: AssignOp::Assign,
+                value,
+            });
+            Ok(DeferBody::Block(Block {
+                span: assign_span,
+                statements: vec![assign_node],
+            }))
+        } else {
+            Ok(DeferBody::Expr(expr))
+        }
     }
 
     /// Parse `when COND: ... else: ...` conditional compilation block.

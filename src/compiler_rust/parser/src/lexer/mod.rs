@@ -482,25 +482,35 @@ impl<'a> Lexer<'a> {
                 }
             }
             '\'' => {
-                // Disambiguate: character literal 'x', label 'ident, or raw string 'text'
+                // Disambiguate: label 'ident vs raw string / char literal 'text'
+                //
+                // Labels ('loop, 'outer) never have a closing tick.
+                // Raw strings and char literals ('a', 'type', 'hello world')
+                // always have a closing tick on the same line.
+                //
+                // Strategy: when the next char is alpha/underscore, peek ahead
+                // (non-destructively) to check for a closing tick before newline.
+                // If found → raw string.  If not → label.
                 if let Some(next_ch) = self.peek() {
                     if next_ch.is_alphabetic() || next_ch == '_' {
-                        // Peek further: if pattern is 'X' (single char + closing quote),
-                        // it's a character literal.  Otherwise it's a label ('loop, 'outer).
-                        let after = self.peek_ahead(1);
-                        if after == Some('\'') {
-                            // Character literal: 'a', 'Z', '_'
-                            // Consume the char and closing quote, emit as single-char string
-                            let char_val = next_ch;
-                            self.advance(); // consume the char
-                            self.advance(); // consume closing '
-                            TokenKind::RawString(char_val.to_string())
+                        // Look ahead for a closing tick on this line
+                        let mut has_close_tick = false;
+                        for i in 0..500 {
+                            match self.peek_ahead(i) {
+                                Some('\'') => { has_close_tick = true; break; }
+                                Some('\n') | None => break,
+                                _ => {}
+                            }
+                        }
+                        if has_close_tick {
+                            // 'text' — delegate to raw string scanner
+                            self.scan_raw_string()
                         } else {
-                            // Label: 'identifier (tick-prefixed, no closing quote)
+                            // 'ident — label (no closing tick)
                             let mut label = String::new();
-                            while let Some(ch) = self.peek() {
-                                if ch.is_alphanumeric() || ch == '_' {
-                                    label.push(ch);
+                            while let Some(c) = self.peek() {
+                                if c.is_alphanumeric() || c == '_' {
+                                    label.push(c);
                                     self.advance();
                                 } else {
                                     break;
@@ -508,11 +518,8 @@ impl<'a> Lexer<'a> {
                             }
                             TokenKind::Label(label)
                         }
-                    } else if next_ch == '\\' {
-                        // Escape sequence char literal: '\n', '\t', etc.
-                        self.scan_raw_string()
                     } else {
-                        self.scan_raw_string() // Single quotes are raw strings
+                        self.scan_raw_string()
                     }
                 } else {
                     self.scan_raw_string()

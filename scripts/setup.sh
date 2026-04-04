@@ -97,6 +97,9 @@ os="${PLATFORM_OS}"
 exe="${PLATFORM_EXE}"
 
 echo "Platform: ${PLATFORM}"
+if [ "${PLATFORM_WSL:-0}" = "1" ]; then
+  echo "WSL:      detected (Windows Subsystem for Linux)"
+fi
 
 # ===========================================================================
 # Locate preferred runtime / release binary
@@ -210,25 +213,35 @@ if [ -n "${prefix}" ]; then
   mkdir -p "${bin_dir}"
 fi
 
+# Atomic symlink creation: create a temp link then mv over the target.
+# This avoids a window where the link doesn't exist (rm + ln race).
+# Falls back to plain ln -sf on platforms where mv over symlinks fails.
 create_link() {
   local target="$1" name="$2"
   local lpath="${bin_dir}/${name}"
-  if [ -L "${lpath}" ] || [ -f "${lpath}" ]; then
-    rm -f "${lpath}"
-  fi
+  local tmp="${lpath}.setup_tmp.$$"
   cd "${bin_dir}"
-  ln -sf "${target}" "${name}"
-  echo "  ${name} → ${target}"
+  ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${lpath}" 2>/dev/null \
+    || { rm -f "${tmp}" 2>/dev/null; rm -f "${lpath}"; ln -sf "${target}" "${name}"; }
+  # Validate: link should resolve to an executable
+  if [ -L "${lpath}" ] && ! [ -e "${lpath}" ]; then
+    echo "  [WARN] ${name} → ${target} (dangling — target does not exist yet)" >&2
+  else
+    echo "  ${name} → ${target}"
+  fi
 }
 
 create_release_link() {
   local target="$1" link_path="$2"
-  if [ -L "${link_path}" ] || [ -f "${link_path}" ]; then
-    rm -f "${link_path}"
-  fi
+  local tmp="${link_path}.setup_tmp.$$"
   mkdir -p "$(dirname "${link_path}")"
-  ln -sf "${target}" "${link_path}"
-  echo "  ${link_path#${repo_root}/} → ${target}"
+  ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${link_path}" 2>/dev/null \
+    || { rm -f "${tmp}" 2>/dev/null; rm -f "${link_path}"; ln -sf "${target}" "${link_path}"; }
+  if [ -L "${link_path}" ] && ! [ -e "${link_path}" ]; then
+    echo "  [WARN] ${link_path#${repo_root}/} → ${target} (dangling)" >&2
+  else
+    echo "  ${link_path#${repo_root}/} → ${target}"
+  fi
 }
 
 if [ "${dry_run}" -eq 1 ]; then

@@ -59,6 +59,14 @@ case "${_pd_host_os}" in
   Linux)
     PLATFORM_OS="linux"
     PLATFORM_ABI="gnu"
+    # WSL detection: set PLATFORM_WSL=1 if running under Windows Subsystem for Linux.
+    # WSL reports uname -s as "Linux" but has Microsoft-specific kernel markers.
+    PLATFORM_WSL=0
+    if [ -f /proc/version ] && grep -qi microsoft /proc/version 2>/dev/null; then
+      PLATFORM_WSL=1
+    elif [ -n "${WSL_DISTRO_NAME:-}" ]; then
+      PLATFORM_WSL=1
+    fi
     ;;
   Darwin)
     PLATFORM_OS="darwin"
@@ -102,6 +110,15 @@ case "${_pd_host_os}" in
     PLATFORM_ABI="elf"
     ;;
 esac
+
+# Default WSL flag for non-Linux platforms
+PLATFORM_WSL="${PLATFORM_WSL:-0}"
+
+# SimpleOS detection: when running under the Simple OS kernel, uname -s
+# reports "SimpleOS".  This is not yet implemented — the triple would be
+# <arch>-unknown-simpleos-elf.  Until the kernel sets the uname identity,
+# SimpleOS can be forced via FORCE_TRIPLE=<arch>-unknown-simpleos-elf.
+# TODO: Add native SimpleOS uname detection when the kernel supports it.
 
 PLATFORM_TRIPLE="${PLATFORM_ARCH}-${PLATFORM_VENDOR}-${PLATFORM_OS}-${PLATFORM_ABI}"
 
