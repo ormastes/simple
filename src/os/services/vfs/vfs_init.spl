@@ -1,0 +1,233 @@
+# VFS Boot Initialization — connects FAT32 to NVMe and starts VFS service
+#
+# MDSOC: feature dimension, vfs layer
+# Called during kernel init. Sets up the complete storage stack:
+# 1. PCI manager discovers NVMe device
+# 2. NVMe driver initializes with DeviceGrant
+# 3. NVMe adapter wraps NVMe driver as BlockDevice
+# 4. FAT32 driver reads BPB from NVMe via adapter
+# 5. VFS mounts FAT32 at "/"
+# 6. VFS service starts listening on IPC port "vfs"
+
+use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.services.fat32.fat32.{Fat32Driver, BlockDevice}
+use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_grant_device}
+use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64}
+
+extern fn serial_println(msg: text)
+extern fn unsafe_addr_of(ref: any) -> u64
+
+# VFS IPC method IDs (must match kernel file syscall routing)
+val VFS_METHOD_OPEN: u32 = 1
+val VFS_METHOD_READ: u32 = 2
+val VFS_METHOD_WRITE: u32 = 3
+val VFS_METHOD_CLOSE: u32 = 4
+val VFS_METHOD_STAT: u32 = 5
+val VFS_METHOD_MKDIR: u32 = 6
+val VFS_METHOD_READDIR: u32 = 7
+
+# Syscall numbers
+val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_CREATE_PORT: u64 = 22
+val SYS_ALLOC_DMA: u64 = 84
+
+# DMA page size for sector I/O buffers
+val DMA_PAGE_SIZE: u64 = 4096
+
+# ============================================================================
+# NVMe-to-BlockDevice Adapter
+# ============================================================================
+#
+# The NVMe driver uses DMA-based sector I/O (physical addresses), while the
+# FAT32 driver expects the BlockDevice trait with byte-buffer read/write.
+# This adapter bridges the two by allocating a DMA bounce buffer and copying
+# data between user-space byte arrays and DMA memory.
+
+class NvmeBlockAdapter:
+    """Wraps NvmeDriver to implement BlockDevice for FAT32."""
+    nvme: NvmeDriver
+    bounce_virt: u64    # Virtual address of DMA bounce buffer
+    bounce_phys: u64    # Physical address of DMA bounce buffer
+    ready: bool
+
+impl NvmeBlockAdapter:
+    static fn new(nvme: NvmeDriver) -> NvmeBlockAdapter:
+        NvmeBlockAdapter(
+            nvme: nvme,
+            bounce_virt: 0,
+            bounce_phys: 0,
+            ready: false
+        )
+
+    me init_bounce_buffer() -> Result<bool, text>:
+        """Allocate a DMA bounce buffer for sector transfers."""
+        var result_buf = DmaAddrs(virt: 0, phys: 0)
+        val result_ptr = unsafe_addr_of(result_buf)
+        val virt_result = syscall(SYS_ALLOC_DMA, DMA_PAGE_SIZE, result_ptr, 0, 0, 0)
+        if virt_result < 0:
+            return Result.Err("NvmeBlockAdapter: DMA bounce buffer alloc failed")
+        self.bounce_phys = mmio_read64(result_ptr)
+        self.bounce_virt = mmio_read64(result_ptr + 8)
+        self.ready = true
+        serial_println("[nvme-adapter] Bounce buffer allocated: virt=0x{self.bounce_virt}, phys=0x{self.bounce_phys}")
+        Result.Ok(true)
+
+impl BlockDevice for NvmeBlockAdapter:
+    me read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        """Read one sector from NVMe into byte buffer via DMA bounce."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        # Zero bounce buffer
+        var offset: u64 = 0
+        val ss = self.nvme.get_sector_size().to_u64()
+        while offset < ss:
+            mmio_write32(self.bounce_virt + offset, 0)
+            offset = offset + 4
+
+        # Issue NVMe read (1 sector)
+        val result = self.nvme.read_sectors(lba, 1, self.bounce_phys)
+        if result.is_err():
+            return Result.Err(result.unwrap_err())
+
+        # Copy from bounce buffer to byte array
+        var i: u64 = 0
+        while i < ss and i.to_i32() < buffer.len():
+            val byte_val = mmio_read32(self.bounce_virt + i) & 0xFF
+            buffer[i.to_i32()] = byte_val.to_u8()
+            i = i + 1
+        Result.Ok(true)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write one sector to NVMe from byte buffer via DMA bounce."""
+        if not self.ready:
+            return Result.Err("NvmeBlockAdapter: not initialized")
+        # Copy data into bounce buffer
+        val ss = self.nvme.get_sector_size().to_u64()
+        var i: u64 = 0
+        while i < ss and i.to_i32() < data.len():
+            val byte_val = data[i.to_i32()].to_u32()
+            mmio_write32(self.bounce_virt + i, byte_val)
+            i = i + 1
+
+        # Issue NVMe write (1 sector)
+        val result = self.nvme.write_sectors(lba, 1, self.bounce_phys)
+        if result.is_err():
+            return Result.Err(result.unwrap_err())
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        self.nvme.get_sector_size()
+
+# ============================================================================
+# Module-Level State
+# ============================================================================
+
+var g_vfs: VfsManager = VfsManager.new()
+var g_nvme: NvmeDriver = NvmeDriver.new()
+var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
+var g_vfs_initialized: bool = false
+
+# ============================================================================
+# Boot Init
+# ============================================================================
+
+fn vfs_boot_init() -> bool:
+    """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
+
+    Returns true if VFS is ready to serve file requests.
+    """
+    serial_println("[vfs-init] Starting storage stack initialization...")
+
+    # Step 1: Initialize PCI manager and find NVMe device
+    pcimgr_init()
+    val nvme_idx = pcimgr_find_by_class(PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME)
+    if nvme_idx < 0:
+        serial_println("[vfs-init] No NVMe device found -- VFS unavailable")
+        return false
+    serial_println("[vfs-init] Found NVMe device at index {nvme_idx}")
+
+    # Step 2: Get DeviceGrant for NVMe
+    val grant_result = pcimgr_grant_device(nvme_idx.to_u64(), 0)
+    if grant_result.is_err():
+        serial_println("[vfs-init] Failed to grant NVMe device: {grant_result.unwrap_err()}")
+        return false
+    val grant = grant_result.unwrap()
+    serial_println("[vfs-init] NVMe device granted, BAR0=0x{grant.bar0_phys}")
+
+    # Step 3: Initialize NVMe driver
+    val nvme_result = g_nvme.init_from_grant(grant)
+    if nvme_result.is_err():
+        serial_println("[vfs-init] NVMe init failed: {nvme_result.unwrap_err()}")
+        return false
+    serial_println("[vfs-init] NVMe initialized, sectors={g_nvme.sector_count}, size={g_nvme.get_sector_size()} bytes/sector")
+
+    # Step 4: Initialize DMA bounce buffer for NVMe adapter
+    g_adapter = NvmeBlockAdapter.new(g_nvme)
+    val adapter_result = g_adapter.init_bounce_buffer()
+    if adapter_result.is_err():
+        serial_println("[vfs-init] NVMe adapter init failed: {adapter_result.unwrap_err()}")
+        return false
+    serial_println("[vfs-init] NVMe block adapter ready")
+
+    # Step 5: Create FAT32 driver on top of NVMe adapter
+    var fat32 = Fat32Driver.new(g_adapter)
+
+    # Step 6: Mount FAT32 at "/" via VfsManager
+    # VfsManager.mount(path, fs_type, device, read_only, fs)
+    val mount_result = g_vfs.mount("/", "fat32", "nvme0n1", false, fat32)
+    if mount_result.is_err():
+        serial_println("[vfs-init] FAT32 mount failed: {mount_result.unwrap_err()}")
+        serial_println("[vfs-init] (disk may not be FAT32-formatted)")
+        return false
+    serial_println("[vfs-init] FAT32 mounted at /")
+
+    g_vfs_initialized = true
+    serial_println("[vfs-init] Storage stack ready")
+    true
+
+# ============================================================================
+# VFS IPC Service
+# ============================================================================
+
+fn vfs_service_start():
+    """Start VFS IPC service loop. Call after vfs_boot_init()."""
+    if not g_vfs_initialized:
+        serial_println("[vfs] Cannot start service -- not initialized")
+        return
+
+    # Create IPC port for "vfs" service
+    val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if port < 0:
+        serial_println("[vfs] Failed to create IPC port (error {port})")
+        return
+    serial_println("[vfs] Service listening on IPC port (handle={port})")
+
+    val port_handle = port.to_u64()
+
+    # Service loop -- block on IPC recv, dispatch file operations
+    while true:
+        val msg = syscall(SYS_IPC_RECV, port_handle, 0, 0, 0, 0)
+        if msg < 0:
+            serial_println("[vfs] IPC recv error: {msg}")
+            continue
+
+        # IPC message parsing will be wired when the kernel IPC message
+        # framing layer is finalized. For now log receipt and continue.
+        serial_println("[vfs] Received file request (raw={msg})")
+        pass_dn
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+fn vfs_is_ready() -> bool:
+    """Check if VFS has been initialized and is ready for file operations."""
+    g_vfs_initialized
+
+fn vfs_get_manager() -> VfsManager:
+    """Return the global VFS manager instance."""
+    g_vfs

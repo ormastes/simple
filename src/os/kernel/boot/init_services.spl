@@ -1,0 +1,89 @@
+# Kernel Init Services — spawns essential services at boot
+#
+# MDSOC: feature dimension, kernel layer
+# Called from kernel_main after memory/scheduler/IPC are initialized.
+# Starts services in dependency order:
+# 1. VFS + storage stack (PCI -> NVMe -> FAT32 -> mount)
+# 2. Network stack (if VirtIO-net present)
+# 3. Display service (if VirtIO-GPU present)
+
+use os.services.vfs.vfs_init.{vfs_boot_init, vfs_service_start, vfs_is_ready}
+use os.services.pcimgr.pcimgr.{pcimgr_dump_devices}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Service Status Tracking
+# ============================================================================
+
+var svc_storage_ok: bool = false
+var svc_network_ok: bool = false
+var svc_display_ok: bool = false
+
+# ============================================================================
+# Boot-Time Service Initialization
+# ============================================================================
+
+fn init_services():
+    """Initialize and start all kernel services.
+
+    Called once during boot, after scheduler and IPC are ready.
+    Services are started in dependency order -- storage first
+    (other services may need filesystem access), then network,
+    then display.
+    """
+    serial_println("========================================")
+    serial_println("[init] Starting SimpleOS services...")
+    serial_println("========================================")
+
+    # Step 1: Storage stack (PCI -> NVMe -> FAT32 -> VFS)
+    svc_storage_ok = vfs_boot_init()
+    if svc_storage_ok:
+        serial_println("[init] Storage stack: OK")
+    else:
+        serial_println("[init] Storage stack: UNAVAILABLE (no NVMe or no FAT32)")
+
+    # Step 2: Dump discovered PCI devices for diagnostics
+    pcimgr_dump_devices()
+
+    # Step 3: Network stack (placeholder -- VirtIO-net driver not yet wired)
+    # When ready: svc_network_ok = net_boot_init()
+    serial_println("[init] Network stack: SKIPPED (not yet implemented)")
+
+    # Step 4: Display service (placeholder -- VirtIO-GPU driver not yet wired)
+    # When ready: svc_display_ok = display_boot_init()
+    serial_println("[init] Display service: SKIPPED (not yet implemented)")
+
+    # Step 5: Start VFS service loop if storage is available
+    # NOTE: In a full system this would be spawn_task(vfs_service_start)
+    # so the IPC loop runs in its own task. For now we mark it inline-ready
+    # and the caller can invoke vfs_service_start() when ready to block.
+    if svc_storage_ok:
+        serial_println("[init] VFS service ready (call vfs_service_start to enter IPC loop)")
+
+    serial_println("========================================")
+    serial_println("[init] Service initialization complete")
+    serial_println("[init]   storage: {if svc_storage_ok: "OK" else: "UNAVAILABLE"}")
+    serial_println("[init]   network: {if svc_network_ok: "OK" else: "UNAVAILABLE"}")
+    serial_println("[init]   display: {if svc_display_ok: "OK" else: "UNAVAILABLE"}")
+    serial_println("========================================")
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+fn services_storage_ready() -> bool:
+    """Check if storage stack initialized successfully."""
+    svc_storage_ok
+
+fn services_network_ready() -> bool:
+    """Check if network stack initialized successfully."""
+    svc_network_ok
+
+fn services_display_ready() -> bool:
+    """Check if display service initialized successfully."""
+    svc_display_ok
+
+fn services_all_ready() -> bool:
+    """Check if all essential services are available."""
+    svc_storage_ok and svc_network_ok and svc_display_ok

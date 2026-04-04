@@ -1,0 +1,50 @@
+#!/bin/sh
+# Build a FAT32 disk image for SimpleOS QEMU testing.
+# Usage: sh scripts/make_os_disk.shs [size_mb] [output_path]
+#
+# Creates a FAT32-formatted disk image with test files.
+
+SIZE_MB="${1:-64}"
+OUTPUT="${2:-build/os/fat32.img}"
+
+# Ensure output directory exists
+mkdir -p "$(dirname "$OUTPUT")"
+
+# Create empty disk image
+dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null
+echo "[make_os_disk] Created ${SIZE_MB}MB image: $OUTPUT"
+
+# Format as FAT32 (use mkfs.fat or mformat)
+if command -v mkfs.fat >/dev/null 2>&1; then
+    mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
+    echo "[make_os_disk] Formatted as FAT32"
+elif command -v mformat >/dev/null 2>&1; then
+    mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
+    echo "[make_os_disk] Formatted as FAT32 (mtools)"
+else
+    echo "[make_os_disk] WARNING: No mkfs.fat or mformat found"
+    echo "[make_os_disk] Image created but not formatted"
+    exit 0
+fi
+
+# Copy test files using mtools (if available)
+if command -v mcopy >/dev/null 2>&1; then
+    echo "Hello from SimpleOS!" > /tmp/hello.txt
+    mcopy -i "$OUTPUT" /tmp/hello.txt ::hello.txt
+    echo "[make_os_disk] Added hello.txt"
+    rm -f /tmp/hello.txt
+
+    # Create a minimal hello.spl
+    cat > /tmp/hello.spl << 'SPLEOF'
+# Hello World for SimpleOS
+fn main():
+    print("Hello from SimpleOS!")
+SPLEOF
+    mcopy -i "$OUTPUT" /tmp/hello.spl ::hello.spl
+    echo "[make_os_disk] Added hello.spl"
+    rm -f /tmp/hello.spl
+else
+    echo "[make_os_disk] mtools not found -- no test files added"
+fi
+
+echo "[make_os_disk] Done: $OUTPUT"
