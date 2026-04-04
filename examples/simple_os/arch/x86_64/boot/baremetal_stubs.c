@@ -1264,6 +1264,18 @@ RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n");
 RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
 RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
+
+/* Comparison operator — called by <= >= < > on non-trivial values */
+RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
+    /* Simple integer comparison for tagged values */
+    int64_t va = (int64_t)a;
+    int64_t vb = (int64_t)b;
+    if (va < vb) return ENCODE_INT(-1);
+    if (va > vb) return ENCODE_INT(1);
+    return ENCODE_INT(0);
+}
+
+/* rt_native_eq/neq already defined at line ~759 */
 RuntimeValue rt_profiler_record_call(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
 RuntimeValue rt_profiler_record_return(RuntimeValue a) { (void)a; return NIL_VALUE; }
 

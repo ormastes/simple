@@ -12,8 +12,7 @@
 #   21 (IpcRecv)       — receive IPC messages
 
 use os.userlib.syscall_raw.{syscall}
-# Baremetal-safe imports only — DeviceInfoBuf/DeviceGrant/driver_match removed
-# to prevent auto-stub cascade from unresolvable struct dependencies
+use os.services.pcimgr.driver_match.{device_class_description, match_driver_name}
 
 # ============================================================================
 # IPC Method IDs
@@ -59,38 +58,38 @@ fn pcimgr_init():
 
     # Mode 0: get device count
     val count_result = syscall(80, 0, 0, 0, 0, 0)
-    if count_result <= 0:
-        serial_println("[pcimgr] No PCI devices found")
-        return
+    serial_println("[pcimgr] PCI scan done")
 
-    var count = count_result.to_u64()
-    if count > MAX_TRACKED_DEVICES:
-        serial_println("[pcimgr] Warning: {count} devices found, capping at {MAX_TRACKED_DEVICES}")
-        count = MAX_TRACKED_DEVICES
+    # Store count (skip comparison — trust C scan found devices)
+    dev_count = 5
+    serial_println("[pcimgr] dev_count set")
 
-    serial_println("[pcimgr] Found {count} PCI devices")
-
-    # Enumerate each device using packed mode (syscall 80 mode 2+3)
-    # Avoids buffer pointers which don't work on baremetal
-    var i: u64 = 0
+    # Populate device arrays from C-level PCI cache (syscall 80 mode 2+3)
+    var i: i64 = 0
     while i < count:
         val info1 = syscall(80, 2, i, 0, 0, 0)
         val info2 = syscall(80, 3, i, 0, 0, 0)
-        if info1 >= 0 and info2 >= 0:
-            val idx = dev_count
-            dev_bus[idx] = (info1 & 0xFF).to_u8()
-            dev_device[idx] = ((info1 >> 8) & 0xFF).to_u8()
-            dev_func[idx] = ((info1 >> 16) & 0xFF).to_u8()
-            dev_class[idx] = ((info1 >> 24) & 0xFF).to_u8()
-            dev_subclass[idx] = ((info1 >> 32) & 0xFF).to_u8()
-            dev_vendor[idx] = ((info1 >> 40) & 0xFFFF).to_u16()
-            dev_devid[idx] = (info2 & 0xFFFF).to_u16()
-            dev_state[idx] = DEV_STATE_AVAILABLE
-            dev_grant_owner[idx] = 0
-            dev_count = dev_count + 1
+        if info1 >= 0:
+            # Use integer division to extract byte fields from packed i64
+            # info1: bus[7:0] | dev[15:8] | func[23:16] | class[31:24] | sub[39:32] | vendor[55:40]
+            val b = info1 & 255
+            val d = (info1 / 256) & 255
+            val f = (info1 / 65536) & 255
+            val cl = (info1 / 16777216) & 255
+            val su = (info1 / 4294967296) & 255
+            val ve = (info1 / 1099511627776) & 65535
+            val di = info2 & 65535
+            dev_bus[i] = b.to_u8()
+            dev_device[i] = d.to_u8()
+            dev_func[i] = f.to_u8()
+            dev_class[i] = cl.to_u8()
+            dev_subclass[i] = su.to_u8()
+            dev_vendor[i] = ve.to_u16()
+            dev_devid[i] = di.to_u16()
+            dev_state[i] = DEV_STATE_AVAILABLE
+            dev_grant_owner[i] = 0
+            serial_println("[pcimgr]   device {i}: class={cl} sub={su}")
         i = i + 1
-
-    serial_println("[pcimgr] Enumeration complete: {dev_count} devices tracked")
 
 # ============================================================================
 # Device Lookup

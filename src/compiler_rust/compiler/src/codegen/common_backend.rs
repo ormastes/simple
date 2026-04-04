@@ -293,13 +293,14 @@ impl<M: Module> CodegenBackend<M> {
         self.sanitize_symbol(&mangled)
     }
 
-    /// Sanitize a symbol name for the target platform.
+    /// Sanitize a symbol name for consistent cross-module resolution.
     ///
-    /// Mach-O (macOS) does not support dots in symbol names — Apple ld crashes.
-    /// Replace dots with `_dot_` to produce valid symbols on macOS.
-    /// ELF (Linux) allows dots, so no transformation is needed.
+    /// Dots in symbol names cause issues on macOS (Mach-O / Apple ld crashes)
+    /// and create definition/reference mismatches when cross-compiling from
+    /// macOS to bare-metal targets. Always sanitize to ensure consistency
+    /// between function definitions and cross-module references.
     pub fn sanitize_symbol(&self, name: &str) -> String {
-        if self.target.os == simple_common::target::TargetOS::MacOS && name.contains('.') {
+        if name.contains('.') {
             name.replace('.', "_dot_")
         } else {
             name.to_string()

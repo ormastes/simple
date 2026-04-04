@@ -1722,7 +1722,8 @@ int main(int argc, char** argv) {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     if stdout.lines().any(|l| {
                         let parts: Vec<&str> = l.split_whitespace().collect();
-                        parts.len() >= 3 && parts[2].ends_with("___start") && parts[2] != "_start"
+                        parts.len() >= 3 && (parts[2].ends_with("___start") || parts[2].ends_with("__spl_start"))
+                            && parts[2] != "_start" && parts[2] != "spl_start"
                             && !parts[2].contains("_starts_with")
                             && arch_filters.iter().any(|f| parts[2].contains(f))
                             && !arch_neg_filters.iter().any(|f| parts[2].contains(f))
@@ -1799,18 +1800,23 @@ int main(int argc, char** argv) {
             let mut fallback_start: Option<String> = None;
 
             // Priority 1: entry file's _start — always wins over arch heuristics.
-            // Compute expected mangled symbol from entry file path.
+            // Compute expected mangled symbols from entry file path.
+            // The compiler may mangle _start as ___start or __spl_start.
             if let Some(ref entry) = self.entry_file {
                 let entry_str = entry.to_string_lossy();
                 let stem = entry_str.trim_start_matches('/').trim_end_matches(".spl");
-                let expected = format!("{}___start", stem.replace('/', "__"));
+                let mangled_stem = stem.replace('/', "__");
+                let candidates = [
+                    format!("{}___start", mangled_stem),
+                    format!("{}__spl_start", mangled_stem),
+                ];
                 'entry_search: for obj in object_paths {
                     if let Ok(out) = std::process::Command::new("nm").arg("-g").arg(obj).output() {
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         for line in stdout.lines() {
                             let parts: Vec<&str> = line.split_whitespace().collect();
-                            if parts.len() >= 3 && parts[2] == expected {
-                                best_start = Some(expected);
+                            if parts.len() >= 3 && candidates.contains(&parts[2].to_string()) {
+                                best_start = Some(parts[2].to_string());
                                 break 'entry_search;
                             }
                         }
@@ -1827,7 +1833,7 @@ int main(int argc, char** argv) {
                             let parts: Vec<&str> = line.split_whitespace().collect();
                             if parts.len() >= 3 {
                                 let sym = parts[2];
-                                if sym.ends_with("___start") && sym != "_start" {
+                                if (sym.ends_with("___start") || sym.ends_with("__spl_start")) && sym != "_start" && sym != "spl_start" {
                                     let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
                                     if neg_match { continue; }
                                     let pos_match = arch_filters.iter().any(|f| sym.contains(f));
