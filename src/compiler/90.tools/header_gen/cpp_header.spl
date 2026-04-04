@@ -14,6 +14,7 @@
 use compiler.mir.mir_data.*
 use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_cpp_error_method_wrapper, emit_cpp_error_free_function_wrapper}
+use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, extract_callback_params, extract_callback_return, CallbackTypedef}
 use compiler.types.type_layout.{layoutattr_c_repr, verify_c_layout, generate_cpp_static_asserts}
 use hir_definitions.{HirField}
 use hir_types.{HirType}
@@ -48,6 +49,7 @@ fn emit_cpp_header(lib_name: text, exported_types: [MirTypeDef], exported_fns: [
     lines.push(r"#include <memory>")
     lines.push(r"#include <string>")
     lines.push(r"#include <stdexcept>")
+    lines.push(r"#include <functional>")
     lines.push(r"#include <utility>")
     lines.push(r"#include <cstddef>")
     lines.push(r"")
@@ -325,14 +327,20 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
     # Check if return type needs string conversion
     val needs_string_return = _is_text_type(func.signature.return_type)
 
-    lines.push(ret_type + " " + method_name + "(" + params_str + ") {")
+    lines.push(ret_type + " " + method_name + "(" + params_str + ") noexcept {")
+    lines.push("    try {")
     if is_void:
-        lines.push("    " + c_fn_name + "(" + args_str + ");")
+        lines.push("        " + c_fn_name + "(" + args_str + ");")
     elif needs_string_return:
-        lines.push("    const char* _result = " + c_fn_name + "(" + args_str + ");")
-        lines.push("    return _result ? std::string(_result) : std::string();")
+        lines.push("        const char* _result = " + c_fn_name + "(" + args_str + ");")
+        lines.push("        return _result ? std::string(_result) : std::string();")
     else:
-        lines.push("    return " + c_fn_name + "(" + args_str + ");")
+        lines.push("        return " + c_fn_name + "(" + args_str + ");")
+    lines.push("    } catch (...) {")
+    lines.push("        _spl_set_last_error(\"C++ exception in " + method_name + "\", -1);")
+    if not is_void:
+        lines.push("        return " + ret_type + "{};")
+    lines.push("    }")
     lines.push("}")
     lines.push("")
     lines
@@ -391,14 +399,20 @@ fn _emit_function_wrapper(func: MirFunction) -> [text]:
 
     val needs_string_return = _is_text_type(func.signature.return_type)
 
-    lines.push(r"inline " + ret_type + " " + cpp_name + "(" + params_str + ") {")
+    lines.push(r"inline " + ret_type + " " + cpp_name + "(" + params_str + ") noexcept {")
+    lines.push("    try {")
     if is_void:
-        lines.push("    " + export_name + "(" + args_str + ");")
+        lines.push("        " + export_name + "(" + args_str + ");")
     elif needs_string_return:
-        lines.push("    const char* _result = " + export_name + "(" + args_str + ");")
-        lines.push("    return _result ? std::string(_result) : std::string();")
+        lines.push("        const char* _result = " + export_name + "(" + args_str + ");")
+        lines.push("        return _result ? std::string(_result) : std::string();")
     else:
-        lines.push("    return " + export_name + "(" + args_str + ");")
+        lines.push("        return " + export_name + "(" + args_str + ");")
+    lines.push("    } catch (...) {")
+    lines.push("        _spl_set_last_error(\"C++ exception in " + cpp_name + "\", -1);")
+    if not is_void:
+        lines.push("        return " + ret_type + "{};")
+    lines.push("    }")
     lines.push(r"}")
     lines.push(r"")
     lines
@@ -465,6 +479,43 @@ fn _mir_type_to_hir_type(ty: MirType) -> HirType:
         case Unit: HirType.named("unit")
         case Ptr(_, _): HirType.named("usize")
         case _: HirType.named("i64")
+
+# ============================================================================
+# Callback Helpers for C++ Wrappers
+# ============================================================================
+
+fn _mir_type_name(ty: MirType) -> text:
+    """Extract the type name string from a MIR type for callback detection."""
+    match ty.kind:
+        case Opaque(name): name
+        case _: ""
+
+fn _callback_type_to_std_function(type_name: text) -> text:
+    """Convert a Fn<(A, B) -> C> type string to std::function<C(A, B)>.
+
+    Example: "Fn<(i64, f64) -> bool>" -> "std::function<int64_t(int64_t, double)>"
+    """
+    val simple_params = extract_callback_params(type_name)
+    val simple_return = extract_callback_return(type_name)
+
+    val cpp_return = _simple_type_to_cpp(simple_return)
+
+    var cpp_params: [text] = []
+    var pi = 0
+    while pi < simple_params.len():
+        cpp_params.push(_simple_type_to_cpp(simple_params[pi]))
+        pi = pi + 1
+
+    val params_str = cpp_params.join(", ")
+    "std::function<{cpp_return}({params_str})>"
+
+fn _callback_type_to_c_fptr(type_name: text) -> text:
+    """Convert a Fn<(A, B) -> C> type name to the C typedef name.
+
+    Used to bridge std::function parameters to the underlying C callback typedef.
+    """
+    val cb = build_callback_typedef(type_name)
+    cb.name
 
 # ============================================================================
 # Export

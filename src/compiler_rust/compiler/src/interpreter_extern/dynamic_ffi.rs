@@ -471,6 +471,11 @@ fn try_call_manifest_library(
 
     let fptr = if let Some(&cached) = state.symbols.get(name) {
         if cached == 0 {
+            // Symbol not found as a flat function — try class dispatch before failing
+            drop(libraries);
+            if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
+                return Some(result);
+            }
             return Some(Err(CompileError::runtime(format!(
                 "plugin symbol '{}' not found in {}",
                 name, library_path
@@ -485,6 +490,11 @@ fn try_call_manifest_library(
             }
             None => {
                 state.symbols.insert(name.to_string(), 0);
+                // Symbol not found as a flat function — try class dispatch before failing
+                drop(libraries);
+                if let Some(result) = try_call_manifest_class_method(library_path, name, evaluated_args) {
+                    return Some(result);
+                }
                 return Some(Err(CompileError::runtime(format!(
                     "plugin symbol '{}' not found in {}",
                     name, library_path

@@ -49,7 +49,7 @@ Several requested items are real but only partial, experimental, or host-depende
 | Test session sharing | Implemented | Test DB/run DB support |
 | UI sharing with TUI and GUI | Implemented (scoped) | Shared UI contract (Protocol V1) across web backend and TUI-web proxy with cross-surface contract suite; not a full unified rendering layer |
 | AOP | Partial | Real compiler/runtime surface, but some stubs remain |
-| C/C++ bidirectional interface | Partial | Strong SFFI stack; bidirectional completeness not proven |
+| C/C++ bidirectional interface | Partial (advancing) | Strong SFFI stack with class-level plugin imports, callback trampolines, SFFI006 lint; bidirectional completeness not yet fully proven |
 | LLVM backend | Partial but real | Real backend and LLVM-oriented flows; still tool-dependent and not uniformly complete |
 | VHDL backend | Experimental | Concrete codegen surface exists, but should not be presented as complete |
 | GC and no-GC mode support | Public/stable (5 families) | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc` with compiler enforcement, interpreter warnings, target preset mapping. `nogc_async_immut` advanced-scoped. [Support matrix](../04_architecture/runtime_family_support_matrix.md) |

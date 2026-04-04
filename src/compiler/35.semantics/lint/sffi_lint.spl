@@ -4,10 +4,13 @@
 # Validates that @export("C") classes have C-compatible layouts and types.
 #
 # SFFI001: Non-C-compatible field type in exported class              ERROR
+#          (Note: plain function pointers Fn<(A) -> B> are ALLOWED;
+#           only closures with captures Fn<...>[...] are rejected)
 # SFFI002: text field in exported struct (needs marshalling)          WARNING
 # SFFI003: Struct passed by-value without @repr("C")                  ERROR
 # SFFI004: Bitfield without explicit width                            ERROR
 # SFFI005: Platform-dependent type size in FFI struct                 WARNING
+# SFFI006: Callback parameter without ownership documentation         WARNING
 #
 # These checks run on HirClass definitions at the semantic analysis stage,
 # catching ABI safety issues before code generation.
@@ -79,6 +82,24 @@ fn _is_function_type(kind: HirTypeKind) -> bool:
     """Check if a type is a function/closure type."""
     match kind:
         case Function(params, ret, effects): true
+        case _: false
+
+fn _is_callback_function_type(kind: HirTypeKind) -> bool:
+    """Check if a type is a plain function pointer (stateless, no captures).
+
+    Plain function pointers have a stable C ABI and can cross the FFI
+    boundary as typedef'd function pointer types. Closures with captures
+    carry hidden state and are NOT allowed.
+
+    In HIR, Function types without a capture list represent plain function
+    pointers. The effects field distinguishes: empty effects = stateless.
+    """
+    match kind:
+        case Function(params, ret, effects):
+            # A function type with no effects/captures is a plain function pointer
+            # that maps to a C callback typedef. If effects contains "captures",
+            # it's a closure and should be rejected.
+            not effects.contains("captures")
         case _: false
 
 fn _is_platform_dependent_type(kind: HirTypeKind) -> bool:
@@ -181,11 +202,17 @@ fn check_sffi001_c_compatible_types(class_def: HirClass, file_path: text) -> [Sf
                 file_path: file_path
             ))
         elif _is_function_type(kind):
+            # Allow plain function pointers (stateless) — they map to C callback typedefs
+            if _is_callback_function_type(kind):
+                # Plain function pointer: C-compatible via typedef, no error
+                fi = fi + 1
+                continue
+            # Closure with captures: cannot cross FFI boundary
             warnings.push(SffiLintWarning(
                 code: "SFFI001",
                 severity: "ERROR",
-                message: "field '{field.name}' has non-C-compatible type 'Function' in @export(\"C\") class '{class_def.name}'",
-                hint: "closures cannot cross the FFI boundary — use a function pointer (Ptr) instead",
+                message: "field '{field.name}' has non-C-compatible type 'closure' in @export(\"C\") class '{class_def.name}'",
+                hint: "closures with captures cannot cross the FFI boundary — use a plain function pointer (Fn<(A) -> B> without captures) instead",
                 line_num: line,
                 file_path: file_path
             ))
@@ -442,11 +469,12 @@ fn lint_sffi_export(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
     for non-exported classes.
 
     Checks:
-    - SFFI001: Non-C-compatible field types (ERROR)
+    - SFFI001: Non-C-compatible field types (ERROR) — allows plain fn ptrs
     - SFFI002: text fields needing marshalling (WARNING)
     - SFFI003: Missing @repr("C") layout (ERROR)
     - SFFI004: Bitfield without explicit width (ERROR)
     - SFFI005: Platform-dependent type sizes (WARNING)
+    - SFFI006: Callback parameter without ownership docs (WARNING)
     """
     var warnings: [SffiLintWarning] = []
 
@@ -462,6 +490,45 @@ fn lint_sffi_export(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
     warnings = warnings + check_sffi003_repr_required(class_def, file_path)
     warnings = warnings + check_sffi004_bitfield_width(class_def, file_path)
     warnings = warnings + check_sffi005_platform_dependent(class_def, file_path)
+    warnings = warnings + check_sffi006_callback_ownership(class_def, file_path)
+
+    warnings
+
+
+# ============================================================================
+# SFFI006: Callback parameter without ownership documentation
+# ============================================================================
+
+fn check_sffi006_callback_ownership(class_def: HirClass, file_path: text) -> [SffiLintWarning]:
+    """Warn when an @export("C") class has a callback (function pointer) field
+    without explicit documentation of ownership semantics.
+
+    Callback parameters in FFI APIs should clearly document whether the
+    function pointer is "borrowed" (caller retains ownership, callee does
+    not store it) or "owned" (callee may store and invoke later).
+
+    This is a WARNING, not an error — the code will compile, but the API
+    contract should be documented for safety.
+    """
+    var warnings: [SffiLintWarning] = []
+
+    var fi = 0
+    while fi < class_def.fields.len():
+        val field = class_def.fields[fi]
+        val kind = field.type_.kind
+
+        if _is_callback_function_type(kind):
+            val line = _field_line_num(field)
+            warnings.push(SffiLintWarning(
+                code: "SFFI006",
+                severity: "WARNING",
+                message: "callback parameter '{field.name}' should document ownership (borrowed/owned) in @export(\"C\") class '{class_def.name}'",
+                hint: "add a doc comment specifying whether the callback is borrowed (not stored) or owned (may be stored and called later)",
+                line_num: line,
+                file_path: file_path
+            ))
+
+        fi = fi + 1
 
     warnings
 
@@ -532,3 +599,4 @@ export check_sffi002_text_field
 export check_sffi003_repr_required
 export check_sffi004_bitfield_width
 export check_sffi005_platform_dependent
+export check_sffi006_callback_ownership

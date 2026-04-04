@@ -56,7 +56,7 @@ Complete with bounded scope:
 - VHDL backend compiles a documented hardware-oriented Simple subset to synthesizable VHDL-2008, validated through GHDL analysis/elaboration. Strict fail-fast on unsupported constructs. Simulation-backed execution is a follow-on milestone. Support matrix: [doc/04_architecture/vhdl_support_matrix.md](doc/04_architecture/vhdl_support_matrix.md)
 
 Experimental or partial:
-- C/C++ bidirectional interop has substantial SFFI infrastructure, but not enough evidence to present it as fully complete. Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
+- C/C++ bidirectional interop has substantial SFFI infrastructure including class-level plugin imports, callback trampolines for safe function-pointer bridging, and SFFI lint rules (SFFI006 callback ownership). Current state: [doc/05_design/sffi_bidirectional_interop.md](doc/05_design/sffi_bidirectional_interop.md)
 - Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.

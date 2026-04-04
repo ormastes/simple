@@ -18,6 +18,7 @@ use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, CompiledModule}
 use compiler.backend.c_backend_translate_ops.*
 use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_error_type_definitions, emit_error_converting_wrapper}
+use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, emit_callback_trampoline, CallbackTypedef}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
 from hir_definitions import {HirField}
 from hir_types import {HirType}
@@ -693,6 +694,25 @@ class MirToC:
         if has_result_exports:
             self.builder.emit_raw(emit_error_type_definitions())
 
+        # Emit callback typedefs for any function pointer parameters
+        val callback_typedefs = self._collect_callback_typedefs_from_module(module)
+        if callback_typedefs.len() > 0:
+            self.builder.emit_raw(r"// Callback typedefs (borrowed — caller retains ownership)")
+            var cb_idx = 0
+            while cb_idx < callback_typedefs.len():
+                self.builder.emit_raw(emit_callback_typedef(callback_typedefs[cb_idx]))
+                cb_idx = cb_idx + 1
+            self.builder.emit_blank()
+
+            # Emit trampolines for each callback typedef
+            var tr_idx = 0
+            while tr_idx < callback_typedefs.len():
+                val cb = callback_typedefs[tr_idx]
+                val trampoline_name = r"_spl_trampoline_" + cb.name
+                self.builder.emit_raw(emit_callback_trampoline(trampoline_name, cb))
+                self.builder.emit_blank()
+                tr_idx = tr_idx + 1
+
         # Emit function wrappers
         for _sym in module.functions.keys():
             val func = module.functions[_sym]
@@ -732,9 +752,18 @@ class MirToC:
             val param_name = "a" + param_idx
             # Handle text type: wrapper accepts const char*, converts to spl_text for internal call
             val is_text_param = self.is_text_type(param_ty)
+            val is_cb_param = self.is_callback_param(param_ty)
             if is_text_param:
                 wrapper_params = wrapper_params.push(r"const char* " + param_name)
                 forward_args = forward_args.push(r"spl_text_from_cstr(" + param_name + r")")
+            elif is_cb_param:
+                # Callback parameter: use the typedef'd function pointer type
+                val cb_type_name = match param_ty.kind:
+                    case Opaque(name): name
+                    case _: ""
+                val cb = build_callback_typedef(cb_type_name)
+                wrapper_params = wrapper_params.push(cb.name + " " + param_name)
+                forward_args = forward_args.push(param_name)
             else:
                 wrapper_params = wrapper_params.push(c_ty + " " + param_name)
                 forward_args = forward_args.push(param_name)
@@ -865,9 +894,17 @@ class MirToC:
             val c_ty = self.type_mapper.map_type(param_ty)
             val arg_name = "a" + (param_idx - 1)
             val is_text_param = self.is_text_type(param_ty)
+            val is_cb_param = self.is_callback_param(param_ty)
             if is_text_param:
                 wrapper_params = wrapper_params.push(r"const char* " + arg_name)
                 forward_args = forward_args.push(r"spl_text_from_cstr(" + arg_name + r")")
+            elif is_cb_param:
+                val cb_type_name = match param_ty.kind:
+                    case Opaque(name): name
+                    case _: ""
+                val cb = build_callback_typedef(cb_type_name)
+                wrapper_params = wrapper_params.push(cb.name + " " + arg_name)
+                forward_args = forward_args.push(arg_name)
             else:
                 wrapper_params = wrapper_params.push(c_ty + " " + arg_name)
                 forward_args = forward_args.push(arg_name)
@@ -1011,6 +1048,55 @@ class MirToC:
             case Opaque(name):
                 name == "str" or name == "text" or name == "Text"
             case _: false
+
+    fn is_callback_param(ty: MirType) -> bool:
+        """Check if a MIR type represents a callback function pointer."""
+        match ty.kind:
+            case Opaque(name): is_callback_type(name)
+            case _: false
+
+    fn _collect_callback_typedefs_from_module(module: MirModule) -> [CallbackTypedef]:
+        """Collect all unique callback typedefs from exported functions in the module."""
+        var typedefs: [CallbackTypedef] = []
+        var seen_names: [text] = []
+
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c:
+                for param_ty in func.signature.params:
+                    match param_ty.kind:
+                        case Opaque(name):
+                            if is_callback_type(name):
+                                val cb = build_callback_typedef(name)
+                                if not seen_names.contains(cb.name):
+                                    seen_names.push(cb.name)
+                                    typedefs.push(cb)
+                        case _:
+                            pass_dn
+
+        # Also check methods on exported types
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                val c_name = sanitize_c_name(type_def.name)
+                val method_prefix = r"__simple_" + c_name + r"_"
+                for _fsym in module.functions.keys():
+                    val func = module.functions[_fsym]
+                    if func.name.starts_with(method_prefix):
+                        var pi = 1  # Skip self
+                        while pi < func.signature.params.len():
+                            match func.signature.params[pi].kind:
+                                case Opaque(name):
+                                    if is_callback_type(name):
+                                        val cb = build_callback_typedef(name)
+                                        if not seen_names.contains(cb.name):
+                                            seen_names.push(cb.name)
+                                            typedefs.push(cb)
+                                case _:
+                                    pass_dn
+                            pi = pi + 1
+
+        typedefs
 
 # ============================================================================
 # MIR-to-HirType Conversion for Layout

@@ -10,6 +10,7 @@
 use compiler.mir.mir_data.*
 use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.error_conversion.{is_result_type, is_result_type_name, map_result_type, emit_error_type_header_declarations, emit_result_function_declaration}
+use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, CallbackTypedef}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_c_static_asserts, generate_c_struct_def}
 use hir_definitions.{HirField}
 use hir_types.{HirType}
@@ -101,6 +102,19 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
     if has_repr_c_structs:
         lines.push(r"/* Runtime layout verification — call to assert ABI compatibility */")
         lines.push(r"void spl_verify_layouts(void);")
+        lines.push(r"")
+
+    # Callback typedefs — emitted before function declarations so they can
+    # be used as parameter types. Collected from all exported function signatures.
+    # Ownership: callbacks are "borrowed" — caller owns the function pointer,
+    # callee does not store it beyond the call.
+    val callback_typedefs = _collect_callback_typedefs(exported_fns, exported_types, module)
+    if callback_typedefs.len() > 0:
+        lines.push(r"/* Callback typedefs (borrowed — caller retains ownership) */")
+        var cb_idx = 0
+        while cb_idx < callback_typedefs.len():
+            lines.push(emit_callback_typedef(callback_typedefs[cb_idx]))
+            cb_idx = cb_idx + 1
         lines.push(r"")
 
     # Exported types — opaque handles and function declarations
@@ -379,6 +393,64 @@ fn _mir_type_to_hir_type(ty: MirType) -> HirType:
         case Unit: HirType.named("unit")
         case Ptr(_, _): HirType.named("usize")
         case _: HirType.named("i64")
+
+# ============================================================================
+# Callback Typedef Collection
+# ============================================================================
+
+fn _collect_callback_typedefs(exported_fns: [MirFunction], exported_types: [MirTypeDef], module: MirModule) -> [CallbackTypedef]:
+    """Collect all unique callback typedefs from exported function signatures.
+
+    Scans parameter types of all exported standalone functions and class methods.
+    For each Fn<(A) -> B> type (without captures), builds a CallbackTypedef.
+    Deduplicates by typedef name to avoid redundant declarations.
+    """
+    var typedefs: [CallbackTypedef] = []
+    var seen_names: [text] = []
+
+    # Check standalone exported functions
+    var fi = 0
+    while fi < exported_fns.len():
+        val func = exported_fns[fi]
+        var pi = 0
+        while pi < func.signature.params.len():
+            val param_ty = func.signature.params[pi]
+            val type_name = _mir_type_name(param_ty)
+            if is_callback_type(type_name):
+                val cb = build_callback_typedef(type_name)
+                if not seen_names.contains(cb.name):
+                    seen_names.push(cb.name)
+                    typedefs.push(cb)
+            pi = pi + 1
+        fi = fi + 1
+
+    # Check methods on exported types
+    var ti = 0
+    while ti < exported_types.len():
+        val type_def = exported_types[ti]
+        val c_name = _sanitize_c_name(type_def.name)
+        val method_prefix = r"__simple_" + c_name + r"_"
+        for _sym, func in module.functions:
+            if func.name.starts_with(method_prefix):
+                var mpi = 1  # Skip self
+                while mpi < func.signature.params.len():
+                    val param_ty = func.signature.params[mpi]
+                    val type_name = _mir_type_name(param_ty)
+                    if is_callback_type(type_name):
+                        val cb = build_callback_typedef(type_name)
+                        if not seen_names.contains(cb.name):
+                            seen_names.push(cb.name)
+                            typedefs.push(cb)
+                    mpi = mpi + 1
+        ti = ti + 1
+
+    typedefs
+
+fn _mir_type_name(ty: MirType) -> text:
+    """Extract the type name string from a MIR type for callback detection."""
+    match ty.kind:
+        case Opaque(name): name
+        case _: ""
 
 # ============================================================================
 # Export
