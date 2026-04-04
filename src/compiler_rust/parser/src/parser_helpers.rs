@@ -640,8 +640,6 @@ impl<'a> Parser<'a> {
             // Allow math keywords to be used as identifiers (e.g., struct Slice<T>)
             // These are only keywords inside m{} math blocks
             TokenKind::Slice => "Slice".to_string(),
-            TokenKind::Tensor => "Tensor".to_string(),
-            TokenKind::Grid => "Grid".to_string(),
             TokenKind::Flat => "Flat".to_string(),
             // Allow 'alias' to be used as identifier (e.g., `with resource as alias:`)
             // The 'alias' keyword is only used in type aliasing context: `alias NewType = OldType`

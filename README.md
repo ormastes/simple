@@ -1104,8 +1104,9 @@ scripts/t32q.shs gui-reopen
 scripts/t32q.shs off
 ```
 
-`gui-on` requires a real host X11 session (`DISPLAY`, `/tmp/.X11-unix`, and
-usually `XAUTHORITY`). For quick diagnostics use:
+`gui-on` uses the Docker/Podman TRACE32 GUI path with host X11 forwarding, so
+it requires a real host X11 session (`DISPLAY`, `/tmp/.X11-unix`, and usually
+`XAUTHORITY`). For quick diagnostics use:
 
 ```bash
 scripts/t32q.shs doctor
