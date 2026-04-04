@@ -47,7 +47,7 @@ Several requested items are real but only partial, experimental, or host-depende
 | Baremetal-friendly runtime/build | Implemented | Real build/test plumbing |
 | Remote baremetal test runner | Implemented with host-dependent lanes | Plumbing exists, CH32 composite execution is real, but repo-wide end-to-end status still depends on host tools and boards |
 | Test session sharing | Implemented | Test DB/run DB support |
-| UI sharing with TUI and GUI | Partial | Shared UI testing surface is real; one unified UI layer is not proven |
+| UI sharing with TUI and GUI | Implemented (scoped) | Shared UI contract (Protocol V1) across web backend and TUI-web proxy with cross-surface contract suite; not a full unified rendering layer |
 | AOP | Partial | Real compiler/runtime surface, but some stubs remain |
 | C/C++ bidirectional interface | Partial | Strong SFFI stack; bidirectional completeness not proven |
 | LLVM backend | Partial but real | Real backend and LLVM-oriented flows; still tool-dependent and not uniformly complete |
@@ -241,15 +241,18 @@ Qualification:
 
 ### 11. UI Sharing and UI Testing
 
-Implemented in part:
+Implemented (scoped):
 
-- shared UI test client: `src/lib/nogc_sync_mut/ui_test/client.spl`
-- testing guide explicitly describes shared test API across web backend and TUI web proxy: `doc/07_guide/testing/testing.md`
+- shared UI contract: [`doc/04_architecture/shared_ui_contract.md`](../04_architecture/shared_ui_contract.md)
+- shared UI test client: `src/lib/nogc_sync_mut/ui_test/client.spl` — click, type, submit, drag, focus_next/prev, check_enabled/selected
+- shared test API handler: `src/app/ui.test_api/handler.spl` — Protocol V1, structured error model, versioned responses
+- cross-surface contract suite: `test/system/ui/shared_ui_contract_spec.spl` — 16 tests across both surfaces
+- testing guide: `doc/07_guide/testing/testing.md`
 
 Qualification:
 
-- this is enough to claim shared UI testing surface
-- this is not enough to claim a fully unified TUI/GUI application layer
+- this is enough to claim shared UI contract across web backend and TUI-web proxy (Protocol V1)
+- this is not enough to claim a fully unified TUI/GUI application rendering layer
 
 ## Requested Claims That Need Downgrading
 

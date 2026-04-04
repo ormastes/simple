@@ -9,6 +9,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.backend.error_conversion.{is_result_type, is_result_type_name, map_result_type, emit_error_type_header_declarations, emit_result_function_declaration}
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_c_static_asserts, generate_c_struct_def}
 use hir_definitions.{HirField}
 use hir_types.{HirType}
@@ -56,6 +57,33 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
     lines.push(r"void spl_library_init(void);")
     lines.push(r"void spl_library_shutdown(void);")
     lines.push(r"")
+
+    # Error type declarations — emitted when any export returns Result<T,E>
+    # Check standalone exported functions
+    var has_result_fns = false
+    var rfi = 0
+    while rfi < exported_fns.len():
+        if is_result_type(exported_fns[rfi].signature.return_type):
+            has_result_fns = true
+        rfi = rfi + 1
+    # Also check methods on exported types
+    if not has_result_fns:
+        var rti = 0
+        while rti < exported_types.len():
+            val rt_type = exported_types[rti]
+            val rt_c_name = _sanitize_c_name(rt_type.name)
+            val rt_method_prefix = r"__simple_" + rt_c_name + r"_"
+            for _sym, func in module.functions:
+                if func.name.starts_with(rt_method_prefix):
+                    if is_result_type(func.signature.return_type):
+                        has_result_fns = true
+            rti = rti + 1
+    if has_result_fns:
+        val err_decls = emit_error_type_header_declarations()
+        var edi = 0
+        while edi < err_decls.len():
+            lines.push(err_decls[edi])
+            edi = edi + 1
 
     # Runtime layout verification — declared when repr(C) types are present
     var has_repr_c_structs = false
@@ -216,9 +244,11 @@ fn _fields_to_c_params(fields: [MirFieldDef]) -> text:
     params.join(", ")
 
 fn _emit_method_declaration(prefix: text, method_name: text, func: MirFunction) -> text:
-    """Emit a C function declaration for a class method."""
-    val ret_type = _mir_type_to_c_return(func.signature.return_type)
+    """Emit a C function declaration for a class method.
 
+    If the method returns Result<T,E>, declares with error out-parameter:
+        T prefix_method(self, args..., spl_error_t** err_out);
+    """
     # First param is self handle, rest are method params
     var params: [text] = []
     params.push(prefix + r"_t self")
@@ -230,11 +260,25 @@ fn _emit_method_declaration(prefix: text, method_name: text, func: MirFunction) 
         params.push(param_ty + " arg" + "{pi}")
         pi = pi + 1
 
+    # Check for Result<T,E> return type
+    if is_result_type(func.signature.return_type):
+        val type_name = match func.signature.return_type.kind:
+            case Opaque(name): name
+            case _: "Result"
+        val mapping = map_result_type(type_name)
+        val full_name = prefix + "_" + method_name
+        return emit_result_function_declaration(full_name, mapping.ok_c_type, params, mapping.is_void_ok)
+
+    val ret_type = _mir_type_to_c_return(func.signature.return_type)
     val params_str = params.join(", ")
     ret_type + " " + prefix + "_" + method_name + "(" + params_str + ");"
 
 fn _emit_function_declaration(func: MirFunction) -> text:
-    """Emit a C function declaration for a standalone exported function."""
+    """Emit a C function declaration for a standalone exported function.
+
+    If the function returns Result<T,E>, declares with error out-parameter:
+        T fn_name(args..., spl_error_t** err_out);
+    """
     val internal_name = func.name
     val export_name = if func.export_name != "":
         func.export_name
@@ -244,6 +288,22 @@ fn _emit_function_declaration(func: MirFunction) -> text:
             "spl_" + internal_name.replace(r"__simple_", "")
         else:
             "spl_" + _sanitize_c_name(internal_name)
+
+    # Check for Result<T,E> return type
+    if is_result_type(func.signature.return_type):
+        val type_name = match func.signature.return_type.kind:
+            case Opaque(name): name
+            case _: "Result"
+        val mapping = map_result_type(type_name)
+
+        var params: [text] = []
+        var pi = 0
+        while pi < func.signature.params.len():
+            val param_ty = _mir_type_to_c_param(func.signature.params[pi])
+            params.push(param_ty + " arg" + "{pi}")
+            pi = pi + 1
+
+        return emit_result_function_declaration(export_name, mapping.ok_c_type, params, mapping.is_void_ok)
 
     val ret_type = _mir_type_to_c_return(func.signature.return_type)
 

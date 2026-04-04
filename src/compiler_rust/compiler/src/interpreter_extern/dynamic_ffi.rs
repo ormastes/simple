@@ -300,6 +300,144 @@ fn try_call_satellite(prefix: &str, name: &str, evaluated_args: &[Value]) -> Opt
     call_fptr(fptr, name, evaluated_args)
 }
 
+/// Resolved class bundle: constructor, destructor, and method function pointers.
+#[derive(Debug, Clone)]
+pub struct ResolvedClassBundle {
+    pub class_name: String,
+    pub constructor_fptr: usize,
+    pub destructor_fptr: usize,
+    /// Method name -> function pointer address
+    pub method_fptrs: HashMap<String, usize>,
+}
+
+/// Global cache of resolved class bundles: "library_path::ClassName" -> bundle.
+static RESOLVED_CLASS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, ResolvedClassBundle>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve all symbols for a manifest class entry from a loaded library.
+///
+/// Given a library handle and a `PluginClassEntry`, this function resolves
+/// the constructor, destructor, and all method symbols via dlsym and returns
+/// them as a `ResolvedClassBundle`.
+///
+/// Returns `None` if the library handle is 0 or required symbols are missing.
+pub fn resolve_manifest_class(
+    library_path: &str,
+    class: &crate::plugin_manifest::PluginClassEntry,
+) -> Option<ResolvedClassBundle> {
+    // Check cache first
+    let cache_key = format!("{}::{}", library_path, class.name);
+    {
+        let cache = RESOLVED_CLASS_CACHE.lock().ok()?;
+        if let Some(bundle) = cache.get(&cache_key) {
+            return Some(bundle.clone());
+        }
+    }
+
+    // Ensure the library is loaded
+    let mut libraries = MANIFEST_LIBRARIES.lock().ok()?;
+    let state = libraries
+        .entry(library_path.to_string())
+        .or_insert_with(|| SatelliteLibrary {
+            handle: 0,
+            attempted: false,
+            symbols: HashMap::new(),
+        });
+
+    if !state.attempted {
+        state.attempted = true;
+        state.handle = try_dlopen(library_path).unwrap_or(0);
+    }
+
+    if state.handle == 0 {
+        return None;
+    }
+
+    let handle = state.handle;
+    drop(libraries);
+
+    // Resolve constructor
+    let constructor_fptr = dlsym_lookup(handle, &class.constructor)?;
+
+    // Resolve destructor
+    let destructor_fptr = dlsym_lookup(handle, &class.destructor)?;
+
+    // Resolve all methods
+    let mut method_fptrs = HashMap::new();
+    for method in &class.methods {
+        let fptr = dlsym_lookup(handle, &method.symbol)?;
+        method_fptrs.insert(method.name.clone(), fptr);
+    }
+
+    let bundle = ResolvedClassBundle {
+        class_name: class.name.clone(),
+        constructor_fptr,
+        destructor_fptr,
+        method_fptrs,
+    };
+
+    // Cache the bundle
+    if let Ok(mut cache) = RESOLVED_CLASS_CACHE.lock() {
+        cache.insert(cache_key, bundle.clone());
+    }
+
+    Some(bundle)
+}
+
+/// Try to call a class-related symbol (constructor, destructor, or method) from
+/// a manifest library. The symbol name is matched against class entries to find
+/// the correct function pointer.
+///
+/// Returns `Some(Ok(Value))` on success, `Some(Err(...))` on failure, or `None`
+/// if the symbol is not a class symbol.
+fn try_call_manifest_class_method(
+    library_path: &str,
+    name: &str,
+    evaluated_args: &[Value],
+) -> Option<Result<Value, CompileError>> {
+    // Look up class entries from the manifest
+    let manifest_cache = {
+        let cache = crate::plugin_manifest::PLUGIN_MANIFEST_CACHE.lock().ok()?;
+        cache.clone()
+    };
+
+    if !manifest_cache.loaded {
+        return None;
+    }
+
+    for plugin in &manifest_cache.manifest.plugins {
+        if plugin.library != library_path {
+            continue;
+        }
+        for class in &plugin.classes {
+            // Check constructor
+            if class.constructor == name {
+                if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                    return call_fptr(bundle.constructor_fptr, name, evaluated_args);
+                }
+            }
+            // Check destructor
+            if class.destructor == name {
+                if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                    return call_fptr(bundle.destructor_fptr, name, evaluated_args);
+                }
+            }
+            // Check methods
+            for method in &class.methods {
+                if method.symbol == name {
+                    if let Some(bundle) = resolve_manifest_class(library_path, class) {
+                        if let Some(&fptr) = bundle.method_fptrs.get(&method.name) {
+                            return call_fptr(fptr, name, evaluated_args);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Try to call a function from a library explicitly mapped by the plugin manifest.
 fn try_call_manifest_library(
     library_path: &str,

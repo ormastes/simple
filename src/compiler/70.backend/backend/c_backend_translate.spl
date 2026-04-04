@@ -714,6 +714,9 @@ class MirToC:
         Generates a C ABI function that forwards to the internal __simple_ function.
         The wrapper uses the export_name if set, otherwise derives a clean name
         by stripping the __simple_ prefix.
+
+        If the function returns Result<T,E>, the wrapper uses error out-parameter
+        pattern: T func_name(args..., spl_error_t** err_out)
         """
         val internal_name = func.name
         val export_name = self.derive_export_name(func.export_name, internal_name)
@@ -739,6 +742,23 @@ class MirToC:
 
         val params_str = if wrapper_params.len() == 0: "void" else: wrapper_params.join(", ")
         val args_str = forward_args.join(", ")
+
+        # Check if this function returns Result<T,E>
+        if is_result_type(func.signature.return_type):
+            # Extract Result type info from the opaque name
+            val type_name = match func.signature.return_type.kind:
+                case Opaque(name): name
+                case _: "Result"
+            val mapping = map_result_type(type_name)
+
+            # Emit error-converting wrapper
+            val wrapper_code = emit_error_converting_wrapper(
+                export_name, internal_name,
+                mapping.ok_c_type, params_str, args_str,
+                mapping.is_void_ok
+            )
+            self.builder.emit_raw(wrapper_code)
+            return
 
         # Handle text return type: internal returns spl_text, wrapper returns const char*
         val is_text_return = self.is_text_type(func.signature.return_type)
@@ -822,7 +842,11 @@ class MirToC:
         self.builder.emit_raw(r"")
 
     me emit_class_method_wrapper(prefix: text, c_name: text, method_name: text, func: MirFunction):
-        """Emit spl_ClassName_method(spl_ClassName_t self, args...) -> ret wrapper for a class method."""
+        """Emit spl_ClassName_method(spl_ClassName_t self, args...) -> ret wrapper for a class method.
+
+        If the method returns Result<T,E>, generates an error-converting wrapper
+        with spl_error_t** err_out parameter instead.
+        """
         val internal_name = func.name
         val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
         val is_void = ret_ty == "void"
@@ -851,6 +875,22 @@ class MirToC:
 
         val params_str = wrapper_params.join(", ")
         val args_str = forward_args.join(", ")
+
+        # Check if this method returns Result<T,E>
+        if is_result_type(func.signature.return_type):
+            val type_name = match func.signature.return_type.kind:
+                case Opaque(name): name
+                case _: "Result"
+            val mapping = map_result_type(type_name)
+            val full_export_name = prefix + "_" + method_name
+
+            val wrapper_code = emit_error_converting_wrapper(
+                full_export_name, internal_name,
+                mapping.ok_c_type, params_str, args_str,
+                mapping.is_void_ok
+            )
+            self.builder.emit_raw(wrapper_code)
+            return
 
         self.builder.emit_raw(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + prefix + r"_" + method_name + r"(" + params_str + r") {")
         if is_void:

@@ -24,7 +24,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Multiple execution paths**: interpreter, loader, SMF/module loading, and native/LLVM-oriented compilation paths coexist in one system.
 - **Baremetal-oriented build and test plumbing**: QEMU, semihosting, remote baremetal flows, and adapter-backed hardware lanes are built into the repo story.
 - **Tooling-aware language rules**: Tree-sitter integration, primitive-public-API linting, traceability tooling, and language statistics are part of the platform.
-- **Shared UI testing surface**: the UI test client can drive both web backends and the TUI web proxy through one HTTP-oriented test interface.
+- **Shared UI contract across supported surfaces**: one HTTP-based test protocol (Protocol V1) with `UITestClient` drives both the web backend and the TUI-web proxy through a shared `handle_test_request` handler, verified by a cross-surface contract suite. Contract: [doc/04_architecture/shared_ui_contract.md](doc/04_architecture/shared_ui_contract.md)
 
 ## Feature Status Highlights
 
@@ -46,7 +46,7 @@ Implemented, but best described with qualifiers:
 - `m{}` / `loss{}` / `nograd{}` are real and usable, but the broader DL story is still evolving
 - LLVM support is real, but some paths still depend on external LLVM tooling
 - GC and no-GC runtime families: 5 public families (`common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`) with compiler boundary enforcement, interpreter warnings, and target preset mapping. Support matrix: [doc/04_architecture/runtime_family_support_matrix.md](doc/04_architecture/runtime_family_support_matrix.md)
-- Shared UI testing across web and TUI-web surfaces is real, but this is not yet one finished unified UI layer
+- Shared UI contract across web backend and TUI-web proxy (Protocol V1): shared handler, structured error model, stable element IDs, cross-surface contract suite — but this is a shared test protocol, not a full unified UI rendering layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
 Complete with bounded scope:

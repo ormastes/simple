@@ -13,6 +13,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_cpp_error_method_wrapper, emit_cpp_error_free_function_wrapper}
 use compiler.types.type_layout.{layoutattr_c_repr, verify_c_layout, generate_cpp_static_asserts}
 use hir_definitions.{HirField}
 use hir_types.{HirType}
@@ -46,6 +47,7 @@ fn emit_cpp_header(lib_name: text, exported_types: [MirTypeDef], exported_fns: [
     # Standard C++ includes
     lines.push(r"#include <memory>")
     lines.push(r"#include <string>")
+    lines.push(r"#include <stdexcept>")
     lines.push(r"#include <utility>")
     lines.push(r"#include <cstddef>")
     lines.push(r"")
@@ -280,7 +282,11 @@ fn _emit_constructor(c_name: text, prefix: text, fields: [MirFieldDef]) -> [text
     lines
 
 fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [text]:
-    """Emit a C++ method that delegates to the C function."""
+    """Emit a C++ method that delegates to the C function.
+
+    If the method returns Result<T,E>, generates an error-converting wrapper
+    that catches spl_error_t and throws std::runtime_error.
+    """
     var lines: [text] = []
 
     val ret_type = _mir_type_to_cpp_return(func.signature.return_type)
@@ -304,6 +310,15 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
             c_args.push("arg" + "{pi}")
         pi = pi + 1
 
+    # Check for Result<T,E> return type — generate error-converting wrapper
+    if is_result_type(func.signature.return_type):
+        val type_name = match func.signature.return_type.kind:
+            case Opaque(name): name
+            case _: "Result"
+        val mapping = map_result_type(type_name)
+        val ok_cpp_type = _simple_type_to_cpp(mapping.ok_type_name)
+        return emit_cpp_error_method_wrapper(method_name, c_fn_name, ok_cpp_type, cpp_params, c_args, mapping.is_void_ok)
+
     val params_str = cpp_params.join(", ")
     val args_str = c_args.join(", ")
 
@@ -323,7 +338,11 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
     lines
 
 fn _emit_function_wrapper(func: MirFunction) -> [text]:
-    """Emit a C++ free function wrapper for an exported standalone function."""
+    """Emit a C++ free function wrapper for an exported standalone function.
+
+    If the function returns Result<T,E>, generates an error-converting wrapper
+    that catches spl_error_t and throws std::runtime_error.
+    """
     var lines: [text] = []
 
     val internal_name = func.name
@@ -357,6 +376,15 @@ fn _emit_function_wrapper(func: MirFunction) -> [text]:
             cpp_params.push(cpp_ty + " arg" + "{pi}")
             c_args.push("arg" + "{pi}")
         pi = pi + 1
+
+    # Check for Result<T,E> return type — generate error-converting wrapper
+    if is_result_type(func.signature.return_type):
+        val type_name = match func.signature.return_type.kind:
+            case Opaque(name): name
+            case _: "Result"
+        val mapping = map_result_type(type_name)
+        val ok_cpp_type = _simple_type_to_cpp(mapping.ok_type_name)
+        return emit_cpp_error_free_function_wrapper(cpp_name, export_name, ok_cpp_type, cpp_params, c_args, mapping.is_void_ok)
 
     val params_str = cpp_params.join(", ")
     val args_str = c_args.join(", ")
@@ -398,6 +426,28 @@ fn _emit_cpp_layout_asserts(type_def: MirTypeDef) -> text:
             generate_cpp_static_asserts(verification)
         case _:
             ""
+
+fn _simple_type_to_cpp(type_name: text) -> text:
+    """Map a Simple type name to C++ type string for Result decomposition."""
+    match type_name:
+        case "i64": "int64_t"
+        case "i32": "int32_t"
+        case "i16": "int16_t"
+        case "i8": "int8_t"
+        case "u64": "uint64_t"
+        case "u32": "uint32_t"
+        case "u16": "uint16_t"
+        case "u8": "uint8_t"
+        case "f64": "double"
+        case "f32": "float"
+        case "bool": "int64_t"
+        case "text": "std::string"
+        case "Text": "std::string"
+        case "str": "std::string"
+        case "Unit": "void"
+        case "unit": "void"
+        case "()": "void"
+        case _: "void*"
 
 fn _mir_type_to_hir_type(ty: MirType) -> HirType:
     match ty.kind:
