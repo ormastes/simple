@@ -7,7 +7,7 @@
  * The existing Simple rendering infrastructure:
  *   src/lib/math_repr.spl    - Math expression parser with to_pretty(), render_latex_raw(), to_md()
  *   src/lib/mathjax.spl      - MathJax SFFI wrapper for SVG/HTML rendering
- *   src/app/lsp/handlers/hover.spl - LSP hover handler that renders math blocks server-side
+ *   src/app/cli/query_visibility.spl - query/LSP hover path that renders math blocks server-side
  *   src/app/lsp/             - Full LSP server with hover, completion, diagnostics, etc.
  *
  * This module provides local TypeScript equivalents (via mathConverter.ts) for
@@ -31,7 +31,7 @@ export { simpleToLatex, simpleToUnicode } from './mathConverter';
  * @param context - Extension context
  * @param onLspStateChanged - Optional callback that receives a function to update
  *   LSP running state. When the LSP is running, the hover provider defers to
- *   the LSP hover handler (src/app/lsp/handlers/hover.spl) which provides
+ *   the query/LSP hover path which provides
  *   full math rendering.
  */
 export function activateMathFeatures(

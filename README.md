@@ -19,7 +19,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Verification-native workflow**: SSpec BDD tests, SDoctest executable docs, coverage, traceability checks, and generated spec docs are part of the toolchain rather than bolted on.
 - **MDSOC architecture support**: virtual capsules, manifests, and architecture-aware repository structure are first-class concepts.
 - **Parser-friendly macro system**: macro definitions, expansion, validation, and hygiene are compiler features rather than editor-hostile text substitution.
-- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (VSCode highlighting with nested brace support, Neovim inline Unicode preview with conceal).
+- **Math-oriented syntax blocks**: `m{}`, `loss{}`, and `nograd{}` are implemented syntax with parsing, evaluation, five rendering backends (text, debug, Unicode, LaTeX, Markdown), and editor integration (query/LSP hover, VSCode highlighting/preview, Neovim inline Unicode preview with conceal).
 - **SDN-backed textual databases**: tests, todos, dashboards, and other project metadata are stored through repo-native SDN data flows.
 - **Multiple execution paths**: interpreter, loader, SMF/module loading, and native/LLVM-oriented compilation paths coexist in one system.
 - **Baremetal-oriented build and test plumbing**: QEMU, semihosting, remote baremetal flows, and adapter-backed hardware lanes are built into the repo story.
@@ -30,7 +30,7 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 
 Implemented and safe to advertise:
 - SSpec, SDoctest, coverage, traceability checks, and generated spec docs
-- Language-level mock policy: system test mock ban, HAL-only and custom pattern modes
+- SSpec mock policy: system-test mock ban, HAL-only and custom pattern modes
 - Self-hosted staged compiler, interpreter, and loader architecture
 - MDSOC manifests and architecture-focused project structure
 - Parser-friendly macros with validation and hygiene

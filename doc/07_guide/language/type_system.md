@@ -270,6 +270,31 @@ impl Milliseconds:
         return (n * 1000)_ms
 ```
 
+### Cross-Module Semantic Wrappers
+
+Use `unit` wrappers directly in public APIs across module boundaries:
+
+```simple
+# src/demo/user.spl
+unit UserId: i64 as uid
+
+pub fn current_user() -> UserId:
+    return 7_uid
+
+pub fn bump(user_id: UserId) -> UserId:
+    return (user_id.value() + 1)_uid
+
+# app.spl
+use demo.user.{UserId, current_user, bump}
+
+fn main():
+    val user_id: UserId = current_user()
+    print bump(user_id).to_string()
+```
+
+This is the supported pattern to give primitive-backed values domain meaning.
+Prefer this over claiming built-in primitive redefinition.
+
 ### Enum for Finite Modes
 
 Use enums instead of magic numbers:

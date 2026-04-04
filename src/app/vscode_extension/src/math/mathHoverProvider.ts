@@ -6,8 +6,9 @@
  * - The math expression formatted nicely
  * - A link to open the preview panel
  *
- * IMPORTANT: The LSP server (src/app/lsp/handlers/hover.spl) already provides
- * full math hover with render_latex_raw() and to_pretty() from the Simple runtime.
+ * IMPORTANT: The active LSP hover path ultimately routes through
+ * `src/app/cli/query_visibility.spl hover`, which now provides server-side
+ * math hover with render_latex_raw() and to_pretty() from the Simple runtime.
  * This provider acts as a FALLBACK when the LSP is not connected. When the LSP
  * is running, it handles math hover natively and this provider defers to it.
  */
@@ -23,8 +24,8 @@ export class MathHoverProvider implements vscode.HoverProvider {
 
     /**
      * Set whether the LSP client is currently running.
-     * When the LSP is running, its hover handler (src/app/lsp/handlers/hover.spl)
-     * provides math block rendering, so this provider defers to it.
+     * When the LSP is running, the query-backed hover path provides math block
+     * rendering, so this provider defers to it.
      */
     public setLspRunning(running: boolean): void {
         this.lspRunning = running;
@@ -33,8 +34,8 @@ export class MathHoverProvider implements vscode.HoverProvider {
     /**
      * Provide hover information for math blocks.
      *
-     * When the LSP is running, returns null to let the LSP hover handler
-     * (src/app/lsp/handlers/hover.spl) provide the response instead.
+     * When the LSP is running, returns null to let the query/LSP hover path
+     * provide the response instead.
      * Acts as fallback when LSP is not connected.
      */
     public provideHover(
@@ -42,9 +43,8 @@ export class MathHoverProvider implements vscode.HoverProvider {
         position: vscode.Position,
         _token: vscode.CancellationToken
     ): vscode.ProviderResult<vscode.Hover> {
-        // When LSP is running, defer to its hover handler which provides
-        // full rendering via render_latex_raw() and to_pretty() from
-        // src/app/lsp/handlers/hover.spl
+        // When LSP is running, defer to the query/LSP hover path which
+        // provides full rendering via render_latex_raw() and to_pretty().
         if (this.lspRunning) {
             return null;
         }

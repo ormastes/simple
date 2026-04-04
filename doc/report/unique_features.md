@@ -55,10 +55,10 @@ Several requested items are real but only partial, experimental, or host-depende
 | GC and no-GC mode support | Partial but substantial | Multiple runtime families exist, completeness varies by path |
 | Language statistics | Implemented | CLI/tooling support exists |
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
-| Language-level ban on mocks in system tests | Not verified | Policy docs say “no mocks”, but hard enforcement was not confirmed |
+| Language-level mock policy in system tests | Implemented with scope | Executor-path proof now covers system-test bans plus unit-test override behavior |
 | Declarative argparser integrated into language | Partial but real | `cli Name:` parser, interpreter evaluation, and backend codegen exist; this is not yet the uniform CLI path for every app |
 | Semantic wrapper / unit-type patterns | Implemented | `unit`-based semantic types are documented and used across stdlib-facing APIs |
-| VS Code / Neovim rendering for math/loss blocks | Unproven README claim | Editor tooling exists, but a polished integrated rendering feature should not be marketed without dedicated evidence |
+| VS Code / Neovim math rendering | Implemented with qualifiers | Query/LSP hover, VS Code inline decoration, preview panel, and Neovim conceal are real; broader polished editor UX is still evolving |
 
 ## Evidence By Area
 
@@ -202,12 +202,42 @@ Implemented:
 - lifetime support: `src/compiler/55.borrow/borrow_check/lifetime.spl`
 - semantic wrapper / unit-type guidance: `doc/07_guide/language/type_system.md`
 - semantic wrapper rollout evidence: `doc/09_report/misc/primitive_api_project_closure.md`
+- cross-module wrapper proof: `test/integration/app/unit_wrapper_module_boundary_spec.spl`
 
 Qualification:
 
 - a completed polished borrowing user guide was not verified
 - “limited scope borrowing and its guide document and generated spec” is too strong as a README claim
 - the repo evidence is for `unit`-style semantic wrappers, not built-in primitive redefinition
+
+### 10a. Mock Policy Enforcement
+
+Implemented with scope:
+
+- executor integration proof: `test/integration/spec/mock_policy_execution_spec.spl`
+- runtime policy hooks: `src/compiler_rust/lib/std/src/spec/mock.spl`
+- executor wiring: `src/compiler_rust/lib/std/src/spec/runner/executor.spl`
+- lower-level enforcement/unit coverage: `test/unit/lib/nogc_sync_mut/mock_policy_spec.spl`
+
+Qualification:
+
+- this is a scoped SSpec/system-test feature, not a universal language-wide impossibility result
+- the safe claim is that system-test execution bans mocks by default while unit-test paths can opt back in
+
+### 10b. Math Block Editor Rendering
+
+Implemented with qualifiers:
+
+- query/LSP hover surface: `src/app/cli/query_visibility.spl`
+- query hover regression: `test/integration/app/query_visibility_surfaces_spec.spl`
+- VS Code inline decoration/hover/preview: `src/app/vscode_extension/src/math/`
+- Neovim conceal/preview: `src/app/nvim_plugin/lua/simple/math.lua`
+- rendering core: `src/lib/common/math_repr.spl`
+
+Qualification:
+
+- the editor story is now real enough to advertise with scope
+- avoid calling it a fully polished unified editor experience; keep the wording specific to hover, decorations, preview, and Neovim conceal
 
 ### 11. UI Sharing and UI Testing
 
@@ -229,9 +259,7 @@ These should not be advertised as complete in README:
 - remote interpreter / remote baremetal end-to-end execution on all lanes
 - VHDL backend support as production-ready
 - C/C++ bidirectional interop as complete
-- language-level prevention of mocks in system tests
-- easy custom primitive support
-- VS Code / Neovim rendering for math/loss blocks as a completed feature
+- custom primitive redefinition
 
 ## Recommended README Positioning
 
@@ -248,6 +276,8 @@ Use Simple's differentiators in three tiers:
 2. Strong but scoped
 - Tree-sitter integration
 - math/loss/nograd blocks
+- system-test mock policy
+- semantic wrapper / unit-type patterns
 - UI test sharing between web and TUI-web surfaces
 - primitive API linting
 - mmap-backed loader support
