@@ -13,6 +13,33 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+/// Safe canonicalize that avoids `libc::realpath` which segfaults in
+/// self-hosted Cranelift-compiled binaries.  Falls back to manual
+/// absolute-path resolution when the stdlib call fails or when running
+/// in a self-hosted context.
+fn safe_canonicalize(path: &Path) -> PathBuf {
+    // Try stdlib first (works in Rust-seed binary)
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    // Fallback: make absolute and normalize components
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    // Resolve . and ..
+    let mut out = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// CLI-provided runtime library directory override.
 /// Set before building; read by `find_native_all_library()` and `find_runtime_library()`.
 static RUNTIME_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
@@ -225,7 +252,7 @@ impl NativeProjectBuilder {
 
     /// Set the entry file whose `main` function becomes the program entry point (`spl_main`).
     pub fn entry_file(mut self, path: PathBuf) -> Self {
-        self.entry_file = Some(std::fs::canonicalize(&path).unwrap_or(path));
+        self.entry_file = Some(safe_canonicalize(&path));
         self
     }
 
@@ -246,11 +273,11 @@ impl NativeProjectBuilder {
     }
 
     fn effective_source_root_for(&self, path: &Path) -> PathBuf {
-        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical_path = safe_canonicalize(path);
         let mut best: Option<PathBuf> = None;
         let mut best_depth = 0usize;
         for dir in &self.source_dirs {
-            let canonical_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+            let canonical_dir = safe_canonicalize(dir);
             if canonical_path.starts_with(&canonical_dir) {
                 let depth = canonical_dir.components().count();
                 if depth > best_depth {
@@ -268,7 +295,7 @@ impl NativeProjectBuilder {
         }
         self.source_dirs
             .first()
-            .and_then(|dir| std::fs::canonicalize(dir).ok())
+            .map(|dir| safe_canonicalize(dir))
             .unwrap_or_else(|| self.source_root.clone())
     }
 
@@ -459,7 +486,7 @@ impl NativeProjectBuilder {
         if use_incremental {
             // Canonicalize entry early so we can force-recompile the entry file
             let canon_entry_for_cache: Option<PathBuf> =
-                self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+                self.entry_file.as_ref().map(|p| safe_canonicalize(p));
             for (i, (path, source)) in file_sources.iter().enumerate() {
                 // Skip symlink aliases — only compile each physical file once
                 if !compile_indices.contains(&i) {
@@ -497,7 +524,7 @@ impl NativeProjectBuilder {
         }
 
         // Canonicalize the entry file path for comparison during compilation
-        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
         if self.config.verbose {
             match &canonical_entry {
                 Some(p) => eprintln!("Canonical entry: {}", p.display()),
@@ -737,7 +764,7 @@ impl NativeProjectBuilder {
             }
         }
         if let Some(entry_file) = &self.entry_file {
-            let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.clone());
+            let canonical_entry = safe_canonicalize(entry_file);
             if !files.iter().any(|path| same_file_path(path, &canonical_entry)) {
                 files.push(entry_file.clone());
             }
@@ -747,7 +774,7 @@ impl NativeProjectBuilder {
     }
 
     fn discover_reachable_files(&self, entry_file: &Path) -> Result<Vec<PathBuf>, String> {
-        let canonical_entry = std::fs::canonicalize(entry_file).unwrap_or_else(|_| entry_file.to_path_buf());
+        let canonical_entry = safe_canonicalize(entry_file);
 
         // Build one resolver per source dir so imports can cross source boundaries.
         // E.g. entry in --source src/os can import from --source src/lib.
@@ -755,7 +782,7 @@ impl NativeProjectBuilder {
             .source_dirs
             .iter()
             .map(|dir| {
-                let canonical_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+                let canonical_dir = safe_canonicalize(dir);
                 ModuleResolver::new(self.project_root.clone(), canonical_dir)
             })
             .collect();
@@ -770,7 +797,7 @@ impl NativeProjectBuilder {
         let canonical_source_dirs: Vec<PathBuf> = self
             .source_dirs
             .iter()
-            .filter_map(|d| std::fs::canonicalize(d).ok())
+            .map(|d| safe_canonicalize(d))
             .collect();
 
         let mut queue = VecDeque::from([canonical_entry.clone()]);
@@ -778,7 +805,7 @@ impl NativeProjectBuilder {
         let mut files = Vec::new();
 
         while let Some(path) = queue.pop_front() {
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let canonical = safe_canonicalize(&path);
             if !seen.insert(canonical.clone()) {
                 continue;
             }
@@ -799,7 +826,7 @@ impl NativeProjectBuilder {
             let mut found_deps: Vec<PathBuf> = Vec::new();
             for resolver in &mut resolvers {
                 for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
-                    let dep_canonical = std::fs::canonicalize(&dep).unwrap_or(dep);
+                    let dep_canonical = safe_canonicalize(&dep);
                     if !found_deps.iter().any(|existing| same_file_path(existing, &dep_canonical)) {
                         found_deps.push(dep_canonical);
                     }
@@ -888,7 +915,7 @@ impl NativeProjectBuilder {
                             let spl_path = src_dir.join(&rel_path).with_extension("spl");
                             if spl_path.is_file() {
                                 let dep_canonical =
-                                    std::fs::canonicalize(&spl_path).unwrap_or(spl_path);
+                                    safe_canonicalize(&spl_path);
                                 if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
                                     found_deps.push(dep_canonical);
                                 }
@@ -898,7 +925,7 @@ impl NativeProjectBuilder {
                             let mod_path = src_dir.join(&rel_path).join("mod.spl");
                             if mod_path.is_file() {
                                 let dep_canonical =
-                                    std::fs::canonicalize(&mod_path).unwrap_or(mod_path);
+                                    safe_canonicalize(&mod_path);
                                 if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
                                     found_deps.push(dep_canonical);
                                 }
@@ -908,7 +935,7 @@ impl NativeProjectBuilder {
                             let init_path = src_dir.join(&rel_path).join("__init__.spl");
                             if init_path.is_file() {
                                 let dep_canonical =
-                                    std::fs::canonicalize(&init_path).unwrap_or(init_path);
+                                    safe_canonicalize(&init_path);
                                 if !found_deps.iter().any(|e| same_file_path(e, &dep_canonical)) {
                                     found_deps.push(dep_canonical);
                                 }
@@ -937,7 +964,7 @@ impl NativeProjectBuilder {
         let mut seen = std::collections::HashSet::new();
         let mut indices = Vec::new();
         for (i, path) in files.iter().enumerate() {
-            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let canonical = safe_canonicalize(path);
             if seen.insert(canonical) {
                 indices.push(i);
             }
@@ -2160,7 +2187,7 @@ fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, Strin
         return Ok(lib.to_path_buf());
     }
 
-    let archive_path = std::fs::canonicalize(lib).unwrap_or_else(|_| lib.to_path_buf());
+    let archive_path = safe_canonicalize(lib);
 
     let extract_dir = temp_dir.join("_rt_ctor_strip");
     std::fs::create_dir_all(&extract_dir).map_err(|e| format!("mkdir: {e}"))?;
@@ -3049,13 +3076,11 @@ fn mangle_mir(
 /// Returns the most specific (deepest) source dir that contains the file,
 /// or falls back to the fallback root.
 fn source_root_for_file(file_path: &Path, source_dirs: &[PathBuf], fallback: &Path) -> PathBuf {
-    let canonical_path = std::fs::canonicalize(file_path)
-        .unwrap_or_else(|_| file_path.to_path_buf());
+    let canonical_path = safe_canonicalize(file_path);
     let mut best: Option<PathBuf> = None;
     let mut best_depth = 0usize;
     for dir in source_dirs {
-        let canonical_dir = std::fs::canonicalize(dir)
-            .unwrap_or_else(|_| dir.clone());
+        let canonical_dir = safe_canonicalize(dir);
         if canonical_path.starts_with(&canonical_dir) {
             let depth = canonical_dir.components().count();
             if depth > best_depth {
@@ -3533,31 +3558,24 @@ fn compile_file_safe(
 /// Check if a file path matches the canonical entry file path.
 fn is_entry_file(file_path: &Path, canonical_entry: &Option<PathBuf>) -> bool {
     match canonical_entry {
-        Some(entry) => match std::fs::canonicalize(file_path) {
-            Ok(p) => {
-                let is_entry = p == *entry;
-                if is_entry {
-                    return true;
-                }
-                if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
-                    eprintln!("[entry-debug] no match: {} vs {}", p.display(), entry.display());
-                }
-                false
+        Some(entry) => {
+            let p = safe_canonicalize(file_path);
+            let is_entry = p == *entry;
+            if is_entry {
+                return true;
             }
-            Err(e) => {
-                if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
-                    eprintln!("[entry-debug] canonicalize failed for {}: {}", file_path.display(), e);
-                }
-                false
+            if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
+                eprintln!("[entry-debug] no match: {} vs {}", p.display(), entry.display());
             }
+            false
         },
         None => false,
     }
 }
 
 fn same_file_path(a: &Path, b: &Path) -> bool {
-    let canon_a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let canon_b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
+    let canon_a = safe_canonicalize(a);
+    let canon_b = safe_canonicalize(b);
     canon_a == canon_b
 }
 
@@ -3582,7 +3600,7 @@ fn extract_reachable_module_paths(
                 module_segments.push(name.clone());
                 let module_path = ModulePath::new(module_segments);
                 if let Ok(resolved) = resolver.resolve(&module_path, from_file) {
-                    return Some(std::fs::canonicalize(&resolved.path).unwrap_or(resolved.path));
+                    return Some(safe_canonicalize(&resolved.path));
                 }
             }
             _ => {}
@@ -3590,7 +3608,7 @@ fn extract_reachable_module_paths(
         resolver
             .resolve(path, from_file)
             .ok()
-            .map(|resolved| std::fs::canonicalize(&resolved.path).unwrap_or(resolved.path))
+            .map(|resolved| safe_canonicalize(&resolved.path))
     }
 
     fn push_dep(
@@ -3702,7 +3720,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
         if path.to_string_lossy().contains("check.spl") {
             continue;
         }
-        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical_path = safe_canonicalize(path);
         if !seen_canonical.insert(canonical_path) {
             continue; // skip symlink duplicate — already indexed under first-seen path
         }
@@ -3861,7 +3879,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
     let mut re_exports: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut seen_canonical_reexport = HashSet::new();
     for (path, source) in file_sources {
-        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical_path = safe_canonicalize(path);
         if !seen_canonical_reexport.insert(canonical_path) {
             continue; // skip symlink duplicate
         }

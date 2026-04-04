@@ -57,10 +57,7 @@ fn extract_rt_string_array(arr: RuntimeValue) -> Vec<String> {
 /// Returns exit code (0 = success).
 #[no_mangle]
 pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
-    let args_raw: u64 = unsafe { std::mem::transmute(args) };
-    eprintln!("[rt_native_build] args raw=0x{:x} is_heap={} tag={}", args_raw, args.is_heap(), args.tag());
     let args_vec = extract_rt_string_array(args);
-    eprintln!("[rt_native_build] extracted {} args: {:?}", args_vec.len(), args_vec);
 
     let mut source_dirs: Vec<PathBuf> = Vec::new();
     let mut output: Option<PathBuf> = None;
@@ -77,8 +74,17 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut runtime_path: Option<PathBuf> = None;
     let mut entry_closure = false;
 
-    // Parse arguments (skip "native-build" at index 0)
-    let mut i = 1;
+    // Parse arguments — skip binary name and "native-build" command prefix.
+    // The args may come as ["native-build", ...] or ["path/to/simple", "native-build", ...].
+    let mut i = 0;
+    // Skip past the binary name and/or "native-build" command word
+    while i < args_vec.len() {
+        if args_vec[i] == "native-build" {
+            i += 1; // skip "native-build" itself
+            break;
+        }
+        i += 1; // skip binary name or other preamble
+    }
     while i < args_vec.len() {
         match args_vec[i].as_str() {
             "--help" | "-h" => {
@@ -334,11 +340,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         std::env::set_var("SIMPLE_BACKEND", &backend);
     }
 
-    eprintln!("[rt_native_build] project_root={:?} output={:?}", project_root.display(), output.display());
-    eprintln!("[rt_native_build] source_dirs={:?} entry={:?}", source_dirs, entry_file);
-    eprintln!("[rt_native_build] calling NativeProjectBuilder::new...");
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
-    eprintln!("[rt_native_build] NativeProjectBuilder::new returned OK");
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
     }

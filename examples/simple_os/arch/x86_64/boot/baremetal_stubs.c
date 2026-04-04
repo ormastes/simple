@@ -1033,49 +1033,30 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
     gui_fill(944, 742, 70, 20, 0x002C2C3E);
     serial_puts("[GUI] dock\r\n");
 
-    /* Window shadow */
-    gui_fill(203, 103, 504, 326, 0x00101020);
-
-    /* Window title bar (blue) */
-    gui_fill(200, 100, 500, 28, 0x00007ACC);
+    /* Window title bar (blue, 300x24) */
+    gui_fill(200, 100, 300, 24, 0x00007ACC);
+    serial_puts("[GUI] win title\r\n");
 
     /* Close button (red) */
-    gui_fill(676, 104, 20, 20, 0x00E74C3C);
+    gui_fill(480, 104, 16, 16, 0x00E74C3C);
 
-    /* Window body (white) */
-    gui_fill(200, 128, 500, 296, 0x00FFFFFF);
-    serial_puts("[GUI] hello world window\r\n");
+    /* Window body (white, 300x120) */
+    gui_fill(200, 124, 300, 120, 0x00FFFFFF);
+    serial_puts("[GUI] win body\r\n");
 
     /* "Hello World!" text */
-    fb_draw_text(230, 155, "Hello World!", 0x00333333, 0x00FFFFFF);
+    fb_draw_text(220, 140, "Hello World!", 0x00333333, 0x00FFFFFF);
+    serial_puts("[GUI] text\r\n");
 
-    /* RGB blocks */
-    gui_fill(230, 200, 100, 40, 0x00FF4444);
-    gui_fill(350, 200, 100, 40, 0x0044CC44);
-    gui_fill(470, 200, 100, 40, 0x004488FF);
+    /* RGB blocks (smaller) */
+    gui_fill(220, 170, 60, 24, 0x00FF4444);
+    gui_fill(290, 170, 60, 24, 0x0044CC44);
+    gui_fill(360, 170, 60, 24, 0x004488FF);
 
-    /* Text placeholder lines */
-    gui_fill(230, 260, 300, 3, 0x00666666);
-    gui_fill(230, 273, 250, 3, 0x00666666);
-    gui_fill(230, 286, 280, 3, 0x00666666);
-
-    /* "Click Me!" button */
-    gui_fill(230, 310, 120, 32, 0x003498DB);
-    fb_draw_text(242, 318, "Click Me!", 0x00FFFFFF, 0x003498DB);
-
-    /* Status bar */
-    gui_fill(200, 396, 500, 28, 0x00E0E0E0);
-    fb_draw_text(210, 402, "Hello World", 0x00666666, 0x00E0E0E0);
-
-    /* Terminal window (behind) */
-    gui_fill(50, 180, 180, 24, 0x00333333);
-    fb_draw_text(58, 185, "Simple OS", 0x00FFFFFF, 0x00333333);
-    gui_fill(50, 204, 180, 300, 0x001A1A2E);
-    gui_fill(60, 220, 120, 2, 0x0044FF44);
-    gui_fill(60, 232, 80, 2, 0x0044FF44);
-    gui_fill(60, 244, 140, 2, 0x0044FF44);
-    gui_fill(60, 256, 60, 2, 0x0044FF44);
-    serial_puts("[GUI] terminal window\r\n");
+    /* Status bar (300x20) */
+    gui_fill(200, 224, 300, 20, 0x00E0E0E0);
+    fb_draw_text(210, 228, "SimpleOS", 0x00666666, 0x00E0E0E0);
+    serial_puts("[GUI] status\r\n");
 
     serial_puts("[GUI] render complete\r\n");
     return 0;
@@ -3156,46 +3137,48 @@ S1(rt_closure_bind)
 #if defined(__x86_64__) || defined(__i386__)
 /* --- Port I/O: real x86 implementations --- */
 
-/* Port I/O and MMIO: Cranelift passes RAW (untagged) integer values
- * to extern fns. Return RAW values too. No ENCODE/DECODE needed. */
+/* Port I/O and MMIO: Cranelift passes TAGGED RuntimeValues (integer << 3).
+ * Must DECODE_INT arguments and ENCODE_INT return values.
+ * Fix: 2026-04-05 — PCI enumeration found 0 devices because port address
+ * 0xCF8 was passed as tagged 0x67C0, causing garbage I/O. */
 
 RuntimeValue rt_port_outb_real(RuntimeValue port, RuntimeValue val)
 {
-    outb((uint16_t)(uint64_t)port, (uint8_t)(uint64_t)val);
-    return 0;
+    outb((uint16_t)DECODE_INT(port), (uint8_t)DECODE_INT(val));
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_port_outw_real(RuntimeValue port, RuntimeValue val)
 {
-    outw((uint16_t)(uint64_t)port, (uint16_t)(uint64_t)val);
-    return 0;
+    outw((uint16_t)DECODE_INT(port), (uint16_t)DECODE_INT(val));
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_port_outl_real(RuntimeValue port, RuntimeValue val)
 {
-    outl((uint16_t)(uint64_t)port, (uint32_t)(uint64_t)val);
-    return 0;
+    outl((uint16_t)DECODE_INT(port), (uint32_t)DECODE_INT(val));
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_port_inb_real(RuntimeValue port)
 {
-    return (RuntimeValue)(uint64_t)inb((uint16_t)(uint64_t)port);
+    return ENCODE_INT((int64_t)(uint64_t)inb((uint16_t)DECODE_INT(port)));
 }
 
 RuntimeValue rt_port_inw_real(RuntimeValue port)
 {
-    return (RuntimeValue)(uint64_t)inw((uint16_t)(uint64_t)port);
+    return ENCODE_INT((int64_t)(uint64_t)inw((uint16_t)DECODE_INT(port)));
 }
 
 RuntimeValue rt_port_inl_real(RuntimeValue port)
 {
-    return (RuntimeValue)(uint64_t)inl((uint16_t)(uint64_t)port);
+    return ENCODE_INT((int64_t)(uint64_t)inl((uint16_t)DECODE_INT(port)));
 }
 
 RuntimeValue rt_port_io_wait_real(void)
 {
     io_wait();
-    return 0;
+    return NIL_VALUE;
 }
 
 /* Expose as the primary symbols (linker sees these).
@@ -3222,50 +3205,58 @@ RuntimeValue rt_port_io_wait(void) {
     return rt_port_io_wait_real();
 }
 
-/* --- MMIO: real x86_64 implementations --- */
+/* --- MMIO: real x86_64 implementations (DECODE_INT for tagged args) --- */
 
 RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 {
-    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint8_t *)a);
 }
 
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
-    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint16_t *)a);
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
 {
-    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    return ENCODE_INT((int64_t)(uint64_t)*(volatile uint32_t *)a);
 }
 
 RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
 {
-    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    return ENCODE_INT((int64_t)*(volatile uint64_t *)a);
 }
 
 RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val;
-    return 0;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    *(volatile uint8_t *)a = (uint8_t)DECODE_INT(val);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val;
-    return 0;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    *(volatile uint16_t *)a = (uint16_t)DECODE_INT(val);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val;
-    return 0;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    *(volatile uint32_t *)a = (uint32_t)DECODE_INT(val);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
 {
-    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val;
-    return 0;
+    uintptr_t a = (uintptr_t)DECODE_INT(addr);
+    *(volatile uint64_t *)a = (uint64_t)DECODE_INT(val);
+    return NIL_VALUE;
 }
 
 RuntimeValue rt_mmio_read_u8(RuntimeValue a) { return rt_mmio_read_u8_real(a); }
