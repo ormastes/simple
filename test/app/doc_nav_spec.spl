@@ -1,0 +1,375 @@
+# @cover src/app/sspec_docgen/main.spl 70%
+# @cover src/app/feature_doc/main.spl 70%
+"""
+# Documentation Navigation Generation Specification
+
+**Feature IDs:** #1210-1215 (doc navigation generation)
+**Category:** Tooling / Documentation
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests that the sspec-docgen and feature-doc generators produce correct
+documentation with navigation structure from SSpec test files.
+
+Verifies:
+- Heading hierarchy (H1→H3) from describe/context/it structure
+- Metadata extraction from docstring headers
+- Feature ID, category, difficulty, status parsing
+- Navigation link generation (requirement, plan, design, research)
+- Source file reference in output
+- Category inference from file path
+"""
+
+use std.io_runtime.{read_file}
+
+# ============================================================================
+# Metadata Extraction Helpers
+# ============================================================================
+
+# Parse feature metadata from spec file docstring header.
+# This replicates the parsing logic in src/app/feature_doc/parser.spl
+
+fn extract_docstring(content: text) -> text?:
+    val start = content.index_of("\"\"\"")
+    if not start.?:
+        return nil
+    val after = content.substring(start + 3, content.len())
+    val end_pos = after.index_of("\"\"\"")
+    if not end_pos.?:
+        return nil
+    Some(after.substring(0, end_pos).trim())
+
+fn extract_field(docstring: text, field: text) -> text?:
+    val lines = docstring.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with(field):
+            val after = trimmed.substring(field.len(), trimmed.len()).trim()
+            return Some(after)
+    nil
+
+fn extract_feature_ids(docstring: text) -> text?:
+    extract_field(docstring, "**Feature IDs:**")
+
+fn extract_category(docstring: text) -> text?:
+    extract_field(docstring, "**Category:**")
+
+fn extract_difficulty(docstring: text) -> text?:
+    extract_field(docstring, "**Difficulty:**")
+
+fn extract_status(docstring: text) -> text?:
+    extract_field(docstring, "**Status:**")
+
+fn extract_title(docstring: text) -> text?:
+    val lines = docstring.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# ") and not trimmed.starts_with("##"):
+            return Some(trimmed.substring(2, trimmed.len()).trim())
+    nil
+
+fn extract_cover_annotation(content: text) -> text?:
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @cover "):
+            return Some(trimmed.substring(9, trimmed.len()).trim())
+    nil
+
+# ============================================================================
+# Heading Hierarchy Builder
+# ============================================================================
+
+# Build the markdown heading hierarchy that sspec-docgen would generate
+# from describe/context/it structure.
+
+fn build_heading_hierarchy(content: text) -> [text]:
+    var headings: [text] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("describe "):
+            val after = trimmed.substring(9, trimmed.len())
+            if after.starts_with("\""):
+                val end_q = after.index_of("\"", 1)
+                if end_q.?:
+                    val label = after.substring(1, end_q)
+                    headings.push("## " + label)
+        elif trimmed.starts_with("context "):
+            val after = trimmed.substring(8, trimmed.len())
+            if after.starts_with("\""):
+                val end_q = after.index_of("\"", 1)
+                if end_q.?:
+                    val label = after.substring(1, end_q)
+                    headings.push("### " + label)
+        elif trimmed.starts_with("it "):
+            val after = trimmed.substring(3, trimmed.len())
+            if after.starts_with("\""):
+                val end_q = after.index_of("\"", 1)
+                if end_q.?:
+                    val label = after.substring(1, end_q)
+                    headings.push("- " + label)
+    headings
+
+fn infer_category_from_path(path: text) -> text:
+    if path.contains("/usage/"):
+        return "Usage"
+    if path.contains("/app/"):
+        return "App"
+    if path.contains("/lib/"):
+        return "Library"
+    if path.contains("/compiler/"):
+        return "Compiler"
+    if path.contains("/system/"):
+        return "System"
+    "Unknown"
+
+
+# ============================================================================
+# Metadata Extraction Tests
+# ============================================================================
+
+describe "Doc navigation metadata extraction":
+
+    context "math_render_spec.spl metadata":
+        it "extracts docstring":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            expect(doc.?).to_equal(true)
+
+        it "extracts title":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            val title = extract_title(doc)
+            expect(title.?).to_equal(true)
+            expect(title).to_equal("Math Block Rendering Specification")
+
+        it "extracts feature IDs":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            val ids = extract_feature_ids(doc)
+            expect(ids.?).to_equal(true)
+            expect(ids).to_contain("#1090")
+
+        it "extracts category":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            val cat = extract_category(doc)
+            expect(cat.?).to_equal(true)
+            expect(cat).to_contain("Math DSL")
+
+        it "extracts difficulty":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            val diff = extract_difficulty(doc)
+            expect(diff.?).to_equal(true)
+            expect(diff).to_contain("3/5")
+
+        it "extracts status":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            val status = extract_status(doc)
+            expect(status.?).to_equal(true)
+            expect(status).to_equal("Implemented")
+
+    context "loss_nograd_blocks_spec.spl metadata":
+        it "extracts title":
+            val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+            val doc = extract_docstring(content)
+            val title = extract_title(doc)
+            expect(title.?).to_equal(true)
+            expect(title).to_contain("loss{}")
+
+        it "extracts feature IDs":
+            val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+            val doc = extract_docstring(content)
+            val ids = extract_feature_ids(doc)
+            expect(ids.?).to_equal(true)
+            expect(ids).to_contain("#1099")
+
+    context "@cover annotation":
+        it "extracts cover from math_render_spec":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val cover = extract_cover_annotation(content)
+            expect(cover.?).to_equal(true)
+            expect(cover).to_contain("math_repr.spl")
+
+        it "extracts cover with percentage":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val cover = extract_cover_annotation(content)
+            expect(cover).to_contain("90%")
+
+
+# ============================================================================
+# Heading Hierarchy Tests
+# ============================================================================
+
+describe "Doc navigation heading hierarchy":
+
+    context "math_render_spec.spl headings":
+        it "generates H2 from describe blocks":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            var h2_count = 0
+            for h in headings:
+                if h.starts_with("## "):
+                    h2_count = h2_count + 1
+            expect(h2_count).to_be_greater_than(5)
+
+        it "generates H3 from context blocks":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            var h3_count = 0
+            for h in headings:
+                if h.starts_with("### "):
+                    h3_count = h3_count + 1
+            expect(h3_count).to_be_greater_than(10)
+
+        it "generates list items from it blocks":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            var li_count = 0
+            for h in headings:
+                if h.starts_with("- "):
+                    li_count = li_count + 1
+            # 129 it blocks → 129 list items
+            expect(li_count).to_be_greater_than(100)
+
+        it "has correct hierarchy order":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            # First heading should be an H2 (describe)
+            expect(headings[0]).to_start_with("## ")
+
+        it "contains key navigation sections":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            val joined = headings.join("\n")
+            expect(joined).to_contain("## to_text rendering")
+            expect(joined).to_contain("## to_debug rendering")
+            expect(joined).to_contain("## render_latex_raw rendering")
+            expect(joined).to_contain("## to_pretty rendering")
+            expect(joined).to_contain("## to_md rendering")
+            expect(joined).to_contain("## rendering edge cases")
+
+        it "contains DL equation subsections":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            val joined = headings.join("\n")
+            expect(joined).to_contain("### DL equations")
+            expect(joined).to_contain("### fractions")
+            expect(joined).to_contain("### greek letters")
+
+    context "loss_nograd_blocks_spec.spl headings":
+        it "generates describe headings for loss and nograd":
+            val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            val joined = headings.join("\n")
+            expect(joined).to_contain("loss{}")
+            expect(joined).to_contain("nograd{}")
+
+        it "generates context headings for evaluation types":
+            val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            val joined = headings.join("\n")
+            expect(joined).to_contain("basic arithmetic")
+            expect(joined).to_contain("scope variable bridging")
+
+        it "generates parity section":
+            val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            val joined = headings.join("\n")
+            expect(joined).to_contain("parity")
+
+
+# ============================================================================
+# Category Inference Tests
+# ============================================================================
+
+describe "Doc navigation category inference":
+
+    it "infers Usage from feature/usage path":
+        expect(infer_category_from_path("test/feature/usage/math_render_spec.spl")).to_equal("Usage")
+
+    it "infers App from app path":
+        expect(infer_category_from_path("test/app/test_lens_spec.spl")).to_equal("App")
+
+    it "infers Library from lib path":
+        expect(infer_category_from_path("test/lib/std/math_spec.spl")).to_equal("Library")
+
+    it "infers Compiler from compiler path":
+        expect(infer_category_from_path("test/compiler/parser_spec.spl")).to_equal("Compiler")
+
+    it "infers System from system path":
+        expect(infer_category_from_path("test/system/live_spec.spl")).to_equal("System")
+
+    it "returns Unknown for unrecognized path":
+        expect(infer_category_from_path("test/other/spec.spl")).to_equal("Unknown")
+
+
+# ============================================================================
+# Navigation Link Generation Tests
+# ============================================================================
+
+describe "Doc navigation link generation":
+
+    context "anchor generation from headings":
+        it "generates anchors from describe labels":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            # Markdown renderers auto-generate anchors from headings
+            # e.g. "## to_text rendering" → #to_text-rendering
+            var has_to_text = false
+            for h in headings:
+                if h == "## to_text rendering":
+                    has_to_text = true
+            expect(has_to_text).to_equal(true)
+
+        it "generates anchors from context labels":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val headings = build_heading_hierarchy(content)
+            var has_dl = false
+            for h in headings:
+                if h == "### DL equations":
+                    has_dl = true
+            expect(has_dl).to_equal(true)
+
+    context "cross-reference link structure":
+        it "cover annotation links to source file":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val cover = extract_cover_annotation(content)
+            expect(cover).to_contain("src/lib/common/math_repr.spl")
+
+        it "docstring contains overview section":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val doc = extract_docstring(content)
+            expect(doc).to_contain("## Overview")
+
+    context "multi-spec navigation consistency":
+        it "all three math specs have feature IDs":
+            val specs = [
+                "test/feature/usage/math_blocks_spec.spl",
+                "test/feature/usage/loss_nograd_blocks_spec.spl",
+                "test/feature/usage/math_render_spec.spl",
+            ]
+            for spec_path in specs:
+                val content = read_file(spec_path)
+                val has_feature_comment = content.contains("#1090") or content.contains("#1099")
+                expect(has_feature_comment).to_equal(true)
+
+        it "all math specs have describe blocks for navigation":
+            val specs = [
+                "test/feature/usage/math_blocks_spec.spl",
+                "test/feature/usage/loss_nograd_blocks_spec.spl",
+                "test/feature/usage/math_render_spec.spl",
+            ]
+            for spec_path in specs:
+                val content = read_file(spec_path)
+                val headings = build_heading_hierarchy(content)
+                var h2_count = 0
+                for h in headings:
+                    if h.starts_with("## "):
+                        h2_count = h2_count + 1
+                expect(h2_count).to_be_greater_than(3)

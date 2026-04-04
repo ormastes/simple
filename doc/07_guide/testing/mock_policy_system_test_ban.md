@@ -141,20 +141,26 @@ MockPolicy.check_allowed("app.service.user")  # panics if not allowed
                      |
          Mock.new() / Spy.new() / Stub.new()
                      |
-        mock_policy_check_allowed(name)     <-- Simple-side gate
+        mock_policy_check_disabled()        <-- Simple-side gate (Disabled only)
                      |
-            Rust FFI (__mock_policy_check)   <-- Rust-side gate
+              (test executes)
                      |
-            check_mock_use_from()           <-- Atomic policy check
+    Executor sets both layers before each test:
+      mock_policy_disable()                 <-- Simple-side state
+      __mock_policy_disable()               <-- Rust-side state (FFI)
+                     |
+    Rust FFI: check_mock_use_from(          <-- Rust-side pattern gate
+      module_path!()                            (uses real caller module path)
+    )
 ```
 
-**Two enforcement layers:**
+**Two enforcement layers with distinct roles:**
 
-1. **Simple-side** (`spec/mock.spl`): `mock_policy_check_allowed()` checks the `MockMode` enum state and panics with a descriptive error.
+1. **Simple-side constructor gate** (`mock_policy_check_disabled()`): Called inside `Mock.new()` / `Spy.new()` / `Stub.new()`. Only checks `Disabled` mode — panics if mocks are completely banned. Takes **no arguments**, so it can't be spoofed by naming a mock `"my.hal.fake"`. HalOnly/Custom pattern checks are NOT done here because constructors don't have access to the caller's module path.
 
-2. **Rust-side** (`mock_helper/mock_policy.rs`): `check_mock_use_from()` uses atomic booleans and pattern matching. Called via FFI from the SSpec executor.
+2. **Rust-side pattern gate** (`check_mock_use_from(module_path!())`): Called via FFI by the executor and compiled-mode runtime. Uses the **real caller module path** (compile-time `module_path!()` macro), so HalOnly/Custom patterns can't be spoofed. Enforces all four modes.
 
-The SSpec executor (`spec/runner/executor.spl`) calls `init_mock_policy_for_mode()` before each test, setting the Rust-side policy to match the example's effective mock mode. This means both layers are synchronized.
+The SSpec executor (`spec/runner/executor.spl`) synchronizes **both** layers before each test by calling both the Simple-side functions (`mock_policy_disable()`) and the Rust FFI functions (`__mock_policy_disable()`).
 
 ### Group Inheritance
 

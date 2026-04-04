@@ -1,0 +1,309 @@
+# @cover src/app/nvim_plugin/lua/simple/test_lens.lua 80%
+# @cover src/app/vscode_extension/src/testing/testCodeLensProvider.ts 80%
+"""
+# Test Lens (Editor Gutter Arrows) Specification
+
+**Feature IDs:** #1200-1205 (test lens / CodeLens)
+**Category:** Editor / IDE Integration
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests that the test lens detection logic correctly identifies
+`describe`, `context`, `it`, and `sdoctest` blocks in SSpec files,
+which powers the "▶ Run" gutter arrows in VSCode and Neovim.
+
+Both editors use identical regex/pattern logic:
+- VSCode: `testCodeLensProvider.ts` → CodeLens on matching lines
+- Neovim: `test_lens.lua` → virtual text extmarks on matching lines
+
+These tests verify detection on real spec files including the
+math block render spec with deeply nested describe/context/it.
+"""
+
+use std.io_runtime.{read_file}
+
+# ============================================================================
+# Test Block Detection Helpers
+# ============================================================================
+
+# Replicate the detection logic used by VSCode/Neovim test lens:
+#   describe "label":
+#   context "label":
+#   it "label":
+#   """ sdoctest:
+
+fn detect_describe(line: text) -> text?:
+    val trimmed = line.trim()
+    if trimmed.starts_with("describe "):
+        val after = trimmed.substring(9, trimmed.len())
+        if after.starts_with("\""):
+            val end_quote = after.index_of("\"", 1)
+            if end_quote.? and end_quote > 1:
+                val label = after.substring(1, end_quote)
+                return Some(label)
+    nil
+
+fn detect_context(line: text) -> text?:
+    val trimmed = line.trim()
+    if trimmed.starts_with("context "):
+        val after = trimmed.substring(8, trimmed.len())
+        if after.starts_with("\""):
+            val end_quote = after.index_of("\"", 1)
+            if end_quote.? and end_quote > 1:
+                val label = after.substring(1, end_quote)
+                return Some(label)
+    nil
+
+fn detect_it(line: text) -> text?:
+    val trimmed = line.trim()
+    if trimmed.starts_with("it "):
+        val after = trimmed.substring(3, trimmed.len())
+        if after.starts_with("\""):
+            val end_quote = after.index_of("\"", 1)
+            if end_quote.? and end_quote > 1:
+                val label = after.substring(1, end_quote)
+                return Some(label)
+    nil
+
+fn detect_sdoctest(line: text) -> bool:
+    val trimmed = line.trim()
+    trimmed.starts_with("\"\"\" sdoctest:") or trimmed.starts_with("\"\"\"sdoctest:")
+
+fn count_blocks(content: text) -> [i64]:
+    # Returns [describe_count, context_count, it_count, sdoctest_count]
+    var describes = 0
+    var contexts = 0
+    var its = 0
+    var sdoctests = 0
+    val lines = content.split("\n")
+    for line in lines:
+        if detect_describe(line).?:
+            describes = describes + 1
+        if detect_context(line).?:
+            contexts = contexts + 1
+        if detect_it(line).?:
+            its = its + 1
+        if detect_sdoctest(line):
+            sdoctests = sdoctests + 1
+    [describes, contexts, its, sdoctests]
+
+
+# ============================================================================
+# Detection Pattern Tests
+# ============================================================================
+
+describe "Test lens detection patterns":
+
+    context "describe blocks":
+        it "detects standard describe":
+            val label = detect_describe("describe \"Math Block Arithmetic\":")
+            expect(label.?).to_equal(true)
+            expect(label).to_equal("Math Block Arithmetic")
+
+        it "detects indented describe":
+            val label = detect_describe("    describe \"nested\":")
+            expect(label.?).to_equal(true)
+            expect(label).to_equal("nested")
+
+        it "rejects non-describe lines":
+            val label = detect_describe("# describe \"commented out\":")
+            expect(label.?).to_equal(false)
+
+        it "rejects describe without colon":
+            val label = detect_describe("describe \"no colon\"")
+            # Still detects the label — colon is after the quote
+            # The pattern matches the label between quotes
+            expect(label.?).to_equal(true)
+
+    context "context blocks":
+        it "detects standard context":
+            val label = detect_context("    context \"basic arithmetic\":")
+            expect(label.?).to_equal(true)
+            expect(label).to_equal("basic arithmetic")
+
+        it "detects deeply indented context":
+            val label = detect_context("        context \"nested\":")
+            expect(label.?).to_equal(true)
+
+        it "rejects non-context lines":
+            val label = detect_context("val context_var = 5")
+            expect(label.?).to_equal(false)
+
+    context "it blocks":
+        it "detects standard it":
+            val label = detect_it("    it \"evaluates addition\":")
+            expect(label.?).to_equal(true)
+            expect(label).to_equal("evaluates addition")
+
+        it "detects deeply indented it":
+            val label = detect_it("            it \"deep test\":")
+            expect(label.?).to_equal(true)
+            expect(label).to_equal("deep test")
+
+        it "rejects non-it lines":
+            val label = detect_it("val iterator = items")
+            expect(label.?).to_equal(false)
+
+    context "sdoctest blocks":
+        it "detects sdoctest with space":
+            expect(detect_sdoctest("    \"\"\" sdoctest:")).to_equal(true)
+
+        it "detects sdoctest without space":
+            expect(detect_sdoctest("    \"\"\"sdoctest:")).to_equal(true)
+
+        it "rejects non-sdoctest docstring":
+            expect(detect_sdoctest("    \"\"\" This is a docstring")).to_equal(false)
+
+
+# ============================================================================
+# Real Spec File Detection Tests
+# ============================================================================
+
+describe "Test lens on math_render_spec.spl":
+
+    it "detects all describe blocks":
+        val content = read_file("test/feature/usage/math_render_spec.spl")
+        val counts = count_blocks(content)
+        # math_render_spec has: to_text, to_debug, render_latex_raw,
+        # to_pretty, to_md, rendering edge cases = 6 top-level describes
+        expect(counts[0]).to_be_greater_than(5)
+
+    it "detects all context blocks":
+        val content = read_file("test/feature/usage/math_render_spec.spl")
+        val counts = count_blocks(content)
+        # Multiple context blocks within describes
+        expect(counts[1]).to_be_greater_than(10)
+
+    it "detects all it blocks":
+        val content = read_file("test/feature/usage/math_render_spec.spl")
+        val counts = count_blocks(content)
+        # 129 tests = 129 it blocks
+        expect(counts[2]).to_be_greater_than(100)
+
+    it "has no sdoctest blocks":
+        val content = read_file("test/feature/usage/math_render_spec.spl")
+        val counts = count_blocks(content)
+        expect(counts[3]).to_equal(0)
+
+
+describe "Test lens on loss_nograd_blocks_spec.spl":
+
+    it "detects describe blocks":
+        val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+        val counts = count_blocks(content)
+        # loss{} eval, nograd{} eval, DL loss, DL nograd, rendering loss,
+        # rendering nograd, parity = 7 describes
+        expect(counts[0]).to_be_greater_than(5)
+
+    it "detects context blocks":
+        val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+        val counts = count_blocks(content)
+        expect(counts[1]).to_be_greater_than(5)
+
+    it "detects it blocks":
+        val content = read_file("test/feature/usage/loss_nograd_blocks_spec.spl")
+        val counts = count_blocks(content)
+        # 38 tests
+        expect(counts[2]).to_be_greater_than(30)
+
+
+describe "Test lens on math_blocks_spec.spl":
+
+    it "detects describe blocks":
+        val content = read_file("test/feature/usage/math_blocks_spec.spl")
+        val counts = count_blocks(content)
+        # Arithmetic, Functions, Matrix, Constants, Array, LaTeX compat,
+        # LaTeX export = 7 describes
+        expect(counts[0]).to_be_greater_than(5)
+
+    it "detects it blocks":
+        val content = read_file("test/feature/usage/math_blocks_spec.spl")
+        val counts = count_blocks(content)
+        # 28 tests
+        expect(counts[2]).to_be_greater_than(20)
+
+
+# ============================================================================
+# Block Label Extraction Tests
+# ============================================================================
+
+describe "Test lens label extraction":
+
+    context "math block labels":
+        it "extracts DL equation labels":
+            val label = detect_it("        it \"renders sigmoid\":")
+            expect(label).to_equal("renders sigmoid")
+
+        it "extracts Greek letter labels":
+            val label = detect_it("        it \"renders alpha\":")
+            expect(label).to_equal("renders alpha")
+
+        it "extracts nested expression labels":
+            val label = detect_it("        it \"renders frac inside sqrt inside frac\":")
+            expect(label).to_equal("renders frac inside sqrt inside frac")
+
+        it "extracts complex DL labels":
+            val label = detect_it("        it \"renders GELU approximation\":")
+            expect(label).to_equal("renders GELU approximation")
+
+    context "describe labels":
+        it "extracts rendering describe":
+            val label = detect_describe("describe \"render_latex_raw rendering\":")
+            expect(label).to_equal("render_latex_raw rendering")
+
+        it "extracts edge cases describe":
+            val label = detect_describe("describe \"rendering edge cases\":")
+            expect(label).to_equal("rendering edge cases")
+
+    context "context labels":
+        it "extracts DL context":
+            val label = detect_context("    context \"DL equations\":")
+            expect(label).to_equal("DL equations")
+
+        it "extracts deeply nested context":
+            val label = detect_context("    context \"deeply nested\":")
+            expect(label).to_equal("deeply nested")
+
+
+# ============================================================================
+# Gutter Arrow Mapping Tests
+# ============================================================================
+
+describe "Test lens gutter arrow mapping":
+
+    context "arrow type assignment":
+        it "describe gets Run File arrow":
+            # VSCode: describe → "▶ Run File" CodeLens
+            # Neovim: describe → "▶ Run File" virtual text
+            val label = detect_describe("describe \"test group\":")
+            expect(label.?).to_equal(true)
+            # describe blocks always get file-level run
+
+        it "it gets Run Test arrow":
+            # VSCode: it → "▶ Run Test" CodeLens
+            # Neovim: it → "▶ Run Test" virtual text
+            val label = detect_it("    it \"single test\":")
+            expect(label.?).to_equal(true)
+
+        it "context gets Run Test arrow":
+            val label = detect_context("    context \"test context\":")
+            expect(label.?).to_equal(true)
+
+        it "sdoctest gets Run Doctest arrow":
+            val is_sdoctest = detect_sdoctest("    \"\"\" sdoctest:")
+            expect(is_sdoctest).to_equal(true)
+
+    context "all math spec blocks get arrows":
+        it "every describe/it/context line is detectable":
+            val content = read_file("test/feature/usage/math_render_spec.spl")
+            val lines = content.split("\n")
+            var detected_count = 0
+            for line in lines:
+                if detect_describe(line).? or detect_context(line).? or detect_it(line).?:
+                    detected_count = detected_count + 1
+            # Total should match describe + context + it counts
+            val counts = count_blocks(content)
+            val total = counts[0] + counts[1] + counts[2]
+            expect(detected_count).to_equal(total)

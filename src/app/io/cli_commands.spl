@@ -3,10 +3,10 @@
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
-use compiler.driver.driver_api_core.{interpret_file, check_file}
-use compiler.driver.driver_types.{CompileResult}
+use compiler.driver.driver_api_core.{interpret_file}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use compiler.tools.lint.main.{LintConfig, LintLevel}
 use std.tooling.easy_fix.{FixConfidence}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
 use compiler.core.tokens.{TOK_EOF, TOK_ERROR}
@@ -108,15 +108,25 @@ fn cli_run_lint(args: [text]) -> i64:
             exit_code = 1
             continue
 
-        # Run type-check pass which includes diagnostics
-        val result = check_file(file_path)
-        match result:
-            case CompileResult.Success(msg):
-                print "lint: {file_path} OK"
-            case _:
-                _cli_eprint("lint: {file_path} has issues")
-                exit_code = 1
-                total_warnings = total_warnings + 1
+        val source = rt_file_read_text(file_path)
+        var lint_config = LintConfig.new()
+        lint_config.apply_file_attributes(source)
+        var source_fixes = collect_fixes_from_source(file_path, source)
+        var visible_fix_count = 0
+        for fix in source_fixes:
+            val id_parts = fix.id.split(":")
+            if id_parts.len() >= 2:
+                val lint_name = id_parts[1]
+                if lint_config.get_level(lint_name) != LintLevel.Allow:
+                    visible_fix_count = visible_fix_count + 1
+                    print "{file_path}:{fix.replacements[0].line}: warning[{lint_name}]: {fix.description}"
+
+        if visible_fix_count == 0:
+            print "lint: {file_path} OK"
+        else:
+            _cli_eprint("lint: {file_path} has issues")
+            exit_code = 1
+            total_warnings = total_warnings + 1
 
     if total_warnings > 0:
         print ""

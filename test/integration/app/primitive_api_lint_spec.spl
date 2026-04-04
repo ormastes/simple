@@ -1,0 +1,40 @@
+use compiler.tools.fix.main.{collect_fixes_from_source}
+use compiler.tools.lint.main.{LintConfig, LintLevel}
+
+fn count_visible_primitive_api(source: text) -> i64:
+    val fixes = collect_fixes_from_source("sample.spl", source)
+    var config = LintConfig.new()
+    config.apply_file_attributes(source)
+    var count = 0
+
+    for fix in fixes:
+        val parts = fix.id.split(":")
+        if parts.len() >= 2 and parts[1] == "primitive_api" and config.get_level("primitive_api") != LintLevel.Allow:
+            count = count + 1
+
+    count
+
+describe "primitive_api lint":
+    it "flags bare primitive public function parameter and return types":
+        val source =
+            "pub fn bad(x: i64) -> i64:\n" +
+            "    return x\n"
+
+        expect(count_visible_primitive_api(source)).to_equal(2)
+
+    it "does not flag semantic wrapper public APIs":
+        val source =
+            "unit UserId: i64 as uid\n" +
+            "\n" +
+            "pub fn current_user() -> UserId:\n" +
+            "    return 42_uid\n"
+
+        expect(count_visible_primitive_api(source)).to_equal(0)
+
+    it "respects allow primitive_api at file level":
+        val source =
+            "@allow(primitive_api)\n" +
+            "pub fn bad(x: i64) -> i64:\n" +
+            "    return x\n"
+
+        expect(count_visible_primitive_api(source)).to_equal(0)

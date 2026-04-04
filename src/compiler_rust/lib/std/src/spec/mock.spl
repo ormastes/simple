@@ -87,8 +87,18 @@ fn mock_policy_reset():
     _mock_policy_patterns = []
     _mock_policy_initialized = false
 
+fn mock_policy_check_disabled():
+    # Hard gate: panics if mocks are completely disabled (system test mode).
+    # This is called from Mock/Spy/Stub constructors as defense-in-depth.
+    # HalOnly/Custom pattern checks are NOT done here because constructors
+    # receive the mock name, not the caller's module path. Those checks are
+    # enforced by the executor + Rust FFI layer which has module_path!().
+    if _mock_policy_mode == MockMode.Disabled:
+        panic("Mock/Spy/Stub creation blocked: mocks are disabled (system test policy)")
+
 fn mock_policy_check_allowed(source_module: text):
-    # Check if mock usage is allowed, panics if not
+    # Full check including pattern matching — requires caller's module path.
+    # Used by executor and direct API calls, NOT by constructors.
     match _mock_policy_mode:
         case MockMode.All:
             return
@@ -528,8 +538,10 @@ class Mock:
     _current_stub_args: List<Any>
 
     static fn new(name: text) -> Mock:
-        # Enforce mock policy — panics if mocks are disabled (system test mode)
-        mock_policy_check_allowed(name)
+        # Enforce system-test mock ban (Disabled mode blocks all mocks).
+        # HalOnly/Custom checks need the caller's module path, not the mock name,
+        # so those are enforced by the executor + Rust FFI layer which has module_path!().
+        mock_policy_check_disabled()
         return Mock {
             name: name,
             _id: name,
@@ -631,8 +643,7 @@ class Spy:
     recorder: CallRecorder
 
     static fn new(name: text) -> Spy:
-        # Enforce mock policy — panics if mocks are disabled (system test mode)
-        mock_policy_check_allowed(name)
+        mock_policy_check_disabled()
         return Spy {
             name: name,
             recorder: CallRecorder.new()
@@ -666,8 +677,7 @@ class Stub:
     values: Dict<text, Any>
 
     static fn new(name: text) -> Stub:
-        # Enforce mock policy — panics if mocks are disabled (system test mode)
-        mock_policy_check_allowed(name)
+        mock_policy_check_disabled()
         return Stub {
             name: name,
             values: {}
