@@ -17,6 +17,9 @@ use compiler.backend.c_type_mapper.{CTypeMapper}
 use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, CompiledModule}
 use compiler.backend.c_backend_translate_ops.*
+use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
+from hir_definitions import {HirField}
+from hir_types import {HirType}
 
 # ============================================================================
 # Utility
@@ -692,6 +695,9 @@ class MirToC:
             if type_def.is_export_c:
                 self.emit_type_export_wrapper(type_def, module)
 
+        # Emit runtime layout verification function for @repr("C") / @export("C") types
+        self.emit_verify_layouts(module)
+
     me emit_function_export_wrapper(func: MirFunction):
         """Emit an extern "C" wrapper for a single @export("C") function.
 
@@ -847,6 +853,88 @@ class MirToC:
         self.builder.emit_raw(r"")
 
     # ================================================================
+    # Runtime Layout Verification
+    # ================================================================
+
+    me emit_verify_layouts(module: MirModule):
+        """Emit spl_verify_layouts(void) function with runtime assert checks.
+
+        For each @export("C") struct type, emits assert(sizeof(...)) and
+        assert(offsetof(...)) calls. The generated function can be called
+        from an init path to catch layout drift when a shared library is
+        loaded against a different header version.
+
+        Skips emission entirely when no @export("C") struct types exist.
+        """
+        # Collect exported struct types
+        var repr_c_types: [MirTypeDef] = []
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                match type_def.kind:
+                    case Struct(fields):
+                        if fields.len() > 0:
+                            repr_c_types.push(type_def)
+                    case _:
+                        pass_dn
+
+        if repr_c_types.len() == 0:
+            return
+
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_raw(r"// Runtime Layout Verification")
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"#include <assert.h>")
+        self.builder.emit_raw(r"#include <stddef.h>")
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_verify_layouts(void) {")
+
+        var ti = 0
+        while ti < repr_c_types.len():
+            val type_def = repr_c_types[ti]
+            val assert_block = self._build_runtime_asserts_for_type(type_def)
+            if assert_block != "":
+                self.builder.emit_raw(assert_block)
+            ti = ti + 1
+
+        self.builder.emit_raw(r"}")
+        self.builder.emit_blank()
+
+    fn _build_runtime_asserts_for_type(type_def: MirTypeDef) -> text:
+        """Build runtime assert lines for a single exported struct type.
+
+        Converts MirFieldDef to HirField, computes layout via verify_c_layout,
+        then generates assert() calls using generate_runtime_layout_asserts.
+        """
+        match type_def.kind:
+            case Struct(fields):
+                if fields.len() == 0:
+                    return ""
+
+                val c_name = sanitize_c_name(type_def.name)
+
+                # Build HirField list from MirFieldDef for layout computation
+                var hir_fields: [HirField] = []
+                var fi = 0
+                while fi < fields.len():
+                    val field = fields[fi]
+                    val hir_type = _mir_type_to_hir_type_for_layout(field.type_)
+                    hir_fields.push(HirField(
+                        name: field.name,
+                        type_: hir_type,
+                        has_bits_attr: field.has_bits_attr,
+                        bits_width: field.bits_width
+                    ))
+                    fi = fi + 1
+
+                val verification = verify_c_layout(c_name, hir_fields, layoutattr_c_repr())
+                generate_runtime_layout_asserts(verification)
+
+            case _:
+                ""
+
+    # ================================================================
     # Export Name Derivation Helpers
     # ================================================================
 
@@ -873,6 +961,33 @@ class MirToC:
             case Opaque(name):
                 name == "str" or name == "text" or name == "Text"
             case _: false
+
+# ============================================================================
+# MIR-to-HirType Conversion for Layout
+# ============================================================================
+
+fn _mir_type_to_hir_type_for_layout(ty: MirType) -> HirType:
+    """Convert a MIR type to an approximate HirType for layout computation.
+
+    Maps MIR type kinds to HirType names for use with the type_layout
+    module's size/alignment computation. Mirrors the conversion in
+    c_header.spl but lives here to avoid circular imports.
+    """
+    match ty.kind:
+        case I64: HirType.named("i64")
+        case I32: HirType.named("i32")
+        case I16: HirType.named("i16")
+        case I8: HirType.named("i8")
+        case U64: HirType.named("u64")
+        case U32: HirType.named("u32")
+        case U16: HirType.named("u16")
+        case U8: HirType.named("u8")
+        case F64: HirType.named("f64")
+        case F32: HirType.named("f32")
+        case Bool: HirType.named("bool")
+        case Unit: HirType.named("unit")
+        case Ptr(_, _): HirType.named("usize")
+        case _: HirType.named("i64")
 
 # ============================================================================
 # Export

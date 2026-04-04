@@ -904,3 +904,76 @@ fn compute_padding_bytes(verification: LayoutVerification) -> i64:
         fi = fi + 1
 
     verification.total_size - data_bytes
+
+
+# ============================================================================
+# Runtime Layout Verification
+# ============================================================================
+#
+# Generates C runtime assert() calls for spl_verify_layouts().
+# Complements the compile-time _Static_assert checks: the runtime function
+# can be called from an init path to catch layout drift in dynamically
+# loaded shared libraries where the header was compiled separately.
+
+struct FieldOffset:
+    """Simplified field offset record for runtime verification."""
+    name: text
+    offset: i64
+    size: i64
+
+fn compute_layout_verification(class_name: text, fields: [HirField], layout_attr: LayoutAttr) -> LayoutVerification:
+    """Compute layout verification data for runtime assert generation.
+
+    Wraps verify_c_layout and returns the same LayoutVerification
+    struct. This is the public entry point for the runtime layout
+    verification pipeline used by the C backend.
+    """
+    verify_c_layout(class_name, fields, layout_attr)
+
+fn generate_runtime_layout_asserts(verification: LayoutVerification) -> text:
+    """Generate C runtime assert() calls for spl_verify_layouts().
+
+    Produces code like:
+        assert(sizeof(spl_ClassName) == 16 && "spl_ClassName size mismatch");
+        assert(offsetof(spl_ClassName, field) == 0 && "spl_ClassName.field offset mismatch");
+
+    These are runtime checks (stdlib assert) rather than _Static_assert,
+    so they catch mismatches when a shared library is loaded against
+    a different header version at runtime.
+    """
+    val name = verification.class_name
+    var lines: [text] = []
+
+    # Size assertion
+    lines.push("    assert(sizeof(spl_{name}) == {verification.total_size} && \"spl_{name} size mismatch\");")
+
+    # Alignment assertion
+    lines.push("    assert(_Alignof(spl_{name}) == {verification.alignment} && \"spl_{name} alignment mismatch\");")
+
+    # Field offset assertions (skip bitfields — offsetof not meaningful for them)
+    var fi = 0
+    while fi < verification.fields.len():
+        val field = verification.fields[fi]
+        if not field.has_bits:
+            lines.push("    assert(offsetof(spl_{name}, {field.name}) == {field.offset} && \"spl_{name}.{field.name} offset mismatch\");")
+        fi = fi + 1
+
+    lines.join("\n")
+
+fn extract_field_offsets(verification: LayoutVerification) -> [FieldOffset]:
+    """Extract simplified FieldOffset records from a LayoutVerification.
+
+    Useful for tooling that only needs name/offset/size triples without
+    the full FieldLayout details (type, alignment, bitfield info).
+    """
+    var offsets: [FieldOffset] = []
+    var fi = 0
+    while fi < verification.fields.len():
+        val field = verification.fields[fi]
+        offsets.push(FieldOffset(
+            name: field.name,
+            offset: field.offset,
+            size: field.size
+        ))
+        fi = fi + 1
+    offsets
