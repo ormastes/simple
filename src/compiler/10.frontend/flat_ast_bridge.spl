@@ -8,9 +8,10 @@ use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with
 use compiler.core.ast.*
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
+use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
-use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind}
+use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
 use compiler.frontend.lexer_types.Span
 
 fn make_span() -> Span:
@@ -291,6 +292,25 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             body = body.push(convert_flat_stmt(body_stmts[bi]))
             bi = bi + 1
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
+    elif tag == STMT_GPU_LAUNCH:
+        val body_stmts = stmt_body[idx]
+        var body: [Stmt] = []
+        var gi = 0
+        while gi < body_stmts.len():
+            body = body.push(convert_flat_stmt(body_stmts[gi]))
+            gi = gi + 1
+        val block = Block(stmts: body, span: span)
+        # Convert grid/block dimension expressions
+        val grid_indices = stmt_get_gpu_grid(idx)
+        val block_indices = stmt_get_gpu_block(idx)
+        var grid_exprs: [Expr] = []
+        for gei in grid_indices:
+            grid_exprs.push(convert_flat_expr(gei))
+        var block_dim_exprs: [Expr] = []
+        for bei in block_indices:
+            block_dim_exprs.push(convert_flat_expr(bei))
+        val config = GpuLaunchConfig(grid: grid_exprs, block: block_dim_exprs, span: span)
+        Stmt(kind: StmtKind.GpuLaunch(config, block), span: span)
     else:
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 

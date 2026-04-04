@@ -1,7 +1,7 @@
 # LLVM Backend Completion Plan
 
 **Date:** 2026-04-04  
-**Status:** Draft  
+**Status:** Implemented (2026-04-04)  
 **Scope:** Complete the LLVM backend implementation so it moves from “partial but real” to a fully supported, evidence-backed backend family.
 
 ## 1. Current Classification

@@ -1,0 +1,370 @@
+# Package Manager - Package Installer
+#
+# pkg install  -- reads package.sdn, clones missing deps to cache, creates packages/ symlinks
+# pkg add      -- adds dependency to package.sdn and installs
+# pkg remove   -- removes from package.sdn and cache
+
+use app.pkg.manifest.{PackageManifest, Dependency, parse_manifest, parse_manifest_file, generate_manifest}
+use app.pkg.resolver.{resolve_all, ResolvedDep, ResolutionResult, get_cache_dir}
+use app.pkg.lock.{LockFile, LockEntry, parse_lock_file, write_lock_file, generate_lock_content}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# Shell helper
+fn shell_run(command: text) -> (text, text, i64):
+    val os = rt_env_get("OS")
+    var is_windows = false
+    if os != nil and os != "":
+        is_windows = os.lower().contains("windows")
+    if is_windows:
+        rt_process_run("cmd.exe", ["/c", command])
+    else:
+        rt_process_run("/bin/sh", ["-c", command])
+
+
+# Get current working directory
+fn get_cwd() -> text:
+    val (out, _, _) = shell_run("pwd")
+    out.trim()
+
+
+# Create symlink from packages/ dir to cache
+fn create_package_link(packages_dir: text, name: text, target: text) -> bool:
+    val link_path = "{packages_dir}/{name}"
+    # Remove existing link/dir
+    if rt_file_exists(link_path):
+        val (_, _, rm_code) = shell_run("rm -rf \"{link_path}\"")
+        if rm_code != 0:
+            return false
+    # Create symlink
+    val (_, link_err, link_code) = shell_run("ln -sf \"{target}\" \"{link_path}\"")
+    if link_code != 0:
+        print "    Warning: symlink failed ({link_err}), copying instead..."
+        val (_, cp_err, cp_code) = shell_run("cp -r \"{target}\" \"{link_path}\"")
+        return cp_code == 0
+    true
+
+
+# ============================================================================
+# pkg install
+# ============================================================================
+
+fn do_install(project_dir: text, frozen: bool, dry_run: bool, include_dev: bool) -> i64:
+    val manifest_path = "{project_dir}/package.sdn"
+    if not rt_file_exists(manifest_path):
+        print "pkg install: no package.sdn found in {project_dir}"
+        print "Run 'simple pkg init' to create a project."
+        return 1
+
+    # Parse manifest
+    val manifest_result = parse_manifest_file(manifest_path)
+    var manifest: PackageManifest = PackageManifest.empty()
+    match manifest_result:
+        case Ok(m):
+            manifest = m
+        case Err(e):
+            print "pkg install: {e}"
+            return 1
+
+    val all_deps = manifest.dependencies.len() + (if include_dev: manifest.dev_dependencies.len() else: 0)
+    if all_deps == 0:
+        print "No dependencies to install."
+        return 0
+
+    # Load lock file if present
+    val lock_path = "{project_dir}/package.lock.sdn"
+    var lock: LockFile? = nil
+
+    if frozen:
+        lock = parse_lock_file(lock_path)
+        if not lock.?:
+            print "pkg install: --frozen requires package.lock.sdn to exist"
+            return 1
+
+    if not frozen:
+        lock = parse_lock_file(lock_path)
+
+    # Dry run: just show what would be installed
+    if dry_run:
+        print "Would install {all_deps} dependencies:"
+        for dep in manifest.dependencies:
+            print "  {dep.to_text()}"
+        if include_dev:
+            for dep in manifest.dev_dependencies:
+                print "  {dep.to_text()} (dev)"
+        return 0
+
+    print "Resolving {all_deps} dependencies..."
+    print ""
+
+    # Resolve all dependencies
+    val resolution = resolve_all(manifest, lock, include_dev)
+
+    if resolution.has_errors():
+        print ""
+        print "Errors during resolution:"
+        for err in resolution.errors:
+            print "  {err}"
+        return 1
+
+    # Create packages/ directory
+    val packages_dir = "{project_dir}/packages"
+    val (_, _, mkdir_code) = shell_run("mkdir -p \"{packages_dir}\"")
+    if mkdir_code != 0:
+        print "pkg install: failed to create packages/ directory"
+        return 1
+
+    # Create symlinks
+    var linked = 0
+    for resolved in resolution.resolved:
+        if resolved.source_type == "path":
+            val success = create_package_link(packages_dir, resolved.name, resolved.cache_path)
+            if success:
+                print "  Linked {resolved.name} -> {resolved.cache_path}"
+                linked = linked + 1
+            else:
+                print "  Failed to link {resolved.name}"
+        else:
+            val success = create_package_link(packages_dir, resolved.name, resolved.cache_path)
+            if success:
+                print "  Linked {resolved.name} ({resolved.version})"
+                linked = linked + 1
+            else:
+                print "  Failed to link {resolved.name}"
+
+    # Generate lock file
+    if not frozen:
+        var lock_entries: [LockEntry] = []
+        for resolved in resolution.resolved:
+            lock_entries.push(LockEntry(
+                name: resolved.name,
+                version: resolved.version,
+                source_type: resolved.source_type,
+                git_url: resolved.git_url,
+                git_commit: resolved.git_commit,
+                path: resolved.path
+            ))
+        val wrote_lock = write_lock_file(lock_path, lock_entries)
+        if wrote_lock:
+            print ""
+            print "Generated package.lock.sdn"
+
+    print ""
+    print "Installed {linked}/{all_deps} packages to packages/"
+    0
+
+
+# ============================================================================
+# pkg add <name> --git <url>
+# ============================================================================
+
+fn do_add(project_dir: text, package_spec: text, git_url: text, git_branch: text,
+          git_tag: text, path_dep: text, is_dev: bool) -> i64:
+    val manifest_path = "{project_dir}/package.sdn"
+    if not rt_file_exists(manifest_path):
+        print "pkg add: no package.sdn found in {project_dir}"
+        print "Run 'simple pkg init' to create a project."
+        return 1
+
+    # Parse name and optional version from spec
+    var name = package_spec
+    var version_constraint = "*"
+    if package_spec.contains("@"):
+        val parts = package_spec.split("@")
+        name = parts[0]
+        if parts.len() > 1:
+            version_constraint = parts[1]
+
+    # Read and parse current manifest
+    val source = rt_file_read_text(manifest_path)
+    val manifest_result = parse_manifest(source)
+    var manifest: PackageManifest = PackageManifest.empty()
+    match manifest_result:
+        case Ok(m): manifest = m
+        case Err(e):
+            print "pkg add: {e}"
+            return 1
+
+    # Check if already exists
+    if manifest.has_dep(name):
+        print "pkg add: dependency '{name}' already exists."
+        print "Use 'simple pkg update {name}' to change it."
+        return 1
+
+    # Build dependency entry SDN text
+    var dep_sdn = ""
+    if path_dep != "":
+        dep_sdn = "    {name}:\n        path: {path_dep}\n"
+    elif git_url != "":
+        dep_sdn = "    {name}:\n        git: \"{git_url}\"\n"
+        if git_tag != "":
+            dep_sdn = "{dep_sdn}        tag: {git_tag}\n"
+        elif git_branch != "" and git_branch != "main":
+            dep_sdn = "{dep_sdn}        branch: {git_branch}\n"
+    elif version_constraint != "*":
+        dep_sdn = "    {name}: \"{version_constraint}\"\n"
+    else:
+        dep_sdn = "    {name}: \"*\"\n"
+
+    # Insert into manifest text
+    val section = if is_dev: "dev_dependencies" else: "dependencies"
+    var new_source = ""
+    if source.contains("{section}:"):
+        # Insert after section header
+        val lines = source.split("\n")
+        var result: [text] = []
+        var found_section = false
+        var inserted = false
+        for line in lines:
+            result.push(line)
+            if not inserted and line.trim() == "{section}:":
+                found_section = true
+            elif found_section and not inserted:
+                # Check if we're still in the section
+                if line.trim() == "" or (not line.starts_with("    ") and not line.starts_with("\t") and line.trim() != ""):
+                    # Insert before this line (end of section)
+                    # Actually insert before the blank line
+                    val last = result.pop()
+                    result.push(dep_sdn.trim_end())
+                    result.push(last)
+                    inserted = true
+        if not inserted:
+            result.push(dep_sdn.trim_end())
+        new_source = result.join("\n")
+    else:
+        # Add new section at end
+        new_source = "{source}\n{section}:\n{dep_sdn}"
+
+    val wrote = rt_file_write_text(manifest_path, new_source)
+    if not wrote:
+        print "pkg add: failed to write {manifest_path}"
+        return 1
+
+    if path_dep != "":
+        print "Added {name} (path: {path_dep})"
+    elif git_url != "":
+        print "Added {name} (git: {git_url})"
+    else:
+        print "Added {name} ({version_constraint})"
+
+    # Auto-install the new dependency
+    print ""
+    do_install(project_dir, false, false, is_dev)
+
+
+# ============================================================================
+# pkg remove <name>
+# ============================================================================
+
+fn do_remove(project_dir: text, package_name: text, dev_only: bool) -> i64:
+    val manifest_path = "{project_dir}/package.sdn"
+    if not rt_file_exists(manifest_path):
+        print "pkg remove: no package.sdn found in {project_dir}"
+        return 1
+
+    val source = rt_file_read_text(manifest_path)
+
+    # Remove the dependency from manifest text
+    val lines = source.split("\n")
+    var result: [text] = []
+    var in_deps_section = false
+    var in_dev_deps_section = false
+    var removing = false
+    var found = false
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Track sections
+        if trimmed == "dependencies:":
+            in_deps_section = true
+            in_dev_deps_section = false
+            removing = false
+            result.push(line)
+            continue
+        if trimmed == "dev_dependencies:":
+            in_deps_section = false
+            in_dev_deps_section = true
+            removing = false
+            result.push(line)
+            continue
+        if not line.starts_with(" ") and not line.starts_with("\t") and trimmed != "" and trimmed != "dependencies:" and trimmed != "dev_dependencies:":
+            in_deps_section = false
+            in_dev_deps_section = false
+            removing = false
+
+        # Check if we should remove in this section
+        var in_target = false
+        if dev_only:
+            in_target = in_dev_deps_section
+        else:
+            in_target = in_deps_section or in_dev_deps_section
+
+        if in_target and not removing:
+            if trimmed.starts_with("{package_name}:") or trimmed.starts_with("{package_name} "):
+                removing = true
+                found = true
+                continue
+        if removing:
+            # Skip sub-fields (indented more deeply)
+            if line.starts_with("        ") and trimmed != "":
+                continue
+            else:
+                removing = false
+                result.push(line)
+                continue
+
+        result.push(line)
+
+    if not found:
+        print "pkg remove: dependency '{package_name}' not found in manifest"
+        return 1
+
+    val new_source = result.join("\n")
+    val wrote = rt_file_write_text(manifest_path, new_source)
+    if not wrote:
+        print "pkg remove: failed to write {manifest_path}"
+        return 1
+
+    # Remove symlink from packages/
+    val link_path = "{project_dir}/packages/{package_name}"
+    if rt_file_exists(link_path):
+        val (_, _, rm_code) = shell_run("rm -rf \"{link_path}\"")
+        if rm_code == 0:
+            print "Removed packages/{package_name} symlink"
+
+    print "Removed dependency '{package_name}' from package.sdn"
+    0
+
+
+# ============================================================================
+# pkg init
+# ============================================================================
+
+fn do_init(project_dir: text, name: text) -> i64:
+    val manifest_path = "{project_dir}/package.sdn"
+    if rt_file_exists(manifest_path):
+        print "pkg init: package.sdn already exists"
+        return 1
+
+    var project_name = name
+    if project_name == "":
+        # Use directory name as project name
+        val parts = project_dir.split("/")
+        if parts.len() > 0:
+            project_name = parts[parts.len() - 1]
+        if project_name == "":
+            project_name = "my-project"
+
+    val content = generate_manifest(project_name, "0.1.0", "", "", "MIT")
+    val wrote = rt_file_write_text(manifest_path, content)
+    if not wrote:
+        print "pkg init: failed to write package.sdn"
+        return 1
+
+    print "Created package.sdn for '{project_name}'"
+    0
