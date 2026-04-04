@@ -52,7 +52,7 @@ Several requested items are real but only partial, experimental, or host-depende
 | C/C++ bidirectional interface | Partial | Strong SFFI stack; bidirectional completeness not proven |
 | LLVM backend | Partial but real | Real backend and LLVM-oriented flows; still tool-dependent and not uniformly complete |
 | VHDL backend | Experimental | Concrete codegen surface exists, but should not be presented as complete |
-| GC and no-GC mode support | Partial but substantial | Multiple runtime families exist, completeness varies by path |
+| GC and no-GC mode support | Public/stable (5 families) | `common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc` with compiler enforcement, interpreter warnings, target preset mapping. `nogc_async_immut` advanced-scoped. [Support matrix](../04_architecture/runtime_family_support_matrix.md) |
 | Language statistics | Implemented | CLI/tooling support exists |
 | Coverage thresholds against dummy implementations | Partial but meaningful | Stub lint and coverage enforcement exist; not a universal proof against every weak implementation |
 | Language-level mock policy in system tests | Implemented with scope | Executor-path proof now covers system-test bans plus unit-test override behavior |
@@ -287,7 +287,7 @@ Use Simple's differentiators in three tiers:
 - remote baremetal end-to-end hardware flows
 - LLVM/VHDL backend completeness
 - C/C++ bidirectional interop
-- full GC/no-GC story
+- `nogc_async_immut` (advanced-scoped, limited tests)
 - Lean verification integration
 
 ## Spawn-Agent Check

@@ -45,7 +45,7 @@ Completed the GC/no-GC runtime-family feature across all 7 agent workstreams. Th
 - `test/unit/compiler/semantics/gc_boundary_enforcement_spec.spl` — 30 test cases (boundary rules, family classification)
 - `test/integration/runtime_family_spec.spl` — 26 test cases (target presets, family restriction)
 - `test/unit/compiler/interpreter/gc_parity_spec.spl` — 32 test cases (path extraction, boundary warnings)
-- Total: **88 test cases** across 3 new files + 1 existing
+- Total: **112 test cases** across 3 new files + 1 existing (30 + 29 + 30 + 23)
 
 ### Agent 7: README & Support Matrix Reclassification (Phase 4)
 - Updated `README.md` with precise runtime family table and enforcement description

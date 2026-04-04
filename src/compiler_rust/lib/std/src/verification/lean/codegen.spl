@@ -16,6 +16,8 @@ use verification.lean.memory_safety as memory_safety
 use verification.lean.verification_checker as checker
 use verification.lean.verification_diagnostics as diagnostics
 use verification.lean.runner as runner
+use verification.lean.lean_block as lean_block
+use verification.lean.proof_ref as proof_ref
 use verification.models.contracts as models_contracts
 use io.fs as fs
 
@@ -144,9 +146,10 @@ class LeanCodegen:
     theorems: List<LeanTheorem>
     imports: List<text>
     raw_output: text  # For raw line output mode (string concatenation)
+    lean_blocks: List<lean_block.LeanBlock>  # Embedded lean{} blocks from source
 
     fn new(options: LeanCodegenOptions) -> LeanCodegen:
-        LeanCodegen(options, [], [], [], [], ["Mathlib.Data.Nat.Basic"], "")
+        LeanCodegen(options, [], [], [], [], ["Mathlib.Data.Nat.Basic"], "", [])
 
     # Static factory method for simplified creation
     static fn create(module_name: text) -> LeanCodegen:
@@ -178,6 +181,48 @@ class LeanCodegen:
     me add_theorem_implicit(theorem: LeanTheorem) -> LeanCodegen:
         self.theorems = self.theorems + [theorem]
         self
+
+    # Add an embedded lean{} block from source
+    me add_lean_block(block: lean_block.LeanBlock) -> LeanCodegen:
+        self.lean_blocks = self.lean_blocks + [block]
+        self
+
+    # Collect all theorem names from lean{} blocks for collision detection
+    fn lean_block_theorem_names(self) -> List<text>:
+        var names: List<text> = []
+        for block in self.lean_blocks:
+            for name in block.theorem_names:
+                names = names + [name]
+        names
+
+    # Collect all imports from lean{} blocks, deduplicated against existing imports
+    fn deduplicated_lean_block_imports(self) -> List<text>:
+        var new_imports: List<text> = []
+        for block in self.lean_blocks:
+            for imp in block.imports:
+                # Check if already in main imports or already collected
+                var already_present = false
+                for existing in self.imports:
+                    if existing == imp:
+                        already_present = true
+                        break
+                if not already_present:
+                    for collected in new_imports:
+                        if collected == imp:
+                            already_present = true
+                            break
+                if not already_present:
+                    new_imports = new_imports + [imp]
+        new_imports
+
+    # Check for theorem name collisions between structured theorems and lean{} blocks.
+    # Returns CollisionErrors if any theorem name appears in both.
+    fn check_lean_block_collisions(self) -> List<proof_ref.CollisionError>:
+        var generated_names: List<text> = []
+        for thm in self.theorems:
+            generated_names = generated_names + [thm.name]
+        val block_names = self.lean_block_theorem_names()
+        proof_ref.ProofRefResolver.check_collisions(generated_names, block_names)
 
     # Raw line output methods for flexible code generation
     # All methods return self for method chaining
@@ -229,19 +274,27 @@ class LeanCodegen:
         self
 
     # Emit all raw output combined with structured content as a single string
-    # The structured content is inserted before "end <namespace>" if present
+    # The structured content is inserted before "end <namespace>" if present.
+    # lean{} block bodies are inserted after structured content but before "end".
+    # Imports from lean{} blocks are deduplicated with existing imports.
     me emit() -> text:
         # Build type declarations separately from functions/theorems so raw
         # recursive definitions can appear after their referenced types.
         var structured_types = ""
         var structured_rest = ""
 
+        # Merge deduplicated lean{} block imports into the import list
+        val extra_imports = self.deduplicated_lean_block_imports()
+        var all_imports = self.imports
+        for imp in extra_imports:
+            all_imports = all_imports + [imp]
+
         # Sort all collections by name for deterministic output
         var sorted_inductives = self.inductives.sort_by(\a, b: a.name < b.name)
         var sorted_structures = self.structures.sort_by(\a, b: a.name < b.name)
         var sorted_functions = self.functions.sort_by(\a, b: a.name < b.name)
         var sorted_theorems = self.theorems.sort_by(\a, b: a.name < b.name)
-        var sorted_imports = self.imports.sort_by(\a, b: a < b)
+        var sorted_imports = all_imports.sort_by(\a, b: a < b)
 
         # Emit inductives before structures so structures can refer to them.
         for inductive in sorted_inductives:
@@ -292,6 +345,21 @@ class LeanCodegen:
                 case nil:
                     structured_rest = structured_rest + "  sorry\n\n"
 
+        # Build lean{} block content section
+        var lean_block_content = ""
+        if self.lean_blocks.len() > 0:
+            lean_block_content = lean_block_content + "-- ════════════════════════════════════════════════════════════════\n"
+            lean_block_content = lean_block_content + "-- Embedded lean{{}} blocks\n"
+            lean_block_content = lean_block_content + "-- ════════════════════════════════════════════════════════════════\n\n"
+            for block in self.lean_blocks:
+                lean_block_content = lean_block_content + "-- From {block.source_file}:{block.source_line}\n"
+                # Strip import lines from body (they are merged into top-level imports)
+                for body_line in block.body.split("\n"):
+                    val trimmed_body = body_line.trim()
+                    if not trimmed_body.starts_with("import "):
+                        lean_block_content = lean_block_content + body_line + "\n"
+                lean_block_content = lean_block_content + "\n"
+
         # Find "end " in raw_output and insert structured content before it
         val lines = self.raw_output.split("\n")
         var result = ""
@@ -317,6 +385,7 @@ class LeanCodegen:
                     result = result + structured_types
                     inserted_types = true
                 result = result + structured_rest
+                result = result + lean_block_content
                 found_end = true
             result = result + line + "\n"
 
@@ -325,6 +394,7 @@ class LeanCodegen:
             if not inserted_types:
                 result = result + structured_types
             result = result + structured_rest
+            result = result + lean_block_content
 
         result
 
@@ -357,8 +427,14 @@ class LeanCodegen:
     me generate() -> text:
         var emit = emitter.LeanEmitter.new()
 
+        # Merge deduplicated lean{} block imports into the import list
+        val extra_imports = self.deduplicated_lean_block_imports()
+        var all_imports = self.imports
+        for imp in extra_imports:
+            all_imports = all_imports + [imp]
+
         # Sort all collections by name for deterministic output
-        var sorted_imports = self.imports.sort_by(\a, b: a < b)
+        var sorted_imports = all_imports.sort_by(\a, b: a < b)
         var sorted_structures = self.structures.sort_by(\a, b: a.name < b.name)
         var sorted_inductives = self.inductives.sort_by(\a, b: a.name < b.name)
         var sorted_functions = self.functions.sort_by(\a, b: a.name < b.name)
@@ -396,6 +472,18 @@ class LeanCodegen:
         for theorem in sorted_theorems:
             emit.emit_theorem_data(theorem.name, theorem.params, theorem.statement, theorem.proof, self.options.generate_stubs)
             emit.emit_blank()
+
+        # Embedded lean{} blocks
+        if self.lean_blocks.len() > 0:
+            emit.emit_line("-- Embedded lean{} blocks")
+            emit.emit_blank()
+            for block in self.lean_blocks:
+                emit.emit_line("-- From {block.source_file}:{block.source_line}")
+                for body_line in block.body.split("\n"):
+                    val trimmed_body = body_line.trim()
+                    if not trimmed_body.starts_with("import "):
+                        emit.emit_line(body_line)
+                emit.emit_blank()
 
         # Close namespace
         emit.emit_end_namespace(self.options.module_name)

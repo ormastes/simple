@@ -1,0 +1,164 @@
+use std.spec.{describe, it, expect, context}
+use verification.cache.{VerificationCache, CacheEntry, CacheStats}
+use verification.fingerprint.{Fingerprint, simple_hash}
+use verification.state.{VerificationState}
+use verification.proof_unit.{ProofUnit}
+
+# @cover src/compiler_rust/lib/std/src/verification/cache.spl 80%
+
+describe "Verification Cache":
+    it "returns nil for unknown entries":
+        val cache = VerificationCache.new("/tmp/test-vcache-empty")
+        val fp = Fingerprint.from_hashes("h1", "h2", [], "v4.x")
+        val result = cache.lookup("unknown.spl", fp)
+        expect(result).to_be_nil()
+
+    it "stores and retrieves an entry with matching fingerprint":
+        var cache = VerificationCache.new("/tmp/test-vcache-store")
+        val fp = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
+        cache.store("my_module.spl", fp, VerificationState.Verified, {}, "v4.x")
+        val result = cache.lookup("my_module.spl", fp)
+        expect(result).to_be(Option<CacheEntry>)
+        match result:
+            case Some(entry):
+                expect(entry.fingerprint).to_equal(fp.combined)
+                expect(entry.state).to_equal(VerificationState.Verified)
+            case nil:
+                expect(false).to_equal(true)  # Should not reach here
+
+    it "returns nil when fingerprint has changed (stale detection)":
+        var cache = VerificationCache.new("/tmp/test-vcache-stale")
+        val fp_old = Fingerprint.from_hashes("src1", "lean1", [], "v4.x")
+        cache.store("stale_module.spl", fp_old, VerificationState.Verified, {}, "v4.x")
+        # Now compute a different fingerprint (source changed)
+        val fp_new = Fingerprint.from_hashes("src2_changed", "lean1", [], "v4.x")
+        val result = cache.lookup("stale_module.spl", fp_new)
+        expect(result).to_be_nil()
+
+    it "never returns a Verified result when fingerprint mismatches":
+        var cache = VerificationCache.new("/tmp/test-vcache-safety")
+        val fp_original = Fingerprint.from_hashes("original", "lean_ok", [], "v4.x")
+        cache.store("safety.spl", fp_original, VerificationState.Verified, {}, "v4.x")
+        # Simulate a semantic change by altering the source hash
+        val fp_changed = Fingerprint.from_hashes("modified", "lean_ok", [], "v4.x")
+        val result = cache.lookup("safety.spl", fp_changed)
+        # The safety invariant: stale entries must not be returned
+        expect(result).to_be_nil()
+
+    it "tracks cache statistics for hits and misses":
+        var cache = VerificationCache.new("/tmp/test-vcache-stats")
+        val fp = Fingerprint.from_hashes("s1", "l1", [], "v4.x")
+        cache.store("hit.spl", fp, VerificationState.Verified, {}, "v4.x")
+
+        # Hit
+        cache.lookup("hit.spl", fp)
+        # Miss
+        cache.lookup("nonexistent.spl", fp)
+        # Stale
+        val fp2 = Fingerprint.from_hashes("s2", "l1", [], "v4.x")
+        cache.lookup("hit.spl", fp2)
+
+        val s = cache.stats()
+        expect(s.hits).to_equal(1)
+        expect(s.misses).to_equal(1)
+        expect(s.stale).to_equal(1)
+        expect(s.total_entries).to_equal(1)
+
+    it "formats cache stats as human-readable text":
+        val s = CacheStats(total_entries=5, hits=3, misses=1, stale=1)
+        val formatted = s.format()
+        expect(formatted).to_contain("5 entries")
+        expect(formatted).to_contain("3 hits")
+        expect(formatted).to_contain("1 misses")
+        expect(formatted).to_contain("1 stale")
+
+    context "invalidate_dependents":
+        it "removes cached entries for units depending on changed module":
+            var cache = VerificationCache.new("/tmp/test-vcache-invalidate")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+
+            # Unit b depends on module "base_defs"
+            var unit_a = ProofUnit.create("a.spl", "*", "Verification.A", "a.lean")
+            var unit_b = ProofUnit.create("b.spl", "*", "Verification.B", "b.lean")
+            unit_b = unit_b.with_dependencies(["base_defs"])
+
+            cache.invalidate_dependents("base_defs", [unit_a, unit_b])
+
+            # a.spl should still be cached (no dependency on base_defs)
+            val result_a = cache.lookup("a.spl", fp_a)
+            match result_a:
+                case Some(_): expect(true).to_equal(true)
+                case nil: expect(false).to_equal(true)
+
+            # b.spl should have been invalidated
+            val result_b = cache.lookup("b.spl", fp_b)
+            expect(result_b).to_be_nil()
+
+    context "clear":
+        it "empties the cache completely":
+            var cache = VerificationCache.new("/tmp/test-vcache-clear")
+            val fp = Fingerprint.from_hashes("x", "y", [], "v4.x")
+            cache.store("one.spl", fp, VerificationState.Verified, {}, "v4.x")
+            cache.store("two.spl", fp, VerificationState.Failed, {}, "v4.x")
+            expect(cache.stats().total_entries).to_equal(2)
+
+            cache.clear()
+            expect(cache.stats().total_entries).to_equal(0)
+            expect(cache.stats().hits).to_equal(0)
+
+    context "Fingerprint":
+        it "produces deterministic hashes for identical input":
+            val fp1 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
+            val fp2 = Fingerprint.from_hashes("src", "lean", ["dep1"], "v4.x")
+            expect(fp1.matches(fp2)).to_equal(true)
+            expect(fp1.combined).to_equal(fp2.combined)
+
+        it "produces different hashes for different input":
+            val fp1 = Fingerprint.from_hashes("src_a", "lean", [], "v4.x")
+            val fp2 = Fingerprint.from_hashes("src_b", "lean", [], "v4.x")
+            expect(fp1.matches(fp2)).to_equal(false)
+
+        it "includes toolchain version in fingerprint":
+            val fp1 = Fingerprint.from_hashes("src", "lean", [], "v4.3.0")
+            val fp2 = Fingerprint.from_hashes("src", "lean", [], "v4.4.0")
+            expect(fp1.matches(fp2)).to_equal(false)
+
+        it "includes dependency hashes in fingerprint":
+            val fp1 = Fingerprint.from_hashes("src", "lean", ["dep_v1"], "v4.x")
+            val fp2 = Fingerprint.from_hashes("src", "lean", ["dep_v2"], "v4.x")
+            expect(fp1.matches(fp2)).to_equal(false)
+
+        it "round-trips through to_text and from_text":
+            val fp = Fingerprint.from_hashes("abc", "def", ["g1", "g2"], "v4.x")
+            val serialized = fp.to_text()
+            val restored = Fingerprint.from_text(serialized)
+            match restored:
+                case Some(fp2):
+                    expect(fp.matches(fp2)).to_equal(true)
+                    expect(fp2.source_hash).to_equal("abc")
+                    expect(fp2.lean_hash).to_equal("def")
+                    expect(fp2.toolchain_version).to_equal("v4.x")
+                case nil:
+                    expect(false).to_equal(true)  # Should not fail
+
+        it "returns nil for malformed text":
+            val result = Fingerprint.from_text("incomplete")
+            expect(result).to_be_nil()
+
+    context "simple_hash":
+        it "returns consistent results for same input":
+            val h1 = simple_hash("hello world")
+            val h2 = simple_hash("hello world")
+            expect(h1).to_equal(h2)
+
+        it "returns different results for different input":
+            val h1 = simple_hash("hello")
+            val h2 = simple_hash("world")
+            expect(h1 == h2).to_equal(false)
+
+        it "handles empty string":
+            val h = simple_hash("")
+            expect(h.len() > 0).to_equal(true)

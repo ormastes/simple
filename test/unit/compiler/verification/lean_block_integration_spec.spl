@@ -1,0 +1,182 @@
+# @cover src/compiler_rust/lib/std/src/verification/lean/lean_block.spl 80%
+# @cover src/compiler_rust/lib/std/src/verification/lean/codegen.spl 60%
+"""
+# Lean Block Integration Specification
+
+**Feature IDs:** #LEAN-BLOCK
+**Category:** Verification
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** doc/03_plan/lean_verification_contract.md
+
+## Overview
+
+Verifies that embedded lean{} blocks are correctly parsed, merged into
+generated Lean output, and that namespace collisions are detected.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| lean{} block | Raw Lean 4 code embedded in Simple source |
+| Collision | Same theorem name in both generated and handwritten code |
+| Import dedup | Imports from lean{} blocks merged without duplicates |
+"""
+
+use std.sspec.*
+use verification.lean.lean_block as lean_block
+use verification.lean.proof_ref as proof_ref
+use verification.lean.codegen as codegen
+
+
+# ============================================================================
+# Test Group 1: LeanBlock Model
+# ============================================================================
+
+describe "LeanBlock Model":
+    it "extracts theorem names from body":
+        val body = "theorem my_theorem (n : Nat) : n + 0 = n := by\n  simp\n\ntheorem another_thm : True := trivial"
+        val names = lean_block.LeanBlock.extract_theorem_names(body)
+        expect(names.len()).to_equal(2)
+        expect(names[0]).to_equal("my_theorem")
+        expect(names[1]).to_equal("another_thm")
+
+    it "extracts imports from body":
+        val body = "import Mathlib.Data.Nat.Basic\nimport Std.Data.List\n\ntheorem foo : True := trivial"
+        val imps = lean_block.LeanBlock.extract_imports(body)
+        expect(imps.len()).to_equal(2)
+        expect(imps[0]).to_equal("Mathlib.Data.Nat.Basic")
+        expect(imps[1]).to_equal("Std.Data.List")
+
+    it "creates with placement and auto-extracts":
+        val body = "import Mathlib.Tactic\ntheorem helper_lemma : 1 + 1 = 2 := by norm_num"
+        val block = lean_block.LeanBlock.create("test.spl", 42, lean_block.LeanBlockPlacement.ModuleLevel, body)
+        expect(block.source_file).to_equal("test.spl")
+        expect(block.source_line).to_equal(42)
+        expect(block.theorem_names.len()).to_equal(1)
+        expect(block.theorem_names[0]).to_equal("helper_lemma")
+        expect(block.imports.len()).to_equal(1)
+        expect(block.imports[0]).to_equal("Mathlib.Tactic")
+
+    it "handles body with no theorems or imports":
+        val body = "-- just a comment\ndef helper := 42"
+        val block = lean_block.LeanBlock.create("empty.spl", 1, lean_block.LeanBlockPlacement.FunctionLevel, body)
+        expect(block.theorem_names.len()).to_equal(0)
+        expect(block.imports.len()).to_equal(0)
+
+    it "sets explicit namespace":
+        val body = "theorem ns_thm : True := trivial"
+        var block = lean_block.LeanBlock.create("ns.spl", 10, lean_block.LeanBlockPlacement.TypeLevel, body)
+        block = block.with_namespace("MyModule.Proofs")
+        expect(block.namespace).to_equal(Some("MyModule.Proofs"))
+
+
+# ============================================================================
+# Test Group 2: Codegen Integration with lean{} blocks
+# ============================================================================
+
+describe "Lean Block Codegen Integration":
+    it "includes lean{} block content in generated output":
+        var opts = codegen.LeanCodegenOptions.new()
+        opts = opts.with_module_name("BlockTest")
+        var gen = codegen.LeanCodegen.new(opts)
+
+        val block = lean_block.LeanBlock.create(
+            "example.spl", 15,
+            lean_block.LeanBlockPlacement.ModuleLevel,
+            "theorem my_theorem (n : Nat) : n + 0 = n := by simp"
+        )
+        gen = gen.add_lean_block(block)
+        gen = gen.add_namespace("BlockTest")
+        gen = gen.end_namespace("BlockTest")
+
+        val output = gen.emit()
+        expect(output).to_contain("theorem my_theorem")
+        expect(output).to_contain("From example.spl:15")
+
+    it "deduplicates imports from lean{} blocks":
+        var opts = codegen.LeanCodegenOptions.new()
+        opts = opts.with_module_name("ImportTest")
+        var gen = codegen.LeanCodegen.new(opts)
+
+        # Default imports already include Mathlib.Data.Nat.Basic
+        val block = lean_block.LeanBlock.create(
+            "dup.spl", 1,
+            lean_block.LeanBlockPlacement.ModuleLevel,
+            "import Mathlib.Data.Nat.Basic\nimport Std.Data.List\ntheorem t : True := trivial"
+        )
+        gen = gen.add_lean_block(block)
+
+        val extra = gen.deduplicated_lean_block_imports()
+        # Mathlib.Data.Nat.Basic is already in default imports, should not duplicate
+        expect(extra.len()).to_equal(1)
+        expect(extra[0]).to_equal("Std.Data.List")
+
+    it "strips import lines from lean{} block body in output":
+        var opts = codegen.LeanCodegenOptions.new()
+        opts = opts.with_module_name("StripTest")
+        var gen = codegen.LeanCodegen.new(opts)
+
+        val block = lean_block.LeanBlock.create(
+            "strip.spl", 5,
+            lean_block.LeanBlockPlacement.ModuleLevel,
+            "import Std.Data.List\ntheorem strip_thm : True := trivial"
+        )
+        gen = gen.add_lean_block(block)
+        gen = gen.add_namespace("StripTest")
+        gen = gen.end_namespace("StripTest")
+
+        val output = gen.emit()
+        # The import line should NOT appear inside the block body section
+        # (it is merged into top-level imports instead)
+        expect(output).to_contain("theorem strip_thm")
+        # The top-level imports section should contain it
+        expect(output).to_contain("Std.Data.List")
+
+
+# ============================================================================
+# Test Group 3: Collision Detection
+# ============================================================================
+
+describe "Lean Block Collision Detection":
+    it "detects duplicate theorem names between generated and lean{} blocks":
+        var opts = codegen.LeanCodegenOptions.new()
+        opts = opts.with_module_name("CollisionTest")
+        var gen = codegen.LeanCodegen.new(opts)
+
+        # Add a structured theorem
+        val thm = codegen.LeanTheorem.new("shared_name", "True")
+        gen = gen.add_theorem(thm)
+
+        # Add a lean{} block with the same theorem name
+        val block = lean_block.LeanBlock.create(
+            "collision.spl", 20,
+            lean_block.LeanBlockPlacement.ModuleLevel,
+            "theorem shared_name : True := trivial"
+        )
+        gen = gen.add_lean_block(block)
+
+        val collisions = gen.check_lean_block_collisions()
+        expect(collisions.len()).to_equal(1)
+        expect(collisions[0].theorem_name).to_equal("shared_name")
+        expect(collisions[0].message).to_contain("Collision")
+        expect(collisions[0].message).to_contain("shared_name")
+
+    it "reports no collisions when names are distinct":
+        var opts = codegen.LeanCodegenOptions.new()
+        opts = opts.with_module_name("NoCollisionTest")
+        var gen = codegen.LeanCodegen.new(opts)
+
+        val thm = codegen.LeanTheorem.new("gen_theorem", "True")
+        gen = gen.add_theorem(thm)
+
+        val block = lean_block.LeanBlock.create(
+            "ok.spl", 10,
+            lean_block.LeanBlockPlacement.ModuleLevel,
+            "theorem hand_theorem : True := trivial"
+        )
+        gen = gen.add_lean_block(block)
+
+        val collisions = gen.check_lean_block_collisions()
+        expect(collisions.len()).to_equal(0)

@@ -13,6 +13,9 @@ use app.verify.tooling_gate.{
     write_verify_report,
     default_report_dir
 }
+use verification.state.{VerificationState}
+use verification.proof_unit.{ProofUnit, ProofUnitSet}
+use verification.report.{VerificationReport, ReportLevel}
 
 fn print_help():
     print "Usage: simple verify [options] [file ...]"
@@ -23,6 +26,9 @@ fn print_help():
     print "  --all                 Run the tooling gate for the full project scope"
     print "  --files=a,b,c         Override changed-file discovery with an explicit file list"
     print "  --no-write-report     Do not write doc/09_report/verify output"
+    print "  --lean-status         Show Lean verification status report"
+    print "  --detail              With --lean-status: show theorem-level detail"
+    print "  --format=sdn          With --lean-status: output machine-readable SDN"
     print "  -h, --help            Show this help"
 
 fn collect_scope_files(args: [text]) -> [text]:
@@ -45,6 +51,10 @@ fn main() -> i64:
             print_help()
             return 0
 
+    for arg in args:
+        if arg == "--lean-status":
+            return run_lean_status(args)
+
     val files = collect_scope_files(args)
     val scope = if args.contains("--all"):
         "full project"
@@ -64,3 +74,62 @@ fn main() -> i64:
         1
     else:
         0
+
+# --lean-status: Lean verification status report
+fn run_lean_status(args: [text]) -> i64:
+    val units = discover_proof_units()
+
+    # Determine detail level
+    var level = ReportLevel.File
+    for arg in args:
+        if arg == "--detail":
+            level = ReportLevel.Theorem
+
+    # Determine output format
+    var use_sdn = false
+    for arg in args:
+        if arg == "--format=sdn":
+            use_sdn = true
+
+    val timestamp = "2026-04-04T00:00:00Z"  # TODO: use real timestamp from std.time
+    val report = VerificationReport.from_units(
+        "Lean Verification Status", "project", units, timestamp
+    )
+
+    if use_sdn:
+        print report.render_sdn()
+    else:
+        print report.render(level)
+
+    # Return non-zero if any unit has failed state
+    val counts = units.state_counts()
+    if counts.failed > 0:
+        1
+    else:
+        0
+
+# Discover proof units from verification/generated/ directory
+fn discover_proof_units() -> ProofUnitSet:
+    use std.io_runtime.{file_exists, read_dir, read_file}
+
+    var units = ProofUnitSet.empty()
+    val gen_dir = "verification/generated"
+
+    if not file_exists(gen_dir):
+        return units
+
+    val entries = read_dir(gen_dir)
+    for entry in entries:
+        if entry.ends_with(".lean"):
+            val lean_path = "{gen_dir}/{entry}"
+            val module_name = entry.replace(".lean", "")
+            var unit = ProofUnit.create(
+                source_file="(discovered)",
+                source_symbol="*",
+                lean_module="Verification.{module_name}",
+                lean_file=lean_path
+            )
+            unit = unit.with_state(VerificationState.NotChecked)
+            units = units.add(unit)
+
+    units

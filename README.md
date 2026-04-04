@@ -45,7 +45,7 @@ Implemented and safe to advertise:
 Implemented, but best described with qualifiers:
 - `m{}` / `loss{}` / `nograd{}` are real and usable, but the broader DL story is still evolving
 - LLVM support is real, but some paths still depend on external LLVM tooling
-- GC and no-GC runtime families both exist, but completeness varies by execution path
+- GC and no-GC runtime families: 5 public families (`common`, `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc`) with compiler boundary enforcement, interpreter warnings, and target preset mapping. Support matrix: [doc/04_architecture/runtime_family_support_matrix.md](doc/04_architecture/runtime_family_support_matrix.md)
 - Shared UI testing across web and TUI-web surfaces is real, but this is not yet one finished unified UI layer
 - Remote baremetal execution is real, but some hardware lanes remain host- and board-dependent
 
@@ -60,6 +60,26 @@ Experimental or partial:
 - Lean generation, artifact inventory, and proof-checking commands exist, but the supported end-to-end formal verification workflow is still partial. Current state: [doc/03_plan/lean_verification_implementation.md](doc/03_plan/lean_verification_implementation.md)
 
 See [doc/report/unique_features.md](doc/report/unique_features.md) for the evidence-backed audit.
+
+---
+
+## Runtime Families
+
+Simple organizes its standard library into runtime families based on allocation, mutation, and concurrency requirements:
+
+| Family | Allocation | Mutation | Async | Use Case |
+|--------|-----------|----------|-------|----------|
+| `common` | heap (default) | immutable | no | Pure functions, math, text, encoding |
+| `nogc_sync_mut` | heap/arena/pool | mutable | no | File I/O, networking, FFI, databases |
+| `nogc_async_mut` | heap | mutable | yes | Async I/O, threads, actors, generators |
+| `gc_async_mut` | GC-managed | mutable | yes | GPU/CUDA, ML pipelines |
+| `nogc_async_mut_noalloc` | stack only | mutable | yes | Baremetal, embedded, RTOS |
+
+The compiler enforces family boundaries: importing a GC module from a no-GC context produces a diagnostic warning. Target presets (`Baremetal`, `Hosted`, `EmbeddedWithHeap`) automatically restrict module resolution to compatible families.
+
+For advanced use: `nogc_async_immut` provides persistent data structures with lock-free concurrency.
+
+See [Runtime Family Support Matrix](doc/04_architecture/runtime_family_support_matrix.md) for full contracts, and [Known Limitations](doc/08_tracking/bug/gc_runtime_limitations.md) for current caveats.
 
 ---
 
