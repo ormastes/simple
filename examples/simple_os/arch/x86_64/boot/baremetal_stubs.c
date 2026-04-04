@@ -809,6 +809,17 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return 0;
         case 80: /* DevEnumerate — PCI bus scan via direct port I/O */
             return _pci_enumerate(a0, a1, a2);
+        case 82: /* DeviceGrant — read PCI BAR0 via _pci_enumerate mode 5 */
+            return _pci_enumerate(5, a0, 0);
+        case 83: { /* MapBar — identity map on baremetal (no-op, return same addr) */
+            return (int64_t)a0; /* On baremetal, phys == virt (identity mapped) */
+        }
+        case 84: { /* AllocDma — allocate DMA buffer (use heap) */
+            uint64_t size = a0;
+            void *p = malloc(size);
+            if (!p) return -12; /* ENOMEM */
+            return (int64_t)(uintptr_t)p; /* Return virtual address (= physical on identity map) */
+        }
         default:
             return -38; /* ENOSYS */
     }
@@ -964,6 +975,18 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
             case 7: return (int64_t)_pci_cache[i].irq;
             default: return -22;
         }
+    }
+    if (mode == 5) {
+        /* Mode 5: Read PCI BAR0 for device at index.
+         * Returns physical base address of BAR0 (type bits masked off). */
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        uint32_t addr = 0x80000000 | ((uint32_t)_pci_cache[i].bus << 16)
+                      | ((uint32_t)_pci_cache[i].dev << 11) | 0x10;
+        outl(0xCF8, addr);
+        uint32_t bar0 = inl(0xCFC);
+        if (bar0 & 1) return (int64_t)(bar0 & ~0x3u); /* I/O BAR */
+        return (int64_t)(bar0 & ~0xFu); /* Memory BAR */
     }
     return -38; /* ENOSYS */
 }

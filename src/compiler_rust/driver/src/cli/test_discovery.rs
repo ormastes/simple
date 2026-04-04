@@ -32,7 +32,10 @@ pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files
         Ok(_) => {}
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
+        let all_entries: Vec<_> = entries.collect();
+        eprintln!("[discover] read_dir returned {} entries, ok={}", all_entries.len(),
+            all_entries.iter().filter(|e| e.is_ok()).count());
+        for entry in all_entries.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
 
             if path.is_dir() {
