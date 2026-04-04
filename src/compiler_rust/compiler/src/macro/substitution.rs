@@ -177,6 +177,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             is_suspend: stmt.is_suspend,
             auto_enumerate: stmt.auto_enumerate,
             invariants: stmt.invariants.clone(),
+            label: stmt.label.clone(),
         }),
         Node::While(stmt) => Node::While(WhileStmt {
             span: stmt.span,
@@ -185,10 +186,12 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             let_pattern: stmt.let_pattern.clone(),
             is_suspend: stmt.is_suspend,
             invariants: stmt.invariants.clone(),
+            label: stmt.label.clone(),
         }),
         Node::Loop(stmt) => Node::Loop(LoopStmt {
             span: stmt.span,
             body: substitute_block_templates(&stmt.body, const_bindings),
+            label: stmt.label.clone(),
         }),
         Node::Context(stmt) => Node::Context(ContextStmt {
             span: stmt.span,

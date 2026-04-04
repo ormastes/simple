@@ -540,7 +540,18 @@ Or in simple.sdn:
     resource_leak = "allow"
 "#.to_string(),
             LintName::WildcardMatch => "Lint: wildcard_match\nLevel: allow\n\nWarns about wildcard catch-all patterns in match expressions.".to_string(),
-            LintName::NonExhaustiveMatch => "Lint: non_exhaustive_match\nLevel: warn\n\nWarns when match expressions may not cover all variants.".to_string(),
+            LintName::NonExhaustiveMatch => r#"Lint: non_exhaustive_match
+Level: warn
+
+Warns when match expressions may not cover all possible cases.
+
+Codes:
+  MEXH001 — enum match missing variant(s)
+  MEXH002 — match without wildcard/default case
+  MEXH003 — boolean match missing true or false
+  MEXH004 — unreachable match arm (after wildcard or duplicate)
+  MEXH005 — Option/Result match missing variant(s)
+"#.to_string(),
             LintName::InitBoundaryViolation => r#"Lint: init_boundary_violation
 Level: warn (default, will become deny in v1.0)
 

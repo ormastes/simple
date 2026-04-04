@@ -130,6 +130,18 @@ pub(super) fn eval_control_expr(
                 }
             }
 
+            // Check boolean exhaustiveness
+            if matches!(&subject_val, Value::Bool(_)) {
+                let analysis = crate::pattern_analysis::analyze_match(arms);
+                if !analysis.is_exhaustive && !analysis.missing_patterns.is_empty() {
+                    let missing_str = analysis.missing_patterns.join(", ");
+                    tracing::warn!(
+                        "Non-exhaustive pattern match on boolean: missing {}",
+                        missing_str
+                    );
+                }
+            }
+
             for arm in arms {
                 let mut arm_bindings = HashMap::new();
                 if pattern_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums)? {
@@ -185,8 +197,8 @@ pub(super) fn eval_control_expr(
 
                         match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
                             Control::Return(v) => return Ok(Some(v)),
-                            Control::Break(_) => return Ok(Some(Value::Nil)),
-                            Control::Continue => break,
+                            Control::Break(..) => return Ok(Some(Value::Nil)),
+                            Control::Continue(_) => break,
                             Control::Next => {
                                 if let Node::Expression(expr) = stmt {
                                     result =

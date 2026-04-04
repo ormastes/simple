@@ -77,6 +77,6 @@ pub(crate) enum Control {
     Next,
     Return(crate::value::Value),
     #[allow(dead_code)]
-    Break(Option<crate::value::Value>),
-    Continue,
+    Break(Option<crate::value::Value>, Option<String>),
+    Continue(Option<String>),
 }

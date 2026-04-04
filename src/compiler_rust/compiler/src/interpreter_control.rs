@@ -74,14 +74,37 @@ use super::interpreter_patterns::{is_catch_all_pattern, pattern_matches};
 use super::coverage_helpers::{record_decision_coverage_ffi, decision_id_from_span};
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
+/// `my_label` is this loop's label (if any).
 #[inline]
-fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
+fn handle_loop_control_labeled(ctrl: Control, my_label: &Option<String>) -> Option<Result<Control, CompileError>> {
     match ctrl {
         Control::Next => None,
-        Control::Continue => None, // caller handles continue
-        Control::Break(_) => Some(Ok(Control::Next)),
+        Control::Continue(ref lbl) => {
+            // If continue has a label and it doesn't match this loop, propagate
+            if let Some(target) = lbl {
+                if my_label.as_deref() != Some(target.as_str()) {
+                    return Some(Ok(ctrl));
+                }
+            }
+            None // continue to next iteration of this loop
+        }
+        Control::Break(_, ref lbl) => {
+            // If break has a label and it doesn't match this loop, propagate
+            if let Some(target) = lbl {
+                if my_label.as_deref() != Some(target.as_str()) {
+                    return Some(Ok(ctrl));
+                }
+            }
+            Some(Ok(Control::Next)) // break out of this loop
+        }
         ret @ Control::Return(_) => Some(Ok(ret)),
     }
+}
+
+/// Handle loop control flow result. Returns Some if we should exit the loop.
+#[inline]
+fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
+    handle_loop_control_labeled(ctrl, &None)
 }
 
 pub(super) fn exec_if(
@@ -187,10 +210,7 @@ pub(super) fn exec_while(
                 env.insert(name, val);
             }
             let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
-            if matches!(ctrl, Control::Continue) {
-                continue;
-            }
-            if let Some(result) = handle_loop_control(ctrl) {
+            if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
                 return result;
             }
         }
@@ -224,10 +244,7 @@ pub(super) fn exec_while(
             break;
         }
         let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
-        if matches!(ctrl, Control::Continue) {
-            continue;
-        }
-        if let Some(result) = handle_loop_control(ctrl) {
+        if let Some(result) = handle_loop_control_labeled(ctrl, &while_stmt.label) {
             return result;
         }
     }
@@ -247,10 +264,7 @@ pub(super) fn exec_loop(
         check_execution_limit!();
         check_timeout!();
         let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
-        if matches!(ctrl, Control::Continue) {
-            continue;
-        }
-        if let Some(result) = handle_loop_control(ctrl) {
+        if let Some(result) = handle_loop_control_labeled(ctrl, &loop_stmt.label) {
             return result;
         }
     }
@@ -550,10 +564,7 @@ pub(super) fn exec_for(
         }
 
         let ctrl = exec_block(&for_stmt.body, env, functions, classes, enums, impl_methods)?;
-        if matches!(ctrl, Control::Continue) {
-            continue;
-        }
-        if let Some(result) = handle_loop_control(ctrl) {
+        if let Some(result) = handle_loop_control_labeled(ctrl, &for_stmt.label) {
             return result;
         }
     }
@@ -631,7 +642,7 @@ pub(super) fn exec_match(
 ) -> Result<Control, CompileError> {
     let (flow, _last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
     match flow {
-        Control::Return(_) | Control::Break(_) | Control::Continue => Ok(flow),
+        Control::Return(_) | Control::Break(..) | Control::Continue(_) => Ok(flow),
         Control::Next => {
             // Match arm completed normally - continue after match
             // Note: implicit return from match arms should NOT return from function
@@ -745,7 +756,7 @@ pub(crate) fn exec_match_expr(
     let (flow, last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
     match flow {
         Control::Return(v) => Ok(v),
-        Control::Break(_) | Control::Continue => Ok(Value::Nil),
+        Control::Break(..) | Control::Continue(_) => Ok(Value::Nil),
         Control::Next => {
             // Return the implicit value from the match arm
             Ok(last_val.unwrap_or(Value::Nil))

@@ -1886,19 +1886,73 @@ fn _word_occurs_in(line: text, word: text) -> bool:
 
 fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
     """Text-based heuristic for match exhaustiveness.
-    Checks if match expressions have a wildcard/default arm.
+
+    Checks:
+    - MEXH001: Enum match missing variant(s)
+    - MEXH002: Match without wildcard/default case
+    - MEXH003: Boolean match missing true or false
+    - MEXH004: Unreachable arm (after wildcard or duplicate)
+    - MEXH005: Option/Result match missing variant(s)
+
+    Pass 1: Collect enum definitions from the file.
+    Pass 2: Scan match expressions for exhaustiveness.
     """
     var count = 0
+
+    # Pass 1: Collect enum definitions  { name -> [variant_names] }
+    var enum_defs: {text: [text]} = {}
     var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if trimmed.starts_with("enum ") and trimmed.ends_with(":"):
+            val enum_name = trimmed.substring(5, trimmed.len() - 1).trim()
+            val enum_indent = _count_indent(line)
+            var variants: [text] = []
+            var vi = li + 1
+            while vi < lines.len():
+                val vline = lines[vi]
+                val vt = vline.trim()
+                if vt == "":
+                    vi = vi + 1
+                    continue
+                val vindent = _count_indent(vline)
+                if vindent <= enum_indent:
+                    break
+                # Variant line: just a name (possibly with payload)
+                val vname = vt.split("(")[0].split(" ")[0].trim()
+                if vname != "" and not vname.starts_with("#"):
+                    variants.push(vname)
+                vi = vi + 1
+            if variants.len() > 0:
+                enum_defs[enum_name] = variants
+        li = li + 1
+
+    # Add built-in exhaustible types
+    if not enum_defs.contains_key("bool"):
+        enum_defs["bool"] = ["true", "false"]
+    if not enum_defs.contains_key("Bool"):
+        enum_defs["Bool"] = ["true", "false"]
+    if not enum_defs.contains_key("Option"):
+        enum_defs["Option"] = ["Some", "nil"]
+    if not enum_defs.contains_key("Result"):
+        enum_defs["Result"] = ["Ok", "Err"]
+
+    # Pass 2: Scan match expressions
+    li = 0
     while li < lines.len():
         val line = lines[li]
         val trimmed = line.trim()
 
         if trimmed.starts_with("match ") and trimmed.ends_with(":"):
             val match_indent = _count_indent(line)
+            val line_num = li + 1
+
             # Scan case arms
             var has_wildcard = false
+            var wildcard_pos = -1
             var arm_count = 0
+            var arm_patterns: [text] = []
             var ai = li + 1
             while ai < lines.len():
                 val aline = lines[ai]
@@ -1909,21 +1963,148 @@ fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text, emi
                 val aindent = _count_indent(aline)
                 if aindent <= match_indent:
                     break
-                if at.starts_with("case _:") or at.starts_with("case _\n") or at == "case _":
-                    has_wildcard = true
+
+                # Extract the pattern name from "case PATTERN:" or "PATTERN:"
+                var pat_name = ""
+                if at.starts_with("case "):
+                    pat_name = at.substring(5).split(":")[0].split("(")[0].trim()
+                elif at.contains(":"):
+                    pat_name = at.split(":")[0].split("(")[0].trim()
+
+                if pat_name == "_":
+                    if not has_wildcard:
+                        has_wildcard = true
+                        wildcard_pos = arm_count
+                    else:
+                        # Duplicate wildcard — unreachable
+                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                            "unreachable match arm: duplicate wildcard '_'", format)
+                elif pat_name != "":
+                    # Check for duplicate exact pattern
+                    var is_dup = false
+                    for prev in arm_patterns:
+                        if prev == pat_name:
+                            is_dup = true
+                    if is_dup:
+                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                            "unreachable match arm: duplicate pattern '{pat_name}'", format)
+
+                # Check for unreachable arm after wildcard
+                if has_wildcard and arm_count > wildcard_pos:
+                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                        "unreachable match arm after wildcard '_'", format)
+
+                if pat_name != "" and pat_name != "_":
+                    arm_patterns.push(pat_name)
                 arm_count = arm_count + 1
                 ai = ai + 1
 
+            # Exhaustiveness checks (only if no wildcard)
             if arm_count > 0 and not has_wildcard:
-                val line_num = li + 1
-                if format == "json":
-                    _diag_emit_or_collect("{\"severity\":2,\"code\":\"MEXH002\",\"message\":\"match expression has no wildcard/default case\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                # Try to infer type from arm patterns
+                var inferred_type = _infer_type_from_patterns(arm_patterns, enum_defs)
+
+                if inferred_type != "":
+                    if enum_defs.contains_key(inferred_type):
+                        val all_variants = enum_defs[inferred_type]
+                        var missing: [text] = []
+                        for v in all_variants:
+                            var found = false
+                            for p in arm_patterns:
+                                if p == v:
+                                    found = true
+                            if not found:
+                                missing.push(v)
+
+                        if missing.len() > 0:
+                            val missing_text = missing.join(", ")
+                            val warn_code = if (inferred_type == "bool" or inferred_type == "Bool"):
+                                "MEXH003"
+                            elif (inferred_type == "Option" or inferred_type == "Result"):
+                                "MEXH005"
+                            else:
+                                "MEXH001"
+                            val type_label = if (inferred_type == "bool" or inferred_type == "Bool"):
+                                "boolean"
+                            elif inferred_type == "Option":
+                                "Option<T>"
+                            elif inferred_type == "Result":
+                                "Result<T, E>"
+                            else:
+                                "enum '{inferred_type}'"
+                            count = count + _emit_mexh(file, line_num, trimmed.len(), warn_code,
+                                "non-exhaustive match on {type_label}: missing [{missing_text}]", format)
                 else:
-                    print "{file}:{line_num}: warning[MEXH002]: match expression has no wildcard/default case"
-                count = count + 1
+                    # Unknown type — generic MEXH002
+                    count = count + _emit_mexh(file, line_num, trimmed.len(), "MEXH002",
+                        "match expression has no wildcard/default case", format)
 
         li = li + 1
     count
+
+fn _emit_mexh(file: text, line_num: i64, end_col: i64, code: text, message: text, format: text) -> i64:
+    """Emit a MEXH warning in the requested format. Returns 1."""
+    if format == "json":
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[],\"source\":\"simple-lint\"}")
+    else:
+        print "{file}:{line_num}: warning[{code}]: {message}"
+    1
+
+fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
+    """Infer the match scrutinee type from arm pattern names.
+
+    Checks built-in types first (bool, Option, Result), then
+    user-defined enums. Returns the type name or "" if ambiguous.
+    """
+    if patterns.len() == 0:
+        return ""
+
+    # Boolean check
+    var all_bool = true
+    for p in patterns:
+        if p != "true" and p != "false":
+            all_bool = false
+    if all_bool and patterns.len() > 0:
+        return "bool"
+
+    # Option check
+    var all_option = true
+    for p in patterns:
+        if p != "Some" and p != "nil" and p != "None":
+            all_option = false
+    if all_option and patterns.len() > 0:
+        return "Option"
+
+    # Result check
+    var all_result = true
+    for p in patterns:
+        if p != "Ok" and p != "Err":
+            all_result = false
+    if all_result and patterns.len() > 0:
+        return "Result"
+
+    # General enum check: find enums whose variants are a superset
+    var matches: [text] = []
+    for enum_name in enums.keys():
+        if (enum_name == "bool" or enum_name == "Bool" or
+            enum_name == "Option" or enum_name == "Result"):
+            continue
+        val variants = enums[enum_name]
+        var is_subset = true
+        for p in patterns:
+            var found = false
+            for v in variants:
+                if v == p:
+                    found = true
+            if not found:
+                is_subset = false
+        if is_subset:
+            matches.push(enum_name)
+
+    if matches.len() == 1:
+        return matches[0]
+
+    ""
 
 fn _find_in_line(line: text, pattern: text) -> i64:
     """Find the 0-based position of pattern in line. Returns 0 if not found."""

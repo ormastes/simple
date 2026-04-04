@@ -90,12 +90,25 @@ pub fn analyze_match(arms: &[MatchArm]) -> PatternAnalysis {
     }
 
     // Check for exhaustiveness based on pattern type
-    // For now, we consider non-exhaustive unless there's a wildcard
-    // A more sophisticated analysis would check:
-    // - All enum variants are covered
-    // - All boolean values (true/false) are covered
-    // - Numeric ranges are complete
-    if !has_wildcard {
+    // Check boolean exhaustiveness: if all arms are bool literals covering {true, false}
+    let has_true = covered_patterns.contains("true");
+    let has_false = covered_patterns.contains("false");
+    if has_true || has_false {
+        // Looks like a boolean match
+        if has_true && has_false {
+            analysis.is_exhaustive = true;
+        } else {
+            analysis.is_exhaustive = false;
+            if !has_true {
+                analysis.missing_patterns.push("true".to_string());
+            }
+            if !has_false {
+                analysis.missing_patterns.push("false".to_string());
+            }
+        }
+    } else if !has_wildcard {
+        // For non-boolean, non-wildcard matches, mark as non-exhaustive
+        // (enum exhaustiveness is checked separately via check_enum_exhaustiveness)
         analysis.is_exhaustive = false;
         analysis.missing_patterns.push("_".to_string());
     }

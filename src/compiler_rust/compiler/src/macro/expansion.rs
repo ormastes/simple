@@ -118,7 +118,7 @@ fn expand_user_macro_inner(
                 let hygienic_block = apply_macro_hygiene_block(block, &mut hygiene_ctx, false);
                 match exec_block(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)? {
                     Control::Return(v) => return Ok(v),
-                    Control::Break(_) | Control::Continue => {}
+                    Control::Break(..) | Control::Continue(_) => {}
                     Control::Next => {}
                 }
             }
@@ -236,7 +236,7 @@ fn expand_user_macro_inner(
                 let hygienic_node = apply_macro_hygiene_node(node, &mut hygiene_ctx);
                 match exec_node(&hygienic_node, &mut local_env, functions, classes, enums, impl_methods)? {
                     Control::Return(v) => return Ok(v),
-                    Control::Break(_) | Control::Continue => {}
+                    Control::Break(..) | Control::Continue(_) => {}
                     Control::Next => {}
                 }
             }

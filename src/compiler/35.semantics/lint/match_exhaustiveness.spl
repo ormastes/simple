@@ -4,15 +4,21 @@
 #
 # MEXH001: Match on enum without covering all variants                WARNING
 # MEXH002: Match without a default/wildcard case                     WARNING
+# MEXH003: Boolean match missing true or false                        WARNING
+# MEXH004: Unreachable match arm (after wildcard or duplicate)        WARNING
+# MEXH005: Option/Result match missing variant (Some/nil, Ok/Err)     WARNING
 #
 # Algorithm:
 # 1. Collect all enum definitions in the module (DECL_ENUM -> variant names)
-# 2. For each match expression, extract the scrutinee and arm patterns
-# 3. If scrutinee is a known enum type, check variant coverage
-# 4. If no wildcard/default arm exists and not all variants covered, warn
+# 2. Register built-in exhaustible types (bool, Option, Result)
+# 3. For each match expression, extract the scrutinee and arm patterns
+# 4. Infer scrutinee type from arm patterns (reverse inference)
+# 5. If scrutinee is a known enum type, check variant coverage
+# 6. If no wildcard/default arm exists and not all variants covered, warn
+# 7. Detect unreachable arms (after wildcard, or exact duplicates)
 #
 # Does NOT flag:
-# - Match expressions with a wildcard (_) or default arm
+# - Match expressions with a wildcard (_) or default arm (for exhaustiveness)
 # - Match on non-enum types (int, text, etc.) with a wildcard arm
 # - extern fn declarations (no body)
 #
@@ -49,15 +55,40 @@ struct MatchExhaustivenessWarning:
         "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
 
 # ============================================================================
+# Built-in Exhaustible Types
+# ============================================================================
+
+# These are virtual enum definitions for types that have a fixed set of
+# variants and should be exhaustively matched. They are merged with
+# user-defined enums so the same analysis logic handles all cases.
+
+fn builtin_exhaustible_types() -> {text: [text]}:
+    """Return built-in types that have a known finite set of match variants."""
+    var builtins: {text: [text]} = {}
+
+    # Boolean: match on bool should cover true and false
+    builtins["bool"] = ["true", "false"]
+    builtins["Bool"] = ["true", "false"]
+
+    # Option<T>: Some(val) and nil/None
+    builtins["Option"] = ["Some", "nil"]
+
+    # Result<T, E>: Ok(val) and Err(err)
+    builtins["Result"] = ["Ok", "Err"]
+
+    builtins
+
+# ============================================================================
 # Main Entry Point
 # ============================================================================
 
 fn check_match_exhaustiveness(decl_indices: [i64]) -> [MatchExhaustivenessWarning]:
     """Run match-exhaustiveness lint on module declarations.
 
-    Two-pass algorithm:
+    Three-pass algorithm:
     1. Collect all enum definitions -> {enum_name: [variant_names]}
-    2. Walk function bodies to find match expressions, check coverage
+    2. Merge with built-in exhaustible types (bool, Option, Result)
+    3. Walk function bodies to find match expressions, check coverage
     """
     # Pass 1: Collect enum definitions
     var enum_variants: {text: [text]} = {}
@@ -67,7 +98,13 @@ fn check_match_exhaustiveness(decl_indices: [i64]) -> [MatchExhaustivenessWarnin
             val variants = decl_field_names[idx]
             enum_variants[enum_name] = variants
 
-    # Pass 2: Walk function bodies
+    # Pass 2: Merge built-in exhaustible types (don't override user enums)
+    val builtins = builtin_exhaustible_types()
+    for name in builtins.keys():
+        if not enum_variants.contains_key(name):
+            enum_variants[name] = builtins[name]
+
+    # Pass 3: Walk function bodies
     var warnings: [MatchExhaustivenessWarning] = []
     for idx in decl_indices:
         if decl_tag[idx] == DECL_FN:
@@ -176,40 +213,66 @@ fn check_expr_children_for_match(e: i64, fn_name: text, enums: {text: [text]}, w
 # ============================================================================
 
 fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text: [text]}) -> [MatchExhaustivenessWarning]:
-    """Analyze a match expression for exhaustiveness.
+    """Analyze a match expression for exhaustiveness and unreachability.
 
     Checks:
-    1. If any arm is a wildcard/default, the match is exhaustive
-    2. If the scrutinee is a known enum, check all variants are covered
-    3. Otherwise, warn about missing default case
+    1. Detect unreachable arms (after wildcard or exact duplicates)
+    2. If any arm is a wildcard/default, the match is exhaustive
+    3. If the scrutinee is a known enum, check all variants are covered
+    4. For booleans, check both true and false are covered
+    5. For Option/Result, check all variants are covered
+    6. Otherwise, warn about missing default case
     """
     var warnings: [MatchExhaustivenessWarning] = []
 
     if arm_indices.len() == 0:
         return warnings
 
-    # Check for wildcard arms
+    # Collect pattern info and detect wildcards + unreachable arms
     var has_wildcard = false
+    var wildcard_arm_pos = -1
     var covered_variants: [text] = []
+    var seen_patterns: [text] = []
+    var arm_pos = 0
 
     for arm_idx in arm_indices:
         if arm_idx < 0:
+            arm_pos = arm_pos + 1
             continue
 
         val pattern = arm_pattern[arm_idx]
         if pattern < 0:
+            arm_pos = arm_pos + 1
             continue
 
         val pat_tag = expr_tag[pattern]
+        var pat_repr = ""
 
         # Wildcard pattern: EXPR_IDENT with name "_"
         if pat_tag == EXPR_IDENT:
             val pat_name = expr_s_val[pattern]
             if pat_name == "_":
-                has_wildcard = true
+                if not has_wildcard:
+                    has_wildcard = true
+                    wildcard_arm_pos = arm_pos
+                else:
+                    # Duplicate wildcard is unreachable
+                    warnings.push(MatchExhaustivenessWarning(
+                        code: "MEXH004",
+                        severity: "WARNING",
+                        message: "unreachable match arm: duplicate wildcard '_'",
+                        hint: "remove this arm — it can never be reached",
+                        fn_name: fn_name
+                    ))
+                pat_repr = "_"
             else:
-                # Could be an enum variant name or a binding
+                # Could be an enum variant name or a binding variable.
+                # Bare identifiers that are also catch-all bindings act like
+                # wildcards for exhaustiveness purposes. However, if the
+                # identifier matches a known enum variant it is a specific
+                # pattern. We resolve this below after type inference.
                 covered_variants.push(pat_name)
+                pat_repr = pat_name
 
         # Enum variant with payload: EXPR_CALL where callee is EXPR_IDENT
         elif pat_tag == EXPR_CALL:
@@ -217,32 +280,79 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
             if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
                 val variant_name = expr_s_val[callee]
                 covered_variants.push(variant_name)
+                pat_repr = variant_name + "(...)"
 
         # Enum variant via field access: Type.Variant
         elif pat_tag == EXPR_FIELD_ACCESS:
             val field_name = expr_s_val[pattern]
             covered_variants.push(field_name)
+            pat_repr = "." + field_name
 
         # nil literal pattern
         elif pat_tag == EXPR_NIL_LIT:
             covered_variants.push("nil")
+            pat_repr = "nil"
 
         # Bool literal pattern
         elif pat_tag == EXPR_BOOL_LIT:
             if expr_i_val[pattern] == 0:
                 covered_variants.push("false")
+                pat_repr = "false"
             else:
                 covered_variants.push("true")
+                pat_repr = "true"
 
-    # If there is a wildcard, the match is exhaustive
+        # Int literal pattern — not exhaustible, but track for duplicates
+        elif pat_tag == EXPR_INT_LIT:
+            pat_repr = "int:" + expr_i_val[pattern].to_text()
+
+        # String literal pattern — not exhaustible, but track for duplicates
+        elif pat_tag == EXPR_STRING_LIT:
+            pat_repr = "str:" + expr_s_val[pattern]
+
+        # Check for unreachable: arm after wildcard
+        if has_wildcard and arm_pos > wildcard_arm_pos:
+            warnings.push(MatchExhaustivenessWarning(
+                code: "MEXH004",
+                severity: "WARNING",
+                message: "unreachable match arm after wildcard '_'",
+                hint: "remove this arm — the wildcard already catches all remaining patterns",
+                fn_name: fn_name
+            ))
+
+        # Check for unreachable: duplicate exact pattern
+        if pat_repr != "" and pat_repr != "_":
+            if list_contains_text(seen_patterns, pat_repr):
+                warnings.push(MatchExhaustivenessWarning(
+                    code: "MEXH004",
+                    severity: "WARNING",
+                    message: "unreachable match arm: duplicate pattern '{pat_repr}'",
+                    hint: "remove this duplicate arm — an earlier arm already matches this pattern",
+                    fn_name: fn_name
+                ))
+
+        if pat_repr != "":
+            seen_patterns.push(pat_repr)
+
+        arm_pos = arm_pos + 1
+
+    # If there is a wildcard, the match is exhaustive (unreachable warnings
+    # were already emitted above for any arms after the wildcard)
     if has_wildcard:
         return warnings
 
-    # Try to determine the scrutinee type from context
-    val scrutinee_type = infer_scrutinee_type(scrutinee, enums)
+    # Try to determine the scrutinee type:
+    # Strategy 1: Direct inference from scrutinee expression
+    var scrutinee_type = infer_scrutinee_type(scrutinee, enums)
+
+    # Strategy 2: Reverse inference from arm patterns
+    # If we could not determine the type from the scrutinee, try to
+    # figure it out by checking which enum's variants the arms mention.
+    if scrutinee_type == "":
+        scrutinee_type = infer_type_from_arms(covered_variants, enums)
 
     if scrutinee_type != "":
-        # Check if all variants of the enum are covered
+        # Check if all variants of the type are covered
         if enums.contains_key(scrutinee_type):
             val all_variants = enums[scrutinee_type]
             var missing: [text] = []
@@ -252,10 +362,28 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 
             if missing.len() > 0:
                 val missing_text = missing.join(", ")
+
+                # Use specific warning codes for built-in types
+                val warn_code = if (scrutinee_type == "bool" or scrutinee_type == "Bool"):
+                    "MEXH003"
+                elif (scrutinee_type == "Option" or scrutinee_type == "Result"):
+                    "MEXH005"
+                else:
+                    "MEXH001"
+
+                val type_label = if (scrutinee_type == "bool" or scrutinee_type == "Bool"):
+                    "boolean"
+                elif scrutinee_type == "Option":
+                    "Option<T>"
+                elif scrutinee_type == "Result":
+                    "Result<T, E>"
+                else:
+                    "enum '{scrutinee_type}'"
+
                 warnings.push(MatchExhaustivenessWarning(
-                    code: "MEXH001",
+                    code: warn_code,
                     severity: "WARNING",
-                    message: "non-exhaustive match on '{scrutinee_type}': missing variant(s) [{missing_text}]",
+                    message: "non-exhaustive match on {type_label}: missing [{missing_text}]",
                     hint: "add missing arms or a wildcard '_' catch-all",
                     fn_name: fn_name
                 ))
@@ -278,24 +406,106 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 # ============================================================================
 
 fn infer_scrutinee_type(scrutinee: i64, enums: {text: [text]}) -> text:
-    """Try to infer the type of a match scrutinee from context.
+    """Try to infer the type of a match scrutinee from the expression itself.
 
-    Heuristic: if the scrutinee is a simple identifier, check if any enum
-    name matches common patterns. This is a best-effort heuristic since
-    full type inference is done in a different compiler phase.
+    Heuristics:
+    1. Field access like EnumType.Variant — the left side is the type
+    2. Identifier whose name matches an enum type name (less common)
+
+    Full type inference is done in a different compiler phase; this is
+    a best-effort heuristic for the lint pass.
     """
     if scrutinee < 0:
         return ""
 
     val tag = expr_tag[scrutinee]
 
-    # For field access like value.kind, the type might be inferable
-    # but we don't have enough context here without full type info.
+    # Field access: e.g., Color.Red — left is "Color"
+    if tag == EXPR_FIELD_ACCESS:
+        val left = expr_left[scrutinee]
+        if left >= 0 and expr_tag[left] == EXPR_IDENT:
+            val type_name = expr_s_val[left]
+            if enums.contains_key(type_name):
+                return type_name
 
-    # For method calls that return known enum types, we could check
-    # but this requires full type info.
+    # Bool literal scrutinee — type is bool
+    if tag == EXPR_BOOL_LIT:
+        return "bool"
 
-    # Return empty — the caller will use MEXH002 (no wildcard) instead
+    ""
+
+fn infer_type_from_arms(covered_variants: [text], enums: {text: [text]}) -> text:
+    """Reverse-infer the scrutinee type from the arm patterns.
+
+    If the covered variant names are a subset of exactly one enum's
+    variants, that enum is the inferred type. This handles the common
+    case where the match uses bare variant names:
+
+        match color:
+            Red: ...
+            Green: ...
+            # Blue missing -> infer type is Color enum
+
+    Returns the enum name if exactly one enum matches, otherwise "".
+    """
+    if covered_variants.len() == 0:
+        return ""
+
+    # Check boolean patterns first (special fast path)
+    var has_true = list_contains_text(covered_variants, "true")
+    var has_false = list_contains_text(covered_variants, "false")
+    if has_true or has_false:
+        # If any arm is true/false literal, this is a boolean match
+        # (assuming no enum has variants named "true"/"false")
+        var all_bool = true
+        for v in covered_variants:
+            if v != "true" and v != "false":
+                all_bool = false
+        if all_bool:
+            return "bool"
+
+    # Check nil/Some patterns for Option
+    var has_nil = list_contains_text(covered_variants, "nil")
+    var has_some = list_contains_text(covered_variants, "Some")
+    if has_nil and has_some:
+        return "Option"
+    if has_nil or has_some:
+        # If we see Some or nil but not both, and no other known enum
+        # matches, it is likely an Option match
+        var only_option_names = true
+        for v in covered_variants:
+            if v != "nil" and v != "Some" and v != "None":
+                only_option_names = false
+        if only_option_names:
+            return "Option"
+
+    # Check Ok/Err patterns for Result
+    var has_ok = list_contains_text(covered_variants, "Ok")
+    var has_err = list_contains_text(covered_variants, "Err")
+    if has_ok or has_err:
+        var only_result_names = true
+        for v in covered_variants:
+            if v != "Ok" and v != "Err":
+                only_result_names = false
+        if only_result_names:
+            return "Result"
+
+    # General case: find enums whose variant set is a superset of covered_variants
+    var matching_enums: [text] = []
+    for enum_name in enums.keys():
+        # Skip built-in types already checked above
+        if (enum_name == "bool" or enum_name == "Bool" or
+            enum_name == "Option" or enum_name == "Result"):
+            continue
+
+        val variants = enums[enum_name]
+        if is_subset_of(covered_variants, variants):
+            matching_enums.push(enum_name)
+
+    # Only infer if exactly one enum matches (ambiguity = no inference)
+    if matching_enums.len() == 1:
+        return matching_enums[0]
+
     ""
 
 # ============================================================================
@@ -308,6 +518,13 @@ fn list_contains_text(lst: [text], item: text) -> bool:
         if v == item:
             return true
     false
+
+fn is_subset_of(subset: [text], superset: [text]) -> bool:
+    """Check if every element in subset exists in superset."""
+    for item in subset:
+        if not list_contains_text(superset, item):
+            return false
+    true
 
 # ============================================================================
 # Exports

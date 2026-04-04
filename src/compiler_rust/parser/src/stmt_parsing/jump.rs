@@ -37,7 +37,16 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Break)?;
 
-        let value = if !self.check(&TokenKind::Newline) && !self.is_at_end() {
+        // Check for labeled break: break 'label
+        let label = if let TokenKind::Label(name) = &self.current.kind {
+            let name = name.clone();
+            self.advance();
+            Some(name)
+        } else {
+            None
+        };
+
+        let value = if label.is_none() && !self.check(&TokenKind::Newline) && !self.is_at_end() {
             Some(self.parse_expression()?)
         } else {
             None
@@ -51,12 +60,22 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             value,
+            label,
         }))
     }
 
     pub(crate) fn parse_continue(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Continue)?;
+
+        // Check for labeled continue: continue 'label
+        let label = if let TokenKind::Label(name) = &self.current.kind {
+            let name = name.clone();
+            self.advance();
+            Some(name)
+        } else {
+            None
+        };
 
         Ok(Node::Continue(ContinueStmt {
             span: Span::new(
@@ -65,6 +84,7 @@ impl<'a> Parser<'a> {
                 start_span.line,
                 start_span.column,
             ),
+            label,
         }))
     }
 

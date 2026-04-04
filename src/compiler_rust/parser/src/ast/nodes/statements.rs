@@ -137,23 +137,31 @@ pub struct WhileStmt {
     ///     y = y + 1
     /// ```
     pub invariants: Vec<ContractClause>,
+    /// Optional label for labeled break/continue: `'outer: while cond:`
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopStmt {
     pub span: Span,
     pub body: Block,
+    /// Optional label for labeled break/continue: `'outer: loop:`
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BreakStmt {
     pub span: Span,
     pub value: Option<Expr>,
+    /// Optional label for labeled break: `break 'outer`
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContinueStmt {
     pub span: Span,
+    /// Optional label for labeled continue: `continue 'outer`
+    pub label: Option<String>,
 }
 
 /// Pass statement (no-op, like Python's pass)

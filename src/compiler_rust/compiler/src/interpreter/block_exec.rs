@@ -38,7 +38,7 @@ pub(crate) fn exec_block(
     for stmt in &block.statements {
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
-            flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => {
+            flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
                 // Execute pending tail injections before exiting the block
                 let tail_blocks = exit_block_scope();
                 for tail_block in tail_blocks {
@@ -105,7 +105,7 @@ pub(crate) fn exec_block_fn(
 
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
-            flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => {
+            flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
                 // Execute pending tail injections before exiting the block
                 let tail_blocks = exit_block_scope();
                 for tail_block in tail_blocks {

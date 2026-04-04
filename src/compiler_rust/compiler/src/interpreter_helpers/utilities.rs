@@ -54,7 +54,7 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
     match result {
         Ok(Control::Return(v)) => Ok(v),
         Ok(Control::Next) => Ok(Value::Nil),
-        Ok(Control::Break(_)) => {
+        Ok(Control::Break(..)) => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("break can only be used inside a loop");
@@ -63,7 +63,7 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
                 ctx,
             ))
         }
-        Ok(Control::Continue) => {
+        Ok(Control::Continue(_)) => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("continue can only be used inside a loop");

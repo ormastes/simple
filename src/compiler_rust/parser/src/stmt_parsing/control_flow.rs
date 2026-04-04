@@ -357,6 +357,10 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_for(&mut self) -> Result<Node, ParseError> {
+        self.parse_for_with_label(None)
+    }
+
+    pub(crate) fn parse_for_with_label(&mut self, label: Option<String>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::For)?;
 
@@ -393,6 +397,7 @@ impl<'a> Parser<'a> {
                 is_suspend: false,
                 auto_enumerate,
                 invariants,
+                label,
             }))
         } else {
             // Inline for body: `for x in items: single_statement`
@@ -419,6 +424,7 @@ impl<'a> Parser<'a> {
                 is_suspend: false,
                 auto_enumerate,
                 invariants: vec![],
+                label,
             }))
         }
     }
@@ -453,6 +459,10 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_while(&mut self) -> Result<Node, ParseError> {
+        self.parse_while_with_label(None)
+    }
+
+    pub(crate) fn parse_while_with_label(&mut self, label: Option<String>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::While)?;
 
@@ -497,10 +507,15 @@ impl<'a> Parser<'a> {
             body,
             is_suspend: false,
             invariants,
+            label,
         }))
     }
 
     pub(crate) fn parse_loop(&mut self) -> Result<Node, ParseError> {
+        self.parse_loop_with_label(None)
+    }
+
+    pub(crate) fn parse_loop_with_label(&mut self, label: Option<String>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Loop)?;
         self.expect(&TokenKind::Colon)?;
@@ -514,7 +529,41 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             body,
+            label,
         }))
+    }
+
+    /// Parse a labeled loop: `'label: for/while/loop`
+    pub(crate) fn parse_labeled_loop(&mut self) -> Result<Node, ParseError> {
+        let label = if let TokenKind::Label(name) = &self.current.kind {
+            let name = name.clone();
+            self.advance();
+            name
+        } else {
+            return Err(ParseError::unexpected_token(
+                "label",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        };
+
+        // Expect colon after label
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse the loop that follows
+        if self.check(&TokenKind::For) {
+            self.parse_for_with_label(Some(label))
+        } else if self.check(&TokenKind::While) {
+            self.parse_while_with_label(Some(label))
+        } else if self.check(&TokenKind::Loop) {
+            self.parse_loop_with_label(Some(label))
+        } else {
+            Err(ParseError::unexpected_token(
+                "for, while, or loop after label",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ))
+        }
     }
 
     pub(crate) fn parse_context(&mut self) -> Result<Node, ParseError> {
@@ -860,6 +909,7 @@ impl<'a> Parser<'a> {
             is_suspend: true,
             auto_enumerate,
             invariants,
+            label: None,
         }))
     }
 
@@ -892,6 +942,7 @@ impl<'a> Parser<'a> {
             body,
             is_suspend: true,
             invariants,
+            label: None,
         }))
     }
 

@@ -243,9 +243,9 @@ pub(crate) fn exec_node(
             } else {
                 None
             };
-            Ok(Control::Break(value))
+            Ok(Control::Break(value, b.label.clone()))
         }
-        Node::Continue(_) => Ok(Control::Continue),
+        Node::Continue(c) => Ok(Control::Continue(c.label.clone())),
         Node::Pass(_) => Ok(Control::Next), // No-op, just continue to next statement
         Node::Defer(defer_stmt) => {
             // Defer statement: queue the body for execution when the current scope exits
