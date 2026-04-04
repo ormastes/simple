@@ -393,8 +393,184 @@ src/runtime/           # C implementations
 
 ---
 
+## Bidirectional Interop
+
+SFFI supports bidirectional C/C++ interop: Simple code can be exported for use from C/C++ (Direction A), and C/C++ libraries can be imported into Simple (Direction B).
+
+For the full type compatibility matrix, see `doc/06_spec/app/compiler/sffi_interop_support_matrix.md`.
+
+---
+
+### Direction A: Simple to C/C++ Export
+
+Mark classes and functions with `@export("C")` to generate C-callable wrappers. Use `@repr("C")` for structs that must be passed by value across the boundary.
+
+#### Exporting a Class
+
+```simple
+@export("C")
+class Calculator:
+    precision: i32
+
+    static fn create(precision: i32) -> Calculator:
+        Calculator(precision: precision)
+
+    fn add(a: f64, b: f64) -> f64:
+        a + b
+```
+
+#### Building a Shared Library
+
+```bash
+# Build shared library
+bin/simple build --shared -o libcalc.so calculator.spl
+
+# Generate C header
+bin/simple build --emit-header -o calculator.h calculator.spl
+
+# Generate C++ wrapper header
+bin/simple build --emit-cxx-header -o calculator.hpp calculator.spl
+```
+
+#### Generated C Header (simplified)
+
+```c
+typedef struct spl_Calculator* spl_Calculator_t;
+
+void spl_library_init(void);
+void spl_library_shutdown(void);
+
+spl_Calculator_t spl_Calculator_create(int32_t precision);
+void             spl_Calculator_destroy(spl_Calculator_t self);
+double           spl_Calculator_add(spl_Calculator_t self, double a, double b);
+```
+
+#### Using from C
+
+```c
+#include "calculator.h"
+
+int main() {
+    spl_library_init();
+    spl_Calculator_t calc = spl_Calculator_create(10);
+    double result = spl_Calculator_add(calc, 1.5, 2.5);
+    spl_Calculator_destroy(calc);
+    spl_library_shutdown();
+    return 0;
+}
+```
+
+The C++ header (`--emit-cxx-header`) wraps the C API in a RAII class under the `spl` namespace with move semantics, so C++ callers get `spl::Calculator calc(10); calc.add(1.5, 2.5);`.
+
+---
+
+### Direction B: C/C++ to Simple Import
+
+External C/C++ libraries can be imported using a plugin manifest in SDN format and `extern fn` declarations.
+
+#### Plugin Manifest (`manifest.sdn`)
+
+```sdn
+name: "mathlib"
+version: "1.0.0"
+library: "libmathlib.so"
+
+functions:
+    - name: "fast_sin"
+      symbol: "mathlib_fast_sin"
+      params: [{name: "x", type: "f64"}]
+      return_type: "f64"
+
+classes:
+    - name: "Matrix4"
+      create_symbol: "mathlib_Matrix4_create"
+      destroy_symbol: "mathlib_Matrix4_destroy"
+      methods:
+          - name: "multiply"
+            symbol: "mathlib_Matrix4_multiply"
+            params: [{name: "other", type: "handle"}]
+            return_type: "handle"
+```
+
+#### Plugin CLI
+
+```bash
+bin/simple plugin install path/to/mathlib/
+bin/simple plugin list
+bin/simple plugin remove mathlib
+```
+
+#### Using Imported Functions
+
+```simple
+extern fn mathlib_fast_sin(x: f64) -> f64
+extern fn mathlib_Matrix4_create() -> i64
+extern fn mathlib_Matrix4_destroy(handle: i64)
+
+fn main():
+    val angle = mathlib_fast_sin(3.14159)
+    print "sin(pi) = {angle}"
+```
+
+---
+
+### Type Compatibility
+
+| Simple Type | C Type | C++ Type | Notes |
+|-------------|--------|----------|-------|
+| `i8`-`i64` | `int8_t`-`int64_t` | same | Fully supported |
+| `u8`-`u64` | `uint8_t`-`uint64_t` | same | Fully supported |
+| `f32`, `f64` | `float`, `double` | same | Fully supported |
+| `bool` | `bool` | `bool` | Fully supported |
+| `text` | `const char*` | `std::string_view` | UTF-8, borrowed |
+| `@export("C") class` | opaque handle (`spl_Foo_t`) | `spl::Foo` wrapper | Heap-allocated, opaque |
+| Function pointer | `T (*)(args)` | same | Stateless only |
+
+---
+
+### Error Handling Across FFI
+
+Simple `Result<T, E>` return types are converted to an out-parameter pattern in the C API:
+
+```c
+/* C: error out-param */
+double spl_Calculator_divide(spl_Calculator_t self, double a, double b,
+                             spl_error_t** err_out);
+
+/* Usage */
+spl_error_t* err = NULL;
+double result = spl_Calculator_divide(calc, 1.0, 0.0, &err);
+if (err) {
+    fprintf(stderr, "Error: %s\n", spl_error_message(err));
+    spl_error_free(err);
+}
+```
+
+C++ wrappers throw `std::runtime_error` instead:
+
+```cpp
+try {
+    double result = calc.divide(1.0, 0.0);
+} catch (const std::runtime_error& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+}
+```
+
+---
+
+### Known Limitations
+
+- **No closures with captures across FFI** -- only stateless function pointers are supported (SFFI001 lint enforces this)
+- **No generic types across FFI** -- `@export("C")` classes cannot have type parameters
+- **No trait objects across FFI** -- dynamic dispatch is not supported across the C boundary
+- **Interpreter mode** -- Direction A features (header generation, SFFI lint) work in interpreter mode; Direction B (`dlopen`-based plugin loading) requires compiled mode
+
+---
+
 ## Related Documentation
 
 - Full syntax reference: `doc/07_guide/quick_reference/syntax_quick_reference.md`
 - Wrapper generator: `doc/07_guide/ffi/wrapper_gen.md`
 - GPU FFI: `doc/07_guide/apps/gpu.md`
+- Interop support matrix: `doc/06_spec/app/compiler/sffi_interop_support_matrix.md`
+- Bidirectional interop design: `doc/05_design/sffi_bidirectional_interop.md`

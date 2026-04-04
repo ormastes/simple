@@ -1058,7 +1058,7 @@ fn compiler_driver_run_compile(driver: CompilerDriver) -> CompileResult:
 # These mirror driver_api.spl directly because direct script resolution does
 # not reliably surface new driver_api exports through the package facade.
 fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, emit_cpp: bool) -> CompileResult:
-    use compiler.tools.header_gen.mod_.{HeaderGenerator}
+    use compiler.tools.header_gen.mod_.{HeaderGenerator, validate_generated_header}
 
     var options = CompileOptions.default()
     options.input_files = [path]
@@ -1076,6 +1076,18 @@ fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, 
                     print "[header-gen] Warning: no @export(\"C\") items found"
                     return result
 
+                # Collect export names for validation
+                var export_fn_names: [text] = []
+                for _sym, func in mir_module.functions:
+                    if func.is_export_c:
+                        val fn_export = if func.export_name != "": func.export_name else: "spl_" + func.name
+                        export_fn_names.push(fn_export)
+                var export_type_names: [text] = []
+                for _sym, td in mir_module.types:
+                    if td.is_export_c:
+                        val t_export = if td.export_name != "": td.export_name else: "spl_" + td.name
+                        export_type_names.push(t_export)
+
                 rt_dir_create(output_dir, true)
 
                 if emit_c:
@@ -1084,11 +1096,27 @@ fn generate_headers(path: text, output_dir: text, lib_name: text, emit_c: bool, 
                     rt_file_write_text(c_path, c_header)
                     print "[header-gen] Generated C header: {c_path}"
 
+                    # Validate generated C header
+                    val c_validation = validate_generated_header(c_header, export_fn_names, export_type_names)
+                    if not c_validation.is_valid:
+                        var ei = 0
+                        while ei < c_validation.errors.len():
+                            log_warn("[header-gen] C header validation: {c_validation.errors[ei]}")
+                            ei = ei + 1
+
                 if emit_cpp:
                     val cpp_header = gen.generate_cpp_header(lib_name)
                     val cpp_path = rt_path_join(output_dir, lib_name + ".hpp")
                     rt_file_write_text(cpp_path, cpp_header)
                     print "[header-gen] Generated C++ header: {cpp_path}"
+
+                    # Validate generated C++ header
+                    val cpp_validation = validate_generated_header(cpp_header, export_fn_names, export_type_names)
+                    if not cpp_validation.is_valid:
+                        var ei = 0
+                        while ei < cpp_validation.errors.len():
+                            log_warn("[header-gen] C++ header validation: {cpp_validation.errors[ei]}")
+                            ei = ei + 1
             result
         case _:
             result
@@ -1171,6 +1199,17 @@ fn aot_shared_library(path: text, output: text) -> CompileResult:
 
             if link_code != 0:
                 return CompileResult.CodegenError(_combine_process_error("Shared library link failed", link_out, link_err))
+
+            # Diagnostic: check if @export("C") symbols appear in compiled shared library
+            # Use nm -D to list dynamic symbols, and verify spl_ prefixed entries exist
+            val (nm_out, _nm_err, nm_code) = rt_process_run("nm", ["-D", output])
+            if nm_code == 0:
+                # Read the generated C++ source to extract exported symbol names
+                # Look for function names that follow the spl_ convention
+                if not nm_out.contains("spl_library_init"):
+                    log_warn("[shared-lib] spl_library_init not found in dynamic symbols — @export(\"C\") symbols may be missing")
+                if not nm_out.contains("spl_library_shutdown"):
+                    log_warn("[shared-lib] spl_library_shutdown not found in dynamic symbols — @export(\"C\") symbols may be missing")
 
             CompileResult.Success(output)
         case _:

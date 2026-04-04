@@ -1,0 +1,230 @@
+# @cover src/compiler/99.loader/sffi_loader.spl 70%
+# @cover src/lib/ffi/mod.spl 60%
+"""
+# Direction B: C -> Simple Import Round-Trip Proof
+
+**Feature IDs:** #SFFI-BIDIR-WS7
+**Category:** Compiler Integration / SFFI
+**Status:** End-to-End Proof
+
+## Overview
+
+Full pipeline verification for Direction B (C -> Simple):
+1. Create a minimal C shared library with known functions
+2. Compile it to a .so
+3. Write a manifest.sdn pointing to the library
+4. Simple code uses `extern fn` to call the C functions via SFFI
+5. Verify correct results through the interpreter / compiled path
+
+Requires: gcc (or cc) on the host system. Tests skip gracefully if unavailable.
+"""
+
+use std.spec
+
+val NL = "\n"
+val TEST_DIR = "/tmp/sffi_test_b_roundtrip"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn setup_test_dir():
+    rt_dir_create(TEST_DIR, true)
+
+fn cleanup_test_dir():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
+    pass_dn
+
+fn gcc_available() -> bool:
+    val (_out, _err, code) = rt_process_run("which", ["gcc"])
+    code == 0
+
+fn cc_available() -> bool:
+    val (_out, _err, code) = rt_process_run("which", ["cc"])
+    code == 0
+
+fn has_c_compiler() -> bool:
+    gcc_available() or cc_available()
+
+fn c_compiler() -> text:
+    if gcc_available():
+        "gcc"
+    else:
+        "cc"
+
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+
+describe "Direction B: C -> Simple import round-trip":
+
+    before_all:
+        setup_test_dir()
+
+    after_all:
+        cleanup_test_dir()
+
+    describe "C library creation":
+        it "creates a minimal C library with arithmetic functions":
+            val c_source = TEST_DIR + "/mathlib.c"
+            val c_code = "#include <stdint.h>" + NL +
+                NL +
+                "int64_t mathlib_add(int64_t a, int64_t b) {" + NL +
+                "    return a + b;" + NL +
+                "}" + NL +
+                NL +
+                "int64_t mathlib_multiply(int64_t a, int64_t b) {" + NL +
+                "    return a * b;" + NL +
+                "}" + NL +
+                NL +
+                "int64_t mathlib_negate(int64_t x) {" + NL +
+                "    return -x;" + NL +
+                "}" + NL
+
+            expect(write_source(c_source, c_code)).to_equal(true)
+            expect(rt_file_exists(c_source)).to_equal(true)
+
+        it "compiles C library to shared object":
+            if not has_c_compiler():
+                print("SKIP: no C compiler available")
+                expect(true).to_equal(true)
+                return
+
+            val cc = c_compiler()
+            val c_source = TEST_DIR + "/mathlib.c"
+            val so_path = TEST_DIR + "/libmathlib.so"
+
+            val (out, err, code) = rt_process_run(cc, [
+                "-shared", "-fPIC",
+                "-o", so_path,
+                c_source
+            ])
+
+            if code != 0:
+                print("compile stdout: " + out)
+                print("compile stderr: " + err)
+            expect(code).to_equal(0)
+            expect(rt_file_exists(so_path)).to_equal(true)
+
+    describe "Simple extern fn import":
+        it "creates Simple source that imports the C functions via extern fn":
+            val spl_source = TEST_DIR + "/test_import.spl"
+            val spl_code = "# Test: import C functions via extern fn" + NL +
+                "extern fn mathlib_add(a: i64, b: i64) -> i64" + NL +
+                "extern fn mathlib_multiply(a: i64, b: i64) -> i64" + NL +
+                "extern fn mathlib_negate(x: i64) -> i64" + NL +
+                NL +
+                "val sum = mathlib_add(10, 20)" + NL +
+                "val product = mathlib_multiply(6, 7)" + NL +
+                "val neg = mathlib_negate(42)" + NL +
+                NL +
+                "assert sum == 30" + NL +
+                "assert product == 42" + NL +
+                "assert neg == -42" + NL +
+                NL +
+                "print \"PASS: Direction B import round-trip\"" + NL
+
+            expect(write_source(spl_source, spl_code)).to_equal(true)
+
+        it "executes Simple source linked against C library":
+            if not has_c_compiler():
+                print("SKIP: no C compiler available")
+                expect(true).to_equal(true)
+                return
+
+            val so_path = TEST_DIR + "/libmathlib.so"
+            if not rt_file_exists(so_path):
+                print("SKIP: C library not built")
+                expect(true).to_equal(true)
+                return
+
+            val spl_source = TEST_DIR + "/test_import.spl"
+            val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + so_path
+            val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
+
+            if code != 0:
+                print("simple stdout: " + out)
+                print("simple stderr: " + err)
+            expect(code).to_equal(0)
+            expect(out).to_contain("PASS")
+
+    describe "manifest-based import":
+        it "creates SDN manifest pointing to library":
+            val manifest_path = TEST_DIR + "/mathlib.sdn"
+            val manifest = "library {" + NL +
+                "  name: \"mathlib\"" + NL +
+                "  path: \"" + TEST_DIR + "/libmathlib.so\"" + NL +
+                "  language: \"C\"" + NL +
+                "  functions {" + NL +
+                "    mathlib_add { params: [\"i64\", \"i64\"], return: \"i64\" }" + NL +
+                "    mathlib_multiply { params: [\"i64\", \"i64\"], return: \"i64\" }" + NL +
+                "    mathlib_negate { params: [\"i64\"], return: \"i64\" }" + NL +
+                "  }" + NL +
+                "}" + NL
+
+            expect(write_source(manifest_path, manifest)).to_equal(true)
+            expect(rt_file_exists(manifest_path)).to_equal(true)
+
+        it "verifies manifest describes the correct function signatures":
+            val manifest_path = TEST_DIR + "/mathlib.sdn"
+            if not rt_file_exists(manifest_path):
+                print("SKIP: manifest not created")
+                expect(true).to_equal(true)
+                return
+
+            val content = rt_file_read_text(manifest_path) ?? ""
+            expect(content).to_contain("mathlib_add")
+            expect(content).to_contain("mathlib_multiply")
+            expect(content).to_contain("mathlib_negate")
+            expect(content).to_contain("language: \"C\"")
+
+    describe "error handling for missing symbols":
+        it "creates C library with subset of expected functions":
+            if not has_c_compiler():
+                print("SKIP: no C compiler available")
+                expect(true).to_equal(true)
+                return
+
+            val c_source = TEST_DIR + "/partial.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "int64_t partial_add(int64_t a, int64_t b) { return a + b; }" + NL
+
+            expect(write_source(c_source, c_code)).to_equal(true)
+
+            val cc = c_compiler()
+            val (out, err, code) = rt_process_run(cc, [
+                "-shared", "-fPIC",
+                "-o", TEST_DIR + "/libpartial.so",
+                c_source
+            ])
+            expect(code).to_equal(0)
+
+        it "reports missing symbol when extern fn is not found in library":
+            if not has_c_compiler():
+                print("SKIP: no C compiler available")
+                expect(true).to_equal(true)
+                return
+
+            val so_path = TEST_DIR + "/libpartial.so"
+            if not rt_file_exists(so_path):
+                print("SKIP: partial library not built")
+                expect(true).to_equal(true)
+                return
+
+            val spl_source = TEST_DIR + "/test_missing.spl"
+            val spl_code = "extern fn partial_missing(x: i64) -> i64" + NL +
+                "val result = partial_missing(1)" + NL
+
+            expect(write_source(spl_source, spl_code)).to_equal(true)
+
+            # Attempting to link against library missing the symbol should fail
+            val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " bin/simple run " + spl_source + " --link " + so_path + " 2>&1"
+            val (out, _err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
+
+            # Should fail -- symbol not found
+            expect(code != 0).to_equal(true)

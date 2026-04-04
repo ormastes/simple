@@ -3,9 +3,15 @@
 **Related plan:** [phase4_sffi_implementation_plan.md](/doc/05_design/phase4_sffi_implementation_plan.md)
 **Related architecture:** [doc/04_architecture/sffi_bidirectional_interop.md](../04_architecture/sffi_bidirectional_interop.md)
 
-**Current repo state (2026-03-30):**
+**Status:** Implemented
+**Completed:** 2026-04-04
+
+**Current repo state (2026-04-04):**
 - Direction A export, manifest-backed Direction B extern registration, and the core verification suites are implemented.
-- Runtime `spl_verify_layouts()` remains a follow-on extension; current safety relies on generated compile-time layout assertions and linting.
+- Runtime `spl_verify_layouts()` is implemented via `compute_layout_verification()` in `type_layout.spl` and tested in `test/unit/compiler/types/runtime_layout_verification_spec.spl`.
+- Error conversion (Result to spl_error_t out-param) is implemented in `error_conversion.spl` with C++ wrappers throwing `std::runtime_error`.
+- Callback function pointer support is implemented via `callback_trampoline.spl` with C++ `noexcept` boundary and SFFI006 lint rule.
+- Cross-language proof suite: 5 round-trip specs and 3 C/C++ fixtures verify end-to-end interop.
 
 **Related requirements:**
 - [doc/02_requirements/feature/usage/sffi_bidirectional_interop.md](../02_requirements/feature/usage/sffi_bidirectional_interop.md) (REQ-SFFI-BIDIR001–012)
@@ -987,13 +993,13 @@ Simple follows the C bitfield packing rules for the target platform:
 
 ---
 
-## 4. Runtime Layout Verification (Deferred)
+## 4. Runtime Layout Verification (Implemented)
 
 **REQ:** REQ-SFFI-BIDIR006
 
-This section describes a possible follow-on extension. The current implementation does not emit `spl_verify_layouts()` and instead relies on generated `_Static_assert` / `static_assert` checks in the emitted headers.
+**Updated 2026-04-04:** Runtime layout verification is now implemented. The compiler emits `spl_verify_layouts()` via `compute_layout_verification()` in `src/compiler/30.types/type_layout.spl`. Both compile-time `_Static_assert` checks and runtime `spl_verify_layouts()` are generated. The runtime function is tested in `test/unit/compiler/types/runtime_layout_verification_spec.spl` and `test/integration/sffi/layout_verification_roundtrip_spec.spl`.
 
-If runtime layout verification is added later, the library init path can call `spl_verify_layouts()`:
+The library init path calls `spl_verify_layouts()`:
 
 ```c
 void spl_verify_layouts(void) {
