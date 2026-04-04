@@ -94,6 +94,21 @@ impl PlatformLinkConfig {
         }
     }
 
+    /// Apple frameworks required by the Rust standard library and its transitive
+    /// dependencies (CommonCrypto, I/O, networking, UI for some optional paths).
+    /// Linked via `-framework` flags on macOS.
+    pub fn macos_frameworks() -> Vec<&'static str> {
+        vec![
+            "CoreFoundation",
+            "Security",
+            "SystemConfiguration",
+            "IOKit",
+            "CoreServices",
+            "Foundation",
+            "AppKit",
+        ]
+    }
+
     fn freebsd() -> Self {
         Self {
             libraries: vec!["pthread", "m", "execinfo", "z", "zstd", "util", "rt"],

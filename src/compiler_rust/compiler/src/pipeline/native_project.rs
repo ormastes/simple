@@ -1496,14 +1496,18 @@ int main(int argc, char** argv) {
                 cmd.arg(format!("-l{}", lib));
             }
         }
-        // macOS-specific: c++ linking when native_all is present
-        // (native_all/Cargo.toml hard-codes features=["llvm"])
+        // macOS-specific: c++ linking + Apple frameworks when native_all is present.
+        // The Rust stdlib requires CoreFoundation (HashMap randomization via
+        // CCRandomGenerateBytes) and other frameworks for I/O and networking.
         if cfg!(target_os = "macos") && find_native_all_library().is_some() {
             if let Some(llvm_lib) = simple_common::platform::cc_detect::find_homebrew_llvm_lib() {
                 cmd.arg(format!("-L{}", llvm_lib));
                 cmd.arg(format!("-Wl,-rpath,{}", llvm_lib));
             }
             cmd.arg("-lc++");
+            for fw in simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks() {
+                cmd.arg("-framework").arg(fw);
+            }
         }
 
         // Generate stub object for unresolved symbols + apply linker flags.
@@ -2346,8 +2350,21 @@ fn is_macos_system_symbol(sym: &str) -> bool {
         return true;
     }
 
-    // CoreFoundation basics (linked via libSystem)
-    if name.starts_with("kCF") {
+    // Apple framework symbols — CoreFoundation, Security, IOKit, etc.
+    // These are resolved by -framework flags at link time. Never stub them.
+    if name.starts_with("CF") || name.starts_with("kCF") ||
+       name.starts_with("CC") ||  // CommonCrypto (CCRandomGenerateBytes, etc.)
+       name.starts_with("Sec") || name.starts_with("kSec") ||  // Security framework
+       name.starts_with("IORegistr") || name.starts_with("IOService") || name.starts_with("IOObject") || // IOKit
+       name.starts_with("SCDynamic") || name.starts_with("SCNetwork") || name.starts_with("kSC") ||  // SystemConfiguration
+       name.starts_with("NSApp") || name.starts_with("NSView") || name.starts_with("NSWindow") ||  // AppKit
+       name.starts_with("NSFile") || name.starts_with("NSKey") || name.starts_with("NSConcrete") || // Foundation
+       name.starts_with("_NSGet") || name.starts_with("_NSConcrete") ||  // Foundation internals
+       name.starts_with("dispatch_") || name.starts_with("_dispatch_") ||  // libdispatch
+       name.starts_with("xpc_") ||  // XPC
+       name.starts_with("notify_") ||  // Notify
+       name.starts_with("os_log") ||  // os_log
+       name.starts_with("Block_") || name.starts_with("_Block_") {  // Blocks runtime
         return true;
     }
 

@@ -791,6 +791,8 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
  * to be compiled and linked without crashing on import.
  * =================================================================== */
 
+int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
+
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
 {
@@ -805,10 +807,8 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;
-        case 80: { /* DevEnumerate — PCI bus scan via direct port I/O */
-            extern int64_t _pci_enumerate(uint64_t, uint64_t, uint64_t);
+        case 80: /* DevEnumerate — PCI bus scan via direct port I/O */
             return _pci_enumerate(a0, a1, a2);
-        }
         default:
             return -38; /* ENOSYS */
     }
@@ -896,7 +896,6 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
         /* Mode 1: fill DeviceInfoBuf at buf_addr for device[index] */
         if ((int)index >= _pci_cache_count) return -22; /* EINVAL */
         uint8_t *buf = (uint8_t *)(uintptr_t)buf_addr;
-        if (!buf) return -14; /* EFAULT */
         int i = (int)index;
         buf[0] = _pci_cache[i].bus;
         buf[1] = _pci_cache[i].dev;
@@ -910,6 +909,42 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
         buf[11] = _pci_cache[i].htype;
         buf[12] = _pci_cache[i].irq;
         return 0;
+    }
+    if (mode == 2) {
+        /* Mode 2: return packed device info for device[index] — no buffer needed.
+         * Return value layout (i64):
+         *   bits [7:0]   = bus
+         *   bits [15:8]  = device
+         *   bits [23:16] = func
+         *   bits [31:24] = class_code
+         *   bits [39:32] = subclass
+         *   bits [55:40] = vendor_id
+         *   bits [63:56] = 0 (reserved)
+         * Second call with mode 3 returns device_id + extras:
+         *   bits [15:0]  = device_id
+         *   bits [23:16] = prog_if
+         *   bits [31:24] = irq_line
+         */
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        return (int64_t)(
+            ((uint64_t)_pci_cache[i].bus) |
+            ((uint64_t)_pci_cache[i].dev << 8) |
+            ((uint64_t)_pci_cache[i].func << 16) |
+            ((uint64_t)_pci_cache[i].cls << 24) |
+            ((uint64_t)_pci_cache[i].sub << 32) |
+            ((uint64_t)_pci_cache[i].vendor << 40)
+        );
+    }
+    if (mode == 3) {
+        /* Mode 3: return device_id + extras for device[index] */
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        return (int64_t)(
+            ((uint64_t)_pci_cache[i].devid) |
+            ((uint64_t)_pci_cache[i].progif << 16) |
+            ((uint64_t)_pci_cache[i].irq << 24)
+        );
     }
     return -38; /* ENOSYS */
 }
@@ -1069,10 +1104,22 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
 static uint64_t g_fb_addr = 0xFD000000;
 static uint64_t g_fb_w = 1024;
 
+static void serial_hex(uint64_t v) {
+    char hex[] = "0123456789abcdef";
+    serial_putchar('0'); serial_putchar('x');
+    for (int i = 60; i >= 0; i -= 4)
+        serial_putchar(hex[(v >> i) & 0xF]);
+}
+
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
     g_fb_addr = (uint64_t)addr;
     g_fb_w = (uint64_t)w;
+    serial_puts("[GUI] set_fb addr=");
+    serial_hex(g_fb_addr);
+    serial_puts(" w=");
+    serial_hex(g_fb_w);
+    serial_puts("\r\n");
     return 0;
 }
 
@@ -1227,6 +1274,13 @@ RuntimeValue serial_println(RuntimeValue val) {
     return NIL_VALUE;
 }
 
+static void serial_puthex(uint32_t v) {
+    static const char hex[] = "0123456789abcdef";
+    if (v > 0xFFFF) { serial_putchar(hex[(v>>28)&0xF]); serial_putchar(hex[(v>>24)&0xF]); serial_putchar(hex[(v>>20)&0xF]); serial_putchar(hex[(v>>16)&0xF]); }
+    if (v > 0xFF) { serial_putchar(hex[(v>>12)&0xF]); serial_putchar(hex[(v>>8)&0xF]); }
+    serial_putchar(hex[(v>>4)&0xF]); serial_putchar(hex[v&0xF]);
+}
+
 extern void spl_start(void) __attribute__((weak));
 
 void _start(void)
@@ -1248,6 +1302,25 @@ void _start(void)
     /* BGA + GUI rendering is now done by Pure Simple code in spl_start().
      * C boot stub only provides serial, heap, and runtime stubs.
      */
+
+    /* PCI hardware test — verify devices are visible before entering Simple code */
+    {
+        if (_pci_cache_count < 0) _pci_scan();
+        serial_puts("[BOOT] PCI: ");
+        serial_puthex(_pci_cache_count);
+        serial_puts(" devices found\r\n");
+        for (int i = 0; i < _pci_cache_count && i < 8; i++) {
+            serial_puts("[BOOT]   ");
+            serial_puthex(_pci_cache[i].bus); serial_puts(":");
+            serial_puthex(_pci_cache[i].dev); serial_puts(".");
+            serial_puthex(_pci_cache[i].func);
+            serial_puts(" vendor="); serial_puthex(_pci_cache[i].vendor);
+            serial_puts(" device="); serial_puthex(_pci_cache[i].devid);
+            serial_puts(" class="); serial_puthex(_pci_cache[i].cls);
+            serial_puts("."); serial_puthex(_pci_cache[i].sub);
+            serial_puts("\r\n");
+        }
+    }
 
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");
