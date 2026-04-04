@@ -87,10 +87,16 @@ impl SshDaemon:
         Creates a TCP socket, binds to the configured port, and enters
         the accept loop. This method does not return until stop() is called.
         """
-        # Validate Ed25519 implementation before exposing any crypto
+        # Validate Ed25519 implementation before ANY crypto use
         val self_test = ed25519_self_test()
         if self_test.is_err():
             return Err("SSH daemon refused to start: " + self_test.err_val())
+
+        # Self-test passed — now safe to generate host keypair
+        val seed = random_bytes(32)
+        val keypair = ed25519_keypair_from_seed(seed)
+        self.host_private_key = seed
+        self.host_public_key = keypair.1
 
         # Create TCP socket
         val fd = posix_socket(AF_INET, SOCK_STREAM, 0)
@@ -137,6 +143,12 @@ impl SshDaemon:
         # Enforce session limit
         self._cleanup_closed_sessions()
         if self.sessions.len().to_u32() >= SSHD_MAX_SESSIONS:
+            posix_close_socket(client_fd)
+            return
+
+        # Guard: host keys must have been generated in start()
+        if self.host_private_key.len() != 32 or self.host_public_key.len() != 32:
+            serial_println("[sshd] FATAL: host keys not initialized — rejecting connection")
             posix_close_socket(client_fd)
             return
 

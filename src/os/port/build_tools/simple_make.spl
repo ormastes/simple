@@ -193,14 +193,22 @@ fn find_rule(makefile: MakeFile, target: text) -> MakeRule?:
                 )
     nil
 
+var _in_progress: [text] = []
+
 fn build_target(makefile: MakeFile, target: text, built: [text]) -> bool:
     """Build a target and its dependencies recursively.
 
     Returns true on success, false on failure.
+    Detects dependency cycles via _in_progress tracking.
     """
     # Already built this session
     if built.contains(target):
         return true
+
+    # Cycle detection: if target is already being built, we have a loop
+    if _in_progress.contains(target):
+        print "[make] Error: dependency cycle detected at '{target}'"
+        return false
 
     val rule = find_rule(makefile, target)
     if rule == nil:
@@ -210,12 +218,16 @@ fn build_target(makefile: MakeFile, target: text, built: [text]) -> bool:
         print "[make] No rule to make '{target}'"
         return false
 
+    # Mark in-progress before descending into dependencies
+    _in_progress.push(target)
+
     # Expand variables in dependency list
     val expanded_deps = rule.deps.map(\d: expand_vars(d, makefile.vars))
 
     # Build dependencies first (depth-first)
     for dep in expanded_deps:
         if not build_target(makefile, dep, built):
+            _in_progress = _in_progress.filter(\t: t != target)
             return false
 
     # Check if rebuild needed
@@ -237,6 +249,8 @@ fn build_target(makefile: MakeFile, target: text, built: [text]) -> bool:
             print "[make] Error: command failed with exit code {result.exit_code}"
             return false
 
+    # Done building — mark complete, remove from in-progress
+    _in_progress = _in_progress.filter(\t: t != target)
     built.push(target)
     true
 
