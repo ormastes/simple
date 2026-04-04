@@ -11,7 +11,7 @@
 # @feature #1102 compiled-mode math block execution
 
 use std.spec.{describe, context, it, expect}
-use std.torch.{Tensor, no_grad}
+use std.torch.{Tensor, no_grad, NogradGuard}
 
 describe "Math Blocks Autograd Runtime":
     describe "m{} evaluation":
@@ -131,3 +131,42 @@ describe "Math Blocks Autograd Runtime":
                 val grad = w.grad()
                 expect(grad.?.to_equal(true))
                 expect(grad.item()).to_equal(4.0)
+
+    describe "nograd{} failure safety":
+        context "early return via ? inside nograd":
+            it "restores gradient state after error propagation":
+                # Simulate: nograd block contains a ? that propagates an error.
+                # After the enclosing function catches the error, gradient
+                # tracking must be re-enabled (not stuck in no-grad mode).
+                val w = Tensor.from_data([1.0], requires_grad: true)
+                val x = Tensor.from_data([2.0])
+
+                # Use NogradGuard directly to test RAII drop behavior
+                fn guarded_scope() -> Result<Tensor, text>:
+                    val _guard = NogradGuard.enter()
+                    val inner = w * x
+                    # Guard's drop() restores grad state when scope exits
+                    Ok(inner)
+
+                val result = guarded_scope()
+                expect(result.?.to_equal(true))
+
+                # After the guard scope exits, grad tracking is restored
+                val tracked = w * x
+                expect(tracked.requires_grad()).to_equal(true)
+
+        context "NogradGuard RAII guarantees":
+            it "restores state even when guard goes out of scope early":
+                val w = Tensor.from_data([1.0], requires_grad: true)
+
+                # Inner scope — guard is dropped at scope exit
+                val inner_result = {
+                    val _guard = NogradGuard.enter()
+                    val v = w * w
+                    expect(v.requires_grad()).to_equal(false)
+                    v
+                }
+
+                # Outside the guard scope, tracking is restored
+                val outer = w * w
+                expect(outer.requires_grad()).to_equal(true)

@@ -918,6 +918,21 @@ fn parse_module_body():
         elif par_kind_get() == TOK_INDENT:
             # Stray indent at module level -- skip it
             parser_advance()
+        elif par_kind_get() == TOK_KW_ON:
+            # on pc{...} use handler form [priority N]
+            val d = parse_aop_advice_decl()
+            module_add_decl(d)
+            parser_skip_newlines_and_semicolons()
+        elif par_kind_get() == TOK_KW_FORBID:
+            # forbid pc{...} "message"
+            val d = parse_arch_rule_decl("forbid")
+            module_add_decl(d)
+            parser_skip_newlines_and_semicolons()
+        elif par_kind_get() == TOK_KW_ALLOW:
+            # allow pc{...} "message"
+            val d = parse_arch_rule_decl("allow")
+            module_add_decl(d)
+            parser_skip_newlines_and_semicolons()
         else:
             # Handle bare 'print' and 'from' at module level
             if par_kind_get() == TOK_IDENT:
@@ -1102,3 +1117,69 @@ fn parse_bitfield_decl() -> i64:
         parser_error("bitfield '" + bf_name + "' uses " + int_to_str(used_bits) + " bits but backing type allows only " + int_to_str(backing_bits))
 
     decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
+
+# ===== AOP Declaration Parsing =====
+
+fn parse_pointcut_text() -> text:
+    # Expects current token to be 'pc' identifier, then '{', collects text to matching '}'
+    if par_kind_get() == TOK_IDENT:
+        if par_text_get() == "pc":
+            parser_advance()
+        else:
+            parser_error("expected 'pc' before pointcut expression")
+            return ""
+    else:
+        parser_error("expected 'pc' before pointcut expression")
+        return ""
+    parser_expect(TOK_LBRACE)
+    var depth = 1
+    var result = ""
+    for j in 0..10000:
+        if par_kind_get() == TOK_EOF:
+            parser_error("unexpected EOF in pointcut expression")
+            break
+        if par_kind_get() == TOK_LBRACE:
+            depth = depth + 1
+            result = result + "{"
+            parser_advance()
+        elif par_kind_get() == TOK_RBRACE:
+            depth = depth - 1
+            if depth == 0:
+                parser_advance()
+                break
+            result = result + "}"
+            parser_advance()
+        else:
+            if result.len() > 0:
+                result = result + " "
+            result = result + par_text_get()
+            parser_advance()
+    result
+
+fn parse_aop_advice_decl() -> i64:
+    # on pc{...} use handler form [priority N]
+    parser_advance()  # consume 'on'
+    val pointcut = parse_pointcut_text()
+    parser_expect(TOK_KW_USE)
+    val handler = par_text_get()
+    parser_expect(TOK_IDENT)
+    val form = par_text_get()
+    parser_expect(TOK_IDENT)  # before|after_success|after_error|around
+    var priority_text = "0"
+    if par_kind_get() == TOK_IDENT:
+        if par_text_get() == "priority":
+            parser_advance()
+            if par_kind_get() == TOK_INT_LIT:
+                priority_text = par_text_get()
+                parser_advance()
+    decl_aop_advice(pointcut, handler, form, priority_text, 0)
+
+fn parse_arch_rule_decl(kind: text) -> i64:
+    # forbid/allow pc{...} "message"
+    parser_advance()  # consume 'forbid' or 'allow'
+    val pointcut = parse_pointcut_text()
+    var message = ""
+    if par_kind_get() == TOK_STRING_LIT:
+        message = par_text_get()
+        parser_advance()
+    decl_arch_rule(kind, pointcut, message, 0)

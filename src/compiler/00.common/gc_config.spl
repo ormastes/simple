@@ -139,6 +139,57 @@ enum GcMismatchWarning:
     # Implicit conversion between GC modes (e.g., assigning GC ref to NoGC var)
     ImplicitConversion(from_mode: GcMode, to_mode: GcMode, span: Span)
 
+# ============================================================================
+# Family-Prefix GC Mode Inference
+# ============================================================================
+
+fn gc_mode_from_family_prefix(module_path: text) -> GcConfig:
+    """Infer GC configuration from the runtime family prefix of a module path.
+
+    Family classification:
+    - nogc_*  -> NoGc (ownership-based, unique pointers)
+    - gc_*    -> Gc   (GC-managed references)
+    - common  -> Gc   (pure, default GC mode — no restrictions)
+
+    Falls back to default GC mode for unrecognized prefixes.
+    """
+    # Strip std./lib. prefix for family detection
+    var path = module_path
+    if path.starts_with("std."):
+        path = path[4:path.len()]
+    elif path.starts_with("lib."):
+        path = path[4:path.len()]
+
+    # Check family prefix (order matters: check noalloc before nogc)
+    if path.starts_with("nogc_"):
+        return GcConfig.from_module(GcMode.NoGc)
+    if path.starts_with("gc_"):
+        return GcConfig.from_module(GcMode.Gc)
+    if path.starts_with("common"):
+        return GcConfig.from_module(GcMode.Gc)
+
+    # Unknown family — return inherited default
+    GcConfig.default_gc()
+
+fn is_nogc_family(module_path: text) -> bool:
+    """Check if a module path belongs to a no-GC family."""
+    val config = gc_mode_from_family_prefix(module_path)
+    config.is_nogc() and config.explicit
+
+fn is_gc_family(module_path: text) -> bool:
+    """Check if a module path belongs to a GC family."""
+    val config = gc_mode_from_family_prefix(module_path)
+    config.is_gc() and config.explicit
+
+fn is_noalloc_family(module_path: text) -> bool:
+    """Check if a module path belongs to a no-alloc (baremetal) family."""
+    var path = module_path
+    if path.starts_with("std."):
+        path = path[4:path.len()]
+    elif path.starts_with("lib."):
+        path = path[4:path.len()]
+    path.starts_with("nogc_async_mut_noalloc")
+
 impl GcMismatchWarning:
     fn message() -> text:
         """Generate a human-readable warning message."""

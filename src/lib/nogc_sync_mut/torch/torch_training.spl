@@ -434,23 +434,44 @@ class Sequential:
 
 
 # ============================================================================
+# NogradGuard — RAII scope guard for gradient suppression
+# ============================================================================
+
+struct NogradGuard:
+    """Scope guard that restores gradient tracking when dropped.
+
+    Created by no_grad() or directly via NogradGuard.enter().
+    The auto_defer pass inserts drop() calls at every scope exit
+    (normal return, early return via ?, break, continue), so
+    gradient state is always restored regardless of how the scope
+    is exited.
+    """
+    _active: bool
+
+    static fn enter() -> NogradGuard:
+        """Enter a no-grad context and return a guard that restores it."""
+        rt_torch_autograd_no_grad_begin()
+        NogradGuard(_active: true)
+
+    fn drop():
+        """Restore gradient tracking state. Called automatically at scope exit."""
+        if self._active:
+            rt_torch_autograd_no_grad_end()
+
+# ============================================================================
 # Utility Functions
 # ============================================================================
 
 fn no_grad(f: fn()) -> void:
     """Context manager for disabling gradient computation.
 
-    Wraps the callback with balanced no-grad begin/end calls.
-    Nesting-safe: the torch runtime maintains a reference counter.
-
-    Failure safety: because f is a closure, `return` inside f returns
-    FROM f (not from the calling function), so no_grad_end() always
-    executes after f() completes.  Panics are unrecoverable and cannot
-    be guarded against at this level.
+    Uses NogradGuard for RAII-safe cleanup: drop() is called at scope
+    exit regardless of how the function returns (normal completion,
+    early return, or error propagation).  Panics are unrecoverable
+    and cannot be guarded at this level.
     """
-    rt_torch_autograd_no_grad_begin()
+    val _guard = NogradGuard.enter()
     f()
-    rt_torch_autograd_no_grad_end()
 
 fn set_seed(seed: i64):
     """Set random seed for reproducibility.

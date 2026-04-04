@@ -3,6 +3,10 @@
 # Build commands for bare-metal targets (ARM, x86_64, RISC-V).
 # Uses static linker scripts and crt0.s startup code.
 #
+# Target presets map build targets to runtime family restrictions:
+#   Baremetal → nogc_async_mut_noalloc + common only
+#   Hosted   → all families (default search order)
+#
 # Usage:
 #   simple build baremetal --target=arm
 #   simple build baremetal --target=x86_64
@@ -11,6 +15,99 @@
 use app.build.types.{BuildResult, TestResult}
 use app.io.mod.{dir_create, file_write, file_exists, process_run, current_time_ms}
 use app.build.compile_to_llvm.{compile_to_llvm_ir_pure}
+use compiler.common.driver_core_types.{CompileOptions}
+
+# ============================================================================
+# Target Preset — maps build targets to runtime family settings
+# ============================================================================
+
+enum TargetPreset:
+    """Target preset determines the runtime family restriction for module resolution.
+
+    Each preset defines which runtime families are available for `use std.*` imports
+    and what GC/alloc settings apply.
+    """
+    # Baremetal: stack-only, no GC, no heap. Families: nogc_async_mut_noalloc, common.
+    Baremetal
+
+    # Hosted desktop/server: all families allowed, default search order.
+    Hosted
+
+    # Embedded with heap: no GC, heap OK. Families: nogc_async_mut_noalloc, nogc_sync_mut, nogc_async_mut, common.
+    EmbeddedWithHeap
+
+impl TargetPreset:
+    fn to_text() -> text:
+        match self:
+            case TargetPreset.Baremetal: "baremetal"
+            case TargetPreset.Hosted: "hosted"
+            case TargetPreset.EmbeddedWithHeap: "embedded_with_heap"
+
+    fn allowed_families() -> [text]:
+        """Return the list of allowed runtime families for this preset.
+
+        Empty list means no restriction (all families allowed).
+        """
+        match self:
+            case TargetPreset.Baremetal:
+                ["nogc_async_mut_noalloc", "common"]
+            case TargetPreset.Hosted:
+                []  # No restriction — all families allowed
+            case TargetPreset.EmbeddedWithHeap:
+                ["nogc_async_mut_noalloc", "nogc_sync_mut", "nogc_async_mut", "common"]
+
+    fn gc_off() -> bool:
+        """Whether GC should be disabled for this preset."""
+        match self:
+            case TargetPreset.Baremetal: true
+            case TargetPreset.EmbeddedWithHeap: true
+            case TargetPreset.Hosted: false
+
+    fn alloc_allowed() -> bool:
+        """Whether heap allocation is allowed for this preset."""
+        match self:
+            case TargetPreset.Baremetal: false
+            case TargetPreset.EmbeddedWithHeap: true
+            case TargetPreset.Hosted: true
+
+    me apply_to_compile_options(opts: CompileOptions) -> CompileOptions:
+        """Apply this preset's settings to CompileOptions.
+
+        Sets gc_off, allowed_families based on the preset.
+        Returns a new CompileOptions with the preset applied.
+        """
+        CompileOptions(
+            mode: opts.mode,
+            input_files: opts.input_files,
+            output_file: opts.output_file,
+            output_format: opts.output_format,
+            optimize: opts.optimize,
+            opt_level: opts.opt_level,
+            release: opts.release,
+            debug_info: opts.debug_info,
+            verbose: opts.verbose,
+            log_level: opts.log_level,
+            profile: opts.profile,
+            no_borrow_check: opts.no_borrow_check,
+            backend: opts.backend,
+            interpreter_mode: opts.interpreter_mode,
+            gc_off: self.gc_off(),
+            smf_output_mode: opts.smf_output_mode,
+            low_memory: opts.low_memory,
+            allowed_families: self.allowed_families()
+        )
+
+fn target_preset_for_baremetal() -> TargetPreset:
+    """Get the target preset for baremetal builds."""
+    TargetPreset.Baremetal
+
+fn target_preset_for_hosted() -> TargetPreset:
+    """Get the target preset for hosted desktop/server builds."""
+    TargetPreset.Hosted
+
+fn target_preset_for_embedded_with_heap() -> TargetPreset:
+    """Get the target preset for embedded builds with heap."""
+    TargetPreset.EmbeddedWithHeap
 
 
 # Bare-metal target architectures
@@ -83,6 +180,21 @@ impl BaremetalConfig:
             case BaremetalTarget.Arm: "armv7m-none-eabi"
             case BaremetalTarget.X86_64: "x86_64-unknown-none"
             case BaremetalTarget.Riscv: "riscv64gc-unknown-none-elf"
+
+    # Get the target preset for this baremetal config
+    fn target_preset() -> TargetPreset:
+        if self.alloc_allowed:
+            TargetPreset.EmbeddedWithHeap
+        else:
+            TargetPreset.Baremetal
+
+    # Apply baremetal settings to CompileOptions.
+    # Sets gc_off: true, alloc_allowed based on config, and restricts
+    # module resolution to baremetal-compatible families only.
+    fn compile_options() -> CompileOptions:
+        val preset = self.target_preset()
+        val base = CompileOptions.default()
+        preset.apply_to_compile_options(base)
 
 # Factory functions (exported)
 fn baremetal_config_arm() -> BaremetalConfig:

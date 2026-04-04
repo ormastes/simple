@@ -633,15 +633,15 @@ impl HardwareCodegen for VhdlBackend:
             case Err(e):
                 Err(e)
 
-    fn compile_package(module: MirModule) -> text:
+    fn compile_package(module: MirModule) -> Result<text, CompileError>:
         val builder = VhdlBuilder.create(module.name)
         builder.emit_library_header()
         val result = self.compile_package_into(builder, module)
         if result.is_err():
-            return "-- ERROR: {result.unwrap_err().message}"
-        builder.build()
+            return Err(result.unwrap_err())
+        Ok(builder.build())
 
-    fn compile_process(kind: compiler.backend.hardware_codegen_types.VhdlProcessKind, body_block: MirBlock) -> text:
+    fn compile_process(kind: compiler.backend.hardware_codegen_types.VhdlProcessKind, body_block: MirBlock) -> Result<text, CompileError>:
         val builder = VhdlBuilder.create("process")
         match kind:
             case Combinational:
@@ -650,9 +650,9 @@ impl HardwareCodegen for VhdlBackend:
                 for inst in body_block.instructions:
                     val result = self.compile_instruction(builder, inst)
                     if result.is_err():
-                        builder.emit_comment("ERROR: {result.unwrap_err().message}")
+                        return Err(result.unwrap_err())
                 builder.emit_process_end(nil)
-                builder.build()
+                Ok(builder.build())
             case Clocked:
                 builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", nil)
                 builder.emit_process_body_begin()
@@ -660,25 +660,25 @@ impl HardwareCodegen for VhdlBackend:
                 for inst in body_block.instructions:
                     val result = self.compile_instruction(builder, inst)
                     if result.is_err():
-                        builder.emit_comment("ERROR: {result.unwrap_err().message}")
+                        return Err(result.unwrap_err())
                 builder.emit_if_end()
                 builder.emit_process_end(nil)
-                builder.build()
+                Ok(builder.build())
             case AsyncReset:
                 builder.emit_clocked_process_begin(Some(builder.alloc_label()), "clk", Some("rst"))
                 builder.emit_process_body_begin()
                 builder.emit_if_begin("rst = '1'")
-                builder.emit_comment("hardware trait async reset branch")
+                builder.emit_comment("reset: default signal values applied")
                 builder.emit_else()
                 builder.emit_rising_edge_check("clk")
                 for inst in body_block.instructions:
                     val result = self.compile_instruction(builder, inst)
                     if result.is_err():
-                        builder.emit_comment("ERROR: {result.unwrap_err().message}")
+                        return Err(result.unwrap_err())
                 builder.emit_if_end()
                 builder.emit_if_end()
                 builder.emit_process_end(nil)
-                builder.build()
+                Ok(builder.build())
 
 # ============================================================================
 # Export

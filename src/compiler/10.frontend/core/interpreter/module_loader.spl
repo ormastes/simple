@@ -123,6 +123,7 @@ fn module_loader_init():
     deferred_module_files = []
     deferred_module_imports = []
     deferred_module_set = {}
+    _gc_warn_emitted = {}
     irt_init()
 
 fn module_is_loaded(module_path: text) -> i64:
@@ -213,13 +214,16 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
 
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
     #    Default app mode is nogc_async_mut. Search order:
-    #    nogc_async_mut (default) > nogc_sync_mut (sync fallback) > common > gc_async_mut > nogc_async_mut_noalloc
+    #    nogc_async_mut (default) > nogc_async_immut > nogc_sync_mut (sync fallback) > common > gc_async_mut > nogc_async_mut_noalloc
     if relative_path.starts_with("lib/"):
         val lib_subpath = relative_path.substring(4)
         val lib_dir = rt_path_join("src", "lib")
         val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
         if rt_file_exists(nam) == 1:
             return nam
+        val naim = rt_path_join(lib_dir, rt_path_join("nogc_async_immut", lib_subpath))
+        if rt_file_exists(naim) == 1:
+            return naim
         val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
         if rt_file_exists(nsm) == 1:
             return nsm
@@ -402,6 +406,9 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # Resolve module path
     val resolved_path = resolve_module_path(module_name, current_file)
 
+    # Check GC family boundary compatibility (warnings only)
+    check_gc_family_boundary(current_file, resolved_path, module_name)
+
     # Load source
     val source = load_module_source(resolved_path)
     if source == "":
@@ -454,6 +461,90 @@ fn load_module_selective(module_name: text, imported_names: [text], current_file
         return 0
 
     1
+
+# ===== GC Family Boundary Warnings =====
+#
+# Runtime family compatibility matrix (warnings only, never blocks execution):
+#   common        → always compatible with everything
+#   nogc_*        → importing gc_* warns "GC module imported in no-GC context"
+#   nogc_*_noalloc → importing allocating family warns "Allocating module in no-alloc context"
+#   gc_*          → importing nogc_* is OK (superset)
+
+# Tracks which GC boundary warnings have already been emitted to avoid duplicates.
+var _gc_warn_emitted: {text: bool} = {}
+
+fn extract_runtime_family(resolved_path: text) -> text:
+    """Extract the runtime family from a resolved file path.
+
+    Looks for known lib subdirectory names in the path.
+    Returns one of: "nogc_async_mut", "nogc_async_immut", "nogc_sync_mut",
+                    "common", "gc_async_mut", "nogc_async_mut_noalloc", or ""
+    """
+    if resolved_path.contains("/nogc_async_mut_noalloc/"):
+        return "nogc_async_mut_noalloc"
+    if resolved_path.contains("/nogc_async_mut/"):
+        return "nogc_async_mut"
+    if resolved_path.contains("/nogc_async_immut/"):
+        return "nogc_async_immut"
+    if resolved_path.contains("/nogc_sync_mut/"):
+        return "nogc_sync_mut"
+    if resolved_path.contains("/gc_async_mut/"):
+        return "gc_async_mut"
+    if resolved_path.contains("/common/"):
+        return "common"
+    ""
+
+fn is_nogc_family(family: text) -> bool:
+    """Check if a family is a no-GC family."""
+    family == "nogc_async_mut" or family == "nogc_async_immut" or family == "nogc_sync_mut" or family == "nogc_async_mut_noalloc"
+
+fn is_gc_family(family: text) -> bool:
+    """Check if a family is a GC family."""
+    family == "gc_async_mut"
+
+fn is_noalloc_family(family: text) -> bool:
+    """Check if a family is a no-alloc family."""
+    family == "nogc_async_mut_noalloc"
+
+fn is_allocating_family(family: text) -> bool:
+    """Check if a family performs allocation (anything except noalloc and common)."""
+    family == "nogc_async_mut" or family == "nogc_async_immut" or family == "nogc_sync_mut" or family == "gc_async_mut"
+
+fn check_gc_family_boundary(importer_path: text, imported_path: text, module_name: text):
+    """Emit a warning if importing across incompatible runtime family boundaries.
+
+    This is warnings-only — never blocks execution. Used by the interpreter
+    to surface GC boundary issues that the compiled-mode checker would catch.
+    """
+    val importer_family = extract_runtime_family(importer_path)
+    val imported_family = extract_runtime_family(imported_path)
+
+    # Skip if either family is unknown or common (always compatible)
+    if importer_family == "" or imported_family == "":
+        return
+    if importer_family == "common" or imported_family == "common":
+        return
+    # Same family — always OK
+    if importer_family == imported_family:
+        return
+
+    # Deduplicate: only warn once per (importer_family, imported_family, module_name) triple
+    val warn_key = importer_family + ">" + imported_family + ":" + module_name
+    if _gc_warn_emitted.contains_key(warn_key):
+        return
+    _gc_warn_emitted[warn_key] = true
+
+    # Rule 1: nogc_* importing gc_* → warn
+    if is_nogc_family(importer_family) and is_gc_family(imported_family):
+        val msg = "[gc-warning] GC module '{module_name}' (family: {imported_family}) imported in no-GC context (family: {importer_family})"
+        eval_warnings.push(msg)
+        return
+
+    # Rule 2: noalloc importing from allocating family → warn
+    if is_noalloc_family(importer_family) and is_allocating_family(imported_family):
+        val msg = "[gc-warning] Allocating module '{module_name}' (family: {imported_family}) imported in no-alloc context (family: {importer_family})"
+        eval_warnings.push(msg)
+        return
 
 fn interp_unload_module(module_name: text) -> i64:
     """Selectively unload a module: remove its names from tables.

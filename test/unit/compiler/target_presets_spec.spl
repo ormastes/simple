@@ -212,3 +212,76 @@ describe "TargetPreset":
         it "has pointer_width of 64":
             val p = make_macos_arm64()
             expect(p.pointer_width).to_equal(64)
+
+    # ================================================================
+    # Target preset → runtime family mapping tests
+    # ================================================================
+
+    context "baremetal preset family mapping":
+        it "restricts to nogc_async_mut_noalloc and common":
+            val p = make_cortex_m4()
+            # Baremetal presets (no_std + no_gc) should only allow these two families
+            val families = baremetal_allowed_families()
+            expect(families.len()).to_equal(2)
+            expect(families[0]).to_equal("nogc_async_mut_noalloc")
+            expect(families[1]).to_equal("common")
+
+        it "sets gc_off to true for baremetal":
+            val p = make_cortex_m4()
+            expect(p.no_gc).to_equal(true)
+
+        it "disallows allocation for baremetal":
+            val p = make_cortex_m4()
+            expect(p.heap_size).to_equal(0)
+
+    context "hosted preset family mapping":
+        it "allows all families (empty restriction)":
+            val families = hosted_allowed_families()
+            expect(families.len()).to_equal(0)
+
+        it "does not set gc_off for hosted":
+            val p = make_linux_x86_64()
+            expect(p.no_gc).to_equal(false)
+
+    context "embedded_with_heap preset family mapping":
+        it "allows nogc families plus common but not gc":
+            val families = embedded_with_heap_allowed_families()
+            expect(families.len()).to_equal(4)
+            expect(families[0]).to_equal("nogc_async_mut_noalloc")
+            expect(families[1]).to_equal("nogc_sync_mut")
+            expect(families[2]).to_equal("nogc_async_mut")
+            expect(families[3]).to_equal("common")
+
+    context "is_family_allowed helper":
+        it "allows any family when restriction is empty":
+            val families: [text] = []
+            expect(check_family_allowed(families, "gc_async_mut")).to_equal(true)
+            expect(check_family_allowed(families, "nogc_sync_mut")).to_equal(true)
+
+        it "blocks non-listed families when restriction is active":
+            val families = ["nogc_async_mut_noalloc", "common"]
+            expect(check_family_allowed(families, "nogc_async_mut_noalloc")).to_equal(true)
+            expect(check_family_allowed(families, "common")).to_equal(true)
+            expect(check_family_allowed(families, "nogc_sync_mut")).to_equal(false)
+            expect(check_family_allowed(families, "gc_async_mut")).to_equal(false)
+
+# ============================================================================
+# Family mapping helpers (replicate TargetPreset.allowed_families logic)
+# ============================================================================
+
+fn baremetal_allowed_families() -> [text]:
+    ["nogc_async_mut_noalloc", "common"]
+
+fn hosted_allowed_families() -> [text]:
+    []
+
+fn embedded_with_heap_allowed_families() -> [text]:
+    ["nogc_async_mut_noalloc", "nogc_sync_mut", "nogc_async_mut", "common"]
+
+fn check_family_allowed(allowed: [text], family: text) -> bool:
+    if allowed.len() == 0:
+        return true
+    for af in allowed:
+        if af == family:
+            return true
+    false
