@@ -104,8 +104,7 @@ fn _split_visible(s: text) -> [text]:
 
     Each ANSI escape sequence is attached to the next visible character
     as a single token. Non-ANSI characters become single-char tokens.
-    This preserves ANSI styling while allowing position-based indexing
-    by visual column.
+    Trailing escape-only tokens (e.g. RESET at end) are preserved.
     """
     val chars = _to_chars(s)
     var result: [text] = []
@@ -122,7 +121,6 @@ fn _split_visible(s: text) -> [text]:
         else:
             result = result + ["{pending_esc}{ch}"]
             pending_esc = ""
-    # Trailing escape (e.g. RESET at end) — keep it so it isn't lost
     if pending_esc != "":
         result = result + [pending_esc]
     return result
@@ -190,24 +188,72 @@ class Screen:
                 suffix = "{suffix} "
             j = j + 1
 
-        # Only emit RESET between prefix and text_content when the
-        # overwritten range actually contained a RESET token.  Dropping
-        # that RESET would let a prefix style bleed into new content,
-        # but emitting RESET unconditionally would kill styles the
-        # suffix still depends on during partial overwrites.
+        # Style management across the splice boundary.
+        # Scan the overwritten range to determine:
+        # 1) Did we lose a RESET? → emit RESET before text_content
+        # 2) What style was active at the suffix start? → re-emit it
+        #    before the suffix so tokens that inherited contextually
+        #    keep their style.
         var lost_reset = false
-        var k = col
-        while k < after_col and k < line_tokens.len():
-            if line_tokens[k].contains("\u{001b}[0m") or line_tokens[k].contains("\u{001b}[m"):
-                lost_reset = true
+        var style_entering_suffix = ""
+        var scan_style = ""
+        # Start from the style that the prefix leaves active
+        var k = 0
+        while k < col and k < line_tokens.len():
+            val tok = line_tokens[k]
+            if tok.contains("\u{001b}["):
+                if (tok.contains("\u{001b}[0m") or tok.contains("\u{001b}[m")):
+                    scan_style = ""
+                else:
+                    # Extract escape from token
+                    val idx = tok.split("\u{001b}")
+                    if idx.len() > 1:
+                        scan_style = "\u{001b}{idx[1]}"
             k = k + 1
-        val gap = if lost_reset: RESET else: ""
-        # Always append RESET at the end of the line to prevent any
-        # active style from leaking into the next row during render().
-        # Trailing RESET tokens from _split_visible live beyond
-        # self.width and are dropped by the suffix loop, so we must
-        # re-add one unconditionally.  Double-RESET is harmless.
-        new_buffer[row] = "{prefix}{gap}{text_content}{suffix}{RESET}"
+        val prefix_active = scan_style
+        # Scan the overwritten range — process all ANSI escapes in order
+        # within each token (a token may contain RESET followed by a new style)
+        k = col
+        while k < after_col and k < line_tokens.len():
+            val tok = line_tokens[k]
+            val esc_parts = tok.split("\u{001b}")
+            var pi = 1
+            while pi < esc_parts.len():
+                val esc_body = esc_parts[pi]
+                if esc_body.starts_with("[0m") or esc_body.starts_with("[m"):
+                    lost_reset = true
+                    scan_style = ""
+                elif esc_body.starts_with("["):
+                    # Extract the full escape: "[" + params + terminator
+                    var esc_str = "\u{001b}["
+                    var found_term = false
+                    val esc_chars = _to_chars(esc_body)
+                    var ci = 1
+                    while ci < esc_chars.len() and not found_term:
+                        esc_str = "{esc_str}{esc_chars[ci]}"
+                        if "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(esc_chars[ci]):
+                            found_term = true
+                        ci = ci + 1
+                    if found_term:
+                        scan_style = esc_str
+                pi = pi + 1
+            k = k + 1
+        style_entering_suffix = scan_style
+
+        # Gap: only emit RESET if the prefix has an active style
+        # AND the overwritten range lost a RESET (or we're inserting
+        # into an active style run where text_content should be plain)
+        val gap = if prefix_active != "" and (lost_reset or prefix_active != style_entering_suffix): RESET else: ""
+
+        # Restore: re-emit suffix style if the first suffix token
+        # doesn't carry its own escape but had an inherited style
+        var suffix_restore = ""
+        if style_entering_suffix != "" and after_col < line_tokens.len():
+            val first_suffix = line_tokens[after_col]
+            if not first_suffix.contains("\u{001b}["):
+                suffix_restore = style_entering_suffix
+
+        new_buffer[row] = "{prefix}{gap}{text_content}{suffix_restore}{suffix}{RESET}"
         return Screen(width: self.width, height: self.height, buffer: new_buffer)
 
     fn put_styled(row: i32, col: i32, text_content: text, style: text) -> Screen:

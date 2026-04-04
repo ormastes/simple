@@ -1,0 +1,189 @@
+# OS Executor — Single-threaded async task executor
+#
+# Uses kernel notification objects for sleep/wakeup instead of spin-polling.
+# The executor owns a notification ID (created via syscall 24) and gives
+# each spawned task a waker that signals this notification. When no task
+# makes progress, the executor blocks on syscall 26 (NotificationWait)
+# until a waker fires.
+#
+# Design:
+#   - Single-threaded, cooperative scheduling
+#   - Round-robin polling of all pending tasks
+#   - Notification-based sleep when no progress is made
+#   - Tasks are type-erased to i64 for heterogeneous storage
+
+use os.async.os_poll.{OsPoll}
+use os.async.os_waker.{OsWaker}
+use os.async.os_task.{OsTask, OsTaskHandle}
+use os.userlib.syscall_raw.{syscall}
+
+class OsExecutor:
+    """Single-threaded async executor for SimpleOS.
+
+    Creates a kernel notification object on construction. Spawned tasks
+    receive wakers that signal this notification. The executor sleeps
+    via NotificationWait when no task is ready, avoiding spin-polling.
+    """
+    notification_id: u64
+    tasks: [OsTask]
+    next_task_id: u64
+
+impl OsExecutor:
+    static fn new() -> OsExecutor:
+        """Create a new executor with its own notification object.
+
+        Calls syscall 24 (NotificationCreate) to allocate the notification.
+        The notification is freed when destroy() is called.
+        """
+        val notif_raw = syscall(24, 0, 0, 0, 0, 0)
+        val notif_id = notif_raw as u64
+        OsExecutor(
+            notification_id: notif_id,
+            tasks: [],
+            next_task_id: 1
+        )
+
+    me spawn(poll_fn: fn(OsWaker) -> OsPoll<i64>) -> OsTaskHandle:
+        """Spawn a new async task.
+
+        The poll_fn is called repeatedly with a waker until it returns
+        OsPoll.Ready(value). Returns a handle that can be used to query
+        the task's result after completion.
+        """
+        val id = self.next_task_id
+        self.next_task_id = self.next_task_id + 1
+        val task = OsTask(
+            id: id,
+            poll_fn: poll_fn,
+            completed: false,
+            result: 0
+        )
+        self.tasks.push(task)
+        OsTaskHandle(id: id, completed: false)
+
+    me run_until_complete():
+        """Run all spawned tasks to completion.
+
+        Polls all pending tasks in round-robin order. When a polling round
+        makes no progress (all pending tasks return Pending), the executor
+        blocks on NotificationWait (syscall 26) until a waker signals.
+
+        Returns when every task has completed.
+        """
+        var all_done = false
+        while not all_done:
+            all_done = true
+            var made_progress = false
+
+            # Each poll round uses bit 1 on the executor's notification.
+            # A more advanced executor could assign per-task bits (up to 64).
+            val waker = OsWaker.new(self.notification_id, 1)
+
+            var i = 0
+            while i < self.tasks.len():
+                var task = self.tasks[i]
+                if not task.completed:
+                    all_done = false
+                    val result = task.poll_fn(waker)
+                    match result:
+                        OsPoll.Ready(value):
+                            task.completed = true
+                            task.result = value
+                            self.tasks[i] = task
+                            made_progress = true
+                        OsPoll.Pending:
+                            pass_do_nothing
+                i = i + 1
+
+            if not all_done and not made_progress:
+                # No task made progress — sleep until a waker signals us.
+                # syscall 26 = NotificationWait
+                # Args: notification_id, thread_id (0 = current thread)
+                # Returns: accumulated bits if immediately available, else blocks
+                syscall(26, self.notification_id, 0, 0, 0, 0)
+
+    me run_one() -> bool:
+        """Poll all tasks once. Returns true if any task made progress.
+
+        Does NOT block. Useful for integrating the executor into a custom
+        event loop or for testing.
+        """
+        var made_progress = false
+        val waker = OsWaker.new(self.notification_id, 1)
+
+        var i = 0
+        while i < self.tasks.len():
+            var task = self.tasks[i]
+            if not task.completed:
+                val result = task.poll_fn(waker)
+                match result:
+                    OsPoll.Ready(value):
+                        task.completed = true
+                        task.result = value
+                        self.tasks[i] = task
+                        made_progress = true
+                    OsPoll.Pending:
+                        pass_do_nothing
+            i = i + 1
+        made_progress
+
+    me all_completed() -> bool:
+        """Check if all spawned tasks have completed."""
+        var i = 0
+        while i < self.tasks.len():
+            if not self.tasks[i].completed:
+                return false
+            i = i + 1
+        true
+
+    fn pending_count() -> u64:
+        """Return the number of tasks that have not yet completed."""
+        var count: u64 = 0
+        var i = 0
+        while i < self.tasks.len():
+            if not self.tasks[i].completed:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn completed_count() -> u64:
+        """Return the number of tasks that have completed."""
+        var count: u64 = 0
+        var i = 0
+        while i < self.tasks.len():
+            if self.tasks[i].completed:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn get_result(task_handle: OsTaskHandle) -> i64:
+        """Get the result of a completed task.
+
+        Returns the i64 value produced by the task's poll function.
+        Returns 0 if the task is not found or has not completed.
+        """
+        var i = 0
+        while i < self.tasks.len():
+            if self.tasks[i].id == task_handle.id:
+                if self.tasks[i].completed:
+                    return self.tasks[i].result
+                return 0  # Not yet completed
+            i = i + 1
+        0  # Task not found
+
+    fn task_completed(task_handle: OsTaskHandle) -> bool:
+        """Check if a specific task has completed."""
+        var i = 0
+        while i < self.tasks.len():
+            if self.tasks[i].id == task_handle.id:
+                return self.tasks[i].completed
+            i = i + 1
+        false  # Task not found
+
+    me destroy():
+        """Free the notification object.
+
+        Calls syscall 28 (NotificationDestroy). After this, the executor
+        must not be used. Ensure all tasks have completed first.
+        """
+        syscall(28, self.notification_id, 0, 0, 0, 0)

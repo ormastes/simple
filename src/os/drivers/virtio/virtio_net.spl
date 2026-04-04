@@ -16,6 +16,7 @@ use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32}
 use os.userlib.syscall_raw.{syscall}
 use os.drivers.virtio.virtio_common.{VirtqDesc, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
+use os.drivers.virtio.virtio_net_async.{VirtioNetRecvFuture, VirtioNetSendFuture}
 
 extern fn serial_println(msg: text)
 
@@ -538,6 +539,128 @@ impl VirtioNetDriver:
         mmio_write16(self.rx_avail_virt + 2, avail_idx + 1)
         # Notify device that a new RX buffer is available
         mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_NET_RX_QUEUE)
+
+    # ========================================================================
+    # Async / Non-Blocking Methods
+    # ========================================================================
+
+    me recv_frame_async(max_len: u64) -> VirtioNetRecvFuture:
+        """Create an async receive future (non-blocking).
+
+        Returns a VirtioNetRecvFuture that polls the RX used ring on each
+        executor tick. The device IRQ will wake the executor when a frame
+        arrives, so no busy-wait occurs between polls.
+
+        Call update_rx_tracking() after the future completes to keep the
+        driver's rx_last_used in sync.
+        """
+        VirtioNetRecvFuture(
+            rx_used_virt: self.rx_used_virt,
+            rx_last_used: self.rx_last_used,
+            rx_queue_size: self.rx_queue_size,
+            rx_bufs_virt: self.rx_bufs_virt,
+            rx_avail_virt: self.rx_avail_virt,
+            bar0_virt: self.bar0_virt,
+            notif_id: self.notif_id,
+            max_len: max_len,
+            completed: false,
+            frame_data: []
+        )
+
+    me send_frame_async(data_virt: u64, data_phys: u64, len: u64) -> Result<VirtioNetSendFuture, text>:
+        """Create an async send future (non-blocking).
+
+        Validates the frame length and picks a TX buffer slot, then returns
+        a VirtioNetSendFuture. The actual TX submission and completion
+        polling happen inside the future's poll method.
+
+        Call update_tx_tracking() after the future completes to keep the
+        driver's tx_last_used in sync.
+        """
+        if not self.initialized:
+            return Err("device not initialized")
+        if len > 1514:
+            return Err("frame too large: {len}")
+
+        val slot = (self.tx_last_used % self.tx_queue_size).to_u64()
+
+        Ok(VirtioNetSendFuture(
+            tx_used_virt: self.tx_used_virt,
+            tx_last_used: self.tx_last_used,
+            tx_queue_size: self.tx_queue_size,
+            bar0_virt: self.bar0_virt,
+            notif_id: self.notif_id,
+            submitted: false,
+            completed: false,
+            tx_desc_virt: self.tx_desc_virt,
+            tx_avail_virt: self.tx_avail_virt,
+            tx_bufs_virt: self.tx_bufs_virt,
+            tx_bufs_phys: self.tx_bufs_phys,
+            data_virt: data_virt,
+            data_len: len,
+            slot: slot
+        ))
+
+    me recv_frame_poll(buf_virt: u64, buf_len: u64) -> Result<u64, text>:
+        """Non-blocking receive: returns frame if available, Err if not.
+
+        Checks the RX used ring without blocking. If a completed descriptor
+        is present, copies the frame and reposts the descriptor. Otherwise
+        returns Err("no frame available") immediately.
+        """
+        if not self.initialized:
+            return Err("device not initialized")
+
+        val used_idx = mmio_read16(self.rx_used_virt + 2)
+        if used_idx == self.rx_last_used:
+            return Err("no frame available")
+
+        # Read the used ring entry
+        val ring_idx = self.rx_last_used % self.rx_queue_size
+        val used_entry = self.rx_used_virt + 4 + ring_idx.to_u64() * 8
+        val desc_id = mmio_read32(used_entry)
+        val total_len = mmio_read32(used_entry + 4)
+        self.rx_last_used = self.rx_last_used + 1
+
+        val frame_len = total_len.to_u64() - VIRTIO_NET_HDR_SIZE
+        if frame_len == 0 or frame_len > buf_len:
+            self.repost_rx_descriptor(desc_id.to_u16())
+            return Err("frame too large or empty")
+
+        # Copy frame data (skip virtio-net header)
+        val rx_buf = self.rx_bufs_virt + desc_id.to_u64() * BUFFER_SIZE + VIRTIO_NET_HDR_SIZE
+        var i: u64 = 0
+        while i < frame_len:
+            val byte = mmio_read8(rx_buf + i)
+            mmio_write8(buf_virt + i, byte)
+            i = i + 1
+
+        self.repost_rx_descriptor(desc_id.to_u16())
+        Ok(frame_len)
+
+    me update_rx_tracking(new_last_used: u16):
+        """Update rx_last_used after an async receive future completes.
+
+        The async future maintains its own copy of rx_last_used. Once the
+        future resolves, call this to synchronize the driver's state.
+        """
+        self.rx_last_used = new_last_used
+
+    me update_tx_tracking(new_last_used: u16):
+        """Update tx_last_used after an async send future completes.
+
+        The async future maintains its own copy of tx_last_used. Once the
+        future resolves, call this to synchronize the driver's state.
+        """
+        self.tx_last_used = new_last_used
+
+    # ========================================================================
+    # MAC Address as Array
+    # ========================================================================
+
+    fn mac_address() -> [u8]:
+        """Return MAC address as a 6-byte array."""
+        [self.mac0, self.mac1, self.mac2, self.mac3, self.mac4, self.mac5]
 
     # ========================================================================
     # Status Queries

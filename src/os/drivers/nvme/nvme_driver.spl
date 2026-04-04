@@ -490,6 +490,109 @@ impl NvmeDriver:
         Result.Ok(true)
 
     # ========================================================================
+    # Notification-Based Block I/O (non-spinning)
+    # ========================================================================
+
+    me read_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Read sectors using notification-based completion (non-spinning).
+
+        Same as read_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling. This yields the CPU
+        to other tasks while waiting for the NVMe controller to complete.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to read (1-based)
+        buf_phys: Physical address of DMA buffer (must be pre-allocated)
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: read beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_READ, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: read timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: read error, status={status_code}")
+
+        Result.Ok(true)
+
+    me write_sectors_notify(lba: u64, count: u32, buf_phys: u64) -> Result<bool, text>:
+        """Write sectors using notification-based completion (non-spinning).
+
+        Same as write_sectors() but uses wait_completion_notify() which blocks
+        on the IRQ notification instead of spin-polling.
+
+        lba:      Starting logical block address
+        count:    Number of sectors to write (1-based)
+        buf_phys: Physical address of DMA buffer containing data
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+        val count_u64 = count.to_u64()
+        if lba + count_u64 > self.sector_count:
+            return Result.Err("NVMe: write beyond namespace capacity")
+
+        val lba_low = (lba & 0xFFFFFFFF).to_u32()
+        val lba_high = (lba >> 32).to_u32()
+        val nlb = count - 1  # 0-based count
+
+        self.io_queue.submit_command(
+            NVME_IO_WRITE, 1, buf_phys, 0,
+            lba_low, lba_high, nlb
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: write timeout at LBA {lba}")
+
+        # Check completion status
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: write error, status={status_code}")
+
+        Result.Ok(true)
+
+    me flush_notify() -> Result<bool, text>:
+        """Flush write cache using notification-based completion (non-spinning).
+
+        Same as flush() but uses wait_completion_notify() instead of spin-polling.
+        """
+        if not self.initialized:
+            return Result.Err("NVMe: driver not initialized")
+
+        self.io_queue.submit_command(
+            NVME_IO_FLUSH, 1, 0, 0,
+            0, 0, 0
+        )
+
+        # Wait using notification instead of spin-poll
+        if not self.io_queue.wait_completion_notify(self.notif_id, CMD_TIMEOUT):
+            return Result.Err("NVMe: flush timeout")
+
+        val status_dw3 = self.io_queue.get_completion_status()
+        val status_code = (status_dw3 >> 17) & 0x7FF
+        if status_code != 0:
+            return Result.Err("NVMe: flush error, status={status_code}")
+
+        Result.Ok(true)
+
+    # ========================================================================
     # Query
     # ========================================================================
 

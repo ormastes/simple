@@ -16,6 +16,7 @@ use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read32, mmio_write8, mmio_write32, mmio_write64}
 use os.userlib.syscall_raw.{syscall}
+use os.async.os_waker.{OsWaker}
 
 extern fn serial_println(msg: text)
 
@@ -27,6 +28,8 @@ val NET_METHOD_SEND_FRAME: u32 = 1
 val NET_METHOD_RECV_FRAME: u32 = 2
 val NET_METHOD_GET_MAC: u32 = 3
 val NET_METHOD_LINK_STATUS: u32 = 4
+val NET_METHOD_RECV_ASYNC: u32 = 5
+val NET_METHOD_SEND_ASYNC: u32 = 6
 
 # ============================================================================
 # Shared State
@@ -115,6 +118,8 @@ fn net_service_loop(port_handle: u64):
         #   NET_METHOD_RECV_FRAME  → handle_recv_frame(msg)
         #   NET_METHOD_GET_MAC     → handle_get_mac(msg)
         #   NET_METHOD_LINK_STATUS → handle_link_status(msg)
+        #   NET_METHOD_RECV_ASYNC  → handle_recv_async(msg)
+        #   NET_METHOD_SEND_ASYNC  → handle_send_async(msg)
         pass_dn
 
 # ============================================================================
@@ -195,3 +200,60 @@ fn handle_link_status() -> i64:
         1
     else:
         0
+
+# ============================================================================
+# Async Method Handlers
+# ============================================================================
+
+fn handle_recv_async(dst_virt: u64, dst_len: u64) -> i64:
+    """Handle NET_METHOD_RECV_ASYNC: non-blocking receive.
+
+    Returns immediately with:
+      - Frame length (positive) if a frame was already available
+      - 0 if no frame is available yet (caller should retry or wait)
+      - Negative error code on failure
+
+    Uses recv_frame_poll() which checks the RX used ring without blocking.
+    """
+    if not service_ready or recv_buf_virt == 0:
+        return -1
+
+    val result = driver.recv_frame_poll(recv_buf_virt, 2048)
+    match result:
+        Ok(frame_len):
+            # Copy from scratch buffer to caller's destination
+            var i: u64 = 0
+            val copy_len = if frame_len < dst_len: frame_len else: dst_len
+            while i < copy_len:
+                val byte = mmio_read8(recv_buf_virt + i)
+                mmio_write8(dst_virt + i, byte)
+                i = i + 1
+            frame_len as i64
+        Err(msg):
+            # "no frame available" is not a hard error, return 0
+            0
+
+fn handle_send_async(frame_virt: u64, frame_phys: u64, frame_len: u64) -> i64:
+    """Handle NET_METHOD_SEND_ASYNC: non-blocking send.
+
+    Submits the frame to the TX virtqueue and returns immediately.
+    The caller does not wait for TX completion.
+
+    Returns 0 on successful submission, negative on error.
+    """
+    if not service_ready:
+        return -1
+
+    val future_result = driver.send_frame_async(frame_virt, frame_phys, frame_len)
+    match future_result:
+        Ok(future):
+            # Frame submission happens on first poll of the future.
+            # For the IPC service, we do a single poll to trigger submission
+            # and return immediately without waiting for device consumption.
+            val waker = OsWaker.new(driver.notif_id, 1)
+            val poll_result = future.poll(waker)
+            # Whether Ready or Pending, the frame has been submitted
+            0
+        Err(msg):
+            serial_println("[virtio-net-svc] Async send failed: {msg}")
+            -1

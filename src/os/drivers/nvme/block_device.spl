@@ -1,0 +1,83 @@
+# Block Device Traits -- Sync and Async interfaces for block storage
+#
+# MDSOC: entity dimension, drivers layer
+#
+# Defines the generic BlockDevice and AsyncBlockDevice traits that any
+# block storage driver (NVMe, VirtIO-blk, ramdisk, etc.) can implement.
+#
+# BlockDevice is synchronous: calls block until I/O completes.
+# AsyncBlockDevice returns OsFuture handles that complete when the
+# device fires an IRQ notification, avoiding spin-polling.
+
+use os.async.os_future.{OsFuture}
+
+# ============================================================================
+# Synchronous Block Device
+# ============================================================================
+
+trait BlockDevice:
+    """Synchronous block device interface.
+
+    All methods block until the I/O operation completes.
+    Implementations may spin-poll or use notification-based waiting
+    internally, but the caller sees a blocking API.
+    """
+
+    fn read_sector(lba: u64, buf_phys: u64) -> Result<bool, text>
+        """Read a single sector at the given LBA.
+
+        buf_phys: Physical address of a DMA buffer (at least sector_size bytes).
+        Returns Ok(true) on success, Err on device/timeout error.
+        """
+
+    fn write_sector(lba: u64, buf_phys: u64) -> Result<bool, text>
+        """Write a single sector at the given LBA.
+
+        buf_phys: Physical address of a DMA buffer containing data to write.
+        Returns Ok(true) on success, Err on device/timeout error.
+        """
+
+    fn sector_size() -> u32
+        """Sector size in bytes (typically 512 or 4096)."""
+
+    fn sector_count() -> u64
+        """Total number of addressable sectors on this device."""
+
+# ============================================================================
+# Async Block Device
+# ============================================================================
+
+trait AsyncBlockDevice:
+    """Async block device with notification-based completion.
+
+    Methods submit I/O commands and return immediately with an OsFuture.
+    The future completes when the device fires an IRQ and the completion
+    queue entry is consumed. The executor sleeps on NotificationWait
+    between polls, avoiding spin-polling entirely.
+    """
+
+    fn read_sectors_async(lba: u64, count: u32, buf_phys: u64) -> OsFuture<Result<bool, text>>
+        """Submit an async read of count sectors starting at lba.
+
+        buf_phys: Physical address of DMA buffer (count * sector_size bytes).
+        Returns a future that resolves when the NVMe completion arrives.
+        """
+
+    fn write_sectors_async(lba: u64, count: u32, buf_phys: u64) -> OsFuture<Result<bool, text>>
+        """Submit an async write of count sectors starting at lba.
+
+        buf_phys: Physical address of DMA buffer containing data.
+        Returns a future that resolves when the NVMe completion arrives.
+        """
+
+    fn flush_async() -> OsFuture<Result<bool, text>>
+        """Submit an async flush of the device write cache.
+
+        Returns a future that resolves when the flush completes.
+        """
+
+    fn sector_size() -> u32
+        """Sector size in bytes (typically 512 or 4096)."""
+
+    fn sector_count() -> u64
+        """Total number of addressable sectors on this device."""

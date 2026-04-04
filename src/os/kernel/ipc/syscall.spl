@@ -11,7 +11,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.notification_types.{Notification}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
-use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy}
+use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter}
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
@@ -246,6 +246,8 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_notification_poll(args)
         case 28:    # NotificationDestroy
             _handle_notification_destroy(args)
+        case 29:    # NotificationWaitAny
+            _handle_notification_wait_any(args, scheduler)
 
         # -- File (routed to VFS via IPC) ------------------------------------
         case 30:    # Open
@@ -1430,6 +1432,37 @@ fn _handle_notification_destroy(args: SyscallArgs) -> SyscallResult:
     """
     val id = args.arg0
     notification_destroy(g_notification_table, id)
+    SyscallResult(value: 0)
+
+fn _handle_notification_wait_any(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Multiplex wait on up to 4 notifications.
+
+    Args:
+      arg0-arg3: notification IDs (0 = unused slot)
+      arg4: count of valid IDs (1-4)
+
+    Returns (notif_id << 32) | bits for the first ready notification,
+    or blocks the calling thread if none are ready.
+    """
+    val count = args.arg4
+    var ids: [u64] = []
+    if count >= 1: ids.push(args.arg0)
+    if count >= 2: ids.push(args.arg1)
+    if count >= 3: ids.push(args.arg2)
+    if count >= 4: ids.push(args.arg3)
+
+    var sched = scheduler
+    val current = sched.get_current()
+    val task_id = current.id
+
+    val result = notification_wait_any(g_notification_table, ids, count, task_id)
+    if result != 0:
+        # At least one notification had bits — return immediately
+        return SyscallResult(value: result.to_i64())
+
+    # None ready — register as waiter on all and block
+    notification_register_multi_waiter(g_notification_table, ids, count, task_id)
+    sched.block_task(current, BlockReason.Notification(id: args.arg0))
     SyscallResult(value: 0)
 
 # ============================================================================

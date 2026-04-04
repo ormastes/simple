@@ -11,6 +11,7 @@
 
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_write64}
 use os.drivers.nvme.nvme_types.{SQE_SIZE, CQE_SIZE}
+use os.userlib.syscall_raw.{syscall}
 
 # ============================================================================
 # NVMe Queue Pair
@@ -148,6 +149,40 @@ impl NvmeQueuePair:
 
         Returns true if a completion arrived, false on timeout.
         """
+        var i: u32 = 0
+        while i < timeout_polls:
+            if self.poll_completion():
+                return true
+            i = i + 1
+        false
+
+    me wait_completion_notify(notif_id: u64, timeout_polls: u32) -> bool:
+        """Wait for completion using notification-based sleep.
+
+        First does a quick poll check. If the CQE is not ready, blocks on
+        the IRQ notification via syscall 26 (NotificationWait). After wakeup,
+        polls again to consume the CQE. Falls back to a limited spin-poll
+        to handle spurious wakeups or coalesced IRQs.
+
+        This is the non-spinning alternative to wait_completion(). The NVMe
+        device IRQ is routed to notif_id by the kernel's irq_routing module,
+        so blocking on NotificationWait yields the CPU to other tasks until
+        the device actually completes the command.
+        """
+        # Quick poll -- if the CQE arrived before we even started waiting
+        if self.poll_completion():
+            return true
+
+        # Block on IRQ notification (syscall 26 = NotificationWait)
+        # This yields the CPU until the NVMe controller fires an IRQ,
+        # which the kernel routes to our notification object.
+        syscall(26, notif_id, 0, 0, 0, 0)
+
+        # After wakeup, try to consume the CQE
+        if self.poll_completion():
+            return true
+
+        # Spurious wakeup or coalesced IRQ -- fall back to limited poll
         var i: u32 = 0
         while i < timeout_polls:
             if self.poll_completion():

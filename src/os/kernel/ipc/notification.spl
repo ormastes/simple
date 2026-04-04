@@ -159,6 +159,54 @@ fn notification_poll(table: NotificationTable, id: u64) -> u64:
     tbl.slots[idx] = slot
     accumulated
 
+fn notification_wait_any(table: NotificationTable, ids: [u64], count: u64, thread_id: u64) -> u64:
+    """Wait on multiple notifications. Returns (notif_id << 32) | bits for first ready.
+
+    Polls each notification ID. If any has bits set, returns immediately with
+    that notification's ID in the upper 32 bits and the bits in the lower 32.
+    If none are ready, returns 0 (caller must block the thread).
+
+    The caller (syscall dispatcher) is responsible for:
+    - Blocking the thread if 0 is returned
+    - Registering the thread as a waiter on all specified notifications
+    """
+    var i: u64 = 0
+    while i < count:
+        if i < ids.len().to_u64():
+            val id = ids[i]
+            if id > 0 and id <= MAX_NOTIFICATIONS:
+                val idx = id - 1
+                var tbl = table
+                var slot = tbl.slots[idx]
+                if slot.active and slot.notif.bits != 0:
+                    val accumulated = slot.notif.bits
+                    # Clear bits (consumed)
+                    slot.notif.bits = 0
+                    tbl.slots[idx] = slot
+                    # Return: upper 32 bits = notification ID, lower 32 = bits
+                    return (id << 32) | (accumulated & 0xFFFFFFFF)
+        i = i + 1
+    0  # None ready — caller must block
+
+fn notification_register_multi_waiter(table: NotificationTable, ids: [u64], count: u64, thread_id: u64):
+    """Register thread as waiter on all specified notifications.
+
+    Used when notification_wait_any returns 0 — the thread will be woken
+    when ANY of the notifications is signaled.
+    """
+    var i: u64 = 0
+    while i < count:
+        if i < ids.len().to_u64():
+            val id = ids[i]
+            if id > 0 and id <= MAX_NOTIFICATIONS:
+                val idx = id - 1
+                var tbl = table
+                var slot = tbl.slots[idx]
+                if slot.active:
+                    slot.notif.waiter_id = thread_id
+                    tbl.slots[idx] = slot
+        i = i + 1
+
 fn notification_destroy(table: NotificationTable, id: u64):
     """Free a notification slot.
 

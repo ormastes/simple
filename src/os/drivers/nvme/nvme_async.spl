@@ -1,0 +1,83 @@
+# NVMe Async Command Tracking
+#
+# MDSOC: feature dimension, drivers layer
+#
+# Provides notification-based completion for NVMe commands.
+# Instead of spin-polling the CQ in a tight loop, waits on the IRQ
+# notification via the OS async runtime (OsFuture / OsPoll / OsWaker).
+#
+# How it works:
+#   1. NvmeDriver submits a command to the I/O queue (returns cmd_id)
+#   2. NvmeAsyncCompletion is created with the queue ref and cmd_id
+#   3. The executor polls the future; it checks the CQ for the entry
+#   4. If not ready, the executor sleeps on NotificationWait
+#   5. When the NVMe device fires an IRQ, the kernel signals the
+#      notification, waking the executor, which polls again
+#   6. On next poll, the CQE is found and the future resolves
+#
+# The IRQ-to-notification routing is already set up by the kernel's
+# irq_routing module when the DeviceGrant is issued.
+
+use os.async.os_future.{OsFuture}
+use os.async.os_poll.{OsPoll}
+use os.async.os_waker.{OsWaker}
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+
+# ============================================================================
+# NVMe Async Completion Future
+# ============================================================================
+
+struct NvmeAsyncCompletion:
+    """Tracks an in-flight NVMe command for async completion.
+
+    Implements OsFuture<u32> where the result is the CQE DW3 status word.
+    Each instance tracks one submitted command on one queue pair.
+    """
+    queue: NvmeQueuePair    # The queue pair this command was submitted to
+    cmd_id: u16             # Command ID assigned by submit_command
+    notif_id: u64           # IRQ notification ID (from DeviceGrant)
+    completed: bool         # Whether the CQE has been consumed
+    status: u32             # CQE DW3 when completed
+
+impl NvmeAsyncCompletion:
+    static fn new(queue: NvmeQueuePair, cmd_id: u16, notif_id: u64) -> NvmeAsyncCompletion:
+        """Create a new async completion tracker for an in-flight command."""
+        NvmeAsyncCompletion(
+            queue: queue,
+            cmd_id: cmd_id,
+            notif_id: notif_id,
+            completed: false,
+            status: 0
+        )
+
+impl OsFuture<u32> for NvmeAsyncCompletion:
+    fn poll(waker: OsWaker) -> OsPoll<u32>:
+        """Poll for NVMe command completion.
+
+        Checks the completion queue for a new CQE. If found, consumes it
+        and returns Ready with the DW3 status word. If not found, returns
+        Pending -- the executor will sleep on NotificationWait until the
+        device IRQ fires.
+
+        The waker does not need explicit registration because the NVMe IRQ
+        is already routed to our notification_id by the kernel. The executor
+        creates wakers from the same notification, so IRQ delivery
+        automatically wakes the executor.
+        """
+        if self.completed:
+            return OsPoll.Ready(value: self.status)
+
+        # Try to consume a CQE from the completion queue
+        var q = self.queue
+        if q.poll_completion():
+            var this = self
+            this.completed = true
+            this.status = q.get_completion_status()
+            # Write back the mutated queue state
+            this.queue = q
+            return OsPoll.Ready(value: this.status)
+
+        # Not ready -- the executor will sleep on NotificationWait.
+        # When the NVMe controller posts a CQE and fires an IRQ,
+        # the kernel signals our notification, waking the executor.
+        OsPoll.Pending
