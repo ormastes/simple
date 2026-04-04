@@ -795,28 +795,32 @@ fn hal_timer_init(frequency_hz: u64):
     pass_todo("arch: riscv32 timer init not yet implemented")
 
 @cfg(x86_64)
-fn hal_timer_set_deadline(ticks: u64):
-    """Set one-shot timer deadline — x86_64 APIC timer one-shot mode."""
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set one-shot timer deadline in microseconds.
+
+    HAL contract: delay_us is a relative delay in microseconds.
+    The x86_64 implementation converts to APIC timer ticks internally.
+    """
     var timer = X86Timer()
-    timer.set_oneshot(ticks)
+    timer.set_oneshot(delay_us)
 
 @cfg(arm64)
-fn hal_timer_set_deadline(ticks: u64):
+fn hal_timer_set_deadline(delay_us: u64):
     """Set timer deadline — arch: arm64 CNTV_CVAL_EL0."""
     pass_todo("arch: arm64 timer set_deadline not yet implemented")
 
 @cfg(arm32)
-fn hal_timer_set_deadline(ticks: u64):
+fn hal_timer_set_deadline(delay_us: u64):
     """Set timer deadline — arch: arm32."""
     pass_todo("arch: arm32 timer set_deadline not yet implemented")
 
 @cfg(riscv64)
-fn hal_timer_set_deadline(ticks: u64):
+fn hal_timer_set_deadline(delay_us: u64):
     """Set timer deadline — arch: riscv64 mtimecmp via SBI."""
     pass_todo("arch: riscv64 timer set_deadline not yet implemented")
 
 @cfg(riscv32)
-fn hal_timer_set_deadline(ticks: u64):
+fn hal_timer_set_deadline(delay_us: u64):
     """Set timer deadline — arch: riscv32 mtimecmp via SBI."""
     pass_todo("arch: riscv32 timer set_deadline not yet implemented")
 
@@ -878,7 +882,15 @@ fn hal_timer_ticks_per_second() -> u64:
 
 @cfg(x86_64)
 fn hal_context_save() -> ArchContext:
-    """Save current CPU state — x86_64 GPRs + rflags + segments."""
+    """Save current CPU state — x86_64 GPRs + rflags + segments.
+
+    Note: A true register save requires inline assembly or a dedicated
+    save trampoline. This function creates a minimal context suitable
+    for use as the 'from' side of context_switch, where the switch
+    assembly itself saves the live registers into this slot.
+    The returned context is a placeholder that context_switch will
+    overwrite with actual register values.
+    """
     var ctx_switch = X86ContextSwitch()
     val x86_ctx = ctx_switch.create(0, 0, false)
     ArchContext.X86_64(ctx: x86_ctx)
@@ -939,7 +951,9 @@ fn hal_context_restore(ctx: ArchContext):
 fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
     """Create new task context — x86_64 set rip=entry, rsp=stack, rdi=arg."""
     var ctx_switch = X86ContextSwitch()
-    val x86_ctx = ctx_switch.create(entry, stack, false)
+    var x86_ctx = ctx_switch.create(entry, stack, false)
+    # Pass arg as first parameter (rdi in System V ABI)
+    x86_ctx.rdi = arg
     ArchContext.X86_64(ctx: x86_ctx)
 
 @cfg(arm64)

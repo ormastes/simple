@@ -30,6 +30,8 @@ use os.compositor.compositor.{Compositor, WindowSurface}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED}
 use os.userlib.syscall_raw.{syscall}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
+use common.ui.builder.{column, panel, text_widget, statusbar, build_tree_with_title}
+use common.ui.widget.{UITree}
 
 extern fn serial_println(msg: text)
 
@@ -250,18 +252,37 @@ impl WmService:
     me handle_update_tree(src_port: u64, payload_addr: u64, payload_len: u32):
         """Handle COMP_UPDATE_TREE: update the widget tree for a window.
 
-        Payload: window_id(u64) | tree_data(bytes)
-        Full widget tree deserialization is deferred; for MVP we mark
-        the window dirty so the compositor re-renders it on the next frame.
+        Payload: window_id(u64) | content_len(u32) | content_text(bytes)
+
+        The content text is used to rebuild a simple widget tree
+        (panel with text content and status bar). For full structured
+        tree transfer a serialization format would be needed; this MVP
+        approach lets remote apps push text-based UI updates.
         """
         val window_id = _read_u64(payload_addr)
         val owner = self.find_owner(window_id)
         if owner == 0 or owner != src_port:
             self.send_status_reply(src_port, STATUS_ERR)
             return
-        # Mark the window dirty so the compositor re-renders it
-        self.compositor.mark_window_dirty(window_id)
-        serial_println("[wm-service] Widget tree update for window {window_id} (marked dirty)")
+        # Read content text from payload
+        val content_len = _read_u32(payload_addr + 8).to_i32()
+        var content: text = ""
+        if content_len > 0 and payload_len.to_i32() >= 12 + content_len:
+            content = _read_text(payload_addr + 12, content_len.to_u32())
+        # Rebuild a widget tree from the content
+        val wid_str = "{window_id}"
+        val root = column("remote_root_{wid_str}", [
+            panel("remote_content_{wid_str}", "", [
+                text_widget("remote_text_{wid_str}", content)
+            ]),
+            statusbar("remote_status_{wid_str}",
+                "Remote window {wid_str}",
+                "Updated")
+        ])
+        val new_tree = build_tree_with_title(root, "Window {wid_str}", "dark")
+        # Apply the new tree to the window's session
+        self.compositor.update_window_tree(window_id, new_tree)
+        serial_println("[wm-service] Applied tree update for window {window_id}")
         self.send_status_reply(src_port, STATUS_OK)
 
     me handle_focus(src_port: u64, payload_addr: u64, payload_len: u32):
