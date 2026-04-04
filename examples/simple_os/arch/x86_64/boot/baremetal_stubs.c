@@ -947,12 +947,18 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
     return 0;
 }
 
-RuntimeValue rt_gui_fill(RuntimeValue x, RuntimeValue y, RuntimeValue w, RuntimeValue h, RuntimeValue color)
+/* 4-arg version: pack x|y into xy and w|h into wh (high 32 = first, low 32 = second) */
+RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue _unused)
 {
+    (void)_unused;
+    uint32_t rx = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t ry = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t rw = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t rh = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
     uint32_t c = (uint32_t)(uint64_t)color;
-    for (uint64_t row = 0; row < (uint64_t)h; row++) {
-        uint64_t base = g_fb_addr + (((uint64_t)y + row) * g_fb_w + (uint64_t)x) * 4;
-        for (uint64_t col = 0; col < (uint64_t)w; col++) {
+    for (uint32_t row = 0; row < rh; row++) {
+        uint64_t base = g_fb_addr + ((uint64_t)(ry + row) * g_fb_w + rx) * 4;
+        for (uint32_t col = 0; col < rw; col++) {
             *(volatile uint32_t *)(uintptr_t)(base + col * 4) = c;
         }
     }
