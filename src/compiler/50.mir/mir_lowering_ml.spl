@@ -94,7 +94,7 @@ impl MirLowering:
         body_result ?? self.builder.new_temp(MirType.unit())
 
     me lower_nograd_block(body: HirBlock) -> LocalId:
-        """Lower nograd block to MIR.
+        """Lower nograd block to MIR with failure-safe cleanup.
 
         Nograd blocks:
         1. Call rt_torch_autograd_no_grad_begin() to disable gradient tracking
@@ -104,19 +104,53 @@ impl MirLowering:
         Begin/end calls are balanced and nesting-safe — the torch runtime
         maintains an internal counter so nested nograd{} blocks restore
         correctly.
+
+        Failure safety: if the body contains early-return paths (? operator,
+        explicit return), cleanup is injected before each Return terminator
+        so that no-grad state is always restored.
         """
         # Emit call to disable gradient tracking
-        # rt_torch_autograd_no_grad_begin() -> void
         val begin_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_begin")
         self.builder.emit_call(begin_fn, [], MirType.unit())
+
+        # Track completed blocks before body lowering so we can patch
+        # any Return terminators with cleanup calls afterwards.
+        val blocks_before = self.builder.blocks.len()
 
         # Lower the body
         val body_result = self.lower_block(body)
 
-        # Emit call to restore gradient tracking
-        # rt_torch_autograd_no_grad_end() -> void
+        # Emit cleanup on the success (fall-through) path
         val end_fn = _rt_fn_operand_void("rt_torch_autograd_no_grad_end")
         self.builder.emit_call(end_fn, [], MirType.unit())
+
+        # Patch Return terminators created during body lowering.
+        # If the body contains ? or return, the MIR has blocks that jump
+        # directly to function exit — those would skip the inline cleanup
+        # above.  We insert a no_grad_end() call into each such block so
+        # that gradient state is always restored.
+        val cleanup_inst = MirInst(
+            kind: MirInstKind.Call(nil, _rt_fn_operand_void("rt_torch_autograd_no_grad_end"), []),
+            span: nil
+        )
+        var new_blocks: [MirBlock] = []
+        var i = 0
+        while i < self.builder.blocks.len():
+            var block = self.builder.blocks[i]
+            if i >= blocks_before:
+                match block.terminator:
+                    case MirTerminator.Return(_):
+                        block = MirBlock(
+                            id: block.id,
+                            label: block.label,
+                            instructions: block.instructions.push(cleanup_inst),
+                            terminator: block.terminator
+                        )
+                    case _:
+                        pass
+            new_blocks = new_blocks.push(block)
+            i = i + 1
+        self.builder.blocks = new_blocks
 
         body_result ?? self.builder.new_temp(MirType.unit())
 

@@ -70,11 +70,19 @@ The block:
 - `nograd{}` inside `loss{}`: The nograd subexpression does not record gradient ops, but the surrounding loss block's result can still call backward (on the parts outside nograd)
 - `loss{}` after `nograd{}`: Normal gradient behavior resumes
 
+**Failure safety:** If the body contains early-exit paths (`?` operator, explicit `return`), the MIR lowering patches every `Return` terminator created during body lowering with a `no_grad_end()` call inserted before the return. This ensures gradient state is always restored, even on error-propagation paths.
+
 **MIR lowering:**
 ```
 emit_call("rt_torch_autograd_no_grad_begin", [])
+blocks_before = builder.blocks.len()
 body_result = lower_block(body)
-emit_call("rt_torch_autograd_no_grad_end", [])
+emit_call("rt_torch_autograd_no_grad_end", [])     # success path
+
+# Patch early-exit paths:
+for block in builder.blocks[blocks_before..]:
+    if block.terminator is Return:
+        block.instructions.push(Call("rt_torch_autograd_no_grad_end", []))
 return body_result
 ```
 
