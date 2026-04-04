@@ -185,4 +185,6 @@ pub enum FStringPart {
     Literal(String),
     /// Expression value to format
     Expr(VReg),
+    /// Expression value with format specifier (e.g., ".2f", "05d", ">20")
+    ExprWithFormat(VReg, String),
 }

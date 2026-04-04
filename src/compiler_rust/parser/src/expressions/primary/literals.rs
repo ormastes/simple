@@ -84,6 +84,23 @@ impl<'a> Parser<'a> {
                                 }
                             }
                         }
+                        FStringToken::ExprWithFormat(expr_str, format_spec) => {
+                            // Parse the expression part (before the ':')
+                            let mut sub_parser = Parser::new_expression(&expr_str);
+                            match sub_parser.parse_expression() {
+                                Ok(expr) => {
+                                    if sub_parser.is_at_end() || matches!(sub_parser.current.kind, TokenKind::Eof) {
+                                        result_parts.push(FStringPart::ExprWithFormat(expr, format_spec));
+                                    } else {
+                                        // Expression didn't consume all input, treat as literal
+                                        result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                                    }
+                                }
+                                Err(_) => {
+                                    result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                                }
+                            }
+                        }
                     }
                 }
                 // Extract const_keys from placeholders and create TypeMeta

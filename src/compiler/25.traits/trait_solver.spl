@@ -130,6 +130,10 @@ class TraitSolver:
     # Associated type resolver
     assoc_resolver: AssocTypeResolver
 
+    # Map from trait name to all method names (required + default)
+    # Used by resolve_strategies for method dispatch
+    trait_methods: Dict<Symbol, [text]>
+
 impl TraitSolver:
     static fn create() -> TraitSolver:
         """Create a new trait solver."""
@@ -140,13 +144,26 @@ impl TraitSolver:
             cache: {},
             obligations: [],
             errors: [],
-            assoc_resolver: AssocTypeResolver.create()
+            assoc_resolver: AssocTypeResolver.create(),
+            trait_methods: {}
         )
 
     me add_trait(trait_def: TraitDef):
-        """Register a trait definition."""
+        """Register a trait definition.
+
+        Collects all method names (both required and default) into
+        trait_methods for efficient lookup during method resolution.
+        """
         self.traits[trait_def.name] = trait_def
         self.assoc_resolver.add_trait(trait_def)
+
+        # Build method name list: required methods + default methods
+        var method_names: [text] = []
+        for method in trait_def.methods:
+            method_names = method_names.push(method.name)
+        for default in trait_def.defaults:
+            method_names = method_names.push(default.name)
+        self.trait_methods[trait_def.name] = method_names
 
     me add_impl(impl_block: ImplBlock):
         """Register an impl block.
@@ -367,6 +384,29 @@ impl TraitSolver:
             if impl_block.trait_name == trait_name:
                 return Some(impl_block)
         nil
+
+    fn get_default_method(trait_name: Symbol, method_name: text) -> HirFunction?:
+        """Get a default method implementation from a trait.
+
+        Returns the default method body if the trait has one for the given name,
+        nil otherwise. Used by method dispatch to fall back to default implementations
+        when the impl block doesn't override a method.
+        """
+        if not self.traits[trait_name].?:
+            return nil
+        val trait_def = self.traits[trait_name]
+        trait_def.get_default_method(method_name)
+
+    fn is_method_required(trait_name: Symbol, method_name: text) -> bool:
+        """Check if a method is required (no default) in a trait.
+
+        Returns true if the method exists in the trait and has no default body.
+        Returns false if the method has a default or doesn't exist in the trait.
+        """
+        if not self.traits[trait_name].?:
+            return false
+        val trait_def = self.traits[trait_name]
+        trait_def.has_required_method(method_name)
 
     me check_coherence():
         """Check coherence rules (no overlapping impls)."""

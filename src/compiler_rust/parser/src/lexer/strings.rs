@@ -271,8 +271,12 @@ impl<'a> super::Lexer<'a> {
                 // Escapes like \" are translated to just " in the expression
                 let mut expr = String::new();
                 let mut brace_depth = 1;
+                let mut paren_depth = 0; // Track () and [] nesting for format spec detection
                 let mut in_string: Option<char> = None; // Track if inside string and which quote
                 let mut expr_failed = false;
+                // Track the byte offset of the last top-level ':' for format spec splitting.
+                // A top-level ':' means: brace_depth==1, paren_depth==0, not in a string.
+                let mut last_top_colon: Option<usize> = None;
                 while let Some(c) = self.peek() {
                     // Handle escape sequences - translate them for the expression
                     if c == '\\' {
@@ -363,7 +367,7 @@ impl<'a> super::Lexer<'a> {
                             }
                         }
                     }
-                    // Only track braces when not in a string
+                    // Only track braces/parens when not in a string
                     if in_string.is_none() {
                         if c == '}' {
                             brace_depth -= 1;
@@ -373,6 +377,15 @@ impl<'a> super::Lexer<'a> {
                             }
                         } else if c == '{' {
                             brace_depth += 1;
+                        } else if c == '(' || c == '[' {
+                            paren_depth += 1;
+                        } else if c == ')' || c == ']' {
+                            if paren_depth > 0 {
+                                paren_depth -= 1;
+                            }
+                        } else if c == ':' && brace_depth == 1 && paren_depth == 0 {
+                            // Record position of top-level ':' — could be format spec
+                            last_top_colon = Some(expr.len());
                         }
                     }
                     expr.push(c);
@@ -392,8 +405,26 @@ impl<'a> super::Lexer<'a> {
                 if expr.trim().is_empty() {
                     current_literal.push_str("{}");
                 } else {
-                    parts.push(FStringToken::Expr(expr));
-                    has_interpolation = true; // Mark that we have interpolation
+                    // Check if we found a top-level ':' that introduces a format spec.
+                    // Format specs follow Python conventions: [fill][align][sign][#][0][width][grouping][.precision][type]
+                    // Valid format spec chars: <>=^+- #0123456789.bcdoxXeEfFgGns%
+                    // We validate that the part after ':' looks like a format spec to avoid
+                    // false positives with dict literals, lambdas, and ternary expressions.
+                    if let Some(colon_pos) = last_top_colon {
+                        let after_colon = &expr[colon_pos + 1..];
+                        if Self::is_format_spec(after_colon) {
+                            let expr_part = expr[..colon_pos].to_string();
+                            let spec_part = after_colon.to_string();
+                            parts.push(FStringToken::ExprWithFormat(expr_part, spec_part));
+                            has_interpolation = true;
+                        } else {
+                            parts.push(FStringToken::Expr(expr));
+                            has_interpolation = true;
+                        }
+                    } else {
+                        parts.push(FStringToken::Expr(expr));
+                        has_interpolation = true; // Mark that we have interpolation
+                    }
                 }
             } else if ch == '}' {
                 self.advance();
@@ -432,5 +463,61 @@ impl<'a> super::Lexer<'a> {
         } else {
             TokenKind::Error("Unterminated f-string".to_string())
         }
+    }
+
+    /// Check if a string looks like a Python-style format specifier.
+    ///
+    /// Format spec grammar: [[fill]align][sign][z][#][0][width][grouping_option][.precision][type]
+    ///   fill      = any character (if followed by align)
+    ///   align     = '<' | '>' | '^' | '='
+    ///   sign      = '+' | '-' | ' '
+    ///   width     = digit+
+    ///   grouping  = '_' | ','
+    ///   precision = '.' digit+
+    ///   type      = 'b'|'c'|'d'|'e'|'E'|'f'|'F'|'g'|'G'|'n'|'o'|'s'|'x'|'X'|'%'
+    ///
+    /// We use a heuristic: the spec must be non-empty and consist only of valid
+    /// format spec characters — no alphanumeric identifiers, no operators like `=`, etc.
+    /// that would indicate this is actually a dict literal or ternary expression.
+    fn is_format_spec(s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+
+        // Format spec characters (Python-style):
+        // Alignment: < > ^ =
+        // Sign: + -
+        // Fill/prefix: # 0
+        // Grouping: , _
+        // Precision: .
+        // Digits: 0-9
+        // Type codes: b c d e E f F g G n o s x X %
+        // Space (for sign)
+        let valid_chars: &[char] = &[
+            '<', '>', '^', '=', '+', '-', ' ', '#', '0', ',', '_', '.',
+            'b', 'c', 'd', 'e', 'E', 'f', 'F', 'g', 'G', 'n', 'o', 's', 'x', 'X', '%',
+            '1', '2', '3', '4', '5', '6', '7', '8', '9',
+        ];
+
+        // First character can be a fill character (any char) if second is an alignment char
+        let chars: Vec<char> = s.chars().collect();
+
+        // If the spec starts with a fill+align pair, skip the fill char for validation
+        let start = if chars.len() >= 2 && matches!(chars[1], '<' | '>' | '^' | '=') {
+            // First char is fill, second is align — skip the fill char
+            // Fill char can be anything
+            2
+        } else {
+            0
+        };
+
+        // All remaining characters must be valid format spec characters
+        for &ch in &chars[start..] {
+            if !valid_chars.contains(&ch) {
+                return false;
+            }
+        }
+
+        true
     }
 }

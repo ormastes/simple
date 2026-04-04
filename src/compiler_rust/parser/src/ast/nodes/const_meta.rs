@@ -248,7 +248,7 @@ pub fn extract_fstring_keys(parts: &[super::FStringPart]) -> Vec<String> {
     parts
         .iter()
         .filter_map(|part| match part {
-            super::FStringPart::Expr(expr) => {
+            super::FStringPart::Expr(expr) | super::FStringPart::ExprWithFormat(expr, _) => {
                 // Extract the identifier name from simple expressions
                 // For "{name}" -> "name"
                 // For complex expressions like "{obj.field}", extract root identifier

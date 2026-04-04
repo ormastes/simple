@@ -833,6 +833,9 @@ impl Argument {
 pub enum FStringPart {
     Literal(String),
     Expr(Expr),
+    /// Expression with format specifier: {expr:spec}
+    /// e.g., {pi:.2f}, {count:05d}, {name:>20}
+    ExprWithFormat(Expr, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -3,7 +3,9 @@
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
 # I/O imports
-use app.io.mod (file_read, file_exists, file_write, get_args, is_dir)
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
+use std.nogc_sync_mut.io.dir_ops (is_dir)
+use app.io.cli_ops (get_args)
 
 # Logging imports
 use std.log.{error, info}
@@ -872,7 +874,7 @@ async fn main() -> Int:
     val fix_interactive = args.contains("--fix-interactive")
 
     # Verify file exists
-    if not native_fs_exists(file_path):
+    if not file_exists(file_path):
         error("lint", "File not found: " + file_path)
         return 1
 
@@ -943,33 +945,33 @@ fn collect_easy_fixes(results: [LintResult], include_all: Bool) -> [EasyFix]:
     fixes
 
 fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool):
-    val source_result = native_fs_read_string(file_path)
-    match source_result:
-        case Err(e):
-            error("lint", "reading file for fix: {e}")
-        case Ok(source):
-            var sources: Dict<String, String> = {}
-            sources[file_path] = source
+    val source = file_read(file_path)
+    if source == "":
+        error("lint", "reading file for fix failed: {file_path}")
+        return
 
-            # Sort replacements by position descending and apply
-            var all_replacements: [Replacement] = []
-            for fix in fixes:
-                for rep in fix.replacements:
-                    all_replacements.push(rep)
+    var sources: Dict<String, String> = {}
+    sources[file_path] = source
 
-            all_replacements = all_replacements.sort_by(\a, b: b.start - a.start)
+    # Sort replacements by position descending and apply
+    var all_replacements: [Replacement] = []
+    for fix in fixes:
+        for rep in fix.replacements:
+            all_replacements.push(rep)
 
-            var new_source = source
-            for rep in all_replacements:
-                if rep.start <= new_source.len() and rep.end <= new_source.len():
-                    new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+    all_replacements = all_replacements.sort_by(\a, b: b.start - a.start)
 
-            if dry_run:
-                print("\nDry run - would apply {fixes.len()} fix(es):")
-                for fix in fixes:
-                    print("  [{fix.id}] {fix.description}")
-            else:
-                file_write(file_path, new_source)
-                print("\nApplied {fixes.len()} fix(es):")
-                for fix in fixes:
-                    print("  [{fix.id}] {fix.description}")
+    var new_source = source
+    for rep in all_replacements:
+        if rep.start <= new_source.len() and rep.end <= new_source.len():
+            new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+    if dry_run:
+        print("\nDry run - would apply {fixes.len()} fix(es):")
+        for fix in fixes:
+            print("  [{fix.id}] {fix.description}")
+    else:
+        file_write(file_path, new_source)
+        print("\nApplied {fixes.len()} fix(es):")
+        for fix in fixes:
+            print("  [{fix.id}] {fix.description}")

@@ -885,20 +885,26 @@ supervisor MyApp:
 
 ### 16a. Or-Patterns (Multi-case matching)
 
-**Missing:** Matching multiple patterns in one arm.
+**Status: IMPLEMENTED.** Fully working in both Rust bootstrap and Simple self-hosted compilers.
 
 **Present in:** Rust (`A | B | C`), Python (`case A | B`), Haskell, OCaml, Swift
 
 ```simple
-# Proposed:
+# Working syntax (all tested):
 match status:
     Pending | Waiting: queue()
     Running | Processing: continue_work()
     Done | Succeeded: finish()
     Failed | Error: handle_failure()
+
+# Also works with: integers, strings, bools, enums, multi-line pipes, guards
+match value:
+    1 | 2 | 3: "small"
+    4 | 5: "medium"
+    _: "large"
 ```
 
-**Note:** The current workaround `case X, Y:` is noted as non-working — `case X | Y:` is required.
+**Implementation:** Parser duplicates each `|`-separated pattern into its own match arm sharing the same body. Both `case X | Y:` and `X | Y:` syntax work. Multi-line pipes (continuation on next line) are supported. Comma-separated or-patterns (`case X, Y:`) also work in the Rust bootstrap.
 
 ### 16b. Binding in Patterns (`as` bind)
 
@@ -1680,7 +1686,7 @@ These could be implemented with minimal risk:
 4. **String multi-line fix** — fix existing broken triple-quote parser
 5. **Numeric separator `_` with enforcement** — lexer change + warning pass
 6. **`errdefer`** — small addition to defer semantics
-7. **`|` or-patterns in match** — `A | B` already partially implied
+7. ~~**`|` or-patterns in match**~~ — **DONE**: fully implemented in both compilers
 8. **Result/Option chaining methods** — pure stdlib addition (no syntax change)
 9. **Exhaustiveness check warning** — static analysis pass
 10. **Module init/teardown syntax** — parser + runtime hook (explicit topological deps)

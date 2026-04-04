@@ -72,6 +72,9 @@ impl Span {
 pub enum FStringToken {
     Literal(String),
     Expr(String), // The expression text to be parsed later
+    /// Expression with format specifier: {expr:spec}
+    /// e.g., {pi:.2f}, {count:05d}, {name:>20}
+    ExprWithFormat(String, String), // (expression text, format spec)
 }
 
 /// Numeric type suffix for typed literals
