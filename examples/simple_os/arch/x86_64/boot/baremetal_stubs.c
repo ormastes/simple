@@ -1067,6 +1067,7 @@ static void bga_init(uint32_t w, uint32_t h, uint32_t bpp)
     bga_write(0x01, (uint16_t)w);    /* XRES */
     bga_write(0x02, (uint16_t)h);    /* YRES */
     bga_write(0x03, (uint16_t)bpp);  /* BPP */
+    bga_write(0x06, (uint16_t)w);    /* VIRT_WIDTH = XRES (set pitch) */
     bga_write(0x04, 0x01 | 0x40);    /* ENABLE | LFB */
     g_fb_addr = detect_vga_lfb();
     g_fb_width = w;
@@ -1157,6 +1158,8 @@ RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
     g_fb_addr = (uint64_t)addr;
     g_fb_w = (uint64_t)w;
+    /* Ensure BGA VIRT_WIDTH matches XRES so pitch = width * bpp/8 */
+    bga_write(0x06, (uint16_t)(uint64_t)w);
     return 0;
 }
 

@@ -14,7 +14,7 @@
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.services.netstack.netstack_service.{NetstackService}
 use os.services.netstack.ipv4.{Ipv4Address}
-use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor}
 use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
 use os.kernel.types.device_mem_types.{DeviceGrant}
 
@@ -73,13 +73,20 @@ fn net_boot_init() -> bool:
     """
     serial_println("[net-init] Starting network stack initialization...")
 
-    # Step 1: Find VirtIO-net device by PCI class (network controller, Ethernet)
-    var dev_idx = pcimgr_find_by_class(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET)
+    # Step 1: Find VirtIO-net device
+    # Search by VirtIO vendor first (precise), then by class (broad).
+    # Class-based search finds any NIC (e.g., Intel 82574L), but we need VirtIO.
+    serial_println("[net-init] Looking for VirtIO-net device (vendor=0x1AF4)...")
+    var dev_idx = pcimgr_find_by_vendor(VIRTIO_VENDOR, VIRTIO_DEV_NET)
 
     if dev_idx < 0:
-        # Fallback: find by VirtIO vendor + device ID (legacy virtio-net)
-        serial_println("[net-init] No network device found by class, trying VirtIO vendor match...")
-        dev_idx = pcimgr_find_by_vendor(VIRTIO_VENDOR, VIRTIO_DEV_NET)
+        # Fallback: find network controller by class, then verify vendor
+        dev_idx = pcimgr_find_by_class(PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET)
+        if dev_idx >= 0:
+            val vendor = pcimgr_get_device_vendor(dev_idx.to_u64())
+            if vendor != VIRTIO_VENDOR:
+                serial_println("[net-init] Found NIC at index {dev_idx} but not VirtIO (vendor=0x{vendor})")
+                dev_idx = -1
 
     if dev_idx < 0:
         serial_println("[net-init] No VirtIO-net device found -- network unavailable")

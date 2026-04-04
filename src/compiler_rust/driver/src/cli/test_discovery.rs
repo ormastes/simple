@@ -35,6 +35,12 @@ pub fn discover_tests_with_skip(dir: &Path, level: TestLevel, include_skip_files
         let all_entries: Vec<_> = entries.collect();
         eprintln!("[discover] read_dir returned {} entries, ok={}", all_entries.len(),
             all_entries.iter().filter(|e| e.is_ok()).count());
+        for e in &all_entries {
+            match e {
+                Ok(entry) => eprintln!("[discover]   ok: {:?}", entry.path()),
+                Err(err) => eprintln!("[discover]   err: {}", err),
+            }
+        }
         for entry in all_entries.into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
 

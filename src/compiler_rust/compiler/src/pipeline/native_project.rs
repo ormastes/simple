@@ -2444,7 +2444,8 @@ fn is_known_system_name(name: &str) -> bool {
         // File system
         "open" | "close" | "read" | "write" | "lseek" | "stat" | "fstat" | "lstat" |
         "mkdir" | "rmdir" | "unlink" | "rename" | "getcwd" | "chdir" | "access" |
-        "realpath" | "readlink" | "symlink" | "opendir" | "readdir" | "closedir" |
+        "realpath" | "readlink" | "symlink" | "opendir" | "readdir" | "readdir_r" |
+        "closedir" | "dirfd" | "fdopendir" | "scandir" | "getdirentries64" |
         // Network
         "socket" | "bind" | "listen" | "accept" | "connect" | "send" | "recv" |
         "sendto" | "recvfrom" | "setsockopt" | "getsockopt" | "getaddrinfo" |

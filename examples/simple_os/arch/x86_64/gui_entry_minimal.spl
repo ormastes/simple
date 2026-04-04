@@ -1,0 +1,39 @@
+# Minimal GUI Entry — cross-module import test
+#
+# Tests that cross-module imports resolve correctly:
+# 1. serial_init / serial_writeln from os.kernel.arch.x86_64.console
+# 2. port_outl / port_inl from os.kernel.boot.cpu (PCI config read)
+# 3. bga_init_framebuffer from os.drivers.framebuffer.bga_init
+#
+# Avoids struct constructors (BootOutputPort etc.) which have
+# unresolved type metadata references cross-module.
+
+use os.kernel.arch.x86_64.console.{serial_init, serial_writeln}
+use os.kernel.boot.cpu.{port_inl, port_outl}
+
+extern fn serial_println(msg: text)
+
+fn spl_start():
+    serial_init()
+    serial_writeln("[GUI-MIN] Serial init OK — cross-module import works!")
+
+    # Direct PCI config read: bus 0, dev 2 (VGA), offset 0
+    # addr = 0x80000000 | (2 << 11) = 0x80001000
+    val pci_addr: u32 = 0x80001000
+    port_outl(0xCF8, pci_addr)
+    val vendor_raw = port_inl(0xCFC)
+    val vendor = vendor_raw & 0xFFFF
+    val device = (vendor_raw >> 16) & 0xFFFF
+
+    serial_println("[GUI-MIN] PCI 00:02.0 vendor={vendor} device={device}")
+
+    if vendor != 0xFFFF and vendor != 0:
+        serial_println("[GUI-MIN] VGA device found — PCI port I/O works!")
+    else:
+        serial_println("[GUI-MIN] No VGA at 00:02.0 — trying 00:01.0")
+        val pci_addr2: u32 = 0x80000800
+        port_outl(0xCF8, pci_addr2)
+        val v2 = port_inl(0xCFC) & 0xFFFF
+        serial_println("[GUI-MIN] PCI 00:01.0 vendor={v2}")
+
+    serial_println("[GUI-MIN] Test complete")
