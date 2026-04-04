@@ -179,6 +179,68 @@ impl VfsManager:
             return entry.fs.mkdir(relative)
         Result.Err("no filesystem mounted for path: {path}")
 
+    # === Write Operations ===
+
+    me write(handle: u64, data: [u8]) -> Result<u64, text>:
+        """Write data to an open file handle.
+
+        Routes to the first mount's filesystem. The handle identifies
+        the open file within that filesystem's handle table.
+        """
+        # The handle was issued by a specific filesystem during open().
+        # For simplicity, we route to the first mount. A full implementation
+        # would maintain a handle-to-mount mapping.
+        if self.mounts.len() == 0:
+            return Result.Err("no filesystems mounted")
+        val mount = self.mounts[0]
+        if mount.point.read_only:
+            return Result.Err("filesystem is read-only")
+        mount.fs.write(handle, data)
+
+    me unlink(path: text) -> Result<bool, text>:
+        """Delete a file."""
+        val mount = self.resolve_mount(path)
+        if mount.?:
+            val entry = mount.unwrap()
+            if entry.point.read_only:
+                return Result.Err("filesystem is read-only")
+            val relative = self.strip_mount_prefix(path, entry.point.path)
+            return entry.fs.unlink(relative)
+        Result.Err("no filesystem mounted for path: {path}")
+
+    me rename(old_path: text, new_path: text) -> Result<bool, text>:
+        """Rename a file or directory."""
+        val mount = self.resolve_mount(old_path)
+        if mount.?:
+            val entry = mount.unwrap()
+            if entry.point.read_only:
+                return Result.Err("filesystem is read-only")
+            val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
+            val rel_new = self.strip_mount_prefix(new_path, entry.point.path)
+            return entry.fs.rename(rel_old, rel_new)
+        Result.Err("no filesystem mounted for path: {old_path}")
+
+    me close(handle: u64) -> Result<bool, text>:
+        """Close an open file handle."""
+        if self.mounts.len() == 0:
+            return Result.Err("no filesystems mounted")
+        val mount = self.mounts[0]
+        mount.fs.close(handle)
+
+    me read(handle: u64, size: u64) -> Result<[u8], text>:
+        """Read from an open file handle."""
+        if self.mounts.len() == 0:
+            return Result.Err("no filesystems mounted")
+        val mount = self.mounts[0]
+        mount.fs.read(handle, size)
+
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        """Seek within an open file."""
+        if self.mounts.len() == 0:
+            return Result.Err("no filesystems mounted")
+        val mount = self.mounts[0]
+        mount.fs.seek(handle, offset, whence)
+
 # ============================================================================
 # Module-Level Convenience Functions
 # ============================================================================

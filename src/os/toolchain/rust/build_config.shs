@@ -1,0 +1,61 @@
+#!/bin/sh
+# Build Rust programs for SimpleOS
+#
+# Usage:
+#   sh build_config.shs build <source.rs> [-o output]
+#   sh build_config.shs cargo-build <project_dir>
+#
+# Prerequisites:
+#   - Rust nightly toolchain (for custom target)
+#   - libsimpleos_c.a (from src/os/libc/)
+#   - clang + lld (for linking)
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+TARGET_SPEC="$SCRIPT_DIR/x86_64-unknown-simpleos.json"
+LIBC_DIR="$REPO_ROOT/src/os/libc"
+
+# Ensure libc is built
+if [ ! -f "$LIBC_DIR/libsimpleos_c.a" ]; then
+    echo "[rust-simpleos] Building SimpleOS libc..."
+    (cd "$LIBC_DIR" && make)
+fi
+
+cmd="${1:-build}"
+shift
+
+case "$cmd" in
+    build)
+        # Single file compilation
+        SOURCE="$1"
+        OUTPUT="${2:--o simpleos_app}"
+        [ "$2" = "-o" ] && OUTPUT="$3"
+
+        echo "[rust-simpleos] Compiling $SOURCE for SimpleOS..."
+        rustc +nightly \
+            --target "$TARGET_SPEC" \
+            -C panic=abort \
+            -C opt-level=2 \
+            -C link-arg="-L$LIBC_DIR" \
+            -C link-arg="-lsimpleos_c" \
+            "$SOURCE" \
+            -o "$OUTPUT"
+        echo "[rust-simpleos] Output: $OUTPUT"
+        ;;
+    cargo-build)
+        PROJECT="$1"
+        echo "[rust-simpleos] Building Cargo project at $PROJECT..."
+        cd "$PROJECT"
+        CARGO_TARGET_X86_64_UNKNOWN_SIMPLEOS_LINKER=clang \
+        CARGO_TARGET_X86_64_UNKNOWN_SIMPLEOS_RUSTFLAGS="-C link-arg=-L$LIBC_DIR -C link-arg=-lsimpleos_c" \
+        cargo +nightly build \
+            --target "$TARGET_SPEC" \
+            --release \
+            -Z build-std=core,alloc \
+            -Z build-std-features=compiler-builtins-mem
+        ;;
+    *)
+        echo "Usage: $0 {build|cargo-build} ..."
+        exit 1
+        ;;
+esac
