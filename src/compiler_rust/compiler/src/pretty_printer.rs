@@ -729,6 +729,9 @@ impl PrettyPrinter {
 
     fn print_for(&mut self, for_stmt: &ForStmt) {
         self.write_indent();
+        if let Some(ref label) = for_stmt.label {
+            self.write(&format!("'{}: ", label));
+        }
         self.write("for ");
         self.print_pattern(&for_stmt.pattern);
         self.write(" in ");
@@ -749,6 +752,9 @@ impl PrettyPrinter {
 
     fn print_while(&mut self, while_stmt: &WhileStmt) {
         self.write_indent();
+        if let Some(ref label) = while_stmt.label {
+            self.write(&format!("'{}: ", label));
+        }
         self.write("while ");
         self.print_expr(&while_stmt.condition);
         self.write(":");
@@ -766,6 +772,10 @@ impl PrettyPrinter {
     }
 
     fn print_loop(&mut self, loop_stmt: &LoopStmt) {
+        self.write_indent();
+        if let Some(ref label) = loop_stmt.label {
+            self.write(&format!("'{}: ", label));
+        }
         self.write_line("loop:");
 
         self.indent_inc();
@@ -782,15 +792,22 @@ impl PrettyPrinter {
     fn print_break(&mut self, break_stmt: &BreakStmt) {
         self.write_indent();
         self.write("break");
-        if let Some(ref value) = break_stmt.value {
+        if let Some(ref label) = break_stmt.label {
+            self.write(&format!(" '{}", label));
+        } else if let Some(ref value) = break_stmt.value {
             self.write(" ");
             self.print_expr(value);
         }
         self.output.push('\n');
     }
 
-    fn print_continue(&mut self, _: &ContinueStmt) {
-        self.write_line("continue");
+    fn print_continue(&mut self, cont_stmt: &ContinueStmt) {
+        self.write_indent();
+        self.write("continue");
+        if let Some(ref label) = cont_stmt.label {
+            self.write(&format!(" '{}", label));
+        }
+        self.output.push('\n');
     }
 
     fn print_use(&mut self, use_stmt: &UseStmt) {
