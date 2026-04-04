@@ -1,0 +1,900 @@
+# TCP Connection -- Per-Connection State Management
+#
+# MDSOC: feature dimension, network layer
+# Implements the full RFC 793 TCP state machine for a single connection.
+# Each TcpConnection tracks sequence numbers, buffers, retransmission,
+# and drives all state transitions.
+#
+# State transitions (RFC 793):
+#   CLOSED -> LISTEN             (passive open)
+#   CLOSED -> SYN_SENT           (active open, send SYN)
+#   LISTEN -> SYN_RECEIVED       (recv SYN, send SYN+ACK)
+#   SYN_SENT -> ESTABLISHED      (recv SYN+ACK, send ACK)
+#   SYN_RECEIVED -> ESTABLISHED  (recv ACK)
+#   ESTABLISHED -> FIN_WAIT_1    (close, send FIN)
+#   ESTABLISHED -> CLOSE_WAIT    (recv FIN, send ACK)
+#   FIN_WAIT_1 -> FIN_WAIT_2    (recv ACK of FIN)
+#   FIN_WAIT_1 -> CLOSING       (recv FIN, send ACK)
+#   FIN_WAIT_2 -> TIME_WAIT     (recv FIN, send ACK)
+#   CLOSE_WAIT -> LAST_ACK      (close, send FIN)
+#   CLOSING -> TIME_WAIT        (recv ACK)
+#   LAST_ACK -> CLOSED          (recv ACK)
+#   TIME_WAIT -> CLOSED         (2MSL timeout)
+
+use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.tcp.{
+    TcpState, TcpHeader, TcpSegment,
+    TCP_FLAG_FIN, TCP_FLAG_SYN, TCP_FLAG_RST, TCP_FLAG_PSH, TCP_FLAG_ACK,
+    TCP_DEFAULT_WINDOW, TCP_MSS, TCP_MAX_RETRIES, TCP_INITIAL_RTO, TCP_TIME_WAIT_MS,
+    tcp_build, tcp_has_flag, tcp_state_name,
+    seq_lt, seq_lte, seq_gt, seq_gte, seq_between
+}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Retransmission Entry
+# ============================================================================
+
+struct TcpRetransmitEntry:
+    """An unacknowledged segment queued for potential retransmission."""
+    seq_num: u32
+    data: [u8]
+    flags: u8        # Original flags (for SYN/FIN retransmit)
+    send_time: u64   # Timestamp when sent (ms)
+    retries: u32     # Number of retransmission attempts
+
+# ============================================================================
+# TCP Connection
+# ============================================================================
+
+struct TcpConnection:
+    """Per-connection TCP state.
+
+    Tracks the full state machine, sequence numbers, send/receive windows,
+    data buffers, and retransmission queue.
+    """
+    state: TcpState
+    local_addr: Ipv4Address
+    local_port: u16
+    remote_addr: Ipv4Address
+    remote_port: u16
+
+    # Sequence numbers
+    snd_una: u32        # Oldest unacknowledged sequence number
+    snd_nxt: u32        # Next sequence number to send
+    snd_wnd: u16        # Send window (advertised by remote)
+    rcv_nxt: u32        # Next sequence number expected to receive
+    rcv_wnd: u16        # Receive window (our advertised window)
+    iss: u32            # Initial send sequence number
+    irs: u32            # Initial receive sequence number
+
+    # Buffers
+    send_buf: [u8]      # Application data queued for sending
+    recv_buf: [u8]      # Received data (ordered, ready for app)
+
+    # Retransmission
+    retransmit_queue: [TcpRetransmitEntry]
+    rto: u64            # Current retransmission timeout (ms)
+    srtt: u64           # Smoothed round-trip time (ms)
+
+    # Application notification
+    notif_id: u64       # Notification ID for incoming data
+    task_id: u64        # Owner task ID
+
+    # Connection ID (assigned by netstack)
+    conn_id: u64
+
+    # TIME_WAIT timer
+    time_wait_start: u64  # Timestamp when TIME_WAIT began
+
+impl TcpConnection:
+    static fn new_client(local_ip: Ipv4Address, local_port: u16, remote_ip: Ipv4Address, remote_port: u16) -> TcpConnection:
+        """Create a new client-side connection (for active open)."""
+        # Use a simple ISS derived from port numbers (a real OS would use a clock)
+        val iss: u32 = (local_port.to_u32() * 31337 + remote_port.to_u32() * 7919) & 0xFFFFFFFF
+        TcpConnection(
+            state: TcpState.Closed,
+            local_addr: local_ip, local_port: local_port,
+            remote_addr: remote_ip, remote_port: remote_port,
+            snd_una: iss, snd_nxt: iss, snd_wnd: 0,
+            rcv_nxt: 0, rcv_wnd: TCP_DEFAULT_WINDOW,
+            iss: iss, irs: 0,
+            send_buf: [], recv_buf: [],
+            retransmit_queue: [],
+            rto: TCP_INITIAL_RTO, srtt: 0,
+            notif_id: 0, task_id: 0, conn_id: 0,
+            time_wait_start: 0
+        )
+
+    static fn new_listener(local_ip: Ipv4Address, local_port: u16) -> TcpConnection:
+        """Create a new server-side listener (for passive open)."""
+        TcpConnection(
+            state: TcpState.Listen,
+            local_addr: local_ip, local_port: local_port,
+            remote_addr: Ipv4Address.any(), remote_port: 0,
+            snd_una: 0, snd_nxt: 0, snd_wnd: 0,
+            rcv_nxt: 0, rcv_wnd: TCP_DEFAULT_WINDOW,
+            iss: 0, irs: 0,
+            send_buf: [], recv_buf: [],
+            retransmit_queue: [],
+            rto: TCP_INITIAL_RTO, srtt: 0,
+            notif_id: 0, task_id: 0, conn_id: 0,
+            time_wait_start: 0
+        )
+
+    # ========================================================================
+    # Active Open (Client initiates)
+    # ========================================================================
+
+    me connect() -> [TcpSegment]:
+        """Initiate a TCP connection (active open).
+
+        Transitions: CLOSED -> SYN_SENT
+        Sends: SYN
+        """
+        if not _is_state(self.state, TcpState.Closed):
+            return []
+
+        self.state = TcpState.SynSent
+        var segments: [TcpSegment] = []
+        val syn = self._build_syn()
+        segments.push(syn)
+
+        # Queue SYN for retransmission
+        self.retransmit_queue.push(TcpRetransmitEntry(
+            seq_num: self.iss, data: [], flags: TCP_FLAG_SYN,
+            send_time: 0, retries: 0
+        ))
+
+        self.snd_nxt = self.iss + 1  # SYN consumes one sequence number
+        segments
+
+    # ========================================================================
+    # Process Incoming Segment (main state machine)
+    # ========================================================================
+
+    me process_segment(segment: TcpSegment, src_ip: Ipv4Address) -> [TcpSegment]:
+        """Process an incoming TCP segment and return segments to send.
+
+        This is the core RFC 793 state machine. Each state handles
+        the segment's flags and transitions accordingly.
+        """
+        val flags = segment.header.flags
+        val seg_seq = segment.header.seq_num
+        val seg_ack = segment.header.ack_num
+        val seg_wnd = segment.header.window
+
+        var out: [TcpSegment] = []
+
+        # -- RST processing (applies to most states) --
+        if tcp_has_flag(flags, TCP_FLAG_RST):
+            match self.state:
+                TcpState.SynSent:
+                    if tcp_has_flag(flags, TCP_FLAG_ACK) and seg_ack == self.snd_nxt:
+                        self.state = TcpState.Closed
+                    return []
+                TcpState.Listen:
+                    return []
+                TcpState.Closed:
+                    return []
+                _:
+                    # RST in an established-ish state -> close
+                    self.state = TcpState.Closed
+                    self.send_buf = []
+                    self.recv_buf = []
+                    self.retransmit_queue = []
+                    return []
+
+        match self.state:
+            TcpState.Closed:
+                out = self._handle_closed(segment)
+            TcpState.Listen:
+                out = self._handle_listen(segment, src_ip)
+            TcpState.SynSent:
+                out = self._handle_syn_sent(segment)
+            TcpState.SynReceived:
+                out = self._handle_syn_received(segment)
+            TcpState.Established:
+                out = self._handle_established(segment)
+            TcpState.FinWait1:
+                out = self._handle_fin_wait_1(segment)
+            TcpState.FinWait2:
+                out = self._handle_fin_wait_2(segment)
+            TcpState.CloseWait:
+                out = self._handle_close_wait(segment)
+            TcpState.Closing:
+                out = self._handle_closing(segment)
+            TcpState.LastAck:
+                out = self._handle_last_ack(segment)
+            TcpState.TimeWait:
+                out = self._handle_time_wait(segment)
+
+        out
+
+    # ========================================================================
+    # State Handlers
+    # ========================================================================
+
+    me _handle_closed(segment: TcpSegment) -> [TcpSegment]:
+        """CLOSED state: send RST for any non-RST segment."""
+        var out: [TcpSegment] = []
+        if not tcp_has_flag(segment.header.flags, TCP_FLAG_RST):
+            out.push(self._build_rst(segment.header.seq_num + segment.data.len().to_u32()))
+        out
+
+    me _handle_listen(segment: TcpSegment, src_ip: Ipv4Address) -> [TcpSegment]:
+        """LISTEN state: handle incoming SYN.
+
+        Transition: LISTEN -> SYN_RECEIVED (on SYN, send SYN+ACK)
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_SYN):
+            # Record remote info
+            self.remote_addr = src_ip
+            self.remote_port = segment.header.src_port
+
+            # Record initial receive sequence
+            self.irs = segment.header.seq_num
+            self.rcv_nxt = self.irs + 1  # SYN consumes one sequence
+
+            # Generate our ISS
+            self.iss = (self.local_port.to_u32() * 49157 + self.remote_port.to_u32() * 12289) & 0xFFFFFFFF
+            self.snd_una = self.iss
+            self.snd_nxt = self.iss + 1  # SYN+ACK consumes one sequence
+            self.snd_wnd = segment.header.window
+
+            # Send SYN+ACK
+            out.push(self._build_syn_ack(self.irs))
+
+            # Queue for retransmission
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.iss, data: [],
+                flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                send_time: 0, retries: 0
+            ))
+
+            self.state = TcpState.SynReceived
+            serial_println("[tcp] LISTEN -> SYN_RECEIVED (remote={src_ip.to_text()}:{segment.header.src_port})")
+
+        out
+
+    me _handle_syn_sent(segment: TcpSegment) -> [TcpSegment]:
+        """SYN_SENT state: waiting for SYN+ACK.
+
+        Transitions:
+          recv SYN+ACK, send ACK -> ESTABLISHED
+          recv SYN (simultaneous open), send SYN+ACK -> SYN_RECEIVED
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_SYN) and tcp_has_flag(flags, TCP_FLAG_ACK):
+            # Normal 3-way handshake: SYN+ACK received
+            if segment.header.ack_num != self.snd_nxt:
+                # ACK doesn't match our SYN -- send RST
+                out.push(self._build_rst(segment.header.seq_num + 1))
+                return out
+
+            self.irs = segment.header.seq_num
+            self.rcv_nxt = self.irs + 1
+            self.snd_una = segment.header.ack_num
+            self.snd_wnd = segment.header.window
+
+            # Clear retransmit queue (SYN acknowledged)
+            self.retransmit_queue = []
+
+            # Send ACK
+            out.push(self._build_ack())
+            self.state = TcpState.Established
+            serial_println("[tcp] SYN_SENT -> ESTABLISHED")
+
+        else if tcp_has_flag(flags, TCP_FLAG_SYN):
+            # Simultaneous open: received bare SYN
+            self.irs = segment.header.seq_num
+            self.rcv_nxt = self.irs + 1
+            self.snd_wnd = segment.header.window
+
+            # Send SYN+ACK
+            out.push(self._build_syn_ack(self.irs))
+            self.state = TcpState.SynReceived
+            serial_println("[tcp] SYN_SENT -> SYN_RECEIVED (simultaneous open)")
+
+        out
+
+    me _handle_syn_received(segment: TcpSegment) -> [TcpSegment]:
+        """SYN_RECEIVED state: waiting for ACK to complete handshake.
+
+        Transition: recv ACK -> ESTABLISHED
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            if segment.header.ack_num == self.snd_nxt:
+                self.snd_una = segment.header.ack_num
+                self.snd_wnd = segment.header.window
+
+                # Clear retransmit queue (SYN+ACK acknowledged)
+                self.retransmit_queue = []
+
+                self.state = TcpState.Established
+                serial_println("[tcp] SYN_RECEIVED -> ESTABLISHED")
+
+                # Process any data in this segment
+                if segment.data.len() > 0:
+                    val data_out = self._process_data(segment)
+                    var di: u64 = 0
+                    while di < data_out.len():
+                        out.push(data_out[di])
+                        di = di + 1
+            else:
+                # Unexpected ACK
+                out.push(self._build_rst(segment.header.ack_num))
+
+        out
+
+    me _handle_established(segment: TcpSegment) -> [TcpSegment]:
+        """ESTABLISHED state: normal data transfer.
+
+        Transitions:
+          recv FIN, send ACK -> CLOSE_WAIT
+          recv data -> ACK
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        # Process ACK
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            self._process_ack(segment.header.ack_num, segment.header.window)
+
+        # Process data
+        if segment.data.len() > 0:
+            val data_out = self._process_data(segment)
+            var di: u64 = 0
+            while di < data_out.len():
+                out.push(data_out[di])
+                di = di + 1
+
+        # Check for FIN
+        if tcp_has_flag(flags, TCP_FLAG_FIN):
+            self.rcv_nxt = self.rcv_nxt + 1  # FIN consumes one sequence
+            out.push(self._build_ack())
+            self.state = TcpState.CloseWait
+            serial_println("[tcp] ESTABLISHED -> CLOSE_WAIT")
+        else if segment.data.len() > 0:
+            # Send ACK for received data (if not already sent via _process_data)
+            if out.len() == 0:
+                out.push(self._build_ack())
+
+        out
+
+    me _handle_fin_wait_1(segment: TcpSegment) -> [TcpSegment]:
+        """FIN_WAIT_1 state: we sent FIN, waiting for ACK and/or FIN.
+
+        Transitions:
+          recv ACK of FIN -> FIN_WAIT_2
+          recv FIN, send ACK -> CLOSING
+          recv FIN+ACK -> TIME_WAIT
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+        var our_fin_acked = false
+
+        # Process ACK
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            self._process_ack(segment.header.ack_num, segment.header.window)
+            # Check if our FIN is acknowledged
+            if seq_gte(segment.header.ack_num, self.snd_nxt):
+                our_fin_acked = true
+                self.retransmit_queue = []
+
+        # Process data
+        if segment.data.len() > 0:
+            val data_out = self._process_data(segment)
+            var di: u64 = 0
+            while di < data_out.len():
+                out.push(data_out[di])
+                di = di + 1
+
+        # Check for FIN
+        if tcp_has_flag(flags, TCP_FLAG_FIN):
+            self.rcv_nxt = self.rcv_nxt + 1
+            out.push(self._build_ack())
+
+            if our_fin_acked:
+                # Both FINs exchanged and our FIN acked -> TIME_WAIT
+                self.state = TcpState.TimeWait
+                self.time_wait_start = 0  # Caller sets actual timestamp
+                serial_println("[tcp] FIN_WAIT_1 -> TIME_WAIT")
+            else:
+                # Simultaneous close: FIN received but our FIN not yet acked
+                self.state = TcpState.Closing
+                serial_println("[tcp] FIN_WAIT_1 -> CLOSING")
+        else if our_fin_acked:
+            # Our FIN acked but no FIN from remote yet
+            self.state = TcpState.FinWait2
+            serial_println("[tcp] FIN_WAIT_1 -> FIN_WAIT_2")
+
+        out
+
+    me _handle_fin_wait_2(segment: TcpSegment) -> [TcpSegment]:
+        """FIN_WAIT_2 state: our FIN acked, waiting for remote FIN.
+
+        Transition: recv FIN, send ACK -> TIME_WAIT
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        # Process ACK
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            self._process_ack(segment.header.ack_num, segment.header.window)
+
+        # Process data (remote can still send data)
+        if segment.data.len() > 0:
+            val data_out = self._process_data(segment)
+            var di: u64 = 0
+            while di < data_out.len():
+                out.push(data_out[di])
+                di = di + 1
+
+        # Check for FIN
+        if tcp_has_flag(flags, TCP_FLAG_FIN):
+            self.rcv_nxt = self.rcv_nxt + 1
+            out.push(self._build_ack())
+            self.state = TcpState.TimeWait
+            self.time_wait_start = 0
+            serial_println("[tcp] FIN_WAIT_2 -> TIME_WAIT")
+
+        out
+
+    me _handle_close_wait(segment: TcpSegment) -> [TcpSegment]:
+        """CLOSE_WAIT state: remote closed, we can still send data.
+
+        The application must call close() to transition CLOSE_WAIT -> LAST_ACK.
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        # Process ACK (may acknowledge our data)
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            self._process_ack(segment.header.ack_num, segment.header.window)
+
+        out
+
+    me _handle_closing(segment: TcpSegment) -> [TcpSegment]:
+        """CLOSING state: simultaneous close, waiting for ACK of our FIN.
+
+        Transition: recv ACK of FIN -> TIME_WAIT
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            if seq_gte(segment.header.ack_num, self.snd_nxt):
+                self.retransmit_queue = []
+                self.state = TcpState.TimeWait
+                self.time_wait_start = 0
+                serial_println("[tcp] CLOSING -> TIME_WAIT")
+
+        out
+
+    me _handle_last_ack(segment: TcpSegment) -> [TcpSegment]:
+        """LAST_ACK state: we sent FIN after CLOSE_WAIT, waiting for ACK.
+
+        Transition: recv ACK -> CLOSED
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_ACK):
+            if seq_gte(segment.header.ack_num, self.snd_nxt):
+                self.retransmit_queue = []
+                self.state = TcpState.Closed
+                serial_println("[tcp] LAST_ACK -> CLOSED")
+
+        out
+
+    me _handle_time_wait(segment: TcpSegment) -> [TcpSegment]:
+        """TIME_WAIT state: waiting 2MSL before final close.
+
+        If we receive a retransmitted FIN, re-send ACK and restart timer.
+        Transition to CLOSED is handled by the timer check in netstack_service.
+        """
+        var out: [TcpSegment] = []
+        val flags = segment.header.flags
+
+        if tcp_has_flag(flags, TCP_FLAG_FIN):
+            # Retransmitted FIN -- re-send ACK and restart 2MSL timer
+            out.push(self._build_ack())
+            self.time_wait_start = 0  # Caller resets
+            serial_println("[tcp] TIME_WAIT: re-ACK retransmitted FIN")
+
+        out
+
+    # ========================================================================
+    # Data Processing
+    # ========================================================================
+
+    me _process_data(segment: TcpSegment) -> [TcpSegment]:
+        """Process incoming data segment: validate sequence, buffer data."""
+        var out: [TcpSegment] = []
+
+        # Check if segment is in receive window
+        val seg_seq = segment.header.seq_num
+
+        # For simplicity, only accept in-order data
+        if seg_seq == self.rcv_nxt:
+            # In-order: append to receive buffer
+            var i: u64 = 0
+            while i < segment.data.len():
+                self.recv_buf.push(segment.data[i])
+                i = i + 1
+            self.rcv_nxt = self.rcv_nxt + segment.data.len().to_u32()
+        else if seq_gt(seg_seq, self.rcv_nxt):
+            # Out of order: drop for now (a real implementation would buffer)
+            # Send duplicate ACK to trigger fast retransmit at sender
+            out.push(self._build_ack())
+        # else: old duplicate, ignore
+
+        out
+
+    me _process_ack(ack_num: u32, window: u16):
+        """Process an incoming ACK: advance snd_una, update window, purge retransmits."""
+        if seq_gt(ack_num, self.snd_una) and seq_lte(ack_num, self.snd_nxt):
+            self.snd_una = ack_num
+            self.snd_wnd = window
+
+            # Remove acknowledged entries from retransmit queue
+            var new_queue: [TcpRetransmitEntry] = []
+            var i: u64 = 0
+            while i < self.retransmit_queue.len():
+                val entry = self.retransmit_queue[i]
+                val entry_end = entry.seq_num + entry.data.len().to_u32()
+                if seq_gt(entry_end, ack_num):
+                    # Not yet fully acknowledged
+                    new_queue.push(entry)
+                i = i + 1
+            self.retransmit_queue = new_queue
+
+    # ========================================================================
+    # Application Interface
+    # ========================================================================
+
+    me send_data(data: [u8]) -> Result<u64, text>:
+        """Queue application data for sending.
+
+        Only valid in ESTABLISHED or CLOSE_WAIT states.
+        Returns the number of bytes queued.
+        """
+        if not (_is_state(self.state, TcpState.Established) or
+                _is_state(self.state, TcpState.CloseWait)):
+            return Err("cannot send in state {tcp_state_name(self.state)}")
+
+        var i: u64 = 0
+        while i < data.len():
+            self.send_buf.push(data[i])
+            i = i + 1
+
+        Ok(data.len())
+
+    me recv_data(max: u64) -> [u8]:
+        """Read received data from buffer.
+
+        Returns up to max bytes and removes them from the receive buffer.
+        """
+        var result: [u8] = []
+        val count = if max < self.recv_buf.len(): max else: self.recv_buf.len()
+
+        var i: u64 = 0
+        while i < count:
+            result.push(self.recv_buf[i])
+            i = i + 1
+
+        # Remove consumed bytes
+        if count > 0:
+            var new_buf: [u8] = []
+            var j: u64 = count
+            while j < self.recv_buf.len():
+                new_buf.push(self.recv_buf[j])
+                j = j + 1
+            self.recv_buf = new_buf
+
+        result
+
+    fn has_recv_data() -> bool:
+        """Check if there is data available to read."""
+        self.recv_buf.len() > 0
+
+    fn has_send_data() -> bool:
+        """Check if there is data queued for sending."""
+        self.send_buf.len() > 0
+
+    me close() -> [TcpSegment]:
+        """Initiate connection close from our side.
+
+        Transitions:
+          ESTABLISHED -> FIN_WAIT_1 (send FIN)
+          CLOSE_WAIT -> LAST_ACK (send FIN)
+        """
+        var out: [TcpSegment] = []
+
+        if _is_state(self.state, TcpState.Established):
+            val fin = self._build_fin()
+            out.push(fin)
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: [],
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                send_time: 0, retries: 0
+            ))
+            self.snd_nxt = self.snd_nxt + 1  # FIN consumes one sequence
+            self.state = TcpState.FinWait1
+            serial_println("[tcp] ESTABLISHED -> FIN_WAIT_1 (close)")
+
+        else if _is_state(self.state, TcpState.CloseWait):
+            val fin = self._build_fin()
+            out.push(fin)
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: [],
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                send_time: 0, retries: 0
+            ))
+            self.snd_nxt = self.snd_nxt + 1
+            self.state = TcpState.LastAck
+            serial_println("[tcp] CLOSE_WAIT -> LAST_ACK (close)")
+
+        else if _is_state(self.state, TcpState.Listen):
+            self.state = TcpState.Closed
+
+        else if _is_state(self.state, TcpState.SynSent):
+            self.state = TcpState.Closed
+            self.retransmit_queue = []
+
+        out
+
+    me abort() -> [TcpSegment]:
+        """Abort the connection immediately (send RST)."""
+        var out: [TcpSegment] = []
+
+        if not (_is_state(self.state, TcpState.Closed) or
+                _is_state(self.state, TcpState.Listen)):
+            out.push(self._build_rst(self.snd_nxt))
+            self.state = TcpState.Closed
+            self.send_buf = []
+            self.recv_buf = []
+            self.retransmit_queue = []
+
+        out
+
+    # ========================================================================
+    # Transmit Pending Data
+    # ========================================================================
+
+    me flush_send_buf() -> [TcpSegment]:
+        """Segment and transmit any pending data in the send buffer.
+
+        Breaks data into MSS-sized segments. Each segment is queued
+        for retransmission.
+        """
+        var out: [TcpSegment] = []
+
+        if not (_is_state(self.state, TcpState.Established) or
+                _is_state(self.state, TcpState.CloseWait)):
+            return out
+
+        while self.send_buf.len() > 0:
+            val max_send = TCP_MSS.to_u64()
+            val send_len = if self.send_buf.len() < max_send: self.send_buf.len() else: max_send
+
+            # Check send window
+            val in_flight = self.snd_nxt - self.snd_una
+            if in_flight.to_u64() + send_len > self.snd_wnd.to_u64():
+                break  # Window full
+
+            # Extract data to send
+            var seg_data: [u8] = []
+            var i: u64 = 0
+            while i < send_len:
+                seg_data.push(self.send_buf[i])
+                i = i + 1
+
+            # Remove from send buffer
+            var new_buf: [u8] = []
+            var j: u64 = send_len
+            while j < self.send_buf.len():
+                new_buf.push(self.send_buf[j])
+                j = j + 1
+            self.send_buf = new_buf
+
+            # Build segment with PSH+ACK
+            val flags: u8 = TCP_FLAG_PSH | TCP_FLAG_ACK
+            val seg = self._build_data_segment(seg_data, flags)
+            out.push(seg)
+
+            # Queue for retransmission
+            self.retransmit_queue.push(TcpRetransmitEntry(
+                seq_num: self.snd_nxt, data: seg_data,
+                flags: flags, send_time: 0, retries: 0
+            ))
+
+            self.snd_nxt = self.snd_nxt + send_len.to_u32()
+
+        out
+
+    # ========================================================================
+    # Retransmission
+    # ========================================================================
+
+    me check_retransmit(current_time: u64) -> [TcpSegment]:
+        """Check for segments that need retransmission.
+
+        Returns segments whose RTO has expired. Uses exponential backoff.
+        """
+        var out: [TcpSegment] = []
+
+        var i: u64 = 0
+        while i < self.retransmit_queue.len():
+            val entry = self.retransmit_queue[i]
+            val elapsed = current_time - entry.send_time
+            val timeout = self.rto * (1 << entry.retries)
+
+            if elapsed >= timeout:
+                if entry.retries >= TCP_MAX_RETRIES:
+                    # Too many retries -- abort connection
+                    serial_println("[tcp] max retries exceeded, aborting connection")
+                    self.state = TcpState.Closed
+                    self.retransmit_queue = []
+                    return []
+
+                # Retransmit
+                val seg_flags = entry.flags
+                if tcp_has_flag(seg_flags, TCP_FLAG_SYN) and not tcp_has_flag(seg_flags, TCP_FLAG_ACK):
+                    out.push(self._build_syn())
+                else if tcp_has_flag(seg_flags, TCP_FLAG_SYN) and tcp_has_flag(seg_flags, TCP_FLAG_ACK):
+                    out.push(self._build_syn_ack(self.irs))
+                else if tcp_has_flag(seg_flags, TCP_FLAG_FIN):
+                    out.push(self._build_fin())
+                else:
+                    out.push(self._build_data_segment(entry.data, seg_flags))
+
+                # Update entry with new retry count and send time
+                self.retransmit_queue[i] = TcpRetransmitEntry(
+                    seq_num: entry.seq_num, data: entry.data,
+                    flags: entry.flags, send_time: current_time,
+                    retries: entry.retries + 1
+                )
+
+            i = i + 1
+
+        out
+
+    me check_time_wait(current_time: u64) -> bool:
+        """Check if TIME_WAIT has expired (2MSL timeout).
+
+        Returns true if the connection should transition to CLOSED.
+        """
+        if _is_state(self.state, TcpState.TimeWait):
+            if self.time_wait_start > 0 and (current_time - self.time_wait_start) >= TCP_TIME_WAIT_MS:
+                self.state = TcpState.Closed
+                serial_println("[tcp] TIME_WAIT -> CLOSED (2MSL expired)")
+                return true
+        false
+
+    fn is_closed() -> bool:
+        _is_state(self.state, TcpState.Closed)
+
+    fn is_established() -> bool:
+        _is_state(self.state, TcpState.Established)
+
+    fn is_listening() -> bool:
+        _is_state(self.state, TcpState.Listen)
+
+    # ========================================================================
+    # Segment Builders
+    # ========================================================================
+
+    fn _build_syn() -> TcpSegment:
+        """Build a SYN segment for connection initiation."""
+        val raw = tcp_build(
+            self.local_port, self.remote_port,
+            self.iss, 0,
+            TCP_FLAG_SYN, self.rcv_wnd, []
+        )
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.iss, ack_num: 0,
+                data_offset: 5, flags: TCP_FLAG_SYN,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_syn_ack(remote_seq: u32) -> TcpSegment:
+        """Build a SYN+ACK segment."""
+        val flags: u8 = TCP_FLAG_SYN | TCP_FLAG_ACK
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.iss, ack_num: remote_seq + 1,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_ack() -> TcpSegment:
+        """Build a pure ACK segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: TCP_FLAG_ACK,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_fin() -> TcpSegment:
+        """Build a FIN+ACK segment."""
+        val flags: u8 = TCP_FLAG_FIN | TCP_FLAG_ACK
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_rst(seq: u32) -> TcpSegment:
+        """Build a RST segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: seq, ack_num: 0,
+                data_offset: 5, flags: TCP_FLAG_RST,
+                window: 0, checksum: 0, urgent_ptr: 0
+            ),
+            data: []
+        )
+
+    fn _build_data_segment(data: [u8], flags: u8) -> TcpSegment:
+        """Build a data-carrying segment."""
+        TcpSegment(
+            header: TcpHeader(
+                src_port: self.local_port, dst_port: self.remote_port,
+                seq_num: self.snd_nxt, ack_num: self.rcv_nxt,
+                data_offset: 5, flags: flags,
+                window: self.rcv_wnd, checksum: 0, urgent_ptr: 0
+            ),
+            data: data
+        )
+
+    fn matches_tuple(src_ip: Ipv4Address, src_port: u16, dst_port: u16) -> bool:
+        """Check if this connection matches a (remote_ip, remote_port, local_port) tuple."""
+        (self.remote_addr.equals(src_ip) and
+         self.remote_port == src_port and
+         self.local_port == dst_port)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _is_state(state: TcpState, expected: TcpState) -> bool:
+    """Compare TCP states."""
+    match state:
+        TcpState.Closed: match expected: TcpState.Closed: true; _: false
+        TcpState.Listen: match expected: TcpState.Listen: true; _: false
+        TcpState.SynSent: match expected: TcpState.SynSent: true; _: false
+        TcpState.SynReceived: match expected: TcpState.SynReceived: true; _: false
+        TcpState.Established: match expected: TcpState.Established: true; _: false
+        TcpState.FinWait1: match expected: TcpState.FinWait1: true; _: false
+        TcpState.FinWait2: match expected: TcpState.FinWait2: true; _: false
+        TcpState.CloseWait: match expected: TcpState.CloseWait: true; _: false
+        TcpState.Closing: match expected: TcpState.Closing: true; _: false
+        TcpState.LastAck: match expected: TcpState.LastAck: true; _: false
+        TcpState.TimeWait: match expected: TcpState.TimeWait: true; _: false
