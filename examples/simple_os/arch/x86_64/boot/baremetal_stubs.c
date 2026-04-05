@@ -13,6 +13,10 @@
  *   6. String operations
  *   7. Print functions
  *   8. Framebuffer copy
+ *  8a. PCI device scan/cache
+ *  8b. NVMe controller + sector read
+ *  8b-fat32. FAT32 file system driver
+ *  8c-net. VirtIO-net driver + ARP/ICMP responder
  *   9. _start (serial init, call spl_start, isa-debug-exit)
  *  10. No-op stubs (~200 runtime functions)
  *  11. Real x86_64 port-I/O and MMIO overrides
@@ -1708,6 +1712,885 @@ static int64_t _fat32_read_file_syscall(uint64_t name_addr, uint64_t buf_addr,
     return (int64_t)bytes_read;
 }
 
+/* Forward declaration for serial_puthex (defined in section 9d) */
+static void serial_puthex(uint32_t v);
+
+/* ===================================================================
+ * 8c-net. VirtIO-net driver + ARP/ICMP (ping) responder
+ *
+ * Supports VirtIO-net PCI legacy transport (vendor 0x1AF4, device
+ * 0x1000 with subsystem for network, or any device with PCI class
+ * 02.00 from vendor 0x1AF4).
+ *
+ * Legacy BAR0 (I/O port) register layout:
+ *   0x00  host_features   (u32, R)
+ *   0x04  guest_features  (u32, W)
+ *   0x08  queue_pfn       (u32, W)  — page frame number of virtqueue
+ *   0x0C  queue_size      (u16, R)
+ *   0x0E  queue_sel       (u16, W)
+ *   0x10  queue_notify    (u16, W)
+ *   0x12  status          (u8, RW)
+ *   0x13  isr             (u8, R)
+ *   0x14  mac[6]          (R)       — device MAC address
+ *
+ * Virtqueue memory layout (contiguous, page-aligned):
+ *   Descriptors:   16 bytes * queue_size
+ *   Available ring: 2+2+2*queue_size bytes
+ *   (pad to 4096 boundary)
+ *   Used ring:      2+2+8*queue_size bytes
+ * =================================================================== */
+
+/* --- VirtIO status bits --- */
+#define VIRTIO_STATUS_ACK        1
+#define VIRTIO_STATUS_DRIVER     2
+#define VIRTIO_STATUS_FEATURES_OK 8
+#define VIRTIO_STATUS_DRIVER_OK  4
+#define VIRTIO_STATUS_FAILED     128
+
+/* --- VirtIO feature bits --- */
+#define VIRTIO_NET_F_MAC         (1u << 5)
+#define VIRTIO_NET_F_STATUS      (1u << 16)
+#define VIRTIO_NET_F_CSUM        (1u << 0)
+
+/* --- Virtqueue descriptor flags --- */
+#define VRING_DESC_F_NEXT     1
+#define VRING_DESC_F_WRITE    2
+
+/* --- VirtIO-net header (legacy, 10 bytes) --- */
+struct virtio_net_hdr {
+    uint8_t  flags;
+    uint8_t  gso_type;
+    uint16_t hdr_len;
+    uint16_t gso_size;
+    uint16_t csum_start;
+    uint16_t csum_offset;
+} __attribute__((packed));
+
+#define VIRTIO_NET_HDR_SIZE 10
+
+/* --- Virtqueue structures --- */
+struct vring_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+} __attribute__((packed));
+
+struct vring_avail {
+    uint16_t flags;
+    uint16_t idx;
+    uint16_t ring[];
+} __attribute__((packed));
+
+struct vring_used_elem {
+    uint32_t id;
+    uint32_t len;
+} __attribute__((packed));
+
+struct vring_used {
+    uint16_t flags;
+    uint16_t idx;
+    struct vring_used_elem ring[];
+} __attribute__((packed));
+
+/* --- Ethernet / ARP / IP / ICMP protocol constants --- */
+#define ETH_ALEN       6
+#define ETH_HLEN       14
+#define ETH_P_IP       0x0800
+#define ETH_P_ARP      0x0806
+
+#define ARP_HW_ETHER   1
+#define ARP_OP_REQUEST  1
+#define ARP_OP_REPLY    2
+
+#define IP_PROTO_ICMP   1
+#define ICMP_ECHO_REQ   8
+#define ICMP_ECHO_REPLY 0
+
+/* --- Ethernet header --- */
+struct eth_hdr {
+    uint8_t  dst[ETH_ALEN];
+    uint8_t  src[ETH_ALEN];
+    uint16_t ethertype;   /* big-endian */
+} __attribute__((packed));
+
+/* --- ARP packet (Ethernet + IPv4) --- */
+struct arp_pkt {
+    uint16_t hw_type;     /* big-endian */
+    uint16_t proto_type;  /* big-endian */
+    uint8_t  hw_len;
+    uint8_t  proto_len;
+    uint16_t opcode;      /* big-endian */
+    uint8_t  sender_mac[ETH_ALEN];
+    uint8_t  sender_ip[4];
+    uint8_t  target_mac[ETH_ALEN];
+    uint8_t  target_ip[4];
+} __attribute__((packed));
+
+/* --- IPv4 header (minimal, no options) --- */
+struct ipv4_hdr {
+    uint8_t  ver_ihl;     /* version(4) + IHL(4) */
+    uint8_t  tos;
+    uint16_t total_len;   /* big-endian */
+    uint16_t id;
+    uint16_t frag_off;
+    uint8_t  ttl;
+    uint8_t  protocol;
+    uint16_t checksum;    /* big-endian */
+    uint8_t  src_ip[4];
+    uint8_t  dst_ip[4];
+} __attribute__((packed));
+
+/* --- ICMP header --- */
+struct icmp_hdr {
+    uint8_t  type;
+    uint8_t  code;
+    uint16_t checksum;    /* big-endian */
+    uint16_t id;
+    uint16_t seq;
+} __attribute__((packed));
+
+/* --- Byte-order helpers --- */
+static inline uint16_t _net_htons(uint16_t h) {
+    return (uint16_t)((h >> 8) | (h << 8));
+}
+static inline uint16_t _net_ntohs(uint16_t n) {
+    return _net_htons(n);
+}
+static inline uint32_t _net_htonl(uint32_t h) {
+    return ((h & 0xFF) << 24) | ((h & 0xFF00) << 8)
+         | ((h >> 8) & 0xFF00) | ((h >> 24) & 0xFF);
+}
+static inline uint32_t __attribute__((unused)) _net_ntohl(uint32_t n) {
+    return _net_htonl(n);
+}
+
+/* --- Internet checksum (RFC 1071) --- */
+static uint16_t _inet_checksum(const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        sum += (uint32_t)((uint16_t)p[i] << 8 | p[i+1]);
+    }
+    if (len & 1) {
+        sum += (uint32_t)((uint16_t)p[len-1] << 8);
+    }
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return _net_htons((uint16_t)~sum);
+}
+
+/* --- MAC address print helper --- */
+static void _net_print_mac(const uint8_t *mac) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 6; i++) {
+        if (i) serial_putchar(':');
+        serial_putchar(hex[(mac[i] >> 4) & 0xF]);
+        serial_putchar(hex[mac[i] & 0xF]);
+    }
+}
+
+/* --- IP address print helper --- */
+static void _net_print_ip(const uint8_t *ip) {
+    for (int i = 0; i < 4; i++) {
+        if (i) serial_putchar('.');
+        serial_put_dec((int64_t)ip[i]);
+    }
+}
+
+/* --- VirtIO-net driver state --- */
+#define VIRTIO_NET_QUEUE_SIZE 128  /* max descriptors per queue */
+#define VIRTIO_NET_BUF_SIZE  2048  /* per-buffer size for RX/TX */
+
+static struct {
+    uint16_t iobase;         /* BAR0 I/O port base */
+    uint8_t  mac[6];
+    uint8_t  our_ip[4];     /* 10.0.2.15 */
+    uint8_t  gateway_ip[4]; /* 10.0.2.2  */
+
+    /* RX queue (queue 0) */
+    uint16_t rx_qsize;
+    struct vring_desc  *rx_desc;
+    struct vring_avail *rx_avail;
+    struct vring_used  *rx_used;
+    uint8_t *rx_buffers;    /* rx_qsize * VIRTIO_NET_BUF_SIZE contiguous */
+    uint16_t rx_last_used;
+
+    /* TX queue (queue 1) */
+    uint16_t tx_qsize;
+    struct vring_desc  *tx_desc;
+    struct vring_avail *tx_avail;
+    struct vring_used  *tx_used;
+    uint8_t *tx_buffers;    /* tx_qsize * VIRTIO_NET_BUF_SIZE contiguous */
+    uint16_t tx_last_used;
+    uint16_t tx_next_desc;  /* next free TX descriptor index */
+
+    int initialized;
+    uint32_t rx_count;      /* total frames received */
+    uint32_t tx_count;      /* total frames sent */
+    uint32_t arp_replies;   /* ARP replies sent */
+    uint32_t icmp_replies;  /* ICMP echo replies sent */
+} _vnet;
+
+/* --- VirtIO BAR0 I/O register access --- */
+static inline uint32_t _vnet_rd32(uint16_t off) {
+    return inl(_vnet.iobase + off);
+}
+static inline void _vnet_wr32(uint16_t off, uint32_t val) {
+    outl(_vnet.iobase + off, val);
+}
+static inline uint16_t _vnet_rd16(uint16_t off) {
+    return inw(_vnet.iobase + off);
+}
+static inline void _vnet_wr16(uint16_t off, uint16_t val) {
+    outw(_vnet.iobase + off, val);
+}
+static inline uint8_t _vnet_rd8(uint16_t off) {
+    return inb(_vnet.iobase + off);
+}
+static inline void _vnet_wr8(uint16_t off, uint8_t val) {
+    outb(_vnet.iobase + off, val);
+}
+
+/* -----------------------------------------------------------
+ * _vnet_setup_queue — allocate and configure one virtqueue
+ *
+ * VirtIO legacy layout for a queue of size N:
+ *   Descriptors: N * 16 bytes
+ *   Available:   2 + 2 + N*2 bytes  (+ 2 bytes used_event, optional)
+ *   Padding to 4096-byte boundary
+ *   Used:        2 + 2 + N*8 bytes  (+ 2 bytes avail_event, optional)
+ *
+ * The device wants the physical page frame number (addr >> 12).
+ * ----------------------------------------------------------- */
+static int _vnet_setup_queue(uint16_t qsel,
+                             uint16_t *out_qsize,
+                             struct vring_desc  **out_desc,
+                             struct vring_avail **out_avail,
+                             struct vring_used  **out_used)
+{
+    /* Select queue */
+    _vnet_wr16(0x0E, qsel);
+
+    /* Read queue size (max descriptors) */
+    uint16_t qsize = _vnet_rd16(0x0C);
+    if (qsize == 0) {
+        serial_puts("[net] queue ");
+        serial_put_dec(qsel);
+        serial_puts(" size=0, not available\r\n");
+        return -1;
+    }
+    /* Clamp to our max */
+    if (qsize > VIRTIO_NET_QUEUE_SIZE) qsize = VIRTIO_NET_QUEUE_SIZE;
+
+    serial_puts("[net] queue ");
+    serial_put_dec(qsel);
+    serial_puts(" size=");
+    serial_put_dec(qsize);
+    serial_puts("\r\n");
+
+    /* Calculate memory layout sizes */
+    size_t desc_sz  = (size_t)qsize * 16;
+    size_t avail_sz = 2 + 2 + (size_t)qsize * 2 + 2; /* +2 for used_event */
+    size_t desc_avail_sz = desc_sz + avail_sz;
+    /* Round up to 4096 boundary */
+    size_t desc_avail_aligned = (desc_avail_sz + 4095) & ~(size_t)4095;
+    size_t used_sz = 2 + 2 + (size_t)qsize * 8 + 2; /* +2 for avail_event */
+    size_t total = desc_avail_aligned + used_sz;
+
+    /* Allocate page-aligned memory */
+    void *mem = nvme_alloc_aligned(total, 4096);
+    if (!mem) {
+        serial_puts("[net] failed to alloc queue memory\r\n");
+        return -12;
+    }
+    __builtin_memset(mem, 0, total);
+
+    uint8_t *base = (uint8_t *)mem;
+    *out_desc  = (struct vring_desc *)base;
+    *out_avail = (struct vring_avail *)(base + desc_sz);
+    *out_used  = (struct vring_used *)(base + desc_avail_aligned);
+    *out_qsize = qsize;
+
+    /* Tell device the page frame number */
+    uint32_t pfn = (uint32_t)((uintptr_t)mem >> 12);
+    _vnet_wr32(0x08, pfn);
+
+    return 0;
+}
+
+/* -----------------------------------------------------------
+ * _vnet_rx_fill — populate RX queue with empty buffers
+ *
+ * Each RX buffer gets a 2-descriptor chain:
+ *   desc[2i]   = virtio_net_hdr (device-writable, 10 bytes)
+ *   desc[2i+1] = frame payload  (device-writable, rest of buffer)
+ *
+ * For simplicity we use a single descriptor per buffer that
+ * covers the whole buffer (header + frame). The device writes
+ * the virtio-net header first, then the ethernet frame.
+ * ----------------------------------------------------------- */
+static void _vnet_rx_fill(void)
+{
+    for (uint16_t i = 0; i < _vnet.rx_qsize; i++) {
+        uint8_t *buf = _vnet.rx_buffers + (size_t)i * VIRTIO_NET_BUF_SIZE;
+        _vnet.rx_desc[i].addr  = (uint64_t)(uintptr_t)buf;
+        _vnet.rx_desc[i].len   = VIRTIO_NET_BUF_SIZE;
+        _vnet.rx_desc[i].flags = VRING_DESC_F_WRITE; /* device writes */
+        _vnet.rx_desc[i].next  = 0;
+
+        _vnet.rx_avail->ring[i] = i;
+    }
+    /* Memory barrier before updating idx */
+    __asm__ volatile("mfence" ::: "memory");
+    _vnet.rx_avail->idx = _vnet.rx_qsize;
+    _vnet.rx_last_used = 0;
+
+    /* Notify device about RX buffers (queue 0) */
+    _vnet_wr16(0x10, 0);
+}
+
+/* -----------------------------------------------------------
+ * _vnet_send_frame — transmit one Ethernet frame
+ *
+ * Prepends a 10-byte virtio-net header (all zeros = no offload).
+ * Copies frame data into a TX buffer, adds to TX avail ring,
+ * notifies device.
+ *
+ * Returns 0 on success, negative on error.
+ * ----------------------------------------------------------- */
+static int _vnet_send_frame(const void *frame, uint16_t frame_len)
+{
+    if (!_vnet.initialized) return -19; /* ENODEV */
+    if (frame_len + VIRTIO_NET_HDR_SIZE > VIRTIO_NET_BUF_SIZE) return -90;
+
+    uint16_t di = _vnet.tx_next_desc;
+    if (di >= _vnet.tx_qsize) {
+        /* Wrap around — in a real driver we'd track free descs properly */
+        di = 0;
+    }
+    _vnet.tx_next_desc = di + 1;
+
+    uint8_t *buf = _vnet.tx_buffers + (size_t)di * VIRTIO_NET_BUF_SIZE;
+
+    /* Virtio-net header: all zeros (no checksum offload, no GSO) */
+    __builtin_memset(buf, 0, VIRTIO_NET_HDR_SIZE);
+    /* Ethernet frame right after header */
+    __builtin_memcpy(buf + VIRTIO_NET_HDR_SIZE, frame, frame_len);
+
+    uint32_t total_len = VIRTIO_NET_HDR_SIZE + frame_len;
+
+    /* Fill descriptor */
+    _vnet.tx_desc[di].addr  = (uint64_t)(uintptr_t)buf;
+    _vnet.tx_desc[di].len   = total_len;
+    _vnet.tx_desc[di].flags = 0; /* device reads */
+    _vnet.tx_desc[di].next  = 0;
+
+    /* Add to available ring */
+    uint16_t avail_idx = _vnet.tx_avail->idx;
+    _vnet.tx_avail->ring[avail_idx % _vnet.tx_qsize] = di;
+    __asm__ volatile("mfence" ::: "memory");
+    _vnet.tx_avail->idx = avail_idx + 1;
+
+    /* Notify device (queue 1 = TX) */
+    _vnet_wr16(0x10, 1);
+    _vnet.tx_count++;
+
+    return 0;
+}
+
+/* -----------------------------------------------------------
+ * _vnet_handle_arp — respond to ARP request for our IP
+ * ----------------------------------------------------------- */
+static void _vnet_handle_arp(const uint8_t *frame, uint16_t frame_len)
+{
+    if (frame_len < (uint16_t)(ETH_HLEN + sizeof(struct arp_pkt))) return;
+
+    const struct arp_pkt *arp = (const struct arp_pkt *)(frame + ETH_HLEN);
+
+    /* Only handle Ethernet/IPv4 ARP requests */
+    if (_net_ntohs(arp->hw_type) != ARP_HW_ETHER) return;
+    if (_net_ntohs(arp->proto_type) != ETH_P_IP) return;
+    if (_net_ntohs(arp->opcode) != ARP_OP_REQUEST) return;
+
+    /* Check if target IP is ours */
+    if (__builtin_memcmp(arp->target_ip, _vnet.our_ip, 4) != 0) return;
+
+    serial_puts("[net] ARP request for ");
+    _net_print_ip(arp->target_ip);
+    serial_puts(" from ");
+    _net_print_mac(arp->sender_mac);
+    serial_puts("\r\n");
+
+    /* Build ARP reply */
+    uint8_t reply[ETH_HLEN + sizeof(struct arp_pkt)];
+    struct eth_hdr *reth = (struct eth_hdr *)reply;
+    struct arp_pkt *rarp = (struct arp_pkt *)(reply + ETH_HLEN);
+
+    /* Ethernet header: send back to requester */
+    __builtin_memcpy(reth->dst, arp->sender_mac, ETH_ALEN);
+    __builtin_memcpy(reth->src, _vnet.mac, ETH_ALEN);
+    reth->ethertype = _net_htons(ETH_P_ARP);
+
+    /* ARP reply */
+    rarp->hw_type    = _net_htons(ARP_HW_ETHER);
+    rarp->proto_type = _net_htons(ETH_P_IP);
+    rarp->hw_len     = ETH_ALEN;
+    rarp->proto_len  = 4;
+    rarp->opcode     = _net_htons(ARP_OP_REPLY);
+    __builtin_memcpy(rarp->sender_mac, _vnet.mac, ETH_ALEN);
+    __builtin_memcpy(rarp->sender_ip, _vnet.our_ip, 4);
+    __builtin_memcpy(rarp->target_mac, arp->sender_mac, ETH_ALEN);
+    __builtin_memcpy(rarp->target_ip, arp->sender_ip, 4);
+
+    _vnet_send_frame(reply, sizeof(reply));
+    _vnet.arp_replies++;
+
+    serial_puts("[net] ARP reply sent\r\n");
+}
+
+/* -----------------------------------------------------------
+ * _vnet_handle_icmp — respond to ICMP echo requests (ping)
+ * ----------------------------------------------------------- */
+static void _vnet_handle_icmp(const uint8_t *frame, uint16_t frame_len)
+{
+    if (frame_len < (uint16_t)(ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct icmp_hdr)))
+        return;
+
+    const struct eth_hdr  *eth  = (const struct eth_hdr *)frame;
+    const struct ipv4_hdr *ip   = (const struct ipv4_hdr *)(frame + ETH_HLEN);
+
+    /* Only handle IPv4 */
+    if ((ip->ver_ihl >> 4) != 4) return;
+    uint16_t ihl = (uint16_t)(ip->ver_ihl & 0x0F) * 4;
+    if (ihl < 20) return;
+
+    /* Only handle ICMP */
+    if (ip->protocol != IP_PROTO_ICMP) return;
+
+    /* Check destination is our IP */
+    if (__builtin_memcmp(ip->dst_ip, _vnet.our_ip, 4) != 0) return;
+
+    const struct icmp_hdr *icmp = (const struct icmp_hdr *)(frame + ETH_HLEN + ihl);
+
+    /* Only respond to echo requests */
+    if (icmp->type != ICMP_ECHO_REQ || icmp->code != 0) return;
+
+    uint16_t ip_total = _net_ntohs(ip->total_len);
+    uint16_t icmp_len = (uint16_t)(ip_total - ihl);
+
+    serial_puts("[net] ICMP echo request from ");
+    _net_print_ip(ip->src_ip);
+    serial_puts(" id=");
+    serial_put_dec(_net_ntohs(icmp->id));
+    serial_puts(" seq=");
+    serial_put_dec(_net_ntohs(icmp->seq));
+    serial_puts("\r\n");
+
+    /* Build ICMP echo reply — same frame with swapped addresses and type=0 */
+    uint16_t reply_len = ETH_HLEN + ip_total;
+    if (reply_len > VIRTIO_NET_BUF_SIZE - VIRTIO_NET_HDR_SIZE) return;
+
+    uint8_t reply[VIRTIO_NET_BUF_SIZE];
+    __builtin_memcpy(reply, frame, reply_len);
+
+    struct eth_hdr  *reth  = (struct eth_hdr *)reply;
+    struct ipv4_hdr *rip   = (struct ipv4_hdr *)(reply + ETH_HLEN);
+    struct icmp_hdr *ricmp = (struct icmp_hdr *)(reply + ETH_HLEN + ihl);
+
+    /* Swap Ethernet addresses */
+    __builtin_memcpy(reth->dst, eth->src, ETH_ALEN);
+    __builtin_memcpy(reth->src, _vnet.mac, ETH_ALEN);
+
+    /* Swap IP addresses */
+    __builtin_memcpy(rip->dst_ip, ip->src_ip, 4);
+    __builtin_memcpy(rip->src_ip, _vnet.our_ip, 4);
+    rip->ttl = 64;
+
+    /* Recalculate IP checksum */
+    rip->checksum = 0;
+    rip->checksum = _inet_checksum(rip, ihl);
+
+    /* Change ICMP type from echo request (8) to echo reply (0) */
+    ricmp->type = ICMP_ECHO_REPLY;
+
+    /* Recalculate ICMP checksum */
+    ricmp->checksum = 0;
+    ricmp->checksum = _inet_checksum(ricmp, icmp_len);
+
+    _vnet_send_frame(reply, reply_len);
+    _vnet.icmp_replies++;
+
+    serial_puts("[net] ICMP echo reply sent\r\n");
+}
+
+/* -----------------------------------------------------------
+ * _vnet_handle_frame — dispatch incoming Ethernet frame
+ * ----------------------------------------------------------- */
+static void _vnet_handle_frame(const uint8_t *frame, uint16_t frame_len)
+{
+    if (frame_len < ETH_HLEN) return;
+
+    const struct eth_hdr *eth = (const struct eth_hdr *)frame;
+    uint16_t ethertype = _net_ntohs(eth->ethertype);
+
+    switch (ethertype) {
+        case ETH_P_ARP:
+            _vnet_handle_arp(frame, frame_len);
+            break;
+        case ETH_P_IP:
+            _vnet_handle_icmp(frame, frame_len);
+            break;
+        default:
+            /* Ignore unknown ethertype */
+            break;
+    }
+}
+
+/* -----------------------------------------------------------
+ * _virtio_net_poll — check RX used ring, process frames
+ *
+ * Returns: number of frames processed (0 if none available)
+ * ----------------------------------------------------------- */
+static int _virtio_net_poll(void)
+{
+    if (!_vnet.initialized) return -19;
+
+    int processed = 0;
+
+    while (1) {
+        /* Read used ring idx (device updates this) */
+        __asm__ volatile("mfence" ::: "memory");
+        uint16_t used_idx = _vnet.rx_used->idx;
+
+        if (_vnet.rx_last_used == used_idx) break; /* no new frames */
+
+        /* Get the used element */
+        uint16_t slot = _vnet.rx_last_used % _vnet.rx_qsize;
+        uint32_t desc_id  = _vnet.rx_used->ring[slot].id;
+        uint32_t used_len = _vnet.rx_used->ring[slot].len;
+
+        _vnet.rx_last_used++;
+
+        if (desc_id >= _vnet.rx_qsize) continue; /* safety */
+
+        /* The buffer contains: virtio_net_hdr (10 bytes) + ethernet frame */
+        uint8_t *buf = _vnet.rx_buffers + (size_t)desc_id * VIRTIO_NET_BUF_SIZE;
+        if (used_len <= VIRTIO_NET_HDR_SIZE) {
+            /* Runt — no frame data */
+        } else {
+            uint16_t frame_len = (uint16_t)(used_len - VIRTIO_NET_HDR_SIZE);
+            uint8_t *frame = buf + VIRTIO_NET_HDR_SIZE;
+            _vnet.rx_count++;
+            _vnet_handle_frame(frame, frame_len);
+        }
+
+        /* Recycle the buffer: re-add to available ring */
+        _vnet.rx_desc[desc_id].addr  = (uint64_t)(uintptr_t)buf;
+        _vnet.rx_desc[desc_id].len   = VIRTIO_NET_BUF_SIZE;
+        _vnet.rx_desc[desc_id].flags = VRING_DESC_F_WRITE;
+        _vnet.rx_desc[desc_id].next  = 0;
+
+        uint16_t avail_idx = _vnet.rx_avail->idx;
+        _vnet.rx_avail->ring[avail_idx % _vnet.rx_qsize] = (uint16_t)desc_id;
+        __asm__ volatile("mfence" ::: "memory");
+        _vnet.rx_avail->idx = avail_idx + 1;
+
+        processed++;
+    }
+
+    /* Notify device if we recycled any buffers (queue 0 = RX) */
+    if (processed > 0) {
+        _vnet_wr16(0x10, 0);
+    }
+
+    return processed;
+}
+
+/* -----------------------------------------------------------
+ * _vnet_send_gratuitous_arp — announce our MAC/IP to the network
+ *
+ * Sends a gratuitous ARP request (sender = target = our IP)
+ * so QEMU's user-mode networking and any switches learn our MAC.
+ * ----------------------------------------------------------- */
+static void _vnet_send_gratuitous_arp(void)
+{
+    uint8_t frame[ETH_HLEN + sizeof(struct arp_pkt)];
+    struct eth_hdr *eth = (struct eth_hdr *)frame;
+    struct arp_pkt *arp = (struct arp_pkt *)(frame + ETH_HLEN);
+
+    /* Broadcast Ethernet header */
+    __builtin_memset(eth->dst, 0xFF, ETH_ALEN); /* broadcast */
+    __builtin_memcpy(eth->src, _vnet.mac, ETH_ALEN);
+    eth->ethertype = _net_htons(ETH_P_ARP);
+
+    /* Gratuitous ARP: who-has our_ip, tell our_ip */
+    arp->hw_type    = _net_htons(ARP_HW_ETHER);
+    arp->proto_type = _net_htons(ETH_P_IP);
+    arp->hw_len     = ETH_ALEN;
+    arp->proto_len  = 4;
+    arp->opcode     = _net_htons(ARP_OP_REQUEST);
+    __builtin_memcpy(arp->sender_mac, _vnet.mac, ETH_ALEN);
+    __builtin_memcpy(arp->sender_ip, _vnet.our_ip, 4);
+    __builtin_memset(arp->target_mac, 0x00, ETH_ALEN);
+    __builtin_memcpy(arp->target_ip, _vnet.our_ip, 4);
+
+    _vnet_send_frame(frame, sizeof(frame));
+    serial_puts("[net] Gratuitous ARP sent\r\n");
+}
+
+/* -----------------------------------------------------------
+ * _vnet_send_arp_request — ARP who-has for a specific IP
+ * ----------------------------------------------------------- */
+static void _vnet_send_arp_request(const uint8_t *target_ip)
+{
+    uint8_t frame[ETH_HLEN + sizeof(struct arp_pkt)];
+    struct eth_hdr *eth = (struct eth_hdr *)frame;
+    struct arp_pkt *arp = (struct arp_pkt *)(frame + ETH_HLEN);
+
+    __builtin_memset(eth->dst, 0xFF, ETH_ALEN);
+    __builtin_memcpy(eth->src, _vnet.mac, ETH_ALEN);
+    eth->ethertype = _net_htons(ETH_P_ARP);
+
+    arp->hw_type    = _net_htons(ARP_HW_ETHER);
+    arp->proto_type = _net_htons(ETH_P_IP);
+    arp->hw_len     = ETH_ALEN;
+    arp->proto_len  = 4;
+    arp->opcode     = _net_htons(ARP_OP_REQUEST);
+    __builtin_memcpy(arp->sender_mac, _vnet.mac, ETH_ALEN);
+    __builtin_memcpy(arp->sender_ip, _vnet.our_ip, 4);
+    __builtin_memset(arp->target_mac, 0x00, ETH_ALEN);
+    __builtin_memcpy(arp->target_ip, target_ip, 4);
+
+    _vnet_send_frame(frame, sizeof(frame));
+    serial_puts("[net] ARP request sent for ");
+    _net_print_ip(target_ip);
+    serial_puts("\r\n");
+}
+
+/* -----------------------------------------------------------
+ * _virtio_net_init — find VirtIO-net on PCI, init driver
+ *
+ * Scans PCI for vendor 0x1AF4 with network class (02.00) or
+ * device IDs 0x1000 (legacy transitional network).
+ *
+ * Returns 0 on success, negative errno on failure.
+ * ----------------------------------------------------------- */
+static int _virtio_net_init(void)
+{
+    if (_vnet.initialized) return 0;
+
+    /* Ensure PCI cache is populated */
+    if (_pci_cache_count < 0) _pci_scan();
+
+    /* Find VirtIO-net device:
+     *   VirtIO vendor = 0x1AF4
+     *   Legacy device IDs: 0x1000 (net), 0x1041 (modern net)
+     *   Or any 0x1AF4 device with class=02 (network controller)
+     */
+    int net_idx = -1;
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].vendor == 0x1AF4) {
+            /* VirtIO vendor — check if it's a network device */
+            if (_pci_cache[i].cls == 0x02 ||
+                _pci_cache[i].devid == 0x1000 ||
+                _pci_cache[i].devid == 0x1041) {
+                net_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (net_idx < 0) {
+        serial_puts("[net] No VirtIO-net device found on PCI bus\r\n");
+        serial_puts("[net] PCI devices:\r\n");
+        for (int i = 0; i < _pci_cache_count; i++) {
+            serial_puts("[net]   ");
+            serial_put_hex(_pci_cache[i].bus); serial_puts(":");
+            serial_put_hex(_pci_cache[i].dev); serial_puts(".");
+            serial_put_hex(_pci_cache[i].func);
+            serial_puts(" vendor="); serial_put_hex(_pci_cache[i].vendor);
+            serial_puts(" device="); serial_put_hex(_pci_cache[i].devid);
+            serial_puts(" class="); serial_put_hex(_pci_cache[i].cls);
+            serial_puts("."); serial_put_hex(_pci_cache[i].sub);
+            serial_puts("\r\n");
+        }
+        return -19; /* ENODEV */
+    }
+
+    serial_puts("[net] Found VirtIO-net at PCI ");
+    serial_put_hex(_pci_cache[net_idx].bus); serial_puts(":");
+    serial_put_hex(_pci_cache[net_idx].dev); serial_puts(".");
+    serial_put_hex(_pci_cache[net_idx].func);
+    serial_puts(" (vendor="); serial_put_hex(_pci_cache[net_idx].vendor);
+    serial_puts(" device="); serial_put_hex(_pci_cache[net_idx].devid);
+    serial_puts(")\r\n");
+
+    /* Step 1: Read BAR0 — must be an I/O BAR for legacy VirtIO */
+    uint32_t pci_addr = 0x80000000
+        | ((uint32_t)_pci_cache[net_idx].bus << 16)
+        | ((uint32_t)_pci_cache[net_idx].dev << 11)
+        | 0x10; /* BAR0 offset in PCI config */
+    outl(0xCF8, pci_addr);
+    uint32_t bar0 = inl(0xCFC);
+
+    if (!(bar0 & 1)) {
+        serial_puts("[net] BAR0 is MMIO, not I/O — not legacy VirtIO\r\n");
+        serial_puts("[net] BAR0 raw = ");
+        serial_put_hex(bar0);
+        serial_puts("\r\n");
+        return -19;
+    }
+
+    _vnet.iobase = (uint16_t)(bar0 & ~0x3u);
+    serial_puts("[net] BAR0 I/O base = 0x");
+    serial_put_hex(_vnet.iobase);
+    serial_puts("\r\n");
+
+    /* Enable bus mastering + I/O space in PCI command register */
+    uint32_t cmd_addr = 0x80000000
+        | ((uint32_t)_pci_cache[net_idx].bus << 16)
+        | ((uint32_t)_pci_cache[net_idx].dev << 11)
+        | 0x04;
+    outl(0xCF8, cmd_addr);
+    uint32_t cmd_reg = inl(0xCFC);
+    cmd_reg |= (1 << 0) | (1 << 2); /* I/O Space + Bus Master */
+    outl(0xCF8, cmd_addr);
+    outl(0xCFC, cmd_reg);
+
+    /* Step 2: Reset device */
+    _vnet_wr8(0x12, 0);
+    /* Small delay for reset to take effect */
+    for (volatile int i = 0; i < 10000; i++) {}
+
+    /* Step 3: Acknowledge */
+    _vnet_wr8(0x12, VIRTIO_STATUS_ACK);
+
+    /* Step 4: Driver */
+    _vnet_wr8(0x12, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+
+    /* Step 5: Negotiate features */
+    uint32_t host_features = _vnet_rd32(0x00);
+    serial_puts("[net] Host features: 0x");
+    serial_put_hex(host_features);
+    serial_puts("\r\n");
+
+    /* We only need MAC read capability */
+    uint32_t guest_features = 0;
+    if (host_features & VIRTIO_NET_F_MAC)
+        guest_features |= VIRTIO_NET_F_MAC;
+    if (host_features & VIRTIO_NET_F_STATUS)
+        guest_features |= VIRTIO_NET_F_STATUS;
+    _vnet_wr32(0x04, guest_features);
+
+    /* Step 6: Features OK (for legacy, set DRIVER_OK which includes this) */
+    uint8_t status = _vnet_rd8(0x12);
+    _vnet_wr8(0x12, status | VIRTIO_STATUS_FEATURES_OK);
+
+    /* Verify features were accepted */
+    status = _vnet_rd8(0x12);
+    if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
+        serial_puts("[net] Features not accepted by device\r\n");
+        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
+        return -5;
+    }
+
+    /* Step 7: Read MAC address from BAR0 + 0x14..0x19 */
+    for (int i = 0; i < 6; i++) {
+        _vnet.mac[i] = _vnet_rd8(0x14 + (uint16_t)i);
+    }
+    serial_puts("[net] MAC address: ");
+    _net_print_mac(_vnet.mac);
+    serial_puts("\r\n");
+
+    /* Step 8: Set up RX queue (queue 0) */
+    if (_vnet_setup_queue(0, &_vnet.rx_qsize,
+                          &_vnet.rx_desc, &_vnet.rx_avail, &_vnet.rx_used) < 0) {
+        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
+        return -12;
+    }
+
+    /* Allocate RX buffers (contiguous block) */
+    _vnet.rx_buffers = (uint8_t *)nvme_alloc_aligned(
+        (size_t)_vnet.rx_qsize * VIRTIO_NET_BUF_SIZE, 4096);
+    if (!_vnet.rx_buffers) {
+        serial_puts("[net] Failed to allocate RX buffers\r\n");
+        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
+        return -12;
+    }
+    __builtin_memset(_vnet.rx_buffers, 0, (size_t)_vnet.rx_qsize * VIRTIO_NET_BUF_SIZE);
+
+    /* Step 9: Set up TX queue (queue 1) */
+    if (_vnet_setup_queue(1, &_vnet.tx_qsize,
+                          &_vnet.tx_desc, &_vnet.tx_avail, &_vnet.tx_used) < 0) {
+        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
+        return -12;
+    }
+
+    /* Allocate TX buffers */
+    _vnet.tx_buffers = (uint8_t *)nvme_alloc_aligned(
+        (size_t)_vnet.tx_qsize * VIRTIO_NET_BUF_SIZE, 4096);
+    if (!_vnet.tx_buffers) {
+        serial_puts("[net] Failed to allocate TX buffers\r\n");
+        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
+        return -12;
+    }
+    __builtin_memset(_vnet.tx_buffers, 0, (size_t)_vnet.tx_qsize * VIRTIO_NET_BUF_SIZE);
+    _vnet.tx_last_used = 0;
+    _vnet.tx_next_desc = 0;
+
+    /* Step 10: Set our IP address (QEMU user-mode default) */
+    _vnet.our_ip[0] = 10; _vnet.our_ip[1] = 0;
+    _vnet.our_ip[2] = 2;  _vnet.our_ip[3] = 15;
+    _vnet.gateway_ip[0] = 10; _vnet.gateway_ip[1] = 0;
+    _vnet.gateway_ip[2] = 2;  _vnet.gateway_ip[3] = 2;
+
+    /* Step 11: Driver ready — fill RX buffers, set DRIVER_OK */
+    _vnet_rx_fill();
+
+    status = _vnet_rd8(0x12);
+    _vnet_wr8(0x12, status | VIRTIO_STATUS_DRIVER_OK);
+
+    _vnet.initialized = 1;
+    _vnet.rx_count = 0;
+    _vnet.tx_count = 0;
+    _vnet.arp_replies = 0;
+    _vnet.icmp_replies = 0;
+
+    serial_puts("[net] VirtIO-net initialized: MAC=");
+    _net_print_mac(_vnet.mac);
+    serial_puts(" IP=");
+    _net_print_ip(_vnet.our_ip);
+    serial_puts(" GW=");
+    _net_print_ip(_vnet.gateway_ip);
+    serial_puts("\r\n");
+
+    /* Send gratuitous ARP so QEMU learns our MAC */
+    _vnet_send_gratuitous_arp();
+
+    /* Also ARP for the gateway to trigger QEMU's ARP response */
+    _vnet_send_arp_request(_vnet.gateway_ip);
+
+    return 0;
+}
+
+/* -----------------------------------------------------------
+ * _virtio_net_get_stats — print network statistics
+ * ----------------------------------------------------------- */
+static void _virtio_net_get_stats(void)
+{
+    serial_puts("[net] Stats: rx=");
+    serial_put_dec(_vnet.rx_count);
+    serial_puts(" tx=");
+    serial_put_dec(_vnet.tx_count);
+    serial_puts(" arp_replies=");
+    serial_put_dec(_vnet.arp_replies);
+    serial_puts(" icmp_replies=");
+    serial_put_dec(_vnet.icmp_replies);
+    serial_puts("\r\n");
+}
+
 /* ===================================================================
  * 8b. Bare-metal syscall stub
  *
@@ -1756,6 +2639,16 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _fat32_read_file_syscall(a0, a1, a2);
         case 89: /* Fat32ListDir: list root directory entries to serial */
             return (int64_t)_fat32_list_dir();
+        case 90: /* NetInit: initialize VirtIO-net, set IP 10.0.2.15 */
+            return (int64_t)_virtio_net_init();
+        case 91: /* NetPoll: process incoming frames (ARP/ICMP auto-reply) */
+            return (int64_t)_virtio_net_poll();
+        case 92: /* NetSendFrame: a0=buf_addr, a1=frame_len (raw Ethernet) */
+            return (int64_t)_vnet_send_frame((const void *)(uintptr_t)a0,
+                                              (uint16_t)a1);
+        case 93: /* NetStats: print network statistics to serial */
+            _virtio_net_get_stats();
+            return 0;
         default:
             return -38; /* ENOSYS */
     }
@@ -2294,6 +3187,39 @@ void _start(void)
         }
     } else {
         serial_puts("[BOOT] FAT32 init failed\r\n");
+    }
+
+    /* VirtIO-net initialization + ARP/ICMP polling test */
+    {
+        int net_rc = _virtio_net_init();
+        if (net_rc == 0) {
+            serial_puts("[BOOT] Network initialized: MAC=");
+            _net_print_mac(_vnet.mac);
+            serial_puts(" IP=10.0.2.15\r\n");
+
+            /* Poll for incoming frames for ~2 seconds.
+             * This allows QEMU user-mode networking to:
+             *   1. Receive our gratuitous ARP
+             *   2. Send ARP requests for 10.0.2.15 (which we reply to)
+             *   3. Potentially send ICMP echo requests (which we reply to)
+             * The loop processes ARP and ICMP automatically. */
+            serial_puts("[BOOT] Polling network for 2 seconds...\r\n");
+            int total_frames = 0;
+            for (int i = 0; i < 2000; i++) {
+                int n = _virtio_net_poll();
+                if (n > 0) total_frames += n;
+                /* ~1ms delay */
+                for (volatile int j = 0; j < 10000; j++) {}
+            }
+            serial_puts("[BOOT] Network poll done, frames processed: ");
+            serial_put_dec(total_frames);
+            serial_puts("\r\n");
+            _virtio_net_get_stats();
+        } else {
+            serial_puts("[BOOT] VirtIO-net init failed (rc=");
+            serial_put_dec(net_rc);
+            serial_puts(") — no network device or not VirtIO\r\n");
+        }
     }
 
     if (spl_start) {
