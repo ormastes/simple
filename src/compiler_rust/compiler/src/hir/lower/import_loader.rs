@@ -176,7 +176,10 @@ impl Lowerer {
                             for method in &impl_block.methods {
                                 let ret_ty = self.resolve_type_opt(&method.return_type)?;
                                 let method_full_name = format!("{}.{}", type_name, method.name);
-                                self.globals.insert(method_full_name, ret_ty);
+                                self.globals.insert(method_full_name.clone(), ret_ty);
+                                // Mark as imported function so MIR lowering skips it as a global
+                                // (prevents IncompatibleDeclaration when codegen declares it as data)
+                                self.imported_function_names.insert(method_full_name);
                                 if method.is_pure() {
                                     self.pure_functions.insert(format!("{}.{}", type_name, method.name));
                                 }

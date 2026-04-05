@@ -370,6 +370,7 @@ struct MacOSPumpState {
     event_loop: EventLoop<UserEvent>,
     state: ThreadState,
     event_loop_id: i64,
+    proxy: EventLoopProxy<UserEvent>,
     command_rx: crossbeam::channel::Receiver<RuntimeCommand>,
 }
 
@@ -387,10 +388,9 @@ fn macos_pump(event_loop_id: i64) {
             if ps.event_loop_id != event_loop_id {
                 return;
             }
-            // Process pending commands inline (no proxy needed — same thread)
+            // Forward pending commands to event loop via proxy
             while let Ok(cmd) = ps.command_rx.try_recv() {
-                // We can't use proxy since we're on the same thread.
-                // Instead, handle commands directly during pump.
+                let _ = ps.proxy.send_event(UserEvent::Command(cmd));
             }
             #[allow(deprecated)]
             let _ = ps.event_loop.pump_events(
@@ -417,17 +417,13 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
     // and use pump_events for non-blocking polling.
     #[cfg(target_os = "macos")]
     {
-        let builder = EventLoop::<UserEvent>::with_user_event();
+        let mut builder = EventLoop::<UserEvent>::with_user_event();
         let event_loop = builder
             .build()
             .map_err(|err| runtime_error(format!("failed to create event loop: {err:?}")))?;
 
         let proxy = event_loop.create_proxy();
-        // Forward commands from command_tx to event loop via proxy
-        thread::spawn({
-            let proxy = proxy.clone();
-            move || forward_commands(command_rx.clone(), proxy)
-        });
+        // macOS: NO forward_commands thread — macos_pump handles forwarding inline
 
         MACOS_PUMP.with(|cell| {
             *cell.borrow_mut() = Some(MacOSPumpState {
@@ -438,6 +434,7 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
                     event_tx,
                 },
                 event_loop_id,
+                proxy,
                 command_rx,
             });
         });
@@ -838,20 +835,36 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             config.height = get_i64(args, 2, name)?.max(1) as u32;
             config.title = get_string(args, 3, name)?;
 
-            let loops = EVENT_LOOPS.lock();
-            let Some(handle) = loops.get(&event_loop_id) else {
-                set_last_error(format!("invalid event loop handle: {event_loop_id}"));
-                return Ok(int_value(0));
-            };
             let (response_tx, response_rx) = crossbeam::channel::bounded(1);
-            handle
-                .command_tx
-                .send(RuntimeCommand::CreateWindow {
-                    config,
-                    response: response_tx,
-                })
-                .map_err(|err| runtime_error(format!("failed to send create window request: {err}")))?;
-            match response_rx.recv() {
+            {
+                let loops = EVENT_LOOPS.lock();
+                let Some(handle) = loops.get(&event_loop_id) else {
+                    set_last_error(format!("invalid event loop handle: {event_loop_id}"));
+                    return Ok(int_value(0));
+                };
+                handle
+                    .command_tx
+                    .send(RuntimeCommand::CreateWindow {
+                        config,
+                        response: response_tx,
+                    })
+                    .map_err(|err| runtime_error(format!("failed to send create window request: {err}")))?;
+            } // Release EVENT_LOOPS lock before pumping
+
+            // macOS: pump to process the command on the main thread
+            #[cfg(target_os = "macos")]
+            for _ in 0..200 {
+                macos_pump(event_loop_id);
+                if let Ok(result) = response_rx.try_recv() {
+                    return match result {
+                        Ok(window_id) => Ok(int_value(window_id)),
+                        Err(err) => { set_last_error(err); Ok(int_value(0)) }
+                    };
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            match response_rx.recv_timeout(std::time::Duration::from_secs(5)) {
                 Ok(Ok(window_id)) => Ok(int_value(window_id)),
                 Ok(Err(err)) => {
                     set_last_error(err);
@@ -923,28 +936,45 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let width = get_i64(args, 1, name)?.max(1) as u32;
             let height = get_i64(args, 2, name)?.max(1) as u32;
             let pixels = get_pixels(args, 3, name)?;
-            if let Some(event_loop_id) = WINDOW_OWNERS.lock().get(&window_id).copied() {
-                if let Some(handle) = EVENT_LOOPS.lock().get(&event_loop_id) {
-                    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
-                    handle
-                        .command_tx
-                        .send(RuntimeCommand::Present {
-                            window_id,
-                            width,
-                            height,
-                            pixels,
-                            response: response_tx,
-                        })
-                        .map_err(|err| runtime_error(format!("failed to send present request: {err}")))?;
-                    return match response_rx.recv() {
-                        Ok(Ok(())) => Ok(bool_value(true)),
-                        Ok(Err(err)) => {
-                            set_last_error(err);
-                            Ok(bool_value(false))
-                        }
-                        Err(err) => Err(runtime_error(format!("failed to receive present response: {err}"))),
-                    };
+            let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
+            if let Some(el_id) = event_loop_id {
+                let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+                {
+                    if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
+                        handle
+                            .command_tx
+                            .send(RuntimeCommand::Present {
+                                window_id,
+                                width,
+                                height,
+                                pixels,
+                                response: response_tx,
+                            })
+                            .map_err(|err| runtime_error(format!("failed to send present request: {err}")))?;
+                    }
+                } // Release lock before pumping
+
+                // macOS: pump to process present on main thread
+                #[cfg(target_os = "macos")]
+                for _ in 0..50 {
+                    macos_pump(el_id);
+                    if let Ok(result) = response_rx.try_recv() {
+                        return match result {
+                            Ok(()) => Ok(bool_value(true)),
+                            Err(err) => { set_last_error(err); Ok(bool_value(false)) }
+                        };
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+
+                return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(Ok(())) => Ok(bool_value(true)),
+                    Ok(Err(err)) => {
+                        set_last_error(err);
+                        Ok(bool_value(false))
+                    }
+                    Err(err) => Err(runtime_error(format!("failed to receive present response: {err}"))),
+                };
             }
             set_last_error(format!("invalid window handle: {window_id}"));
             Ok(bool_value(false))

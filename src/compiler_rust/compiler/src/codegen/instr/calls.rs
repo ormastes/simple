@@ -632,24 +632,40 @@ pub fn compile_call<M: Module>(
         };
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-        let func_id = if let Some(&existing) = ctx.func_ids.get(resolved_name.as_ref()) {
+        let func_id: Result<cranelift_module::FuncId, cranelift_module::ModuleError> = if let Some(&existing) = ctx.func_ids.get(resolved_name.as_ref()) {
             Ok(existing)
         } else {
-            // All Simple values are i64-tagged, so use a uniform i64 signature
-            // for unresolved cross-module imports.
             let call_conv = crate::codegen::shared::platform_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
             for _ in 0..arg_vals.len() {
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }
             sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            let result = ctx.module
-                .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig);
-            // Cache for future lookups — prevents re-declaration with different arg counts
-            if let Ok(id) = &result {
-                ctx.func_ids.insert(resolved_name.to_string(), *id);
+            match ctx.module.declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig) {
+                Ok(id) => {
+                    ctx.func_ids.insert(resolved_name.to_string(), id);
+                    Ok(id)
+                }
+                Err(_) => {
+                    // Fallback: name may already be declared (e.g., imported impl method
+                    // declared as Export via declare_functions). Use get_name to find it.
+                    match ctx.module.get_name(&resolved_name) {
+                        Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                            ctx.func_ids.insert(resolved_name.to_string(), id);
+                            Ok(id)
+                        }
+                        _ => {
+                            // Truly unresolved — return NIL
+                            eprintln!("[CODEGEN-WARN] Failed to declare cross-module function '{}' (resolved: '{}'): IncompatibleDeclaration", func_name, resolved_name);
+                            if let Some(d) = dest {
+                                let nil = builder.ins().iconst(types::I64, 3);
+                                ctx.vreg_values.insert(*d, nil);
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
             }
-            result
         };
 
         match func_id {

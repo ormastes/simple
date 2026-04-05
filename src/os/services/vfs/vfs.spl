@@ -241,6 +241,56 @@ impl VfsManager:
         val mount = self.mounts[0]
         mount.fs.seek(handle, offset, whence)
 
+    # === Path-Based Convenience Methods ===
+
+    me read_text(path: text) -> Result<text, text>:
+        """Read entire file contents as text (open → read → close)."""
+        val mount = self.resolve_mount(path)
+        if not mount.?:
+            return Result.Err("no filesystem mounted for path: {path}")
+        val entry = mount.unwrap()
+        val relative = self.strip_mount_prefix(path, entry.point.path)
+        val stat_result = entry.fs.stat(relative)
+        if stat_result.is_err():
+            return Result.Err(stat_result.unwrap_err())
+        val node = stat_result.unwrap()
+        val flags = FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false)
+        val open_result = entry.fs.open(relative, flags)
+        if open_result.is_err():
+            return Result.Err(open_result.unwrap_err())
+        val handle = open_result.unwrap()
+        val read_result = entry.fs.read(handle, node.size)
+        entry.fs.close(handle)
+        if read_result.is_err():
+            return Result.Err(read_result.unwrap_err())
+        val bytes = read_result.unwrap()
+        Ok(text.from_bytes(bytes, bytes.len().to_u64()))
+
+    me write_text(path: text, content: text) -> Result<bool, text>:
+        """Write text to a file (open → write → close)."""
+        val mount = self.resolve_mount(path)
+        if not mount.?:
+            return Result.Err("no filesystem mounted for path: {path}")
+        val entry = mount.unwrap()
+        if entry.point.read_only:
+            return Result.Err("filesystem is read-only")
+        val relative = self.strip_mount_prefix(path, entry.point.path)
+        val flags = FileFlags(read: false, write: true, append: false, create: true, truncate: true, directory: false)
+        val open_result = entry.fs.open(relative, flags)
+        if open_result.is_err():
+            return Result.Err(open_result.unwrap_err())
+        val handle = open_result.unwrap()
+        val data = content.to_bytes()
+        val write_result = entry.fs.write(handle, data)
+        entry.fs.close(handle)
+        if write_result.is_err():
+            return Result.Err(write_result.unwrap_err())
+        Ok(true)
+
+    me remove(path: text) -> Result<bool, text>:
+        """Remove a file (alias for unlink)."""
+        self.unlink(path)
+
 # ============================================================================
 # Module-Level Convenience Functions
 # ============================================================================

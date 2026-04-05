@@ -1,498 +1,160 @@
-# hosted_main.spl -- SimpleOS Desktop in a macOS Window
+# hosted_main.spl — SimpleOS Desktop in a macOS Window
 #
-# Standalone hosted entry point that renders the SimpleOS desktop inside
-# a native macOS window via the SDL2 windowing backend.
-#
-# Creates a 1024x768 window, renders the full desktop scene (background,
-# title bar, taskbar, Hello World window, mouse cursor), and runs an
-# event loop that tracks mouse position and keyboard input.
-#
-# Build:
-#   bin/simple native-build --entry examples/simple_os/hosted/hosted_main.spl \
-#     --source src/lib -o build/hosted/simpleos_desktop
-#
-# Run:
-#   build/hosted/simpleos_desktop
+# Run with: SIMPLE_GUI=1 bin/simple examples/simple_os/hosted/hosted_main.spl
 
-# ============================================================================
-# FFI Declarations -- SDL2 backend (via window_ffi.spl compatibility layer)
-# ============================================================================
-
-extern fn rt_sdl2_init() -> i64
-extern fn rt_sdl2_quit()
-extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
-extern fn rt_sdl2_destroy_window(handle: i64)
-extern fn rt_sdl2_poll_event() -> i64
-extern fn rt_sdl2_event_key_code() -> i64
-extern fn rt_sdl2_event_key_sym() -> i64
-extern fn rt_sdl2_event_mouse_x() -> i64
-extern fn rt_sdl2_event_mouse_y() -> i64
-extern fn rt_sdl2_event_mouse_button() -> i64
-extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64)
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
+extern fn rt_winit_event_mouse_moved(ev: i64) -> (i64, i64)
+extern fn rt_winit_event_mouse_button(ev: i64) -> (i64, bool)
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_present_rgba(win: i64, w: i64, h: i64, pixels: [i64])
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_sleep_ms(ms: i64)
 
-# ============================================================================
-# Screen Constants
-# ============================================================================
-
-val SCREEN_W: i64 = 1024
-val SCREEN_H: i64 = 768
+val SW: i64 = 1024
+val SH: i64 = 768
 
 # ============================================================================
-# Color -- Inline ARGB color utilities (standalone, no OS driver dependency)
+# Pixel Buffer Helpers
 # ============================================================================
 
-struct Color:
-    r: i64
-    g: i64
-    b: i64
+fn make_pixel(r: i64, g: i64, b: i64) -> i64:
+    (255 << 24) | (r << 16) | (g << 8) | b
 
-impl Color:
-    static fn rgb(r: i64, g: i64, b: i64) -> Color:
-        Color(r: r, g: g, b: b)
-
-    static fn black() -> Color: Color.rgb(0, 0, 0)
-    static fn white() -> Color: Color.rgb(255, 255, 255)
-
-    fn to_packed() -> i64:
-        """Pack as RGBA i64: R*16777216 + G*65536 + B*256 + A."""
-        self.r * 16777216 + self.g * 65536 + self.b * 256 + 255
-
-# ============================================================================
-# HostedFramebuffer -- Software pixel buffer with SDL2 present
-# ============================================================================
-
-class HostedFramebuffer:
-    pixels: [i64]
-    width: i64
-    height: i64
-    window_handle: i64
-
-impl HostedFramebuffer:
-    static fn new(window_handle: i64, width: i64, height: i64) -> HostedFramebuffer:
-        var px: [i64] = []
-        var i: i64 = 0
-        val total = width * height
-        while i < total:
-            px.push(0)
-            i = i + 1
-        HostedFramebuffer(
-            pixels: px,
-            width: width,
-            height: height,
-            window_handle: window_handle
-        )
-
-    me put_pixel(x: i64, y: i64, color: Color):
-        if x < 0 or x >= self.width or y < 0 or y >= self.height:
-            return
-        val index = y * self.width + x
-        self.pixels[index] = color.to_packed()
-
-    me fill_rect(x: i64, y: i64, w: i64, h: i64, color: Color):
-        val packed = color.to_packed()
-        var row: i64 = 0
-        while row < h:
-            val py = y + row
-            if py >= 0 and py < self.height:
-                var col: i64 = 0
-                while col < w:
-                    val px = x + col
-                    if px >= 0 and px < self.width:
-                        val index = py * self.width + px
-                        self.pixels[index] = packed
-                    col = col + 1
-            row = row + 1
-
-    me clear(color: Color):
-        val packed = color.to_packed()
-        var i: i64 = 0
-        val total = self.width * self.height
-        while i < total:
-            self.pixels[i] = packed
-            i = i + 1
-
-    me draw_char_simple(x: i64, y: i64, ch: i64, fg: Color, bg: Color):
-        """Draw a single character using a minimal 5x7 bitmap font.
-
-        Only covers printable ASCII (0x20-0x7E). Characters outside
-        this range render as a filled block.
-        """
-        val glyph = get_simple_glyph(ch)
-        var row: i64 = 0
-        while row < 7:
-            val bits = glyph[row]
-            var col: i64 = 0
-            while col < 5:
-                val mask = 16 >> col   # 16, 8, 4, 2, 1
-                if (bits & mask) != 0:
-                    self.put_pixel(x + col, y + row, fg)
-                else:
-                    self.put_pixel(x + col, y + row, bg)
+fn fill_rect(pixels: [i64], x: i64, y: i64, w: i64, h: i64, color: i64) -> [i64]:
+    var buf = pixels
+    var row = 0
+    while row < h:
+        val py = y + row
+        if py >= 0 and py < SH:
+            var col = 0
+            while col < w:
+                val px = x + col
+                if px >= 0 and px < SW:
+                    val idx = py * SW + px
+                    buf = buf.set(idx, color)
                 col = col + 1
-            row = row + 1
+        row = row + 1
+    buf
 
-    me draw_text(x: i64, y: i64, text_str: text, fg: Color, bg: Color):
-        """Draw a text string using 5x7 font (6px advance)."""
-        var cx = x
-        for ch in text_str:
-            self.draw_char_simple(cx, y, ch.to_i64(), fg, bg)
-            cx = cx + 6
-
-    me present():
-        """Copy pixel buffer to the SDL2 window."""
-        rt_sdl2_present_rgba(self.window_handle, self.pixels, self.width, self.height)
+fn put_pixel(pixels: [i64], x: i64, y: i64, color: i64) -> [i64]:
+    if x >= 0 and x < SW and y >= 0 and y < SH:
+        return pixels.set(y * SW + x, color)
+    pixels
 
 # ============================================================================
-# Minimal 5x7 Bitmap Font
+# Desktop Scene
 # ============================================================================
 
-fn get_simple_glyph(ch: i64) -> [i64]:
-    """Return 7-row bitmap for a character. Each row is 5 bits wide (MSB=left).
+fn render_desktop(pixels: [i64]) -> [i64]:
+    var buf = pixels
+    val bg = make_pixel(30, 30, 46)
+    var i = 0
+    while i < SW * SH:
+        buf = buf.set(i, bg)
+        i = i + 1
 
-    Covers common printable ASCII. Returns a filled block for unknowns.
-    """
-    # Space
-    if ch == 32:
-        return [0, 0, 0, 0, 0, 0, 0]
-    # A
-    if ch == 65:
-        return [0x04, 0x0A, 0x11, 0x11, 0x1F, 0x11, 0x11]
-    # B
-    if ch == 66:
-        return [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E]
-    # C
-    if ch == 67:
-        return [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E]
-    # D
-    if ch == 68:
-        return [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E]
-    # E
-    if ch == 69:
-        return [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F]
-    # F
-    if ch == 70:
-        return [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10]
-    # G
-    if ch == 71:
-        return [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E]
-    # H
-    if ch == 72:
-        return [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11]
-    # I
-    if ch == 73:
-        return [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E]
-    # J
-    if ch == 74:
-        return [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C]
-    # K
-    if ch == 75:
-        return [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11]
-    # L
-    if ch == 76:
-        return [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F]
-    # M
-    if ch == 77:
-        return [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11]
-    # N
-    if ch == 78:
-        return [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11]
-    # O
-    if ch == 79:
-        return [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E]
-    # P
-    if ch == 80:
-        return [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10]
-    # Q
-    if ch == 81:
-        return [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D]
-    # R
-    if ch == 82:
-        return [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11]
-    # S
-    if ch == 83:
-        return [0x0E, 0x11, 0x10, 0x0E, 0x01, 0x11, 0x0E]
-    # T
-    if ch == 84:
-        return [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04]
-    # U
-    if ch == 85:
-        return [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E]
-    # V
-    if ch == 86:
-        return [0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04]
-    # W
-    if ch == 87:
-        return [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11]
-    # X
-    if ch == 88:
-        return [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11]
-    # Y
-    if ch == 89:
-        return [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04]
-    # Z
-    if ch == 90:
-        return [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F]
+    # Title bar (top)
+    buf = fill_rect(buf, 0, 0, SW, 28, make_pixel(24, 24, 37))
 
-    # Lowercase letters (a-z = 97-122, map to uppercase glyphs)
-    if ch >= 97 and ch <= 122:
-        return get_simple_glyph(ch - 32)
+    # Hello World window
+    buf = fill_rect(buf, 200, 100, 400, 24, make_pixel(0, 122, 204))
+    buf = fill_rect(buf, 580, 104, 16, 16, make_pixel(231, 76, 60))
+    buf = fill_rect(buf, 200, 124, 400, 200, make_pixel(255, 255, 255))
 
-    # 0
-    if ch == 48:
-        return [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E]
-    # 1
-    if ch == 49:
-        return [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E]
-    # 2
-    if ch == 50:
-        return [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F]
-    # 3
-    if ch == 51:
-        return [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E]
-    # 4
-    if ch == 52:
-        return [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02]
-    # 5
-    if ch == 53:
-        return [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E]
-    # 6
-    if ch == 54:
-        return [0x0E, 0x11, 0x10, 0x1E, 0x11, 0x11, 0x0E]
-    # 7
-    if ch == 55:
-        return [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08]
-    # 8
-    if ch == 56:
-        return [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E]
-    # 9
-    if ch == 57:
-        return [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x11, 0x0E]
+    # RGB blocks
+    buf = fill_rect(buf, 220, 220, 80, 30, make_pixel(255, 68, 68))
+    buf = fill_rect(buf, 310, 220, 80, 30, make_pixel(68, 204, 68))
+    buf = fill_rect(buf, 400, 220, 80, 30, make_pixel(68, 136, 255))
 
-    # ! (33)
-    if ch == 33:
-        return [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04]
-    # . (46)
-    if ch == 46:
-        return [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04]
-    # , (44)
-    if ch == 44:
-        return [0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08]
-    # - (45)
-    if ch == 45:
-        return [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00]
-    # : (58)
-    if ch == 58:
-        return [0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00]
-    # = (61)
-    if ch == 61:
-        return [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00]
-    # ( (40)
-    if ch == 40:
-        return [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02]
-    # ) (41)
-    if ch == 41:
-        return [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08]
-    # / (47)
-    if ch == 47:
-        return [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10]
+    # Status bar
+    buf = fill_rect(buf, 200, 300, 400, 24, make_pixel(224, 224, 224))
 
-    # Unknown character -- filled block
-    [0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F]
+    # Taskbar (bottom)
+    buf = fill_rect(buf, 0, 736, SW, 32, make_pixel(24, 24, 37))
+    buf = fill_rect(buf, 10, 742, 20, 20, make_pixel(52, 152, 219))
+    buf = fill_rect(buf, 36, 742, 20, 20, make_pixel(39, 174, 96))
+    buf = fill_rect(buf, 62, 742, 20, 20, make_pixel(231, 76, 60))
+    buf = fill_rect(buf, 88, 742, 20, 20, make_pixel(243, 156, 18))
+    buf = fill_rect(buf, 114, 742, 20, 20, make_pixel(155, 89, 182))
+    buf
 
-# ============================================================================
-# Desktop Rendering
-# ============================================================================
-
-fn render_desktop(fb: HostedFramebuffer):
-    """Render the full SimpleOS desktop scene."""
-
-    # -- Background: dark blue --
-    fb.clear(Color.rgb(30, 30, 46))
-
-    # -- Top title bar (system bar) --
-    fb.fill_rect(0, 0, SCREEN_W, 28, Color.rgb(24, 24, 37))
-    fb.draw_text(10, 8, "SimpleOS Desktop", Color.rgb(180, 190, 210), Color.rgb(24, 24, 37))
-    fb.draw_text(860, 8, "12:00  Sat", Color.rgb(140, 150, 170), Color.rgb(24, 24, 37))
-
-    # -- Center window: title bar --
-    val win_x: i64 = 200
-    val win_y: i64 = 80
-    val win_w: i64 = 500
-    val win_title_h: i64 = 28
-    val win_body_h: i64 = 240
-    val win_status_h: i64 = 24
-
-    # Title bar -- blue
-    fb.fill_rect(win_x, win_y, win_w, win_title_h, Color.rgb(0, 122, 204))
-    fb.draw_text(win_x + 10, win_y + 8, "Hello World", Color.white(), Color.rgb(0, 122, 204))
-
-    # Close button (red square in title bar)
-    fb.fill_rect(win_x + win_w - 24, win_y + 6, 16, 16, Color.rgb(231, 76, 60))
-
-    # Minimize button (yellow)
-    fb.fill_rect(win_x + win_w - 48, win_y + 6, 16, 16, Color.rgb(243, 156, 18))
-
-    # -- Window body --
-    fb.fill_rect(win_x, win_y + win_title_h, win_w, win_body_h, Color.rgb(255, 255, 255))
-
-    val body_x = win_x + 20
-    val body_y = win_y + win_title_h + 16
-    val text_fg = Color.rgb(51, 51, 51)
-    val text_bg = Color.white()
-
-    fb.draw_text(body_x, body_y, "Hello World!", text_fg, text_bg)
-    fb.draw_text(body_x, body_y + 16, "SimpleOS Desktop Environment", text_fg, text_bg)
-    fb.draw_text(body_x, body_y + 32, "Running in macOS window via SDL2", text_fg, text_bg)
-    fb.draw_text(body_x, body_y + 56, "Move the mouse - cursor follows!", Color.rgb(100, 100, 140), text_bg)
-
-    # RGB test blocks
-    val block_y = body_y + 84
-    fb.fill_rect(body_x, block_y, 100, 36, Color.rgb(255, 68, 68))
-    fb.draw_text(body_x + 20, block_y + 12, "Red", Color.white(), Color.rgb(255, 68, 68))
-
-    fb.fill_rect(body_x + 110, block_y, 100, 36, Color.rgb(68, 204, 68))
-    fb.draw_text(body_x + 130, block_y + 12, "Green", Color.white(), Color.rgb(68, 204, 68))
-
-    fb.fill_rect(body_x + 220, block_y, 100, 36, Color.rgb(68, 136, 255))
-    fb.draw_text(body_x + 240, block_y + 12, "Blue", Color.white(), Color.rgb(68, 136, 255))
-
-    fb.fill_rect(body_x + 330, block_y, 100, 36, Color.rgb(243, 156, 18))
-    fb.draw_text(body_x + 340, block_y + 12, "Amber", Color.black(), Color.rgb(243, 156, 18))
-
-    # -- Status bar --
-    val status_y = win_y + win_title_h + win_body_h
-    fb.fill_rect(win_x, status_y, win_w, win_status_h, Color.rgb(224, 224, 224))
-    fb.draw_text(win_x + 10, status_y + 6, "SimpleOS v0.1 - Hosted Mode", Color.rgb(102, 102, 102), Color.rgb(224, 224, 224))
-
-    # -- Taskbar (bottom) --
-    val taskbar_y = SCREEN_H - 40
-    fb.fill_rect(0, taskbar_y, SCREEN_W, 40, Color.rgb(24, 24, 37))
-
-    # Dock icons -- colored squares with labels
-    val icon_y = taskbar_y + 6
-    val icon_size: i64 = 28
-
-    fb.fill_rect(10, icon_y, icon_size, icon_size, Color.rgb(52, 152, 219))
-    fb.draw_text(14, icon_y + 8, "T", Color.white(), Color.rgb(52, 152, 219))
-
-    fb.fill_rect(46, icon_y, icon_size, icon_size, Color.rgb(39, 174, 96))
-    fb.draw_text(50, icon_y + 8, "F", Color.white(), Color.rgb(39, 174, 96))
-
-    fb.fill_rect(82, icon_y, icon_size, icon_size, Color.rgb(231, 76, 60))
-    fb.draw_text(86, icon_y + 8, "B", Color.white(), Color.rgb(231, 76, 60))
-
-    fb.fill_rect(118, icon_y, icon_size, icon_size, Color.rgb(243, 156, 18))
-    fb.draw_text(122, icon_y + 8, "C", Color.black(), Color.rgb(243, 156, 18))
-
-    fb.fill_rect(154, icon_y, icon_size, icon_size, Color.rgb(155, 89, 182))
-    fb.draw_text(158, icon_y + 8, "S", Color.white(), Color.rgb(155, 89, 182))
-
-    # Active app indicator (white dot under first icon)
-    fb.fill_rect(20, taskbar_y + 36, 8, 2, Color.white())
-
-fn render_cursor(fb: HostedFramebuffer, mx: i64, my: i64):
-    """Draw a simple triangular mouse cursor at (mx, my)."""
-    var cy: i64 = 0
-    while cy < 12:
-        val cw = 12 - cy   # Triangle shape: wide at top, narrow at bottom
-        var cx: i64 = 0
+fn render_cursor(pixels: [i64], mx: i64, my: i64) -> [i64]:
+    var buf = pixels
+    var cy = 0
+    while cy < 10:
+        var cx = 0
+        val cw = 10 - cy
         while cx < cw:
-            val px = mx + cx
-            val py = my + cy
-            if px >= 0 and px < SCREEN_W and py >= 0 and py < SCREEN_H:
-                # Border pixels (outline)
-                if cx == 0 or cy == 0 or cx == cw - 1:
-                    fb.put_pixel(px, py, Color.black())
-                else:
-                    fb.put_pixel(px, py, Color.white())
+            if cx == 0 or cy == 0 or cx == cw - 1:
+                buf = put_pixel(buf, mx + cx, my + cy, make_pixel(0, 0, 0))
+            else:
+                buf = put_pixel(buf, mx + cx, my + cy, make_pixel(255, 255, 255))
             cx = cx + 1
         cy = cy + 1
+    buf
 
 # ============================================================================
-# Event Constants (SDL2 event type codes)
-# ============================================================================
-
-val SDL_QUIT: i64 = 1
-val SDL_KEYDOWN: i64 = 2
-val SDL_KEYUP: i64 = 3
-val SDL_MOUSEMOTION: i64 = 4
-val SDL_MOUSEDOWN: i64 = 5
-val SDL_MOUSEUP: i64 = 6
-
-# SDL keysym: Escape = 27
-val SDLK_ESCAPE: i64 = 27
-
-# ============================================================================
-# Main Entry Point
+# Main Loop
 # ============================================================================
 
 fn main() -> i64:
-    print "SimpleOS Hosted Desktop -- starting..."
+    print "SimpleOS Hosted Desktop"
 
-    # -- Initialize SDL2 --
-    val sdl_ok = rt_sdl2_init()
-    if sdl_ok == 0:
-        print "ERROR: Failed to initialize SDL2"
+    val el = rt_winit_event_loop_new()
+    val win = rt_winit_window_new(el, SW, SH, "SimpleOS Desktop")
+    if win == 0:
+        print "ERROR: Window creation failed"
         return 1
+    print "Window ready"
 
-    # -- Create window --
-    val window = rt_sdl2_create_window("SimpleOS Desktop", SCREEN_W, SCREEN_H)
-    if window == 0:
-        print "ERROR: Failed to create window"
-        rt_sdl2_quit()
-        return 1
+    # Pixel buffer
+    var pixels: [i64] = []
+    var idx = 0
+    while idx < SW * SH:
+        pixels = pixels.push(0)
+        idx = idx + 1
 
-    print "Window created ({SCREEN_W}x{SCREEN_H})"
+    # Initial render
+    pixels = render_desktop(pixels)
+    rt_winit_window_present_rgba(win, SW, SH, pixels)
+    print "First frame presented"
 
-    # -- Create framebuffer --
-    var fb = HostedFramebuffer.new(window, SCREEN_W, SCREEN_H)
-
-    # -- Event loop state --
+    # Event loop
     var running = true
-    var mouse_x: i64 = SCREEN_W / 2
-    var mouse_y: i64 = SCREEN_H / 2
-    var frame: i64 = 0
-
-    print "Entering event loop (press Escape or close window to exit)"
+    var mouse_x: i64 = 512
+    var mouse_y: i64 = 384
+    var frame = 0
 
     while running:
-        # -- Poll SDL2 events --
-        var event_type = rt_sdl2_poll_event()
-        while event_type != 0:
-            if event_type == SDL_QUIT:
+        var ev = rt_winit_event_loop_poll_events(el, 100)
+        while ev != 0:
+            val etype = rt_winit_event_get_type(ev)
+            if etype == 3:
                 running = false
-
-            elif event_type == SDL_KEYDOWN:
-                val keysym = rt_sdl2_event_key_sym()
-                val scancode = rt_sdl2_event_key_code()
-                print "Key down: sym={keysym} scan={scancode}"
-                if keysym == SDLK_ESCAPE:
+            else if etype == 10:
+                val (sc, kc, pressed) = rt_winit_event_keyboard_input(ev)
+                if pressed and kc == 9:
                     running = false
+            else if etype == 21:
+                val (mx, my) = rt_winit_event_mouse_moved(ev)
+                mouse_x = mx
+                mouse_y = my
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 100)
 
-            elif event_type == SDL_MOUSEMOTION:
-                mouse_x = rt_sdl2_event_mouse_x()
-                mouse_y = rt_sdl2_event_mouse_y()
-
-            elif event_type == SDL_MOUSEDOWN:
-                val button = rt_sdl2_event_mouse_button()
-                print "Mouse click: button={button} at ({mouse_x}, {mouse_y})"
-
-            else:
-                pass_dn
-
-            # Poll next event
-            event_type = rt_sdl2_poll_event()
-
-        # -- Render frame --
-        render_desktop(fb)
-        render_cursor(fb, mouse_x, mouse_y)
-        fb.present()
+        var fbuf = render_desktop(pixels)
+        fbuf = render_cursor(fbuf, mouse_x, mouse_y)
+        rt_winit_window_present_rgba(win, SW, SH, fbuf)
 
         frame = frame + 1
-        rt_sleep_ms(16)   # ~60 fps
+        rt_sleep_ms(33)
 
-    print "Desktop closed after {frame} frames"
-    rt_sdl2_destroy_window(window)
-    rt_sdl2_quit()
+    print "Closed after {frame} frames"
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
     return 0
