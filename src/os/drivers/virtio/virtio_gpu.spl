@@ -18,6 +18,7 @@
 
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32, mmio_write64, mmio_read64}
+use os.kernel.boot.cpu.{port_inb, port_outb, port_inw, port_outw, port_inl, port_outl}
 use os.userlib.syscall_raw.{syscall}
 use os.drivers.virtio.virtio_gpu_types.{
     VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
@@ -117,6 +118,8 @@ struct VirtioGpuDriver:
     creation, scanout binding, and flush operations.
     """
     bar0_virt: u64
+    bar0_port: u16       # I/O port base for legacy VirtIO
+    is_io_bar: bool      # True if BAR0 is I/O port, false if MMIO
     notif_id: u64
     # Control queue
     ctrl_desc_virt: u64
@@ -144,7 +147,7 @@ struct VirtioGpuDriver:
 impl VirtioGpuDriver:
     static fn new() -> VirtioGpuDriver:
         VirtioGpuDriver(
-            bar0_virt: 0, notif_id: 0,
+            bar0_virt: 0, bar0_port: 0, is_io_bar: false, notif_id: 0,
             ctrl_desc_virt: 0, ctrl_desc_phys: 0,
             ctrl_avail_virt: 0, ctrl_used_virt: 0,
             ctrl_queue_size: 0, ctrl_desc_idx: 0, ctrl_last_used: 0,
@@ -174,13 +177,24 @@ impl VirtioGpuDriver:
           8. SET_SCANOUT to bind resource to scanout 0
           9. Set DRIVER_OK
         """
-        # -- Step 1: Map BAR0 --
-        val bar_result = syscall(83, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
-        if bar_result < 0:
-            return Err("MapBar failed: error {bar_result}")
-        self.bar0_virt = bar_result as u64
+        # -- Step 1: Detect BAR type and set up access --
         self.notif_id = grant.irq_notification_id
-        serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
+
+        if (grant.bar0_phys & 1) != 0:
+            # I/O port BAR (bit 0 = 1): legacy VirtIO PCI transport
+            self.is_io_bar = true
+            self.bar0_port = (grant.bar0_phys & 0xFFFC).to_u16()
+            self.bar0_virt = 0
+            serial_println("[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
+        else:
+            # Memory-mapped BAR: map via syscall 83
+            self.is_io_bar = false
+            val bar_result = syscall(83, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
+            if bar_result < 0:
+                return Err("MapBar failed: error {bar_result}")
+            self.bar0_virt = bar_result as u64
+            self.bar0_port = 0
+            serial_println("[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
 
         # -- Step 2: Reset and negotiate features --
         self.write_status(0)
@@ -188,15 +202,15 @@ impl VirtioGpuDriver:
         self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
 
         # Read host features and accept them
-        val host_features = mmio_read32(self.bar0_virt + VIRTIO_PCI_HOST_FEATURES)
-        mmio_write32(self.bar0_virt + VIRTIO_PCI_GUEST_FEATURES, host_features)
+        val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
+        self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, host_features)
 
         # Set FEATURES_OK
         val feat_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
         self.write_status(feat_status)
 
         # Verify FEATURES_OK was accepted
-        val current_status = mmio_read8(self.bar0_virt + VIRTIO_PCI_STATUS)
+        val current_status = self.read_reg8(VIRTIO_PCI_STATUS)
         if (current_status & STATUS_FEATURES_OK) == 0:
             self.write_status(STATUS_FAILED)
             return Err("Feature negotiation failed")
@@ -274,10 +288,10 @@ impl VirtioGpuDriver:
     me setup_controlq() -> Result<bool, text>:
         """Set up controlq (queue 0): select, read size, allocate DMA, set PFN."""
         # Select queue 0
-        mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_SEL, VIRTIO_GPU_CONTROLQ)
+        self.write_reg16(VIRTIO_PCI_QUEUE_SEL, VIRTIO_GPU_CONTROLQ)
 
         # Read max queue size
-        val max_size = mmio_read16(self.bar0_virt + VIRTIO_PCI_QUEUE_SIZE)
+        val max_size = self.read_reg16(VIRTIO_PCI_QUEUE_SIZE)
         if max_size == 0:
             return Err("Controlq not available")
 
@@ -325,7 +339,7 @@ impl VirtioGpuDriver:
 
         # Tell device the queue PFN (phys >> 12)
         val pfn = (ring_phys >> 12).to_u32()
-        mmio_write32(self.bar0_virt + VIRTIO_PCI_QUEUE_PFN, pfn)
+        self.write_reg32(VIRTIO_PCI_QUEUE_PFN, pfn)
 
         Ok(true)
 
@@ -348,16 +362,52 @@ impl VirtioGpuDriver:
         GpuDmaAllocResult(virt: virt_out, phys: phys_out, ok: true)
 
     # ========================================================================
-    # Register Access Helpers
+    # Register Access Helpers (I/O port for legacy VirtIO, MMIO otherwise)
     # ========================================================================
+
+    fn read_reg8(offset: u64) -> u8:
+        if self.is_io_bar:
+            port_inb((self.bar0_port + offset.to_u16()))
+        else:
+            mmio_read8(self.bar0_virt + offset)
+
+    fn write_reg8(offset: u64, value: u8):
+        if self.is_io_bar:
+            port_outb((self.bar0_port + offset.to_u16()), value)
+        else:
+            mmio_write8(self.bar0_virt + offset, value)
+
+    fn read_reg16(offset: u64) -> u16:
+        if self.is_io_bar:
+            port_inw((self.bar0_port + offset.to_u16()))
+        else:
+            mmio_read16(self.bar0_virt + offset)
+
+    fn write_reg16(offset: u64, value: u16):
+        if self.is_io_bar:
+            port_outw((self.bar0_port + offset.to_u16()), value)
+        else:
+            mmio_write16(self.bar0_virt + offset, value)
+
+    fn read_reg32(offset: u64) -> u32:
+        if self.is_io_bar:
+            port_inl((self.bar0_port + offset.to_u16()))
+        else:
+            mmio_read32(self.bar0_virt + offset)
+
+    fn write_reg32(offset: u64, value: u32):
+        if self.is_io_bar:
+            port_outl((self.bar0_port + offset.to_u16()), value)
+        else:
+            mmio_write32(self.bar0_virt + offset, value)
 
     fn write_status(status: u8):
         """Write to the VirtIO PCI device status register."""
-        mmio_write8(self.bar0_virt + VIRTIO_PCI_STATUS, status)
+        self.write_reg8(VIRTIO_PCI_STATUS, status)
 
     fn read_isr() -> u8:
         """Read and clear interrupt status register."""
-        mmio_read8(self.bar0_virt + VIRTIO_PCI_ISR)
+        self.read_reg8(VIRTIO_PCI_ISR)
 
     # ========================================================================
     # Command Submission (two-descriptor chain)
@@ -414,7 +464,7 @@ impl VirtioGpuDriver:
         mmio_write16(self.ctrl_avail_virt + 2, avail_idx + 1)
 
         # Notify device (controlq = queue 0)
-        mmio_write16(self.bar0_virt + VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_GPU_CONTROLQ)
+        self.write_reg16(VIRTIO_PCI_QUEUE_NOTIFY, VIRTIO_GPU_CONTROLQ)
 
         # Poll used ring for completion
         var timeout: u64 = 10000000

@@ -3217,7 +3217,98 @@ void _start(void)
             serial_puts(" device="); serial_puthex(_pci_cache[i].devid);
             serial_puts(" class="); serial_puthex(_pci_cache[i].cls);
             serial_puts("."); serial_puthex(_pci_cache[i].sub);
+            /* Print all BARs for each device */
+            for (int bar = 0; bar < 6; bar++) {
+                uint32_t bar_addr = 0x80000000
+                    | ((uint32_t)_pci_cache[i].bus << 16)
+                    | ((uint32_t)_pci_cache[i].dev << 11)
+                    | (0x10 + bar * 4);
+                outl(0xCF8, bar_addr);
+                uint32_t barval = inl(0xCFC);
+                if (barval != 0) {
+                    serial_puts(" bar"); serial_put_dec(bar);
+                    serial_puts("=0x"); serial_put_hex((uint64_t)barval);
+                }
+            }
             serial_puts("\r\n");
+        }
+    }
+
+    /* ===================================================================
+     * PCI BAR assignment for devices with unassigned BARs
+     *
+     * Some devices (e.g., virtio-gpu on q35) don't get BARs assigned by
+     * firmware (SeaBIOS). We detect unassigned BARs and program them.
+     * =================================================================== */
+    {
+        static uint32_t next_io_port = 0xC000;    /* I/O port allocation base */
+        static uint32_t next_mmio_base = 0xFE000000; /* MMIO allocation base */
+
+        for (int i = 0; i < _pci_cache_count; i++) {
+            uint32_t pci_addr = 0x80000000
+                | ((uint32_t)_pci_cache[i].bus << 16)
+                | ((uint32_t)_pci_cache[i].dev << 11)
+                | 0x10; /* BAR0 offset */
+            outl(0xCF8, pci_addr);
+            uint32_t bar0 = inl(0xCFC);
+
+            if (bar0 != 0) continue; /* Already assigned */
+
+            /* Write all-ones to discover BAR size and type */
+            outl(0xCF8, pci_addr);
+            outl(0xCFC, 0xFFFFFFFF);
+            outl(0xCF8, pci_addr);
+            uint32_t bar_mask = inl(0xCFC);
+
+            if (bar_mask == 0 || bar_mask == 0xFFFFFFFF) {
+                /* No BAR implemented or BAR not writable */
+                outl(0xCF8, pci_addr);
+                outl(0xCFC, 0); /* Restore */
+                continue;
+            }
+
+            if (bar_mask & 1) {
+                /* I/O BAR: mask = ~(size-1) | flags */
+                uint32_t io_size = ~(bar_mask & ~0x3u) + 1;
+                if (io_size == 0 || io_size > 256) io_size = 256;
+                /* Align allocation */
+                next_io_port = (next_io_port + io_size - 1) & ~(io_size - 1);
+                uint32_t assigned = next_io_port | 1; /* I/O flag */
+                outl(0xCF8, pci_addr);
+                outl(0xCFC, assigned);
+                serial_puts("[pci-bar] ");
+                serial_put_hex(_pci_cache[i].bus); serial_puts(":");
+                serial_put_hex(_pci_cache[i].dev); serial_puts(".0");
+                serial_puts(" BAR0=IO 0x"); serial_put_hex(next_io_port);
+                serial_puts(" size="); serial_put_dec((int64_t)io_size);
+                serial_puts("\r\n");
+                next_io_port += io_size;
+            } else {
+                /* Memory BAR */
+                uint32_t mem_size = ~(bar_mask & ~0xFu) + 1;
+                if (mem_size == 0) mem_size = 4096;
+                next_mmio_base = (next_mmio_base + mem_size - 1) & ~(mem_size - 1);
+                outl(0xCF8, pci_addr);
+                outl(0xCFC, next_mmio_base);
+                serial_puts("[pci-bar] ");
+                serial_put_hex(_pci_cache[i].bus); serial_puts(":");
+                serial_put_hex(_pci_cache[i].dev); serial_puts(".0");
+                serial_puts(" BAR0=MEM 0x"); serial_put_hex(next_mmio_base);
+                serial_puts(" size="); serial_put_dec((int64_t)mem_size);
+                serial_puts("\r\n");
+                next_mmio_base += mem_size;
+            }
+
+            /* Enable Memory Space + I/O Space + Bus Master in PCI command register */
+            uint32_t cmd_addr = 0x80000000
+                | ((uint32_t)_pci_cache[i].bus << 16)
+                | ((uint32_t)_pci_cache[i].dev << 11)
+                | 0x04; /* Command register offset */
+            outl(0xCF8, cmd_addr);
+            uint32_t cmd = inl(0xCFC);
+            cmd |= 0x07; /* Memory Space | I/O Space | Bus Master */
+            outl(0xCF8, cmd_addr);
+            outl(0xCFC, cmd);
         }
     }
 
