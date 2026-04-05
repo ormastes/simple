@@ -428,11 +428,11 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    /* Return raw integer (Cranelift codegen uses raw convention) */
-    if (!IS_HEAP(str)) return 0;
+    /* Return ENCODE_INT — callers expect tagged integer */
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return 0;
-    return (RuntimeValue)s->len;
+    if (!s) return ENCODE_INT(0);
+    return ENCODE_INT(s->len);
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
@@ -571,24 +571,24 @@ RuntimeValue rt_value_to_string(RuntimeValue val)
 
 RuntimeValue rt_len(RuntimeValue v)
 {
-    /* Return raw length (Cranelift codegen uses raw convention) */
-    if (IS_INT(v)) return 0;
-    if (!IS_HEAP(v)) return 0;
+    /* Return ENCODE_INT — callers expect tagged integer */
+    if (IS_INT(v)) return ENCODE_INT(0);
+    if (!IS_HEAP(v)) return ENCODE_INT(0);
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    if (!h) return 0;
+    if (!h) return ENCODE_INT(0);
     if (h->type == HEAP_STRING) {
         RuntimeString *s = (RuntimeString *)h;
-        return (RuntimeValue)s->len;
+        return ENCODE_INT(s->len);
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
-        return (RuntimeValue)a->len;
+        return ENCODE_INT(a->len);
     }
     if (h->type == HEAP_MAP) {
         RuntimeMap *m = (RuntimeMap *)h;
-        return (RuntimeValue)m->len;
+        return ENCODE_INT(m->len);
     }
-    return 0;
+    return ENCODE_INT(0);
 }
 
 RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
@@ -1456,6 +1456,38 @@ static int _nvme_init_and_read_sector0(void)
  * Uses _nvme_read_sector_impl() for sector reads.
  * =================================================================== */
 
+/* Public FAT32 API — callable from Simple via extern fn */
+int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size);
+int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size, uint32_t *bytes_read);
+int fat32_list_dir(void);
+
+/* RuntimeValue wrappers — Simple passes text as tagged heap pointers.
+ * These extract the C string from RuntimeValue and call the real functions. */
+RuntimeValue spl_fat32_find_file(RuntimeValue name_rv, RuntimeValue out_cluster, RuntimeValue out_size) {
+    const char *name = "";
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) name = s->data;
+    }
+    uint32_t *cluster_ptr = (uint32_t *)(uintptr_t)DECODE_INT(out_cluster);
+    uint32_t *size_ptr    = (uint32_t *)(uintptr_t)DECODE_INT(out_size);
+    int result = fat32_find_file(name, cluster_ptr, size_ptr);
+    return ENCODE_INT(result);
+}
+
+RuntimeValue spl_fat32_read_file(RuntimeValue name_rv, RuntimeValue buf_rv, RuntimeValue max_size_rv, RuntimeValue bytes_read_rv) {
+    const char *name = "";
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) name = s->data;
+    }
+    uint8_t  *buf        = (uint8_t *)(uintptr_t)DECODE_INT(buf_rv);
+    uint32_t  max_size   = (uint32_t)DECODE_INT(max_size_rv);
+    uint32_t *bytes_read = (uint32_t *)(uintptr_t)DECODE_INT(bytes_read_rv);
+    int result = fat32_read_file(name, buf, max_size, bytes_read);
+    return ENCODE_INT(result);
+}
+
 static struct {
     uint32_t bytes_per_sector;
     uint32_t sectors_per_cluster;
@@ -1585,7 +1617,7 @@ static void _fat32_make_8_3_name(const char *name, char out[11]) {
 
 /* Find a file by name in the root directory.
  * Returns 0 on success and fills out_cluster/out_size, -1 if not found. */
-static int _fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size) {
+int fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *out_size) {
     if (!_fat32.initialized) {
         if (_fat32_init() != 0) return -1;
     }
@@ -1630,10 +1662,10 @@ static int _fat32_find_file(const char *name, uint32_t *out_cluster, uint32_t *o
 
 /* Read an entire file by name into buf (up to max_size bytes).
  * Returns 0 on success, -1 on failure. *bytes_read is set to actual bytes read. */
-static int _fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
-                            uint32_t *bytes_read) {
+int fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
+                    uint32_t *bytes_read) {
     uint32_t cluster, file_size;
-    if (_fat32_find_file(name, &cluster, &file_size) != 0) return -1;
+    if (fat32_find_file(name, &cluster, &file_size) != 0) return -1;
 
     uint32_t to_read = file_size < max_size ? file_size : max_size;
     uint32_t remaining = to_read;
@@ -1657,7 +1689,7 @@ static int _fat32_read_file(const char *name, uint8_t *buf, uint32_t max_size,
 }
 
 /* List root directory entries to serial (for diagnostics). */
-static int _fat32_list_dir(void) {
+int fat32_list_dir(void) {
     if (!_fat32.initialized) {
         if (_fat32_init() != 0) return -1;
     }
@@ -1727,7 +1759,7 @@ static int64_t _fat32_read_file_syscall(uint64_t name_addr, uint64_t buf_addr,
     if (!name || !buf || max_size == 0) return -14; /* EFAULT */
 
     uint32_t bytes_read = 0;
-    if (_fat32_read_file(name, buf, (uint32_t)max_size, &bytes_read) != 0)
+    if (fat32_read_file(name, buf, (uint32_t)max_size, &bytes_read) != 0)
         return -2; /* ENOENT */
     return (int64_t)bytes_read;
 }
@@ -2667,7 +2699,7 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 88: /* Fat32ReadFile: a0=name_ptr, a1=buf_ptr, a2=max_size */
             return _fat32_read_file_syscall(a0, a1, a2);
         case 89: /* Fat32ListDir: list root directory entries to serial */
-            return (int64_t)_fat32_list_dir();
+            return (int64_t)fat32_list_dir();
         case 90: /* NetInit: initialize VirtIO-net, set IP 10.0.2.15 */
             return (int64_t)_virtio_net_init();
         case 91: /* NetPoll: process incoming frames (ARP/ICMP auto-reply) */
@@ -3202,11 +3234,11 @@ void _start(void)
     /* FAT32 file read test — read hello.txt from NVMe disk */
     if (_fat32_init() == 0) {
         serial_puts("[BOOT] FAT32 initialized\r\n");
-        _fat32_list_dir();
+        fat32_list_dir();
         char fbuf[256];
         __builtin_memset(fbuf, 0, sizeof(fbuf));
         uint32_t bytes_read = 0;
-        if (_fat32_read_file("hello.txt", (uint8_t *)fbuf, 255, &bytes_read) == 0) {
+        if (fat32_read_file("hello.txt", (uint8_t *)fbuf, 255, &bytes_read) == 0) {
             fbuf[bytes_read] = '\0';
             serial_puts("[BOOT] hello.txt: ");
             serial_puts(fbuf);
