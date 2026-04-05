@@ -338,17 +338,85 @@ fn parse_window_config(config_json: &str) -> Result<WindowConfig, String> {
 
 fn keycode_to_simple(code: KeyCode) -> Option<i64> {
     Some(match code {
+        // Letters (ASCII uppercase)
         KeyCode::KeyA => 65,
+        KeyCode::KeyB => 66,
+        KeyCode::KeyC => 67,
         KeyCode::KeyD => 68,
+        KeyCode::KeyE => 69,
+        KeyCode::KeyF => 70,
+        KeyCode::KeyG => 71,
+        KeyCode::KeyH => 72,
+        KeyCode::KeyI => 73,
+        KeyCode::KeyJ => 74,
+        KeyCode::KeyK => 75,
+        KeyCode::KeyL => 76,
+        KeyCode::KeyM => 77,
+        KeyCode::KeyN => 78,
+        KeyCode::KeyO => 79,
+        KeyCode::KeyP => 80,
+        KeyCode::KeyQ => 81,
+        KeyCode::KeyR => 82,
         KeyCode::KeyS => 83,
+        KeyCode::KeyT => 84,
+        KeyCode::KeyU => 85,
+        KeyCode::KeyV => 86,
         KeyCode::KeyW => 87,
+        KeyCode::KeyX => 88,
+        KeyCode::KeyY => 89,
+        KeyCode::KeyZ => 90,
+        // Digits
+        KeyCode::Digit0 => 48,
+        KeyCode::Digit1 => 49,
+        KeyCode::Digit2 => 50,
+        KeyCode::Digit3 => 51,
+        KeyCode::Digit4 => 52,
+        KeyCode::Digit5 => 53,
+        KeyCode::Digit6 => 54,
+        KeyCode::Digit7 => 55,
+        KeyCode::Digit8 => 56,
+        KeyCode::Digit9 => 57,
+        // Navigation
         KeyCode::ArrowLeft => 37,
         KeyCode::ArrowUp => 38,
         KeyCode::ArrowRight => 39,
         KeyCode::ArrowDown => 40,
+        // Control
+        KeyCode::Tab => 9,
+        KeyCode::Backspace => 8,
+        KeyCode::Delete => 127,
+        KeyCode::Home => 36,
+        KeyCode::End => 35,
+        KeyCode::PageUp => 33,
+        KeyCode::PageDown => 34,
         KeyCode::Space => 32,
         KeyCode::Escape => 27,
         KeyCode::Enter => 13,
+        // Function keys
+        KeyCode::F1 => 112,
+        KeyCode::F2 => 113,
+        KeyCode::F3 => 114,
+        KeyCode::F4 => 115,
+        KeyCode::F5 => 116,
+        KeyCode::F6 => 117,
+        KeyCode::F7 => 118,
+        KeyCode::F8 => 119,
+        KeyCode::F9 => 120,
+        KeyCode::F10 => 121,
+        KeyCode::F11 => 122,
+        KeyCode::F12 => 123,
+        // Punctuation
+        KeyCode::Minus => 189,
+        KeyCode::Equal => 187,
+        KeyCode::BracketLeft => 219,
+        KeyCode::BracketRight => 221,
+        KeyCode::Backslash => 220,
+        KeyCode::Semicolon => 186,
+        KeyCode::Quote => 222,
+        KeyCode::Comma => 188,
+        KeyCode::Period => 190,
+        KeyCode::Slash => 191,
+        KeyCode::Backquote => 192,
         _ => return None,
     })
 }
@@ -1225,6 +1293,63 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(unsupported_window_mutation(name))
         }
         "rt_winit_get_last_error" => Ok(Value::Str(LAST_ERROR.lock().clone())),
+        "rt_winit_save_pixels_bmp" => {
+            let path = get_string(args, 0, name)?;
+            let width = get_i64(args, 1, name)?.max(1) as u32;
+            let height = get_i64(args, 2, name)?.max(1) as u32;
+            let pixels = get_pixels(args, 3, name)?;
+
+            let row_size = ((width * 3 + 3) / 4) * 4; // BMP rows padded to 4-byte boundary
+            let pixel_data_size = row_size * height;
+            let file_size = 54 + pixel_data_size;
+
+            let mut data = Vec::with_capacity(file_size as usize);
+
+            // BMP file header (14 bytes)
+            data.extend_from_slice(b"BM");
+            data.extend_from_slice(&file_size.to_le_bytes());
+            data.extend_from_slice(&[0u8; 4]); // reserved
+            data.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+
+            // DIB header (BITMAPINFOHEADER, 40 bytes)
+            data.extend_from_slice(&40u32.to_le_bytes()); // header size
+            data.extend_from_slice(&width.to_le_bytes());
+            data.extend_from_slice(&height.to_le_bytes());
+            data.extend_from_slice(&1u16.to_le_bytes()); // planes
+            data.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+            data.extend_from_slice(&0u32.to_le_bytes()); // compression (none)
+            data.extend_from_slice(&pixel_data_size.to_le_bytes());
+            data.extend_from_slice(&2835u32.to_le_bytes()); // h resolution (72 DPI)
+            data.extend_from_slice(&2835u32.to_le_bytes()); // v resolution
+            data.extend_from_slice(&0u32.to_le_bytes()); // colors in palette
+            data.extend_from_slice(&0u32.to_le_bytes()); // important colors
+
+            // Pixel data (bottom-up, BGR)
+            let pad_bytes = (row_size - width * 3) as usize;
+            for y in (0..height).rev() {
+                for x in 0..width {
+                    let idx = (y * width + x) as usize;
+                    let argb = if idx < pixels.len() { pixels[idx] } else { 0 };
+                    let b = (argb & 0xFF) as u8;
+                    let g = ((argb >> 8) & 0xFF) as u8;
+                    let r = ((argb >> 16) & 0xFF) as u8;
+                    data.push(b);
+                    data.push(g);
+                    data.push(r);
+                }
+                for _ in 0..pad_bytes {
+                    data.push(0);
+                }
+            }
+
+            match std::fs::write(&path, &data) {
+                Ok(()) => Ok(bool_value(true)),
+                Err(err) => {
+                    set_last_error(format!("failed to write BMP: {err}"));
+                    Ok(bool_value(false))
+                }
+            }
+        }
         _ => Err(unknown_function(name)),
     }
 }
