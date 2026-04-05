@@ -414,19 +414,21 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    /* Return raw integer (Cranelift codegen uses raw convention) */
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return ENCODE_INT(0);
-    return ENCODE_INT(s->len);
+    if (!s) return 0;
+    return (RuntimeValue)s->len;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    /* idx is raw from codegen; return raw char value */
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t i = DECODE_INT(idx);
-    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)(unsigned char)s->data[i]);
+    int64_t i = (int64_t)idx;  /* raw index */
+    if (!s || i < 0 || (uint32_t)i >= s->len) return 0;
+    return (RuntimeValue)(unsigned char)s->data[i];
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
