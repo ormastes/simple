@@ -1,19 +1,12 @@
-# hosted_wm.spl — SimpleOS Hosted Window Manager (1024x768, 3 windows)
+# hosted_wm_verify.spl — Automated WM Verification via Gemini Vision
 #
-# A full desktop window manager running natively on macOS via winit/softbuffer.
-# Ports the multi-window composition from wm_entry.spl (baremetal) to hosted mode.
-#
-# Uses Rust-side pixel buffer for fast rendering (no interpreter overhead per pixel).
-#
-# Features:
-#   - 1024x768 native window
-#   - System bar (top) + Taskbar with dock icons (bottom)
-#   - 3 app windows: Terminal, Hello World, File Manager
-#   - Z-order management (focused window drawn on top)
-#   - Keyboard: Tab=cycle, 1/2/3=focus window, S=screenshot, Escape/Q=quit
+# Renders the full desktop, saves a screenshot, sends it to Gemini Vision API,
+# and prints the AI's description for verification.
 #
 # Run with:
-#   SIMPLE_GUI=1 bin/simple examples/simple_os/hosted/hosted_wm.spl
+#   SIMPLE_GUI=1 GEMINI_API_KEY=<key> bin/simple examples/simple_os/hosted/hosted_wm_verify.spl
+#
+# Requires: curl, base64 (available on macOS by default)
 
 # ============================================================================
 # FFI Declarations
@@ -23,40 +16,28 @@ extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
 extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
 extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
 extern fn rt_winit_event_free(ev: i64)
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 extern fn rt_thread_sleep(ms: i64)
 
-# Buffer-based rendering (Rust-side pixel buffer — fast)
+# Buffer-based rendering
 extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
 extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
 extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
 extern fn rt_winit_buffer_save_bmp(buf: i64, path: text) -> bool
 extern fn rt_winit_buffer_free(buf: i64) -> bool
 
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text)
+
 # ============================================================================
-# Constants
+# Constants & Colors
 # ============================================================================
 
 val SCREEN_W: i64 = 1024
 val SCREEN_H: i64 = 768
-
-val EVT_CLOSE: i64 = 3
-val EVT_KEYBOARD: i64 = 10
-
-val KEY_TAB: i64 = 9
-val KEY_ESCAPE: i64 = 27
-val KEY_1: i64 = 49
-val KEY_2: i64 = 50
-val KEY_3: i64 = 51
-val KEY_S: i64 = 83
-val KEY_Q: i64 = 81
-
-# ============================================================================
-# Color Palette (Dark theme)
-# ============================================================================
 
 fn c(r: i64, g: i64, b: i64) -> i64:
     (255 << 24) | (r << 16) | (g << 8) | b
@@ -80,17 +61,13 @@ val DOCK_CALC: i64       = c(231, 76, 60)
 val DOCK_CLOCK: i64      = c(243, 156, 18)
 val DOCK_SETTINGS: i64   = c(155, 89, 182)
 
-# ============================================================================
-# Drawing helpers (delegate to Rust buffer)
-# ============================================================================
-
 var g_buf: i64 = 0
 
 fn fill(x: i64, y: i64, w: i64, h: i64, color: i64):
     rt_winit_buffer_fill_rect(g_buf, x, y, w, h, color)
 
 # ============================================================================
-# Desktop Components
+# Desktop Components (identical to hosted_wm.spl)
 # ============================================================================
 
 fn draw_system_bar():
@@ -101,12 +78,10 @@ fn draw_system_bar():
 fn draw_taskbar():
     val bar_y = SCREEN_H - 40
     fill(0, bar_y, SCREEN_W, 40, BAR_BG)
-
     val sz: i64 = 28
     val y = bar_y + 6
     val gap: i64 = 8
     var x: i64 = 12
-
     fill(x, y, sz, sz, DOCK_TERM)
     x = x + sz + gap
     fill(x, y, sz, sz, DOCK_FILES)
@@ -116,19 +91,12 @@ fn draw_taskbar():
     fill(x, y, sz, sz, DOCK_CLOCK)
     x = x + sz + gap
     fill(x, y, sz, sz, DOCK_SETTINGS)
-
-    # Running indicators
     fill(24, bar_y + 36, 4, 3, LIGHT)
     fill(24 + sz + gap, bar_y + 36, 4, 3, LIGHT)
-
-# ============================================================================
-# Window Drawing
-# ============================================================================
 
 fn draw_window(x: i64, y: i64, w: i64, h: i64, active: bool):
     val th: i64 = 28
     val bs: i64 = 14
-
     fill(x - 1, y - 1, w + 2, h + 2, WIN_BORDER)
     if active:
         fill(x, y, w, th, WIN_ACTIVE)
@@ -187,15 +155,10 @@ fn draw_files(x: i64, y: i64, active: bool):
             col_ = col_ + 1
         row = row + 1
 
-# ============================================================================
-# Desktop Composition (Z-order)
-# ============================================================================
-
 fn redraw_desktop(active: i64):
     fill(0, 24, SCREEN_W, SCREEN_H - 64, BG)
     draw_system_bar()
     draw_taskbar()
-
     if active == 0:
         draw_files(520, 320, false)
         draw_hello(320, 140, false)
@@ -210,101 +173,156 @@ fn redraw_desktop(active: i64):
         draw_files(520, 320, true)
 
 # ============================================================================
+# Gemini Vision Verification
+# ============================================================================
+
+fn verify_with_gemini(image_path: text) -> text:
+    val api_key = rt_env_get("GEMINI_API_KEY")
+    if api_key == "":
+        return "ERROR: GEMINI_API_KEY environment variable not set"
+
+    print "  Encoding image to base64..."
+    val (b64_out, b64_err, b64_code) = rt_process_run("base64", ["-i", image_path])
+    if b64_code != 0:
+        return "ERROR: base64 encoding failed: {b64_err}"
+
+    val b64_clean = b64_out.trim()
+    print "  Base64 size: {b64_clean.len()} chars"
+
+    print "  Building Gemini Vision request..."
+    val prompt = "Describe what you see in this window manager screenshot. List all visible windows, UI elements (title bars, buttons, taskbar, dock icons), and notable colors. Be specific about the layout."
+
+    # Build JSON body with inlineData
+    var body_parts: [text] = []
+    body_parts.append("{\"contents\":[{\"role\":\"user\",\"parts\":[")
+    body_parts.append("{\"inlineData\":{\"mimeType\":\"image/bmp\",\"data\":\"")
+    body_parts.append(b64_clean)
+    body_parts.append("\"}},")
+    body_parts.append("{\"text\":\"")
+    body_parts.append(prompt)
+    body_parts.append("\"}]}]}")
+    val body = body_parts.join("")
+
+    # Write body to temp file (too large for command-line arg)
+    val body_path = "/tmp/simpleos_gemini_body.json"
+    rt_file_write_text(body_path, body)
+    print "  Request body written ({body.len()} bytes)"
+
+    print "  Sending to Gemini Vision API (gemini-2.5-flash)..."
+    val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + api_key
+    val (out, err, code) = rt_process_run("curl", ["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", "@" + body_path, url])
+    if code != 0:
+        return "ERROR: curl failed (code={code}): {err}"
+
+    if out.contains("\"error\""):
+        return "API ERROR: {out}"
+
+    # Extract text from Gemini response
+    # Look for "text": "..." or "text":"..."
+    var text_start: i64 = -1
+    val marker1 = "\"text\": \""
+    val marker2 = "\"text\":\""
+    val idx1 = out.find(marker1)
+    val idx2 = out.find(marker2)
+
+    if idx1 >= 0:
+        text_start = idx1 + marker1.len()
+    else if idx2 >= 0:
+        text_start = idx2 + marker2.len()
+    else:
+        return "Could not parse response (no text field): {out}"
+
+    # Find closing quote (handle escaped quotes)
+    var pos = text_start
+    var result_parts: [text] = []
+    var found_end = false
+    while pos < out.len() and not found_end:
+        val ch = out.char_at(pos)
+        if ch == "\\":
+            # Skip escaped character
+            if pos + 1 < out.len():
+                val next = out.char_at(pos + 1)
+                if next == "n":
+                    result_parts.append("\n")
+                else if next == "\"":
+                    result_parts.append("\"")
+                else if next == "\\":
+                    result_parts.append("\\")
+                else:
+                    result_parts.append(next)
+                pos = pos + 2
+            else:
+                pos = pos + 1
+        else if ch == "\"":
+            found_end = true
+        else:
+            result_parts.append(ch)
+            pos = pos + 1
+
+    result_parts.join("")
+
+# ============================================================================
 # Main
 # ============================================================================
 
 fn main() -> i64:
-    print "SimpleOS Window Manager — Hosted ({SCREEN_W}x{SCREEN_H})"
-    print "Controls: Tab=cycle, 1/2/3=focus, S=screenshot, Escape/Q=quit"
+    print "======================================"
+    print "SimpleOS WM — Gemini Vision Verification"
+    print "======================================"
     print ""
 
+    # Step 1: Create window and render desktop
+    print "[1/4] Creating window..."
     val el = rt_winit_event_loop_new()
-    val win = rt_winit_window_new(el, SCREEN_W, SCREEN_H, "SimpleOS Window Manager")
+    val win = rt_winit_window_new(el, SCREEN_W, SCREEN_H, "SimpleOS WM Verify")
     if win == 0:
         print "ERROR: Window creation failed (is SIMPLE_GUI=1 set?)"
         return 1
-    print "Window created: {SCREEN_W}x{SCREEN_H}"
 
-    # Create Rust-side pixel buffer
+    print "[2/4] Rendering desktop with 3 windows..."
     g_buf = rt_winit_buffer_create(SCREEN_W, SCREEN_H, BG)
-    print "Pixel buffer ready"
-
-    # Initial render
-    var active_win: i64 = 1
-    print "Rendering desktop..."
-    redraw_desktop(active_win)
+    redraw_desktop(1)  # Hello World focused
     rt_winit_buffer_present(win, g_buf)
-    print "First frame presented"
 
-    # Save initial screenshot
-    val saved = rt_winit_buffer_save_bmp(g_buf, "/tmp/simpleos_wm.bmp")
-    if saved:
-        print "Screenshot saved: /tmp/simpleos_wm.bmp"
-
-    # Event loop
-    var running = true
-    var frame: i64 = 0
-    var screenshot_count: i64 = 1
-
-    print "Entering event loop..."
-
-    while running:
+    # Pump events so macOS shows the window
+    var pump = 0
+    while pump < 10:
         var ev = rt_winit_event_loop_poll_events(el, 100)
         while ev != 0:
-            val etype = rt_winit_event_get_type(ev)
-
-            if etype == EVT_CLOSE:
-                print "Window close requested"
-                running = false
-
-            else if etype == EVT_KEYBOARD:
-                val (scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
-                if pressed:
-                    if keycode == KEY_TAB:
-                        active_win = (active_win + 1) % 3
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        val names = ["Terminal", "Hello World", "File Manager"]
-                        print "Focus: {names[active_win]}"
-
-                    else if keycode == KEY_1:
-                        active_win = 0
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: Terminal"
-
-                    else if keycode == KEY_2:
-                        active_win = 1
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: Hello World"
-
-                    else if keycode == KEY_3:
-                        active_win = 2
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: File Manager"
-
-                    else if keycode == KEY_S:
-                        screenshot_count = screenshot_count + 1
-                        val path = "/tmp/simpleos_wm_{screenshot_count}.bmp"
-                        val ok = rt_winit_buffer_save_bmp(g_buf, path)
-                        if ok:
-                            print "Screenshot saved: {path}"
-
-                    else if keycode == KEY_ESCAPE or keycode == KEY_Q:
-                        print "Quit requested"
-                        running = false
-
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 100)
+        rt_thread_sleep(50)
+        pump = pump + 1
 
-        frame = frame + 1
-        rt_thread_sleep(33)
+    # Step 2: Save screenshot
+    print "[3/4] Saving screenshot..."
+    val bmp_path = "/tmp/simpleos_wm_verify.bmp"
+    val saved = rt_winit_buffer_save_bmp(g_buf, bmp_path)
+    if saved:
+        print "  Screenshot saved: {bmp_path}"
+    else:
+        print "  ERROR: Failed to save screenshot"
+        rt_winit_buffer_free(g_buf)
+        rt_winit_window_free(win)
+        rt_winit_event_loop_free(el)
+        return 1
+
+    # Step 3: Send to Gemini Vision
+    print "[4/4] Verifying with Gemini Vision API..."
+    val description = verify_with_gemini(bmp_path)
 
     print ""
-    print "Desktop closed after {frame} frames"
+    print "======================================"
+    print "Gemini Vision Description:"
+    print "======================================"
+    print description
+    print "======================================"
+
+    # Cleanup
     rt_winit_buffer_free(g_buf)
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
+
+    print ""
+    print "Verification complete."
     return 0

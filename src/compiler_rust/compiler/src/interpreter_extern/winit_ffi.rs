@@ -43,6 +43,14 @@ static EVENTS: LazyLock<Mutex<HashMap<i64, RuntimeEvent>>> = LazyLock::new(|| Mu
 static WINDOW_STATES: LazyLock<Mutex<HashMap<i64, WindowRuntimeState>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static WINDOW_OWNERS: LazyLock<Mutex<HashMap<i64, i64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+static NEXT_BUFFER_ID: AtomicI64 = AtomicI64::new(1);
+static PIXEL_BUFFERS: LazyLock<Mutex<HashMap<i64, PixelBuffer>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct PixelBuffer {
+    width: u32,
+    height: u32,
+    pixels: Vec<u32>, // ARGB
+}
 
 #[derive(Clone)]
 struct EventLoopHandle {
@@ -1293,6 +1301,155 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             Ok(unsupported_window_mutation(name))
         }
         "rt_winit_get_last_error" => Ok(Value::Str(LAST_ERROR.lock().clone())),
+        // ---- Pixel buffer management (Rust-side, no [i64] crossing FFI) ----
+        "rt_winit_buffer_create" => {
+            // rt_winit_buffer_create(width, height, fill_color) -> buffer_id
+            let width = get_i64(args, 0, name)?.max(1) as u32;
+            let height = get_i64(args, 1, name)?.max(1) as u32;
+            let color = get_i64(args, 2, name)? as u32;
+            let id = NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
+            let buf = PixelBuffer {
+                width,
+                height,
+                pixels: vec![color; (width * height) as usize],
+            };
+            PIXEL_BUFFERS.lock().insert(id, buf);
+            Ok(int_value(id))
+        }
+        "rt_winit_buffer_fill_rect" => {
+            // rt_winit_buffer_fill_rect(buffer_id, x, y, w, h, color) -> bool
+            let buf_id = get_i64(args, 0, name)?;
+            let x = get_i64(args, 1, name)?;
+            let y = get_i64(args, 2, name)?;
+            let w = get_i64(args, 3, name)?;
+            let h = get_i64(args, 4, name)?;
+            let color = get_i64(args, 5, name)? as u32;
+            let mut bufs = PIXEL_BUFFERS.lock();
+            if let Some(buf) = bufs.get_mut(&buf_id) {
+                let sw = buf.width as i64;
+                let sh = buf.height as i64;
+                for row in 0..h {
+                    let py = y + row;
+                    if py < 0 || py >= sh { continue; }
+                    for col in 0..w {
+                        let px = x + col;
+                        if px < 0 || px >= sw { continue; }
+                        buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
+                    }
+                }
+                Ok(bool_value(true))
+            } else {
+                set_last_error(format!("invalid buffer handle: {buf_id}"));
+                Ok(bool_value(false))
+            }
+        }
+        "rt_winit_buffer_present" => {
+            // rt_winit_buffer_present(window_id, buffer_id) -> bool
+            let window_id = get_i64(args, 0, name)?;
+            let buf_id = get_i64(args, 1, name)?;
+            let (width, height, pixels) = {
+                let bufs = PIXEL_BUFFERS.lock();
+                if let Some(buf) = bufs.get(&buf_id) {
+                    (buf.width, buf.height, buf.pixels.clone())
+                } else {
+                    set_last_error(format!("invalid buffer handle: {buf_id}"));
+                    return Ok(bool_value(false));
+                }
+            };
+            let event_loop_id = WINDOW_OWNERS.lock().get(&window_id).copied();
+            if let Some(el_id) = event_loop_id {
+                let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+                {
+                    if let Some(handle) = EVENT_LOOPS.lock().get(&el_id) {
+                        handle
+                            .command_tx
+                            .send(RuntimeCommand::Present {
+                                window_id,
+                                width,
+                                height,
+                                pixels,
+                                response: response_tx,
+                            })
+                            .map_err(|err| runtime_error(format!("failed to send present: {err}")))?;
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                for _ in 0..50 {
+                    macos_pump(el_id);
+                    if let Ok(result) = response_rx.try_recv() {
+                        return match result {
+                            Ok(()) => Ok(bool_value(true)),
+                            Err(err) => { set_last_error(err); Ok(bool_value(false)) }
+                        };
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(Ok(())) => Ok(bool_value(true)),
+                    Ok(Err(err)) => { set_last_error(err); Ok(bool_value(false)) }
+                    Err(err) => Err(runtime_error(format!("present response timeout: {err}"))),
+                };
+            }
+            set_last_error(format!("invalid window handle: {window_id}"));
+            Ok(bool_value(false))
+        }
+        "rt_winit_buffer_save_bmp" => {
+            // rt_winit_buffer_save_bmp(buffer_id, path) -> bool
+            let buf_id = get_i64(args, 0, name)?;
+            let path = get_string(args, 1, name)?;
+            let bufs = PIXEL_BUFFERS.lock();
+            if let Some(buf) = bufs.get(&buf_id) {
+                let width = buf.width;
+                let height = buf.height;
+                let row_size = ((width * 3 + 3) / 4) * 4;
+                let pixel_data_size = row_size * height;
+                let file_size = 54 + pixel_data_size;
+                let mut data = Vec::with_capacity(file_size as usize);
+
+                // BMP file header
+                data.extend_from_slice(b"BM");
+                data.extend_from_slice(&file_size.to_le_bytes());
+                data.extend_from_slice(&[0u8; 4]);
+                data.extend_from_slice(&54u32.to_le_bytes());
+                // DIB header
+                data.extend_from_slice(&40u32.to_le_bytes());
+                data.extend_from_slice(&width.to_le_bytes());
+                data.extend_from_slice(&height.to_le_bytes());
+                data.extend_from_slice(&1u16.to_le_bytes());
+                data.extend_from_slice(&24u16.to_le_bytes());
+                data.extend_from_slice(&0u32.to_le_bytes());
+                data.extend_from_slice(&pixel_data_size.to_le_bytes());
+                data.extend_from_slice(&2835u32.to_le_bytes());
+                data.extend_from_slice(&2835u32.to_le_bytes());
+                data.extend_from_slice(&0u32.to_le_bytes());
+                data.extend_from_slice(&0u32.to_le_bytes());
+
+                let pad_bytes = (row_size - width * 3) as usize;
+                for y in (0..height).rev() {
+                    for x in 0..width {
+                        let argb = buf.pixels[(y * width + x) as usize];
+                        data.push((argb & 0xFF) as u8);
+                        data.push(((argb >> 8) & 0xFF) as u8);
+                        data.push(((argb >> 16) & 0xFF) as u8);
+                    }
+                    for _ in 0..pad_bytes { data.push(0); }
+                }
+
+                match std::fs::write(&path, &data) {
+                    Ok(()) => Ok(bool_value(true)),
+                    Err(err) => { set_last_error(format!("BMP write failed: {err}")); Ok(bool_value(false)) }
+                }
+            } else {
+                set_last_error(format!("invalid buffer handle: {buf_id}"));
+                Ok(bool_value(false))
+            }
+        }
+        "rt_winit_buffer_free" => {
+            // rt_winit_buffer_free(buffer_id)
+            let buf_id = get_i64(args, 0, name)?;
+            PIXEL_BUFFERS.lock().remove(&buf_id);
+            Ok(bool_value(true))
+        }
         "rt_winit_save_pixels_bmp" => {
             let path = get_string(args, 0, name)?;
             let width = get_i64(args, 1, name)?.max(1) as u32;
