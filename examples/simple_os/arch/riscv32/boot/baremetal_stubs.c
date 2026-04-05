@@ -843,9 +843,9 @@ RuntimeValue rt_enum_discriminant(RuntimeValue value)
 
 RuntimeValue rt_enum_payload(RuntimeValue value)
 {
-    if (!IS_HEAP(value)) return NIL_VALUE;
+    if (!IS_HEAP(value)) return value;
     RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
-    if (!e || e->header.type != HEAP_TYPE_ENUM) return NIL_VALUE;
+    if (!e || e->header.type != HEAP_TYPE_ENUM) return value;
     return e->payload;
 }
 

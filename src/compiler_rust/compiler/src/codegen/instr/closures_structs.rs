@@ -193,21 +193,47 @@ pub(crate) fn compile_method_call_static<M: Module>(
     }
 
     // Try to find the function - check multiple patterns
-    // 1. Exact match (func_name)
+    // 1. Exact match (func_name or sanitized variant with _dot_)
     // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
-    let func_id = ctx.func_ids.get(func_name).copied().or_else(|| {
-        // Search for a function ending with ".func_name" (e.g., "ArgParser.parse")
-        // On macOS, dots are sanitized to "_dot_", so also try that variant.
-        // When multiple matches exist, pick the shortest name (most specific) for
-        // deterministic output regardless of HashMap iteration order.
-        let dot_suffix = format!(".{}", func_name);
-        let underscore_suffix = format!("_dot_{}", func_name);
-        ctx.func_ids
-            .iter()
-            .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
-            .min_by_key(|(k, _)| k.len())
-            .map(|(_, &v)| v)
-    });
+    let sanitized_name = func_name.replace('.', "_dot_");
+    let func_id = ctx.func_ids.get(func_name).copied()
+        .or_else(|| ctx.func_ids.get(&sanitized_name).copied())
+        .or_else(|| {
+            // Search for a function ending with ".func_name" or "_dot_func_name"
+            // If func_name is already qualified (contains '.'), extract the method part only
+            let method_part = func_name.rsplit('.').next().unwrap_or(func_name);
+            let dot_suffix = format!(".{}", method_part);
+            let underscore_suffix = format!("_dot_{}", method_part);
+
+            // If we have a type qualifier (e.g., "VirtioGpuDriver.init_from_grant"),
+            // prefer functions whose full path contains the type name
+            let type_qualifier = if func_name.contains('.') {
+                func_name.split('.').next()
+            } else {
+                None
+            };
+
+            let candidates: Vec<_> = ctx.func_ids
+                .iter()
+                .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
+                .collect();
+
+            if let Some(tq) = type_qualifier {
+                // Prefer candidate whose name contains the type qualifier
+                let tq_dot = format!("{}_dot_", tq);
+                let tq_dunder = format!("__{}", tq);
+                if let Some((_, &v)) = candidates.iter()
+                    .find(|(k, _)| k.contains(&tq_dot) || k.contains(&tq_dunder) || k.contains(tq))
+                {
+                    return Some(v);
+                }
+            }
+
+            // Fallback: pick shortest name (most specific)
+            candidates.iter()
+                .min_by_key(|(k, _)| k.len())
+                .map(|(_, v)| **v)
+        });
 
     if let Some(func_id) = func_id {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
