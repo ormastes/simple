@@ -3075,30 +3075,80 @@ fn mangle_mir(
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {
                             *func_name = mangled.clone();
-                        } else if let Some(resolved) = use_map
-                            .get(func_name.as_str())
-                            .or_else(|| import_map.get(func_name.as_str()))
-                        {
+                        } else if let Some(resolved) = use_map.get(func_name.as_str()) {
                             *func_name = resolved.clone();
-                        } else if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
+                        } else {
+                            // For MethodCallStatic: before import_map fallback (which picks
+                            // alphabetically first for ambiguous names), check if use_map has
+                            // "TypeName.method" for any imported type. This resolves ambiguous
+                            // methods like init_from_grant to the correct imported type.
+                            let method_part = func_name.as_str();
+                            let mut use_resolved = None;
+                            for (raw, mangled) in use_map.iter() {
+                                if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
+                                    use_resolved = Some(mangled.clone());
+                                    break;
+                                }
+                            }
+                            if let Some(resolved) = use_resolved {
+                                *func_name = resolved;
+                            } else if let Some(resolved) = import_map.get(func_name.as_str()) {
+                                *func_name = resolved.clone();
+                            }
+                        }
+                        if !known_mangled.contains(func_name.as_str()) && !is_runtime_or_builtin(func_name) {
+                          if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
                             *func_name = resolved;
                         } else {
                             // Extract method part: "Type.method" → try "method" in suffix indexes
                             let method = func_name.rsplit('.').next().unwrap_or(func_name);
                             let type_part = func_name.split('.').next().unwrap_or("");
+                            let has_type_qualifier = func_name.contains('.');
                             let type_part_lower = type_part.to_lowercase();
                             let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
                             if let Some(candidates) = candidates {
-                                let best = candidates
-                                    .iter()
-                                    .find(|c| c.to_lowercase().contains(&type_part_lower))
-                                    .or_else(|| {
-                                        if candidates.len() == 1 {
-                                            candidates.first()
-                                        } else {
-                                            None
+                                let best = if has_type_qualifier {
+                                    // Qualified: prefer candidate containing the type name
+                                    candidates
+                                        .iter()
+                                        .find(|c| c.to_lowercase().contains(&type_part_lower))
+                                } else {
+                                    // Unqualified: check use_map for "TypeName.method" entries
+                                    // that map to one of the candidates (prefer imported types)
+                                    let mut use_match: Option<&String> = None;
+                                    for (raw, mangled) in use_map.iter() {
+                                        // Check if use_map has "SomeType.method" → candidate
+                                        if raw.ends_with(&format!(".{}", method)) {
+                                            if let Some(c) = candidates.iter().find(|c| *c == mangled) {
+                                                use_match = Some(c);
+                                                break;
+                                            }
                                         }
-                                    });
+                                    }
+                                    // Also check import_map for qualified names
+                                    if use_match.is_none() {
+                                        for (raw, mangled) in import_map.iter() {
+                                            if raw.ends_with(&format!(".{}", method)) && raw != method {
+                                                if let Some(c) = candidates.iter().find(|c| *c == mangled) {
+                                                    // Check if the raw name's type is in use_map
+                                                    let raw_type = raw.split('.').next().unwrap_or("");
+                                                    if use_map.contains_key(raw_type) {
+                                                        use_match = Some(c);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    use_match
+                                };
+                                let best = best.or_else(|| {
+                                    if candidates.len() == 1 {
+                                        candidates.first()
+                                    } else {
+                                        None
+                                    }
+                                });
                                 if let Some(b) = best {
                                     *func_name = b.clone();
                                 }
@@ -3108,6 +3158,7 @@ fn mangle_mir(
                                 *func_name = resolved;
                             }
                         }
+                        } // end if !known_mangled
                     }
                     _ => {}
                 }
@@ -4077,6 +4128,17 @@ fn collect_use_imports(
         simple_parser::ast::ImportTarget::Single(name) => {
             if let Some(mangled) = resolve_import_name(name, &segments, all_mangled, re_exports) {
                 use_map.insert(name.clone(), mangled);
+            }
+            // Also import impl methods: "TypeName.method" entries for this type
+            // This enables correct cross-module method resolution when multiple
+            // types have methods with the same name (e.g., init_from_grant)
+            let prefix = format!("{}.", name);
+            for (raw_name, _candidates) in all_mangled.iter() {
+                if raw_name.starts_with(&prefix) {
+                    if let Some(mangled) = resolve_import_name(raw_name, &segments, all_mangled, re_exports) {
+                        use_map.insert(raw_name.clone(), mangled);
+                    }
+                }
             }
         }
         simple_parser::ast::ImportTarget::Aliased { name, alias } => {
