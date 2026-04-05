@@ -673,6 +673,13 @@ const COMMAND_TABLE: &[CommandEntry] = &[
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // macOS GUI mode: run on main thread (Cocoa requires EventLoop on main thread).
+    // Set SIMPLE_GUI=1 when running GUI apps that need native windows.
+    if std::env::var("SIMPLE_GUI").is_ok() {
+        real_main();
+        return;
+    }
+
     // Ensure generous stack size for deep recursive module loading chains.
     // Default is 8 MB which can overflow with deeply nested imports.
     // Spawn the real main on a 32 MB stack thread if RUST_MIN_STACK is not already set.
