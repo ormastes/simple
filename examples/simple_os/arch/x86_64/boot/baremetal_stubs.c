@@ -260,21 +260,27 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
+    /* compile_struct_init passes RAW size (not tagged): iconst.i64 16
+     * Return RAW pointer — codegen uses it directly for store(val, ptr, offset).
+     * Other runtime functions that need heap pointers use ENCODE_PTR themselves. */
+    size_t bytes = (size_t)sz;
+    if (bytes == 0) return 0;
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
-    if (!p) return NIL_VALUE;
-    return ENCODE_PTR(p);
+    if (!p) return 0;
+    __builtin_memset(p, 0, bytes);  /* zero to avoid garbage in uninitialized fields */
+    return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
+    size_t bytes = (size_t)sz;
+    if (bytes == 0) return 0;
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
-    if (!p) return NIL_VALUE;
+    if (!p) return 0;
     __builtin_memset(p, 0, bytes);
-    return ENCODE_PTR(p);
+    return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
