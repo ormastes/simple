@@ -423,10 +423,10 @@ RuntimeValue rt_string_len(RuntimeValue str)
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    /* idx is raw from codegen; return raw char value */
+    /* MIR lowering inserts BoxInt on indices, so idx is tagged. Return raw char. */
     if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int64_t i = (int64_t)idx;  /* raw index */
+    int64_t i = DECODE_INT(idx);
     if (!s || i < 0 || (uint32_t)i >= s->len) return 0;
     return (RuntimeValue)(unsigned char)s->data[i];
 }
@@ -586,8 +586,9 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
         return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
-        /* idx is raw from Cranelift codegen (no DECODE_INT needed) */
-        int64_t i = (int64_t)idx;
+        /* MIR lowering inserts BoxInt on indices (lowering_stmt.rs:866),
+         * so idx arrives tagged (value << 3). DECODE_INT to get raw index. */
+        int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
