@@ -181,8 +181,15 @@ fn verify_with_gemini(image_path: text) -> text:
     if api_key == "":
         return "ERROR: GEMINI_API_KEY environment variable not set"
 
-    print "  Encoding image to base64..."
-    val (b64_out, b64_err, b64_code) = rt_process_run("base64", ["-i", image_path])
+    # Convert BMP to PNG (smaller, universally supported)
+    val png_path = image_path + ".png"
+    print "  Converting BMP to PNG..."
+    val (sips_out, sips_err, sips_code) = rt_process_run("sips", ["-s", "format", "png", image_path, "--out", png_path])
+    if sips_code != 0:
+        return "ERROR: BMP to PNG conversion failed: {sips_err}"
+
+    print "  Encoding PNG to base64..."
+    val (b64_out, b64_err, b64_code) = rt_process_run("sh", ["-c", "base64 -i " + png_path + " | tr -d '\\n'"])
     if b64_code != 0:
         return "ERROR: base64 encoding failed: {b64_err}"
 
@@ -193,14 +200,17 @@ fn verify_with_gemini(image_path: text) -> text:
     val prompt = "Describe what you see in this window manager screenshot. List all visible windows, UI elements (title bars, buttons, taskbar, dock icons), and notable colors. Be specific about the layout."
 
     # Build JSON body with inlineData
+    # Note: in Simple, {{ and }} are escapes for literal { and } in interpolated strings
+    val RB = "}"
+    val LB = "{"
     var body_parts: [text] = []
-    body_parts.append("{\"contents\":[{\"role\":\"user\",\"parts\":[")
-    body_parts.append("{\"inlineData\":{\"mimeType\":\"image/bmp\",\"data\":\"")
+    body_parts.append(LB + "\"contents\":[" + LB + "\"role\":\"user\",\"parts\":[")
+    body_parts.append(LB + "\"inlineData\":" + LB + "\"mimeType\":\"image/png\",\"data\":\"")
     body_parts.append(b64_clean)
-    body_parts.append("\"}},")
-    body_parts.append("{\"text\":\"")
+    body_parts.append("\"" + RB + RB + ",")
+    body_parts.append(LB + "\"text\":\"")
     body_parts.append(prompt)
-    body_parts.append("\"}]}]}")
+    body_parts.append("\"" + RB + "]" + RB + "]" + RB)
     val body = body_parts.join("")
 
     # Write body to temp file (too large for command-line arg)
@@ -214,52 +224,9 @@ fn verify_with_gemini(image_path: text) -> text:
     if code != 0:
         return "ERROR: curl failed (code={code}): {err}"
 
-    if out.contains("\"error\""):
-        return "API ERROR: {out}"
-
-    # Extract text from Gemini response
-    # Look for "text": "..." or "text":"..."
-    var text_start: i64 = -1
-    val marker1 = "\"text\": \""
-    val marker2 = "\"text\":\""
-    val idx1 = out.find(marker1)
-    val idx2 = out.find(marker2)
-
-    if idx1 >= 0:
-        text_start = idx1 + marker1.len()
-    else if idx2 >= 0:
-        text_start = idx2 + marker2.len()
-    else:
-        return "Could not parse response (no text field): {out}"
-
-    # Find closing quote (handle escaped quotes)
-    var pos = text_start
-    var result_parts: [text] = []
-    var found_end = false
-    while pos < out.len() and not found_end:
-        val ch = out.char_at(pos)
-        if ch == "\\":
-            # Skip escaped character
-            if pos + 1 < out.len():
-                val next = out.char_at(pos + 1)
-                if next == "n":
-                    result_parts.append("\n")
-                else if next == "\"":
-                    result_parts.append("\"")
-                else if next == "\\":
-                    result_parts.append("\\")
-                else:
-                    result_parts.append(next)
-                pos = pos + 2
-            else:
-                pos = pos + 1
-        else if ch == "\"":
-            found_end = true
-        else:
-            result_parts.append(ch)
-            pos = pos + 1
-
-    result_parts.join("")
+    # Just return the raw response for inspection
+    # (Simple's string processing is limited in the interpreter)
+    out
 
 # ============================================================================
 # Main

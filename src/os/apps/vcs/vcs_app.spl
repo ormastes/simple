@@ -1,0 +1,225 @@
+# SimpleOS VCS — Version Control System Application
+#
+# A simplified file-level VCS for SimpleOS.
+# Designed to run on baremetal SimpleOS with VFS file I/O.
+#
+# Commands:
+#   vcs init                  — Initialize a new repository
+#   vcs add <file>            — Stage a file for commit
+#   vcs commit -m "message"   — Create a snapshot of staged files
+#   vcs log                   — Show commit history
+#   vcs status                — Show modified/staged/untracked files
+#   vcs diff <file>           — Show line-by-line diff of a file vs last commit
+#   vcs checkout <hash>       — Restore files from a commit
+#
+# Storage: .vcs/ directory in the working directory
+
+# ============================================================================
+# VCS Core Data Structures
+# ============================================================================
+
+struct VcsCommit:
+    """A single commit snapshot."""
+    hash: text        # Simple hash (timestamp-based)
+    parent: text      # Parent commit hash ("" for root)
+    message: text     # Commit message
+    timestamp: text   # ISO-like timestamp
+    files: [text]     # List of file paths in this commit
+
+struct VcsStatus:
+    """Working directory status."""
+    staged: [text]     # Files staged for commit
+    modified: [text]   # Files modified since last commit
+    untracked: [text]  # Files not tracked
+
+struct VcsDiffLine:
+    """A single diff line."""
+    kind: text   # "+" (added), "-" (removed), " " (context)
+    content: text
+
+struct VcsRepo:
+    """Repository state."""
+    root: text        # Working directory root
+    vcs_dir: text     # .vcs directory path
+    head: text        # Current HEAD commit hash
+
+# ============================================================================
+# VCS Operations (Pure functions — VFS I/O via callbacks)
+# ============================================================================
+
+# Initialize a new VCS repository
+fn vcs_init(root: text) -> VcsRepo:
+    """Initialize .vcs/ directory structure."""
+    val vcs_dir = root + "/.vcs"
+    VcsRepo(
+        root: root,
+        vcs_dir: vcs_dir,
+        head: ""
+    )
+
+# Directories needed for a repo
+fn vcs_required_dirs(repo: VcsRepo) -> [text]:
+    [
+        repo.vcs_dir,
+        repo.vcs_dir + "/commits",
+        repo.vcs_dir + "/staging",
+        repo.vcs_dir + "/objects"
+    ]
+
+# Generate a simple hash from message + timestamp
+fn vcs_hash(message: text, timestamp: text) -> text:
+    """Simple hash: first 8 chars of a deterministic string."""
+    # Simple hash: sum of char codes mod large prime, formatted as hex-like
+    var h: i64 = 5381
+    var i: i64 = 0
+    val combined = timestamp + ":" + message
+    while i < combined.len():
+        val ch = combined.char_at(i)
+        # djb2-like hash
+        h = ((h * 33) + ch.len()) % 999999937
+        i = i + 1
+    # Format as 8-char hex-like string
+    var result = ""
+    var val_ = h
+    if val_ < 0:
+        val_ = val_ * -1
+    var digits = 0
+    while digits < 8:
+        val d = val_ % 16
+        if d < 10:
+            result = d.to_text() + result
+        else if d == 10:
+            result = "a" + result
+        else if d == 11:
+            result = "b" + result
+        else if d == 12:
+            result = "c" + result
+        else if d == 13:
+            result = "d" + result
+        else if d == 14:
+            result = "e" + result
+        else:
+            result = "f" + result
+        val_ = val_ / 16
+        digits = digits + 1
+    result
+
+# Build commit metadata as text (serialized format)
+fn vcs_serialize_commit(commit: VcsCommit) -> text:
+    """Serialize commit to text for storage."""
+    var lines: [text] = []
+    lines.append("hash: " + commit.hash)
+    lines.append("parent: " + commit.parent)
+    lines.append("message: " + commit.message)
+    lines.append("timestamp: " + commit.timestamp)
+    lines.append("files:")
+    for f in commit.files:
+        lines.append("  " + f)
+    lines.join("\n")
+
+# Parse commit from serialized text
+fn vcs_parse_commit(data: text) -> VcsCommit:
+    """Parse commit from stored text."""
+    var hash = ""
+    var parent = ""
+    var message = ""
+    var timestamp = ""
+    var files: [text] = []
+    val lines = data.split("\n")
+    for line in lines:
+        if line.starts_with("hash: "):
+            hash = line.slice(6, line.len())
+        else if line.starts_with("parent: "):
+            parent = line.slice(8, line.len())
+        else if line.starts_with("message: "):
+            message = line.slice(9, line.len())
+        else if line.starts_with("timestamp: "):
+            timestamp = line.slice(11, line.len())
+        else if line.starts_with("  "):
+            val fname = line.trim()
+            if fname.len() > 0:
+                files.append(fname)
+    VcsCommit(hash: hash, parent: parent, message: message, timestamp: timestamp, files: files)
+
+# Compute a simple line-by-line diff
+fn vcs_diff_lines(old_text: text, new_text: text) -> [VcsDiffLine]:
+    """Simple line diff: show removed lines then added lines."""
+    val old_lines = old_text.split("\n")
+    val new_lines = new_text.split("\n")
+    var result: [VcsDiffLine] = []
+
+    # Simple diff: compare line by line
+    var max_len = old_lines.len()
+    if new_lines.len() > max_len:
+        max_len = new_lines.len()
+
+    var i: i64 = 0
+    while i < max_len:
+        if i < old_lines.len() and i < new_lines.len():
+            if old_lines[i] == new_lines[i]:
+                result.append(VcsDiffLine(kind: " ", content: old_lines[i]))
+            else:
+                result.append(VcsDiffLine(kind: "-", content: old_lines[i]))
+                result.append(VcsDiffLine(kind: "+", content: new_lines[i]))
+        else if i < old_lines.len():
+            result.append(VcsDiffLine(kind: "-", content: old_lines[i]))
+        else if i < new_lines.len():
+            result.append(VcsDiffLine(kind: "+", content: new_lines[i]))
+        i = i + 1
+    result
+
+# Format diff output for display
+fn vcs_format_diff(file: text, diff: [VcsDiffLine]) -> text:
+    """Format diff lines for terminal display."""
+    var lines: [text] = []
+    lines.append("--- a/" + file)
+    lines.append("+++ b/" + file)
+    for d in diff:
+        lines.append(d.kind + d.content)
+    lines.join("\n")
+
+# ============================================================================
+# VCS CLI Interface (for shell integration)
+# ============================================================================
+
+struct VcsCommand:
+    """Parsed VCS command."""
+    action: text       # init, add, commit, log, status, diff, checkout
+    args: [text]       # Positional arguments
+    message: text      # -m "message" for commit
+
+fn vcs_parse_args(args: [text]) -> VcsCommand:
+    """Parse VCS CLI arguments."""
+    var action = ""
+    var positional: [text] = []
+    var message = ""
+
+    if args.len() > 0:
+        action = args[0]
+
+    var i: i64 = 1
+    while i < args.len():
+        if args[i] == "-m" and i + 1 < args.len():
+            message = args[i + 1]
+            i = i + 2
+        else:
+            positional.append(args[i])
+            i = i + 1
+
+    VcsCommand(action: action, args: positional, message: message)
+
+fn vcs_help() -> text:
+    """Return help text."""
+    var lines: [text] = []
+    lines.append("SimpleOS VCS — Version Control System")
+    lines.append("")
+    lines.append("Commands:")
+    lines.append("  vcs init                  Initialize a new repository")
+    lines.append("  vcs add <file>            Stage a file for commit")
+    lines.append("  vcs commit -m \"message\"   Create a commit")
+    lines.append("  vcs log                   Show commit history")
+    lines.append("  vcs status                Show working directory status")
+    lines.append("  vcs diff <file>           Show file diff vs last commit")
+    lines.append("  vcs checkout <hash>       Restore files from a commit")
+    lines.append("  vcs help                  Show this help")
+    lines.join("\n")

@@ -676,18 +676,22 @@ fn handle_command(
         } => {
             let result = if let Some(window_state) = state.windows.get_mut(&window_id) {
                 (|| -> Result<(), String> {
-                    let nz_width = NonZeroU32::new(width.max(1)).unwrap();
-                    let nz_height = NonZeroU32::new(height.max(1)).unwrap();
-                    if window_state.width != width || window_state.height != height {
+                    // Use the actual window size for the surface, not the pixel buffer size
+                    let win_size = window_state.window.inner_size();
+                    let surf_w = win_size.width.max(1);
+                    let surf_h = win_size.height.max(1);
+                    let nz_sw = NonZeroU32::new(surf_w).unwrap();
+                    let nz_sh = NonZeroU32::new(surf_h).unwrap();
+                    if window_state.width != surf_w || window_state.height != surf_h {
                         window_state
                             .surface
-                            .resize(nz_width, nz_height)
+                            .resize(nz_sw, nz_sh)
                             .map_err(|err| format!("failed to resize surface: {err:?}"))?;
-                        window_state.width = width;
-                        window_state.height = height;
+                        window_state.width = surf_w;
+                        window_state.height = surf_h;
                         if let Some(runtime) = WINDOW_STATES.lock().get_mut(&window_id) {
-                            runtime.width = width;
-                            runtime.height = height;
+                            runtime.width = surf_w;
+                            runtime.height = surf_h;
                         }
                     }
 
@@ -695,15 +699,27 @@ fn handle_command(
                         .surface
                         .buffer_mut()
                         .map_err(|err| format!("failed to map backbuffer: {err:?}"))?;
-                    if buffer.len() != pixels.len() {
-                        return Err(format!(
-                            "pixel buffer length mismatch: expected {}, got {}",
-                            buffer.len(),
-                            pixels.len()
-                        ));
-                    }
-                    for (dst, src) in buffer.iter_mut().zip(pixels.iter()) {
-                        *dst = *src;
+
+                    // If pixel buffer matches surface, direct copy
+                    if buffer.len() == pixels.len() {
+                        for (dst, src) in buffer.iter_mut().zip(pixels.iter()) {
+                            *dst = *src;
+                        }
+                    } else {
+                        // Nearest-neighbor upscale from (width x height) to (surf_w x surf_h)
+                        let src_w = width as usize;
+                        let src_h = height as usize;
+                        let dst_w = surf_w as usize;
+                        let dst_h = surf_h as usize;
+                        if pixels.len() == src_w * src_h {
+                            for dy in 0..dst_h {
+                                let sy = dy * src_h / dst_h;
+                                for dx in 0..dst_w {
+                                    let sx = dx * src_w / dst_w;
+                                    buffer[dy * dst_w + dx] = pixels[sy * src_w + sx];
+                                }
+                            }
+                        }
                     }
                     buffer
                         .present()
@@ -862,6 +878,17 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
         "rt_winit_event_loop_free" => {
             let id = get_i64(args, 0, name)?;
+            // Clean up macOS pump state BEFORE removing the event loop handle
+            // to avoid "tried to run event handler, but no handler was set" warning
+            #[cfg(target_os = "macos")]
+            MACOS_PUMP.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                if let Some(ps) = borrow.as_ref() {
+                    if ps.event_loop_id == id {
+                        *borrow = None;
+                    }
+                }
+            });
             if let Some(handle) = EVENT_LOOPS.lock().remove(&id) {
                 let _ = handle.command_tx.send(RuntimeCommand::Exit);
             }

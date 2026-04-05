@@ -1,0 +1,102 @@
+# SimpleOS Hosted Desktop Entry Point
+#
+# Runs the full SimpleOS desktop environment (compositor + shell + apps)
+# natively on macOS, Linux, Windows, and FreeBSD using winit+softbuffer.
+#
+# The hosted backend shares the same CompositorBackend trait as baremetal,
+# so all apps, widgets, and window management work identically.
+#
+# Run with:
+#   SIMPLE_GUI=1 bin/simple src/os/hosted/hosted_entry.spl
+#
+# Or with timeout:
+#   SIMPLE_GUI=1 SIMPLE_TIMEOUT_SECONDS=300 bin/simple src/os/hosted/hosted_entry.spl
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+
+use os.compositor.hosted_backend.{HostedCompositorBackend}
+use os.compositor.hosted_input_backend.{HostedInputBackend}
+use os.compositor.compositor.{Compositor}
+use os.desktop.shell.{DesktopShell}
+
+extern fn serial_println(msg: text)
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val WINDOW_WIDTH: i64 = 640
+val WINDOW_HEIGHT: i64 = 480
+val WINDOW_TITLE: text = "SimpleOS Desktop"
+val BG_COLOR: i64 = 0xFF1A1B2E   # Dark navy (ARGB)
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    print "SimpleOS Hosted Desktop ({WINDOW_WIDTH}x{WINDOW_HEIGHT})"
+    print "Platform: macOS / Linux / Windows / FreeBSD (auto-detected by winit)"
+    print ""
+
+    # --- Step 1: Create winit event loop and window ---
+    print "[hosted] Creating event loop..."
+    val el = rt_winit_event_loop_new()
+
+    print "[hosted] Creating window ({WINDOW_WIDTH}x{WINDOW_HEIGHT})..."
+    val win = rt_winit_window_new(el, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+    if win == 0:
+        print "ERROR: Window creation failed"
+        print "Make sure SIMPLE_GUI=1 is set in your environment"
+        return 1
+
+    # --- Step 2: Create native pixel buffer ---
+    print "[hosted] Creating pixel buffer..."
+    val buf = rt_winit_buffer_create(WINDOW_WIDTH, WINDOW_HEIGHT, BG_COLOR)
+    if buf == 0:
+        print "ERROR: Buffer creation failed"
+        return 1
+
+    # --- Step 3: Create backends ---
+    print "[hosted] Initializing display backend..."
+    val w32 = WINDOW_WIDTH.to_i32()
+    val h32 = WINDOW_HEIGHT.to_i32()
+    var backend = HostedCompositorBackend.create(win, w32, h32, BG_COLOR.to_u32())
+
+    print "[hosted] Initializing input backend..."
+    var input = HostedInputBackend.create(el)
+
+    # --- Step 4: Create compositor ---
+    print "[hosted] Creating compositor..."
+    var compositor = Compositor.with_backends(backend, input, w32, h32)
+
+    # --- Step 5: Create desktop shell ---
+    print "[hosted] Creating desktop shell..."
+    var shell = DesktopShell.new(compositor)
+    shell.init()
+
+    # --- Step 6: Launch default app ---
+    print "[hosted] Launching Terminal..."
+    shell.launch_app("Terminal")
+
+    # --- Step 7: Enter event loop ---
+    print "[hosted] Desktop ready!"
+    print "[hosted] Keyboard shortcuts:"
+    print "  Alt+Tab     = cycle windows"
+    print "  Alt+F4      = close focused window"
+    print "  Ctrl+Alt+H  = launch Hello World"
+    print "  Ctrl+Alt+T  = launch Terminal"
+    print "  Escape      = quit"
+    print ""
+
+    shell.run()
+
+    # --- Cleanup ---
+    print "[hosted] Desktop exited"
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+    return 0

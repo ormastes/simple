@@ -20,6 +20,8 @@ use os.compositor.decorations.{draw_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH
 use os.compositor.cursor.{CursorState, default_cursor_state, draw_cursor}
 use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
+use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
+use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 
 # ============================================================================
 # Window Surface
@@ -71,11 +73,10 @@ class Compositor:
     """
     surfaces: [WindowSurface]
     focused_idx: i32
-    fb: FramebufferDriver
-    keyboard: Ps2Keyboard
-    mouse: Ps2Mouse
+    backend: CompositorBackend
+    input: InputBackend
     cursor: CursorState
-    desktop_bg: Color
+    desktop_bg: u32
     next_id: u64
     screen_width: i32
     screen_height: i32
@@ -92,9 +93,22 @@ class Compositor:
 impl Compositor:
 
     static fn new(fb: FramebufferDriver, keyboard: Ps2Keyboard, mouse: Ps2Mouse) -> Compositor:
-        """Create a new compositor with the given framebuffer, keyboard, and mouse."""
+        """Create a compositor with baremetal framebuffer and PS/2 input.
+
+        Wraps the concrete drivers in CompositorBackend + InputBackend
+        traits so the compositor uses a single rendering/input path.
+        """
         val sw = fb.width.to_i32()
         val sh = fb.height.to_i32()
+        val cb = FbCompositorBackend.new(fb)
+        val ib = Ps2InputBackend.create(keyboard, mouse)
+        Compositor.with_backends(cb, ib, sw, sh)
+
+    static fn with_backends(b: CompositorBackend, i: InputBackend, sw: i32, sh: i32) -> Compositor:
+        """Create a compositor using abstract backend and input traits.
+
+        Works on all platforms: baremetal (FB/GPU), hosted (winit).
+        """
         val initial_cursor = CursorState(
             x: sw / 2,
             y: sh / 2,
@@ -105,11 +119,10 @@ impl Compositor:
         Compositor(
             surfaces: [],
             focused_idx: -1,
-            fb: fb,
-            keyboard: keyboard,
-            mouse: mouse,
+            backend: b,
+            input: i,
             cursor: initial_cursor,
-            desktop_bg: Color.rgb(0, 48, 96),
+            desktop_bg: 0xFF003060,
             next_id: 1,
             screen_width: sw,
             screen_height: sh,
@@ -520,27 +533,22 @@ impl Compositor:
     # -- Rendering -----------------------------------------------------------
 
     me render_all():
-        """Composite all windows onto the framebuffer.
+        """Composite all windows via CompositorBackend.
 
-        Draws desktop background, then each window back-to-front
-        with decorations. The focused window is drawn last (topmost).
+        Single rendering path for all platforms (baremetal + hosted).
+        Draws desktop background, windows back-to-front, cursor on top.
         """
-        # Clear to desktop background
-        self.fb.clear(self.desktop_bg)
+        self.backend.clear(self.desktop_bg)
 
-        # Render each window in Z-order (back to front)
         var idx: i32 = 0
         for surface in self.surfaces:
             if surface.visible:
                 val is_focused = idx == self.focused_idx
-                _render_window(self.fb, surface, is_focused)
+                _render_window(self.backend, surface, is_focused)
             idx = idx + 1
 
-        # Draw mouse cursor on top of everything
-        draw_cursor(self.fb, self.screen_width, self.screen_height, self.cursor)
-
-        # Flip to screen
-        self.fb.swap_buffers()
+        draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
+        self.backend.present()
 
     # -- Input Handling ------------------------------------------------------
 
@@ -559,13 +567,11 @@ impl Compositor:
           Mouse move while dragging — move window
           Left release — stop dragging
         """
-        # --- Keyboard input ---
-        val key_event = self.keyboard.poll()
+        val key_event = self.input.poll_key()
         if key_event != nil:
             self._handle_key_event(key_event)
 
-        # --- Mouse input ---
-        val mouse_event = self.mouse.poll()
+        val mouse_event = self.input.poll_mouse()
         if mouse_event != nil:
             self._handle_mouse_event(mouse_event)
 
@@ -580,7 +586,7 @@ impl Compositor:
         val key = key_event.key
 
         # Compositor-level shortcuts (Alt held)
-        if self.keyboard.alt_held:
+        if self.input.alt_held():
             match key:
                 Key.Tab:
                     self.cycle_focus()
@@ -595,8 +601,8 @@ impl Compositor:
                     pass_dn
 
         # Global shortcuts (Ctrl+Alt held) — dispatched to desktop shell
-        if self.keyboard.ctrl_held and self.keyboard.alt_held:
-            val ch = self.keyboard.key_to_char(key)
+        if self.input.ctrl_held() and self.input.alt_held():
+            val ch = self.input.key_to_char(key)
             if ch != nil:
                 self.pending_shortcut_key = ch
                 return
@@ -607,7 +613,7 @@ impl Compositor:
 
             # Remote window: queue event for IPC delivery
             if focused.owner_port > 0:
-                val key_char = self.keyboard.key_to_char(key)
+                val key_char = self.input.key_to_char(key)
                 var key_code: u32 = 0
                 if key_char != nil:
                     key_code = key_char.to_u32()
@@ -616,7 +622,7 @@ impl Compositor:
                 return
 
             # Local window: dispatch to UISession directly
-            val ui_event = _key_to_ui_event(self.keyboard, key)
+            val ui_event = _key_to_ui_event(self.input, key)
             if ui_event != nil:
                 self.surfaces[self.focused_idx].session.dispatch(ui_event)
                 # Mark dirty
@@ -759,88 +765,59 @@ impl Compositor:
         self.running = false
 
 # ============================================================================
-# Internal: Render a Single Window
+# Internal: Render a Single Window (via CompositorBackend)
 # ============================================================================
 
-fn _render_window(fb: FramebufferDriver, surface: WindowSurface, focused: bool):
-    """Render a single window: decorations + client area content."""
-    # Draw window frame (border + title bar + close button)
-    draw_window_frame(fb, surface.x, surface.y, surface.width, surface.height, surface.title, focused)
+fn _render_window(backend: CompositorBackend, surface: WindowSurface, focused: bool):
+    """Render a single window: decorations + client area content.
 
-    # Calculate client area
-    val sx_u = surface.x.to_u32()
-    val cx_raw = client_area_x(sx_u)
-    val cx = cx_raw.to_i32()
-    val sy_u = surface.y.to_u32()
-    val cy_raw = client_area_y(sy_u)
-    val cy = cy_raw.to_i32()
-    val sw_u = surface.width.to_u32()
-    val cw_raw = client_area_width(sw_u)
-    val cw = cw_raw.to_i32()
-    val sh_u = surface.height.to_u32()
-    val ch_raw = client_area_height(sh_u)
-    val ch = ch_raw.to_i32()
+    Uses CompositorBackend for all rendering — works on all platforms.
+    """
+    draw_window_frame(backend, surface.x, surface.y, surface.width, surface.height, surface.title, focused)
+
+    val cx = client_area_x(surface.x)
+    val cy = client_area_y(surface.y)
+    val cw = client_area_width(surface.width)
+    val ch = client_area_height(surface.height)
 
     if cw <= 0 or ch <= 0:
         return
 
-    # Render the window's widget tree into the client area
     val state = surface.session.current_state()
     val tree_theme = state.tree.theme()
     val theme = resolve_theme(tree_theme)
     val root = state.tree.root_node()
     val rects = compute_layout(root, cx, cy, cw, ch)
 
-    # Clear client area background
-    val cx_u32 = cx.to_u32()
-    val cy_u32 = cy.to_u32()
-    val cw_u32 = cw.to_u32()
-    val ch_u32 = ch.to_u32()
-    fb.fill_rect(cx_u32, cy_u32, cw_u32, ch_u32, theme.bg)
-
-    # Render widget tree into client area
-    _render_tree(fb, root, rects, state.focused_id, theme)
+    backend.fill_rect(cx, cy, cw, ch, theme.bg.to_u32())
+    _render_tree(backend, root, rects, state.focused_id, theme)
 
 # ============================================================================
-# Internal: Key to UIEvent Translation
+# Internal: Key to UIEvent Translation (via InputBackend)
 # ============================================================================
 
-fn _key_to_ui_event(keyboard: Ps2Keyboard, key: Key) -> UIEvent?:
+fn _key_to_ui_event(input: InputBackend, key: Key) -> UIEvent?:
     """Convert a Key press to a UIEvent for window dispatch."""
     match key:
-        Key.Escape:
-            return UIEvent.Quit
+        Key.Escape: return UIEvent.Quit
         Key.Tab:
-            if keyboard.shift_held:
+            if input.shift_held():
                 return UIEvent.FocusPrev
             return UIEvent.FocusNext
-        Key.Up:
-            return UIEvent.KeyPress(key: "up")
-        Key.Down:
-            return UIEvent.KeyPress(key: "down")
-        Key.Left:
-            return UIEvent.KeyPress(key: "left")
-        Key.Right:
-            return UIEvent.KeyPress(key: "right")
-        Key.Enter:
-            return UIEvent.KeyPress(key: "enter")
-        Key.Backspace:
-            return UIEvent.KeyPress(key: "backspace")
-        Key.Delete:
-            return UIEvent.KeyPress(key: "delete")
-        Key.Home:
-            return UIEvent.KeyPress(key: "home")
-        Key.End:
-            return UIEvent.KeyPress(key: "end")
-        Key.PageUp:
-            return UIEvent.KeyPress(key: "pageup")
-        Key.PageDown:
-            return UIEvent.KeyPress(key: "pagedown")
-        _:
-            pass_dn
+        Key.Up: return UIEvent.KeyPress(key: "up")
+        Key.Down: return UIEvent.KeyPress(key: "down")
+        Key.Left: return UIEvent.KeyPress(key: "left")
+        Key.Right: return UIEvent.KeyPress(key: "right")
+        Key.Enter: return UIEvent.KeyPress(key: "enter")
+        Key.Backspace: return UIEvent.KeyPress(key: "backspace")
+        Key.Delete: return UIEvent.KeyPress(key: "delete")
+        Key.Home: return UIEvent.KeyPress(key: "home")
+        Key.End: return UIEvent.KeyPress(key: "end")
+        Key.PageUp: return UIEvent.KeyPress(key: "pageup")
+        Key.PageDown: return UIEvent.KeyPress(key: "pagedown")
+        _: pass_dn
 
-    val ch = keyboard.key_to_char(key)
+    val ch = input.key_to_char(key)
     if ch != nil:
         return UIEvent.KeyPress(key: ch)
-
     return nil

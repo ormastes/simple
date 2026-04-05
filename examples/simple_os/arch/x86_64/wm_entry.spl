@@ -1,16 +1,17 @@
-# SimpleOS Window Manager Entry — BGA framebuffer + Simple window management
+# SimpleOS Glass Window Manager — Modern Glassmorphism Desktop
 #
-# Self-contained entry that:
-# 1. Programs BGA framebuffer (1024x768x32) via port I/O
-# 2. Detects LFB address via PCI BAR scan
-# 3. Renders desktop background, taskbar, dock icons
-# 4. Creates and renders application windows with title bars
-# 5. Shows hello world app content
-# 6. Handles PS/2 keyboard input for basic window management
-#
-# All rendering via C helpers (rt_gui_*) for efficiency.
-# Window management logic is pure Simple.
+# Self-contained entry with frosted glass UI effects:
+# 1. BGA framebuffer (1024x768x32) via port I/O
+# 2. PCI BAR scan for VGA LFB address
+# 3. Gradient desktop background (midnight → purple)
+# 4. Frosted glass windows with blur + alpha blend + shadows
+# 5. Glass system bar and dock with backdrop blur
+# 6. macOS-style traffic light buttons (close/min/max)
+# 7. Dark Glass / White Glass theme toggle (T key)
+# 8. Focus ring effect on active window
+# 9. PS/2 keyboard input for window management
 
+# === Extern FFI declarations ===
 extern fn serial_println(msg: text)
 extern fn rt_port_outw(port: u64, value: u64)
 extern fn rt_port_inw(port: u64) -> u64
@@ -20,58 +21,95 @@ extern fn rt_port_outb(port: u64, value: u64)
 extern fn rt_port_inb(port: u64) -> u64
 extern fn rt_gui_set_fb(addr: u64, width: u64)
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64)
-extern fn rt_gui_hline(y: u64, x: u64, count: u64, color: u64)
-extern fn rt_hlt()
+
+# Glass rendering primitives (from glass_render.c)
+extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64)
+extern fn rt_gui_box_blur(xy: u64, wh: u64, radius: u64, unused: u64)
+extern fn rt_gui_gradient_h(xy: u64, wh: u64, c1: u64, c2: u64)
+extern fn rt_gui_gradient_v(xy: u64, wh: u64, c1: u64, c2: u64)
+extern fn rt_gui_shadow(xy: u64, wh: u64, blur_alpha: u64, offset: u64)
+extern fn rt_gui_rounded_rect(xy: u64, wh: u64, color_radius: u64, alpha: u64)
 
 # Pack two u32 values into one u64 (high|low)
 fn pack(hi: u64, lo: u64) -> u64:
     (hi << 32) | (lo & 0xFFFFFFFF)
 
-# Colors (ARGB)
-val BG_COLOR: u64        = 0x001A1B26  # Dark navy background
-val TITLEBAR_COLOR: u64  = 0x001E1E2E  # System bar
-val TASKBAR_COLOR: u64   = 0x001E1E2E  # Bottom taskbar
-val WIN_TITLE_BG: u64    = 0x00007ACC  # Blue window title
-val WIN_TITLE_ACTIVE: u64 = 0x00007ACC
-val WIN_TITLE_INACTIVE: u64 = 0x00505070
-val WIN_BODY_BG: u64     = 0x00FFFFFF  # White window body
-val WIN_BORDER: u64      = 0x00404060  # Window border
-val CLOSE_BTN: u64       = 0x00E74C3C  # Red close button
-val MIN_BTN: u64         = 0x00F39C12  # Yellow minimize
-val MAX_BTN: u64         = 0x002ECC71  # Green maximize
-val TEXT_COLOR: u64      = 0x00333333
-val TEXT_LIGHT: u64      = 0x00CCCCCC
-val DOCK_TERM: u64       = 0x003498DB  # Blue - Terminal
-val DOCK_FILES: u64      = 0x0027AE60  # Green - Files
-val DOCK_CALC: u64       = 0x00E74C3C  # Red - Calculator
-val DOCK_CLOCK: u64      = 0x00F39C12  # Yellow - Clock
-val DOCK_SETTINGS: u64   = 0x009B59B6  # Purple - Settings
-val CLOCK_BG: u64        = 0x002C2C3E  # Clock background
-val STATUS_BAR: u64      = 0x00E0E0E0  # Light gray status bar
-val ACCENT: u64          = 0x00BB86FC  # Purple accent
-
-# Screen dimensions
+# === Screen dimensions ===
 val SCREEN_W: u64 = 1024
 val SCREEN_H: u64 = 768
+val SYSTEM_BAR_H: u64 = 28
+val DOCK_H: u64 = 52
+val TITLE_BAR_H: u64 = 32
 
-# BGA register write
+# ===========================================================================
+# Dark Glass Theme (default) — derived from glass_tokens.spl
+# ===========================================================================
+val DARK_BG_TOP: u64       = 0x00080810   # Deep midnight blue
+val DARK_BG_BOT: u64       = 0x00180A28   # Dark purple
+val DARK_SURFACE: u64      = 0x001E1E23   # Glass surface color
+val DARK_SURFACE_A: u64    = 184          # 72% opacity
+val DARK_ELEVATED: u64     = 0x002C2C32   # Elevated glass
+val DARK_ELEVATED_A: u64   = 224          # 88% opacity
+val DARK_BORDER: u64       = 0x00FFFFFF   # Glass border (white)
+val DARK_BORDER_A: u64     = 46           # 18% opacity
+val DARK_TEXT: u64         = 0x00F5F5F7   # Primary text
+val DARK_TEXT_SEC: u64     = 0x00EBEBF5   # Secondary text (60%)
+val DARK_ACCENT: u64       = 0x000A84FF   # Blue accent
+val DARK_ACCENT2: u64      = 0x00BB86FC   # Purple accent
+val DARK_SHADOW_A: u64     = 80           # Shadow opacity
+
+# ===========================================================================
+# White Glass Theme
+# ===========================================================================
+val LIGHT_BG_TOP: u64      = 0x00D8D0E8   # Lavender mist
+val LIGHT_BG_BOT: u64      = 0x00F0F0F5   # Soft gray
+val LIGHT_SURFACE: u64     = 0x00FFFFFF   # Glass surface (white)
+val LIGHT_SURFACE_A: u64   = 184          # 72% opacity
+val LIGHT_ELEVATED: u64    = 0x00FFFFFF   # Elevated glass
+val LIGHT_ELEVATED_A: u64  = 230          # 90% opacity
+val LIGHT_BORDER: u64      = 0x00000000   # Glass border (black)
+val LIGHT_BORDER_A: u64    = 20           # 8% opacity
+val LIGHT_TEXT: u64        = 0x001D1D1F   # Primary text
+val LIGHT_TEXT_SEC: u64    = 0x003C3C43   # Secondary text
+val LIGHT_ACCENT: u64      = 0x00007AFF   # Blue accent
+val LIGHT_ACCENT2: u64     = 0x009B59B6   # Purple accent
+val LIGHT_SHADOW_A: u64    = 40           # Shadow opacity (lighter)
+
+# Traffic light button colors (same for both themes)
+val BTN_CLOSE: u64   = 0x00FF5F57  # Red
+val BTN_MIN: u64     = 0x00FFBD2E  # Yellow
+val BTN_MAX: u64     = 0x0028CA41  # Green
+
+# Blur radii
+val BLUR_SURFACE: u64  = 12   # Standard window blur
+val BLUR_ELEVATED: u64 = 20   # System bar / elevated panels
+val BLUR_SUBTLE: u64   = 6    # Subtle effects
+
+# Dock icon colors
+val ICON_TERM: u64     = 0x003498DB
+val ICON_FILES: u64    = 0x0027AE60
+val ICON_CALC: u64     = 0x00E74C3C
+val ICON_CLOCK: u64    = 0x00F39C12
+val ICON_SETTINGS: u64 = 0x009B59B6
+val ICON_BROWSER: u64  = 0x00E67E22
+val ICON_EDITOR: u64   = 0x001ABC9C
+
+# === Hardware init ===
+
 fn bga_wr(idx: u64, val_: u64):
     rt_port_outw(0x01CE, idx)
     rt_port_outw(0x01CF, val_)
 
-# PCI config read (bus 0)
 fn pci_rd(dev: u64, off: u64) -> u64:
     val a: u64 = 0x80000000 | (dev << 11) | (off & 0xFC)
     rt_port_outl(0x0CF8, a)
     rt_port_inl(0x0CFC)
 
-# PCI config write (bus 0)
 fn pci_wr(dev: u64, off: u64, val_: u64):
     val a: u64 = 0x80000000 | (dev << 11) | (off & 0xFC)
     rt_port_outl(0x0CF8, a)
     rt_port_outl(0x0CFC, val_)
 
-# Find VGA device on PCI bus, enable memory space, return BAR0 address
 fn find_vga_fb() -> u64:
     var d: u64 = 0
     while d < 32:
@@ -79,7 +117,6 @@ fn find_vga_fb() -> u64:
         if v != 0xFFFF and v != 0:
             val c = pci_rd(d, 8)
             if ((c >> 24) & 0xFF) == 3:
-                # Enable PCI Memory Space + Bus Master
                 val cmd = pci_rd(d, 0x04)
                 pci_wr(d, 0x04, cmd | 0x06)
                 val bar0 = pci_rd(d, 0x10)
@@ -87,270 +124,398 @@ fn find_vga_fb() -> u64:
                 if addr != 0:
                     return addr
         d = d + 1
-    0xFD000000  # Fallback
+    0xFD000000
 
-# Fill a rectangle: rt_gui_fill4(pack(x,y), pack(w,h), color, 0)
+# === Rendering helpers ===
+
 fn fill(x: u64, y: u64, w: u64, h: u64, color: u64):
     rt_gui_fill4(pack(x, y), pack(w, h), color, 0)
 
-# Draw a window with title bar, body, close/min/max buttons
-fn draw_window(x: u64, y: u64, w: u64, h: u64, title_color: u64, is_active: u64):
-    val title_h: u64 = 28
-    val btn_size: u64 = 14
-    val btn_y = y + 7
-    val body_y = y + title_h
-    val body_h = h - title_h
+fn blend(x: u64, y: u64, w: u64, h: u64, color: u64, alpha: u64):
+    rt_gui_blend_fill(pack(x, y), pack(w, h), color, alpha)
 
-    # Border (1px)
-    fill(x - 1, y - 1, w + 2, h + 2, WIN_BORDER)
+fn blur(x: u64, y: u64, w: u64, h: u64, radius: u64):
+    rt_gui_box_blur(pack(x, y), pack(w, h), radius, 0)
 
-    # Title bar
-    if is_active == 1:
-        fill(x, y, w, title_h, WIN_TITLE_ACTIVE)
-    else:
-        fill(x, y, w, title_h, WIN_TITLE_INACTIVE)
+fn grad_v(x: u64, y: u64, w: u64, h: u64, c1: u64, c2: u64):
+    rt_gui_gradient_v(pack(x, y), pack(w, h), c1, c2)
 
-    # Window control buttons (right side of title bar)
+fn grad_h(x: u64, y: u64, w: u64, h: u64, c1: u64, c2: u64):
+    rt_gui_gradient_h(pack(x, y), pack(w, h), c1, c2)
+
+fn shadow(x: u64, y: u64, w: u64, h: u64, blur_r: u64, alpha: u64, offset: u64):
+    rt_gui_shadow(pack(x, y), pack(w, h), pack(blur_r, alpha), offset)
+
+# === Theme-aware color getters ===
+
+fn bg_top(theme: u64) -> u64:
+    if theme == 0: DARK_BG_TOP
+    else: LIGHT_BG_TOP
+
+fn bg_bot(theme: u64) -> u64:
+    if theme == 0: DARK_BG_BOT
+    else: LIGHT_BG_BOT
+
+fn surface(theme: u64) -> u64:
+    if theme == 0: DARK_SURFACE
+    else: LIGHT_SURFACE
+
+fn surface_a(theme: u64) -> u64:
+    if theme == 0: DARK_SURFACE_A
+    else: LIGHT_SURFACE_A
+
+fn elevated(theme: u64) -> u64:
+    if theme == 0: DARK_ELEVATED
+    else: LIGHT_ELEVATED
+
+fn elevated_a(theme: u64) -> u64:
+    if theme == 0: DARK_ELEVATED_A
+    else: LIGHT_ELEVATED_A
+
+fn border_c(theme: u64) -> u64:
+    if theme == 0: DARK_BORDER
+    else: LIGHT_BORDER
+
+fn border_a(theme: u64) -> u64:
+    if theme == 0: DARK_BORDER_A
+    else: LIGHT_BORDER_A
+
+fn accent(theme: u64) -> u64:
+    if theme == 0: DARK_ACCENT
+    else: LIGHT_ACCENT
+
+fn accent2(theme: u64) -> u64:
+    if theme == 0: DARK_ACCENT2
+    else: LIGHT_ACCENT2
+
+fn shadow_a(theme: u64) -> u64:
+    if theme == 0: DARK_SHADOW_A
+    else: LIGHT_SHADOW_A
+
+fn text_c(theme: u64) -> u64:
+    if theme == 0: DARK_TEXT
+    else: LIGHT_TEXT
+
+# ===========================================================================
+# Glass Window Drawing
+# ===========================================================================
+
+fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64):
+    # 1. Drop shadow (below and right)
+    shadow(x, y, w, h, 10, shadow_a(theme), 6)
+
+    # 2. Blur background behind window (frosted glass effect)
+    blur(x, y, w, h, BLUR_SURFACE)
+
+    # 3. Glass surface overlay
+    blend(x, y, w, h, surface(theme), surface_a(theme))
+
+    # 4. Glass border (subtle 1px edge)
+    # Top
+    blend(x, y, w, 1, border_c(theme), border_a(theme) + 20)
+    # Left
+    blend(x, y, 1, h, border_c(theme), border_a(theme))
+    # Right
+    blend(x + w - 1, y, 1, h, border_c(theme), border_a(theme))
+    # Bottom
+    blend(x, y + h - 1, w, 1, border_c(theme), border_a(theme))
+
+    # 5. Title bar (elevated glass — more opaque)
+    blend(x + 1, y + 1, w - 2, TITLE_BAR_H, elevated(theme), elevated_a(theme))
+    # Title bar bottom separator
+    blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme))
+
+    # 6. Traffic light buttons (macOS-style, left side)
+    val btn_y = y + 10
+    val btn_size: u64 = 12
+    val btn_gap: u64 = 8
+    var bx: u64 = x + 12
     # Close (red)
-    fill(x + w - 22, btn_y, btn_size, btn_size, CLOSE_BTN)
-    # Maximize (green)
-    fill(x + w - 40, btn_y, btn_size, btn_size, MAX_BTN)
+    fill(bx, btn_y, btn_size, btn_size, BTN_CLOSE)
+    bx = bx + btn_size + btn_gap
     # Minimize (yellow)
-    fill(x + w - 58, btn_y, btn_size, btn_size, MIN_BTN)
+    fill(bx, btn_y, btn_size, btn_size, BTN_MIN)
+    bx = bx + btn_size + btn_gap
+    # Maximize (green)
+    fill(bx, btn_y, btn_size, btn_size, BTN_MAX)
 
-    # Window body
-    fill(x, body_y, w, body_h, WIN_BODY_BG)
+    # 7. Focus ring (active window only)
+    if is_active == 1:
+        blend(x - 1, y - 1, w + 2, 1, accent(theme), 100)
+        blend(x - 1, y + h, w + 2, 1, accent(theme), 100)
+        blend(x - 1, y - 1, 1, h + 2, accent(theme), 100)
+        blend(x + w, y - 1, 1, h + 2, accent(theme), 100)
 
-# Draw system title bar at top
-fn draw_system_bar():
-    fill(0, 0, SCREEN_W, 24, TITLEBAR_COLOR)
-    # "SimpleOS" text area (left)
-    fill(6, 4, 60, 16, ACCENT)
-    # Clock area (right)
-    fill(SCREEN_W - 80, 4, 74, 16, CLOCK_BG)
+# ===========================================================================
+# Glass System Bar (top)
+# ===========================================================================
 
-# Draw taskbar/dock at bottom
-fn draw_taskbar():
-    val bar_h: u64 = 40
-    val bar_y = SCREEN_H - bar_h
+fn draw_glass_system_bar(theme: u64):
+    val y: u64 = 0
+    val h = SYSTEM_BAR_H
 
-    # Taskbar background
-    fill(0, bar_y, SCREEN_W, bar_h, TASKBAR_COLOR)
+    # Blur background
+    blur(0, y, SCREEN_W, h, BLUR_ELEVATED)
 
-    # Dock icons (app launchers)
-    val icon_size: u64 = 28
-    val icon_y = bar_y + 6
-    val gap: u64 = 8
-    var ix: u64 = 12
+    # Glass surface
+    blend(0, y, SCREEN_W, h, surface(theme), surface_a(theme))
 
-    # Terminal icon
-    fill(ix, icon_y, icon_size, icon_size, DOCK_TERM)
+    # Bottom border
+    blend(0, h - 1, SCREEN_W, 1, border_c(theme), border_a(theme))
+
+    # "SimpleOS" accent pill (left)
+    grad_h(8, 6, 72, 16, accent(theme), accent2(theme))
+
+    # Clock area (right, subtle elevated glass)
+    blend(SCREEN_W - 90, 5, 82, 18, elevated(theme), 120)
+
+    # Center status indicators (3 small dots)
+    blend(SCREEN_W / 2 - 12, 12, 4, 4, accent(theme), 180)
+    blend(SCREEN_W / 2, 12, 4, 4, accent2(theme), 180)
+    blend(SCREEN_W / 2 + 12, 12, 4, 4, 0x0030D158, 180)
+
+# ===========================================================================
+# Glass Dock (bottom)
+# ===========================================================================
+
+fn draw_glass_dock(theme: u64):
+    val bar_y = SCREEN_H - DOCK_H
+
+    # Blur background
+    blur(0, bar_y, SCREEN_W, DOCK_H, BLUR_ELEVATED)
+
+    # Glass surface
+    blend(0, bar_y, SCREEN_W, DOCK_H, surface(theme), surface_a(theme))
+
+    # Top border
+    blend(0, bar_y, SCREEN_W, 1, border_c(theme), border_a(theme) + 10)
+
+    # Dock icons with glass pill backgrounds
+    val icon_size: u64 = 32
+    val icon_y = bar_y + 10
+    val gap: u64 = 12
+    var ix: u64 = 16
+
+    # Each icon: glass pill background + colored icon
+    # Terminal
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_TERM)
     ix = ix + icon_size + gap
 
-    # Files icon
-    fill(ix, icon_y, icon_size, icon_size, DOCK_FILES)
+    # Files
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_FILES)
     ix = ix + icon_size + gap
 
-    # Calculator icon
-    fill(ix, icon_y, icon_size, icon_size, DOCK_CALC)
+    # Calculator
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_CALC)
     ix = ix + icon_size + gap
 
-    # Clock icon
-    fill(ix, icon_y, icon_size, icon_size, DOCK_CLOCK)
+    # Clock
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_CLOCK)
     ix = ix + icon_size + gap
 
-    # Settings icon
-    fill(ix, icon_y, icon_size, icon_size, DOCK_SETTINGS)
+    # Settings
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_SETTINGS)
+    ix = ix + icon_size + gap
 
-    # Running app indicator (small white dots under active apps)
-    fill(12 + 12, bar_y + 36, 4, 3, TEXT_LIGHT)  # Terminal active
-    fill(12 + icon_size + gap + 12, bar_y + 36, 4, 3, TEXT_LIGHT)  # Files active
+    # Browser
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_BROWSER)
+    ix = ix + icon_size + gap
 
-# Draw a "Hello World" application window
-fn draw_hello_app(x: u64, y: u64):
-    val w: u64 = 360
-    val h: u64 = 240
+    # Editor
+    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
+    fill(ix, icon_y, icon_size, icon_size, ICON_EDITOR)
 
-    draw_window(x, y, w, h, WIN_TITLE_ACTIVE, 1)
+    # Running app indicators (small accent dots)
+    val dot_y = bar_y + DOCK_H - 6
+    fill(16 + 14, dot_y, 4, 3, accent(theme))
+    fill(16 + icon_size + gap + 14, dot_y, 4, 3, accent(theme))
 
-    # App content area
-    val content_y = y + 28
+# ===========================================================================
+# Application Window Content
+# ===========================================================================
+
+fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    val cy = y + TITLE_BAR_H + 2
     val pad: u64 = 16
 
-    # Greeting banner
-    fill(x + pad, content_y + pad, w - pad * 2, 40, 0x00F0F4FF)
-    # Accent stripe on left
-    fill(x + pad, content_y + pad, 4, 40, ACCENT)
+    # Greeting banner with accent stripe
+    blend(x + pad, cy + pad, w - pad * 2, 44, surface(theme), 80)
+    fill(x + pad, cy + pad, 4, 44, accent(theme))
 
-    # Color blocks showing rendering works
-    val block_y = content_y + pad + 56
-    fill(x + pad, block_y, 80, 32, 0x00FF6B6B)       # Red
-    fill(x + pad + 90, block_y, 80, 32, 0x0051CF66)   # Green
-    fill(x + pad + 180, block_y, 80, 32, 0x005B9BD5)  # Blue
+    # Color blocks
+    val block_y = cy + pad + 60
+    fill(x + pad, block_y, 80, 28, 0x00FF6B6B)
+    fill(x + pad + 90, block_y, 80, 28, 0x0051CF66)
+    fill(x + pad + 180, block_y, 80, 28, 0x005B9BD5)
 
-    # Status bar at bottom of window
-    fill(x, y + h - 24, w, 24, STATUS_BAR)
+    # Bottom accent line
+    grad_h(x + pad, y + h - 28, w - pad * 2, 2, accent(theme), accent2(theme))
 
-# Draw a "Terminal" window (second app)
-fn draw_terminal(x: u64, y: u64):
-    val w: u64 = 400
-    val h: u64 = 280
+fn draw_terminal_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    val cy = y + TITLE_BAR_H + 2
 
-    draw_window(x, y, w, h, WIN_TITLE_ACTIVE, 0)
+    # Terminal dark interior (semi-transparent on glass)
+    blend(x + 1, cy, w - 2, h - TITLE_BAR_H - 3, 0x000A0A14, 200)
 
-    # Terminal body (dark)
-    val body_y = y + 28
-    val body_h = h - 28
-    fill(x, body_y, w, body_h, 0x001A1B26)
+    # Cursor
+    fill(x + 14, cy + 14, 8, 16, 0x0044FF44)
 
-    # Cursor block (blinking cursor simulation)
-    fill(x + 12, body_y + 12, 8, 16, 0x0044FF44)
+    # Text lines
+    fill(x + 26, cy + 14, 140, 2, 0x0044FF44)
+    fill(x + 14, cy + 36, 220, 2, 0x00888888)
+    fill(x + 14, cy + 52, 180, 2, 0x00888888)
+    fill(x + 14, cy + 68, 260, 2, 0x005588CC)
+    fill(x + 14, cy + 84, 120, 2, 0x00888888)
+    fill(x + 14, cy + 100, 200, 2, 0x0044FF44)
+    fill(x + 14, cy + 116, 160, 2, 0x00888888)
+    fill(x + 14, cy + 132, 100, 2, 0x005588CC)
 
-    # Some "text lines" (colored rectangles simulating text)
-    fill(x + 24, body_y + 12, 120, 2, 0x0044FF44)
-    fill(x + 12, body_y + 32, 200, 2, 0x00AAAAAA)
-    fill(x + 12, body_y + 48, 160, 2, 0x00AAAAAA)
-    fill(x + 12, body_y + 64, 240, 2, 0x005588CC)
-    fill(x + 12, body_y + 80, 100, 2, 0x00AAAAAA)
-    fill(x + 12, body_y + 96, 180, 2, 0x0044FF44)
+fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    val cy = y + TITLE_BAR_H + 2
 
-# Draw a file manager window
-fn draw_file_manager(x: u64, y: u64):
-    val w: u64 = 320
-    val h: u64 = 200
+    # Sidebar (glass with higher opacity)
+    blend(x + 1, cy, 84, h - TITLE_BAR_H - 3, surface(theme), 100)
+    # Sidebar border
+    blend(x + 85, cy, 1, h - TITLE_BAR_H - 3, border_c(theme), border_a(theme))
 
-    draw_window(x, y, w, h, WIN_TITLE_ACTIVE, 0)
+    # Sidebar items
+    blend(x + 8, cy + 8, 68, 18, surface(theme), 60)
+    blend(x + 8, cy + 30, 68, 18, surface(theme), 60)
+    blend(x + 8, cy + 52, 68, 18, accent(theme), 80)  # Selected
 
-    # Sidebar
-    val body_y = y + 28
-    fill(x, body_y, 80, h - 28, 0x00F0F0F0)
-
-    # Sidebar items (small colored blocks)
-    fill(x + 8, body_y + 8, 64, 16, 0x00E0E0E0)
-    fill(x + 8, body_y + 28, 64, 16, 0x00E0E0E0)
-    fill(x + 8, body_y + 48, 64, 16, 0x00D0E8FF)  # Selected
-
-    # File list (grid of file icons)
-    var fy: u64 = body_y + 8
-    var fx: u64 = x + 92
+    # File grid
+    var fy: u64 = cy + 10
+    var fx: u64 = x + 96
     var row: u64 = 0
     while row < 3:
         var col: u64 = 0
         while col < 3:
-            # File icon
-            fill(fx + col * 72, fy + row * 52, 48, 36, 0x00E8E8E8)
-            # File icon accent
-            fill(fx + col * 72, fy + row * 52, 48, 4, 0x005B9BD5)
+            blend(fx + col * 72, fy + row * 50, 52, 38, surface(theme), 80)
+            fill(fx + col * 72, fy + row * 50, 52, 3, accent(theme))
             col = col + 1
         row = row + 1
 
-# Redraw desktop with given window focused (drawn last = on top)
-fn redraw_desktop(active: u64):
-    # Clear desktop
-    fill(0, 24, SCREEN_W, SCREEN_H - 64, BG_COLOR)
+# ===========================================================================
+# Full Desktop Rendering
+# ===========================================================================
 
-    # Draw windows in z-order (active window drawn last = on top)
+fn draw_desktop(active: u64, theme: u64):
+    # 1. Desktop gradient background
+    grad_v(0, 0, SCREEN_W, SCREEN_H, bg_top(theme), bg_bot(theme))
+
+    # 2. Decorative background elements (subtle)
+    # Large accent glow (top-right)
+    blend(SCREEN_W - 300, 40, 280, 280, accent(theme), 15)
+    blur(SCREEN_W - 300, 40, 280, 280, 30)
+    # Second glow (bottom-left)
+    blend(20, SCREEN_H - 320, 240, 240, accent2(theme), 12)
+    blur(20, SCREEN_H - 320, 240, 240, 30)
+
+    # 3. Windows in z-order (active drawn last = on top)
     if active == 0:
-        # Terminal focused: draw others first, terminal last
-        draw_file_manager(520, 320)
-        draw_hello_app(320, 140)
-        draw_terminal(60, 80)
+        draw_glass_window(540, 300, 340, 220, 0, theme)
+        draw_files_content(540, 300, 340, 220, theme)
+        draw_glass_window(300, 160, 380, 260, 0, theme)
+        draw_hello_content(300, 160, 380, 260, theme)
+        draw_glass_window(60, 60, 420, 300, 1, theme)
+        draw_terminal_content(60, 60, 420, 300, theme)
     else:
         if active == 1:
-            # Hello focused
-            draw_file_manager(520, 320)
-            draw_terminal(60, 80)
-            draw_hello_app(320, 140)
+            draw_glass_window(540, 300, 340, 220, 0, theme)
+            draw_files_content(540, 300, 340, 220, theme)
+            draw_glass_window(60, 60, 420, 300, 0, theme)
+            draw_terminal_content(60, 60, 420, 300, theme)
+            draw_glass_window(300, 160, 380, 260, 1, theme)
+            draw_hello_content(300, 160, 380, 260, theme)
         else:
-            # Files focused
-            draw_terminal(60, 80)
-            draw_hello_app(320, 140)
-            draw_file_manager(520, 320)
+            draw_glass_window(60, 60, 420, 300, 0, theme)
+            draw_terminal_content(60, 60, 420, 300, theme)
+            draw_glass_window(300, 160, 380, 260, 0, theme)
+            draw_hello_content(300, 160, 380, 260, theme)
+            draw_glass_window(540, 300, 340, 220, 1, theme)
+            draw_files_content(540, 300, 340, 220, theme)
+
+    # 4. System bar (glass, on top of everything)
+    draw_glass_system_bar(theme)
+
+    # 5. Dock (glass, at bottom)
+    draw_glass_dock(theme)
+
+# ===========================================================================
+# Entry Point
+# ===========================================================================
 
 fn spl_start():
-    serial_println("[WM] SimpleOS Window Manager starting...")
+    serial_println("[WM] SimpleOS Glass Window Manager starting...")
 
-    # 1. Program BGA framebuffer: 1024x768x32
+    # 1. Program BGA framebuffer
     serial_println("[WM] Programming BGA: 1024x768x32")
-    bga_wr(4, 0)          # Disable
-    bga_wr(1, SCREEN_W)   # X resolution
-    bga_wr(2, SCREEN_H)   # Y resolution
-    bga_wr(3, 32)         # BPP
-    bga_wr(6, SCREEN_W)   # Virtual width
-    bga_wr(4, 0x41)       # Enable + LFB
+    bga_wr(4, 0)
+    bga_wr(1, SCREEN_W)
+    bga_wr(2, SCREEN_H)
+    bga_wr(3, 32)
+    bga_wr(6, SCREEN_W)
+    bga_wr(4, 0x41)
 
-    # 2. Find VGA framebuffer via PCI
-    serial_println("[WM] Scanning PCI for VGA device...")
+    # 2. Find framebuffer
+    serial_println("[WM] Scanning PCI for VGA...")
     val fb_addr = find_vga_fb()
     rt_gui_set_fb(fb_addr, SCREEN_W)
-    serial_println("[WM] Framebuffer configured")
 
-    # 3. Draw desktop background
-    serial_println("[WM] Drawing desktop background...")
-    fill(0, 0, SCREEN_W, SCREEN_H, BG_COLOR)
+    # 3. Initial render (dark glass theme)
+    var theme: u64 = 0  # 0=dark, 1=light
+    var active_win: u64 = 1
 
-    # 4. Draw system bar (top)
-    serial_println("[WM] Drawing system bar...")
-    draw_system_bar()
+    serial_println("[WM] Rendering glass desktop (dark theme)...")
+    draw_desktop(active_win, theme)
 
-    # 5. Draw taskbar with dock (bottom)
-    serial_println("[WM] Drawing taskbar...")
-    draw_taskbar()
+    serial_println("[WM] Glass desktop rendered!")
+    serial_println("[WM] Controls: Tab=cycle, 1/2/3=focus, T=toggle theme, Q=quit")
 
-    # 6. Draw application windows (cascaded)
-    serial_println("[WM] Drawing Terminal window...")
-    draw_terminal(60, 80)
-
-    serial_println("[WM] Drawing Hello World window...")
-    draw_hello_app(320, 140)
-
-    serial_println("[WM] Drawing File Manager window...")
-    draw_file_manager(520, 320)
-
-    serial_println("[WM] Desktop rendering complete!")
-    serial_println("[WM] SimpleOS Window Manager is running.")
-    serial_println("[WM] 3 windows active: Terminal, Hello World, File Manager")
-
-    # 7. Keyboard event loop
-    serial_println("[WM] Entering keyboard event loop...")
-    serial_println("[WM] Press 1/2/3 to focus Terminal/Hello/Files, Tab to cycle, Q to quit")
-
-    var active_win: u64 = 1  # 0=Terminal, 1=Hello, 2=Files
+    # 4. Keyboard event loop
     var running: u64 = 1
-
     while running == 1:
-        # Poll PS/2 keyboard (port 0x64 status, port 0x60 data)
         val status = rt_port_inb(0x64)
         if (status & 1) != 0:
             val scancode = rt_port_inb(0x60)
-
-            # Only handle key-down (bit 7 = 0)
             if (scancode & 0x80) == 0:
-                # Tab (0x0F) = cycle windows
+
+                # Tab = cycle windows
                 if scancode == 0x0F:
                     active_win = (active_win + 1) % 3
-                    redraw_desktop(active_win)
-                    serial_println("[WM] Window focus changed")
+                    draw_desktop(active_win, theme)
+                    serial_println("[WM] Focus cycled")
 
-                # 1 (0x02) = focus Terminal
+                # 1/2/3 = direct focus
                 if scancode == 0x02:
                     active_win = 0
-                    redraw_desktop(active_win)
+                    draw_desktop(active_win, theme)
                     serial_println("[WM] Focus: Terminal")
-
-                # 2 (0x03) = focus Hello
                 if scancode == 0x03:
                     active_win = 1
-                    redraw_desktop(active_win)
+                    draw_desktop(active_win, theme)
                     serial_println("[WM] Focus: Hello World")
-
-                # 3 (0x04) = focus Files
                 if scancode == 0x04:
                     active_win = 2
-                    redraw_desktop(active_win)
-                    serial_println("[WM] Focus: File Manager")
+                    draw_desktop(active_win, theme)
+                    serial_println("[WM] Focus: Files")
 
-                # Q (0x10) = quit
+                # T = toggle theme
+                if scancode == 0x14:
+                    theme = (theme + 1) % 2
+                    draw_desktop(active_win, theme)
+                    if theme == 0:
+                        serial_println("[WM] Theme: Dark Glass")
+                    else:
+                        serial_println("[WM] Theme: White Glass")
+
+                # Q = quit
                 if scancode == 0x10:
                     running = 0
                     serial_println("[WM] Quit requested")

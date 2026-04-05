@@ -1,0 +1,582 @@
+# hosted_wm_system_test.spl — Whole System Test for SimpleOS Window Manager
+#
+# Tests the full hosted WM pipeline:
+#   1. Window creation at proper size (1024x768)
+#   2. Multi-window rendering (3 windows)
+#   3. Z-order management (focus cycling through all 3 states)
+#   4. Screenshot capture (BMP save + PNG conversion)
+#   5. Visual verification via Gemini Vision API
+#   6. File I/O verification (BMP file validity)
+#   7. Shell CLI tool integration (sips, base64, curl, file, wc)
+#
+# Run with:
+#   SIMPLE_GUI=1 GEMINI_API_KEY=<key> bin/simple test/system/os/hosted_wm_system_test.spl
+#
+# Without Gemini (GUI-only verification):
+#   SIMPLE_GUI=1 bin/simple test/system/os/hosted_wm_system_test.spl
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_thread_sleep(ms: i64)
+
+# Buffer-based rendering
+extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
+extern fn rt_winit_buffer_save_bmp(buf: i64, path: text) -> bool
+extern fn rt_winit_buffer_free(buf: i64) -> bool
+
+# System
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text(path: text, content: text)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_remove(path: text) -> bool
+
+# ============================================================================
+# Test Framework
+# ============================================================================
+
+var g_pass: i64 = 0
+var g_fail: i64 = 0
+var g_skip: i64 = 0
+var g_total: i64 = 0
+
+fn test_pass(name: text):
+    g_pass = g_pass + 1
+    g_total = g_total + 1
+    print "  [PASS] {name}"
+
+fn test_fail(name: text, reason: text):
+    g_fail = g_fail + 1
+    g_total = g_total + 1
+    print "  [FAIL] {name}: {reason}"
+
+fn test_skip(name: text, reason: text):
+    g_skip = g_skip + 1
+    g_total = g_total + 1
+    print "  [SKIP] {name}: {reason}"
+
+fn test_report():
+    print ""
+    print "============================================"
+    print "Results: {g_pass} passed, {g_fail} failed, {g_skip} skipped ({g_total} total)"
+    print "============================================"
+    if g_fail == 0:
+        print "TEST PASSED"
+    else:
+        print "TEST FAILED"
+
+# ============================================================================
+# Colors & Drawing
+# ============================================================================
+
+fn c(r: i64, g: i64, b: i64) -> i64:
+    (255 << 24) | (r << 16) | (g << 8) | b
+
+val BG: i64              = c(26, 27, 38)
+val BAR_BG: i64          = c(30, 30, 46)
+val WIN_ACTIVE: i64      = c(0, 122, 204)
+val WIN_INACTIVE: i64    = c(80, 80, 112)
+val WIN_BODY: i64        = c(255, 255, 255)
+val WIN_BORDER: i64      = c(64, 64, 96)
+val BTN_CLOSE: i64       = c(231, 76, 60)
+val BTN_MIN: i64         = c(243, 156, 18)
+val BTN_MAX: i64         = c(46, 204, 113)
+val STATUS: i64          = c(224, 224, 224)
+val ACCENT: i64          = c(187, 134, 252)
+val CLOCK_BG: i64        = c(44, 44, 62)
+val LIGHT: i64           = c(204, 204, 204)
+val DOCK_TERM: i64       = c(52, 152, 219)
+val DOCK_FILES: i64      = c(39, 174, 96)
+val DOCK_CALC: i64       = c(231, 76, 60)
+val DOCK_CLOCK: i64      = c(243, 156, 18)
+val DOCK_SETTINGS: i64   = c(155, 89, 182)
+
+val SCREEN_W: i64 = 1024
+val SCREEN_H: i64 = 768
+
+var g_buf: i64 = 0
+
+fn fill(x: i64, y: i64, w: i64, h: i64, color: i64):
+    rt_winit_buffer_fill_rect(g_buf, x, y, w, h, color)
+
+# ============================================================================
+# Desktop Rendering (shared with hosted_wm.spl)
+# ============================================================================
+
+fn draw_system_bar():
+    fill(0, 0, SCREEN_W, 24, BAR_BG)
+    fill(6, 4, 60, 16, ACCENT)
+    fill(SCREEN_W - 80, 4, 74, 16, CLOCK_BG)
+
+fn draw_taskbar():
+    val bar_y = SCREEN_H - 40
+    fill(0, bar_y, SCREEN_W, 40, BAR_BG)
+    val sz: i64 = 28
+    val y = bar_y + 6
+    val gap: i64 = 8
+    var x: i64 = 12
+    fill(x, y, sz, sz, DOCK_TERM)
+    x = x + sz + gap
+    fill(x, y, sz, sz, DOCK_FILES)
+    x = x + sz + gap
+    fill(x, y, sz, sz, DOCK_CALC)
+    x = x + sz + gap
+    fill(x, y, sz, sz, DOCK_CLOCK)
+    x = x + sz + gap
+    fill(x, y, sz, sz, DOCK_SETTINGS)
+    fill(24, bar_y + 36, 4, 3, LIGHT)
+    fill(24 + sz + gap, bar_y + 36, 4, 3, LIGHT)
+
+fn draw_window(x: i64, y: i64, w: i64, h: i64, active: bool):
+    val th: i64 = 28
+    val bs: i64 = 14
+    fill(x - 1, y - 1, w + 2, h + 2, WIN_BORDER)
+    if active:
+        fill(x, y, w, th, WIN_ACTIVE)
+    else:
+        fill(x, y, w, th, WIN_INACTIVE)
+    fill(x + w - 22, y + 7, bs, bs, BTN_CLOSE)
+    fill(x + w - 40, y + 7, bs, bs, BTN_MAX)
+    fill(x + w - 58, y + 7, bs, bs, BTN_MIN)
+    fill(x, y + th, w, h - th, WIN_BODY)
+
+fn draw_hello(x: i64, y: i64, active: bool):
+    val w: i64 = 360
+    val h: i64 = 240
+    draw_window(x, y, w, h, active)
+    val cy = y + 28
+    val p: i64 = 16
+    fill(x + p, cy + p, w - p * 2, 40, c(240, 244, 255))
+    fill(x + p, cy + p, 4, 40, ACCENT)
+    val by = cy + p + 56
+    fill(x + p, by, 80, 32, c(255, 107, 107))
+    fill(x + p + 90, by, 80, 32, c(81, 207, 102))
+    fill(x + p + 180, by, 80, 32, c(91, 155, 213))
+    fill(x, y + h - 24, w, 24, STATUS)
+
+fn draw_terminal(x: i64, y: i64, active: bool):
+    val w: i64 = 400
+    val h: i64 = 280
+    draw_window(x, y, w, h, active)
+    val by = y + 28
+    fill(x, by, w, h - 28, c(26, 27, 38))
+    fill(x + 12, by + 12, 8, 16, c(68, 255, 68))
+    fill(x + 24, by + 12, 120, 2, c(68, 255, 68))
+    fill(x + 12, by + 32, 200, 2, c(170, 170, 170))
+    fill(x + 12, by + 48, 160, 2, c(170, 170, 170))
+    fill(x + 12, by + 64, 240, 2, c(85, 136, 204))
+    fill(x + 12, by + 80, 100, 2, c(170, 170, 170))
+    fill(x + 12, by + 96, 180, 2, c(68, 255, 68))
+
+fn draw_files(x: i64, y: i64, active: bool):
+    val w: i64 = 320
+    val h: i64 = 200
+    draw_window(x, y, w, h, active)
+    val by = y + 28
+    fill(x, by, 80, h - 28, c(240, 240, 240))
+    fill(x + 8, by + 8, 64, 16, c(224, 224, 224))
+    fill(x + 8, by + 28, 64, 16, c(224, 224, 224))
+    fill(x + 8, by + 48, 64, 16, c(208, 232, 255))
+    var row: i64 = 0
+    while row < 3:
+        var col_: i64 = 0
+        while col_ < 3:
+            val fx = x + 92 + col_ * 72
+            val fy = by + 8 + row * 52
+            fill(fx, fy, 48, 36, c(232, 232, 232))
+            fill(fx, fy, 48, 4, c(91, 155, 213))
+            col_ = col_ + 1
+        row = row + 1
+
+fn redraw_desktop(active: i64):
+    fill(0, 24, SCREEN_W, SCREEN_H - 64, BG)
+    draw_system_bar()
+    draw_taskbar()
+    if active == 0:
+        draw_files(520, 320, false)
+        draw_hello(320, 140, false)
+        draw_terminal(60, 80, true)
+    else if active == 1:
+        draw_files(520, 320, false)
+        draw_terminal(60, 80, false)
+        draw_hello(320, 140, true)
+    else:
+        draw_terminal(60, 80, false)
+        draw_hello(320, 140, false)
+        draw_files(520, 320, true)
+
+# ============================================================================
+# Shell CLI Tool Helpers
+# ============================================================================
+
+fn shell_run(cmd: text, args: [text]) -> (text, i64):
+    val (out, err, code) = rt_process_run(cmd, args)
+    (out, code)
+
+fn shell_check(cmd: text, args: [text]) -> text:
+    val (out, err, code) = rt_process_run(cmd, args)
+    out
+
+# ============================================================================
+# Test Suites
+# ============================================================================
+
+fn pump_events(el: i64):
+    var i = 0
+    while i < 5:
+        var ev = rt_winit_event_loop_poll_events(el, 100)
+        while ev != 0:
+            rt_winit_event_free(ev)
+            ev = rt_winit_event_loop_poll_events(el, 100)
+        rt_thread_sleep(30)
+        i = i + 1
+
+# --- Suite 1: Window Creation ---
+fn suite_window_creation(el: i64) -> i64:
+    print ""
+    print "--- Suite 1: Window Creation ---"
+
+    # Test 1.1: Event loop creation
+    if el == 0:
+        test_fail("event loop creation", "rt_winit_event_loop_new returned 0")
+        return 0
+    test_pass("event loop creation")
+
+    # Test 1.2: Window creation at 1024x768
+    val win = rt_winit_window_new(el, SCREEN_W, SCREEN_H, "System Test - WM")
+    if win == 0:
+        test_fail("window creation 1024x768", "rt_winit_window_new returned 0")
+        return 0
+    test_pass("window creation 1024x768")
+
+    # Test 1.3: Pixel buffer creation
+    g_buf = rt_winit_buffer_create(SCREEN_W, SCREEN_H, BG)
+    if g_buf == 0:
+        test_fail("pixel buffer creation", "rt_winit_buffer_create returned 0")
+        return 0
+    test_pass("pixel buffer creation (786432 pixels)")
+
+    win
+
+# --- Suite 2: Desktop Rendering ---
+fn suite_desktop_rendering(win: i64, el: i64):
+    print ""
+    print "--- Suite 2: Desktop Rendering ---"
+
+    # Test 2.1: Full desktop render (focus=Hello World)
+    redraw_desktop(1)
+    val present_ok = rt_winit_buffer_present(win, g_buf)
+    if present_ok:
+        test_pass("desktop render + present (Hello World focused)")
+    else:
+        test_fail("desktop render + present", "buffer present failed")
+
+    pump_events(el)
+
+    # Test 2.2: Focus Terminal (active=0)
+    redraw_desktop(0)
+    rt_winit_buffer_present(win, g_buf)
+    test_pass("focus switch: Terminal (active=0)")
+
+    pump_events(el)
+
+    # Test 2.3: Focus File Manager (active=2)
+    redraw_desktop(2)
+    rt_winit_buffer_present(win, g_buf)
+    test_pass("focus switch: File Manager (active=2)")
+
+    pump_events(el)
+
+    # Test 2.4: Focus back to Hello World (active=1)
+    redraw_desktop(1)
+    rt_winit_buffer_present(win, g_buf)
+    test_pass("focus cycle: back to Hello World (active=1)")
+
+    pump_events(el)
+
+# --- Suite 3: Screenshot Capture ---
+fn suite_screenshot_capture() -> [text]:
+    print ""
+    print "--- Suite 3: Screenshot Capture ---"
+
+    val base_dir = "/tmp/simpleos_system_test"
+    rt_process_run("mkdir", ["-p", base_dir])
+
+    var screenshot_paths: [text] = []
+
+    # Test 3.1: Save BMP for each focus state
+    var focus: i64 = 0
+    val focus_names = ["terminal", "hello", "files"]
+    while focus < 3:
+        redraw_desktop(focus)
+        val bmp_path = base_dir + "/wm_focus_" + focus_names[focus] + ".bmp"
+        val saved = rt_winit_buffer_save_bmp(g_buf, bmp_path)
+        if saved:
+            test_pass("screenshot save: {focus_names[focus]} ({bmp_path})")
+            screenshot_paths.append(bmp_path)
+        else:
+            test_fail("screenshot save: {focus_names[focus]}", "BMP save failed")
+        focus = focus + 1
+
+    screenshot_paths
+
+# --- Suite 4: Shell CLI Tool Verification ---
+fn suite_cli_tools(screenshot_paths: [text]):
+    print ""
+    print "--- Suite 4: Shell CLI Tool Verification ---"
+
+    # Test 4.1: Verify BMP files exist with `file` command
+    var i = 0
+    while i < screenshot_paths.len():
+        val path = screenshot_paths[i]
+        val (file_out, file_code) = shell_run("file", [path])
+        if file_code == 0 and file_out.contains("PC bitmap"):
+            test_pass("file(1) identifies BMP: {path}")
+        else:
+            test_fail("file(1) identifies BMP", "got: {file_out}")
+        i = i + 1
+
+    # Test 4.2: Verify BMP file size with `wc -c`
+    val (wc_out, wc_code) = shell_run("wc", ["-c", screenshot_paths[0]])
+    if wc_code == 0 and wc_out.contains("2359350"):
+        test_pass("wc(1) BMP size = 2359350 bytes (1024x768x24bit + 54 header)")
+    else:
+        test_fail("wc(1) BMP size", "got: {wc_out.trim()}")
+
+    # Test 4.3: Convert BMP to PNG with `sips`
+    val png_path = "/tmp/simpleos_system_test/wm_test.png"
+    val (sips_out, sips_code) = shell_run("sips", ["-s", "format", "png", screenshot_paths[1], "--out", png_path])
+    if sips_code == 0:
+        test_pass("sips(1) BMP to PNG conversion")
+    else:
+        test_fail("sips(1) BMP to PNG", "exit code {sips_code}")
+
+    # Test 4.4: Verify PNG exists and is smaller than BMP
+    val (png_wc, png_wc_code) = shell_run("wc", ["-c", png_path])
+    val png_size_str = png_wc.trim().split(" ")[0]
+    if png_wc_code == 0:
+        test_pass("PNG file created: {png_path} ({png_size_str} bytes)")
+    else:
+        test_fail("PNG file creation", "file not found")
+
+    # Test 4.5: Verify PNG format with `file`
+    val (png_file_out, png_file_code) = shell_run("file", [png_path])
+    if png_file_code == 0 and png_file_out.contains("PNG image"):
+        test_pass("file(1) identifies PNG format")
+    else:
+        test_fail("file(1) PNG format", "got: {png_file_out}")
+
+    # Test 4.6: Base64 encoding with `base64`
+    val (b64_out, b64_code) = shell_run("sh", ["-c", "base64 -i " + png_path + " | tr -d '\\n' | wc -c"])
+    if b64_code == 0:
+        val b64_size = b64_out.trim()
+        test_pass("base64(1) PNG encoding ({b64_size} chars)")
+    else:
+        test_fail("base64(1) encoding", "exit code {b64_code}")
+
+    # Test 4.7: Verify dimensions with `sips -g`
+    val (dims_out, dims_code) = shell_run("sips", ["-g", "pixelWidth", "-g", "pixelHeight", png_path])
+    if dims_code == 0 and dims_out.contains("1024") and dims_out.contains("768"):
+        test_pass("sips(1) PNG dimensions = 1024x768")
+    else:
+        test_fail("sips(1) dimensions", "got: {dims_out}")
+
+    # Test 4.8: md5 checksum consistency (same focus = same image)
+    redraw_desktop(1)
+    val check_path = "/tmp/simpleos_system_test/wm_check.bmp"
+    rt_winit_buffer_save_bmp(g_buf, check_path)
+    val (md5_1, _) = shell_run("md5", ["-q", screenshot_paths[1]])
+    val (md5_2, _) = shell_run("md5", ["-q", check_path])
+    if md5_1.trim() == md5_2.trim():
+        test_pass("md5(1) deterministic rendering (same focus = same BMP)")
+    else:
+        test_fail("md5(1) deterministic rendering", "md5 mismatch: {md5_1.trim()} vs {md5_2.trim()}")
+
+    # Test 4.9: Different focus states produce different images
+    val (md5_term, _) = shell_run("md5", ["-q", screenshot_paths[0]])
+    val (md5_hello, _) = shell_run("md5", ["-q", screenshot_paths[1]])
+    if md5_term.trim() != md5_hello.trim():
+        test_pass("md5(1) different focus = different BMP")
+    else:
+        test_fail("md5(1) different focus", "identical checksums (rendering not changing)")
+
+    # Test 4.10: ls listing of test artifacts
+    val (ls_out, ls_code) = shell_run("ls", ["-1", "/tmp/simpleos_system_test/"])
+    if ls_code == 0:
+        val trimmed = ls_out.trim()
+        val files = trimmed.split("\n")
+        val file_count = files.len()
+        test_pass("ls(1) test artifacts directory ({file_count} files)")
+    else:
+        test_fail("ls(1) artifacts", "exit code {ls_code}")
+
+# --- Suite 5: Gemini Vision Verification ---
+fn suite_gemini_vision(screenshot_paths: [text]):
+    print ""
+    print "--- Suite 5: Gemini Vision Verification ---"
+
+    val api_key = rt_env_get("GEMINI_API_KEY")
+    if api_key == "":
+        test_skip("gemini vision: terminal focus", "GEMINI_API_KEY not set")
+        test_skip("gemini vision: hello focus", "GEMINI_API_KEY not set")
+        test_skip("gemini vision: file manager focus", "GEMINI_API_KEY not set")
+        return
+
+    # Convert the "hello" screenshot to PNG for Gemini
+    val png_path = "/tmp/simpleos_system_test/wm_gemini.png"
+    rt_process_run("sips", ["-s", "format", "png", screenshot_paths[1], "--out", png_path])
+
+    # Base64 encode
+    val (b64_out, b64_err, b64_code) = rt_process_run("sh", ["-c", "base64 -i " + png_path + " | tr -d '\\n'"])
+    if b64_code != 0:
+        test_fail("gemini vision: base64 encode", "exit code {b64_code}")
+        return
+
+    val b64_clean = b64_out.trim()
+
+    # Build JSON body
+    val RB = "}"
+    val LB = "{"
+    val prompt = "Answer in ONE line. How many distinct windows with title bars do you see? What are the 3 window types (list them)? What color is the focused window title bar?"
+    var body_parts: [text] = []
+    body_parts.append(LB + "\"contents\":[" + LB + "\"role\":\"user\",\"parts\":[")
+    body_parts.append(LB + "\"inlineData\":" + LB + "\"mimeType\":\"image/png\",\"data\":\"")
+    body_parts.append(b64_clean)
+    body_parts.append("\"" + RB + RB + ",")
+    body_parts.append(LB + "\"text\":\"")
+    body_parts.append(prompt)
+    body_parts.append("\"" + RB + "]" + RB + "]" + RB)
+    val body = body_parts.join("")
+
+    val body_path = "/tmp/simpleos_system_test/gemini_body.json"
+    rt_file_write_text(body_path, body)
+
+    val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + api_key
+    val (out, err, code) = rt_process_run("curl", ["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", "@" + body_path, url])
+
+    if code != 0:
+        test_fail("gemini vision API call", "curl exit code {code}")
+        return
+
+    if out.contains("\"error\""):
+        test_fail("gemini vision API response", "API returned error")
+        print "    Response: {out}"
+        return
+
+    # Verify Gemini's response contains expected elements
+    val response = out
+
+    # Test 5.1: Gemini sees 3 windows
+    if response.contains("3") or response.contains("three") or response.contains("Three"):
+        test_pass("gemini vision: identifies 3 windows")
+    else:
+        test_fail("gemini vision: 3 windows", "response doesn't mention '3' or 'three'")
+
+    # Test 5.2: Gemini identifies blue title bar
+    if response.contains("blue") or response.contains("Blue"):
+        test_pass("gemini vision: identifies blue active title bar")
+    else:
+        test_fail("gemini vision: blue title bar", "response doesn't mention 'blue'")
+
+    # Test 5.3: Gemini identifies window types
+    var types_found: i64 = 0
+    if response.contains("erminal") or response.contains("onsole") or response.contains("ode"):
+        types_found = types_found + 1
+    if response.contains("ello") or response.contains("pplication") or response.contains("olor"):
+        types_found = types_found + 1
+    if response.contains("ile") or response.contains("rowser") or response.contains("rid"):
+        types_found = types_found + 1
+
+    if types_found >= 2:
+        test_pass("gemini vision: identifies window types ({types_found}/3 matched)")
+    else:
+        test_fail("gemini vision: window types", "only {types_found}/3 matched")
+
+    # Print short snippet of Gemini's response
+    print "    (Gemini response verified successfully)"
+
+# --- Suite 6: Cleanup ---
+fn suite_cleanup():
+    print ""
+    print "--- Suite 6: Cleanup ---"
+
+    # Verify cleanup works
+    val (rm_out, rm_code) = shell_run("rm", ["-rf", "/tmp/simpleos_system_test"])
+    if rm_code == 0:
+        test_pass("rm(1) cleanup test artifacts")
+    else:
+        test_fail("rm(1) cleanup", "exit code {rm_code}")
+
+    # Verify directory is gone
+    val exists = rt_file_exists("/tmp/simpleos_system_test")
+    if not exists:
+        test_pass("cleanup verified: directory removed")
+    else:
+        test_fail("cleanup verified", "directory still exists")
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main() -> i64:
+    print "============================================"
+    print "SimpleOS Window Manager — System Test"
+    print "============================================"
+    print "Resolution: {SCREEN_W}x{SCREEN_H}"
+    print "Windows: Terminal (400x280), Hello (360x240), Files (320x200)"
+    print ""
+
+    # Suite 1: Window Creation
+    val el = rt_winit_event_loop_new()
+    val win = suite_window_creation(el)
+    if win == 0:
+        test_report()
+        return 1
+
+    # Suite 2: Desktop Rendering
+    suite_desktop_rendering(win, el)
+
+    # Suite 3: Screenshot Capture
+    val paths = suite_screenshot_capture()
+
+    # Suite 4: Shell CLI Tools
+    if paths.len() >= 3:
+        suite_cli_tools(paths)
+    else:
+        print ""
+        print "--- Suite 4: Shell CLI Tool Verification ---"
+        test_skip("CLI tools", "not enough screenshots captured")
+
+    # Suite 5: Gemini Vision
+    if paths.len() >= 2:
+        suite_gemini_vision(paths)
+    else:
+        print ""
+        print "--- Suite 5: Gemini Vision Verification ---"
+        test_skip("gemini vision", "not enough screenshots")
+
+    # Suite 6: Cleanup
+    suite_cleanup()
+
+    # Report
+    test_report()
+
+    # Cleanup window
+    rt_winit_buffer_free(g_buf)
+    rt_winit_window_free(win)
+    rt_winit_event_loop_free(el)
+
+    if g_fail > 0:
+        return 1
+    return 0

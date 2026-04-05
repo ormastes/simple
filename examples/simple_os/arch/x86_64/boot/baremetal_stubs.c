@@ -2899,7 +2899,7 @@ static uint64_t detect_vga_lfb(void)
     return 0xFD000000ULL; /* QEMU Q35 fallback */
 }
 
-static uint64_t g_fb_addr;
+uint64_t g_fb_addr;
 static uint32_t g_fb_width, g_fb_height, g_fb_pitch;
 
 static void bga_init(uint32_t w, uint32_t h, uint32_t bpp)
@@ -2985,8 +2985,8 @@ static void fb_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t fg, 
  * Cranelift passes RAW (untagged) u64 values for all args.
  * =================================================================== */
 
-static uint64_t g_fb_addr = 0xFD000000;
-static uint64_t g_fb_w = 1024;
+uint64_t g_fb_addr = 0xFD000000;
+uint64_t g_fb_w = 1024;
 
 static void serial_hex(uint64_t v) {
     char hex[] = "0123456789abcdef";

@@ -16,6 +16,7 @@ use common.ui.widget.{UIState, UIEvent, UITree, WidgetNode, WidgetRect}
 use common.ui.layout.{compute_layout, find_rect}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard, KeyEvent, Key}
+use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 
 # ============================================================================
 # Theme Colors
@@ -138,15 +139,17 @@ impl RenderBackend for FramebufferBackend:
 
     fn render(state: UIState) -> Result<bool, text>:
         val theme = resolve_theme(state.tree.theme())
+        # Create compositor backend wrapper
+        var cb = FbCompositorBackend.new(self.fb)
         # Clear background
-        self.fb.clear(theme.bg)
+        cb.clear(theme.bg.to_u32())
         # Compute layout for the full viewport
         val root = state.tree.root_node()
         val rects = compute_layout(root, 0, 0, self.width, self.height)
         # Render each widget
-        _render_tree(self.fb, root, rects, state.focused_id, theme)
+        _render_tree(cb, root, rects, state.focused_id, theme)
         # Flip to screen
-        self.fb.swap_buffers()
+        cb.present()
         Ok(true)
 
     fn render_html(state: UIState) -> text:
@@ -172,8 +175,8 @@ impl RenderBackend for FramebufferBackend:
 # Widget Tree Rendering
 # ============================================================================
 
-fn _render_tree(fb: FramebufferDriver, node: WidgetNode, rects: [WidgetRect], focused_id: text, theme: ThemeColors):
-    """Recursively render each widget in the tree to the framebuffer."""
+fn _render_tree(backend: CompositorBackend, node: WidgetNode, rects: [WidgetRect], focused_id: text, theme: ThemeColors):
+    """Recursively render each widget in the tree via CompositorBackend."""
     if not node.is_visible():
         return
 
@@ -186,33 +189,33 @@ fn _render_tree(fb: FramebufferDriver, node: WidgetNode, rects: [WidgetRect], fo
     val kind = node.kind_name()
 
     if kind == "panel":
-        _render_panel(fb, node, r, is_focused, theme)
+        _render_panel(backend, node, r, is_focused, theme)
     elif kind == "text" or kind == "label" or kind == "heading":
-        _render_text(fb, node, r, is_focused, theme)
+        _render_text(backend, node, r, is_focused, theme)
     elif kind == "button":
-        _render_button(fb, node, r, is_focused, theme)
+        _render_button(backend, node, r, is_focused, theme)
     elif kind == "input" or kind == "textfield":
-        _render_input(fb, node, r, is_focused, theme)
+        _render_input(backend, node, r, is_focused, theme)
     elif kind == "menubar":
-        _render_menubar(fb, node, r, theme)
+        _render_menubar(backend, node, r, theme)
     elif kind == "statusbar":
-        _render_statusbar(fb, node, r, theme)
+        _render_statusbar(backend, node, r, theme)
     elif kind == "progress":
-        _render_progress(fb, node, r, theme)
+        _render_progress(backend, node, r, theme)
     elif kind == "divider":
-        _render_divider(fb, r, theme)
+        _render_divider(backend, r, theme)
     elif kind == "list":
-        _render_list(fb, node, r, is_focused, theme)
+        _render_list(backend, node, r, is_focused, theme)
     elif kind == "checkbox":
-        _render_checkbox(fb, node, r, is_focused, theme)
+        _render_checkbox(backend, node, r, is_focused, theme)
     elif kind == "textarea":
-        _render_textarea(fb, node, r, is_focused, theme)
+        _render_textarea(backend, node, r, is_focused, theme)
     else:
         pass_dn
 
     # Render children recursively
     for child in node.children():
-        _render_tree(fb, child, rects, focused_id, theme)
+        _render_tree(backend, child, rects, focused_id, theme)
 
 # ============================================================================
 # Widget Renderers
@@ -222,40 +225,40 @@ fn _render_tree(fb: FramebufferDriver, node: WidgetNode, rects: [WidgetRect], fo
 val CHAR_W: i32 = 8
 val CHAR_H: i32 = 16
 
-fn _render_panel(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_panel(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a panel: background fill + border + optional title."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    val x = r.x
+    val y = r.y
+    val w = r.w
+    val h = r.h
 
     # Background
-    fb.fill_rect(x, y, w, h, theme.panel_bg)
+    backend.fill_rect(x, y, w, h, theme.panel_bg.to_u32())
 
     # Border
     val border_color = if focused: theme.focused_border else: theme.panel_border
     # Top edge
-    fb.fill_rect(x, y, w, 1, border_color)
+    backend.fill_rect(x, y, w, 1, border_color.to_u32())
     # Bottom edge
     if h > 1:
-        fb.fill_rect(x, y + h - 1, w, 1, border_color)
+        backend.fill_rect(x, y + h - 1, w, 1, border_color.to_u32())
     # Left edge
-    fb.fill_rect(x, y, 1, h, border_color)
+    backend.fill_rect(x, y, 1, h, border_color.to_u32())
     # Right edge
     if w > 1:
-        fb.fill_rect(x + w - 1, y, 1, h, border_color)
+        backend.fill_rect(x + w - 1, y, 1, h, border_color.to_u32())
 
     # Title text (if set)
     val title = node.get_prop("title")
     if title != "":
-        val title_x = x + CHAR_W.to_u32()
+        val title_x = x + CHAR_W
         val title_y = y + 2
-        fb.draw_text(title_x, title_y, title, theme.fg, theme.panel_bg)
+        backend.draw_text(title_x, title_y, title, theme.fg.to_u32(), theme.panel_bg.to_u32())
 
-fn _render_text(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_text(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a text/label widget."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
+    val x = r.x
+    val y = r.y
 
     val content = node.get_prop("content")
     val label_text = node.get_prop("label")
@@ -263,192 +266,156 @@ fn _render_text(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused:
 
     if display != "":
         val fg = if focused: theme.selection_bg else: theme.fg
-        fb.draw_text(x, y, display, fg, theme.bg)
+        backend.draw_text(x, y, display, fg.to_u32(), theme.bg.to_u32())
 
-fn _render_button(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_button(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a button: filled rectangle + centered label."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    val x = r.x
+    val y = r.y
+    val w = r.w
+    val h = r.h
 
     val bg = if focused: theme.button_focused_bg else: theme.button_bg
-    fb.fill_rect(x, y, w, h, bg)
+    backend.fill_rect(x, y, w, h, bg.to_u32())
 
     val label_text = node.get_prop("label")
     if label_text != "":
-        val text_w = label_text.len().to_u32() * CHAR_W.to_u32()
+        val text_w = label_text.len().to_i32() * CHAR_W
         val text_x = x + (w - text_w) / 2
-        val text_y = y + (h - CHAR_H.to_u32()) / 2
-        fb.draw_text(text_x, text_y, label_text, theme.button_fg, bg)
+        val text_y = y + (h - CHAR_H) / 2
+        backend.draw_text(text_x, text_y, label_text, theme.button_fg.to_u32(), bg.to_u32())
 
-fn _render_input(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_input(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a text input field."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    val x = r.x
+    val y = r.y
+    val w = r.w
+    val h = r.h
 
     # Background
-    fb.fill_rect(x, y, w, h, theme.input_bg)
+    backend.fill_rect(x, y, w, h, theme.input_bg.to_u32())
 
     # Border
     val border = if focused: theme.focused_border else: theme.input_border
-    fb.fill_rect(x, y, w, 1, border)
+    backend.fill_rect(x, y, w, 1, border.to_u32())
     if h > 1:
-        fb.fill_rect(x, y + h - 1, w, 1, border)
-    fb.fill_rect(x, y, 1, h, border)
+        backend.fill_rect(x, y + h - 1, w, 1, border.to_u32())
+    backend.fill_rect(x, y, 1, h, border.to_u32())
     if w > 1:
-        fb.fill_rect(x + w - 1, y, 1, h, border)
+        backend.fill_rect(x + w - 1, y, 1, h, border.to_u32())
 
     # Value or placeholder
     val value = node.get_prop("value")
     val placeholder = node.get_prop("placeholder")
     val display = if value != "": value else: placeholder
-    val fg = if value != "": theme.input_fg else: Color.gray()
+    val fg = if value != "": theme.input_fg.to_u32() else: 0xFF808080
 
     if display != "":
-        fb.draw_text(x + 4, y + 2, display, fg, theme.input_bg)
+        backend.draw_text(x + 4, y + 2, display, fg, theme.input_bg.to_u32())
 
     # Cursor when focused
     if focused:
-        val cursor_x = x + 4 + value.len().to_u32() * CHAR_W.to_u32()
-        fb.fill_rect(cursor_x, y + 2, 2, CHAR_H.to_u32(), theme.fg)
+        val cursor_x = x + 4 + value.len().to_i32() * CHAR_W
+        backend.fill_rect(cursor_x, y + 2, 2, CHAR_H, theme.fg.to_u32())
 
-fn _render_menubar(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
+fn _render_menubar(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
     """Render a menu bar: horizontal strip with menu items."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    backend.fill_rect(r.x, r.y, r.w, r.h, theme.menubar_bg.to_u32())
 
-    fb.fill_rect(x, y, w, h, theme.menubar_bg)
-
-    var item_x = x + 8
+    var item_x = r.x + 8
     for child in node.children():
         val label_text = child.get_prop("label")
         if label_text != "":
-            fb.draw_text(item_x, y + 2, label_text, theme.menubar_fg, theme.menubar_bg)
-            item_x = item_x + label_text.len().to_u32() * CHAR_W.to_u32() + 16
+            backend.draw_text(item_x, r.y + 2, label_text, theme.menubar_fg.to_u32(), theme.menubar_bg.to_u32())
+            item_x = item_x + label_text.len().to_i32() * CHAR_W + 16
 
-fn _render_statusbar(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
+fn _render_statusbar(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
     """Render a status bar: horizontal strip at bottom."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
-
-    fb.fill_rect(x, y, w, h, theme.statusbar_bg)
+    backend.fill_rect(r.x, r.y, r.w, r.h, theme.statusbar_bg.to_u32())
 
     val left = node.get_prop("left")
     if left != "":
-        fb.draw_text(x + 4, y + 2, left, theme.statusbar_fg, theme.statusbar_bg)
+        backend.draw_text(r.x + 4, r.y + 2, left, theme.statusbar_fg.to_u32(), theme.statusbar_bg.to_u32())
 
     val right = node.get_prop("right")
     if right != "":
-        val right_w = right.len().to_u32() * CHAR_W.to_u32()
-        val right_x = x + w - right_w - 4
-        fb.draw_text(right_x, y + 2, right, theme.statusbar_fg, theme.statusbar_bg)
+        val right_w = right.len().to_i32() * CHAR_W
+        val right_x = r.x + r.w - right_w - 4
+        backend.draw_text(right_x, r.y + 2, right, theme.statusbar_fg.to_u32(), theme.statusbar_bg.to_u32())
 
-fn _render_progress(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
+fn _render_progress(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, theme: ThemeColors):
     """Render a progress bar."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    backend.fill_rect(r.x, r.y, r.w, r.h, theme.progress_bg.to_u32())
 
-    # Background track
-    fb.fill_rect(x, y, w, h, theme.progress_bg)
-
-    # Filled portion
     val value_str = node.get_prop("value")
     if value_str != "":
         val value = value_str.to_int()
         if value > 0:
             val clamped = if value > 100: 100 else: value
-            val fill_w = (w.to_i32() * clamped / 100).to_u32()
-            fb.fill_rect(x, y, fill_w, h, theme.progress_fill)
+            val fill_w = r.w * clamped / 100
+            backend.fill_rect(r.x, r.y, fill_w, r.h, theme.progress_fill.to_u32())
 
-fn _render_divider(fb: FramebufferDriver, r: WidgetRect, theme: ThemeColors):
+fn _render_divider(backend: CompositorBackend, r: WidgetRect, theme: ThemeColors):
     """Render a horizontal divider line."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val mid_y = y + r.h.to_u32() / 2
-    fb.fill_rect(x, mid_y, w, 1, theme.divider_color)
+    val mid_y = r.y + r.h / 2
+    backend.fill_rect(r.x, mid_y, r.w, 1, theme.divider_color.to_u32())
 
-fn _render_list(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_list(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a list widget with selectable items."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
-
-    fb.fill_rect(x, y, w, h, theme.panel_bg)
+    backend.fill_rect(r.x, r.y, r.w, r.h, theme.panel_bg.to_u32())
 
     val selected_str = node.get_prop("selected_index")
     var selected_idx: i32 = -1
     if selected_str != "":
         selected_idx = selected_str.to_int()
 
-    var item_y = y
+    var item_y = r.y
     var idx: i32 = 0
     for child in node.children():
         val label_text = child.get_prop("label")
         if label_text != "":
             val is_selected = idx == selected_idx
-            val item_bg = if is_selected: theme.selection_bg else: theme.panel_bg
-            val item_fg = if is_selected: Color.white() else: theme.fg
-            fb.fill_rect(x, item_y, w, CHAR_H.to_u32(), item_bg)
-            fb.draw_text(x + 4, item_y, label_text, item_fg, item_bg)
-        item_y = item_y + CHAR_H.to_u32()
+            val item_bg = if is_selected: theme.selection_bg.to_u32() else: theme.panel_bg.to_u32()
+            val item_fg = if is_selected: 0xFFFFFFFF else: theme.fg.to_u32()
+            backend.fill_rect(r.x, item_y, r.w, CHAR_H, item_bg)
+            backend.draw_text(r.x + 4, item_y, label_text, item_fg, item_bg)
+        item_y = item_y + CHAR_H
         idx = idx + 1
 
-fn _render_checkbox(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_checkbox(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a checkbox: box + label text."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-
+    val x = r.x
+    val y = r.y
     val checked = node.get_prop("checked") == "true"
     val label_text = node.get_prop("label")
 
-    # Draw checkbox box (12x12 pixels)
-    val box_size: u32 = 12
+    val box_size: i32 = 12
     val box_y = y + 2
-    val border = if focused: theme.focused_border else: theme.panel_border
-    fb.fill_rect(x, box_y, box_size, box_size, theme.input_bg)
-    fb.fill_rect(x, box_y, box_size, 1, border)
-    fb.fill_rect(x, box_y + box_size - 1, box_size, 1, border)
-    fb.fill_rect(x, box_y, 1, box_size, border)
-    fb.fill_rect(x + box_size - 1, box_y, 1, box_size, border)
+    val border: u32 = if focused: theme.focused_border.to_u32() else: theme.panel_border.to_u32()
+    backend.fill_rect(x, box_y, box_size, box_size, theme.input_bg.to_u32())
+    backend.fill_rect(x, box_y, box_size, 1, border)
+    backend.fill_rect(x, box_y + box_size - 1, box_size, 1, border)
+    backend.fill_rect(x, box_y, 1, box_size, border)
+    backend.fill_rect(x + box_size - 1, box_y, 1, box_size, border)
 
-    # Checkmark (fill inner area when checked)
     if checked:
-        fb.fill_rect(x + 2, box_y + 2, box_size - 4, box_size - 4, theme.focused_border)
+        backend.fill_rect(x + 2, box_y + 2, box_size - 4, box_size - 4, theme.focused_border.to_u32())
 
-    # Label
     if label_text != "":
-        fb.draw_text(x + box_size + 6, y, label_text, theme.fg, theme.bg)
+        backend.draw_text(x + box_size + 6, y, label_text, theme.fg.to_u32(), theme.bg.to_u32())
 
-fn _render_textarea(fb: FramebufferDriver, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
+fn _render_textarea(backend: CompositorBackend, node: WidgetNode, r: WidgetRect, focused: bool, theme: ThemeColors):
     """Render a multi-line text area."""
-    val x = r.x.to_u32()
-    val y = r.y.to_u32()
-    val w = r.w.to_u32()
-    val h = r.h.to_u32()
+    backend.fill_rect(r.x, r.y, r.w, r.h, theme.input_bg.to_u32())
+    val border: u32 = if focused: theme.focused_border.to_u32() else: theme.input_border.to_u32()
+    backend.fill_rect(r.x, r.y, r.w, 1, border)
+    backend.fill_rect(r.x, r.y + r.h - 1, r.w, 1, border)
+    backend.fill_rect(r.x, r.y, 1, r.h, border)
+    backend.fill_rect(r.x + r.w - 1, r.y, 1, r.h, border)
 
-    # Background and border
-    fb.fill_rect(x, y, w, h, theme.input_bg)
-    val border = if focused: theme.focused_border else: theme.input_border
-    fb.fill_rect(x, y, w, 1, border)
-    fb.fill_rect(x, y + h - 1, w, 1, border)
-    fb.fill_rect(x, y, 1, h, border)
-    fb.fill_rect(x + w - 1, y, 1, h, border)
-
-    # Text content
     val value = node.get_prop("value")
     if value != "":
-        fb.draw_text(x + 4, y + 2, value, theme.input_fg, theme.input_bg)
+        backend.draw_text(r.x + 4, r.y + 2, value, theme.input_fg.to_u32(), theme.input_bg.to_u32())
 
 # ============================================================================
 # Input Translation

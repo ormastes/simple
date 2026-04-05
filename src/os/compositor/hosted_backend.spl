@@ -1,0 +1,171 @@
+# Hosted Compositor Backend — winit native pixel buffer rendering
+#
+# Implements CompositorBackend trait using Rust FFI functions that manage
+# a native-side pixel buffer via winit. This allows the SimpleOS window
+# manager to render on macOS/Linux/Windows host desktops without a
+# bare-metal framebuffer or GPU driver.
+#
+# The pixel buffer lives in Rust memory (not Simple arrays), so all
+# drawing operations are fast FFI calls — critical for interpreter mode
+# where array-based pixel manipulation would be too slow.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+
+# ============================================================================
+# Winit Buffer FFI Declarations
+# ============================================================================
+
+extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
+extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
+extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
+extern fn rt_winit_buffer_free(buf: i64) -> bool
+
+# ============================================================================
+# HostedCompositorBackend
+# ============================================================================
+
+class HostedCompositorBackend:
+    """CompositorBackend that renders through a winit native pixel buffer.
+
+    All drawing is delegated to Rust-side FFI functions that operate on
+    an opaque pixel buffer identified by buffer_id. The buffer is presented
+    to a winit window identified by window_id.
+
+    Colors are u32 ARGB (0xAARRGGBB), matching the CompositorBackend contract.
+    The FFI layer accepts i64 for all numeric arguments.
+    """
+    window_id: i64
+    buffer_id: i64
+    w: i32
+    h: i32
+
+# ============================================================================
+# CompositorBackend Trait Implementation
+# ============================================================================
+
+impl CompositorBackend for HostedCompositorBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        """Fill the entire buffer with a solid color."""
+        rt_winit_buffer_fill_rect(
+            self.buffer_id,
+            0, 0,
+            self.w.to_i64(), self.h.to_i64(),
+            color.to_i64()
+        )
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """Fill a rectangle in the pixel buffer."""
+        rt_winit_buffer_fill_rect(
+            self.buffer_id,
+            x.to_i64(), y.to_i64(),
+            w.to_i64(), h.to_i64(),
+            color.to_i64()
+        )
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        """Draw a string of text using the 8x16 bitmap font.
+
+        Each character is 8 pixels wide. Characters are rendered
+        left-to-right with no spacing beyond the 8px glyph width.
+        """
+        var cx = x
+        for ch in text_str:
+            val ch_byte = ch.to_u8()
+            self.draw_char_8x16(cx, y, ch_byte, fg, bg)
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        """Draw a single 8x16 character glyph into the pixel buffer.
+
+        Uses the VGA 8x16 bitmap font from fb_driver. Each glyph row is
+        a byte where MSB = leftmost pixel. Set bits draw fg color,
+        clear bits draw bg color. Each pixel is rendered as a 1x1
+        fill_rect call into the native buffer.
+        """
+        val glyph = get_glyph_8x16(ch)
+        var row: i32 = 0
+        while row < 16:
+            val bits = glyph[row]
+            var col: i32 = 0
+            while col < 8:
+                val mask = 0x80 >> col
+                val color = if (bits & mask) != 0: fg else: bg
+                val px = x + col
+                val py = y + row
+                rt_winit_buffer_fill_rect(
+                    self.buffer_id,
+                    px.to_i64(), py.to_i64(),
+                    1, 1,
+                    color.to_i64()
+                )
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        """Write a single pixel using a 1x1 fill_rect call."""
+        rt_winit_buffer_fill_rect(
+            self.buffer_id,
+            x.to_i64(), y.to_i64(),
+            1, 1,
+            color.to_i64()
+        )
+
+    me present():
+        """Present the pixel buffer to the winit window (full frame)."""
+        rt_winit_buffer_present(self.window_id, self.buffer_id)
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        """Present a rectangular region.
+
+        The winit buffer FFI only supports full-frame present, so this
+        degrades to a full present (same as FbCompositorBackend).
+        """
+        rt_winit_buffer_present(self.window_id, self.buffer_id)
+
+# ============================================================================
+# Static Constructor
+# ============================================================================
+
+impl HostedCompositorBackend:
+
+    static fn new(window_id: i64, buffer_id: i64, w: i32, h: i32) -> HostedCompositorBackend:
+        """Create a hosted compositor backend from existing winit handles.
+
+        Args:
+            window_id: Opaque handle from rt_winit_window_new
+            buffer_id: Opaque handle from rt_winit_buffer_create
+            w: Buffer width in pixels
+            h: Buffer height in pixels
+        """
+        HostedCompositorBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
+
+    static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCompositorBackend:
+        """Create a hosted compositor backend, allocating a new pixel buffer.
+
+        Calls rt_winit_buffer_create to allocate the native-side buffer,
+        then wraps it in a HostedCompositorBackend.
+
+        Args:
+            window_id: Opaque handle from rt_winit_window_new
+            w: Buffer width in pixels
+            h: Buffer height in pixels
+            fill_color: Initial fill color (ARGB u32)
+        """
+        val buf = rt_winit_buffer_create(w.to_i64(), h.to_i64(), fill_color.to_i64())
+        HostedCompositorBackend(window_id: window_id, buffer_id: buf, w: w, h: h)
+
+    me free():
+        """Release the native pixel buffer.
+
+        Should be called when the backend is no longer needed to avoid
+        leaking the Rust-side buffer allocation.
+        """
+        rt_winit_buffer_free(self.buffer_id)
