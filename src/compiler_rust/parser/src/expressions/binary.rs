@@ -102,13 +102,11 @@ impl<'a> Parser<'a> {
     // Pipeline operator |> (lowest precedence - passes value to function)
     parse_binary_single!(parse_pipe, parse_compose, PipeForward, BinOp::PipeForward);
 
-    // Compose >> and LayerConnect ~> operators (between pipe and parallel)
-    // >> = function composition: f >> g means \x: g(f(x))
+    // LayerConnect ~> operator (between pipe and parallel)
     // ~> = ML layer composition (neural network layer connection)
-    parse_binary_multi!(parse_compose, parse_parallel,
-        ShiftRight => BinOp::Compose,
-        TildeArrow => BinOp::LayerConnect,
-    );
+    // Note: >> is parsed as ShiftRight at the shift precedence level (line 302).
+    // Function composition uses |> (pipe) instead.
+    parse_binary_single!(parse_compose, parse_parallel, TildeArrow, BinOp::LayerConnect);
 
     // Parallel operator // (executes functions in parallel)
     parse_binary_single!(parse_parallel, parse_or, Parallel, BinOp::Parallel);
@@ -297,9 +295,11 @@ impl<'a> Parser<'a> {
         )
     }
 
-    // Note: >> (ShiftRight token) is now parsed as Compose at higher precedence.
-    // Only << remains as a bitwise shift operator.
-    parse_binary_single!(parse_shift, parse_matmul, ShiftLeft, BinOp::ShiftLeft);
+    // Bitwise shift operators: << (left) and >> (right)
+    parse_binary_multi!(parse_shift, parse_matmul,
+        ShiftLeft => BinOp::ShiftLeft,
+        ShiftRight => BinOp::ShiftRight,
+    );
 
     // Simple Math: Matrix multiplication @ operator (#1930-#1939)
     // Precedence: between shift and term (same level as factor: *, /, %, //)
