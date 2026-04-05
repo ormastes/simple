@@ -13,6 +13,40 @@
     .type _start, @function
 
 _start:
+    /* Check current EL — if EL2, drop to EL1 */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #2
+    b.ne    .Lel1_setup
+
+    /* --- Running at EL2: configure EL1 and drop down --- */
+    /* HCR_EL2: RW=1 (AArch64 at EL1), no traps */
+    mov     x0, #(1 << 31)     /* RW bit */
+    msr     hcr_el2, x0
+
+    /* SCTLR_EL1: disable MMU, caches, alignment check */
+    mov     x0, #0
+    msr     sctlr_el1, x0
+
+    /* Set SPSR_EL2: return to EL1h (EL1 with SP_EL1) */
+    mov     x0, #5              /* M[3:0]=0b0101 = EL1h */
+    msr     spsr_el2, x0
+
+    /* Set ELR_EL2 to continue at .Lel1_setup */
+    adr     x0, .Lel1_setup
+    msr     elr_el2, x0
+    eret
+
+.Lel1_setup:
+    /* Disable MMU, caches, and alignment check in SCTLR_EL1 */
+    mrs     x0, sctlr_el1
+    bic     x0, x0, #(1 << 0)  /* Clear M bit (MMU off) */
+    bic     x0, x0, #(1 << 1)  /* Clear A bit (alignment check off) */
+    bic     x0, x0, #(1 << 2)  /* Clear C bit (data cache off) */
+    bic     x0, x0, #(1 << 12) /* Clear I bit (instruction cache off) */
+    msr     sctlr_el1, x0
+    isb
+
     /* Set up stack pointer from linker symbol */
     adrp    x0, _stack_top
     add     sp, x0, :lo12:_stack_top

@@ -691,7 +691,7 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
  * QEMU virt machine ARM64 ECAM base: 0x3f000000
  * =================================================================== */
 
-#define ECAM_BASE 0x3f000000ULL
+#define ECAM_BASE 0x4010000000ULL
 #define MAX_PCI_CACHED 32
 
 static struct {
@@ -855,6 +855,15 @@ extern void spl_start(void) __attribute__((weak));
 void _c_start(void)
 {
     _pl011_init();
+
+    /* Disable alignment checking — Cranelift may emit unaligned literal pools */
+    {
+        uint64_t sctlr;
+        __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+        sctlr &= ~(1ULL << 1); /* Clear A bit (alignment check) */
+        __asm__ volatile("msr sctlr_el1, %0" : : "r"(sctlr));
+        __asm__ volatile("isb");
+    }
 
     serial_puts("SimpleOS ARM64 boot\r\n");
     serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
