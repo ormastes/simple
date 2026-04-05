@@ -3,8 +3,8 @@
 # MDSOC: feature dimension, vfs layer
 # Called during kernel init. Sets up the complete storage stack:
 # 1. PCI manager discovers NVMe device
-# 2. NVMe driver initializes with DeviceGrant
-# 3. NVMe adapter wraps NVMe driver as BlockDevice
+# 2. NVMe driver initialized via C (syscall 86) — bypasses auto-stubbed MMIO
+# 3. C NVMe adapter reads sectors via syscall 85
 # 4. FAT32 driver reads BPB from NVMe via adapter
 # 5. VFS mounts FAT32 at "/"
 # 6. VFS service starts listening on IPC port "vfs"
@@ -17,19 +17,83 @@ use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_grant_d
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.types.device_mem_types.{DeviceGrant}
-use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16}
 
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
 
 # Syscall numbers
 val SYS_ALLOC_DMA: u64 = 84
+val SYS_NVME_READ_SECTOR: u64 = 85
+val SYS_NVME_INIT: u64 = 86
 
 # DMA page size for sector I/O buffers
 val DMA_PAGE_SIZE: u64 = 4096
 
 # ============================================================================
-# NVMe-to-BlockDevice Adapter
+# C NVMe BlockDevice Adapter (syscall 85)
+# ============================================================================
+#
+# Uses the C NVMe driver in baremetal_stubs.c via syscall 85.
+# The C code does all MMIO directly with volatile pointers, avoiding the
+# auto-stubbed Simple MMIO wrappers that return 0.
+
+class CNvmeBlockAdapter:
+    """Wraps C NVMe driver (syscall 85) as BlockDevice for FAT32."""
+    sector_buf_addr: u64    # DMA buffer address for sector transfers
+    ready: bool
+
+impl CNvmeBlockAdapter:
+    static fn new() -> CNvmeBlockAdapter:
+        CNvmeBlockAdapter(
+            sector_buf_addr: 0,
+            ready: false
+        )
+
+    me init() -> Result<bool, text>:
+        """Initialize: call C NVMe init (syscall 86) and allocate sector buffer."""
+        # Initialize the C NVMe controller
+        val init_result = syscall(SYS_NVME_INIT, 0, 0, 0, 0, 0)
+        if init_result < 0:
+            return Result.Err("CNvmeBlockAdapter: C NVMe init failed")
+
+        # Allocate a DMA buffer for sector transfers
+        val buf = syscall(SYS_ALLOC_DMA, DMA_PAGE_SIZE, 0, 0, 0, 0)
+        if buf < 0:
+            return Result.Err("CNvmeBlockAdapter: DMA buffer alloc failed")
+        self.sector_buf_addr = buf.to_u64()
+        self.ready = true
+        serial_println("[c-nvme-adapter] Ready, sector buffer at 0x{self.sector_buf_addr}")
+        Result.Ok(true)
+
+impl BlockDevice for CNvmeBlockAdapter:
+    me read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        """Read one sector from NVMe via C driver (syscall 85)."""
+        if not self.ready:
+            return Result.Err("CNvmeBlockAdapter: not initialized")
+
+        val result = syscall(SYS_NVME_READ_SECTOR, 0, lba, self.sector_buf_addr, 0, 0)
+        if result < 0:
+            return Result.Err("CNvmeBlockAdapter: read_sector failed")
+
+        # Copy from DMA buffer to byte array
+        var i: u64 = 0
+        val ss: u64 = 512
+        while i < ss and i.to_i32() < buffer.len():
+            val byte_val = mmio_read32(self.sector_buf_addr + i) & 0xFF
+            buffer[i.to_i32()] = byte_val.to_u8()
+            i = i + 1
+        Result.Ok(true)
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        """Write not yet supported via C NVMe driver."""
+        Result.Err("CNvmeBlockAdapter: write not implemented")
+
+    fn sector_size() -> u32:
+        512
+
+# ============================================================================
+# Legacy NVMe-to-BlockDevice Adapter (Pure Simple — kept for non-baremetal)
 # ============================================================================
 #
 # The NVMe driver uses DMA-based sector I/O (physical addresses), while the
@@ -119,6 +183,7 @@ impl BlockDevice for NvmeBlockAdapter:
 var g_vfs: VfsManager = VfsManager.new()
 var g_nvme: NvmeDriver = NvmeDriver.new()
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
+var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_vfs_initialized: bool = false
 
 # ============================================================================
@@ -127,6 +192,9 @@ var g_vfs_initialized: bool = false
 
 fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
+
+    Uses the C NVMe driver (syscall 85/86) on baremetal, bypassing the
+    auto-stubbed Simple MMIO functions that return 0.
 
     Returns true if VFS is ready to serve file requests.
     """
@@ -140,47 +208,34 @@ fn vfs_boot_init() -> bool:
         return false
     serial_println("[vfs-init] Found NVMe device at index {nvme_idx}")
 
-    # Step 2: Get BAR0 for NVMe (syscall 82 on baremetal returns raw BAR0 phys addr)
-    val bar0_phys = syscall(82, nvme_idx, 0, 0, 0, 0)
-    if bar0_phys < 0:
-        serial_println("[vfs-init] Failed to read NVMe BAR0")
+    # Step 2: Initialize NVMe via C driver (syscall 86)
+    # This does the full NVMe init sequence in C with real volatile MMIO,
+    # avoiding the auto-stubbed Simple MMIO wrappers.
+    serial_println("[vfs-init] Initializing NVMe via C driver (syscall 86)...")
+    g_c_adapter = CNvmeBlockAdapter.new()
+    val c_init_result = g_c_adapter.init()
+    if c_init_result.is_err():
+        serial_println("[vfs-init] C NVMe init failed — VFS unavailable")
         return false
-    serial_println("[vfs-init] NVMe BAR0 physical address obtained")
+    serial_println("[vfs-init] C NVMe controller initialized!")
 
-    # Step 3: Map BAR0 (identity mapped on baremetal — syscall 83 returns same addr)
-    val bar0_virt = syscall(83, bar0_phys, 0, 0, 0, 0)
-    serial_println("[vfs-init] NVMe BAR0 mapped")
+    # Step 3: Verify sector 0 via C driver — read BPB and check signature
+    val dma_buf = syscall(SYS_ALLOC_DMA, 4096, 0, 0, 0, 0)
+    if dma_buf >= 0:
+        val sector0_result = syscall(SYS_NVME_READ_SECTOR, 0, 0, dma_buf, 0, 0)
+        if sector0_result >= 0:
+            val sig = mmio_read16(dma_buf.to_u64() + 510)
+            if sig == 0xAA55:
+                serial_println("[vfs-init] FAT32 BPB signature valid!")
+            else:
+                serial_println("[vfs-init] WARNING: invalid BPB signature")
+        else:
+            serial_println("[vfs-init] Sector 0 verification read failed")
 
-    # Step 4: Allocate DMA bounce buffer (syscall 84)
-    val dma_buf = syscall(84, 4096, 0, 0, 0, 0)
-    if dma_buf < 0:
-        serial_println("[vfs-init] Failed to allocate DMA buffer")
-        return false
-    serial_println("[vfs-init] DMA buffer allocated")
+    # Step 4: Create FAT32 driver on top of C NVMe adapter
+    var fat32 = Fat32Driver.new(g_c_adapter)
 
-    # Step 5: Initialize NVMe driver with raw BAR0 + DMA
-    serial_println("[vfs-init] Attempting NVMe controller init...")
-    g_nvme = NvmeDriver.new()
-    val nvme_result = g_nvme.init_baremetal(bar0_virt, dma_buf)
-    if nvme_result.is_err():
-        serial_println("[vfs-init] NVMe init failed — VFS unavailable")
-        return false
-
-    serial_println("[vfs-init] NVMe controller initialized!")
-
-    # Step 6: Initialize NVMe block adapter with DMA bounce buffer
-    g_adapter = NvmeBlockAdapter.new(g_nvme)
-    val adapter_result = g_adapter.init_bounce_buffer()
-    if adapter_result.is_err():
-        serial_println("[vfs-init] NVMe adapter init failed")
-        return false
-    serial_println("[vfs-init] NVMe block adapter ready")
-
-    # Step 6: Create FAT32 driver on top of NVMe adapter
-    var fat32 = Fat32Driver.new(g_adapter)
-
-    # Step 6: Mount FAT32 at "/" via VfsManager
-    # VfsManager.mount(path, fs_type, device, read_only, fs)
+    # Step 5: Mount FAT32 at "/" via VfsManager
     val mount_result = g_vfs.mount("/", "fat32", "nvme0n1", false, fat32)
     if mount_result.is_err():
         serial_println("[vfs-init] FAT32 mount failed: {mount_result.unwrap_err()}")

@@ -783,70 +783,18 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 }
 
 /* ===================================================================
- * 8b. Bare-metal syscall stub
+ * 8a-pci. PCI device cache + scan (moved here for NVMe forward ref)
  *
- * On bare-metal, there is no kernel to syscall into. This stub handles
- * the syscall IDs that make sense on bare-metal (DebugWrite for serial)
- * and returns -ENOSYS for everything else. This allows POSIX layer code
- * to be compiled and linked without crashing on import.
+ * Originally in the syscall 80 section; hoisted so the NVMe C driver
+ * can reference _pci_cache[] and _pci_scan() directly.
  * =================================================================== */
 
-int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
-
-int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
-                                       uint64_t a2, uint64_t a3, uint64_t a4)
-{
-    (void)a2; (void)a3; (void)a4;
-    switch (id) {
-        case 0:  /* Exit */
-            outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit */
-            for (;;) __asm__ volatile("cli; hlt");
-            return 0;
-        case 4:  /* GetPid */
-            return 1; /* bare-metal: PID 1 */
-        case 60: /* DebugWrite */
-            serial_putchar((char)(a0 & 0xFF));
-            return 0;
-        case 80: /* DevEnumerate — PCI bus scan via direct port I/O */
-            return _pci_enumerate(a0, a1, a2);
-        case 82: /* DeviceGrant — read PCI BAR0 via _pci_enumerate mode 5 */
-            return _pci_enumerate(5, a0, 0);
-        case 83: { /* MapBar — identity map on baremetal (no-op, return same addr) */
-            return (int64_t)a0; /* On baremetal, phys == virt (identity mapped) */
-        }
-        case 84: { /* AllocDma — allocate DMA buffer (use heap) */
-            uint64_t size = a0;
-            void *p = malloc(size);
-            if (!p) return -12; /* ENOMEM */
-            return (int64_t)(uintptr_t)p; /* Return virtual address (= physical on identity map) */
-        }
-        default:
-            return -38; /* ENOSYS */
-    }
-}
-
-/* ===================================================================
- * PCI enumeration via direct port I/O (syscall 80 handler)
- *
- * Mode 0 (a0=0): Count PCI devices. Returns device count.
- * Mode 1 (a0=1): Get device info at index a1 into DeviceInfoBuf at a2.
- *                 DeviceInfoBuf layout (from device_mem_types.spl):
- *                   offset 0:  u8  bus
- *                   offset 1:  u8  device
- *                   offset 2:  u8  func
- *                   offset 3:  u8  padding
- *                   offset 4:  u16 vendor_id
- *                   offset 6:  u16 device_id
- *                   offset 8:  u8  class_code
- *                   offset 9:  u8  subclass
- *                   offset 10: u8  prog_if
- *                   offset 11: u8  header_type
- *                   offset 12: u8  irq_line
- * =================================================================== */
-
-/* Cached PCI device list (scanned once on first call) */
 #define MAX_PCI_CACHED 64
-static struct { uint8_t bus, dev, func; uint16_t vendor, devid; uint8_t cls, sub, progif, htype, irq; } _pci_cache[MAX_PCI_CACHED];
+static struct {
+    uint8_t bus, dev, func;
+    uint16_t vendor, devid;
+    uint8_t cls, sub, progif, htype, irq;
+} _pci_cache[MAX_PCI_CACHED];
 static int _pci_cache_count = -1; /* -1 = not scanned yet */
 
 static void _pci_scan(void)
@@ -894,6 +842,655 @@ static void _pci_scan(void)
         }
     }
 }
+
+/* ===================================================================
+ * 8b-nvme. NVMe controller init + sector read (pure C, polling)
+ *
+ * The Simple-compiled NVMe driver calls MMIO read/write via extern fns,
+ * but those are auto-stubbed and return 0.  This C implementation does
+ * the full NVMe init + sector read directly with volatile pointers.
+ * Exposed as syscall 85: NvmeReadSector(device_idx, lba, buf_addr).
+ *
+ * NVMe register layout (BAR0 offsets):
+ *   0x00 CAP     Controller Capabilities (64-bit)
+ *   0x08 VS      Version
+ *   0x14 CC      Controller Configuration
+ *   0x1C CSTS    Controller Status
+ *   0x24 AQA     Admin Queue Attributes
+ *   0x28 ASQ     Admin SQ Base Address (64-bit)
+ *   0x30 ACQ     Admin CQ Base Address (64-bit)
+ *   0x1000+      Doorbells
+ * =================================================================== */
+
+/* --- MMIO helpers (volatile, raw physical addresses) --- */
+#define nvme_rd32(addr) (*(volatile uint32_t *)(uintptr_t)(addr))
+#define nvme_wr32(addr, val) (*(volatile uint32_t *)(uintptr_t)(addr) = (val))
+#define nvme_rd64(addr) (*(volatile uint64_t *)(uintptr_t)(addr))
+#define nvme_wr64(addr, val) (*(volatile uint64_t *)(uintptr_t)(addr) = (val))
+
+/* NVMe register offsets */
+#define NVME_REG_CAP   0x00
+#define NVME_REG_VS    0x08
+#define NVME_REG_CC    0x14
+#define NVME_REG_CSTS  0x1C
+#define NVME_REG_AQA   0x24
+#define NVME_REG_ASQ   0x28
+#define NVME_REG_ACQ   0x30
+
+/* CC bits */
+#define NVME_CC_EN        (1u << 0)
+#define NVME_CC_CSS_NVM   (0u << 4)
+#define NVME_CC_MPS_4K    (0u << 7)
+#define NVME_CC_IOSQES_6  (6u << 16)  /* log2(64) = 6 */
+#define NVME_CC_IOCQES_4  (4u << 20)  /* log2(16) = 4 */
+
+/* CSTS bits */
+#define NVME_CSTS_RDY  (1u << 0)
+#define NVME_CSTS_CFS  (1u << 1)
+
+/* Queue sizes */
+#define NVME_ADMIN_DEPTH  32
+#define NVME_IO_DEPTH     64
+#define NVME_SQE_SIZE     64
+#define NVME_CQE_SIZE     16
+
+/* NVMe SQE (Submission Queue Entry) — 64 bytes */
+struct nvme_sqe {
+    uint32_t cdw0;    /* opcode[7:0] | fuse[9:8] | psdt[15:14] | cid[31:16] */
+    uint32_t nsid;
+    uint64_t rsvd;
+    uint64_t mptr;
+    uint64_t prp1;
+    uint64_t prp2;
+    uint32_t cdw10;
+    uint32_t cdw11;
+    uint32_t cdw12;
+    uint32_t cdw13;
+    uint32_t cdw14;
+    uint32_t cdw15;
+};
+
+/* NVMe CQE (Completion Queue Entry) — 16 bytes */
+struct nvme_cqe {
+    uint32_t dw0;
+    uint32_t rsvd;
+    uint16_t sq_head;
+    uint16_t sq_id;
+    uint16_t cid;
+    uint16_t status;   /* bit 0 = phase, bits 1-15 = status code */
+};
+
+/* NVMe controller state (single device) */
+static struct {
+    uint64_t bar0;
+    uint32_t db_stride;    /* doorbell stride in bytes = 4 << DSTRD */
+
+    /* Admin queue (QID 0) */
+    struct nvme_sqe *admin_sq;
+    struct nvme_cqe *admin_cq;
+    uint16_t admin_sq_tail;
+    uint16_t admin_cq_head;
+    uint8_t  admin_cq_phase;
+    uint16_t admin_cid;
+
+    /* I/O queue (QID 1) */
+    struct nvme_sqe *io_sq;
+    struct nvme_cqe *io_cq;
+    uint16_t io_sq_tail;
+    uint16_t io_cq_head;
+    uint8_t  io_cq_phase;
+    uint16_t io_cid;
+
+    int initialized;
+    uint32_t sector_size;
+    uint64_t sector_count;
+} _nvme;
+
+/* Allocate page-aligned memory from the bump allocator.
+ * NVMe requires queue and data buffers to be page-aligned (4KB).
+ * We waste up to (alignment-1) bytes of padding to get the alignment. */
+static void *nvme_alloc_aligned(size_t size, size_t alignment)
+{
+    /* Allocate extra space so we can align within it */
+    size_t total = size + alignment;
+    void *raw = malloc(total);
+    if (!raw) return (void *)0;
+    /* Align the pointer within the allocated region */
+    uintptr_t addr = (uintptr_t)raw;
+    uintptr_t aligned = (addr + alignment - 1) & ~(alignment - 1);
+    return (void *)aligned;
+}
+
+/* Ring a doorbell: SQ tail doorbell = BAR0 + 0x1000 + (2*qid) * stride
+ *                  CQ head doorbell = BAR0 + 0x1000 + (2*qid+1) * stride */
+static void nvme_ring_sq_doorbell(uint16_t qid, uint16_t tail)
+{
+    uint64_t off = 0x1000 + (uint64_t)(2 * qid) * _nvme.db_stride;
+    nvme_wr32(_nvme.bar0 + off, tail);
+}
+
+static void nvme_ring_cq_doorbell(uint16_t qid, uint16_t head)
+{
+    uint64_t off = 0x1000 + (uint64_t)(2 * qid + 1) * _nvme.db_stride;
+    nvme_wr32(_nvme.bar0 + off, head);
+}
+
+/* Submit a command to the admin queue and poll for completion.
+ * Returns 0 on success, negative on error. */
+static int nvme_admin_cmd(uint8_t opcode, uint32_t nsid,
+                          uint64_t prp1, uint64_t prp2,
+                          uint32_t cdw10, uint32_t cdw11, uint32_t cdw12)
+{
+    int idx = _nvme.admin_sq_tail;
+    struct nvme_sqe *sqe = &_nvme.admin_sq[idx];
+
+    __builtin_memset(sqe, 0, sizeof(*sqe));
+    sqe->cdw0 = (uint32_t)opcode | ((uint32_t)_nvme.admin_cid << 16);
+    sqe->nsid = nsid;
+    sqe->prp1 = prp1;
+    sqe->prp2 = prp2;
+    sqe->cdw10 = cdw10;
+    sqe->cdw11 = cdw11;
+    sqe->cdw12 = cdw12;
+
+    _nvme.admin_sq_tail = (_nvme.admin_sq_tail + 1) % NVME_ADMIN_DEPTH;
+    nvme_ring_sq_doorbell(0, _nvme.admin_sq_tail);
+
+    /* Poll CQ for completion */
+    volatile struct nvme_cqe *cqe = &_nvme.admin_cq[_nvme.admin_cq_head];
+    uint32_t timeout = 5000000;
+    while (timeout--) {
+        uint16_t status_raw = cqe->status;
+        uint8_t phase = status_raw & 1;
+        if (phase == _nvme.admin_cq_phase) {
+            /* Completion arrived */
+            uint16_t sc = (status_raw >> 1) & 0x7FFF;
+            _nvme.admin_cq_head = (_nvme.admin_cq_head + 1) % NVME_ADMIN_DEPTH;
+            if (_nvme.admin_cq_head == 0)
+                _nvme.admin_cq_phase ^= 1;
+            nvme_ring_cq_doorbell(0, _nvme.admin_cq_head);
+            _nvme.admin_cid++;
+            if (sc != 0) {
+                serial_puts("[nvme-c] admin cmd failed, status=0x");
+                serial_put_hex(sc);
+                serial_puts("\r\n");
+                return -5; /* EIO */
+            }
+            return 0;
+        }
+        /* Tiny delay to avoid hammering the bus */
+        __asm__ volatile("pause" ::: "memory");
+    }
+    serial_puts("[nvme-c] admin cmd timeout\r\n");
+    return -110; /* ETIMEDOUT */
+}
+
+/* Submit a command to the I/O queue and poll for completion.
+ * Returns 0 on success, negative on error. */
+static int nvme_io_cmd(uint8_t opcode, uint32_t nsid,
+                       uint64_t prp1, uint64_t prp2,
+                       uint32_t cdw10, uint32_t cdw11, uint32_t cdw12)
+{
+    int idx = _nvme.io_sq_tail;
+    struct nvme_sqe *sqe = &_nvme.io_sq[idx];
+
+    __builtin_memset(sqe, 0, sizeof(*sqe));
+    sqe->cdw0 = (uint32_t)opcode | ((uint32_t)_nvme.io_cid << 16);
+    sqe->nsid = nsid;
+    sqe->prp1 = prp1;
+    sqe->prp2 = prp2;
+    sqe->cdw10 = cdw10;
+    sqe->cdw11 = cdw11;
+    sqe->cdw12 = cdw12;
+
+    _nvme.io_sq_tail = (_nvme.io_sq_tail + 1) % NVME_IO_DEPTH;
+    nvme_ring_sq_doorbell(1, _nvme.io_sq_tail);
+
+    /* Poll CQ for completion */
+    volatile struct nvme_cqe *cqe = &_nvme.io_cq[_nvme.io_cq_head];
+    uint32_t timeout = 5000000;
+    while (timeout--) {
+        uint16_t status_raw = cqe->status;
+        uint8_t phase = status_raw & 1;
+        if (phase == _nvme.io_cq_phase) {
+            uint16_t sc = (status_raw >> 1) & 0x7FFF;
+            _nvme.io_cq_head = (_nvme.io_cq_head + 1) % NVME_IO_DEPTH;
+            if (_nvme.io_cq_head == 0)
+                _nvme.io_cq_phase ^= 1;
+            nvme_ring_cq_doorbell(1, _nvme.io_cq_head);
+            _nvme.io_cid++;
+            if (sc != 0) {
+                serial_puts("[nvme-c] I/O cmd failed, status=0x");
+                serial_put_hex(sc);
+                serial_puts("\r\n");
+                return -5; /* EIO */
+            }
+            return 0;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    serial_puts("[nvme-c] I/O cmd timeout\r\n");
+    return -110;
+}
+
+/* ---------------------------------------------------------------
+ * _nvme_init_and_read_sector0 — full NVMe init + BPB sector read
+ * --------------------------------------------------------------- */
+static int _nvme_init_controller(void)
+{
+    if (_nvme.initialized) return 0;
+
+    /* Ensure PCI cache is populated */
+    if (_pci_cache_count < 0) _pci_scan();
+
+    /* Find NVMe device: class=0x01, subclass=0x08 */
+    int nvme_idx = -1;
+    for (int i = 0; i < _pci_cache_count; i++) {
+        if (_pci_cache[i].cls == 0x01 && _pci_cache[i].sub == 0x08) {
+            nvme_idx = i;
+            break;
+        }
+    }
+    if (nvme_idx < 0) {
+        serial_puts("[nvme-c] No NVMe device found on PCI bus\r\n");
+        return -19; /* ENODEV */
+    }
+
+    /* Step 1: Read BAR0 from PCI config space */
+    uint32_t pci_addr = 0x80000000
+        | ((uint32_t)_pci_cache[nvme_idx].bus << 16)
+        | ((uint32_t)_pci_cache[nvme_idx].dev << 11)
+        | 0x10; /* BAR0 offset */
+    outl(0xCF8, pci_addr);
+    uint32_t bar0_lo = inl(0xCFC);
+
+    /* Check if 64-bit BAR */
+    uint64_t bar0_phys;
+    if ((bar0_lo & 0x6) == 0x4) {
+        /* 64-bit memory BAR: read high 32 bits from BAR1 (offset 0x14) */
+        outl(0xCF8, pci_addr + 4);
+        uint32_t bar0_hi = inl(0xCFC);
+        bar0_phys = ((uint64_t)bar0_hi << 32) | (uint64_t)(bar0_lo & ~0xFu);
+    } else {
+        bar0_phys = (uint64_t)(bar0_lo & ~0xFu);
+    }
+
+    /* Enable bus mastering + memory space in PCI command register */
+    uint32_t cmd_addr = 0x80000000
+        | ((uint32_t)_pci_cache[nvme_idx].bus << 16)
+        | ((uint32_t)_pci_cache[nvme_idx].dev << 11)
+        | 0x04; /* Command register offset */
+    outl(0xCF8, cmd_addr);
+    uint32_t cmd_reg = inl(0xCFC);
+    cmd_reg |= (1 << 1) | (1 << 2); /* Memory Space + Bus Master */
+    outl(0xCF8, cmd_addr);
+    outl(0xCFC, cmd_reg);
+
+    _nvme.bar0 = bar0_phys; /* Identity mapped: phys == virt */
+
+    serial_puts("[nvme-c] BAR0=");
+    serial_put_hex(bar0_phys);
+    serial_puts("\r\n");
+
+    /* Step 2: Read CAP register (64-bit) */
+    uint64_t cap = nvme_rd64(_nvme.bar0 + NVME_REG_CAP);
+    serial_puts("[nvme-c] CAP=");
+    serial_put_hex(cap);
+    serial_puts("\r\n");
+
+    /* Extract doorbell stride: CAP bits [35:32] = DSTRD */
+    uint32_t dstrd = (uint32_t)((cap >> 32) & 0xF);
+    _nvme.db_stride = 4u << dstrd;
+
+    /* Step 3: Disable controller — clear CC.EN, wait CSTS.RDY=0 */
+    uint32_t cc = nvme_rd32(_nvme.bar0 + NVME_REG_CC);
+    nvme_wr32(_nvme.bar0 + NVME_REG_CC, cc & ~NVME_CC_EN);
+
+    for (uint32_t i = 0; i < 1000000; i++) {
+        uint32_t csts = nvme_rd32(_nvme.bar0 + NVME_REG_CSTS);
+        if (!(csts & NVME_CSTS_RDY)) goto disabled;
+        if (csts & NVME_CSTS_CFS) {
+            serial_puts("[nvme-c] Controller fatal status during disable\r\n");
+            return -5;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    serial_puts("[nvme-c] Timeout waiting for controller disable\r\n");
+    return -110;
+disabled:
+    serial_puts("[nvme-c] Controller disabled\r\n");
+
+    /* Step 4: Allocate admin queues (4KB-aligned for NVMe compliance) */
+    size_t admin_sq_bytes = NVME_ADMIN_DEPTH * NVME_SQE_SIZE; /* 2048 */
+    size_t admin_cq_bytes = NVME_ADMIN_DEPTH * NVME_CQE_SIZE; /* 512  */
+
+    _nvme.admin_sq = (struct nvme_sqe *)nvme_alloc_aligned(admin_sq_bytes, 4096);
+    _nvme.admin_cq = (struct nvme_cqe *)nvme_alloc_aligned(admin_cq_bytes, 4096);
+    if (!_nvme.admin_sq || !_nvme.admin_cq) {
+        serial_puts("[nvme-c] Failed to allocate admin queues\r\n");
+        return -12; /* ENOMEM */
+    }
+    __builtin_memset(_nvme.admin_sq, 0, admin_sq_bytes);
+    __builtin_memset(_nvme.admin_cq, 0, admin_cq_bytes);
+    _nvme.admin_sq_tail = 0;
+    _nvme.admin_cq_head = 0;
+    _nvme.admin_cq_phase = 1;
+    _nvme.admin_cid = 0;
+
+    /* Step 5: Configure AQA, ASQ, ACQ */
+    uint32_t aqa = ((NVME_ADMIN_DEPTH - 1) << 16) | (NVME_ADMIN_DEPTH - 1);
+    nvme_wr32(_nvme.bar0 + NVME_REG_AQA, aqa);
+    nvme_wr64(_nvme.bar0 + NVME_REG_ASQ, (uint64_t)(uintptr_t)_nvme.admin_sq);
+    nvme_wr64(_nvme.bar0 + NVME_REG_ACQ, (uint64_t)(uintptr_t)_nvme.admin_cq);
+
+    serial_puts("[nvme-c] Admin queues configured: SQ=");
+    serial_put_hex((uint64_t)(uintptr_t)_nvme.admin_sq);
+    serial_puts(" CQ=");
+    serial_put_hex((uint64_t)(uintptr_t)_nvme.admin_cq);
+    serial_puts("\r\n");
+
+    /* Step 6: Enable controller
+     * CC: EN=1, CSS=0 (NVM), MPS=0 (4KB), IOSQES=6 (64B), IOCQES=4 (16B) */
+    uint32_t cc_val = NVME_CC_EN | NVME_CC_CSS_NVM | NVME_CC_MPS_4K
+                    | NVME_CC_IOSQES_6 | NVME_CC_IOCQES_4;
+    nvme_wr32(_nvme.bar0 + NVME_REG_CC, cc_val);
+
+    /* Step 7: Wait for CSTS.RDY=1 */
+    for (uint32_t i = 0; i < 1000000; i++) {
+        uint32_t csts = nvme_rd32(_nvme.bar0 + NVME_REG_CSTS);
+        if (csts & NVME_CSTS_RDY) goto enabled;
+        if (csts & NVME_CSTS_CFS) {
+            serial_puts("[nvme-c] Controller fatal status during enable\r\n");
+            return -5;
+        }
+        __asm__ volatile("pause" ::: "memory");
+    }
+    serial_puts("[nvme-c] Timeout waiting for CSTS.RDY\r\n");
+    return -110;
+enabled:
+    serial_puts("[nvme-c] Controller enabled (CSTS.RDY=1)\r\n");
+
+    /* Step 8: Identify Controller (admin opcode 0x06, CNS=1) */
+    {
+        void *id_buf = nvme_alloc_aligned(4096, 4096);
+        if (!id_buf) return -12;
+        __builtin_memset(id_buf, 0, 4096);
+        int rc = nvme_admin_cmd(0x06, 0,
+                                (uint64_t)(uintptr_t)id_buf, 0,
+                                1 /* CNS=1: controller */, 0, 0);
+        if (rc < 0) {
+            serial_puts("[nvme-c] Identify Controller failed\r\n");
+            /* Non-fatal: continue anyway */
+        } else {
+            serial_puts("[nvme-c] Identify Controller OK\r\n");
+        }
+    }
+
+    /* Step 9: Identify Namespace 1 (admin opcode 0x06, CNS=0, NSID=1) */
+    {
+        void *ns_buf = nvme_alloc_aligned(4096, 4096);
+        if (!ns_buf) return -12;
+        __builtin_memset(ns_buf, 0, 4096);
+        int rc = nvme_admin_cmd(0x06, 1,
+                                (uint64_t)(uintptr_t)ns_buf, 0,
+                                0 /* CNS=0: namespace */, 0, 0);
+        if (rc < 0) {
+            serial_puts("[nvme-c] Identify Namespace failed\r\n");
+            _nvme.sector_size = 512;
+            _nvme.sector_count = 0;
+        } else {
+            /* Parse NSZE at offset 0 (64-bit) */
+            _nvme.sector_count = *(volatile uint64_t *)((uintptr_t)ns_buf + 0);
+            /* Parse FLBAS at offset 26 (1 byte, lower 4 bits = LBA format index) */
+            uint8_t flbas = *(volatile uint8_t *)((uintptr_t)ns_buf + 26);
+            uint8_t fmt_idx = flbas & 0x0F;
+            /* LBAF starts at offset 128, each 4 bytes; LBADS is bits [23:16] */
+            uint32_t lbaf = *(volatile uint32_t *)((uintptr_t)ns_buf + 128 + (uint32_t)fmt_idx * 4);
+            uint32_t lbads = (lbaf >> 16) & 0xFF;
+            if (lbads >= 9 && lbads <= 16)
+                _nvme.sector_size = 1u << lbads;
+            else
+                _nvme.sector_size = 512;
+
+            serial_puts("[nvme-c] NS1: sectors=");
+            serial_put_dec((int64_t)_nvme.sector_count);
+            serial_puts(", sector_size=");
+            serial_put_dec((int64_t)_nvme.sector_size);
+            serial_puts("\r\n");
+        }
+    }
+
+    /* Step 10: Set Number of Queues (Feature 0x07) — request 1 I/O SQ + 1 I/O CQ */
+    {
+        /* CDW10 = feature ID (0x07) for Set Features */
+        /* CDW11 = NCQR[31:16] | NSQR[15:0], each 0-based */
+        int rc = nvme_admin_cmd(0x09 /* Set Features */, 0,
+                                0, 0,
+                                0x07 /* Feature ID: Number of Queues */,
+                                (0u << 16) | 0u /* 1 SQ, 1 CQ (0-based) */,
+                                0);
+        if (rc < 0)
+            serial_puts("[nvme-c] Set Number of Queues failed (non-fatal)\r\n");
+    }
+
+    /* Step 11: Create I/O Completion Queue (QID 1) */
+    size_t io_cq_bytes = NVME_IO_DEPTH * NVME_CQE_SIZE; /* 1024 */
+    _nvme.io_cq = (struct nvme_cqe *)nvme_alloc_aligned(io_cq_bytes, 4096);
+    if (!_nvme.io_cq) return -12;
+    __builtin_memset(_nvme.io_cq, 0, io_cq_bytes);
+    _nvme.io_cq_head = 0;
+    _nvme.io_cq_phase = 1;
+    _nvme.io_cid = 0;
+    {
+        /* Create I/O CQ: admin opcode 0x05
+         * CDW10: QSIZE[31:16] (0-based) | QID[15:0]
+         * CDW11: IV[31:16] | IEN[1] | PC[0]
+         * PRP1 = CQ physical address */
+        uint32_t cdw10 = ((uint32_t)(NVME_IO_DEPTH - 1) << 16) | 1u; /* QID=1 */
+        uint32_t cdw11 = 1u; /* PC=1 (physically contiguous), IEN=0, IV=0 */
+        int rc = nvme_admin_cmd(0x05, 0,
+                                (uint64_t)(uintptr_t)_nvme.io_cq, 0,
+                                cdw10, cdw11, 0);
+        if (rc < 0) {
+            serial_puts("[nvme-c] Create I/O CQ failed\r\n");
+            return rc;
+        }
+    }
+
+    /* Step 12: Create I/O Submission Queue (QID 1) */
+    size_t io_sq_bytes = NVME_IO_DEPTH * NVME_SQE_SIZE; /* 4096 */
+    _nvme.io_sq = (struct nvme_sqe *)nvme_alloc_aligned(io_sq_bytes, 4096);
+    if (!_nvme.io_sq) return -12;
+    __builtin_memset(_nvme.io_sq, 0, io_sq_bytes);
+    _nvme.io_sq_tail = 0;
+    {
+        /* Create I/O SQ: admin opcode 0x01
+         * CDW10: QSIZE[31:16] (0-based) | QID[15:0]
+         * CDW11: CQID[31:16] | QPRIO[2:1] | PC[0]
+         * PRP1 = SQ physical address */
+        uint32_t cdw10 = ((uint32_t)(NVME_IO_DEPTH - 1) << 16) | 1u; /* QID=1 */
+        uint32_t cdw11 = (1u << 16) | 1u; /* CQID=1, PC=1 */
+        int rc = nvme_admin_cmd(0x01, 0,
+                                (uint64_t)(uintptr_t)_nvme.io_sq, 0,
+                                cdw10, cdw11, 0);
+        if (rc < 0) {
+            serial_puts("[nvme-c] Create I/O SQ failed\r\n");
+            return rc;
+        }
+    }
+
+    serial_puts("[nvme-c] I/O queues created\r\n");
+    _nvme.initialized = 1;
+    return 0;
+}
+
+/* Read one sector from NVMe namespace 1.
+ * lba     = logical block address
+ * buf     = destination buffer (must be large enough for one sector)
+ * Returns 0 on success, negative on error. */
+static int _nvme_read_sector_impl(uint64_t lba, void *buf)
+{
+    if (!_nvme.initialized) {
+        int rc = _nvme_init_controller();
+        if (rc < 0) return rc;
+    }
+
+    /* Allocate a 4KB-aligned DMA buffer for the read */
+    void *dma_buf = nvme_alloc_aligned(4096, 4096);
+    if (!dma_buf) return -12;
+    __builtin_memset(dma_buf, 0, 4096);
+
+    /* NVMe I/O Read: opcode 0x02
+     * NSID = 1
+     * PRP1 = DMA buffer physical address
+     * CDW10 = LBA[31:0]
+     * CDW11 = LBA[63:32]
+     * CDW12 = NLB[15:0] (0-based, so 0 = 1 sector) */
+    uint32_t cdw10 = (uint32_t)(lba & 0xFFFFFFFF);
+    uint32_t cdw11 = (uint32_t)(lba >> 32);
+    uint32_t cdw12 = 0; /* 1 sector (0-based) */
+
+    int rc = nvme_io_cmd(0x02, 1,
+                         (uint64_t)(uintptr_t)dma_buf, 0,
+                         cdw10, cdw11, cdw12);
+    if (rc < 0) return rc;
+
+    /* Copy from DMA buffer to caller's buffer */
+    __builtin_memcpy(buf, dma_buf, _nvme.sector_size);
+    return 0;
+}
+
+/* Syscall 85 handler: NvmeReadSector
+ * a0 = device index (ignored, only one NVMe device supported)
+ * a1 = LBA
+ * a2 = destination buffer address (caller-provided, must be >= sector_size)
+ * Returns 0 on success, negative errno on failure. */
+static int64_t _nvme_read_sector(uint64_t device_idx, uint64_t lba, uint64_t buf_addr)
+{
+    (void)device_idx;
+    void *buf = (void *)(uintptr_t)buf_addr;
+    if (!buf) return -14; /* EFAULT */
+    return (int64_t)_nvme_read_sector_impl(lba, buf);
+}
+
+/* _nvme_init_and_read_sector0 — callable from Simple code or early boot
+ * Initializes NVMe and reads sector 0 (FAT32 BPB).
+ * Returns 0 on success, prints diagnostics to serial. */
+static int _nvme_init_and_read_sector0(void)
+{
+    serial_puts("[nvme-c] === NVMe Init + Sector 0 Read ===\r\n");
+
+    int rc = _nvme_init_controller();
+    if (rc < 0) {
+        serial_puts("[nvme-c] Controller init failed, rc=");
+        serial_put_dec(rc);
+        serial_puts("\r\n");
+        return rc;
+    }
+
+    /* Read sector 0 (FAT32 BPB / boot sector) */
+    serial_puts("[nvme-c] Reading sector 0...\r\n");
+    uint8_t sector_buf[512];
+    __builtin_memset(sector_buf, 0, sizeof(sector_buf));
+    rc = _nvme_read_sector_impl(0, sector_buf);
+    if (rc < 0) {
+        serial_puts("[nvme-c] Sector 0 read failed, rc=");
+        serial_put_dec(rc);
+        serial_puts("\r\n");
+        return rc;
+    }
+
+    /* Print first 16 bytes */
+    serial_puts("[nvme-c] Sector 0 read OK, first bytes:");
+    for (int i = 0; i < 16; i++) {
+        serial_putchar(' ');
+        static const char hex[] = "0123456789ABCDEF";
+        serial_putchar(hex[(sector_buf[i] >> 4) & 0xF]);
+        serial_putchar(hex[sector_buf[i] & 0xF]);
+    }
+    serial_puts("\r\n");
+
+    /* Check FAT32 BPB signature at bytes 510-511: must be 0x55 0xAA */
+    uint16_t sig = (uint16_t)sector_buf[510] | ((uint16_t)sector_buf[511] << 8);
+    serial_puts("[nvme-c] FAT32 signature at offset 510: 0x");
+    serial_put_hex(sig);
+    serial_puts("\r\n");
+    if (sig == 0xAA55) {
+        serial_puts("[nvme-c] FAT32 BPB signature valid!\r\n");
+    } else {
+        serial_puts("[nvme-c] WARNING: invalid BPB signature (expected 0xAA55)\r\n");
+    }
+
+    return 0;
+}
+
+/* ===================================================================
+ * 8b. Bare-metal syscall stub
+ *
+ * On bare-metal, there is no kernel to syscall into. This stub handles
+ * the syscall IDs that make sense on bare-metal (DebugWrite for serial)
+ * and returns -ENOSYS for everything else. This allows POSIX layer code
+ * to be compiled and linked without crashing on import.
+ * =================================================================== */
+
+int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
+
+int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                                       uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    (void)a3; (void)a4;
+    switch (id) {
+        case 0:  /* Exit */
+            outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit */
+            for (;;) __asm__ volatile("cli; hlt");
+            return 0;
+        case 4:  /* GetPid */
+            return 1; /* bare-metal: PID 1 */
+        case 60: /* DebugWrite */
+            serial_putchar((char)(a0 & 0xFF));
+            return 0;
+        case 80: /* DevEnumerate — PCI bus scan via direct port I/O */
+            return _pci_enumerate(a0, a1, a2);
+        case 82: /* DeviceGrant — read PCI BAR0 via _pci_enumerate mode 5 */
+            return _pci_enumerate(5, a0, 0);
+        case 83: { /* MapBar — identity map on baremetal (no-op, return same addr) */
+            return (int64_t)a0; /* On baremetal, phys == virt (identity mapped) */
+        }
+        case 84: { /* AllocDma — allocate DMA buffer (use heap) */
+            uint64_t size = a0;
+            void *p = malloc(size);
+            if (!p) return -12; /* ENOMEM */
+            return (int64_t)(uintptr_t)p; /* Return virtual address (= physical on identity map) */
+        }
+        case 85: /* NvmeReadSector: a0=device_idx, a1=lba, a2=buf_addr */
+            return _nvme_read_sector(a0, a1, a2);
+        case 86: /* NvmeInit: initialize NVMe controller + read sector 0 for diag */
+            return (int64_t)_nvme_init_and_read_sector0();
+        default:
+            return -38; /* ENOSYS */
+    }
+}
+
+/* ===================================================================
+ * PCI enumeration via direct port I/O (syscall 80 handler)
+ *
+ * _pci_cache[] and _pci_scan() are defined in section 8a-pci above.
+ *
+ * Mode 0 (a0=0): Count PCI devices. Returns device count.
+ * Mode 1 (a0=1): Get device info at index a1 into DeviceInfoBuf at a2.
+ *                 DeviceInfoBuf layout (from device_mem_types.spl):
+ *                   offset 0:  u8  bus
+ *                   offset 1:  u8  device
+ *                   offset 2:  u8  func
+ *                   offset 3:  u8  padding
+ *                   offset 4:  u16 vendor_id
+ *                   offset 6:  u16 device_id
+ *                   offset 8:  u8  class_code
+ *                   offset 9:  u8  subclass
+ *                   offset 10: u8  prog_if
+ *                   offset 11: u8  header_type
+ *                   offset 12: u8  irq_line
+ * =================================================================== */
 
 int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
 {

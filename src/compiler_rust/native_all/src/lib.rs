@@ -110,6 +110,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --backend <name>    Codegen backend: cranelift (default) or llvm");
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
+                println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
+                println!("  --linker-script <f> Linker script for freestanding/OS targets");
                 return 0;
             }
             "--source" => {
