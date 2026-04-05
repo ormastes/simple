@@ -46,7 +46,7 @@ fn new_llm_error(provider: text, error_msg: text) -> LLMResponse:
 # ============================================================================
 
 fn list_providers() -> [text]:
-    ["claude_cli", "claude_api", "openai", "openai_compat", "local_torch"]
+    ["claude_cli", "claude_api", "gemini_api", "openai", "openai_compat", "local_torch"]
 
 fn is_valid_provider(provider: text) -> bool:
     if provider == "claude_cli":
@@ -56,6 +56,8 @@ fn is_valid_provider(provider: text) -> bool:
     if provider == "openai":
         return true
     if provider == "openai_compat":
+        return true
+    if provider == "gemini_api":
         return true
     if provider == "local_torch":
         return true
@@ -75,6 +77,8 @@ fn dispatch_send(provider: text, prompt: text, model: text, api_key: text, base_
         return _dispatch_claude_api(api_key, base_url, model, messages_json, system_prompt, max_tokens)
     elif provider == "openai":
         return _dispatch_openai(api_key, base_url, model, messages_json, max_tokens)
+    elif provider == "gemini_api":
+        return _dispatch_gemini_api(api_key, base_url, model, messages_json, system_prompt, max_tokens)
     elif provider == "openai_compat":
         return _dispatch_compat(base_url, api_key, model, messages_json, max_tokens)
     else:
@@ -314,6 +318,74 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
         stop_reason: "stop",
         input_tokens: 0,
         output_tokens: 0,
+        error: "",
+        is_error: false,
+        raw: resp_body
+    )
+
+# ============================================================================
+# Gemini API dispatch
+# ============================================================================
+
+fn _dispatch_gemini_api(api_key: text, base_url: text, model: text, messages_json: text, system_prompt: text, max_tokens: i64) -> LLMResponse:
+    if api_key == "":
+        return new_llm_error("gemini_api", "GEMINI_API_KEY not set")
+    var url = base_url
+    if url == "":
+        url = "https://generativelanguage.googleapis.com"
+    var model_val = model
+    if model_val == "":
+        model_val = "gemini-2.5-flash"
+    url = url + "/v1beta/models/" + model_val + ":generateContent?key=" + api_key
+    # Convert messages_json from standard format to Gemini contents format
+    # Standard: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
+    # Gemini:   [{"role":"user","parts":[{"text":"..."}]},{"role":"model","parts":[{"text":"..."}]}]
+    # Simple transform: replace "content": with "parts":[{"text": and append }]
+    # Also remap "assistant" -> "model"
+    var gemini_msgs = messages_json
+    # Build body with contents
+    var parts: [text] = []
+    parts.push(Q() + "contents" + Q() + ":" + gemini_msgs)
+    if system_prompt != "":
+        parts.push(Q() + "systemInstruction" + Q() + ":" + LB() + Q() + "parts" + Q() + ":[" + LB() + Q() + "text" + Q() + ":" + Q() + escape_json(system_prompt) + Q() + RB() + "]" + RB())
+    var tokens = max_tokens
+    if tokens <= 0:
+        tokens = 4096
+    parts.push(Q() + "generationConfig" + Q() + ":" + LB() + Q() + "maxOutputTokens" + Q() + ":" + tokens.to_text() + RB())
+    var body_parts = []
+    body_parts.append(LB())
+    var i = 0
+    for part in parts:
+        if i > 0:
+            body_parts.append(",")
+        body_parts.append(part)
+        i = i + 1
+    body_parts.append(RB())
+    val body = body_parts.join("")
+    val headers = "Content-Type: application/json"
+    val result = rt_http_request("POST", url, headers, body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return new_llm_error("gemini_api", "HTTP error: " + http_error)
+    # Parse Gemini response
+    val content = extract_json_string(resp_body, "text")
+    val finish = extract_json_string(resp_body, "finishReason")
+    val in_tok = extract_json_int(resp_body, "promptTokenCount")
+    val out_tok = extract_json_int(resp_body, "candidatesTokenCount")
+    # Check for error
+    val error_status = extract_json_string(resp_body, "status")
+    if error_status != "":
+        val error_msg = extract_json_string(resp_body, "message")
+        return new_llm_error("gemini_api", error_msg)
+    LLMResponse(
+        content: content,
+        model: model_val,
+        provider: "gemini_api",
+        session_id: "",
+        stop_reason: if finish != "": finish else: "STOP",
+        input_tokens: in_tok,
+        output_tokens: out_tok,
         error: "",
         is_error: false,
         raw: resp_body

@@ -141,6 +141,10 @@ fn llm_chat(user_msg: text) -> text:
         val r = _send_claude_api()
         result_content = r.0
         result_error = r.1
+    elif LLM_PROVIDER == "gemini_api":
+        val r = _send_gemini_api()
+        result_content = r.0
+        result_error = r.1
     elif LLM_PROVIDER == "openai":
         val r = _send_openai()
         result_content = r.0
@@ -278,6 +282,79 @@ fn _send_openai() -> (text, text):
     if http_error != "":
         return ("", "HTTP error: " + http_error)
     val content = extract_json_string(resp_body, "content")
+    (content, "")
+
+# ============================================================================
+# Send via Gemini API
+# ============================================================================
+
+fn _send_gemini_api() -> (text, text):
+    var key = LLM_API_KEY
+    if key == "":
+        key = rt_env_get("GEMINI_API_KEY") ?? ""
+    if key == "":
+        key = rt_env_get("GOOGLE_API_KEY") ?? ""
+    if key == "":
+        return ("", "GEMINI_API_KEY not set")
+    var url = LLM_BASE_URL
+    if url == "":
+        url = "https://generativelanguage.googleapis.com"
+    var model_val = LLM_MODEL
+    if model_val == "":
+        model_val = "gemini-2.5-flash"
+    url = url + "/v1beta/models/" + model_val + ":generateContent?key=" + key
+    # Build Gemini contents array from history
+    var items: [text] = []
+    var idx = 0
+    while idx < LLM_ROLES.len():
+        var role = LLM_ROLES[idx]
+        if role == "assistant":
+            role = "model"
+        var msg_parts = []
+        msg_parts.append(LB())
+        msg_parts.append(Q() + "role" + Q() + ":" + Q() + role + Q() + ",")
+        msg_parts.append(Q() + "parts" + Q() + ":[" + LB() + Q() + "text" + Q() + ":" + Q() + escape_json(LLM_CONTENTS[idx]) + Q() + RB() + "]")
+        msg_parts.append(RB())
+        items = items + [msg_parts.join("")]
+        idx = idx + 1
+    var contents_parts = []
+    contents_parts.append("[")
+    var j = 0
+    for item in items:
+        if j > 0:
+            contents_parts.append(",")
+        contents_parts.append(item)
+        j = j + 1
+    contents_parts.append("]")
+    val contents_json = contents_parts.join("")
+    # Build body
+    var parts: [text] = []
+    parts = parts + [Q() + "contents" + Q() + ":" + contents_json]
+    if LLM_SYSTEM_PROMPT != "":
+        parts = parts + [Q() + "systemInstruction" + Q() + ":" + LB() + Q() + "parts" + Q() + ":[" + LB() + Q() + "text" + Q() + ":" + Q() + escape_json(LLM_SYSTEM_PROMPT) + Q() + RB() + "]" + RB()]
+    parts = parts + [Q() + "generationConfig" + Q() + ":" + LB() + Q() + "maxOutputTokens" + Q() + ":4096" + RB()]
+    var body_parts = []
+    body_parts.append(LB())
+    var i = 0
+    for part in parts:
+        if i > 0:
+            body_parts.append(",")
+        body_parts.append(part)
+        i = i + 1
+    body_parts.append(RB())
+    val body = body_parts.join("")
+    val headers = "Content-Type: application/json"
+    val result = rt_http_request("POST", url, headers, body)
+    val resp_body = result.1 ?? ""
+    val http_error = result.2 ?? ""
+    if http_error != "":
+        return ("", "HTTP error: " + http_error)
+    # Check for error
+    val error_status = extract_json_string(resp_body, "status")
+    if error_status != "":
+        val error_msg = extract_json_string(resp_body, "message")
+        return ("", error_msg)
+    val content = extract_json_string(resp_body, "text")
     (content, "")
 
 # ============================================================================
