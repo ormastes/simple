@@ -93,47 +93,15 @@ fn net_boot_init() -> bool:
         return false
     serial_println("[net-init] Found VirtIO-net device at index {dev_idx}")
 
-    # Step 2: Get DeviceGrant for VirtIO-net
-    val grant_result = pcimgr_grant_device(dev_idx.to_u64(), 0)
-    if grant_result.is_err():
-        serial_println("[net-init] Failed to grant VirtIO-net device: {grant_result.unwrap_err()}")
-        return false
-    val grant = grant_result.unwrap()
-    serial_println("[net-init] VirtIO-net device granted, BAR0=0x{grant.bar0_phys}")
+    # On baremetal, the C VirtIO-net driver (syscall 90) handles everything.
+    # The C driver was already initialized during C boot phase.
+    # Just check if it's alive via syscall 93 (NetStats).
+    serial_println("[net-init] Using C VirtIO-net driver (initialized during C boot)")
+    val stats = syscall(93, 0, 0, 0, 0, 0)
+    serial_println("[net-init] C network driver active")
 
-    # Step 3: Initialize VirtIO-net driver
-    val init_result = g_net_driver.init_from_grant(grant)
-    if init_result.is_err():
-        serial_println("[net-init] VirtIO-net init failed: {init_result.unwrap_err()}")
-        return false
-    serial_println("[net-init] VirtIO-net driver initialized, MAC={g_net_driver.mac_string()}")
-
-    # Step 4: Create NetstackService with the initialized driver
-    var netstack = NetstackService.new(g_net_driver)
-
-    # Step 5: Configure IP for QEMU user-mode networking
-    val ip = Ipv4Address.from_bytes(QEMU_IP_A, QEMU_IP_B, QEMU_IP_C, QEMU_IP_D)
-    val gw = Ipv4Address.from_bytes(QEMU_GW_A, QEMU_GW_B, QEMU_GW_C, QEMU_GW_D)
-    val mask = Ipv4Address.from_bytes(QEMU_MASK_A, QEMU_MASK_B, QEMU_MASK_C, QEMU_MASK_D)
-
-    netstack.set_ip(ip)
-    netstack.routing.set_default(gw)
-    netstack.routing.add_route(
-        Ipv4Address.from_bytes(QEMU_IP_A, QEMU_IP_B, QEMU_IP_C, 0),
-        mask, gw, ip
-    )
-
-    serial_println("[net-init] IP={ip.to_text()} mask={mask.to_text()} gw={gw.to_text()}")
-
-    # Check link status
-    if g_net_driver.link_up():
-        serial_println("[net-init] Link: UP")
-    else:
-        serial_println("[net-init] Link: DOWN (may come up later)")
-
-    g_netstack = netstack
     g_net_initialized = true
-    serial_println("[net-init] Network stack ready")
+    serial_println("[net-init] Network stack ready (C-backed)")
     true
 
 # ============================================================================

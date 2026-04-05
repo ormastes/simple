@@ -260,21 +260,26 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
+    /* Cranelift codegen passes raw size (not tagged RuntimeValue).
+     * Return raw pointer (not ENCODE_PTR) — codegen uses it directly
+     * for field stores via store(val, ptr, offset). */
+    size_t bytes = (size_t)sz;
+    if (bytes == 0) return 0;
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
-    if (!p) return NIL_VALUE;
-    return ENCODE_PTR(p);
+    if (!p) return 0;
+    return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
+    size_t bytes = (size_t)sz;
+    if (bytes == 0) return 0;
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
-    if (!p) return NIL_VALUE;
+    if (!p) return 0;
     __builtin_memset(p, 0, bytes);
-    return ENCODE_PTR(p);
+    return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)
@@ -2042,10 +2047,13 @@ static void _vnet_rx_fill(void)
 
         _vnet.rx_avail->ring[i] = i;
     }
-    /* Memory barrier before updating idx */
+    /* Memory barrier: ensure descriptors + ring entries are visible */
     __asm__ volatile("mfence" ::: "memory");
     _vnet.rx_avail->idx = _vnet.rx_qsize;
     _vnet.rx_last_used = 0;
+
+    /* Memory barrier: ensure idx is visible before we notify */
+    __asm__ volatile("mfence" ::: "memory");
 
     /* Notify device about RX buffers (queue 0) */
     _vnet_wr16(0x10, 0);
@@ -2546,9 +2554,12 @@ static int _virtio_net_init(void)
     _vnet.gateway_ip[0] = 10; _vnet.gateway_ip[1] = 0;
     _vnet.gateway_ip[2] = 2;  _vnet.gateway_ip[3] = 2;
 
-    /* Step 11: Driver ready — fill RX buffers, set DRIVER_OK */
-    _vnet_rx_fill();
-
+    /* Step 11: Set DRIVER_OK *before* filling RX queue.
+     * The VirtIO spec says the device MUST NOT process virtqueue entries
+     * until DRIVER_OK is set. If we fill the RX queue first and then set
+     * DRIVER_OK, the device never sees the already-posted buffers because
+     * there is no new notification after the status change.
+     * Fix: set DRIVER_OK first, then fill RX buffers and notify. */
     status = _vnet_rd8(0x12);
     _vnet_wr8(0x12, status | VIRTIO_STATUS_DRIVER_OK);
 
@@ -2557,6 +2568,9 @@ static int _virtio_net_init(void)
     _vnet.tx_count = 0;
     _vnet.arp_replies = 0;
     _vnet.icmp_replies = 0;
+
+    /* Now fill RX queue — device is live and will see the notify */
+    _vnet_rx_fill();
 
     serial_puts("[net] VirtIO-net initialized: MAC=");
     _net_print_mac(_vnet.mac);
