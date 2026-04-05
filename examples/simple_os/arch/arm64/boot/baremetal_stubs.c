@@ -4,18 +4,26 @@
  * Provides a complete freestanding runtime for the Simple language compiler
  * targeting ARM64 bare-metal (QEMU virt machine, PL011 UART).
  *
+ * Ported from x86_64/boot/baremetal_stubs.c — all shared runtime functions
+ * are identical; only serial I/O, PCI enumeration, and CPU control differ.
+ *
  * Sections:
  *   1. Includes and types
  *   2. Serial I/O (PL011 UART at 0x09000000)
  *   3. RuntimeValue tagging
- *   4. Heap allocator (bump, 16 MB)
+ *   4. Heap allocator (bump, 64 MB)
  *   5. Memory functions
  *   6. String operations
  *   7. Print functions
- *   8. Framebuffer copy
- *   9. _start (PL011 init, call spl_start, wfe loop)
- *  10. No-op stubs (~200 runtime functions)
- *  11. Real ARM64 MMIO overrides
+ *   8. Framebuffer, native comparison, PCI, syscall
+ *   9. _c_start (PL011 init, call spl_start, wfe loop)
+ *  10. Arithmetic, type introspection, conversion
+ *  11. String extras (full implementations)
+ *  12. Array operations (full implementations)
+ *  13. Map/Dict operations (full implementations)
+ *  14. Additional runtime stubs (OS boot path)
+ *  15. Fatal-panic stubs (~200 runtime functions)
+ *  16. Real ARM64 MMIO and CPU overrides
  */
 
 /* ===================================================================
@@ -86,7 +94,6 @@ static void serial_put_dec(int64_t v)
 {
     if (v < 0) {
         serial_putchar('-');
-        /* Handle INT64_MIN carefully */
         if (v == (-9223372036854775807LL - 1)) {
             serial_puts("9223372036854775808");
             return;
@@ -103,6 +110,13 @@ static void serial_put_dec(int64_t v)
     while (pos > 0) {
         serial_putchar(buf[--pos]);
     }
+}
+
+static void serial_puthex(uint32_t v) {
+    static const char hex[] = "0123456789abcdef";
+    if (v > 0xFFFF) { serial_putchar(hex[(v>>28)&0xF]); serial_putchar(hex[(v>>24)&0xF]); serial_putchar(hex[(v>>20)&0xF]); serial_putchar(hex[(v>>16)&0xF]); }
+    if (v > 0xFF) { serial_putchar(hex[(v>>12)&0xF]); serial_putchar(hex[(v>>8)&0xF]); }
+    serial_putchar(hex[(v>>4)&0xF]); serial_putchar(hex[v&0xF]);
 }
 
 /* ===================================================================
@@ -153,23 +167,54 @@ typedef struct {
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
 
+/* Forward declaration */
+typedef struct {
+    HeapHeader    hdr;
+    uint32_t      len;
+    uint32_t      cap;
+    RuntimeValue *keys;
+    RuntimeValue *values;
+} RuntimeMap;
+
+/* Forward declarations for functions used before definition */
+RuntimeValue rt_map_clone(RuntimeValue map);
+RuntimeValue rt_map_new(void);
+RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
+RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
+RuntimeValue rt_array_new(RuntimeValue cap_val);
+RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
+RuntimeValue rt_string_from_cstr(const char *cstr);
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
+RuntimeValue rt_value_to_string(RuntimeValue val);
+RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, RuntimeValue fmt_len);
+RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
+RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue end);
+void rt_print_value(RuntimeValue val);
+
 /* ===================================================================
- * 4. Heap allocator — bump allocator, 16 MB
+ * 4. Heap allocator — bump allocator, 64 MB
  * =================================================================== */
 
-static char   _heap[16 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[64 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
-void *malloc(size_t sz)
+static void *_heap_alloc(size_t sz)
 {
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
-        return (void *)0;
+        for(;;) __asm__ volatile("wfe");
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
     return p;
+}
+
+void *malloc(size_t sz)
+{
+    return _heap_alloc(sz);
 }
 
 void free(void *p)
@@ -194,9 +239,8 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    /* sz is raw (untagged) per the Rust runtime ABI. */
-    size_t bytes = (size_t)sz;
-    if (bytes == 0 || bytes > 0x1000000) return NIL_VALUE;
+    size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     return ENCODE_PTR(p);
@@ -204,9 +248,8 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    /* sz is raw (untagged) per the Rust runtime ABI. */
-    size_t bytes = (size_t)sz;
-    if (bytes == 0 || bytes > 0x1000000) return NIL_VALUE;
+    size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
     void *p = malloc(bytes);
     if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);
@@ -310,18 +353,15 @@ char *strcat(char *dst, const char *src)
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
-    /* Parameters are raw (untagged) per the Rust runtime ABI.
-       len_val is the raw byte count, data is a raw pointer. */
     int64_t len = len_val;
-    if (len <= 0 || len > 0x100000) return NIL_VALUE;
+    if (len < 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
     s->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)len + 1);
     s->len = (uint32_t)len;
-    /* data is a raw pointer cast to i64 */
     const char *src = (const char *)(uintptr_t)data;
-    if (src) __builtin_memcpy(s->data, src, (size_t)len);
+    if (src && len > 0) __builtin_memcpy(s->data, src, (size_t)len);
     s->data[len] = '\0';
     return ENCODE_PTR(s);
 }
@@ -360,14 +400,11 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 {
     if (!IS_HEAP(a) && !IS_HEAP(b)) return NIL_VALUE;
-
     RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : (RuntimeString *)0;
     RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : (RuntimeString *)0;
-
     uint32_t la = sa ? sa->len : 0;
     uint32_t lb = sb ? sb->len : 0;
     uint32_t total = la + lb;
-
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + total + 1);
     if (!r) return NIL_VALUE;
     r->hdr.type = HEAP_STRING;
@@ -429,20 +466,53 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     return ENCODE_PTR(r);
 }
 
+RuntimeValue rt_value_to_string(RuntimeValue val)
+{
+    if (IS_INT(val)) {
+        int64_t n = DECODE_INT(val);
+        if (n == 0) return rt_string_from_cstr("0");
+        if (n == (-9223372036854775807LL - 1))
+            return rt_string_from_cstr("-9223372036854775808");
+        char buf[21];
+        int pos = 0;
+        int neg = 0;
+        uint64_t uv;
+        if (n < 0) { neg = 1; uv = (uint64_t)(-n); }
+        else { uv = (uint64_t)n; }
+        while (uv > 0) { buf[pos++] = '0' + (char)(uv % 10); uv /= 10; }
+        uint32_t len = (uint32_t)(pos + neg);
+        RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+        if (!s) return NIL_VALUE;
+        s->hdr.type = HEAP_STRING;
+        s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+        s->len = len;
+        int out = 0;
+        if (neg) s->data[out++] = '-';
+        while (pos > 0) s->data[out++] = buf[--pos];
+        s->data[out] = '\0';
+        return ENCODE_PTR(s);
+    }
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) return val;
+        if (h && h->type == HEAP_ARRAY) return rt_string_from_cstr("<array>");
+        if (h && h->type == HEAP_MAP) return rt_string_from_cstr("<map>");
+        return rt_string_from_cstr("<object>");
+    }
+    if (IS_NIL(val)) return rt_string_from_cstr("nil");
+    if (IS_FLOAT(val)) return rt_string_from_cstr("<float>");
+    return rt_string_from_cstr("<unknown>");
+}
+
 RuntimeValue rt_len(RuntimeValue v)
 {
     if (IS_INT(v)) return ENCODE_INT(0);
     if (!IS_HEAP(v)) return ENCODE_INT(0);
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return ENCODE_INT(0);
-    if (h->type == HEAP_STRING) {
-        RuntimeString *s = (RuntimeString *)h;
-        return ENCODE_INT(s->len);
-    }
-    if (h->type == HEAP_ARRAY) {
-        RuntimeArray *a = (RuntimeArray *)h;
-        return ENCODE_INT(a->len);
-    }
+    if (h->type == HEAP_STRING) return ENCODE_INT(((RuntimeString *)h)->len);
+    if (h->type == HEAP_ARRAY) return ENCODE_INT(((RuntimeArray *)h)->len);
+    if (h->type == HEAP_MAP) return ENCODE_INT(((RuntimeMap *)h)->len);
     return ENCODE_INT(0);
 }
 
@@ -451,15 +521,14 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
-    if (h->type == HEAP_STRING) {
-        return rt_string_char_at(v, idx);
-    }
+    if (h->type == HEAP_STRING) return rt_string_char_at(v, idx);
     if (h->type == HEAP_ARRAY) {
+        int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
     }
+    if (h->type == HEAP_MAP) return rt_map_get(v, idx);
     return NIL_VALUE;
 }
 
@@ -468,11 +537,15 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
-    int64_t i = DECODE_INT(idx);
     if (h->type == HEAP_ARRAY) {
+        int64_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         a->items[i] = val;
+        return val;
+    }
+    if (h->type == HEAP_MAP) {
+        rt_map_set(v, idx, val);
         return val;
     }
     return NIL_VALUE;
@@ -484,11 +557,18 @@ RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue idx, RuntimeValue val)
 
 void rt_print_str(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return;
-    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return;
-    for (uint32_t i = 0; i < s->len; i++) {
-        serial_putchar(s->data[i]);
+    if (IS_HEAP(str)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+            return;
+        }
+    }
+    if (str != 0) {
+        RuntimeString *s = (RuntimeString *)(uintptr_t)str;
+        if (s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        }
     }
 }
 
@@ -501,25 +581,18 @@ void rt_println_str(RuntimeValue str)
 
 void rt_print_value(RuntimeValue val)
 {
-    if (IS_INT(val)) {
+    if (val == 0 || IS_NIL(val)) {
+        serial_puts("nil");
+    } else if (IS_INT(val)) {
         serial_put_dec(DECODE_INT(val));
     } else if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
-        if (h && h->type == HEAP_STRING) {
-            rt_print_str(val);
-        } else {
-            serial_puts("<object@");
-            serial_put_hex((uint64_t)(uintptr_t)h);
-            serial_putchar('>');
-        }
-    } else if (IS_NIL(val)) {
-        serial_puts("nil");
-    } else if (IS_FLOAT(val)) {
-        serial_puts("<float>");
+        if (h && h->type == HEAP_STRING) rt_print_str(val);
+        else { serial_puts("<object>"); }
     } else {
-        serial_puts("<unknown:");
-        serial_put_hex((uint64_t)val);
-        serial_putchar('>');
+        RuntimeString *s = (RuntimeString *)(uintptr_t)val;
+        if (s->hdr.type == HEAP_STRING && s->len < 0x100000) rt_print_str(val);
+        else serial_put_dec(val);
     }
 }
 
@@ -530,43 +603,43 @@ void rt_println_value(RuntimeValue val)
     serial_putchar('\n');
 }
 
-void rt_print_int(RuntimeValue val)
+void rt_print_int(RuntimeValue val) { serial_put_dec(DECODE_INT(val)); }
+void rt_println_int(RuntimeValue val) { serial_put_dec(DECODE_INT(val)); serial_putchar('\r'); serial_putchar('\n'); }
+void rt_print_char(RuntimeValue val) { serial_putchar((char)DECODE_INT(val)); }
+void rt_print_hex(RuntimeValue val) { serial_put_hex((uint64_t)DECODE_INT(val)); }
+void rt_print_bool(RuntimeValue val) { if (DECODE_INT(val)) serial_puts("true"); else serial_puts("false"); }
+void rt_println_bool(RuntimeValue val) { rt_print_bool(val); serial_putchar('\r'); serial_putchar('\n'); }
+
+RuntimeValue rt_print(RuntimeValue val)
 {
-    serial_put_dec(DECODE_INT(val));
+    if (IS_INT(val)) {
+        serial_put_dec(DECODE_INT(val));
+    } else if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]);
+        } else {
+            serial_puts("<object>");
+        }
+    } else if (IS_NIL(val)) {
+        serial_puts("nil");
+    } else {
+        serial_puts("<value>");
+    }
+    return NIL_VALUE;
 }
 
-void rt_println_int(RuntimeValue val)
+RuntimeValue rt_println(RuntimeValue val)
 {
-    serial_put_dec(DECODE_INT(val));
+    rt_print(val);
     serial_putchar('\r');
     serial_putchar('\n');
-}
-
-void rt_print_char(RuntimeValue val)
-{
-    serial_putchar((char)DECODE_INT(val));
-}
-
-void rt_print_hex(RuntimeValue val)
-{
-    serial_put_hex((uint64_t)DECODE_INT(val));
-}
-
-void rt_print_bool(RuntimeValue val)
-{
-    if (DECODE_INT(val)) serial_puts("true");
-    else serial_puts("false");
-}
-
-void rt_println_bool(RuntimeValue val)
-{
-    rt_print_bool(val);
-    serial_putchar('\r');
-    serial_putchar('\n');
+    return NIL_VALUE;
 }
 
 /* ===================================================================
- * 8. Framebuffer copy
+ * 8. Framebuffer copy + native comparison
  * =================================================================== */
 
 void rt_framebuffer_copy(RuntimeValue dst, RuntimeValue src, RuntimeValue count)
@@ -588,44 +661,221 @@ void rt_framebuffer_write(RuntimeValue addr, RuntimeValue offset, RuntimeValue v
     base[off] = (uint8_t)v;
 }
 
+RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
+{
+    if (a == b) return 1;
+    if (IS_HEAP(a) && IS_HEAP(b)) {
+        HeapHeader *ha = (HeapHeader *)DECODE_PTR(a);
+        HeapHeader *hb = (HeapHeader *)DECODE_PTR(b);
+        if (ha && hb && ha->type == HEAP_STRING && hb->type == HEAP_STRING) {
+            RuntimeString *sa = (RuntimeString *)ha;
+            RuntimeString *sb = (RuntimeString *)hb;
+            if (sa->len != sb->len) return 0;
+            for (uint32_t i = 0; i < sa->len; i++) {
+                if (sa->data[i] != sb->data[i]) return 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
+{
+    return rt_native_eq(a, b) ? 0 : 1;
+}
+
 /* ===================================================================
- * 9. _start — PL011 init, spl_start, wfe loop
+ * 8a. PCI device cache + scan via ECAM MMIO (ARM64)
+ *
+ * QEMU virt machine ARM64 ECAM base: 0x3f000000
+ * =================================================================== */
+
+#define ECAM_BASE 0x3f000000ULL
+#define MAX_PCI_CACHED 32
+
+static struct {
+    uint8_t bus, dev, func;
+    uint16_t vendor, devid;
+    uint8_t cls, sub, progif, htype, irq;
+    uint32_t bar0;
+} _pci_cache[MAX_PCI_CACHED];
+static int _pci_cache_count = -1;
+
+static void _pci_scan(void)
+{
+    _pci_cache_count = 0;
+    for (int dev = 0; dev < 32 && _pci_cache_count < MAX_PCI_CACHED; dev++) {
+        volatile uint32_t *cfg = (volatile uint32_t *)(ECAM_BASE + ((uint64_t)dev << 15));
+        uint32_t reg0 = cfg[0];
+        uint16_t vendor = (uint16_t)(reg0 & 0xFFFF);
+        uint16_t devid_val = (uint16_t)(reg0 >> 16);
+        if (vendor == 0xFFFF || vendor == 0) continue;
+        uint32_t class_reg = cfg[2];
+        uint32_t hdr_reg = cfg[3];
+        uint32_t irq_reg = cfg[15]; /* offset 0x3C */
+        uint32_t bar0_reg = cfg[4]; /* offset 0x10 */
+        int i = _pci_cache_count++;
+        _pci_cache[i].bus = 0;
+        _pci_cache[i].dev = (uint8_t)dev;
+        _pci_cache[i].func = 0;
+        _pci_cache[i].vendor = vendor;
+        _pci_cache[i].devid = devid_val;
+        _pci_cache[i].cls = (uint8_t)(class_reg >> 24);
+        _pci_cache[i].sub = (uint8_t)(class_reg >> 16);
+        _pci_cache[i].progif = (uint8_t)(class_reg >> 8);
+        _pci_cache[i].htype = (uint8_t)(hdr_reg >> 16);
+        _pci_cache[i].irq = (uint8_t)(irq_reg & 0xFF);
+        _pci_cache[i].bar0 = bar0_reg & 0xFFFFFFF0;
+    }
+}
+
+/* PCI enumeration handler (same protocol as x86_64) */
+int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+
+    if (mode == 0) return (int64_t)_pci_cache_count;
+    if (mode == 1) {
+        if ((int)index >= _pci_cache_count) return -22;
+        uint8_t *buf = (uint8_t *)(uintptr_t)buf_addr;
+        int i = (int)index;
+        buf[0] = _pci_cache[i].bus;
+        buf[1] = _pci_cache[i].dev;
+        buf[2] = _pci_cache[i].func;
+        buf[3] = 0;
+        *(uint16_t *)(buf + 4) = _pci_cache[i].vendor;
+        *(uint16_t *)(buf + 6) = _pci_cache[i].devid;
+        buf[8] = _pci_cache[i].cls;
+        buf[9] = _pci_cache[i].sub;
+        buf[10] = _pci_cache[i].progif;
+        buf[11] = _pci_cache[i].htype;
+        buf[12] = _pci_cache[i].irq;
+        return 0;
+    }
+    if (mode == 2) {
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        return (int64_t)(
+            ((uint64_t)_pci_cache[i].bus) |
+            ((uint64_t)_pci_cache[i].dev << 8) |
+            ((uint64_t)_pci_cache[i].func << 16) |
+            ((uint64_t)_pci_cache[i].cls << 24) |
+            ((uint64_t)_pci_cache[i].sub << 32) |
+            ((uint64_t)_pci_cache[i].vendor << 40)
+        );
+    }
+    if (mode == 3) {
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        return (int64_t)(
+            ((uint64_t)_pci_cache[i].devid) |
+            ((uint64_t)_pci_cache[i].progif << 16) |
+            ((uint64_t)_pci_cache[i].irq << 24)
+        );
+    }
+    if (mode == 4) {
+        if ((int)index >= _pci_cache_count) return -22;
+        int i = (int)index;
+        switch ((int)buf_addr) {
+            case 0: return (int64_t)_pci_cache[i].bus;
+            case 1: return (int64_t)_pci_cache[i].dev;
+            case 2: return (int64_t)_pci_cache[i].func;
+            case 3: return (int64_t)_pci_cache[i].cls;
+            case 4: return (int64_t)_pci_cache[i].sub;
+            case 5: return (int64_t)_pci_cache[i].vendor;
+            case 6: return (int64_t)_pci_cache[i].devid;
+            case 7: return (int64_t)_pci_cache[i].irq;
+            default: return -22;
+        }
+    }
+    if (mode == 5) {
+        if ((int)index >= _pci_cache_count) return -22;
+        return (int64_t)_pci_cache[(int)index].bar0;
+    }
+    return -38;
+}
+
+/* ===================================================================
+ * 8b. Syscall dispatcher
+ * =================================================================== */
+
+int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                                       uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    (void)a3; (void)a4;
+    switch (id) {
+        case 0:  /* Exit */
+            for (;;) __asm__ volatile("wfe");
+            return 0;
+        case 4:  /* GetPid */
+            return 1;
+        case 60: /* DebugWrite */
+            serial_putchar((char)(a0 & 0xFF));
+            return 0;
+        case 80: /* DevEnumerate */
+            return _pci_enumerate(a0, a1, a2);
+        case 82: /* DeviceGrant */
+            return _pci_enumerate(5, a0, 0);
+        case 83: /* MapBar — identity map on baremetal */
+            return (int64_t)a0;
+        case 84: { /* AllocDma */
+            void *p = _heap_alloc(a0 > 0 ? a0 : 4096);
+            return ENCODE_INT((int64_t)(uintptr_t)p);
+        }
+        default:
+            return -38; /* ENOSYS */
+    }
+}
+
+int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+}
+
+/* ===================================================================
+ * 9. _c_start — PL011 init, PCI scan, spl_start, wfe loop
+ *
+ * Called from crt0.S after stack/BSS setup and vector table install.
  * =================================================================== */
 
 static void _pl011_init(void)
 {
-    /* Disable UART */
     *pl011_reg(PL011_CR) = 0;
-
-    /* Clear all interrupts */
     *pl011_reg(PL011_ICR) = 0x7FF;
-
-    /* Set baud rate: assuming 24 MHz clock, 115200 baud
-     * IBRD = 24000000 / (16 * 115200) = 13
-     * FBRD = frac(0.0208...) * 64 + 0.5 = 1 */
-    *pl011_reg(PL011_IBRD) = 13;
-    *pl011_reg(PL011_FBRD) = 1;
-
-    /* 8 bits, FIFO enabled, no parity, 1 stop bit */
-    *pl011_reg(PL011_LCRH) = (3 << 5) | (1 << 4);  /* WLEN=11 (8 bits), FEN=1 */
-
-    /* Mask all interrupts */
-    *pl011_reg(PL011_IMSC) = 0;
-
-    /* Enable UART, TX, RX */
-    *pl011_reg(PL011_CR) = (1 << 0) | (1 << 8) | (1 << 9);  /* UARTEN | TXE | RXE */
+    *pl011_reg(PL011_IBRD) = 1;
+    *pl011_reg(PL011_FBRD) = 0;
+    *pl011_reg(PL011_LCRH) = (3 << 5) | (1 << 4);
+    *pl011_reg(PL011_CR) = (1 << 0) | (1 << 8) | (1 << 9);
 }
 
 extern void spl_start(void) __attribute__((weak));
 
-void _start(void)
+void _c_start(void)
 {
     _pl011_init();
 
     serial_puts("SimpleOS ARM64 boot\r\n");
-    serial_puts("[BOOT] PL011 UART at 0x09000000\r\n");
-    serial_puts("[BOOT] Heap: 16 MB bump allocator\r\n");
-    serial_puts("[BOOT] RuntimeValue: tagged 64-bit (int/heap/float/special)\r\n");
+    serial_puts("[BOOT] PL011 UART initialized at 0x09000000\r\n");
+    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
+    serial_puts("[BOOT] RuntimeValue: tagged 64-bit\r\n");
+
+    _pci_scan();
+    serial_puts("[BOOT] PCI: ");
+    serial_put_dec(_pci_cache_count);
+    serial_puts(" devices found\r\n");
+    for (int i = 0; i < _pci_cache_count && i < 8; i++) {
+        serial_puts("[BOOT]   ");
+        serial_puthex(_pci_cache[i].bus); serial_puts(":");
+        serial_puthex(_pci_cache[i].dev); serial_puts(".");
+        serial_puthex(_pci_cache[i].func);
+        serial_puts(" vendor="); serial_puthex(_pci_cache[i].vendor);
+        serial_puts(" device="); serial_puthex(_pci_cache[i].devid);
+        serial_puts(" class="); serial_puthex(_pci_cache[i].cls);
+        serial_puts("."); serial_puthex(_pci_cache[i].sub);
+        serial_puts("\r\n");
+    }
 
     if (spl_start) {
         serial_puts("[BOOT] Calling spl_start()...\r\n");
@@ -637,110 +887,713 @@ void _start(void)
 
     serial_puts("[BOOT] ARM64 boot complete\r\n");
 
-    /* Halt: wait-for-event loop */
     for (;;) {
         __asm__ volatile("wfe");
     }
 }
 
 /* ===================================================================
- * 10. No-op stubs — macro-generated runtime function stubs
- *
- * These provide link-time symbols for all runtime functions that the
- * Simple compiler may reference.  On bare metal most of them are no-ops.
+ * 10. Arithmetic, type introspection, conversion
+ *     (copied from x86_64 — identical logic)
  * =================================================================== */
 
-#define S0(n) RuntimeValue n(void) { return 0; }
-#define S1(n) RuntimeValue n(RuntimeValue a) { (void)a; return 0; }
-#define S2(n) RuntimeValue n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return 0; }
-#define S3(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a; (void)b; (void)c; return 0; }
-#define S4(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a; (void)b; (void)c; (void)d; return 0; }
-#define S5(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0; }
+RuntimeValue rt_add(RuntimeValue a, RuntimeValue b)
+{
+    if (IS_INT(a) && IS_INT(b))
+        return ENCODE_INT(DECODE_INT(a) + DECODE_INT(b));
+    if (IS_HEAP(a) || IS_HEAP(b))
+        return rt_string_concat(a, b);
+    return ENCODE_INT(0);
+}
 
-/* void-return stub macros */
-#define V0(n) void n(void) {}
-#define V1(n) void n(RuntimeValue a) { (void)a; }
-#define V2(n) void n(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+RuntimeValue rt_sub(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) - DECODE_INT(b)); }
+RuntimeValue rt_mul(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) * DECODE_INT(b)); }
+RuntimeValue rt_div(RuntimeValue a, RuntimeValue b) { int64_t d = DECODE_INT(b); if (d == 0) return ENCODE_INT(0); return ENCODE_INT(DECODE_INT(a) / d); }
+RuntimeValue rt_mod(RuntimeValue a, RuntimeValue b) { int64_t d = DECODE_INT(b); if (d == 0) return ENCODE_INT(0); return ENCODE_INT(DECODE_INT(a) % d); }
 
-/* --- Arithmetic / comparison --- */
-S2(rt_add)
-S2(rt_sub)
-S2(rt_mul)
-S2(rt_div)
-S2(rt_mod)
-S2(rt_pow)
-S2(rt_eq)
-S2(rt_ne)
-S2(rt_lt)
-S2(rt_gt)
-S2(rt_le)
-S2(rt_ge)
-S2(rt_and)
-S2(rt_or)
-S1(rt_not)
-S2(rt_shl)
-S2(rt_shr)
-S2(rt_bitand)
-S2(rt_bitor)
-S2(rt_bitxor)
-S1(rt_bitnot)
-S1(rt_neg)
+RuntimeValue rt_pow(RuntimeValue a, RuntimeValue b)
+{
+    int64_t base = DECODE_INT(a);
+    int64_t exp  = DECODE_INT(b);
+    if (exp < 0) return ENCODE_INT(0);
+    int64_t result = 1;
+    for (int64_t i = 0; i < exp; i++) result *= base;
+    return ENCODE_INT(result);
+}
 
-/* --- Type introspection / conversion --- */
-S1(rt_type_of)
-S1(rt_is_nil)
-S1(rt_is_int)
-S1(rt_is_float)
-S1(rt_is_string)
-S1(rt_is_bool)
-S1(rt_is_array)
-S1(rt_is_map)
-S1(rt_is_object)
-S1(rt_to_int)
+RuntimeValue rt_eq(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_ne(RuntimeValue a, RuntimeValue b) { return rt_native_eq(a, b) ? FALSE_VALUE : TRUE_VALUE; }
+RuntimeValue rt_lt(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) < DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_gt(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) > DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_le(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) <= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) >= DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_and(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) && DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_or(RuntimeValue a, RuntimeValue b) { return (DECODE_INT(a) || DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_not(RuntimeValue a) { return DECODE_INT(a) ? FALSE_VALUE : TRUE_VALUE; }
+RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) << DECODE_INT(b)); }
+RuntimeValue rt_shr(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) >> DECODE_INT(b)); }
+RuntimeValue rt_bitand(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) & DECODE_INT(b)); }
+RuntimeValue rt_bitor(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) | DECODE_INT(b)); }
+RuntimeValue rt_bitxor(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(DECODE_INT(a) ^ DECODE_INT(b)); }
+RuntimeValue rt_bitnot(RuntimeValue a) { return ENCODE_INT(~DECODE_INT(a)); }
+RuntimeValue rt_neg(RuntimeValue a) { return ENCODE_INT(-DECODE_INT(a)); }
+
+/* Type introspection */
+RuntimeValue rt_type_of(RuntimeValue val) {
+    if (IS_NIL(val)) return rt_string_from_cstr("nil");
+    if (IS_INT(val)) return rt_string_from_cstr("int");
+    if (IS_FLOAT(val)) return rt_string_from_cstr("float");
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h) {
+            if (h->type == HEAP_STRING) return rt_string_from_cstr("string");
+            if (h->type == HEAP_ARRAY) return rt_string_from_cstr("array");
+            if (h->type == HEAP_MAP) return rt_string_from_cstr("map");
+            if (h->type == HEAP_OBJECT) return rt_string_from_cstr("object");
+        }
+        return rt_string_from_cstr("heap");
+    }
+    return rt_string_from_cstr("unknown");
+}
+
+RuntimeValue rt_is_nil(RuntimeValue v) { return IS_NIL(v) ? 1 : 0; }
+RuntimeValue rt_is_int(RuntimeValue v) { return IS_INT(v) ? 1 : 0; }
+RuntimeValue rt_is_float(RuntimeValue v) { return IS_FLOAT(v) ? 1 : 0; }
+RuntimeValue rt_is_string(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_STRING) ? 1 : 0; }
+RuntimeValue rt_is_bool(RuntimeValue v) { if (!IS_INT(v)) return 0; int64_t n = DECODE_INT(v); return (n == 0 || n == 1) ? 1 : 0; }
+RuntimeValue rt_is_array(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_ARRAY) ? 1 : 0; }
+RuntimeValue rt_is_map(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_MAP) ? 1 : 0; }
+RuntimeValue rt_is_object(RuntimeValue v) { if (!IS_HEAP(v)) return 0; HeapHeader *h = (HeapHeader *)DECODE_PTR(v); return (h && h->type == HEAP_OBJECT) ? 1 : 0; }
+
+RuntimeValue rt_to_int(RuntimeValue val) {
+    if (IS_INT(val)) return val;
+    if (IS_NIL(val)) return ENCODE_INT(0);
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) {
+            RuntimeString *s = (RuntimeString *)h;
+            if (s->len == 0) return ENCODE_INT(0);
+            int64_t result = 0; int neg = 0; uint32_t i = 0;
+            if (s->data[0] == '-') { neg = 1; i = 1; }
+            else if (s->data[0] == '+') { i = 1; }
+            for (; i < s->len; i++) {
+                char c = s->data[i];
+                if (c < '0' || c > '9') break;
+                result = result * 10 + (c - '0');
+            }
+            if (neg) result = -result;
+            return ENCODE_INT(result);
+        }
+    }
+    return ENCODE_INT(0);
+}
+RuntimeValue rt_to_string(RuntimeValue val) { return rt_value_to_string(val); }
+RuntimeValue rt_to_bool(RuntimeValue val) {
+    if (IS_NIL(val)) return FALSE_VALUE;
+    if (IS_INT(val)) return DECODE_INT(val) ? TRUE_VALUE : FALSE_VALUE;
+    if (IS_HEAP(val)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (h && h->type == HEAP_STRING) return ((RuntimeString *)h)->len > 0 ? TRUE_VALUE : FALSE_VALUE;
+        if (h && h->type == HEAP_ARRAY) return ((RuntimeArray *)h)->len > 0 ? TRUE_VALUE : FALSE_VALUE;
+        return TRUE_VALUE;
+    }
+    return FALSE_VALUE;
+}
+RuntimeValue rt_clone(RuntimeValue val) {
+    if (!IS_HEAP(val)) return val;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+    if (!h) return val;
+    if (h->type == HEAP_STRING) {
+        RuntimeString *s = (RuntimeString *)h;
+        return rt_string_new((RuntimeValue)(uintptr_t)s->data, (RuntimeValue)s->len);
+    }
+    if (h->type == HEAP_ARRAY) {
+        RuntimeArray *a = (RuntimeArray *)h;
+        RuntimeValue new_arr = rt_array_new(ENCODE_INT(a->cap));
+        for (uint32_t i = 0; i < a->len; i++) new_arr = rt_array_push(new_arr, a->items[i]);
+        return new_arr;
+    }
+    if (h->type == HEAP_MAP) return rt_map_clone(val);
+    return val;
+}
+RuntimeValue rt_freeze(RuntimeValue val) { return val; }
+RuntimeValue rt_is_frozen(RuntimeValue val) { (void)val; return 0; }
+
+/* ===================================================================
+ * 11. String extras (full implementations from x86_64)
+ * =================================================================== */
+
+static RuntimeString *decode_string(RuntimeValue v) {
+    if (!IS_HEAP(v)) return (RuntimeString *)0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(v);
+    if (!s || s->hdr.type != HEAP_STRING) return (RuntimeString *)0;
+    return s;
+}
+
+RuntimeValue rt_string_contains(RuntimeValue str, RuntimeValue needle) {
+    RuntimeString *s = decode_string(str); RuntimeString *n = decode_string(needle);
+    if (!s || !n) return 0; if (n->len == 0) return 1; if (n->len > s->len) return 0;
+    for (uint32_t i = 0; i <= s->len - n->len; i++) {
+        uint32_t j; for (j = 0; j < n->len; j++) { if (s->data[i+j] != n->data[j]) break; }
+        if (j == n->len) return 1;
+    } return 0;
+}
+
+RuntimeValue rt_string_starts_with(RuntimeValue str, RuntimeValue prefix) {
+    RuntimeString *s = decode_string(str); RuntimeString *p = decode_string(prefix);
+    if (!s || !p) return 0; if (p->len > s->len) return 0;
+    for (uint32_t i = 0; i < p->len; i++) { if (s->data[i] != p->data[i]) return 0; }
+    return 1;
+}
+
+RuntimeValue rt_string_ends_with(RuntimeValue str, RuntimeValue suffix) {
+    RuntimeString *s = decode_string(str); RuntimeString *x = decode_string(suffix);
+    if (!s || !x) return 0; if (x->len > s->len) return 0;
+    uint32_t off = s->len - x->len;
+    for (uint32_t i = 0; i < x->len; i++) { if (s->data[off+i] != x->data[i]) return 0; }
+    return 1;
+}
+
+RuntimeValue rt_string_index_of(RuntimeValue str, RuntimeValue needle) {
+    RuntimeString *s = decode_string(str); RuntimeString *n = decode_string(needle);
+    if (!s || !n || n->len == 0) return ENCODE_INT(-1); if (n->len > s->len) return ENCODE_INT(-1);
+    for (uint32_t i = 0; i <= s->len - n->len; i++) {
+        uint32_t j; for (j = 0; j < n->len; j++) { if (s->data[i+j] != n->data[j]) break; }
+        if (j == n->len) return ENCODE_INT((int64_t)i);
+    } return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_string_last_index_of(RuntimeValue str, RuntimeValue needle) {
+    RuntimeString *s = decode_string(str); RuntimeString *n = decode_string(needle);
+    if (!s || !n || n->len == 0) return ENCODE_INT(-1); if (n->len > s->len) return ENCODE_INT(-1);
+    for (int64_t i = (int64_t)(s->len - n->len); i >= 0; i--) {
+        uint32_t j; for (j = 0; j < n->len; j++) { if (s->data[i+j] != n->data[j]) break; }
+        if (j == n->len) return ENCODE_INT(i);
+    } return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start) {
+    RuntimeString *s = decode_string(str); if (!s) return NIL_VALUE;
+    int64_t a = DECODE_INT(start); if (a < 0) a = 0;
+    if ((uint32_t)a >= s->len) return rt_string_from_cstr("");
+    return rt_string_slice(str, start, ENCODE_INT(s->len));
+}
+
+RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
+    RuntimeString *s = decode_string(str); RuntimeString *d = decode_string(delim);
+    RuntimeValue arr = rt_array_new(ENCODE_INT(4));
+    if (!s || s->len == 0) return arr;
+    if (!d || d->len == 0) {
+        for (uint32_t i = 0; i < s->len; i++) {
+            RuntimeValue ch = rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1);
+            arr = rt_array_push(arr, ch);
+        } return arr;
+    }
+    uint32_t start = 0;
+    for (uint32_t i = 0; i <= s->len - d->len; ) {
+        uint32_t j; for (j = 0; j < d->len; j++) { if (s->data[i+j] != d->data[j]) break; }
+        if (j == d->len) {
+            RuntimeValue part = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(i));
+            arr = rt_array_push(arr, part); i += d->len; start = i;
+        } else { i++; }
+    }
+    RuntimeValue rest = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+    arr = rt_array_push(arr, rest); return arr;
+}
+
+static int is_whitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+RuntimeValue rt_string_trim(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
+    uint32_t start = 0; while (start < s->len && is_whitespace(s->data[start])) start++;
+    uint32_t end = s->len; while (end > start && is_whitespace(s->data[end-1])) end--;
+    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(end));
+}
+RuntimeValue rt_string_trim_start(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
+    uint32_t start = 0; while (start < s->len && is_whitespace(s->data[start])) start++;
+    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+}
+RuntimeValue rt_string_trim_end(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
+    uint32_t end = s->len; while (end > 0 && is_whitespace(s->data[end-1])) end--;
+    return rt_string_slice(str, ENCODE_INT(0), ENCODE_INT(end));
+}
+
+RuntimeValue rt_string_to_upper(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1); r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) { char c = s->data[i]; r->data[i] = (c >= 'a' && c <= 'z') ? (char)(c-32) : c; }
+    r->data[s->len] = '\0'; return ENCODE_PTR(r);
+}
+RuntimeValue rt_string_to_lower(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1); r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) { char c = s->data[i]; r->data[i] = (c >= 'A' && c <= 'Z') ? (char)(c+32) : c; }
+    r->data[s->len] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val) {
+    RuntimeString *s = decode_string(str); RuntimeString *o = decode_string(old_val); RuntimeString *n = decode_string(new_val);
+    if (!s || !o || o->len == 0) return str; if (o->len > s->len) return str;
+    uint32_t nlen = n ? n->len : 0;
+    for (uint32_t i = 0; i <= s->len - o->len; i++) {
+        uint32_t j; for (j = 0; j < o->len; j++) { if (s->data[i+j] != o->data[j]) break; }
+        if (j == o->len) {
+            uint32_t result_len = s->len - o->len + nlen;
+            RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+            if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1); r->len = result_len;
+            __builtin_memcpy(r->data, s->data, i);
+            if (n && nlen > 0) __builtin_memcpy(r->data + i, n->data, nlen);
+            __builtin_memcpy(r->data + i + nlen, s->data + i + o->len, s->len - i - o->len);
+            r->data[result_len] = '\0'; return ENCODE_PTR(r);
+        }
+    } return str;
+}
+
+RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val) {
+    RuntimeString *s = decode_string(str); RuntimeString *o = decode_string(old_val); RuntimeString *n = decode_string(new_val);
+    if (!s || !o || o->len == 0) return str; uint32_t nlen = n ? n->len : 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i + o->len <= s->len; ) {
+        uint32_t j; for (j = 0; j < o->len; j++) { if (s->data[i+j] != o->data[j]) break; }
+        if (j == o->len) { count++; i += o->len; } else { i++; }
+    }
+    if (count == 0) return str;
+    uint32_t result_len = s->len - count * o->len + count * nlen;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1); r->len = result_len;
+    uint32_t out = 0;
+    for (uint32_t i = 0; i < s->len; ) {
+        if (i + o->len <= s->len) {
+            uint32_t j; for (j = 0; j < o->len; j++) { if (s->data[i+j] != o->data[j]) break; }
+            if (j == o->len) { if (n && nlen > 0) { __builtin_memcpy(r->data + out, n->data, nlen); out += nlen; } i += o->len; continue; }
+        }
+        r->data[out++] = s->data[i++];
+    }
+    r->data[result_len] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_repeat(RuntimeValue str, RuntimeValue count_val) {
+    RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
+    int64_t count = DECODE_INT(count_val); if (count <= 0) return rt_string_from_cstr(""); if (count == 1) return str;
+    if ((uint64_t)count * s->len > 0x100000) count = (int64_t)(0x100000 / s->len);
+    uint32_t result_len = s->len * (uint32_t)count;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1); r->len = result_len;
+    for (int64_t i = 0; i < count; i++) __builtin_memcpy(r->data + i * s->len, s->data, s->len);
+    r->data[result_len] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_pad_start(RuntimeValue str, RuntimeValue width_val) {
+    RuntimeString *s = decode_string(str); if (!s) return str;
+    int64_t width = DECODE_INT(width_val); if (width <= 0 || (uint32_t)width <= s->len) return str;
+    uint32_t pad = (uint32_t)width - s->len;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + (uint32_t)width + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + (uint32_t)width + 1); r->len = (uint32_t)width;
+    __builtin_memset(r->data, ' ', pad); __builtin_memcpy(r->data + pad, s->data, s->len);
+    r->data[(uint32_t)width] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_pad_end(RuntimeValue str, RuntimeValue width_val) {
+    RuntimeString *s = decode_string(str); if (!s) return str;
+    int64_t width = DECODE_INT(width_val); if (width <= 0 || (uint32_t)width <= s->len) return str;
+    uint32_t pad = (uint32_t)width - s->len;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + (uint32_t)width + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + (uint32_t)width + 1); r->len = (uint32_t)width;
+    __builtin_memcpy(r->data, s->data, s->len); __builtin_memset(r->data + s->len, ' ', pad);
+    r->data[(uint32_t)width] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_reverse(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); if (!s || s->len <= 1) return str;
+    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + s->len + 1);
+    if (!r) return str; r->hdr.type = HEAP_STRING; r->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1); r->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) r->data[i] = s->data[s->len - 1 - i];
+    r->data[s->len] = '\0'; return ENCODE_PTR(r);
+}
+
+RuntimeValue rt_string_chars(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
+    if (!s) return arr;
+    for (uint32_t i = 0; i < s->len; i++) { arr = rt_array_push(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], 1)); }
+    return arr;
+}
+
+RuntimeValue rt_string_bytes(RuntimeValue str) {
+    RuntimeString *s = decode_string(str); RuntimeValue arr = rt_array_new(ENCODE_INT(s ? s->len : 0));
+    if (!s) return arr;
+    for (uint32_t i = 0; i < s->len; i++) arr = rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+    return arr;
+}
+
+RuntimeValue rt_string_is_empty(RuntimeValue str) { RuntimeString *s = decode_string(str); if (!s) return 1; return s->len == 0 ? 1 : 0; }
+
+RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b) {
+    RuntimeString *sa = decode_string(a); RuntimeString *sb = decode_string(b);
+    if (!sa && !sb) return ENCODE_INT(0); if (!sa) return ENCODE_INT(-1); if (!sb) return ENCODE_INT(1);
+    uint32_t min_len = sa->len < sb->len ? sa->len : sb->len;
+    for (uint32_t i = 0; i < min_len; i++) { if (sa->data[i] != sb->data[i]) return ENCODE_INT((int64_t)(unsigned char)sa->data[i] - (int64_t)(unsigned char)sb->data[i]); }
+    if (sa->len < sb->len) return ENCODE_INT(-1); if (sa->len > sb->len) return ENCODE_INT(1); return ENCODE_INT(0);
+}
+
+RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val) {
+    RuntimeValue val_str = rt_value_to_string(val);
+    if (!IS_HEAP(fmt)) return val_str;
+    return rt_string_concat(fmt, val_str);
+}
+
+RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, RuntimeValue fmt_len_rv) {
+    const char *spec = (const char *)(uintptr_t)fmt_ptr_rv;
+    int64_t spec_len = fmt_len_rv;
+    if (!spec || spec_len <= 0) return rt_value_to_string(val);
+    /* Simple fallback: just convert to string */
+    return rt_value_to_string(val);
+}
+
+/* ===================================================================
+ * 12. Array operations (full implementations from x86_64)
+ * =================================================================== */
+
+RuntimeValue rt_array_new(RuntimeValue cap_val) {
+    int64_t cap = DECODE_INT(cap_val); if (cap <= 0) cap = 4; if (cap > 0x100000) cap = 0x100000;
+    size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
+    if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint32_t)cap;
+    for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->len >= a->cap) {
+        uint32_t new_cap = a->cap * 2; if (new_cap < 8) new_cap = 8;
+        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        RuntimeArray *na = (RuntimeArray *)malloc(new_size);
+        if (!na) return NIL_VALUE;
+        na->hdr.type = HEAP_ARRAY; na->hdr.size = (uint32_t)new_size; na->len = a->len; na->cap = new_cap;
+        for (uint32_t i = 0; i < a->len; i++) na->items[i] = a->items[i];
+        for (uint32_t i = a->len; i < new_cap; i++) na->items[i] = NIL_VALUE;
+        a = na;
+    }
+    a->items[a->len] = val; a->len++;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_array_pop(RuntimeValue arr) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return NIL_VALUE;
+    a->len--; RuntimeValue val = a->items[a->len]; a->items[a->len] = NIL_VALUE; return val;
+}
+
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx); if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    return a->items[i];
+}
+
+RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx); if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    a->items[i] = val; return val;
+}
+
+RuntimeValue rt_array_len(RuntimeValue arr) {
+    if (!IS_HEAP(arr)) return ENCODE_INT(0); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0); return ENCODE_INT(a->len);
+}
+
+RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t s = DECODE_INT(start); int64_t e = DECODE_INT(end);
+    if (s < 0) s = 0; if (e > (int64_t)a->len) e = (int64_t)a->len;
+    if (s >= e) return rt_array_new(ENCODE_INT(1));
+    RuntimeValue result = rt_array_new(ENCODE_INT(e - s));
+    for (int64_t i = s; i < e; i++) result = rt_array_push(result, a->items[i]);
+    return result;
+}
+
+RuntimeValue rt_array_contains(RuntimeValue arr, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return 0; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    for (uint32_t i = 0; i < a->len; i++) { if (rt_native_eq(a->items[i], val)) return 1; } return 0;
+}
+
+RuntimeValue rt_array_index_of(RuntimeValue arr, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return ENCODE_INT(-1); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    for (uint32_t i = 0; i < a->len; i++) { if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i); } return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_array_last_index_of(RuntimeValue arr, RuntimeValue val) {
+    if (!IS_HEAP(arr)) return ENCODE_INT(-1); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    for (int64_t i = (int64_t)a->len - 1; i >= 0; i--) { if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i); } return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = DECODE_INT(idx); if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    RuntimeValue removed = a->items[i];
+    for (uint32_t j = (uint32_t)i; j + 1 < a->len; j++) a->items[j] = a->items[j+1];
+    a->len--; a->items[a->len] = NIL_VALUE; return removed;
+}
+
+RuntimeValue rt_array_join(RuntimeValue arr, RuntimeValue sep) {
+    if (!IS_HEAP(arr)) return rt_string_from_cstr(""); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return rt_string_from_cstr("");
+    RuntimeValue result = rt_value_to_string(a->items[0]);
+    for (uint32_t i = 1; i < a->len; i++) {
+        if (IS_HEAP(sep)) result = rt_string_concat(result, sep);
+        result = rt_string_concat(result, rt_value_to_string(a->items[i]));
+    } return result;
+}
+
+RuntimeValue rt_array_concat(RuntimeValue arr_a, RuntimeValue arr_b) {
+    RuntimeArray *a = IS_HEAP(arr_a) ? (RuntimeArray *)DECODE_PTR(arr_a) : (RuntimeArray *)0;
+    RuntimeArray *b = IS_HEAP(arr_b) ? (RuntimeArray *)DECODE_PTR(arr_b) : (RuntimeArray *)0;
+    uint32_t la = (a && a->hdr.type == HEAP_ARRAY) ? a->len : 0;
+    uint32_t lb = (b && b->hdr.type == HEAP_ARRAY) ? b->len : 0;
+    RuntimeValue result = rt_array_new(ENCODE_INT(la + lb > 0 ? la + lb : 1));
+    for (uint32_t i = 0; i < la; i++) result = rt_array_push(result, a->items[i]);
+    for (uint32_t i = 0; i < lb; i++) result = rt_array_push(result, b->items[i]);
+    return result;
+}
+
+RuntimeValue rt_array_clear(RuntimeValue arr) {
+    if (!IS_HEAP(arr)) return arr; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return arr;
+    for (uint32_t i = 0; i < a->len; i++) a->items[i] = NIL_VALUE; a->len = 0; return arr;
+}
+
+RuntimeValue rt_array_clone(RuntimeValue arr) {
+    if (!IS_HEAP(arr)) return NIL_VALUE; RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    RuntimeValue result = rt_array_new(ENCODE_INT(a->cap));
+    for (uint32_t i = 0; i < a->len; i++) result = rt_array_push(result, a->items[i]);
+    return result;
+}
+
+/* ===================================================================
+ * 13. Map/Dict operations (full implementations from x86_64)
+ * =================================================================== */
+
+static RuntimeMap *decode_map(RuntimeValue v) {
+    if (!IS_HEAP(v)) return (RuntimeMap *)0;
+    RuntimeMap *m = (RuntimeMap *)DECODE_PTR(v);
+    if (!m || m->hdr.type != HEAP_MAP) return (RuntimeMap *)0; return m;
+}
+
+static int32_t map_find_key(RuntimeMap *m, RuntimeValue key) {
+    for (uint32_t i = 0; i < m->len; i++) { if (rt_native_eq(m->keys[i], key)) return (int32_t)i; } return -1;
+}
+
+static void map_grow(RuntimeMap *m) {
+    uint32_t new_cap = m->cap * 2; if (new_cap < 16) new_cap = 16;
+    RuntimeValue *nk = (RuntimeValue *)malloc(new_cap * sizeof(RuntimeValue));
+    RuntimeValue *nv = (RuntimeValue *)malloc(new_cap * sizeof(RuntimeValue));
+    if (!nk || !nv) return;
+    for (uint32_t i = 0; i < m->len; i++) { nk[i] = m->keys[i]; nv[i] = m->values[i]; }
+    for (uint32_t i = m->len; i < new_cap; i++) { nk[i] = NIL_VALUE; nv[i] = NIL_VALUE; }
+    m->keys = nk; m->values = nv; m->cap = new_cap;
+}
+
+RuntimeValue rt_map_new(void) {
+    uint32_t cap = 16;
+    RuntimeMap *m = (RuntimeMap *)malloc(sizeof(RuntimeMap)); if (!m) return NIL_VALUE;
+    m->hdr.type = HEAP_MAP; m->hdr.size = (uint32_t)sizeof(RuntimeMap); m->len = 0; m->cap = cap;
+    m->keys = (RuntimeValue *)malloc(cap * sizeof(RuntimeValue));
+    m->values = (RuntimeValue *)malloc(cap * sizeof(RuntimeValue));
+    if (!m->keys || !m->values) return NIL_VALUE;
+    for (uint32_t i = 0; i < cap; i++) { m->keys[i] = NIL_VALUE; m->values[i] = NIL_VALUE; }
+    return ENCODE_PTR(m);
+}
+
+RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key);
+    if (idx >= 0) { m->values[idx] = value; return map; }
+    if (m->len >= m->cap) map_grow(m);
+    if (m->len >= m->cap) return map;
+    m->keys[m->len] = key; m->values[m->len] = value; m->len++; return map;
+}
+
+RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key); if (idx >= 0) return m->values[idx]; return NIL_VALUE;
+}
+
+RuntimeValue rt_map_has(RuntimeValue map, RuntimeValue key) {
+    RuntimeMap *m = decode_map(map); if (!m) return 0; return map_find_key(m, key) >= 0 ? 1 : 0;
+}
+
+RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    int32_t idx = map_find_key(m, key); if (idx < 0) return NIL_VALUE;
+    RuntimeValue removed = m->values[idx];
+    for (uint32_t i = (uint32_t)idx; i + 1 < m->len; i++) { m->keys[i] = m->keys[i+1]; m->values[i] = m->values[i+1]; }
+    m->len--; m->keys[m->len] = NIL_VALUE; m->values[m->len] = NIL_VALUE; return removed;
+}
+
+RuntimeValue rt_map_keys(RuntimeValue map) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push(arr, m->keys[i]); return arr;
+}
+
+RuntimeValue rt_map_values(RuntimeValue map) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) arr = rt_array_push(arr, m->values[i]); return arr;
+}
+
+RuntimeValue rt_map_entries(RuntimeValue map) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new(ENCODE_INT(m->len > 0 ? m->len : 1));
+    for (uint32_t i = 0; i < m->len; i++) {
+        RuntimeValue pair = rt_array_new(ENCODE_INT(2));
+        pair = rt_array_push(pair, m->keys[i]); pair = rt_array_push(pair, m->values[i]);
+        arr = rt_array_push(arr, pair);
+    } return arr;
+}
+
+RuntimeValue rt_map_len(RuntimeValue map) { RuntimeMap *m = decode_map(map); if (!m) return ENCODE_INT(0); return ENCODE_INT(m->len); }
+
+RuntimeValue rt_map_clear(RuntimeValue map) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    for (uint32_t i = 0; i < m->len; i++) { m->keys[i] = NIL_VALUE; m->values[i] = NIL_VALUE; } m->len = 0; return map;
+}
+
+RuntimeValue rt_map_clone(RuntimeValue map) {
+    RuntimeMap *m = decode_map(map); if (!m) return NIL_VALUE;
+    RuntimeValue new_map = rt_map_new(); RuntimeMap *nm = decode_map(new_map); if (!nm) return NIL_VALUE;
+    for (uint32_t i = 0; i < m->len; i++) rt_map_set(new_map, m->keys[i], m->values[i]);
+    return new_map;
+}
+
+RuntimeValue rt_map_merge(RuntimeValue map_a, RuntimeValue map_b) {
+    RuntimeValue result = rt_map_clone(map_a); RuntimeMap *mb = decode_map(map_b); if (!mb) return result;
+    for (uint32_t i = 0; i < mb->len; i++) result = rt_map_set(result, mb->keys[i], mb->values[i]);
+    return result;
+}
+
+RuntimeValue rt_map_for_each(RuntimeValue map, RuntimeValue callback) { (void)map; (void)callback; return NIL_VALUE; }
+
+/* ===================================================================
+ * 14. Additional runtime stubs for OS boot path
+ * =================================================================== */
+
+RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
+RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
+RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
+RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return ENCODE_INT(0); }
+RuntimeValue rt_dict_keys(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
+RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
+RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
+RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
+RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
+RuntimeValue rt_file_read_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_file_read_text_rv(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_file_write_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_append_text(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_open(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_close(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_remove(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_find(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_file_get_size(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_file_canonicalize(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_hash(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_file_read_lines(RuntimeValue a) { (void)a; return NIL_VALUE; }
+RuntimeValue rt_write_file(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_cli_file_exists(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_execute(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_process_exists(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_is_running(RuntimeValue a) { (void)a; return ENCODE_INT(0); }
+RuntimeValue rt_process_run_with_limits(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a;(void)b;(void)c;(void)d; return NIL_VALUE; }
+RuntimeValue rt_process_spawn_async(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_cli_print(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_cli_println(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
+RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
+
+RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
+    int64_t va = (int64_t)a; int64_t vb = (int64_t)b;
+    if (va < vb) return ENCODE_INT(-1); if (va > vb) return ENCODE_INT(1); return ENCODE_INT(0);
+}
+
+RuntimeValue rt_profiler_record_call(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return NIL_VALUE; }
+RuntimeValue rt_profiler_record_return(RuntimeValue a) { (void)a; return NIL_VALUE; }
+
+/* serial_println — called by compiled Simple code (extern fn serial_println) */
+RuntimeValue serial_println(RuntimeValue val) {
+    rt_print(val);
+    serial_puts("\r\n");
+    return NIL_VALUE;
+}
+
+/* ===================================================================
+ * 15. Fatal-panic stubs — ARM64 version (wfe instead of cli;hlt)
+ * =================================================================== */
+
+#define S0(n) RuntimeValue n(void) { \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+#define S1(n) RuntimeValue n(RuntimeValue a) { \
+    (void)a; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+#define S2(n) RuntimeValue n(RuntimeValue a, RuntimeValue b) { \
+    (void)a; (void)b; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+#define S3(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c) { \
+    (void)a; (void)b; (void)c; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+#define S4(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { \
+    (void)a; (void)b; (void)c; (void)d; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+#define S5(n) RuntimeValue n(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d, RuntimeValue e) { \
+    (void)a; (void)b; (void)c; (void)d; (void)e; \
+    serial_puts("FATAL: unimplemented rt function: " #n "\n"); \
+    for(;;) __asm__ volatile("wfe"); \
+    return 0; \
+}
+
 S1(rt_to_float)
-S1(rt_to_string)
-S1(rt_to_bool)
-S1(rt_clone)
-S1(rt_freeze)
-S1(rt_is_frozen)
 
-/* --- String extras --- */
-S2(rt_string_contains)
-S2(rt_string_starts_with)
-S2(rt_string_ends_with)
-S2(rt_string_index_of)
-S2(rt_string_last_index_of)
-S2(rt_string_substr)
-S2(rt_string_split)
-S1(rt_string_trim)
-S1(rt_string_trim_start)
-S1(rt_string_trim_end)
-S1(rt_string_to_upper)
-S1(rt_string_to_lower)
-S2(rt_string_replace)
-S3(rt_string_replace_all)
-S2(rt_string_repeat)
-S2(rt_string_pad_start)
-S2(rt_string_pad_end)
-S1(rt_string_reverse)
-S1(rt_string_chars)
-S1(rt_string_bytes)
-S1(rt_string_is_empty)
-S2(rt_string_compare)
-S2(rt_string_format)
-
-/* --- Array --- */
-S1(rt_array_new)
-S2(rt_array_push)
-S1(rt_array_pop)
-S2(rt_array_get)
-S3(rt_array_set)
-S1(rt_array_len)
-S3(rt_array_slice)
-S2(rt_array_contains)
-S2(rt_array_index_of)
-S2(rt_array_last_index_of)
-S2(rt_array_remove)
+/* Remaining stubs for array ops not fully implemented */
 S3(rt_array_insert)
 S1(rt_array_reverse)
 S1(rt_array_sort)
@@ -753,30 +1606,11 @@ S2(rt_array_find)
 S2(rt_array_find_index)
 S2(rt_array_every)
 S2(rt_array_some)
-S2(rt_array_join)
-S2(rt_array_concat)
-S1(rt_array_clear)
 S1(rt_array_flatten)
 S2(rt_array_fill)
-S1(rt_array_clone)
 S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
-
-/* --- Map / Dictionary --- */
-S0(rt_map_new)
-S3(rt_map_set)
-S2(rt_map_get)
-S2(rt_map_has)
-S2(rt_map_remove)
-S1(rt_map_keys)
-S1(rt_map_values)
-S1(rt_map_entries)
-S1(rt_map_len)
-S1(rt_map_clear)
-S1(rt_map_clone)
-S2(rt_map_merge)
-S2(rt_map_for_each)
 
 /* --- File I/O --- */
 S1(rt_file_read)
@@ -823,383 +1657,193 @@ S2(rt_env_set)
 S0(rt_env_all)
 
 /* --- Math --- */
-S1(rt_math_sqrt)
-S1(rt_math_sin)
-S1(rt_math_cos)
-S1(rt_math_tan)
-S1(rt_math_asin)
-S1(rt_math_acos)
-S1(rt_math_atan)
-S2(rt_math_atan2)
-S1(rt_math_abs)
-S1(rt_math_floor)
-S1(rt_math_ceil)
-S1(rt_math_round)
-S1(rt_math_log)
-S1(rt_math_log2)
-S1(rt_math_log10)
-S1(rt_math_exp)
-S2(rt_math_min)
-S2(rt_math_max)
-S2(rt_math_pow)
-S0(rt_math_random)
-S0(rt_math_pi)
-S0(rt_math_e)
-S0(rt_math_inf)
-S0(rt_math_nan)
-S1(rt_math_is_nan)
-S1(rt_math_is_inf)
+S1(rt_math_sqrt) S1(rt_math_sin) S1(rt_math_cos) S1(rt_math_tan)
+S1(rt_math_asin) S1(rt_math_acos) S1(rt_math_atan) S2(rt_math_atan2)
+S1(rt_math_abs) S1(rt_math_floor) S1(rt_math_ceil) S1(rt_math_round)
+S1(rt_math_log) S1(rt_math_log2) S1(rt_math_log10) S1(rt_math_exp)
+S2(rt_math_min) S2(rt_math_max) S2(rt_math_pow)
+S0(rt_math_random) S0(rt_math_pi) S0(rt_math_e) S0(rt_math_inf) S0(rt_math_nan)
+S1(rt_math_is_nan) S1(rt_math_is_inf)
 
-/* --- Port I/O (no-op on ARM64 — x86 only) --- */
-S2(rt_port_outb)
-S2(rt_port_outw)
-S2(rt_port_outl)
-S1(rt_port_inb)
-S1(rt_port_inw)
-S1(rt_port_inl)
-S0(rt_port_io_wait)
+/* --- Port I/O (no-op on ARM64) --- */
+RuntimeValue rt_port_outb(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
+RuntimeValue rt_port_outw(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
+RuntimeValue rt_port_outl(RuntimeValue p, RuntimeValue v) { (void)p; (void)v; return NIL_VALUE; }
+RuntimeValue rt_port_inb(RuntimeValue p) { (void)p; return ENCODE_INT(0); }
+RuntimeValue rt_port_inw(RuntimeValue p) { (void)p; return ENCODE_INT(0); }
+RuntimeValue rt_port_inl(RuntimeValue p) { (void)p; return ENCODE_INT(0); }
+RuntimeValue rt_port_io_wait(void) { return NIL_VALUE; }
 
-/* --- MMIO (stubs — overridden in section 11) --- */
-S1(rt_mmio_read_u8)
-S1(rt_mmio_read_u16)
-S1(rt_mmio_read_u32)
-S1(rt_mmio_read_u64)
-S2(rt_mmio_write_u8)
-S2(rt_mmio_write_u16)
-S2(rt_mmio_write_u32)
-S2(rt_mmio_write_u64)
-
-/* --- CPU control --- */
-S0(rt_hlt)
-S0(rt_sti)
-S0(rt_cli)
-S1(rt_lgdt)
-S1(rt_lidt)
-S1(rt_ltr)
-S1(rt_invlpg)
-S0(rt_read_cr0)
-S1(rt_write_cr0)
-S1(rt_read_cr2)
-S1(rt_read_cr3)
-S1(rt_write_cr3)
-S0(rt_read_cr4)
-S1(rt_write_cr4)
-S1(rt_read_msr)
-S2(rt_write_msr)
-S0(rt_cpuid)
-S0(rt_rdtsc)
-
-/* --- ARM64-specific CPU --- */
-S0(rt_wfe)
-S0(rt_wfi)
-S0(rt_sev)
-S0(rt_isb)
-S0(rt_dsb)
-S0(rt_dmb)
-S1(rt_read_sysreg)
-S2(rt_write_sysreg)
+/* --- CPU control (x86 stubs, ARM64 equivalents in section 16) --- */
+RuntimeValue rt_hlt(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
+RuntimeValue rt_sti(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
+RuntimeValue rt_cli(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
+S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr) S1(rt_invlpg)
+S0(rt_read_cr0) S1(rt_write_cr0) S1(rt_read_cr2) S1(rt_read_cr3) S1(rt_write_cr3)
+S0(rt_read_cr4) S1(rt_write_cr4) S1(rt_read_msr) S2(rt_write_msr) S0(rt_cpuid) S0(rt_rdtsc)
 
 /* --- Interrupts --- */
-S0(rt_enable_interrupts)
-S0(rt_disable_interrupts)
-S2(rt_register_isr)
-S1(rt_send_eoi)
-S0(rt_get_interrupt_flag)
+S2(rt_register_isr) S1(rt_send_eoi) S0(rt_get_interrupt_flag)
 
 /* --- Timer / Clock --- */
-S1(rt_time_now_ms)
-S0(rt_time_now_nanos)
-S0(rt_time_monotonic)
-S1(rt_sleep_ms)
-S1(rt_timer_create)
-S1(rt_timer_cancel)
+S1(rt_time_now_ms) S0(rt_time_now_nanos) S0(rt_time_monotonic)
+S1(rt_sleep_ms) S1(rt_timer_create) S1(rt_timer_cancel)
 
 /* --- Network --- */
-S2(rt_net_connect)
-S1(rt_net_listen)
-S2(rt_net_send)
-S1(rt_net_recv)
-S1(rt_net_close)
-S2(rt_net_bind)
-S1(rt_net_accept)
-S2(rt_net_set_timeout)
-S1(rt_net_get_addr)
+S2(rt_net_connect) S1(rt_net_listen) S2(rt_net_send) S1(rt_net_recv) S1(rt_net_close)
+S2(rt_net_bind) S1(rt_net_accept) S2(rt_net_set_timeout) S1(rt_net_get_addr)
 
 /* --- HTTP --- */
-S2(rt_http_get)
-S3(rt_http_post)
-S3(rt_http_put)
-S3(rt_http_patch)
-S2(rt_http_delete)
-S2(rt_http_request)
-S3(rt_http_request_full)
-S2(rt_http_set_header)
+S2(rt_http_get) S3(rt_http_post) S3(rt_http_put) S3(rt_http_patch)
+S2(rt_http_delete) S2(rt_http_request) S3(rt_http_request_full) S2(rt_http_set_header)
 
 /* --- JSON --- */
-S1(rt_json_parse)
-S1(rt_json_stringify)
-S2(rt_json_get)
-S3(rt_json_set)
-S1(rt_json_keys)
-S1(rt_json_values)
-S1(rt_json_is_object)
-S1(rt_json_is_array)
+S1(rt_json_parse) S1(rt_json_stringify) S2(rt_json_get) S3(rt_json_set)
+S1(rt_json_keys) S1(rt_json_values) S1(rt_json_is_object) S1(rt_json_is_array)
 
 /* --- Regex --- */
-S2(ffi_regex_is_match)
-S2(ffi_regex_find)
-S2(ffi_regex_find_all)
-S2(ffi_regex_replace)
-S3(ffi_regex_replace_all)
-S1(ffi_regex_compile)
+S2(ffi_regex_is_match) S2(ffi_regex_find) S2(ffi_regex_find_all)
+S2(ffi_regex_replace) S3(ffi_regex_replace_all) S1(ffi_regex_compile)
 
 /* --- Test / BDD --- */
-S1(rt_bdd_describe_start)
-S1(rt_bdd_describe_end)
-S2(rt_bdd_it_start)
-S1(rt_bdd_it_end)
-S1(rt_expect)
-S2(rt_expect_eq)
-S2(rt_expect_ne)
-S2(rt_expect_gt)
-S2(rt_expect_lt)
-S1(rt_expect_nil)
-S1(rt_expect_not_nil)
-S1(rt_expect_true)
-S1(rt_expect_false)
-S2(rt_expect_contains)
-S2(rt_expect_throws)
-S0(rt_bdd_suite_start)
-S0(rt_bdd_suite_end)
-S0(rt_bdd_report)
+S1(rt_bdd_describe_start) S1(rt_bdd_describe_end) S2(rt_bdd_it_start) S1(rt_bdd_it_end)
+S1(rt_expect) S2(rt_expect_eq) S2(rt_expect_ne) S2(rt_expect_gt) S2(rt_expect_lt)
+S1(rt_expect_nil) S1(rt_expect_not_nil) S1(rt_expect_true) S1(rt_expect_false)
+S2(rt_expect_contains) S2(rt_expect_throws)
+S0(rt_bdd_suite_start) S0(rt_bdd_suite_end) S0(rt_bdd_report)
 
 /* --- Misc / Debug --- */
-S1(rt_hash)
-S2(rt_hash_combine)
-S1(rt_debug_print)
-S1(rt_debug_dump)
-S0(rt_debug_break)
-S1(rt_panic)
-S1(rt_assert)
-S2(rt_assert_eq)
-S2(rt_assert_ne)
-S1(rt_abort)
-S0(rt_gc_collect)
-S0(rt_gc_disable)
-S0(rt_gc_enable)
-S0(rt_gc_stats)
-S1(rt_typeof)
+RuntimeValue rt_hash(RuntimeValue val) {
+    uint64_t h = 14695981039346656037ULL;
+    if (IS_INT(val)) { int64_t n = DECODE_INT(val); for (int i = 0; i < 8; i++) { h ^= (uint8_t)(n & 0xFF); h *= 1099511628211ULL; n >>= 8; } }
+    else if (IS_HEAP(val)) { HeapHeader *hdr = (HeapHeader *)DECODE_PTR(val);
+        if (hdr && hdr->type == HEAP_STRING) { RuntimeString *s = (RuntimeString *)hdr; for (uint32_t i = 0; i < s->len; i++) { h ^= (uint8_t)s->data[i]; h *= 1099511628211ULL; } }
+        else { uint64_t p = (uint64_t)(uintptr_t)hdr; for (int i = 0; i < 8; i++) { h ^= (uint8_t)(p & 0xFF); h *= 1099511628211ULL; p >>= 8; } }
+    }
+    return ENCODE_INT((int64_t)(h >> 3));
+}
+RuntimeValue rt_hash_combine(RuntimeValue h1, RuntimeValue h2) {
+    int64_t a = DECODE_INT(h1); int64_t b = DECODE_INT(h2);
+    uint64_t combined = (uint64_t)a ^ ((uint64_t)b + 0x9e3779b97f4a7c15ULL + ((uint64_t)a << 6) + ((uint64_t)a >> 2));
+    return ENCODE_INT((int64_t)(combined >> 3));
+}
 
-/* --- Threading (no-ops on bare metal) --- */
-S1(rt_thread_create)
-S1(rt_thread_join)
-S0(rt_thread_yield)
-S0(rt_thread_current)
-S1(rt_thread_sleep)
-S0(rt_mutex_new)
-S1(rt_mutex_lock)
-S1(rt_mutex_unlock)
-S1(rt_mutex_try_lock)
-S0(rt_condvar_new)
-S1(rt_condvar_wait)
-S1(rt_condvar_notify)
-S1(rt_condvar_notify_all)
+RuntimeValue rt_debug_print(RuntimeValue val) { serial_puts("[DEBUG] "); rt_print_value(val); serial_putchar('\r'); serial_putchar('\n'); return NIL_VALUE; }
+RuntimeValue rt_debug_dump(RuntimeValue val) {
+    serial_puts("[DUMP] raw="); serial_put_hex((uint64_t)val); serial_puts(" tag="); serial_put_dec((int64_t)((uint64_t)val & TAG_MASK));
+    if (IS_INT(val)) { serial_puts(" int="); serial_put_dec(DECODE_INT(val)); }
+    else if (IS_HEAP(val)) { HeapHeader *h = (HeapHeader *)DECODE_PTR(val); serial_puts(" heap_type="); serial_put_dec(h ? (int64_t)h->type : -1); }
+    serial_putchar('\r'); serial_putchar('\n'); return NIL_VALUE;
+}
+RuntimeValue rt_debug_break(void) { serial_puts("[BREAK] debug break\r\n"); return NIL_VALUE; }
 
-/* --- Channels (no-ops on bare metal) --- */
-S0(rt_channel_new)
-S2(rt_channel_send)
-S1(rt_channel_recv)
-S1(rt_channel_try_recv)
-S1(rt_channel_close)
+RuntimeValue rt_panic(RuntimeValue msg) {
+    serial_puts("[PANIC] ");
+    if (IS_HEAP(msg)) { HeapHeader *h = (HeapHeader *)DECODE_PTR(msg);
+        if (h && h->type == HEAP_STRING) { RuntimeString *s = (RuntimeString *)h; for (uint32_t i = 0; i < s->len; i++) serial_putchar(s->data[i]); }
+        else serial_puts("<non-string>");
+    } else serial_put_hex((uint64_t)msg);
+    serial_puts("\r\n"); for (;;) __asm__ volatile("wfe"); return NIL_VALUE;
+}
 
-/* --- Async (no-ops on bare metal) --- */
-S1(rt_async_spawn)
-S1(rt_async_await)
-S0(rt_async_yield)
+RuntimeValue rt_function_not_found(RuntimeValue name_ptr, RuntimeValue name_len) {
+    serial_puts("[WARN] unresolved fn: ");
+    if (name_ptr) { const char *p = (const char *)(uintptr_t)name_ptr; int64_t len = (int64_t)name_len;
+        for (int64_t i = 0; i < len && i < 128; i++) serial_putchar(p[i]); }
+    serial_puts("\r\n"); return NIL_VALUE;
+}
+
+RuntimeValue rt_assert(RuntimeValue cond) {
+    if (IS_INT(cond) && DECODE_INT(cond)) return NIL_VALUE;
+    if (IS_HEAP(cond)) return NIL_VALUE;
+    serial_puts("[ASSERT] assertion failed\r\n"); for (;;) __asm__ volatile("wfe"); return NIL_VALUE;
+}
+
+RuntimeValue rt_assert_eq(RuntimeValue a, RuntimeValue b) {
+    if (rt_native_eq(a, b)) return NIL_VALUE;
+    serial_puts("[ASSERT_EQ] "); rt_print_value(a); serial_puts(" != "); rt_print_value(b); serial_puts("\r\n");
+    for (;;) __asm__ volatile("wfe"); return NIL_VALUE;
+}
+
+RuntimeValue rt_assert_ne(RuntimeValue a, RuntimeValue b) {
+    if (!rt_native_eq(a, b)) return NIL_VALUE;
+    serial_puts("[ASSERT_NE] values are equal: "); rt_print_value(a); serial_puts("\r\n");
+    for (;;) __asm__ volatile("wfe"); return NIL_VALUE;
+}
+
+RuntimeValue rt_abort(RuntimeValue msg) {
+    serial_puts("[ABORT] "); rt_print_value(msg); serial_puts("\r\n");
+    for (;;) __asm__ volatile("wfe"); return NIL_VALUE;
+}
+
+RuntimeValue rt_gc_collect(void) { return NIL_VALUE; }
+RuntimeValue rt_gc_disable(void) { return NIL_VALUE; }
+RuntimeValue rt_gc_enable(void) { return NIL_VALUE; }
+RuntimeValue rt_gc_stats(void) { return NIL_VALUE; }
+
+/* Threading */
+S1(rt_thread_create) S1(rt_thread_join)
+RuntimeValue rt_thread_yield(void) { return NIL_VALUE; }
+RuntimeValue rt_thread_current(void) { return ENCODE_INT(0); }
+RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }
+S0(rt_mutex_new) S1(rt_mutex_lock) S1(rt_mutex_unlock) S1(rt_mutex_try_lock)
+S0(rt_condvar_new) S1(rt_condvar_wait) S1(rt_condvar_notify) S1(rt_condvar_notify_all)
+
+/* Channels */
+S0(rt_channel_new) S2(rt_channel_send) S1(rt_channel_recv) S1(rt_channel_try_recv) S1(rt_channel_close)
+
+/* Async */
+S1(rt_async_spawn) S1(rt_async_await)
+RuntimeValue rt_async_yield(void) { return NIL_VALUE; }
 S2(rt_async_select)
 
-/* --- Encoding --- */
-S1(rt_base64_encode)
-S1(rt_base64_decode)
-S1(rt_hex_encode)
-S1(rt_hex_decode)
-S1(rt_utf8_encode)
-S1(rt_utf8_decode)
-S1(rt_url_encode)
-S1(rt_url_decode)
+/* Encoding */
+S1(rt_base64_encode) S1(rt_base64_decode) S1(rt_hex_encode) S1(rt_hex_decode)
+S1(rt_utf8_encode) S1(rt_utf8_decode) S1(rt_url_encode) S1(rt_url_decode)
 
-/* --- Crypto (no-ops on bare metal) --- */
-S1(rt_sha256)
-S1(rt_sha512)
-S1(rt_md5)
-S2(rt_hmac_sha256)
-S1(rt_random_bytes)
+/* Crypto */
+S1(rt_sha256) S1(rt_sha512) S1(rt_md5) S2(rt_hmac_sha256) S1(rt_random_bytes)
 
-/* --- Object / Struct --- */
-S1(rt_object_new)
-S2(rt_object_get)
-S3(rt_object_set)
-S2(rt_object_has)
-S2(rt_object_delete)
-S1(rt_object_keys)
-S1(rt_object_values)
-S1(rt_object_freeze)
-S1(rt_object_clone)
+/* Object / Struct */
+S1(rt_object_new) S2(rt_object_get) S3(rt_object_set) S2(rt_object_has) S2(rt_object_delete)
+S1(rt_object_keys) S1(rt_object_values) S1(rt_object_freeze) S1(rt_object_clone)
 
-/* --- Error handling --- */
-S1(rt_error_new)
-S1(rt_error_message)
-S1(rt_error_code)
-S1(rt_error_stack)
-S2(rt_result_ok)
-S2(rt_result_err)
-S1(rt_result_is_ok)
-S1(rt_result_is_err)
-S1(rt_result_unwrap)
-S2(rt_result_unwrap_or)
+/* Error handling */
+S1(rt_error_new) S1(rt_error_message) S1(rt_error_code) S1(rt_error_stack)
+S2(rt_result_ok) S2(rt_result_err) S1(rt_result_is_ok) S1(rt_result_is_err)
+S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 
-/* --- Weak references & closures --- */
-S1(rt_weak_ref)
-S1(rt_weak_deref)
-S1(rt_closure_new)
-S2(rt_closure_call)
-S1(rt_closure_bind)
+/* Weak references & closures */
+S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_closure_bind)
 
 /* ===================================================================
- * 11. Real ARM64 MMIO and CPU overrides
- *
- * These provide actual hardware access for ARM64-specific operations.
- * Port I/O stubs remain no-ops since ARM64 has no port I/O.
+ * 16. Real ARM64 MMIO and CPU overrides
  * =================================================================== */
 
-/* --- MMIO: real ARM64 implementations --- */
+RuntimeValue rt_mmio_read_u8(RuntimeValue addr) { return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr)); }
+RuntimeValue rt_mmio_read_u16(RuntimeValue addr) { return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr)); }
+RuntimeValue rt_mmio_read_u32(RuntimeValue addr) { return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr)); }
+RuntimeValue rt_mmio_read_u64(RuntimeValue addr) { return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr)); }
+RuntimeValue rt_mmio_write_u8(RuntimeValue addr, RuntimeValue val) { *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val); return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u16(RuntimeValue addr, RuntimeValue val) { *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val); return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u32(RuntimeValue addr, RuntimeValue val) { *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val); return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) { *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val); return NIL_VALUE; }
 
-RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
-{
-    return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr));
-}
+/* ARM64-specific CPU operations */
+RuntimeValue rt_wfe(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
+RuntimeValue rt_wfi(void) { __asm__ volatile("wfi"); return NIL_VALUE; }
+RuntimeValue rt_sev(void) { __asm__ volatile("sev"); return NIL_VALUE; }
+RuntimeValue rt_isb(void) { __asm__ volatile("isb"); return NIL_VALUE; }
+RuntimeValue rt_dsb(void) { __asm__ volatile("dsb sy"); return NIL_VALUE; }
+RuntimeValue rt_dmb(void) { __asm__ volatile("dmb sy"); return NIL_VALUE; }
+RuntimeValue rt_enable_interrupts(void) { __asm__ volatile("msr daifclr, #0xF"); return NIL_VALUE; }
+RuntimeValue rt_disable_interrupts(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
+S1(rt_read_sysreg) S2(rt_write_sysreg)
 
-RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
-{
-    return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr));
-}
-
-RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
-{
-    return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr));
-}
-
-RuntimeValue rt_mmio_read_u64_real(RuntimeValue addr)
-{
-    return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr));
-}
-
-RuntimeValue rt_mmio_write_u8_real(RuntimeValue addr, RuntimeValue val)
-{
-    *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val);
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_mmio_write_u16_real(RuntimeValue addr, RuntimeValue val)
-{
-    *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val);
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_mmio_write_u32_real(RuntimeValue addr, RuntimeValue val)
-{
-    *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val);
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_mmio_write_u64_real(RuntimeValue addr, RuntimeValue val)
-{
-    *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val);
-    return NIL_VALUE;
-}
-
-/* --- CPU: real ARM64 barrier and WFE/WFI implementations --- */
-
-RuntimeValue rt_wfe_real(void)
-{
-    __asm__ volatile("wfe");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_wfi_real(void)
-{
-    __asm__ volatile("wfi");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_sev_real(void)
-{
-    __asm__ volatile("sev");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_isb_real(void)
-{
-    __asm__ volatile("isb");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_dsb_real(void)
-{
-    __asm__ volatile("dsb sy");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_dmb_real(void)
-{
-    __asm__ volatile("dmb sy");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_enable_interrupts_real(void)
-{
-    __asm__ volatile("msr daifclr, #0xF");
-    return NIL_VALUE;
-}
-
-RuntimeValue rt_disable_interrupts_real(void)
-{
-    __asm__ volatile("msr daifset, #0xF");
-    return NIL_VALUE;
-}
-
-/* Expose as the primary symbols via alias */
-RuntimeValue rt_mmio_read_u8(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u8_real")));
-RuntimeValue rt_mmio_read_u16(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u16_real")));
-RuntimeValue rt_mmio_read_u32(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u32_real")));
-RuntimeValue rt_mmio_read_u64(RuntimeValue)
-    __attribute__((alias("rt_mmio_read_u64_real")));
-RuntimeValue rt_mmio_write_u8(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u8_real")));
-RuntimeValue rt_mmio_write_u16(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u16_real")));
-RuntimeValue rt_mmio_write_u32(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u32_real")));
-RuntimeValue rt_mmio_write_u64(RuntimeValue, RuntimeValue)
-    __attribute__((alias("rt_mmio_write_u64_real")));
-RuntimeValue rt_wfe(void)
-    __attribute__((alias("rt_wfe_real")));
-RuntimeValue rt_wfi(void)
-    __attribute__((alias("rt_wfi_real")));
-RuntimeValue rt_sev(void)
-    __attribute__((alias("rt_sev_real")));
-RuntimeValue rt_isb(void)
-    __attribute__((alias("rt_isb_real")));
-RuntimeValue rt_dsb(void)
-    __attribute__((alias("rt_dsb_real")));
-RuntimeValue rt_dmb(void)
-    __attribute__((alias("rt_dmb_real")));
-RuntimeValue rt_enable_interrupts(void)
-    __attribute__((alias("rt_enable_interrupts_real")));
-RuntimeValue rt_disable_interrupts(void)
-    __attribute__((alias("rt_disable_interrupts_real")));
+/* GUI stubs (no framebuffer on ARM64 QEMU virt without VGA) */
+RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w) { (void)addr; (void)w; return 0; }
+RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, RuntimeValue color) { (void)y;(void)x;(void)count;(void)color; return 0; }
+RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
+RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
 /* End of ARM64 baremetal_stubs.c */
