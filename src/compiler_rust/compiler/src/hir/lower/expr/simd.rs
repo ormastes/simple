@@ -247,7 +247,10 @@ impl Lowerer {
             .unwrap_or_else(|| {
                 // If not found as a function, check if class_name is a known type
                 // (constructor pattern: ClassName.factory() returns ClassName)
-                self.module.types.lookup(class_name).unwrap_or(TypeId::ANY)
+                // Check type registry first, then globals (where imported types are registered)
+                self.module.types.lookup(class_name)
+                    .or_else(|| self.globals.get(class_name).copied())
+                    .unwrap_or(TypeId::ANY)
             });
 
         let func_expr = HirExpr {

@@ -2960,9 +2960,39 @@ fn mangle_mir(
                             *target = target.with_name(mangled.clone());
                         } else if let Some(resolved) = use_map.get(&name) {
                             *target = target.with_name(resolved.clone());
-                        } else if let Some(resolved) = import_map.get(&name) {
-                            *target = target.with_name(resolved.clone());
-                        } else if let Some(resolved) = resolve_name_variants(&name, use_map, import_map) {
+                        } else {
+                            // Before import_map fallback (which picks alphabetically first
+                            // for ambiguous names), check use_map for "TypeName.method"
+                            // qualified entries matching this bare method name.
+                            let method_dot = format!(".{}", name);
+                            let mut use_resolved = None;
+                            for (raw, mangled) in use_map.iter() {
+                                if raw.ends_with(&method_dot) && raw.len() > name.len() + 1 {
+                                    use_resolved = Some(mangled.clone());
+                                    break;
+                                }
+                            }
+                            if use_resolved.is_none() {
+                                // Check import_map for "TypeName.method" keys where TypeName is in use_map
+                                for (raw, mangled) in import_map.iter() {
+                                    if raw.ends_with(&method_dot) && raw.len() > name.len() + 1 {
+                                        let type_part = &raw[..raw.len() - method_dot.len()];
+                                        if use_map.contains_key(type_part) {
+                                            use_resolved = Some(mangled.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(resolved) = use_resolved {
+                                *target = target.with_name(resolved);
+                            } else if let Some(resolved) = import_map.get(&name) {
+                                *target = target.with_name(resolved.clone());
+                            }
+                        }
+                        let name = target.name().to_string();
+                        if !known_mangled.contains(name.as_str()) && !is_runtime_or_builtin(&name) {
+                        if let Some(resolved) = resolve_name_variants(&name, use_map, import_map) {
                             *target = target.with_name(resolved);
                         } else if name.contains('.') {
                             // Dotted call: "Type.method" or "module.function"
@@ -3024,6 +3054,7 @@ fn mangle_mir(
                                 name, func.name, prefix
                             );
                         }
+                        } // end if !known_mangled
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
