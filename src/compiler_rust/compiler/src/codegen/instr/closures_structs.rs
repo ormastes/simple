@@ -229,6 +229,33 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 }
             }
 
+            if candidates.len() > 1 {
+                let method_dot = format!("_dot_{}", method_part);
+                for (cand_name, &cand_id) in &candidates {
+                    // Extract type name from candidate: "mod__Type_dot_method" → "Type"
+                    if let Some(dot_pos) = cand_name.rfind(&method_dot) {
+                        let prefix = &cand_name[..dot_pos];
+                        // Get the type name (last segment after __)
+                        let type_name = prefix.rsplit("__").next().unwrap_or(prefix);
+                        if ctx.use_map.contains_key(type_name) {
+                            return Some(cand_id);
+                        }
+                    }
+                }
+                // Also check import_map for "TypeName.method" where TypeName is in use_map
+                for (raw, mangled) in ctx.import_map.iter() {
+                    if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
+                        let type_part = &raw[..raw.len() - method_part.len() - 1];
+                        if ctx.use_map.contains_key(type_part) {
+                            // Find the candidate matching this mangled name
+                            if let Some((_, &v)) = candidates.iter().find(|(k, _)| k.as_str() == mangled.as_str()) {
+                                return Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Fallback: pick shortest name (most specific)
             candidates.iter()
                 .min_by_key(|(k, _)| k.len())
@@ -254,11 +281,39 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
     } else {
         // Cross-module method: resolve via use_map → import_map
+        // First try exact match, then check for "TypeName.method" qualified
+        // entries in use_map (prefers imported types over alphabetical import_map)
         let mut resolved_name = ctx
             .use_map
             .get(func_name)
-            .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str());
+        // Check use_map for "TypeName.func_name" entries (from imported impl methods)
+        if resolved_name.is_none() {
+            let method_suffix = format!(".{}", func_name);
+            for (raw, mangled) in ctx.use_map.iter() {
+                if raw.ends_with(&method_suffix) && raw.len() > func_name.len() + 1 {
+                    resolved_name = Some(mangled.as_str());
+                    break;
+                }
+            }
+        }
+        // Also check import_map for qualified entries where type is imported
+        if resolved_name.is_none() {
+            let method_suffix = format!(".{}", func_name);
+            for (raw, mangled) in ctx.import_map.iter() {
+                if raw.ends_with(&method_suffix) && raw.len() > func_name.len() + 1 {
+                    let type_part = &raw[..raw.len() - method_suffix.len()];
+                    if ctx.use_map.contains_key(type_part) {
+                        resolved_name = Some(mangled.as_str());
+                        break;
+                    }
+                }
+            }
+        }
+        // Final fallback: import_map bare name (may pick wrong overload)
+        if resolved_name.is_none() {
+            resolved_name = ctx.import_map.get(func_name).map(|s| s.as_str());
+        }
 
         // If not found and func_name contains '.', try additional name variants.
         // Prefer qualified/type-specific spellings before the bare method name.
