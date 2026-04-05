@@ -103,7 +103,11 @@ impl GpuBridge:
         elif cmd.kind == "text":
             me render_text_placeholder(cmd)
         elif cmd.kind == "clip_push":
-            me push_clip(cmd.x, cmd.y, cmd.width, cmd.height)
+            val cx = cmd.x
+            val cy = cmd.y
+            val cw = cmd.width
+            val ch = cmd.height
+            me push_clip(cx, cy, cw, ch)
         elif cmd.kind == "clip_pop":
             me pop_clip()
         else:
@@ -115,14 +119,10 @@ impl GpuBridge:
 
     me render_fill_rect(cmd: SceneCommand):
         """Render a filled rectangle, respecting the clip stack."""
-        var x = cmd.x
-        var y = cmd.y
-        var w = cmd.width
-        var h = cmd.height
-        me clip_rect(&x, &y, &w, &h)
-        if w <= 0 or h <= 0:
+        val clipped = self.clip_rect(cmd.x, cmd.y, cmd.width, cmd.height)
+        if clipped.w <= 0 or clipped.h <= 0:
             return
-        self.gpu.fill_rect(x.to_u32(), y.to_u32(), w.to_u32(), h.to_u32(), cmd.color)
+        self.gpu.fill_rect(clipped.x.to_u32(), clipped.y.to_u32(), clipped.w.to_u32(), clipped.h.to_u32(), cmd.color)
 
     me render_stroke_rect(cmd: SceneCommand):
         """Render a stroked (outline) rectangle."""
@@ -309,8 +309,9 @@ impl GpuBridge:
             var col: i32 = 0
             while col < pw:
                 val idx = row * pw + col
-                if idx < cmd.pixels.len():
-                    val color = cmd.pixels[idx]
+                val pixels = cmd.pixels
+                if idx < pixels.len():
+                    val color = pixels[idx]
                     self.gpu.put_pixel(px + col.to_u32(), py + row.to_u32(), color)
                 col = col + 1
             row = row + 1
@@ -328,7 +329,8 @@ impl GpuBridge:
         val char_h: u32 = 16
         var cx: u32 = x
         var i: i32 = 0
-        val text_len = cmd.text_val.len()
+        val text_val = cmd.text_val
+        val text_len = text_val.len()
         while i < text_len:
             # Draw a small filled block for each character
             self.gpu.fill_rect(cx, y, char_w, char_h, color)
@@ -342,47 +344,50 @@ impl GpuBridge:
 
     me push_clip(x: i32, y: i32, w: i32, h: i32):
         """Push a clip rectangle onto the stack."""
-        self.clip_stack = self.clip_stack.push(GpuClipRect(x: x, y: y, w: w, h: h))
+        val rect = GpuClipRect(x: x, y: y, w: w, h: h)
+        val stack = self.clip_stack
+        self.clip_stack = stack.push(rect)
 
     me pop_clip():
         """Pop the top clip rectangle from the stack."""
-        if self.clip_stack.len() > 0:
+        val stack = self.clip_stack
+        if stack.len() > 0:
             var new_stack: [GpuClipRect] = []
             var i: i32 = 0
-            val last = self.clip_stack.len() - 1
+            val last = stack.len() - 1
             while i < last:
-                new_stack = new_stack.push(self.clip_stack[i])
+                new_stack = new_stack.push(stack[i])
                 i = i + 1
             self.clip_stack = new_stack
 
-    me clip_rect(x: &i32, y: &i32, w: &i32, h: &i32):
+    fn clip_rect(x: i32, y: i32, w: i32, h: i32) -> GpuClipRect:
         """Intersect a rectangle with the current clip (top of stack).
 
-        Modifies x, y, w, h in-place. If the clip stack is empty,
-        the rectangle is unchanged.
+        Returns the clipped rectangle. If the clip stack is empty,
+        returns the original rectangle unchanged.
         """
-        if self.clip_stack.len() == 0:
-            return
-        val clip = self.clip_stack[self.clip_stack.len() - 1]
+        val stack = self.clip_stack
+        if stack.len() == 0:
+            return GpuClipRect(x: x, y: y, w: w, h: h)
+        val clip = stack[stack.len() - 1]
 
-        var x0 = *x
-        var y0 = *y
-        var x1 = *x + *w
-        var y1 = *y + *h
+        var x0 = x
+        var y0 = y
+        var x1 = x + w
+        var y1 = y + h
 
         if x0 < clip.x:
             x0 = clip.x
         if y0 < clip.y:
             y0 = clip.y
-        if x1 > clip.x + clip.w:
-            x1 = clip.x + clip.w
-        if y1 > clip.y + clip.h:
-            y1 = clip.y + clip.h
+        val clip_x1 = clip.x + clip.w
+        val clip_y1 = clip.y + clip.h
+        if x1 > clip_x1:
+            x1 = clip_x1
+        if y1 > clip_y1:
+            y1 = clip_y1
 
-        *x = x0
-        *y = y0
-        *w = x1 - x0
-        *h = y1 - y0
+        GpuClipRect(x: x0, y: y0, w: x1 - x0, h: y1 - y0)
 
     # ========================================================================
     # Direct Operations

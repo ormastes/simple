@@ -595,11 +595,14 @@ impl<M: Module> CodegenBackend<M> {
             &self.import_map,
             &self.use_map,
         )
-        .map_err(BackendError::ModuleError)?;
+        .map_err(|e| {
+            eprintln!("[CODEGEN BODY] Function '{}' body compilation failed: {}", func.name, e);
+            BackendError::ModuleError(e)
+        })?;
 
         // Verify the function before defining - log errors but try to compile anyway
-        if let Err(_errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            // Verifier errors - attempt compilation anyway
+        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
+            eprintln!("[CODEGEN VERIFY] Function '{}' has verifier errors: {}", func.name, errors);
         }
 
         // Define the function (may fail if verifier errors are critical)
@@ -652,6 +655,7 @@ impl<M: Module> CodegenBackend<M> {
             match self.compile_function(func) {
                 Ok(()) => {}
                 Err(_e) => {
+                    eprintln!("[CODEGEN STUB] Function '{}' failed to compile: {:?}", func.name, _e);
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);

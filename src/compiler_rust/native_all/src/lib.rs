@@ -74,6 +74,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut backend = "cranelift".to_string();
     let mut runtime_path: Option<PathBuf> = None;
     let mut entry_closure = false;
+    let mut target_triple: Option<String> = None;
+    let mut linker_script: Option<PathBuf> = None;
 
     // Parse arguments — skip binary name and "native-build" command prefix.
     // The args may come as ["native-build", ...] or ["path/to/simple", "native-build", ...].
@@ -218,6 +220,24 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 entry_closure = true;
                 i += 1;
             }
+            "--target" => {
+                if i + 1 < args_vec.len() {
+                    target_triple = Some(args_vec[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("error: --target requires a target triple (e.g. x86_64-unknown-none)");
+                    return 1;
+                }
+            }
+            "--linker-script" => {
+                if i + 1 < args_vec.len() {
+                    linker_script = Some(PathBuf::from(&args_vec[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("error: --linker-script requires a file path");
+                    return 1;
+                }
+            }
             other => {
                 // Handle --key=value forms for flags that take values
                 if let Some(val) = other.strip_prefix("--backend=") {
@@ -246,6 +266,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     cache_dir = Some(PathBuf::from(val));
                 } else if let Some(val) = other.strip_prefix("--runtime-path=") {
                     runtime_path = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--target=") {
+                    target_triple = Some(val.to_string());
+                } else if let Some(val) = other.strip_prefix("--linker-script=") {
+                    linker_script = Some(PathBuf::from(val));
                 } else if other.starts_with("--") {
                     eprintln!("warning: unknown option '{}', ignoring", other);
                 } else {
@@ -303,6 +327,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             eprintln!("  Runtime path: {}", rp.display());
         }
         eprintln!("  Entry closure: {}", entry_closure);
+        if let Some(ref t) = target_triple {
+            eprintln!("  Target: {}", t);
+        }
+        if let Some(ref ls) = linker_script {
+            eprintln!("  Linker script: {}", ls.display());
+        }
     }
 
     // Set runtime path override before building (works in C-compiled binaries)
@@ -328,6 +358,24 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.no_mangle = no_mangle;
     config.runtime_path = runtime_path;
     config.entry_closure = entry_closure;
+    config.linker_script = linker_script;
+
+    // Parse and set target override
+    let target = if let Some(ref triple) = target_triple {
+        match simple_common::target::Target::parse(triple) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("error: invalid target triple '{}': {}", triple, e);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(ref t) = target {
+        simple_compiler::pipeline::native_project::set_target_override(*t);
+    }
+    config.target = target;
 
     // Normalize backend aliases
     if backend == "llvm-lib" {
