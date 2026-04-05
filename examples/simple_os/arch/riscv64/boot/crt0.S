@@ -34,8 +34,21 @@ _start:
     la      t0, _stack_top
     csrw    sscratch, t0
 
+    /* Quick UART test: write 'K' directly to 16550 at 0x10000000 */
+    li      t0, 0x10000000
+    li      t1, 75          /* 'K' */
+    sb      t1, 0(t0)
+
+    /* Initialize UART and print boot banner before entering Simple code */
+    call    _boot_init
+
     /* Call Simple entry point */
     call    spl_start
+
+    /* Shutdown via SBI (ecall with a7=8) */
+    li      a7, 8
+    li      a0, 0
+    ecall
 
     /* Halt: infinite WFI loop */
 .Lhalt:

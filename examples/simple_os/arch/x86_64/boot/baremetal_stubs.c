@@ -260,26 +260,21 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    /* Cranelift codegen passes raw size (not tagged RuntimeValue).
-     * Return raw pointer (not ENCODE_PTR) — codegen uses it directly
-     * for field stores via store(val, ptr, offset). */
-    size_t bytes = (size_t)sz;
-    if (bytes == 0) return 0;
-    if (bytes > 0x1000000) bytes = 0x1000000;
+    size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
     void *p = malloc(bytes);
-    if (!p) return 0;
-    return (RuntimeValue)(uintptr_t)p;
+    if (!p) return NIL_VALUE;
+    return ENCODE_PTR(p);
 }
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
-    size_t bytes = (size_t)sz;
-    if (bytes == 0) return 0;
-    if (bytes > 0x1000000) bytes = 0x1000000;
+    size_t bytes = (size_t)DECODE_INT(sz);
+    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz;
     void *p = malloc(bytes);
-    if (!p) return 0;
+    if (!p) return NIL_VALUE;
     __builtin_memset(p, 0, bytes);
-    return (RuntimeValue)(uintptr_t)p;
+    return ENCODE_PTR(p);
 }
 
 RuntimeValue rt_dealloc(RuntimeValue ptr)

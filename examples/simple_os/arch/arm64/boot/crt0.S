@@ -91,7 +91,7 @@ _start:
     .globl _vectors
 _vectors:
     /* Current EL with SP0 — Synchronous */
-    b       _fault_handler
+    b       _alignment_handler
     .balign 128
     /* Current EL with SP0 — IRQ */
     b       _fault_handler
@@ -104,7 +104,7 @@ _vectors:
     .balign 128
 
     /* Current EL with SPx — Synchronous */
-    b       _fault_handler
+    b       _alignment_handler
     .balign 128
     /* Current EL with SPx — IRQ */
     b       _fault_handler
@@ -140,6 +140,200 @@ _vectors:
     .balign 128
     /* Lower EL using AArch32 — SError */
     b       _fault_handler
+
+/* ===================================================================
+ * Alignment fault emulator — handles unaligned LDR Xt,[literal]
+ *
+ * Cranelift may emit 64-bit literal loads from 4-byte aligned
+ * addresses. ARMv8 requires 8-byte alignment for LDR Xt.
+ * This handler detects alignment faults from LDR (literal),
+ * performs two 32-bit reads, combines them, writes to the
+ * destination register, and returns.
+ * =================================================================== */
+
+_alignment_handler:
+    /* Save ALL general-purpose registers to stack frame (33 * 8 = 264 bytes) */
+    sub     sp, sp, #272        /* 34 * 8, 16-byte aligned */
+    stp     x0,  x1,  [sp, #0]
+    stp     x2,  x3,  [sp, #16]
+    stp     x4,  x5,  [sp, #32]
+    stp     x6,  x7,  [sp, #48]
+    stp     x8,  x9,  [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    stp     x18, x19, [sp, #144]
+    stp     x20, x21, [sp, #160]
+    stp     x22, x23, [sp, #176]
+    stp     x24, x25, [sp, #192]
+    stp     x26, x27, [sp, #208]
+    stp     x28, x29, [sp, #224]
+    str     x30,       [sp, #240]
+
+    /* Check if this is an alignment fault */
+    mrs     x0, esr_el1
+    and     x1, x0, #0x3F      /* DFSC */
+    cmp     x1, #0x21           /* alignment fault */
+    b.ne    .Lnot_align_fault
+
+    /* Check WnR bit 6: 0=read, 1=write */
+    tst     x0, #(1 << 6)
+    b.ne    .Lalign_write
+
+    /* --- READ alignment fault emulation --- */
+
+    /* Get faulting instruction */
+    mrs     x2, elr_el1
+    ldr     w3, [x2]            /* fetch the 32-bit instruction */
+
+    /* Use the Fault Address Register to get the exact address */
+    mrs     x11, far_el1           /* faulting data address */
+
+    /* Perform an unaligned 64-bit load using two 32-bit loads.
+     * The faulting address in FAR_EL1 is the data address.
+     * For ANY 64-bit load that faults with alignment, we can:
+     * - Read the target address (FAR_EL1)
+     * - Load 8 bytes using byte-by-byte reads
+     * - Put the result into the destination register
+     * - Advance PC past the faulting instruction
+     */
+
+    /* Byte-by-byte read of 8 bytes from the faulting address.
+     * This avoids any alignment requirement. */
+    ldrb    w12, [x11, #0]
+    ldrb    w13, [x11, #1]
+    orr     w12, w12, w13, lsl #8
+    ldrb    w13, [x11, #2]
+    orr     w12, w12, w13, lsl #16
+    ldrb    w13, [x11, #3]
+    orr     w12, w12, w13, lsl #24
+    /* w12 now has low 32 bits */
+    mov     x14, x12               /* save low word in x14 */
+
+    ldrb    w12, [x11, #4]
+    ldrb    w13, [x11, #5]
+    orr     w12, w12, w13, lsl #8
+    ldrb    w13, [x11, #6]
+    orr     w12, w12, w13, lsl #16
+    ldrb    w13, [x11, #7]
+    orr     w12, w12, w13, lsl #24
+    /* w12 now has high 32 bits */
+    orr     x12, x14, x12, lsl #32 /* combined 64-bit value in x12 */
+
+    /* Decode the faulting instruction to find Rt */
+    ldr     w3, [x2]               /* re-read instruction */
+    and     w10, w3, #0x1F         /* Rt = bits [4:0] */
+
+    /* Write the loaded value into the saved register frame
+     * x10 = Rt, x12 = value, saved regs at sp+0 = x0, sp+8 = x1, etc. */
+    cmp     w10, #30
+    b.hi    .Lnot_align_fault      /* Rt > 30 invalid */
+
+    /* Store value at sp + Rt*8 */
+    lsl     x10, x10, #3           /* byte offset = Rt * 8 */
+    str     x12, [sp, x10]         /* write into saved register slot */
+
+    /* Advance ELR past the faulting instruction */
+    add     x2, x2, #4
+    msr     elr_el1, x2
+
+    /* Restore ALL registers from frame (including the one we just wrote) */
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldr     x30,       [sp, #240]
+    add     sp, sp, #272
+    eret
+
+.Lalign_write:
+    /* --- WRITE alignment fault emulation --- */
+    mrs     x2, elr_el1
+    ldr     w3, [x2]               /* faulting instruction */
+    mrs     x11, far_el1           /* faulting data address */
+
+    /* Get Rt (source register) = bits [4:0] */
+    and     w10, w3, #0x1F
+
+    /* Read the value from saved register frame */
+    cmp     w10, #30
+    b.hi    .Lnot_align_fault
+    lsl     x10, x10, #3
+    ldr     x12, [sp, x10]        /* value to store */
+
+    /* Byte-by-byte write of 8 bytes to the faulting address */
+    strb    w12, [x11, #0]
+    lsr     x13, x12, #8
+    strb    w13, [x11, #1]
+    lsr     x13, x12, #16
+    strb    w13, [x11, #2]
+    lsr     x13, x12, #24
+    strb    w13, [x11, #3]
+    lsr     x13, x12, #32
+    strb    w13, [x11, #4]
+    lsr     x13, x12, #40
+    strb    w13, [x11, #5]
+    lsr     x13, x12, #48
+    strb    w13, [x11, #6]
+    lsr     x13, x12, #56
+    strb    w13, [x11, #7]
+
+    /* Advance ELR past the faulting instruction */
+    add     x2, x2, #4
+    msr     elr_el1, x2
+
+    /* Restore ALL registers */
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldr     x30,       [sp, #240]
+    add     sp, sp, #272
+    eret
+
+.Lnot_align_fault:
+    /* Restore registers and fall through to fault handler */
+    ldp     x0,  x1,  [sp, #0]
+    ldp     x2,  x3,  [sp, #16]
+    ldp     x4,  x5,  [sp, #32]
+    ldp     x6,  x7,  [sp, #48]
+    ldp     x8,  x9,  [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldp     x18, x19, [sp, #144]
+    ldp     x20, x21, [sp, #160]
+    ldp     x22, x23, [sp, #176]
+    ldp     x24, x25, [sp, #192]
+    ldp     x26, x27, [sp, #208]
+    ldp     x28, x29, [sp, #224]
+    ldr     x30,       [sp, #240]
+    add     sp, sp, #272
+    /* Fall through to print FAULT */
 
 /* ===================================================================
  * Fault handler — prints "FAULT @ 0x<ELR_EL1>" to PL011 then halts
