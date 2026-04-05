@@ -189,10 +189,23 @@ typedef struct {
     RuntimeValue items[];
 } RuntimeArray;
 
-#define HEAP_STRING 1
-#define HEAP_ARRAY  2
-#define HEAP_MAP    3
-#define HEAP_OBJECT 4
+#define HEAP_STRING  1
+#define HEAP_ARRAY   2
+#define HEAP_MAP     3
+#define HEAP_OBJECT  4
+#define HEAP_CLOSURE 5
+#define HEAP_MODULE  6
+#define HEAP_ENUM    7
+
+/* Enum/Optional/Result representation — matches Rust runtime RuntimeEnum.
+ * Used by rt_enum_new / rt_enum_discriminant / rt_enum_payload.
+ * Total size: 24 bytes (header 8 + enum_id 4 + discriminant 4 + payload 8). */
+typedef struct {
+    HeapHeader   hdr;
+    uint32_t     enum_id;
+    uint32_t     discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
 
 /* Forward declaration — full definition in the Map section */
 typedef struct {
@@ -265,6 +278,7 @@ RuntimeValue rt_alloc(RuntimeValue sz)
      * Other runtime functions that need heap pointers use ENCODE_PTR themselves. */
     size_t bytes = (size_t)sz;
     if (bytes == 0) return 0;
+    /* Debug: log allocations of PciDevice-sized (96) or similar struct sizes */
     if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
     if (!p) return 0;
@@ -4368,11 +4382,15 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 
 /* --- Array --- */
 
-/* rt_array_new: create a new array with given capacity */
+/* rt_array_new: create a new array with given capacity.
+ * Cranelift codegen passes RAW capacity (iconst.i64 N), NOT tagged.
+ * Must use raw value, not DECODE_INT. */
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
-    int64_t cap = DECODE_INT(cap_val);
-    if (cap <= 0) cap = 4; /* default capacity */
+    int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
+    if (cap <= 0) cap = 64; /* default capacity — generous for bare metal */
+    /* Ensure minimum capacity for OS use (PCI scan needs ~32, string ops need ~16) */
+    if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -4386,30 +4404,18 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     return ENCODE_PTR(a);
 }
 
-/* rt_array_push: push a value onto the array, growing if needed */
+/* rt_array_push: push element, no growth (matching Rust runtime).
+ * Returns ENCODE_PTR of same array. If at capacity, item is silently dropped.
+ * Callers must pre-allocate sufficient capacity (compiler uses 16 for empty []). */
 RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    /* Grow if needed */
     if (a->len >= a->cap) {
-        uint32_t new_cap = a->cap * 2;
-        if (new_cap < 8) new_cap = 8;
-        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        RuntimeArray *na = (RuntimeArray *)malloc(new_size);
-        if (!na) return NIL_VALUE;
-        /* Copy header and existing items */
-        na->hdr.type = HEAP_ARRAY;
-        na->hdr.size = (uint32_t)new_size;
-        na->len = a->len;
-        na->cap = new_cap;
-        for (uint32_t i = 0; i < a->len; i++) na->items[i] = a->items[i];
-        /* Zero new slots */
-        for (uint32_t i = a->len; i < new_cap; i++) na->items[i] = NIL_VALUE;
-        /* Note: bump allocator can't free old array, but we return the new pointer.
-           Callers must use the returned value. This is a limitation of the bump allocator. */
-        a = na;
+        /* At capacity — cannot grow (flexible array member can't be resized in-place).
+         * Silently drop. Initial capacity should be large enough for the use case. */
+        return ENCODE_PTR(a);
     }
     a->items[a->len] = val;
     a->len++;
@@ -4601,6 +4607,74 @@ RuntimeValue rt_array_clone(RuntimeValue arr)
 S2(rt_array_zip)
 S1(rt_array_uniq)
 S1(rt_array_compact)
+
+/* ===================================================================
+ * Enum / Optional / Result runtime
+ *
+ * The compiler generates rt_enum_new / rt_enum_discriminant /
+ * rt_enum_payload calls for Optional<T> (PciDevice?, Result, etc.).
+ * Without these, --unresolved-symbols=ignore-all resolves them to 0
+ * and Optional wrapping silently corrupts pointers.
+ * =================================================================== */
+
+/* rt_enum_new(enum_id, discriminant, payload) → heap-allocated RuntimeEnum.
+ * Calling convention: (i32, i32, i64) → i64 (ENCODE_PTR).
+ * Matches Rust runtime RuntimeEnum layout (24 bytes). */
+RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
+{
+    RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
+    if (!e) return NIL_VALUE;
+    e->hdr.type = HEAP_ENUM;
+    e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
+    e->enum_id = (uint32_t)(int32_t)enum_id_rv;
+    e->discriminant = (uint32_t)(int32_t)disc_rv;
+    e->payload = payload;
+    return ENCODE_PTR(e);
+}
+
+/* rt_enum_discriminant(value) → discriminant as i64 */
+RuntimeValue rt_enum_discriminant(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return -1;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return -1;
+    return (RuntimeValue)(int64_t)e->discriminant;
+}
+
+/* rt_enum_payload(value) → payload RuntimeValue */
+RuntimeValue rt_enum_payload(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return NIL_VALUE;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return NIL_VALUE;
+    return e->payload;
+}
+
+/* rt_enum_check_discriminant(value, expected) → 1 if match, 0 otherwise */
+RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expected)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return (e->discriminant == (uint32_t)(int32_t)expected) ? 1 : 0;
+}
+
+/* rt_is_none(value) → 1 if nil or None enum, 0 otherwise */
+RuntimeValue rt_is_none(RuntimeValue value)
+{
+    if (IS_NIL(value)) return 1;
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    /* None variant has nil payload */
+    return IS_NIL(e->payload) ? 1 : 0;
+}
+
+/* rt_is_some(value) → 1 if Some enum (non-nil payload), 0 otherwise */
+RuntimeValue rt_is_some(RuntimeValue value)
+{
+    return rt_is_none(value) ? 0 : 1;
+}
 
 /* --- Map / Dictionary ---
  *
