@@ -1793,6 +1793,12 @@ void rt_fb_fill_rect(int64_t fb_addr, int64_t pitch, int64_t x, int64_t y, int64
  * as a fallback if crt0.S is not linked.
  * =================================================================== */
 
+/* c_pcimgr_init — extern C wrapper for PCI scan, called from vfs_init.spl */
+void c_pcimgr_init(void)
+{
+    _pci_scan();
+}
+
 /* _boot_init: called from crt0.S before spl_start() */
 void _boot_init(void)
 {

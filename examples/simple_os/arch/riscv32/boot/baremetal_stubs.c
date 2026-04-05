@@ -156,7 +156,17 @@ RuntimeValue rt_string_new(RuntimeValue data_ptr, RuntimeValue len_val) {
     /* Parameters are raw (untagged) per the Rust runtime ABI.
        len_val is the raw byte count, data_ptr is a raw pointer. */
     int32_t len = len_val;
-    if (len <= 0 || len > 0x100000) return NIL_VALUE;
+    if (len < 0 || len > 0x100000) return NIL_VALUE;
+    if (len == 0) {
+        /* Empty string — allocate a valid string object (not NIL) */
+        RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + 1);
+        if (!s) return NIL_VALUE;
+        s->header.type = HEAP_TYPE_STRING;
+        s->header.size = (uint32_t)(sizeof(RuntimeString) + 1);
+        s->len = 0;
+        s->data[0] = 0;
+        return ENCODE_PTR(s);
+    }
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->header.type = HEAP_TYPE_STRING;
@@ -302,8 +312,12 @@ void rt_print_value(RuntimeValue val) {
         else { while (n > 0) { buf[i++] = '0' + (int)(n % 10); n /= 10; } }
         if (neg) buf[i++] = '-';
         while (i > 0) serial_putchar(buf[--i]);
+    } else if (val == 1) {
+        /* LLVM-emitted true (raw 1, tag=TAG_HEAP, DECODE_PTR=NULL) */
+        serial_puts("true");
     } else if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (!h) { serial_puts("<null>"); return; }
         if (h->type == HEAP_TYPE_STRING) {
             rt_print_str(val);
         } else {
@@ -531,8 +545,13 @@ RuntimeValue rt_int_to_string(RuntimeValue val) {
 
 RuntimeValue rt_value_to_string(RuntimeValue val) {
     if (IS_INT(val)) return rt_int_to_string(val);
+    /* LLVM backend emits bools as raw 0/1 (not tagged TRUE_VALUE/FALSE_VALUE).
+     * Value 1 has tag bits 001 = TAG_HEAP, DECODE_PTR(1) = NULL -> crash.
+     * Catch LLVM-style true before IS_HEAP dereference. */
+    if (val == 1) return rt_string_from_cstr("true");
     if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
+        if (!h) return rt_string_from_cstr("<null>");
         if (h->type == HEAP_TYPE_STRING) return val;
         return rt_string_from_cstr("<object>");
     }
@@ -635,7 +654,127 @@ RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a 
 RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a != b ? 1 : 0); }
 
 /* ================================================================
- * 10. _start entry point
+ * 10. Serial decimal output helper
+ * ================================================================ */
+
+static void serial_put_dec(int32_t v) {
+    if (v < 0) { serial_putchar('-'); v = -v; }
+    if (v == 0) { serial_putchar('0'); return; }
+    char buf[12];
+    int i = 0;
+    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+    while (i > 0) serial_putchar(buf[--i]);
+}
+
+/* ================================================================
+ * 11. PCI enumeration via ECAM MMIO (QEMU virt: 0x30000000)
+ * ================================================================ */
+
+#define ECAM_BASE 0x30000000UL
+#define MAX_PCI_CACHED 32
+
+static struct {
+    uint8_t bus, dev, func, class_code, subclass, progif, htype, irq;
+    uint16_t vendor, device;
+    uint32_t bar0;
+} _pci_cache[MAX_PCI_CACHED];
+static int _pci_cache_count = 0;
+
+static void _pci_scan(void) {
+    _pci_cache_count = 0;
+    for (int dev = 0; dev < 32 && _pci_cache_count < MAX_PCI_CACHED; dev++) {
+        volatile uint32_t *cfg = (volatile uint32_t *)(ECAM_BASE + ((uint32_t)dev << 15));
+        uint32_t reg0 = cfg[0];
+        uint16_t vendor = (uint16_t)(reg0 & 0xFFFF);
+        uint16_t devid = (uint16_t)(reg0 >> 16);
+        if (vendor == 0xFFFF || vendor == 0) continue;
+        uint32_t class_reg = cfg[2];
+        uint32_t bar0_reg = cfg[4];
+        uint32_t irq_reg = cfg[15];
+        int i = _pci_cache_count++;
+        _pci_cache[i].bus = 0;
+        _pci_cache[i].dev = (uint8_t)dev;
+        _pci_cache[i].func = 0;
+        _pci_cache[i].vendor = vendor;
+        _pci_cache[i].device = devid;
+        _pci_cache[i].class_code = (class_reg >> 24) & 0xFF;
+        _pci_cache[i].subclass = (class_reg >> 16) & 0xFF;
+        _pci_cache[i].progif = (class_reg >> 8) & 0xFF;
+        _pci_cache[i].htype = (cfg[3] >> 16) & 0xFF;
+        _pci_cache[i].irq = (uint8_t)(irq_reg & 0xFF);
+        _pci_cache[i].bar0 = bar0_reg & 0xFFFFFFF0;
+    }
+}
+
+static int32_t _pci_enumerate(uint32_t mode, uint32_t index, uint32_t buf_addr) {
+    if (_pci_cache_count == 0) _pci_scan();
+    if (mode == 0) return (int32_t)_pci_cache_count;
+    if (mode == 1) {
+        if ((int)index >= _pci_cache_count) return -22;
+        uint8_t *buf = (uint8_t *)(uintptr_t)buf_addr;
+        int i = (int)index;
+        buf[0] = _pci_cache[i].bus; buf[1] = _pci_cache[i].dev; buf[2] = _pci_cache[i].func; buf[3] = 0;
+        *(uint16_t *)(buf + 4) = _pci_cache[i].vendor; *(uint16_t *)(buf + 6) = _pci_cache[i].device;
+        buf[8] = _pci_cache[i].class_code; buf[9] = _pci_cache[i].subclass;
+        buf[10] = _pci_cache[i].progif; buf[11] = _pci_cache[i].htype; buf[12] = _pci_cache[i].irq;
+        return 0;
+    }
+    if (mode == 5) {
+        if ((int)index >= _pci_cache_count) return -22;
+        return (int32_t)_pci_cache[(int)index].bar0;
+    }
+    return -38; /* ENOSYS */
+}
+
+/* ================================================================
+ * 12. Syscall dispatcher (32-bit trap handler)
+ *
+ * Called from crt0.S M-mode trap handler when mcause=11 (ecall).
+ * All args are 32-bit (RV32 registers).
+ * ================================================================ */
+
+int32_t _trap_syscall(uint32_t id, uint32_t a0, uint32_t a1,
+                      uint32_t a2, uint32_t a3, uint32_t a4) {
+    (void)a3; (void)a4;
+    switch (id) {
+        case 0: /* Exit: halt with WFI loop */
+            serial_puts("[HALT] exit syscall\r\n");
+            for (;;) __asm__ volatile("wfi");
+            return 0;
+        case 4: return 1; /* GetPid */
+        case 60: serial_putchar((char)(a0 & 0xFF)); return 0; /* DebugWrite */
+        case 80: return _pci_enumerate(a0, a1, a2); /* DevEnumerate */
+        case 82: return _pci_enumerate(5, a0, 0); /* DeviceGrant: return BAR0 */
+        case 83: return (int32_t)a0; /* MapBar: identity mapped */
+        case 84: { /* AllocDMA */
+            void *p = malloc(a0 > 0 ? a0 : 4096);
+            return (int32_t)(uintptr_t)p;
+        }
+        case 85: return 0; /* NvmeReadSector: stub success */
+        case 86: return 0; /* NvmeInit: stub success */
+        case 90: return 0; /* VirtioNetInit: stub */
+        case 93: return 0; /* NetStats: stub */
+        default: return -38; /* ENOSYS */
+    }
+}
+
+/* ================================================================
+ * 13. c_pcimgr_init — extern C wrapper for PCI scan
+ *
+ * Called from vfs_init.spl to avoid --no-mangle symbol collision
+ * where pcimgr_init() resolves to CNvmeBlockAdapter.init().
+ * ================================================================ */
+
+void c_pcimgr_init(void) {
+    serial_puts("[c_pcimgr_init] ENTERED\r\n");
+    _pci_scan();
+    serial_puts("[c_pcimgr_init] PCI scan: ");
+    serial_put_dec(_pci_cache_count);
+    serial_puts(" devices\r\n");
+}
+
+/* ================================================================
+ * 14. _start entry point / _boot_init
  * ================================================================ */
 
 /* _boot_init: called from crt0.S before spl_start.
@@ -655,13 +794,19 @@ void _boot_init(void) {
     _uart_init();
     serial_puts("SimpleOS RISC-V32 boot\r\n");
     serial_puts("[BOOT] 16550 UART initialized at 0x10000000\r\n");
-    serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
+    serial_puts("[BOOT] Heap: 4 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 32-bit (LLVM i32)\r\n");
+
+    _pci_scan();
+    serial_puts("[BOOT] PCI: ");
+    serial_put_dec(_pci_cache_count);
+    serial_puts(" devices found\r\n");
+
     serial_puts("[BOOT] Calling spl_start()...\r\n");
 }
 
 /* ================================================================
- * 11. No-op runtime stubs (~200 functions)
+ * 15. No-op runtime stubs (~200 functions)
  *
  * These satisfy unresolved symbols from the Simple compiler's
  * generated code. They return 0/NIL_VALUE and do nothing.

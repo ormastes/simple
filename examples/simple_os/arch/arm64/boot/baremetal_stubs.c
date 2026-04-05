@@ -834,6 +834,12 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
+/* c_pcimgr_init — extern C wrapper for PCI scan, called from vfs_init.spl */
+void c_pcimgr_init(void)
+{
+    _pci_scan();
+}
+
 /* ===================================================================
  * 9. _c_start — PL011 init, PCI scan, spl_start, wfe loop
  *

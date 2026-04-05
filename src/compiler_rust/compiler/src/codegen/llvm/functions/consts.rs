@@ -28,7 +28,7 @@ impl LlvmBackend {
         value: bool,
         vreg_map: &mut VRegMap,
     ) -> Result<(), CompileError> {
-        // Use i64 to match the runtime's tagged-value ABI (0 = false, 1 = true)
+        // TODO(P2/compiler): LLVM emits bools as raw 0/1 but C runtime expects tagged TRUE_VALUE(0xB)/FALSE_VALUE(0x13). Worked around in C stubs. Fix to emit tagged values and update branch instructions.
         let const_val = self.runtime_int_type().const_int(value as u64, false);
         vreg_map.insert(dest, const_val.into());
         Ok(())
