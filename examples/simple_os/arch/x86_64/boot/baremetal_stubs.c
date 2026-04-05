@@ -455,15 +455,16 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 
 RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
 {
-    if (!IS_HEAP(a) || !IS_HEAP(b)) return ENCODE_INT(a == b ? 1 : 0);
+    /* Return raw 0/1 (Cranelift uses raw convention) */
+    if (!IS_HEAP(a) || !IS_HEAP(b)) return (RuntimeValue)(a == b ? 1 : 0);
     RuntimeString *sa = (RuntimeString *)DECODE_PTR(a);
     RuntimeString *sb = (RuntimeString *)DECODE_PTR(b);
-    if (!sa || !sb) return ENCODE_INT(0);
-    if (sa->len != sb->len) return ENCODE_INT(0);
+    if (!sa || !sb) return 0;
+    if (sa->len != sb->len) return 0;
     for (uint32_t i = 0; i < sa->len; i++) {
-        if (sa->data[i] != sb->data[i]) return ENCODE_INT(0);
+        if (sa->data[i] != sb->data[i]) return 0;
     }
-    return ENCODE_INT(1);
+    return 1;
 }
 
 RuntimeValue rt_string_data(RuntimeValue str)
@@ -562,23 +563,24 @@ RuntimeValue rt_value_to_string(RuntimeValue val)
 
 RuntimeValue rt_len(RuntimeValue v)
 {
-    if (IS_INT(v)) return ENCODE_INT(0);
-    if (!IS_HEAP(v)) return ENCODE_INT(0);
+    /* Return raw length (Cranelift codegen uses raw convention) */
+    if (IS_INT(v)) return 0;
+    if (!IS_HEAP(v)) return 0;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    if (!h) return ENCODE_INT(0);
+    if (!h) return 0;
     if (h->type == HEAP_STRING) {
         RuntimeString *s = (RuntimeString *)h;
-        return ENCODE_INT(s->len);
+        return (RuntimeValue)s->len;
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
-        return ENCODE_INT(a->len);
+        return (RuntimeValue)a->len;
     }
     if (h->type == HEAP_MAP) {
         RuntimeMap *m = (RuntimeMap *)h;
-        return ENCODE_INT(m->len);
+        return (RuntimeValue)m->len;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
@@ -590,7 +592,8 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
         return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
-        int64_t i = DECODE_INT(idx);
+        /* idx is raw from Cranelift codegen (no DECODE_INT needed) */
+        int64_t i = (int64_t)idx;
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
@@ -4453,13 +4456,13 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return val;
 }
 
-/* rt_array_len: return array length */
+/* rt_array_len: return raw array length (Cranelift raw convention) */
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    if (!IS_HEAP(arr)) return 0;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
-    return ENCODE_INT(a->len);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (RuntimeValue)a->len;
 }
 /* rt_array_slice(arr, start, end) — return sub-array */
 RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end)

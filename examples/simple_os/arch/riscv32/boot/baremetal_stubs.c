@@ -638,10 +638,6 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b) { return ENCODE_INT(a
  * 10. _start entry point
  * ================================================================ */
 
-/* Forward declarations for _boot_init */
-void _pci_scan(void);
-void serial_put_dec(int32_t v);
-
 /* _boot_init: called from crt0.S before spl_start.
  * crt0.S provides the real _start (sets stack, zeros BSS, installs mtvec). */
 void _boot_init(void) {
@@ -660,13 +656,7 @@ void _boot_init(void) {
     serial_puts("SimpleOS RISC-V32 boot\r\n");
     serial_puts("[BOOT] 16550 UART initialized at 0x10000000\r\n");
     serial_puts("[BOOT] Heap: 64 MB bump allocator\r\n");
-    serial_puts("[BOOT] RuntimeValue: tagged 32-bit\r\n");
-
-    _pci_scan();
-    serial_puts("[BOOT] PCI: ");
-    serial_put_dec(_pci_cache_count);
-    serial_puts(" devices found\r\n");
-
+    serial_puts("[BOOT] RuntimeValue: tagged 32-bit (LLVM i32)\r\n");
     serial_puts("[BOOT] Calling spl_start()...\r\n");
 }
 
