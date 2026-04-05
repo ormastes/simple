@@ -505,47 +505,43 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     return ENCODE_PTR(r);
 }
 
-/* --- rt_value_to_string: convert any RuntimeValue to a string RuntimeValue --- */
+/* --- rt_value_to_string: convert any RuntimeValue to a string RuntimeValue ---
+ *
+ * Handles both tagged (BoxInt: val << 3) and raw integer values.
+ * The Cranelift codegen uses raw integers internally, but inserts BoxInt
+ * before calling this function for f-string interpolation. Cross-module
+ * return values may arrive without BoxInt (raw). We handle both cases.
+ */
+static RuntimeValue _int_to_string(int64_t n)
+{
+    if (n == 0) return rt_string_from_cstr("0");
+    if (n == (-9223372036854775807LL - 1))
+        return rt_string_from_cstr("-9223372036854775808");
+    char buf[21];
+    int pos = 0, neg = 0;
+    uint64_t uv;
+    if (n < 0) { neg = 1; uv = (uint64_t)(-n); } else { uv = (uint64_t)n; }
+    while (uv > 0) { buf[pos++] = '0' + (char)(uv % 10); uv /= 10; }
+    uint32_t len = (uint32_t)(pos + neg);
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->len = len;
+    int out = 0;
+    if (neg) s->data[out++] = '-';
+    while (pos > 0) s->data[out++] = buf[--pos];
+    s->data[out] = '\0';
+    return ENCODE_PTR(s);
+}
+
 RuntimeValue rt_value_to_string(RuntimeValue val)
 {
-    /* Integer -> decimal string */
+    /* 1. Tagged integer (BoxInt: low 3 bits = 0, TAG_INT) */
     if (IS_INT(val)) {
-        int64_t n = DECODE_INT(val);
-        /* Handle zero */
-        if (n == 0) return rt_string_from_cstr("0");
-        /* Handle INT64_MIN */
-        if (n == (-9223372036854775807LL - 1))
-            return rt_string_from_cstr("-9223372036854775808");
-
-        char buf[21]; /* max 20 digits + sign */
-        int pos = 0;
-        int neg = 0;
-        uint64_t uv;
-        if (n < 0) {
-            neg = 1;
-            uv = (uint64_t)(-n);
-        } else {
-            uv = (uint64_t)n;
-        }
-        /* Build digits in reverse */
-        while (uv > 0) {
-            buf[pos++] = '0' + (char)(uv % 10);
-            uv /= 10;
-        }
-        /* Total length */
-        uint32_t len = (uint32_t)(pos + neg);
-        RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
-        if (!s) return NIL_VALUE;
-        s->hdr.type = HEAP_STRING;
-        s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
-        s->len = len;
-        int out = 0;
-        if (neg) s->data[out++] = '-';
-        while (pos > 0) s->data[out++] = buf[--pos];
-        s->data[out] = '\0';
-        return ENCODE_PTR(s);
+        return _int_to_string(DECODE_INT(val));
     }
-    /* Heap string -> return as-is */
+    /* 2. Heap object (string, array, map) */
     if (IS_HEAP(val)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(val);
         if (h && h->type == HEAP_STRING) return val;
@@ -553,12 +549,10 @@ RuntimeValue rt_value_to_string(RuntimeValue val)
         if (h && h->type == HEAP_MAP) return rt_string_from_cstr("<map>");
         return rt_string_from_cstr("<object>");
     }
-    /* nil */
-    if (IS_NIL(val)) return rt_string_from_cstr("nil");
-    /* float */
-    if (IS_FLOAT(val)) return rt_string_from_cstr("<float>");
-    /* unknown */
-    return rt_string_from_cstr("<unknown>");
+    /* 3. nil (0x3) */
+    if (val == NIL_VALUE) return rt_string_from_cstr("nil");
+    /* 4. Everything else: treat as raw integer (cross-module return without BoxInt) */
+    return _int_to_string((int64_t)val);
 }
 
 RuntimeValue rt_len(RuntimeValue v)
