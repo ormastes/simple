@@ -16,7 +16,7 @@ impl LlvmBackend {
         value: i64,
         vreg_map: &mut VRegMap,
     ) -> Result<(), CompileError> {
-        let const_val = self.context.i64_type().const_int(value as u64, true);
+        let const_val = self.runtime_int_type().const_int(value as u64, true);
         vreg_map.insert(dest, const_val.into());
         Ok(())
     }
@@ -29,7 +29,7 @@ impl LlvmBackend {
         vreg_map: &mut VRegMap,
     ) -> Result<(), CompileError> {
         // Use i64 to match the runtime's tagged-value ABI (0 = false, 1 = true)
-        let const_val = self.context.i64_type().const_int(value as u64, false);
+        let const_val = self.runtime_int_type().const_int(value as u64, false);
         vreg_map.insert(dest, const_val.into());
         Ok(())
     }
@@ -54,7 +54,7 @@ impl LlvmBackend {
         vreg_map: &mut VRegMap,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Declare rt_string_new if not exists: fn(i64, i64) -> i64
         // First arg is ptr-as-i64 (matching the tagged-value ABI).

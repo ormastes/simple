@@ -327,6 +327,69 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
 # Gemini API dispatch
 # ============================================================================
 
+# Convert standard-format messages JSON to Gemini contents format.
+# Parses the standard [{"role":"...","content":"..."},...] by scanning for
+# "role" and "content" keys within each object boundary, then rebuilds with
+# Gemini's "parts":[{"text":"..."}] structure and "assistant" -> "model" remap.
+fn _convert_standard_to_gemini(messages_json: text) -> text:
+    var result_items: [text] = []
+    var pos = 0
+    val src = messages_json
+    val len = src.len()
+    while pos < len:
+        # Find next object start '{'
+        val ch = src[pos]
+        if ch == "{":
+            # Find matching '}' (simple brace counting, handles nested)
+            var depth = 1
+            var obj_end = pos + 1
+            var in_str = false
+            var esc = false
+            while obj_end < len and depth > 0:
+                val c = src[obj_end]
+                if esc:
+                    esc = false
+                elif c == "\\":
+                    if in_str:
+                        esc = true
+                elif c == "\"":
+                    in_str = not in_str
+                elif not in_str:
+                    if c == "{":
+                        depth = depth + 1
+                    elif c == "}":
+                        depth = depth - 1
+                obj_end = obj_end + 1
+            # obj_end points past the closing '}'
+            val obj_str = src.substring(pos, obj_end)
+            # Extract role and content from this object
+            var role = extract_json_string(obj_str, "role")
+            val content = extract_json_string(obj_str, "content")
+            # Remap "assistant" -> "model" for Gemini
+            if role == "assistant":
+                role = "model"
+            # Build Gemini-format message: {"role":"...","parts":[{"text":"..."}]}
+            var msg_parts: [text] = []
+            msg_parts.append(LB())
+            msg_parts.append(Q() + "role" + Q() + ":" + Q() + role + Q() + ",")
+            msg_parts.append(Q() + "parts" + Q() + ":[" + LB() + Q() + "text" + Q() + ":" + Q() + escape_json(content) + Q() + RB() + "]")
+            msg_parts.append(RB())
+            result_items = result_items + [msg_parts.join("")]
+            pos = obj_end
+        else:
+            pos = pos + 1
+    # Join into a JSON array
+    var out_parts: [text] = []
+    out_parts.append("[")
+    var j = 0
+    for item in result_items:
+        if j > 0:
+            out_parts.append(",")
+        out_parts.append(item)
+        j = j + 1
+    out_parts.append("]")
+    out_parts.join("")
+
 fn _dispatch_gemini_api(api_key: text, base_url: text, model: text, messages_json: text, system_prompt: text, max_tokens: i64) -> LLMResponse:
     if api_key == "":
         return new_llm_error("gemini_api", "GEMINI_API_KEY not set")
@@ -340,9 +403,11 @@ fn _dispatch_gemini_api(api_key: text, base_url: text, model: text, messages_jso
     # Convert messages_json from standard format to Gemini contents format
     # Standard: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}]
     # Gemini:   [{"role":"user","parts":[{"text":"..."}]},{"role":"model","parts":[{"text":"..."}]}]
-    # Simple transform: replace "content": with "parts":[{"text": and append }]
-    # Also remap "assistant" -> "model"
-    var gemini_msgs = messages_json
+    # Parse each message from the standard JSON and rebuild in Gemini format.
+    # We extract role/content pairs by scanning for "role"/"content" keys in each
+    # message object, then rebuild with Gemini's "parts" structure and remap
+    # "assistant" -> "model".
+    var gemini_msgs = _convert_standard_to_gemini(messages_json)
     # Build body with contents
     var parts: [text] = []
     parts.push(Q() + "contents" + Q() + ":" + gemini_msgs)
@@ -368,16 +433,16 @@ fn _dispatch_gemini_api(api_key: text, base_url: text, model: text, messages_jso
     val http_error = result.2 ?? ""
     if http_error != "":
         return new_llm_error("gemini_api", "HTTP error: " + http_error)
-    # Parse Gemini response
-    val content = extract_json_string(resp_body, "text")
-    val finish = extract_json_string(resp_body, "finishReason")
-    val in_tok = extract_json_int(resp_body, "promptTokenCount")
-    val out_tok = extract_json_int(resp_body, "candidatesTokenCount")
-    # Check for error
+    # Check for error first (Gemini errors: {"error":{"code":400,"message":"...","status":"..."}})
     val error_status = extract_json_string(resp_body, "status")
     if error_status != "":
         val error_msg = extract_json_string(resp_body, "message")
         return new_llm_error("gemini_api", error_msg)
+    # Parse Gemini response: candidates[0].content.parts[0].text
+    val content = extract_json_string(resp_body, "text")
+    val finish = extract_json_string(resp_body, "finishReason")
+    val in_tok = extract_json_int(resp_body, "promptTokenCount")
+    val out_tok = extract_json_int(resp_body, "candidatesTokenCount")
     LLMResponse(
         content: content,
         model: model_val,

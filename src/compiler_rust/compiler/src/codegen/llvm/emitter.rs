@@ -62,7 +62,7 @@ impl LlvmEmitter<'_> {
 
     /// Call a runtime function by name and return its result.
     fn call_runtime(&self, name: &str, args: &[BasicValueEnum<'static>]) -> Result<BasicValueEnum<'static>, String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
 
         let func = self.module.get_function(name).unwrap_or_else(|| {
@@ -86,7 +86,7 @@ impl LlvmEmitter<'_> {
 
     /// Call a runtime function that returns void.
     fn call_runtime_void(&self, name: &str, args: &[BasicValueEnum<'static>]) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
 
         let func = self.module.get_function(name).unwrap_or_else(|| {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -104,7 +104,7 @@ impl LlvmEmitter<'_> {
 
     /// Helper to create an i64 constant.
     fn i64_const(&self, value: i64) -> BasicValueEnum<'static> {
-        self.backend.context.i64_type().const_int(value as u64, true).into()
+        self.backend.runtime_int_type().const_int(value as u64, true).into()
     }
 
     /// Helper to create an i32 constant.
@@ -122,7 +122,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // Constants
     // =========================================================================
     fn emit_const_int(&mut self, dest: VReg, value: i64) -> Result<(), String> {
-        let val = self.backend.context.i64_type().const_int(value as u64, true);
+        let val = self.backend.runtime_int_type().const_int(value as u64, true);
         self.set(dest, val.into());
         Ok(())
     }
@@ -214,7 +214,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_load(&mut self, dest: VReg, addr: VReg) -> Result<(), String> {
         let addr_val = self.get(addr)?;
         if let BasicValueEnum::PointerValue(ptr) = addr_val {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let loaded = self
                 .builder
                 .build_load(i64_type, ptr, "load")
@@ -315,7 +315,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), String> {
         let func_name = target.name();
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
 
         let called_func = self.module.get_function(func_name).unwrap_or_else(|| {
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
@@ -344,7 +344,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
 
         let interp_call = self.module.get_function("rt_interp_call").unwrap_or_else(|| {
@@ -380,7 +380,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_interp_eval(&mut self, dest: VReg, expr_index: usize) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
 
         let interp_eval = self.module.get_function("rt_interp_eval").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -483,7 +483,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // Collections
     // =========================================================================
     fn emit_array_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let array_type = i64_type.array_type(elements.len() as u32);
         let alloc = self
             .builder
@@ -510,7 +510,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_tuple_lit(&mut self, dest: VReg, elements: &[VReg]) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let field_types: Vec<inkwell::types::BasicTypeEnum> = elements.iter().map(|_| i64_type.into()).collect();
         let struct_type = self.backend.context.struct_type(&field_types, false);
         let alloc = self
@@ -538,7 +538,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_dict_lit(&mut self, dest: VReg, keys: &[VReg], values: &[VReg]) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
 
         let dict_new = self.module.get_function("rt_dict_new").unwrap_or_else(|| {
@@ -580,7 +580,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let idx_val = self.get(index)?;
 
         if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) = (coll_val, idx_val) {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let arr_type = i64_type.array_type(0);
             let indices = [self.backend.context.i32_type().const_int(0, false), idx];
             let gep = unsafe {
@@ -603,7 +603,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let val = self.get(value)?;
 
         if let (BasicValueEnum::PointerValue(ptr), BasicValueEnum::IntValue(idx)) = (coll_val, idx_val) {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let arr_type = i64_type.array_type(0);
             let indices = [self.backend.context.i32_type().const_int(0, false), idx];
             let gep = unsafe {
@@ -626,7 +626,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         end: Option<VReg>,
         step: Option<VReg>,
     ) -> Result<(), String> {
-        let i64_type = self.backend.context.i64_type();
+        let i64_type = self.backend.runtime_int_type();
         let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
 
         let slice_fn = self.module.get_function("rt_slice").unwrap_or_else(|| {
@@ -1419,7 +1419,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_unit_saturate(&mut self, dest: VReg, value: VReg, min: i64, max: i64) -> Result<(), String> {
         let val = self.get(value)?;
         if let BasicValueEnum::IntValue(int_val) = val {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let min_v = i64_type.const_int(min as u64, true);
             let max_v = i64_type.const_int(max as u64, true);
 
@@ -1494,15 +1494,21 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let mut val = self.get(value)?;
         if let BasicValueEnum::IntValue(int_val) = val {
             let val_type = int_val.get_type();
-            let i64_type = self.backend.context.i64_type();
+            let rv_type = self.backend.runtime_int_type();
+            let rv_width = rv_type.get_bit_width();
             let mut int_v = int_val;
-            if val_type.get_bit_width() < 64 {
+            if val_type.get_bit_width() < rv_width {
                 int_v = self
                     .builder
-                    .build_int_s_extend(int_val, i64_type, "sext")
+                    .build_int_s_extend(int_val, rv_type, "sext")
                     .map_err(|e| format!("sext failed: {}", e))?;
+            } else if val_type.get_bit_width() > rv_width {
+                int_v = self
+                    .builder
+                    .build_int_truncate(int_val, rv_type, "trunc")
+                    .map_err(|e| format!("trunc failed: {}", e))?;
             }
-            let three = i64_type.const_int(3, false);
+            let three = rv_type.const_int(3, false);
             let boxed = self
                 .builder
                 .build_left_shift(int_v, three, "box_shl")
@@ -1517,7 +1523,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_box_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
         if let BasicValueEnum::FloatValue(_) = val {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let bits = self
                 .builder
                 .build_bit_cast(val, i64_type, "f2i")
@@ -1550,7 +1556,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_unbox_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
         if let BasicValueEnum::IntValue(int_val) = val {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let three = i64_type.const_int(3, false);
             let unboxed = self
                 .builder
@@ -1566,7 +1572,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_unbox_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
         if let BasicValueEnum::IntValue(int_val) = val {
-            let i64_type = self.backend.context.i64_type();
+            let i64_type = self.backend.runtime_int_type();
             let f64_type = self.backend.context.f64_type();
             let three = i64_type.const_int(3, false);
             let shifted = self
@@ -1690,7 +1696,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
     fn emit_gpu_load_f64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), String> {
         // GPU memory ops not used in LLVM AOT path — stub
-        let val = self.backend.context.i64_type().const_int(0, false);
+        let val = self.backend.runtime_int_type().const_int(0, false);
         self.set(dest, val.into());
         Ok(())
     }
@@ -1700,7 +1706,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
     fn emit_gpu_load_i64(&mut self, dest: VReg, _ptr: VReg, _index: VReg) -> Result<(), String> {
         // GPU memory ops not used in LLVM AOT path — stub
-        let val = self.backend.context.i64_type().const_int(0, false);
+        let val = self.backend.runtime_int_type().const_int(0, false);
         self.set(dest, val.into());
         Ok(())
     }

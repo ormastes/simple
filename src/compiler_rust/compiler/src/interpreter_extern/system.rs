@@ -631,6 +631,65 @@ pub fn rt_term_enable_ansi(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get terminal size (columns, rows)
+///
+/// Callable from Simple as: `rt_term_get_size()`
+///
+/// # Returns
+/// * Tuple(Int, Int): (columns, rows), falls back to (80, 24) if detection fails
+pub fn rt_term_get_size(_args: &[Value]) -> Result<Value, CompileError> {
+    let (cols, rows) = get_terminal_size_impl();
+    Ok(Value::Tuple(vec![Value::Int(cols as i64), Value::Int(rows as i64)]))
+}
+
+/// Platform-specific terminal size detection
+fn get_terminal_size_impl() -> (i32, i32) {
+    #[cfg(unix)]
+    {
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
+                && ws.ws_col > 0
+                && ws.ws_row > 0
+            {
+                return (ws.ws_col as i32, ws.ws_row as i32);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        extern "system" {
+            fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
+        }
+        #[repr(C)]
+        struct Coord { x: i16, y: i16 }
+        #[repr(C)]
+        struct SmallRect { left: i16, top: i16, right: i16, bottom: i16 }
+        #[repr(C)]
+        struct ConsoleScreenBufferInfo {
+            size: Coord,
+            cursor_position: Coord,
+            attributes: u16,
+            window: SmallRect,
+            maximum_window_size: Coord,
+        }
+        let handle = std::io::stdout().as_raw_handle() as isize;
+        unsafe {
+            let mut info: ConsoleScreenBufferInfo = std::mem::zeroed();
+            if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+                let cols = info.window.right - info.window.left + 1;
+                let rows = info.window.bottom - info.window.top + 1;
+                if cols > 0 && rows > 0 {
+                    return (cols as i32, rows as i32);
+                }
+            }
+        }
+    }
+    // Fallback
+    (80, 24)
+}
+
 /// Exit the process with given exit code
 ///
 /// Callable from Simple as: `rt_exit(code)`

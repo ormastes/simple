@@ -20,7 +20,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Use minimum capacity of 16 for empty arrays to allow push operations
         let capacity = if elements.is_empty() { 16 } else { elements.len() };
@@ -67,7 +67,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Call rt_tuple_new(size) to create a proper heap-allocated RuntimeValue tuple
         let tuple_new = module.get_function("rt_tuple_new").unwrap_or_else(|| {
@@ -111,7 +111,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Declare rt_dict_new if not exists — all i64 to match tagged-value ABI
         let dict_new = module.get_function("rt_dict_new").unwrap_or_else(|| {
@@ -169,7 +169,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let coll_val = self.get_vreg(&collection, vreg_map)?;
         let idx_val = self.get_vreg(&index, vreg_map)?;
 
@@ -203,7 +203,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let coll_val = self.get_vreg(&collection, vreg_map)?;
         let idx_val = self.get_vreg(&index, vreg_map)?;
         let val = self.get_vreg(&value, vreg_map)?;
@@ -238,7 +238,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Declare rt_slice if not exists — all i64 to match tagged-value ABI
         let slice_fn = module.get_function("rt_slice").unwrap_or_else(|| {
@@ -287,7 +287,7 @@ impl LlvmBackend {
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             vreg_map.insert(dest, ret_val);
         } else {
-            let default_val = self.context.i64_type().const_int(0, false);
+            let default_val = self.runtime_int_type().const_int(0, false);
             vreg_map.insert(dest, default_val.into());
         }
 

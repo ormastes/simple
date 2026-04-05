@@ -170,13 +170,26 @@ class BeDomNode:
 
 fn parse_color_value(s: text) -> u32:
     """Parse a color string to a u32 RGBA value.
-    Supports: '#RRGGBB', '#RGB', named colors, and decimal numbers.
+    Supports: '#RRGGBB', '#RRGGBBAA', '#RGB', 'rgb(r,g,b)',
+    'rgba(r,g,b,a)', named colors, and decimal numbers.
     """
     if s.len() == 0:
         return 0x000000FF
 
     if s.starts_with("#"):
         return parse_hex_color(s)
+
+    # rgba(r,g,b,a) or rgb(r,g,b)
+    if s.starts_with("rgba(") and s.ends_with(")"):
+        return parse_rgba_func(s)
+
+    if s.starts_with("rgb(") and s.ends_with(")"):
+        return parse_rgb_func(s)
+
+    # CSS var() — not resolved by the software renderer; return transparent
+    # so unresolved custom properties don't produce opaque black artifacts.
+    if s.starts_with("var("):
+        return 0x00000000
 
     # Named colors
     match s:
@@ -199,8 +212,14 @@ fn parse_color_value(s: text) -> u32:
             return 0x000000FF
 
 fn parse_hex_color(s: text) -> u32:
-    """Parse a hex color string like '#RRGGBB' or '#RGB' to u32 RGBA."""
+    """Parse a hex color string like '#RRGGBB', '#RRGGBBAA', or '#RGB' to u32 RGBA."""
     val hex = s.slice(1, s.len())
+    if hex.len() == 8:
+        val r = hex_byte(hex.slice(0, 2))
+        val g = hex_byte(hex.slice(2, 4))
+        val b = hex_byte(hex.slice(4, 6))
+        val a = hex_byte(hex.slice(6, 8))
+        return (r * 16777216) + (g * 65536) + (b * 256) + a
     if hex.len() == 6:
         val r = hex_byte(hex.slice(0, 2))
         val g = hex_byte(hex.slice(2, 4))
@@ -215,6 +234,62 @@ fn parse_hex_color(s: text) -> u32:
         val bb = b * 17
         return (rr * 16777216) + (gg * 65536) + (bb * 256) + 255
     return 0x000000FF
+
+fn parse_rgba_func(s: text) -> u32:
+    """Parse 'rgba(r,g,b,a)' where a is 0.0-1.0 (float) to u32 RGBA."""
+    # Extract content between 'rgba(' and ')'
+    val inner = s.slice(5, s.len() - 1)
+    val parts = split_comma(inner)
+    if parts.len() < 4:
+        return 0x000000FF
+    val r = parse_int_clamped(parts[0].trim(), 0, 255)
+    val g = parse_int_clamped(parts[1].trim(), 0, 255)
+    val b = parse_int_clamped(parts[2].trim(), 0, 255)
+    val a_f = parse_float_value(parts[3].trim())
+    var a_byte = (a_f * 255.0).to_i32()
+    if a_byte < 0:
+        a_byte = 0
+    if a_byte > 255:
+        a_byte = 255
+    val a = a_byte.to_u32()
+    return (r * 16777216) + (g * 65536) + (b * 256) + a
+
+fn parse_rgb_func(s: text) -> u32:
+    """Parse 'rgb(r,g,b)' to u32 RGBA with alpha=255."""
+    val inner = s.slice(4, s.len() - 1)
+    val parts = split_comma(inner)
+    if parts.len() < 3:
+        return 0x000000FF
+    val r = parse_int_clamped(parts[0].trim(), 0, 255)
+    val g = parse_int_clamped(parts[1].trim(), 0, 255)
+    val b = parse_int_clamped(parts[2].trim(), 0, 255)
+    return (r * 16777216) + (g * 65536) + (b * 256) + 255
+
+fn split_comma(s: text) -> [text]:
+    """Split a string by commas."""
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == ",":
+            parts = parts + [current]
+            current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    return parts
+
+fn parse_int_clamped(s: text, min_val: u32, max_val: u32) -> u32:
+    """Parse an integer string, clamp to [min_val, max_val]."""
+    val n = s.parse_i64()
+    if n == nil:
+        return 0
+    var v = n.to_u32()
+    if v < min_val:
+        v = min_val
+    if v > max_val:
+        v = max_val
+    return v
 
 fn hex_byte(s: text) -> u32:
     """Parse a two-character hex string to a byte value (0-255)."""

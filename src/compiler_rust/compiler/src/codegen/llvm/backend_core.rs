@@ -150,6 +150,21 @@ impl LlvmBackend {
         }
     }
 
+    /// Get the LLVM integer type used for RuntimeValue on this target.
+    ///
+    /// On 64-bit targets, RuntimeValue is i64 (tagged 64-bit value).
+    /// On 32-bit targets, RuntimeValue is i32 (tagged 32-bit value).
+    /// The C runtime defines `typedef int32_t RuntimeValue` on RV32 and
+    /// `typedef int64_t RuntimeValue` on 64-bit, so this must match.
+    #[cfg(feature = "llvm")]
+    pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
+        if self.pointer_width() == 32 {
+            self.context.i32_type()
+        } else {
+            self.context.i64_type()
+        }
+    }
+
     /// Create an LLVM module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn create_module(&self, name: &str) -> Result<(), CompileError> {
@@ -381,7 +396,7 @@ impl NativeBackend for LlvmBackend {
         {
             let m = self.module.borrow();
             if let Some(m) = m.as_ref() {
-                let i64_type = self.context.i64_type();
+                let rv_type = self.runtime_int_type();
 
                 for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
                     // Skip if already declared
@@ -390,9 +405,10 @@ impl NativeBackend for LlvmBackend {
                     }
 
                     // Only pre-declare functions with ALL i64 params and i64 return.
-                    // MIR always uses i64 for all values (tagged-value ABI).
+                    // (The Cranelift spec uses I64 universally; on 32-bit targets we
+                    // map these to the RuntimeValue width via rv_type.)
                     // Functions with i8/i32/f64 params would cause type mismatches
-                    // when compile_call passes i64 args. Those functions will be
+                    // when compile_call passes rv_type args. Those functions will be
                     // declared on-demand by compile_call with matching arg types,
                     // and the indirect call path handles arity mismatches.
                     let all_i64_params = spec.params.iter().all(|ty| *ty == cranelift_codegen::ir::types::I64);
@@ -409,9 +425,9 @@ impl NativeBackend for LlvmBackend {
                     }
 
                     let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                        spec.params.iter().map(|_| i64_type.into()).collect();
+                        spec.params.iter().map(|_| rv_type.into()).collect();
 
-                    let fn_type = i64_type.fn_type(&params, false);
+                    let fn_type = rv_type.fn_type(&params, false);
                     let f = m.add_function(spec.name, fn_type, None);
                     f.set_linkage(inkwell::module::Linkage::External);
                 }

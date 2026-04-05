@@ -16,7 +16,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         // Declare rt_gpu_global_id if not exists
@@ -46,7 +46,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         let gpu_local_id = module.get_function("rt_gpu_local_id").unwrap_or_else(|| {
@@ -75,7 +75,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         let gpu_group_id = module.get_function("rt_gpu_group_id").unwrap_or_else(|| {
@@ -104,7 +104,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         let gpu_global_size = module.get_function("rt_gpu_global_size").unwrap_or_else(|| {
@@ -133,7 +133,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         let gpu_local_size = module.get_function("rt_gpu_local_size").unwrap_or_else(|| {
@@ -162,7 +162,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i32_type = self.context.i32_type();
 
         let gpu_num_groups = module.get_function("rt_gpu_num_groups").unwrap_or_else(|| {
@@ -247,7 +247,7 @@ impl LlvmBackend {
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         use crate::mir::GpuAtomicOp;
 
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Select the appropriate atomic function based on operation
@@ -290,7 +290,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // CmpXchg takes 3 arguments: ptr, expected, desired
@@ -319,7 +319,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         let gpu_shared_alloc = module.get_function("rt_gpu_shared_alloc").unwrap_or_else(|| {

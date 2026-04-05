@@ -52,7 +52,7 @@ impl LlvmBackend {
 
         // Convert struct pointer to i64 (tagged-value ABI)
         let struct_i64 = builder
-            .build_ptr_to_int(struct_ptr, self.context.i64_type(), "struct_i64")
+            .build_ptr_to_int(struct_ptr, self.runtime_int_type(), "struct_i64")
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
         vreg_map.insert(dest, struct_i64.into());
         Ok(())
@@ -81,7 +81,7 @@ impl LlvmBackend {
             }
             _ => {
                 // Fallback: insert default value
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(dest, default_val.into());
                 return Ok(());
             }
@@ -218,7 +218,7 @@ impl LlvmBackend {
 
         // Convert closure pointer to i64 (tagged-value ABI)
         let closure_i64 = builder
-            .build_ptr_to_int(closure_ptr, self.context.i64_type(), "closure_i64")
+            .build_ptr_to_int(closure_ptr, self.runtime_int_type(), "closure_i64")
             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
         vreg_map.insert(dest, closure_i64.into());
         Ok(())

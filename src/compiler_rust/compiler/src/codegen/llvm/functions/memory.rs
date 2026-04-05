@@ -30,7 +30,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?
             }
             _ => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(dest, default_val.into());
                 return Ok(());
             }

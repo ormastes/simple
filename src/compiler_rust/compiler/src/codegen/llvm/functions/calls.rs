@@ -133,7 +133,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<Vec<inkwell::values::BasicMetadataValueEnum<'static>>, CompileError> {
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Declare rt_string_data and rt_string_len if not already declared
         let string_data_fn = module.get_function("rt_string_data").unwrap_or_else(|| {
@@ -186,7 +186,7 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let func_name_raw = target.name();
         let ffi_name = map_ffi_name(func_name_raw);
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions.
         // Accepts both bare names and spl_ prefixed names (safe symbol exports).
@@ -524,7 +524,7 @@ impl LlvmBackend {
             _ => {
                 // Fallback: insert default dest value and return
                 if let Some(d) = dest {
-                    let default_val = self.context.i64_type().const_int(0, false);
+                    let default_val = self.runtime_int_type().const_int(0, false);
                     vreg_map.insert(d, default_val.into());
                 }
                 return Ok(());
@@ -553,11 +553,11 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
 
             if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 // Prepend closure pointer (coerced to i64) as implicit first argument
                 // This matches Cranelift's behavior in closures_structs.rs:67-78
                 let closure_as_i64 = builder
-                    .build_ptr_to_int(closure_ptr, self.context.i64_type(), "closure_i64")
+                    .build_ptr_to_int(closure_ptr, self.runtime_int_type(), "closure_i64")
                     .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![closure_as_i64.into()];
                 for arg in args {
@@ -570,7 +570,7 @@ impl LlvmBackend {
                 // Use actual arg count for function type (param_types from HIR may differ).
                 // All args are coerced to i64 matching the tagged-value ABI.
                 let mut llvm_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                    vec![self.context.i64_type().into()];
+                    vec![self.runtime_int_type().into()];
                 let user_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     args.iter().map(|_| i64_type.into()).collect();
                 llvm_param_types.extend(user_param_types);
@@ -590,7 +590,7 @@ impl LlvmBackend {
                     if let Some(ret_val) = call_site.try_as_basic_value().left() {
                         vreg_map.insert(d, ret_val);
                     } else {
-                        let default_val = self.context.i64_type().const_int(0, false);
+                        let default_val = self.runtime_int_type().const_int(0, false);
                         vreg_map.insert(d, default_val.into());
                     }
                 }
@@ -611,7 +611,7 @@ impl LlvmBackend {
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
         // Call interpreter bridge function rt_interp_call
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Declare rt_interp_call if not exists
@@ -647,7 +647,7 @@ impl LlvmBackend {
             if let Some(ret_val) = call_site.try_as_basic_value().left() {
                 vreg_map.insert(d, ret_val);
             } else {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(d, default_val.into());
             }
         }
@@ -665,7 +665,7 @@ impl LlvmBackend {
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
         // Call interpreter to evaluate expression by index
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
 
         // Declare rt_interp_eval if not exists
         let interp_eval = module.get_function("rt_interp_eval").unwrap_or_else(|| {
@@ -681,7 +681,7 @@ impl LlvmBackend {
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             vreg_map.insert(dest, ret_val);
         } else {
-            let default_val = self.context.i64_type().const_int(0, false);
+            let default_val = self.runtime_int_type().const_int(0, false);
             vreg_map.insert(dest, default_val.into());
         }
 

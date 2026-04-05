@@ -25,19 +25,29 @@ impl LlvmBackend {
         // Both operands must be the same type
         match (left, right) {
             (inkwell::values::BasicValueEnum::IntValue(l), inkwell::values::BasicValueEnum::IntValue(r)) => {
-                // Ensure both operands have the same bit width
-                let i64_type = self.context.i64_type();
-                let l = if l.get_type().get_bit_width() < 64 {
+                // Ensure both operands have the same bit width as RuntimeValue
+                let rv_type = self.runtime_int_type();
+                let i64_type = rv_type; // alias for compatibility (may be i32 on 32-bit targets)
+                let rv_width = rv_type.get_bit_width();
+                let l = if l.get_type().get_bit_width() < rv_width {
                     builder
-                        .build_int_z_extend(l, i64_type, "zext_l")
+                        .build_int_z_extend(l, rv_type, "zext_l")
                         .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                } else if l.get_type().get_bit_width() > rv_width {
+                    builder
+                        .build_int_truncate(l, rv_type, "trunc_l")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("trunc", &e))?
                 } else {
                     l
                 };
-                let r = if r.get_type().get_bit_width() < 64 {
+                let r = if r.get_type().get_bit_width() < rv_width {
                     builder
-                        .build_int_z_extend(r, i64_type, "zext_r")
+                        .build_int_z_extend(r, rv_type, "zext_r")
                         .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                } else if r.get_type().get_bit_width() > rv_width {
+                    builder
+                        .build_int_truncate(r, rv_type, "trunc_r")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("trunc", &e))?
                 } else {
                     r
                 };
@@ -185,7 +195,7 @@ impl LlvmBackend {
                         let cmp = builder
                             .build_float_compare(pred, l, r, "fcmp")
                             .map_err(|e| crate::error::factory::llvm_build_failed("fcmp", &e))?;
-                        let i64_type = self.context.i64_type();
+                        let i64_type = self.runtime_int_type();
                         let result = builder
                             .build_int_z_extend(cmp, i64_type, "fcmp_ext")
                             .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?;
@@ -196,7 +206,7 @@ impl LlvmBackend {
             }
             (inkwell::values::BasicValueEnum::PointerValue(l), inkwell::values::BasicValueEnum::PointerValue(r)) => {
                 // Pointer comparisons: cast to i64 and compare
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let l_int = builder
                     .build_ptr_to_int(l, i64_type, "ptrtoint_l")
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_ptr_to_int", &e))?;
@@ -209,7 +219,7 @@ impl LlvmBackend {
                             let fn_type = self
                                 .context
                                 .i64_type()
-                                .fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
+                                .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
                             module.add_function("rt_native_eq", fn_type, None)
                         });
                         let call_site = builder
@@ -218,7 +228,7 @@ impl LlvmBackend {
                         call_site
                             .try_as_basic_value()
                             .left()
-                            .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
+                            .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
                             .into_int_value()
                     }
                     BinOp::NotEq => {
@@ -226,7 +236,7 @@ impl LlvmBackend {
                             let fn_type = self
                                 .context
                                 .i64_type()
-                                .fn_type(&[self.context.i64_type().into(), self.context.i64_type().into()], false);
+                                .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
                             module.add_function("rt_native_neq", fn_type, None)
                         });
                         let call_site = builder
@@ -235,7 +245,7 @@ impl LlvmBackend {
                         call_site
                             .try_as_basic_value()
                             .left()
-                            .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into())
+                            .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
                             .into_int_value()
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
@@ -262,7 +272,7 @@ impl LlvmBackend {
             }
             _ => {
                 // Mixed types: cast both to i64 and operate as integers
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let l_int = self.coerce_to_int(left, i64_type, builder, "coerce_l")?;
                 let r_int = self.coerce_to_int(right, i64_type, builder, "coerce_r")?;
 
@@ -419,14 +429,14 @@ impl LlvmBackend {
             Terminator::Return(Some(vreg)) => {
                 if let Some(val) = vreg_map.get(vreg) {
                     // Coerce return value to i64 (function return type)
-                    let i64_type = self.context.i64_type();
+                    let i64_type = self.runtime_int_type();
                     let coerced = self.coerce_value_to_type(*val, Some(i64_type.into()), builder)?;
                     builder
                         .build_return(Some(&coerced))
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
                 } else {
                     // Missing vreg — return 0 as fallback
-                    let zero = self.context.i64_type().const_int(0, false);
+                    let zero = self.runtime_int_type().const_int(0, false);
                     builder
                         .build_return(Some(&zero))
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
@@ -434,7 +444,7 @@ impl LlvmBackend {
             }
             Terminator::Return(None) => {
                 // All functions return i64 in the tagged-value ABI; void returns become 0
-                let zero = self.context.i64_type().const_int(0, false);
+                let zero = self.runtime_int_type().const_int(0, false);
                 builder
                     .build_return(Some(&zero))
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
@@ -483,10 +493,10 @@ impl LlvmBackend {
                             .build_int_compare(
                                 inkwell::IntPredicate::NE,
                                 builder
-                                    .build_ptr_to_int(*pv, self.context.i64_type(), "ptoi")
+                                    .build_ptr_to_int(*pv, self.runtime_int_type(), "ptoi")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?,
                                 builder
-                                    .build_ptr_to_int(null, self.context.i64_type(), "nulltoi")
+                                    .build_ptr_to_int(null, self.runtime_int_type(), "nulltoi")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?,
                                 "tobool",
                             )
@@ -536,7 +546,7 @@ impl LlvmBackend {
         let counter_global = if let Some(global) = module.get_global(&counter_name) {
             global
         } else {
-            let i64_type = self.context.i64_type();
+            let i64_type = self.runtime_int_type();
             let global = module.add_global(i64_type, None, &counter_name);
             global.set_initializer(&i64_type.const_zero());
             global.set_linkage(inkwell::module::Linkage::Internal);
@@ -544,7 +554,7 @@ impl LlvmBackend {
         };
 
         // Load current value
-        let i64_type = self.context.i64_type();
+        let i64_type = self.runtime_int_type();
         let current = builder
             .build_load(i64_type, counter_global.as_pointer_value(), "cov_load")
             .map_err(|e| crate::error::factory::llvm_build_failed("load coverage counter", &e))?;

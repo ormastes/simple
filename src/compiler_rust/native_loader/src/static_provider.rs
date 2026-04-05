@@ -45,7 +45,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
             rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_method_not_found,
             rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
-            rt_term_enable_ansi, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
+            rt_term_enable_ansi, rt_term_get_size, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
             rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env,
             rt_set_macro_trace, rt_value_eq, rt_value_compare,
         };
@@ -318,6 +318,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_process_execute,
             rt_platform_name,
             rt_term_enable_ansi,
+            rt_term_get_size,
             rt_decision_probe,
             rt_condition_probe,
             rt_path_probe,

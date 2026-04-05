@@ -10,43 +10,43 @@ use browser.shared.logging.(Logger, LogLevel)
 # --- Scope tracking ---
 
 class CompilerScope:
-    locals: List<Pair<text, i64>>
+    locals: [Pair<text, i64>]
     depth: i64
     parent_scope: i64
 
     static fn create(depth: i64, parent_scope: i64) -> CompilerScope:
-        CompilerScope(locals: List<Pair<text, i64>>(), depth: depth, parent_scope: parent_scope)
+        CompilerScope(locals: [Pair<text, i64>](), depth: depth, parent_scope: parent_scope)
 
 # --- Bytecode compiler ---
 
 class BytecodeCompiler:
     chunk: BytecodeChunk
-    constants: List<JsValue>
-    scopes: List<CompilerScope>
+    constants: [JsValue]
+    scopes: [CompilerScope]
     current_scope: i64
     next_scope_id: i64
-    loop_starts: List<i64>
-    loop_breaks: List<List<i64>>
+    loop_starts: [i64]
+    loop_breaks: [[i64]]
     logger: Logger
 
     static fn new(logger: Logger) -> BytecodeCompiler:
-        var scopes = List<CompilerScope>()
+        var scopes = [CompilerScope]()
         val global_scope = CompilerScope.create(0, -1)
         scopes.push(global_scope)
         BytecodeCompiler(
             chunk: BytecodeChunk.create("main"),
-            constants: List<JsValue>(),
+            constants: [JsValue](),
             scopes: scopes,
             current_scope: 0,
             next_scope_id: 1,
-            loop_starts: List<i64>(),
-            loop_breaks: List<List<i64>>(),
+            loop_starts: [i64](),
+            loop_breaks: [[i64]](),
             logger: logger
         )
 
     # --- Main entry ---
 
-    me compile(program: List<Statement>) -> BrowserResult<BytecodeChunk>:
+    me compile(program: [Statement]) -> BrowserResult<BytecodeChunk>:
         self.logger.info("Compiling program with {program.len()} statements")
         var i = 0
         while i < program.len():
@@ -154,13 +154,13 @@ class BytecodeCompiler:
             val new_slot = self.resolve_local(name)
             self.emit(OpCode.StoreLocal(idx: new_slot))
 
-    me compile_function_decl(name: text, params: List<text>, body: List<Statement>):
+    me compile_function_decl(name: text, params: [text], body: [Statement]):
         self.logger.debug("Compiling function: {name} with {params.len()} params")
         # Save current compilation state
         val parent_chunk = self.chunk
         val parent_constants = self.constants
         self.chunk = BytecodeChunk.create(name)
-        self.constants = List<JsValue>()
+        self.constants = [JsValue]()
         self.begin_scope()
         # Declare parameters as locals
         var p = 0
@@ -193,7 +193,7 @@ class BytecodeCompiler:
         self.compile_expression(value)
         self.emit(OpCode.Return)
 
-    me compile_if(cond: Expression, then_body: List<Statement>, else_body: List<Statement>):
+    me compile_if(cond: Expression, then_body: [Statement], else_body: [Statement]):
         self.compile_expression(cond)
         val else_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
         # Then branch
@@ -217,10 +217,10 @@ class BytecodeCompiler:
         # Patch end jump
         self.patch_jump(end_jump)
 
-    me compile_while(cond: Expression, body: List<Statement>):
+    me compile_while(cond: Expression, body: [Statement]):
         val loop_start = self.current_offset()
         self.loop_starts.push(loop_start)
-        self.loop_breaks.push(List<i64>())
+        self.loop_breaks.push([i64]())
         self.compile_expression(cond)
         val exit_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
         self.begin_scope()
@@ -240,13 +240,13 @@ class BytecodeCompiler:
             b = b + 1
         self.loop_starts.pop()
 
-    me compile_for(init: Statement, cond: Expression, update: Expression, body: List<Statement>):
+    me compile_for(init: Statement, cond: Expression, update: Expression, body: [Statement]):
         self.begin_scope()
         # Init
         self.compile_statement(init)
         val loop_start = self.current_offset()
         self.loop_starts.push(loop_start)
-        self.loop_breaks.push(List<i64>())
+        self.loop_breaks.push([i64]())
         # Condition
         self.compile_expression(cond)
         val exit_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
@@ -270,7 +270,7 @@ class BytecodeCompiler:
         self.loop_starts.pop()
         self.end_scope()
 
-    me compile_block(stmts: List<Statement>):
+    me compile_block(stmts: [Statement]):
         self.begin_scope()
         var i = 0
         while i < stmts.len():
@@ -278,7 +278,7 @@ class BytecodeCompiler:
             i = i + 1
         self.end_scope()
 
-    me compile_try_catch(try_body: List<Statement>, catch_param: text, catch_body: List<Statement>, finally_body: List<Statement>):
+    me compile_try_catch(try_body: [Statement], catch_param: text, catch_body: [Statement], finally_body: [Statement]):
         # Push exception handler pointing to catch block
         val handler_jump = self.emit_jump(OpCode.PushExceptionHandler(catch_offset: 0))
         # Try body
@@ -313,10 +313,10 @@ class BytecodeCompiler:
                 fi = fi + 1
             self.end_scope()
 
-    me compile_switch(discriminant: Expression, cases: List<SwitchCase>):
+    me compile_switch(discriminant: Expression, cases: [SwitchCase]):
         self.compile_expression(discriminant)
         # Compile as chained comparisons
-        var end_jumps = List<i64>()
+        var end_jumps = [i64]()
         var ci = 0
         while ci < cases.len():
             val sc = cases.get(ci)
@@ -385,7 +385,7 @@ class BytecodeCompiler:
                 val parent_chunk = self.chunk
                 val parent_constants = self.constants
                 self.chunk = BytecodeChunk.create("__arrow__")
-                self.constants = List<JsValue>()
+                self.constants = [JsValue]()
                 self.begin_scope()
                 var p = 0
                 while p < params.len():
@@ -456,7 +456,7 @@ class BytecodeCompiler:
             "-": self.emit(OpCode.Neg)
             _: self.logger.warn("Unknown unary operator: {op}")
 
-    me compile_call(callee: Expression, args: List<Expression>):
+    me compile_call(callee: Expression, args: [Expression]):
         self.compile_expression(callee)
         var i = 0
         while i < args.len():
@@ -485,14 +485,14 @@ class BytecodeCompiler:
             _:
                 self.logger.error("Invalid assignment target")
 
-    me compile_array(elements: List<Expression>):
+    me compile_array(elements: [Expression]):
         var i = 0
         while i < elements.len():
             self.compile_expression(elements.get(i))
             i = i + 1
         self.emit(OpCode.NewArray(count: elements.len()))
 
-    me compile_object(properties: List<Pair<text, Expression>>):
+    me compile_object(properties: [Pair<text, Expression>]):
         self.emit(OpCode.NewObject)
         var i = 0
         while i < properties.len():

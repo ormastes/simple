@@ -51,14 +51,18 @@ impl super::LlvmBackend {
 
     /// Get actual LLVM BasicTypeEnum for a TypeId (feature-gated)
     ///
-    /// For native-build (bootstrap), ALL values are represented as i64 to match
-    /// the Simple runtime's tagged-pointer scheme. This mirrors the Cranelift
-    /// backend which also uses i64 for everything.
+    /// For native-build (bootstrap), ALL values are represented as a single
+    /// integer whose width matches the target's RuntimeValue:
+    /// - 64-bit targets: i64 (tagged 64-bit value)
+    /// - 32-bit targets: i32 (tagged 32-bit value)
+    ///
+    /// The C runtime defines `typedef int64_t RuntimeValue` on 64-bit and
+    /// `typedef int32_t RuntimeValue` on 32-bit (e.g. RV32). Using the
+    /// matching width avoids calling-convention mismatches where the LLVM
+    /// backend would pass i64 in two registers (a0+a1 on RV32) but the C
+    /// function expects a single-register i32 argument.
     #[cfg(feature = "llvm")]
     pub(super) fn llvm_type(&self, _ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
-        // Simple runtime uses i64 for all values (tagged pointers).
-        // Using i64 uniformly avoids type mismatches between the LLVM backend
-        // and the runtime's C ABI (all functions are fn(i64, ...) -> i64).
-        Ok(self.context.i64_type().into())
+        Ok(self.runtime_int_type().into())
     }
 }

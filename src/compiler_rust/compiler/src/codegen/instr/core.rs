@@ -144,20 +144,12 @@ pub(crate) fn compile_binop<M: Module>(
         BinOp::ShiftLeft => {
             let li = ensure_i64(builder, lhs);
             let ri = ensure_i64(builder, rhs);
-            // Shift amount may be tagged (value << 3 from BoxInt). Untag it.
-            // The left operand is kept as-is (may be raw or tagged — the shift
-            // result inherits the same scale, which is correct for both cases).
-            let three = builder.ins().iconst(types::I64, 3);
-            let ri_raw = builder.ins().ushr(ri, three);
-            builder.ins().ishl(li, ri_raw)
+            builder.ins().ishl(li, ri)
         }
         BinOp::ShiftRight => {
             let li = ensure_i64(builder, lhs);
             let ri = ensure_i64(builder, rhs);
-            // Shift amount may be tagged (value << 3 from BoxInt). Untag it.
-            let three = builder.ins().iconst(types::I64, 3);
-            let ri_raw = builder.ins().ushr(ri, three);
-            builder.ins().sshr(li, ri_raw)
+            builder.ins().sshr(li, ri)
         }
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
             if is_float {

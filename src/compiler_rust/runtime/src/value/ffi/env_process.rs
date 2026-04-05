@@ -920,6 +920,80 @@ pub extern "C" fn rt_term_enable_ansi() -> RuntimeValue {
     RuntimeValue::from_bool(true)
 }
 
+/// Get terminal size as (columns, rows) tuple.
+/// Returns (80, 24) as fallback if detection fails.
+/// Callable from Simple as: `rt_term_get_size()`
+#[no_mangle]
+pub extern "C" fn rt_term_get_size() -> RuntimeValue {
+    let (cols, rows) = get_terminal_size_native();
+    unsafe {
+        let tuple = super::super::collections::rt_tuple_new(2);
+        super::super::collections::rt_tuple_set(tuple, 0, RuntimeValue::from_int(cols as i64));
+        super::super::collections::rt_tuple_set(tuple, 1, RuntimeValue::from_int(rows as i64));
+        tuple
+    }
+}
+
+fn get_terminal_size_native() -> (i32, i32) {
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Winsize {
+            ws_row: u16,
+            ws_col: u16,
+            ws_xpixel: u16,
+            ws_ypixel: u16,
+        }
+        extern "C" {
+            fn ioctl(fd: i32, request: u64, ...) -> i32;
+        }
+        // TIOCGWINSZ value varies by platform
+        #[cfg(target_os = "macos")]
+        const TIOCGWINSZ: u64 = 0x40087468;
+        #[cfg(target_os = "linux")]
+        const TIOCGWINSZ: u64 = 0x5413;
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        const TIOCGWINSZ: u64 = 0x5413; // Linux default for other Unix
+        unsafe {
+            let mut ws = std::mem::MaybeUninit::<Winsize>::zeroed().assume_init();
+            if ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+                return (ws.ws_col as i32, ws.ws_row as i32);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        extern "system" {
+            fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfoNative) -> i32;
+        }
+        #[repr(C)]
+        struct CoordNative { x: i16, y: i16 }
+        #[repr(C)]
+        struct SmallRectNative { left: i16, top: i16, right: i16, bottom: i16 }
+        #[repr(C)]
+        struct ConsoleScreenBufferInfoNative {
+            size: CoordNative,
+            cursor_position: CoordNative,
+            attributes: u16,
+            window: SmallRectNative,
+            maximum_window_size: CoordNative,
+        }
+        let handle = std::io::stdout().as_raw_handle() as isize;
+        unsafe {
+            let mut info = std::mem::MaybeUninit::<ConsoleScreenBufferInfoNative>::zeroed().assume_init();
+            if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+                let cols = info.window.right - info.window.left + 1;
+                let rows = info.window.bottom - info.window.top + 1;
+                if cols > 0 && rows > 0 {
+                    return (cols as i32, rows as i32);
+                }
+            }
+        }
+    }
+    (80, 24)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

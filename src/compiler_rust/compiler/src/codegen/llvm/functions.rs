@@ -78,7 +78,7 @@ impl LlvmBackend {
         // Get the function that was forward-declared in the compile() pass
         // If it doesn't exist, create it (for backwards compatibility)
         let function = module.get_function(resolved_name).unwrap_or_else(|| {
-            let i64_type = self.context.i64_type();
+            let i64_type = self.runtime_int_type();
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 func.params.iter().map(|_| i64_type.into()).collect();
             let fn_type = i64_type.fn_type(&param_types, false);
@@ -154,7 +154,7 @@ impl LlvmBackend {
             }
 
             // Create allocas for all vregs (for cross-block SSA correctness)
-            let i64_type = self.context.i64_type();
+            let i64_type = self.runtime_int_type();
             for vreg in &all_vregs {
                 let alloca = builder
                     .build_alloca(i64_type, &format!("v{}", vreg.0))
@@ -233,7 +233,7 @@ impl LlvmBackend {
                 }
 
                 // Load only live-in vregs from allocas
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 for vreg in &live_in {
                     if let Some(&alloca) = vreg_allocas.get(vreg) {
                         if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
@@ -255,25 +255,32 @@ impl LlvmBackend {
                 // Store any newly defined vreg to its alloca (for cross-block access)
                 if let Some(d) = inst.dest() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
-                        // Coerce value to i64 before storing (alloca is i64 type)
-                        let i64_type = self.context.i64_type();
+                        // Coerce value to RuntimeValue int width before storing
+                        let rv_type = self.runtime_int_type();
+                        let rv_width = rv_type.get_bit_width();
                         let i64_val = match val {
                             inkwell::values::BasicValueEnum::IntValue(iv) => {
-                                if iv.get_type().get_bit_width() == 64 {
+                                let bw = iv.get_type().get_bit_width();
+                                if bw == rv_width {
                                     val
+                                } else if bw < rv_width {
+                                    builder
+                                        .build_int_z_extend(iv, rv_type, "vext")
+                                        .map(|v| v.into())
+                                        .unwrap_or(val)
                                 } else {
                                     builder
-                                        .build_int_z_extend(iv, i64_type, "vext")
+                                        .build_int_truncate(iv, rv_type, "vtrunc")
                                         .map(|v| v.into())
                                         .unwrap_or(val)
                                 }
                             }
                             inkwell::values::BasicValueEnum::PointerValue(pv) => builder
-                                .build_ptr_to_int(pv, i64_type, "vp2i")
+                                .build_ptr_to_int(pv, rv_type, "vp2i")
                                 .map(|v| v.into())
                                 .unwrap_or(val),
                             inkwell::values::BasicValueEnum::FloatValue(fv) => builder
-                                .build_float_to_signed_int(fv, i64_type, "vf2i")
+                                .build_float_to_signed_int(fv, rv_type, "vf2i")
                                 .map(|v| v.into())
                                 .unwrap_or(val),
                             _ => val,
@@ -339,7 +346,7 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, *val);
                 } else {
                     // Source vreg undefined — insert default i64(0) to prevent cascade failures
-                    let default_val = self.context.i64_type().const_int(0, false);
+                    let default_val = self.runtime_int_type().const_int(0, false);
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
@@ -380,7 +387,7 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, (*alloca).into());
                 } else {
                     // Unknown local index — create a temporary alloca as fallback
-                    let i64_type = self.context.i64_type();
+                    let i64_type = self.runtime_int_type();
                     let alloca = builder
                         .build_alloca(i64_type, &format!("local_{}", local_index))
                         .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
@@ -556,7 +563,7 @@ impl LlvmBackend {
 
             // GPU memory load/store (not used in LLVM AOT path — stub)
             MirInst::GpuLoadF64 { dest, .. } | MirInst::GpuLoadI64 { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             MirInst::GpuStoreF64 { .. } | MirInst::GpuStoreI64 { .. } => {}
@@ -591,7 +598,7 @@ impl LlvmBackend {
             | MirInst::VecMinVec { dest, .. }
             | MirInst::VecMaxVec { dest, .. }
             | MirInst::VecClamp { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             // SIMD store instructions (no dest vreg)
@@ -601,7 +608,7 @@ impl LlvmBackend {
             MirInst::PointerNew { dest, .. }
             | MirInst::PointerRef { dest, .. }
             | MirInst::PointerDeref { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
 
@@ -612,7 +619,7 @@ impl LlvmBackend {
 
             // Pattern matching
             MirInst::PatternTest { dest, subject, pattern } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let subject_val = self.get_vreg_val(subject, vreg_map, i64_type);
                 let result = match pattern {
                     crate::mir::MirPattern::Wildcard | crate::mir::MirPattern::Binding(_) => {
@@ -756,7 +763,7 @@ impl LlvmBackend {
             }
 
             MirInst::PatternBind { dest, subject, binding } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let subject_val = self.get_vreg_val(subject, vreg_map, i64_type);
                 let result = if binding.path.is_empty() {
                     subject_val
@@ -803,7 +810,7 @@ impl LlvmBackend {
 
             // Enum instructions
             MirInst::EnumDiscriminant { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let val = vreg_map
                     .get(value)
                     .copied()
@@ -821,7 +828,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
             MirInst::EnumPayload { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let val = vreg_map
                     .get(value)
                     .copied()
@@ -840,7 +847,7 @@ impl LlvmBackend {
             }
             MirInst::EnumUnit { dest, variant_name, .. } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -875,7 +882,7 @@ impl LlvmBackend {
                 payload,
                 ..
             } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -908,7 +915,7 @@ impl LlvmBackend {
             }
             // Union instructions — use same enum runtime functions
             MirInst::UnionDiscriminant { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let val = vreg_map
                     .get(value)
                     .copied()
@@ -926,7 +933,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
             MirInst::UnionPayload { dest, value, .. } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let val = vreg_map
                     .get(value)
                     .copied()
@@ -948,7 +955,7 @@ impl LlvmBackend {
                 value,
                 type_index,
             } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -977,7 +984,7 @@ impl LlvmBackend {
             | MirInst::ActorJoin { dest, .. }
             | MirInst::GeneratorCreate { dest, .. }
             | MirInst::GeneratorNext { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             // Async instructions without dest vreg
@@ -985,7 +992,7 @@ impl LlvmBackend {
 
             // Error handling instructions — use rt_enum_new for proper enum representation
             MirInst::OptionSome { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -1016,7 +1023,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
             MirInst::OptionNone { dest } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -1047,7 +1054,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
             MirInst::ResultOk { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -1078,7 +1085,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
             MirInst::ResultErr { dest, value } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 let i32_t = self.context.i32_type();
                 let disc = {
                     use std::collections::hash_map::DefaultHasher;
@@ -1114,7 +1121,7 @@ impl LlvmBackend {
                 error_block: _,
                 error_dest: _,
             } => {
-                let i64_t = self.context.i64_type();
+                let i64_t = self.runtime_int_type();
                 // Extract payload from Result/Option enum
                 let val = vreg_map
                     .get(value)
@@ -1136,7 +1143,7 @@ impl LlvmBackend {
             // Contract instructions (not yet implemented)
             MirInst::ContractCheck { .. } => {}
             MirInst::ContractOldCapture { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
 
@@ -1148,13 +1155,13 @@ impl LlvmBackend {
             // Unit type instructions (not yet implemented)
             MirInst::UnitBoundCheck { .. } => {}
             MirInst::UnitWiden { dest, .. } | MirInst::UnitNarrow { dest, .. } | MirInst::UnitSaturate { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
 
             // Parallel iterator instructions (not yet implemented)
             MirInst::ParMap { dest, .. } | MirInst::ParReduce { dest, .. } | MirInst::ParFilter { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             MirInst::ParForEach { .. } => {}
@@ -1163,7 +1170,7 @@ impl LlvmBackend {
             // TAG_INT = 0b000, from_int(i) = i << 3, as_int() = val >> 3
             MirInst::BoxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let int_val = self
                     .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
@@ -1174,7 +1181,7 @@ impl LlvmBackend {
             }
             MirInst::UnboxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let int_val = self
                     .coerce_value_to_type(val, Some(i64_type.into()), builder)?
                     .into_int_value();
@@ -1186,7 +1193,7 @@ impl LlvmBackend {
             MirInst::BoxFloat { dest, value } => {
                 // Box float: (bits >> 3) << 3 | TAG_FLOAT(2)
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let three = i64_type.const_int(3, false);
                 let tag_float = i64_type.const_int(2, false);
                 // Convert float to bits (i64)
@@ -1213,7 +1220,7 @@ impl LlvmBackend {
             MirInst::UnboxFloat { dest, value } => {
                 // Unbox float: extract bits and shift back
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let f64_type = self.context.f64_type();
                 let three = i64_type.const_int(3, false);
                 let int_val = self
@@ -1232,12 +1239,12 @@ impl LlvmBackend {
             }
 
             MirInst::Spread { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             MirInst::FStringFormat { dest, parts } => {
                 use crate::mir::FStringPart;
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
 
                 // Declare runtime functions — all i64 to match tagged-value ABI
                 let string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
@@ -1340,7 +1347,7 @@ impl LlvmBackend {
             MirInst::MethodCallVirtual {
                 dest, receiver, args, ..
             } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let mut all_args = vec![*receiver];
                 all_args.extend_from_slice(args);
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -1361,7 +1368,7 @@ impl LlvmBackend {
                 func_name,
                 args,
             } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
 
                 // Extract plain method name from qualified name (e.g., "text.len" -> "len")
                 let method = func_name.rsplit('.').next().unwrap_or(func_name);
@@ -1600,7 +1607,7 @@ impl LlvmBackend {
                 ..
             } => {
                 // Map builtin method calls to runtime functions (matching Cranelift backend)
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let receiver_val = self.get_vreg(receiver, vreg_map)?;
                 let receiver_i64 = self.coerce_value_to_type(receiver_val, Some(i64_type.into()), builder)?;
 
@@ -1715,7 +1722,7 @@ impl LlvmBackend {
                 ..
             } => {
                 // Compile as ClassName.method_name(receiver?, args...)
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let full_name = format!("{}.{}", class_name, method_name);
                 let mut all_args: Vec<crate::mir::VReg> = Vec::new();
                 if let Some(r) = receiver {
@@ -1803,7 +1810,7 @@ impl LlvmBackend {
 
             // Global variable access
             MirInst::GlobalLoad { dest, global_name, ty } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 // Look up global variable, or create one
                 let global = module.get_global(global_name).unwrap_or_else(|| {
                     let g = module.add_global(i64_type, None, global_name);
@@ -1817,7 +1824,7 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, loaded);
             }
             MirInst::GlobalStore { global_name, value, ty } => {
-                let i64_type = self.context.i64_type();
+                let i64_type = self.runtime_int_type();
                 let val = self.get_vreg(value, vreg_map)?;
                 let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                 let global = module.get_global(global_name).unwrap_or_else(|| {
@@ -1830,12 +1837,12 @@ impl LlvmBackend {
             }
             // Advanced memory instructions (not yet implemented — insert default dest values)
             MirInst::GetElementPtr { dest, .. } | MirInst::NeighborLoad { dest, .. } => {
-                let default_val = self.context.i64_type().const_int(0, false);
+                let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
             MirInst::Wait { dest, .. } => {
                 if let Some(d) = dest {
-                    let default_val = self.context.i64_type().const_int(0, false);
+                    let default_val = self.runtime_int_type().const_int(0, false);
                     vreg_map.insert(*d, default_val.into());
                 }
             }
@@ -1858,7 +1865,7 @@ impl LlvmBackend {
         Ok(vreg_map
             .get(vreg)
             .copied()
-            .unwrap_or_else(|| self.context.i64_type().const_int(0, false).into()))
+            .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into()))
     }
 
     #[cfg(feature = "llvm")]
