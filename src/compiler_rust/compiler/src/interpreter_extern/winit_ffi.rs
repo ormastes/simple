@@ -17,6 +17,8 @@ use winit::window::{Fullscreen, Window, WindowLevel};
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
 use winit::platform::x11::EventLoopBuilderExtX11;
+#[cfg(target_os = "macos")]
+use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 
 use super::common::error_utils::{runtime_error, unknown_function, wrong_arg_count, wrong_arg_type};
 
@@ -359,54 +361,108 @@ fn mouse_button_to_simple(button: winit::event::MouseButton) -> i64 {
     }
 }
 
+/// macOS main-thread pump state for non-blocking event processing.
+/// Uses thread_local because EventLoop is !Send on macOS (Cocoa requirement).
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
+
+#[cfg(target_os = "macos")]
+struct MacOSPumpState {
+    event_loop: EventLoop<UserEvent>,
+    state: ThreadState,
+    event_loop_id: i64,
+    proxy: EventLoopProxy<UserEvent>,
+    command_rx: crossbeam::channel::Receiver<RuntimeCommand>,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static MACOS_PUMP_STATE: RefCell<Option<MacOSPumpState>> = RefCell::new(None);
+}
+
 fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, CompileError> {
     let (command_tx, command_rx) = crossbeam::channel::unbounded::<RuntimeCommand>();
     let (event_tx, event_rx) = crossbeam::channel::unbounded::<RuntimeEvent>();
-    let (ready_tx, ready_rx) = crossbeam::channel::bounded::<Result<(), String>>(1);
 
-    thread::Builder::new()
-        .name(format!("simple-winit-{event_loop_id}"))
-        .spawn(move || {
-            let mut builder = EventLoop::<UserEvent>::with_user_event();
-            #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
-            {
-                EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
-                EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
-            }
-            let event_loop = match builder.build() {
-                Ok(loop_handle) => loop_handle,
-                Err(err) => {
-                    let _ = ready_tx.send(Err(format!("failed to create event loop: {err:?}")));
-                    return;
-                }
-            };
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: Create EventLoop on main thread, use pump_app_events for non-blocking
+        let mut builder = EventLoop::<UserEvent>::with_user_event();
+        let event_loop = builder
+            .build()
+            .map_err(|err| runtime_error(format!("failed to create event loop: {err:?}")))?;
 
-            let proxy = event_loop.create_proxy();
-            let _ = ready_tx.send(Ok(()));
+        let proxy = event_loop.create_proxy();
 
-            thread::spawn(move || forward_commands(command_rx, proxy));
+        let state = ThreadState {
+            next_window_id: 1,
+            windows: HashMap::new(),
+            event_tx,
+        };
 
-            let mut state = ThreadState {
-                next_window_id: 1,
-                windows: HashMap::new(),
-                event_tx,
-            };
-
-            let _ = event_loop.run(move |event, target| match event {
-                Event::UserEvent(UserEvent::Command(command)) => {
-                    handle_command(command, event_loop_id, &mut state, target)
-                }
-                Event::WindowEvent { window_id, event } => handle_window_event(window_id, event, &state),
-                Event::AboutToWait => {}
-                _ => {}
+        MACOS_PUMP_STATE.with(|cell| {
+            *cell.borrow_mut() = Some(MacOSPumpState {
+                event_loop,
+                state,
+                event_loop_id,
+                proxy,
+                command_rx,
             });
-        })
-        .map_err(|err| runtime_error(format!("failed to spawn event loop thread: {err}")))?;
+        });
 
-    match ready_rx.recv() {
-        Ok(Ok(())) => Ok(EventLoopHandle { command_tx, event_rx }),
-        Ok(Err(err)) => Err(runtime_error(err)),
-        Err(err) => Err(runtime_error(format!("failed to initialize event loop: {err}"))),
+        return Ok(EventLoopHandle { command_tx, event_rx });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (ready_tx, ready_rx) = crossbeam::channel::bounded::<Result<(), String>>(1);
+
+        thread::Builder::new()
+            .name(format!("simple-winit-{event_loop_id}"))
+            .spawn(move || {
+                let mut builder = EventLoop::<UserEvent>::with_user_event();
+                #[cfg(all(target_os = "linux", not(target_family = "wasm")))]
+                {
+                    EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
+                    EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
+                }
+                let event_loop = match builder.build() {
+                    Ok(loop_handle) => loop_handle,
+                    Err(err) => {
+                        let _ = ready_tx.send(Err(format!("failed to create event loop: {err:?}")));
+                        return;
+                    }
+                };
+
+                let proxy = event_loop.create_proxy();
+                let _ = ready_tx.send(Ok(()));
+
+                thread::spawn(move || forward_commands(command_rx, proxy));
+
+                let mut state = ThreadState {
+                    next_window_id: 1,
+                    windows: HashMap::new(),
+                    event_tx,
+                };
+
+                let _ = event_loop.run(move |event, target| match event {
+                    Event::UserEvent(UserEvent::Command(command)) => {
+                        handle_command(command, event_loop_id, &mut state, target)
+                    }
+                    Event::WindowEvent { window_id, event } => {
+                        handle_window_event(window_id, event, &state)
+                    }
+                    Event::AboutToWait => {}
+                    _ => {}
+                });
+            })
+            .map_err(|err| runtime_error(format!("failed to spawn event loop thread: {err}")))?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(EventLoopHandle { command_tx, event_rx }),
+            Ok(Err(err)) => Err(runtime_error(err)),
+            Err(err) => Err(runtime_error(format!("failed to initialize event loop: {err}"))),
+        }
     }
 }
 
@@ -684,6 +740,113 @@ fn event_window_id(event: &RuntimeEvent) -> i64 {
     }
 }
 
+/// macOS: Pump winit events on the main thread (non-blocking).
+#[cfg(target_os = "macos")]
+fn macos_pump_events(event_loop_id: i64) {
+    MACOS_PUMP_STATE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(ps) = borrow.as_mut() {
+            if ps.event_loop_id == event_loop_id {
+                // Forward pending commands
+                while let Ok(cmd) = ps.command_rx.try_recv() {
+                    let _ = ps.proxy.send_event(UserEvent::Command(cmd));
+                }
+                let el_id = ps.event_loop_id;
+                let _ = ps.event_loop.pump_app_events(
+                    Some(std::time::Duration::ZERO),
+                    |event, target| match event {
+                        Event::UserEvent(UserEvent::Command(command)) => {
+                            handle_command(command, el_id, &mut ps.state, target)
+                        }
+                        Event::WindowEvent { window_id, event } => {
+                            handle_window_event(window_id, event, &ps.state)
+                        }
+                        _ => {}
+                    },
+                );
+            }
+        }
+    });
+}
+
+/// macOS: Send a command and pump until response arrives.
+#[cfg(target_os = "macos")]
+fn macos_send_command_and_pump(
+    event_loop_id: i64,
+    make_cmd: impl FnOnce(crossbeam::channel::Sender<Result<(), String>>) -> RuntimeCommand,
+) -> Option<Result<(), String>> {
+    MACOS_PUMP_STATE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let ps = borrow.as_mut()?;
+        if ps.event_loop_id != event_loop_id {
+            return None;
+        }
+        let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+        let cmd = make_cmd(response_tx);
+        let _ = ps.proxy.send_event(UserEvent::Command(cmd));
+        let el_id = ps.event_loop_id;
+        // Pump until we get the response
+        for _ in 0..20 {
+            let _ = ps.event_loop.pump_app_events(
+                Some(std::time::Duration::from_millis(50)),
+                |event, target| match event {
+                    Event::UserEvent(UserEvent::Command(command)) => {
+                        handle_command(command, el_id, &mut ps.state, target)
+                    }
+                    Event::WindowEvent { window_id, event } => {
+                        handle_window_event(window_id, event, &ps.state)
+                    }
+                    _ => {}
+                },
+            );
+            if let Ok(result) = response_rx.try_recv() {
+                return Some(result);
+            }
+        }
+        Some(Err("timeout waiting for command response".into()))
+    })
+}
+
+/// macOS: Create a window directly via pump (CreateWindow has i64 response, not ()).
+#[cfg(target_os = "macos")]
+fn macos_create_window(event_loop_id: i64, config: WindowConfig) -> Option<Result<Value, CompileError>> {
+    MACOS_PUMP_STATE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let ps = borrow.as_mut()?;
+        if ps.event_loop_id != event_loop_id {
+            return None;
+        }
+        let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+        let cmd = RuntimeCommand::CreateWindow { config, response: response_tx };
+        let _ = ps.proxy.send_event(UserEvent::Command(cmd));
+        let el_id = ps.event_loop_id;
+        for _ in 0..20 {
+            let _ = ps.event_loop.pump_app_events(
+                Some(std::time::Duration::from_millis(50)),
+                |event, target| match event {
+                    Event::UserEvent(UserEvent::Command(command)) => {
+                        handle_command(command, el_id, &mut ps.state, target)
+                    }
+                    Event::WindowEvent { window_id, event } => {
+                        handle_window_event(window_id, event, &ps.state)
+                    }
+                    _ => {}
+                },
+            );
+            if let Ok(result) = response_rx.try_recv() {
+                return Some(match result {
+                    Ok(window_id) => Ok(int_value(window_id)),
+                    Err(err) => {
+                        set_last_error(err);
+                        Ok(int_value(0))
+                    }
+                });
+            }
+        }
+        Some(Ok(int_value(0)))
+    })
+}
+
 pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
     match name {
         "rt_winit_event_loop_new" => {
@@ -708,6 +871,13 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         "rt_winit_event_loop_poll_events" => {
             let event_loop_id = get_i64(args, 0, name)?;
             let _max_events = get_i64(args, 1, name)?;
+
+            // macOS: pump the event loop on the main thread before reading events
+            #[cfg(target_os = "macos")]
+            {
+                macos_pump_events(event_loop_id);
+            }
+
             let loops = EVENT_LOOPS.lock();
             if let Some(handle) = loops.get(&event_loop_id) {
                 match handle.event_rx.try_recv() {
@@ -742,6 +912,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             config.width = get_i64(args, 1, name)?.max(1) as u32;
             config.height = get_i64(args, 2, name)?.max(1) as u32;
             config.title = get_string(args, 3, name)?;
+
+            // macOS: handle window creation directly on main thread via pump
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(result) = macos_create_window(event_loop_id, config) {
+                    return result;
+                }
+            }
 
             let loops = EVENT_LOOPS.lock();
             let Some(handle) = loops.get(&event_loop_id) else {
@@ -828,6 +1006,25 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             let width = get_i64(args, 1, name)?.max(1) as u32;
             let height = get_i64(args, 2, name)?.max(1) as u32;
             let pixels = get_pixels(args, 3, name)?;
+
+            // macOS: handle present directly via pump
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(event_loop_id) = WINDOW_OWNERS.lock().get(&window_id).copied() {
+                    if let Some(result) = macos_send_command_and_pump(event_loop_id, |response_tx| {
+                        RuntimeCommand::Present { window_id, width, height, pixels: pixels.clone(), response: response_tx }
+                    }) {
+                        return match result {
+                            Ok(()) => Ok(bool_value(true)),
+                            Err(err) => {
+                                set_last_error(err);
+                                Ok(bool_value(false))
+                            }
+                        };
+                    }
+                }
+            }
+
             if let Some(event_loop_id) = WINDOW_OWNERS.lock().get(&window_id).copied() {
                 if let Some(handle) = EVENT_LOOPS.lock().get(&event_loop_id) {
                     let (response_tx, response_rx) = crossbeam::channel::bounded(1);
