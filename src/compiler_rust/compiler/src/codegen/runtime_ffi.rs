@@ -408,6 +408,40 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dyn_torch_tensor_from_bits_1d", &[I64, I64], &[I64]),
     // =========================================================================
+    // Port I/O (baremetal x86 — classified as Core by tier_of fallthrough)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_port_inb", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_outb", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_inw", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_outw", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_inl", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_outl", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_port_io_wait", &[], &[I64]),
+    // =========================================================================
+    // CPU control registers / interrupts (baremetal — Core tier)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_cli", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_sti", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_hlt", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_lgdt", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_lidt", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ltr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_read_cr2", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_read_cr3", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_write_cr3", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_invlpg", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_read_msr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_write_msr", &[I64, I64], &[I64]),
+    // =========================================================================
+    // MMIO (memory-mapped I/O — Core tier for baremetal device drivers)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_mmio_read_u8", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_write_u8", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_read_u16", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_write_u16", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_read_u32", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmio_write_u32", &[I64, I64], &[I64]),
+    // =========================================================================
     // Async/concurrency operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_wait", &[I64], &[I64]),

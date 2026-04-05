@@ -259,9 +259,9 @@ pub(crate) fn adapt_args_to_signature(
             if actual_ty == expected_ty {
                 adapted.push(val);
             } else if actual_ty.is_int() && expected_ty.is_int() {
-                // Integer width conversion
+                // Integer width conversion (uextend preserves unsigned semantics)
                 if actual_ty.bits() < expected_ty.bits() {
-                    adapted.push(builder.ins().sextend(expected_ty, val));
+                    adapted.push(builder.ins().uextend(expected_ty, val));
                 } else {
                     adapted.push(builder.ins().ireduce(expected_ty, val));
                 }
@@ -453,11 +453,12 @@ pub fn compile_call<M: Module>(
                 // but all vregs are expected to be i64
                 if let Some(ret_type) = get_runtime_return_type(ffi_name) {
                     if ret_type == types::I32 {
-                        // Sign-extend i32 to i64 (for exit codes and status values)
-                        result = builder.ins().sextend(types::I64, result);
+                        // Zero-extend i32 to i64 (preserves unsigned semantics —
+                        // sextend would turn u16 0xFFFF into -1 via i32→i64)
+                        result = builder.ins().uextend(types::I64, result);
                     } else if ret_type == types::I8 {
-                        // Sign-extend i8 to i64
-                        result = builder.ins().sextend(types::I64, result);
+                        // Zero-extend i8 to i64
+                        result = builder.ins().uextend(types::I64, result);
                     }
                 }
 

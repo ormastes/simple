@@ -4489,13 +4489,13 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return val;
 }
 
-/* rt_array_len: return raw array length (Cranelift raw convention) */
+/* rt_array_len: return ENCODE_INT — callers expect tagged integer */
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return 0;
+    if (!IS_HEAP(arr)) return ENCODE_INT(0);
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
-    return (RuntimeValue)a->len;
+    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    return ENCODE_INT(a->len);
 }
 /* rt_array_slice(arr, start, end) — return sub-array */
 RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end)

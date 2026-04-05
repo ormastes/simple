@@ -104,6 +104,16 @@ typedef struct { HeapHeader header; uint32_t len; uint32_t cap; RuntimeValue dat
 #define HEAP_TYPE_STRING  1
 #define HEAP_TYPE_ARRAY   2
 #define HEAP_TYPE_OBJECT  3
+#define HEAP_TYPE_ENUM    7
+
+#define IS_NIL(v) ((v) == NIL_VALUE)
+
+typedef struct {
+    HeapHeader   header;
+    uint32_t     enum_id;
+    uint32_t     discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
 
 /* ================================================================
  * 3. Heap allocator -- 4MB bump allocator, 8-byte aligned
@@ -475,8 +485,10 @@ RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) {
  * ================================================================ */
 
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
-    int32_t cap = DECODE_INT(cap_val);
-    if (cap < 4) cap = 4;
+    int32_t cap = (int32_t)cap_val;  /* RAW -- not DECODE_INT */
+    if (cap <= 0) cap = 64;
+    if (cap < 64) cap = 64;
+    if (cap > 0x100000) cap = 0x100000;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->header.type = HEAP_TYPE_ARRAY;
@@ -803,6 +815,60 @@ void _boot_init(void) {
     serial_puts(" devices found\r\n");
 
     serial_puts("[BOOT] Calling spl_start()...\r\n");
+}
+
+/* ================================================================
+ * 14b. Enum / Optional / Result operations
+ * ================================================================ */
+
+RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
+{
+    RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
+    if (!e) return NIL_VALUE;
+    e->header.type = HEAP_TYPE_ENUM;
+    e->header.size = (uint32_t)sizeof(RuntimeEnum);
+    e->enum_id = (uint32_t)(int32_t)enum_id_rv;
+    e->discriminant = (uint32_t)(int32_t)disc_rv;
+    e->payload = payload;
+    return ENCODE_PTR(e);
+}
+
+RuntimeValue rt_enum_discriminant(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return -1;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->header.type != HEAP_TYPE_ENUM) return -1;
+    return (RuntimeValue)(int32_t)e->discriminant;
+}
+
+RuntimeValue rt_enum_payload(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return NIL_VALUE;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->header.type != HEAP_TYPE_ENUM) return NIL_VALUE;
+    return e->payload;
+}
+
+RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expected)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->header.type != HEAP_TYPE_ENUM) return 0;
+    return (e->discriminant == (uint32_t)(int32_t)expected) ? 1 : 0;
+}
+
+RuntimeValue rt_is_none(RuntimeValue value)
+{
+    if (IS_NIL(value)) return 1;
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->header.type != HEAP_TYPE_ENUM) return 0;
+    return IS_NIL(e->payload) ? 1 : 0;
+}
+
+RuntimeValue rt_is_some(RuntimeValue value)
+{
+    return rt_is_none(value) ? 0 : 1;
 }
 
 /* ================================================================

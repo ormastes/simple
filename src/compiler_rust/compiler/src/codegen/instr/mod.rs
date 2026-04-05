@@ -1009,7 +1009,7 @@ pub fn compile_instruction<M: Module>(
             // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns)
             let val_type = builder.func.dfg.value_type(val);
             if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
-                val = builder.ins().sextend(types::I64, val);
+                val = builder.ins().uextend(types::I64, val);
             }
             let three = builder.ins().iconst(types::I64, 3);
             let boxed = builder.ins().ishl(val, three);

@@ -167,6 +167,14 @@ typedef struct {
 #define HEAP_ARRAY  2
 #define HEAP_MAP    3
 #define HEAP_OBJECT 4
+#define HEAP_ENUM   7
+
+typedef struct {
+    HeapHeader   hdr;
+    uint32_t     enum_id;
+    uint32_t     discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
 
 typedef struct {
     HeapHeader    hdr;
@@ -241,11 +249,15 @@ void *calloc(size_t n, size_t sz)
 
 RuntimeValue rt_alloc(RuntimeValue sz)
 {
-    size_t bytes = (size_t)DECODE_INT(sz);
-    if (bytes == 0 || bytes > 0x1000000) bytes = (size_t)sz; /* fallback to raw */
+    /* compile_struct_init passes RAW size (not tagged): iconst.i64 16
+     * Return RAW pointer -- codegen uses it directly for store(val, ptr, offset). */
+    size_t bytes = (size_t)sz;
+    if (bytes == 0) return 0;
+    if (bytes > 0x1000000) bytes = 0x1000000;
     void *p = malloc(bytes);
-    if (!p) return NIL_VALUE;
-    return ENCODE_PTR(p);
+    if (!p) return 0;
+    __builtin_memset(p, 0, bytes);
+    return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
@@ -1323,8 +1335,9 @@ RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
 
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
-    int64_t cap = DECODE_INT(cap_val);
-    if (cap <= 0) cap = 4;
+    int64_t cap = (int64_t)cap_val;  /* RAW -- not DECODE_INT */
+    if (cap <= 0) cap = 64;
+    if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -1340,14 +1353,9 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (a->len >= a->cap) {
-        uint32_t new_cap = a->cap * 2; if (new_cap < 8) new_cap = 8;
-        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        RuntimeArray *na = (RuntimeArray *)malloc(new_size);
-        if (!na) return NIL_VALUE;
-        na->hdr.type = HEAP_ARRAY; na->hdr.size = (uint32_t)new_size; na->len = a->len; na->cap = new_cap;
-        for (uint32_t i = 0; i < a->len; i++) na->items[i] = a->items[i];
-        for (uint32_t i = a->len; i < new_cap; i++) na->items[i] = NIL_VALUE;
-        a = na;
+        /* At capacity -- cannot grow (flexible array member can't be resized in-place).
+         * Silently drop. Initial capacity should be large enough for the use case. */
+        return ENCODE_PTR(a);
     }
     a->items[a->len] = val; a->len++;
     return ENCODE_PTR(a);
@@ -1476,6 +1484,60 @@ RuntimeValue rt_array_clone(RuntimeValue arr) {
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
+
+/* ===================================================================
+ * 9b. Enum / Optional / Result operations
+ * =================================================================== */
+
+RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
+{
+    RuntimeEnum *e = (RuntimeEnum *)malloc(sizeof(RuntimeEnum));
+    if (!e) return NIL_VALUE;
+    e->hdr.type = HEAP_ENUM;
+    e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
+    e->enum_id = (uint32_t)(int32_t)enum_id_rv;
+    e->discriminant = (uint32_t)(int32_t)disc_rv;
+    e->payload = payload;
+    return ENCODE_PTR(e);
+}
+
+RuntimeValue rt_enum_discriminant(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return -1;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return -1;
+    return (RuntimeValue)(int64_t)e->discriminant;
+}
+
+RuntimeValue rt_enum_payload(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return NIL_VALUE;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return NIL_VALUE;
+    return e->payload;
+}
+
+RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expected)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return (e->discriminant == (uint32_t)(int32_t)expected) ? 1 : 0;
+}
+
+RuntimeValue rt_is_none(RuntimeValue value)
+{
+    if (IS_NIL(value)) return 1;
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return IS_NIL(e->payload) ? 1 : 0;
+}
+
+RuntimeValue rt_is_some(RuntimeValue value)
+{
+    return rt_is_none(value) ? 0 : 1;
+}
 
 /* ===================================================================
  * 10. Map/Dict operations

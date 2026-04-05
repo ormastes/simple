@@ -216,32 +216,155 @@ impl Lowerer {
             }
 
             Node::If(if_stmt) => {
-                let condition = self.lower_expr(&if_stmt.condition, ctx)?;
-                let then_block = self.lower_block(&if_stmt.then_block, ctx)?;
+                if let Some(pattern) = &if_stmt.let_pattern {
+                    // if val Some(x) = expr: / if var Ok(v) = expr:
+                    // Lower as pattern match (same mechanism as match arms)
 
-                let mut else_block = if let Some(eb) = &if_stmt.else_block {
-                    Some(self.lower_block(eb, ctx)?)
-                } else {
-                    None
-                };
+                    // 1. Lower subject (the condition expr is the value to match)
+                    let subject_hir = self.lower_expr(&if_stmt.condition, ctx)?;
+                    let subject_ty = subject_hir.ty;
 
-                for (_elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
-                    let elif_condition = self.lower_expr(elif_cond, ctx)?;
-                    let elif_then = self.lower_block(elif_body, ctx)?;
+                    // 2. Create temp local for subject value
+                    let subject_idx = ctx.locals.len();
+                    ctx.add_local("$if_let_subject".to_string(), subject_ty, Mutability::Immutable);
 
-                    // TODO: Handle elif val/var pattern bindings in HIR lowering
-                    else_block = Some(vec![HirStmt::If {
-                        condition: elif_condition,
-                        then_block: elif_then,
+                    let store_stmt = HirStmt::Let {
+                        local_index: subject_idx,
+                        ty: subject_ty,
+                        value: Some(subject_hir),
+                    };
+
+                    // 3. Generate pattern condition (rt_is_some for Some, etc.)
+                    let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx)?;
+
+                    // 4. Extract + register bindings
+                    let bindings = self.extract_pattern_bindings(pattern, subject_ty);
+                    let is_mut = if_stmt.let_pattern.as_ref().map_or(false, |p| {
+                        matches!(p, Pattern::MutIdentifier(_))
+                    });
+                    let mutability = if is_mut { Mutability::Mutable } else { Mutability::Immutable };
+                    for (name, ty) in &bindings {
+                        ctx.add_local(name.clone(), *ty, mutability);
+                    }
+
+                    // 5. Generate payload extraction stmts (for enum bindings like Some(x))
+                    let mut binding_stmts = Vec::new();
+                    if let Pattern::Enum {
+                        payload: Some(payload_patterns),
+                        ..
+                    } = pattern
+                    {
+                        let binding_type_map: std::collections::HashMap<String, TypeId> =
+                            bindings.iter().cloned().collect();
+
+                        for (i, p) in payload_patterns.iter().enumerate() {
+                            if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
+                                if let Some(local_idx) = ctx.local_map.get(name) {
+                                    let local_idx = *local_idx;
+                                    let binding_ty =
+                                        binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+
+                                    let payload_expr = HirExpr {
+                                        kind: HirExprKind::BuiltinCall {
+                                            name: "rt_enum_payload".to_string(),
+                                            args: vec![HirExpr {
+                                                kind: HirExprKind::Local(subject_idx),
+                                                ty: subject_ty,
+                                            }],
+                                        },
+                                        ty: binding_ty,
+                                    };
+
+                                    let value = if payload_patterns.len() == 1 {
+                                        payload_expr
+                                    } else {
+                                        HirExpr {
+                                            kind: HirExprKind::Index {
+                                                receiver: Box::new(payload_expr),
+                                                index: Box::new(HirExpr {
+                                                    kind: HirExprKind::Integer(i as i64),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: binding_ty,
+                                        }
+                                    };
+                                    binding_stmts.push(HirStmt::Let {
+                                        local_index: local_idx,
+                                        ty: binding_ty,
+                                        value: Some(value),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // 6. Lower then_block with bindings in scope
+                    let mut then_block = Vec::new();
+                    then_block.extend(binding_stmts);
+                    then_block.extend(self.lower_block(&if_stmt.then_block, ctx)?);
+
+                    // 7. Clean up bindings from scope
+                    for (name, _) in &bindings {
+                        ctx.local_map.remove(name);
+                    }
+
+                    // 8. Handle else block (elif branches + else)
+                    let mut else_block = if let Some(eb) = &if_stmt.else_block {
+                        Some(self.lower_block(eb, ctx)?)
+                    } else {
+                        None
+                    };
+
+                    for (elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
+                        let elif_condition = if let Some(ep) = elif_pattern {
+                            self.lower_pattern_condition_stmt(subject_idx, subject_ty, ep, ctx)?
+                        } else {
+                            self.lower_expr(elif_cond, ctx)?
+                        };
+                        let elif_then = self.lower_block(elif_body, ctx)?;
+                        else_block = Some(vec![HirStmt::If {
+                            condition: elif_condition,
+                            then_block: elif_then,
+                            else_block,
+                        }]);
+                    }
+
+                    let mut result = vec![store_stmt];
+                    result.push(HirStmt::If {
+                        condition,
+                        then_block,
                         else_block,
-                    }]);
-                }
+                    });
+                    Ok(result)
+                } else {
+                    // Regular if (no pattern)
+                    let condition = self.lower_expr(&if_stmt.condition, ctx)?;
+                    let then_block = self.lower_block(&if_stmt.then_block, ctx)?;
 
-                Ok(vec![HirStmt::If {
-                    condition,
-                    then_block,
-                    else_block,
-                }])
+                    let mut else_block = if let Some(eb) = &if_stmt.else_block {
+                        Some(self.lower_block(eb, ctx)?)
+                    } else {
+                        None
+                    };
+
+                    for (_elif_pattern, elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
+                        let elif_condition = self.lower_expr(elif_cond, ctx)?;
+                        let elif_then = self.lower_block(elif_body, ctx)?;
+
+                        else_block = Some(vec![HirStmt::If {
+                            condition: elif_condition,
+                            then_block: elif_then,
+                            else_block,
+                        }]);
+                    }
+
+                    Ok(vec![HirStmt::If {
+                        condition,
+                        then_block,
+                        else_block,
+                    }])
+                }
             }
 
             Node::While(while_stmt) => {

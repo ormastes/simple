@@ -129,6 +129,7 @@ pub(crate) fn safe_extend_to_i64(
 
 /// Ensure a value is i64, converting floats via bitcast.
 /// Use this before passing values to functions that expect i64.
+/// Uses uextend (zero-extend) to preserve unsigned semantics.
 pub(crate) fn ensure_i64_for_call(
     builder: &mut FunctionBuilder,
     val: cranelift_codegen::ir::Value,
@@ -137,7 +138,7 @@ pub(crate) fn ensure_i64_for_call(
     if ty == types::I64 {
         val
     } else if ty.is_int() && ty.bits() < 64 {
-        builder.ins().sextend(types::I64, val)
+        builder.ins().uextend(types::I64, val)
     } else if ty == types::F64 {
         builder
             .ins()
@@ -194,10 +195,11 @@ fn adapt_value_to_type(
     if actual_ty == expected_ty {
         return val;
     }
-    // int → int
+    // int → int (use uextend to preserve unsigned semantics —
+    // sextend turns u16 0xFFFF into i64 -1, breaking PCI vendor checks etc.)
     if actual_ty.is_int() && expected_ty.is_int() {
         if actual_ty.bits() < expected_ty.bits() {
-            return builder.ins().sextend(expected_ty, val);
+            return builder.ins().uextend(expected_ty, val);
         } else {
             return builder.ins().ireduce(expected_ty, val);
         }

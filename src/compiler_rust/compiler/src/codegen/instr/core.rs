@@ -19,7 +19,7 @@ use super::{InstrContext, InstrResult};
 fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
     let val_type = builder.func.dfg.value_type(val);
     match val_type {
-        types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
+        types::I8 | types::I16 | types::I32 => builder.ins().uextend(types::I64, val),
         types::F64 => builder
             .ins()
             .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val),

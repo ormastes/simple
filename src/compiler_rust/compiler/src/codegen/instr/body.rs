@@ -33,7 +33,7 @@ fn coerce_to_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Valu
     if ty == types::I64 {
         val
     } else if ty.is_int() && ty.bits() < 64 {
-        builder.ins().sextend(types::I64, val)
+        builder.ins().uextend(types::I64, val)
     } else if ty.is_int() && ty.bits() > 64 {
         builder.ins().ireduce(types::I64, val)
     } else if ty.is_float() {
@@ -469,7 +469,7 @@ pub fn compile_function_body<M: Module>(
                     if let Some(&val) = vreg_values.get(&dest) {
                         let ty = builder.func.dfg.value_type(val);
                         if ty.is_int() && ty.bits() < 64 {
-                            let extended = builder.ins().sextend(types::I64, val);
+                            let extended = builder.ins().uextend(types::I64, val);
                             vreg_values.insert(dest, extended);
                             if let Some(&var) = vreg_vars.get(&dest) {
                                 builder.def_var(var, extended);
@@ -544,7 +544,7 @@ pub fn compile_function_body<M: Module>(
                                 if val_type.bits() > ret_ty.bits() {
                                     builder.ins().ireduce(ret_ty, rv)
                                 } else if val_type.bits() < ret_ty.bits() {
-                                    builder.ins().sextend(ret_ty, rv)
+                                    builder.ins().uextend(ret_ty, rv)
                                 } else {
                                     rv
                                 }
