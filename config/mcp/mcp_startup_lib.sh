@@ -211,12 +211,25 @@ mcp_exec_cached() {
   export SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}"
   export SIMPLE_LOG="${SIMPLE_LOG:-error}"
 
-  # Use cached artifact if it exists and is fresh
+  # Use cached artifact if it exists, is fresh, and is not corrupt (>1KB)
   _mcp_artifact="$_mcp_entry"
+  _mcp_cache_valid=0
   if [ -f "$_mcp_cache_file" ] && [ ! "$_mcp_entry" -nt "$_mcp_cache_file" ] && [ ! "$MCP_RUNTIME" -nt "$_mcp_cache_file" ]; then
-    _mcp_artifact="$_mcp_cache_file"
-  else
-    # Cache stale or missing — background compile for next startup
+    _mcp_cache_size=0
+    if stat -c '%s' "$_mcp_cache_file" >/dev/null 2>&1; then
+      _mcp_cache_size=$(stat -c '%s' "$_mcp_cache_file")
+    else
+      _mcp_cache_size=$(stat -f '%z' "$_mcp_cache_file")
+    fi
+    if [ "$_mcp_cache_size" -gt 1024 ]; then
+      _mcp_cache_valid=1
+      _mcp_artifact="$_mcp_cache_file"
+    else
+      rm -f "$_mcp_cache_file"
+    fi
+  fi
+  if [ "$_mcp_cache_valid" = "0" ]; then
+    # Cache stale, missing, or corrupt — background compile for next startup
     (
       mcp_compile_cached "$_mcp_entry" "$_mcp_cache_file" "$_mcp_lib" || true
     ) &

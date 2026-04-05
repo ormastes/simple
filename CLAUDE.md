@@ -39,6 +39,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
 | **t32** | Installing T32 MCP, CMM LSP plugin setup | `/t32` |
+| **sstack/*** | SStack phase agents (intake, research, arch, spec, implement, refactor, verify, ship) | `/sstack` |
 
 **Usage pattern:** When spawning a Task, include the relevant agent context:
 ```
@@ -65,19 +66,21 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
+| `sstack` | SStack pipeline — 8-phase BDD/TDD + fresh orchestrators + specialized roles (sub-40% context) |
 | `sync` | Pull/rebase/push with file-count safety, worktree-aware |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
 | `impl` | End-to-end implementation workflow from requirements through VCS sync |
 | `agents` | Agent loop iteration patterns and multi-agent team orchestration |
-| `design` | Design patterns, type system |
+| `ui` | TUI/GUI mockup design |
+| `arch` | Architecture + system test design |
+| `design` | Detail design — data structures, algorithms, module interactions |
 | `architecture` | Compiler pipeline, module structure |
-| `research_claude` | Step 1: Local+domain research with agent teams (Claude) |
-| `research_codex` | Step 2: Forked agent research + requirement selection (Codex) |
-| `design_gemini` | Step 3: TUI/GUI design generation (Gemini) |
-| `design_codex` | Step 4: Architecture + system test design (Codex) |
-| `design_claude` | Step 5: SSpec quality + detail design (Claude) |
+| `research` | Step 1: Local+domain research with agent teams (Claude) |
+| `research_codex` | Step 2: Forked agent research + requirement selection (Codex plugin) |
+| `gemini_ui_design` | Step 3: TUI/GUI design generation (Gemini plugin) |
+| `verify` | Production readiness verification (Claude + MCP agent plugin) |
 | `debug` | Debugging, tracing, fault detection |
 | `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
 | `refactor` | Code quality refactoring workflow and verification checklist |
@@ -93,6 +96,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `t32` | TRACE32 setup, `scripts/t32q.shs` container lifecycle, GUI reopen flow, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
+| `sstack` | SStack orchestrator -- Superpowers+GSD+GStack 8-phase pipeline |
 
 **Full Syntax Reference:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`

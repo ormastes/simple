@@ -1,12 +1,13 @@
-# Research Skill (Claude) -- Step 1: Local + Domain Research
+# Research Skill (Claude) — Step 1: Local + Domain Research
+
+See `lib/research_common.md` for shared format and templates.
 
 ## Cooperative Phase
 **Step 1 of 5** in multi-LLM cooperative pipeline.
 - Solo mode: Full research (local + domain + requirements)
-- Cooperative mode: Local research + domain research, then hand off to Codex `$research` (Step 2)
-- See: `doc/guide/llm_cooperative_dev_phase.md`
+- Cooperative mode: Local research + domain research, then hand off to `/research_codex` (Step 2)
 
-**Pipeline:** Step 1 of 5 (research_claude -> research_codex -> design_gemini -> design_codex -> design_claude)
+**Always capture the user's original request verbatim in the research doc under `## User Request`.**
 
 ## Local Implementation Research
 
@@ -27,12 +28,12 @@ Spawn parallel agents:
 ## Domain Research
 
 ### Tools
-- **Playwright CLI:** Web search for external references, API docs, papers
+- **Web Search:** Search for external references, API docs, papers
 - **Obsidian CLI:** Search existing `doc/01_research/domain/` for prior work
 
 ### Workflow
 1. Search existing research docs for prior analysis
-2. Web search via Playwright for external knowledge
+2. Web search for external knowledge
 3. Synthesize into research document
 
 ### Output
@@ -44,18 +45,5 @@ Generate draft requirement options:
 - Feature requirements -> `doc/02_requirements/feature/<feature>_draft.md`
 - NFR requirements -> `doc/02_requirements/nfr/<feature>_draft.md`
 
-## Research Document Format
-
-```markdown
-# Title - Research & Implementation Plan
-**Date:** YYYY-MM-DD  |  **Status:** Research Phase
-## 1. Problem Analysis (current state + requirements)
-## 2. Proposed Solution (architecture + code examples)
-## 3. Integration with Existing Infrastructure
-## 4. Implementation Roadmap (phased tasks)
-## 5. Testing Strategy
-## 6. References
-```
-
 ## Handoff
-Pass research results to `/research_codex` (Step 2).
+Pass research results to `/research_codex` (Step 2) or proceed to `/arch` (solo mode).
