@@ -363,13 +363,17 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     shadow(x, y, w, h, 8, shadow_a(theme), 6)
 
     # 2. Blur background (frosted glass)
+    # Double-pass blur for deep frosted glass effect
     blur(x, y, w, h, BLUR_SURFACE)
+    blur(x, y, w, h, 8)
     # Glass color vibrancy — tinted saturation boost
     blend(x, y, w, h, accent(theme), 8)
     blend(x, y, w, h, 0x00FFFFFF, 10)
 
     # 3. Glass surface — anti-aliased rounded corners
     rrect_aa(x, y, w, h, surface(theme), 12, surface_a(theme))
+    # Glass top-edge highlight (light from above)
+    blend(x + 4, y + 1, w - 8, 1, 0x00FFFFFF, 25)
 
     # 4. Title bar with gradient depth (lighter top → darker bottom)
     val tb_light = elevated(theme)
@@ -410,47 +414,100 @@ fn draw_glass_system_bar(theme: u64):
     val y: u64 = 0
     val h = SYSTEM_BAR_H
 
-    # Blur background (strong frosted glass)
+    # Double-pass blur for frosted menu bar
     blur(0, y, SCREEN_W, h, BLUR_ELEVATED)
+    blur(0, y, SCREEN_W, h, 10)
 
-    # Glass surface — very transparent
+    # Glass surface
     blend(0, y, SCREEN_W, h, surface(theme), 70)
 
-    # Bottom border with subtle highlight
+    # Bottom border
     blend(0, h - 1, SCREEN_W, 1, border_c(theme), border_a(theme) + 10)
 
-    # Left: App logo + menu items
-    rrect_aa(6, 5, 24, 18, accent(theme), 6, 180)
-    # Menu items — subtle pill shapes (macOS style: visible on hover only)
-    rrect_aa(38, 6, 28, 16, text_c(theme), 4, 30)
-    rrect_aa(72, 6, 24, 16, text_c(theme), 4, 30)
-    rrect_aa(102, 6, 26, 16, text_c(theme), 4, 30)
+    # Build layout tree for system bar content
+    rt_layout_reset(0, 0, 0, 0)
 
-    # Right: Status icons
+    # Root: HStack filling full bar width
+    val root = rt_layout_add(LT_HSTACK, 0 - 1, 0, 0)
+    rt_layout_set_size(root, layout_fixed(SCREEN_W), layout_fixed(h), 0)
+    rt_layout_set_padding(root, pack(6, 6), pack(4, 4), 0)
+    rt_layout_set_props(root, 6, pack(0, ALIGN_CENTER), 0)
+
+    # Left section: logo + menu items
+    val logo = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(logo, layout_fixed(24), layout_fixed(18), 0)
+
+    val menu1 = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(menu1, layout_fixed(28), layout_fixed(16), 0)
+
+    val menu2 = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(menu2, layout_fixed(24), layout_fixed(16), 0)
+
+    val menu3 = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(menu3, layout_fixed(26), layout_fixed(16), 0)
+
+    # Spacer (fills center)
+    val spacer = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(spacer, layout_fill(1), layout_fixed(16), 0)
+
+    # Right section: status icons + clock
+    val wifi = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(wifi, layout_fixed(20), layout_fixed(18), 0)
+
+    val battery = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(battery, layout_fixed(28), layout_fixed(14), 0)
+
+    val volume = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(volume, layout_fixed(14), layout_fixed(14), 0)
+
+    val clock = rt_layout_add(0, root, 0, 0)
+    rt_layout_set_size(clock, layout_fixed(66), layout_fixed(18), 0)
+
+    # Compute layout
+    rt_layout_compute(pack(SCREEN_W, h), 0, 0, 0)
+
+    # Draw elements at computed positions
+    # Logo
+    rrect_aa(layout_x(logo), layout_y(logo), layout_w(logo), layout_h(logo), accent(theme), 6, 180)
+
+    # Menu items (subtle pills)
+    rrect_aa(layout_x(menu1), layout_y(menu1), layout_w(menu1), layout_h(menu1), text_c(theme), 4, 30)
+    rrect_aa(layout_x(menu2), layout_y(menu2), layout_w(menu2), layout_h(menu2), text_c(theme), 4, 30)
+    rrect_aa(layout_x(menu3), layout_y(menu3), layout_w(menu3), layout_h(menu3), text_c(theme), 4, 30)
+
     # Wi-Fi icon (3 arcs)
-    ring(SCREEN_W - 152, 4, 18, 2, text_c(theme), 100)
-    ring(SCREEN_W - 149, 7, 12, 2, text_c(theme), 120)
-    ring(SCREEN_W - 146, 10, 6, 2, text_c(theme), 140)
+    val wx = layout_x(wifi)
+    val wy = layout_y(wifi)
+    ring(wx, wy, 18, 2, text_c(theme), 100)
+    ring(wx + 3, wy + 3, 12, 2, text_c(theme), 120)
+    ring(wx + 6, wy + 6, 6, 2, text_c(theme), 140)
 
-    # Battery icon (outline rect + fill)
-    rrect_aa(SCREEN_W - 126, 8, 24, 12, text_c(theme), 3, 120)
-    rrect_aa(SCREEN_W - 124, 10, 16, 8, 0x0030D158, 2, 200)
-    rrect_aa(SCREEN_W - 102, 11, 3, 6, text_c(theme), 1, 100)
+    # Battery
+    val bx = layout_x(battery)
+    val by = layout_y(battery)
+    rrect_aa(bx, by, 24, 12, text_c(theme), 3, 120)
+    rrect_aa(bx + 2, by + 2, 16, 8, 0x0030D158, 2, 200)
+    rrect_aa(bx + 24, by + 3, 3, 6, text_c(theme), 1, 100)
 
-    # Volume icon (speaker shape)
-    rrect_aa(SCREEN_W - 92, 9, 6, 10, text_c(theme), 2, 120)
-    line(SCREEN_W - 86, 9, SCREEN_W - 82, 6, text_c(theme), 2, 100)
-    line(SCREEN_W - 86, 19, SCREEN_W - 82, 22, text_c(theme), 2, 100)
+    # Volume
+    val vx = layout_x(volume)
+    val vy = layout_y(volume)
+    rrect_aa(vx, vy + 2, 6, 10, text_c(theme), 2, 120)
+    line(vx + 6, vy + 2, vx + 10, vy, text_c(theme), 2, 100)
+    line(vx + 6, vy + 12, vx + 10, vy + 14, text_c(theme), 2, 100)
 
-    # Clock area with time text
-    rrect_aa(SCREEN_W - 74, 5, 66, 18, elevated(theme), 8, 70)
-    # "12:00 PM" (ASCII: 49=1, 50=2, 58=:, 48=0, 32=space, 80=P, 77=M)
-    draw_label(SCREEN_W - 68, 9, text_c(theme), 200, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8)
+    # Clock
+    val clx = layout_x(clock)
+    val cly = layout_y(clock)
+    rrect_aa(clx, cly, layout_w(clock), layout_h(clock), elevated(theme), 8, 70)
+    draw_label(clx + 6, cly + 4, text_c(theme), 200, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8)
 
-    # Center status dots
-    circle(SCREEN_W / 2 - 12, 11, 6, accent(theme), 160)
-    circle(SCREEN_W / 2, 11, 6, accent2(theme), 160)
-    circle(SCREEN_W / 2 + 12, 11, 6, 0x0030D158, 160)
+    # Center status dots (positioned relative to spacer center)
+    val sx = layout_x(spacer) + layout_w(spacer) / 2
+    val sy = layout_y(spacer) + 2
+    circle(sx - 12, sy, 6, accent(theme), 160)
+    circle(sx, sy, 6, accent2(theme), 160)
+    circle(sx + 12, sy, 6, 0x0030D158, 160)
 
 # ===========================================================================
 # Glass Dock (bottom)
@@ -472,8 +529,9 @@ fn draw_glass_dock(theme: u64):
     # Dock shadow (floating depth effect)
     shadow(dock_x, dock_y, dock_w, dock_h, 8, 50, 4)
 
-    # Blur background
+    # Double-pass blur for deep dock glass
     blur(dock_x, dock_y, dock_w, dock_h, BLUR_ELEVATED)
+    blur(dock_x, dock_y, dock_w, dock_h, 10)
     # Saturation boost for dock glass
     blend(dock_x, dock_y, dock_w, dock_h, 0x00FFFFFF, 12)
 
@@ -482,6 +540,9 @@ fn draw_glass_dock(theme: u64):
 
     # Glass border
     rrect(dock_x, dock_y, dock_w, dock_h, border_c(theme), 18, border_a(theme))
+
+    # Dock top-edge highlight (3D depth — light from above)
+    blend(dock_x + 8, dock_y + 1, dock_w - 16, 1, 0x00FFFFFF, 35)
 
     # Icons
     val icon_y = dock_y + 8
@@ -544,6 +605,9 @@ fn draw_glass_dock(theme: u64):
     fill(ix + 14, icon_y + 13, 12, 2, 0x00148F77)
     fill(ix + 14, icon_y + 18, 10, 2, 0x00148F77)
     fill(ix + 14, icon_y + 23, 14, 2, 0x00148F77)
+
+    # Subtle divider above running indicators
+    blend(dock_x + dock_pad, dock_y + dock_h - DOCK_INDICATOR_MARGIN - 2, dock_w - dock_pad * 2, 1, border_c(theme), 20)
 
     # Running indicators — glowing dots
     val dot_y = dock_y + dock_h - 6
@@ -619,6 +683,16 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
         row = row + 1
 
 # ===========================================================================
+# Window Title Drawing
+# ===========================================================================
+
+fn draw_window_title(x: u64, y: u64, w: u64, title_chars: u64, title_len: u64, theme: u64):
+    # Draw title text centered in title bar
+    val text_x = x + 80
+    val text_y = y + 11
+    draw_label(text_x, text_y, text_c(theme), 200, title_chars, title_len)
+
+# ===========================================================================
 # Full Desktop Rendering
 # ===========================================================================
 
@@ -636,25 +710,43 @@ fn draw_desktop(active: u64, theme: u64):
     if active == 0:
         draw_glass_window(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, 0, theme)
         draw_files_content(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, theme)
+        # Window title: "Files" (ASCII: 70,105,108,101,115)
+        draw_window_title(WIN2_X, WIN2_Y, WIN2_W, pack8(70, 105, 108, 101, 115, 0, 0, 0), 5, theme)
         draw_glass_window(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, 0, theme)
         draw_hello_content(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, theme)
+        # Window title: "Hello" (ASCII: 72,101,108,108,111)
+        draw_window_title(WIN1_X, WIN1_Y, WIN1_W, pack8(72, 101, 108, 108, 111, 0, 0, 0), 5, theme)
         draw_glass_window(WIN0_X, WIN0_Y - boff, WIN0_W, WIN0_H, 1, theme)
         draw_terminal_content(WIN0_X, WIN0_Y - boff, WIN0_W, WIN0_H, theme)
+        # Window title: "Terminal" (ASCII: 84,101,114,109,105,110,97,108)
+        draw_window_title(WIN0_X, WIN0_Y - boff, WIN0_W, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, theme)
     else:
         if active == 1:
             draw_glass_window(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, 0, theme)
             draw_files_content(WIN2_X, WIN2_Y, WIN2_W, WIN2_H, theme)
+            # Window title: "Files" (ASCII: 70,105,108,101,115)
+            draw_window_title(WIN2_X, WIN2_Y, WIN2_W, pack8(70, 105, 108, 101, 115, 0, 0, 0), 5, theme)
             draw_glass_window(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, 0, theme)
             draw_terminal_content(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, theme)
+            # Window title: "Terminal" (ASCII: 84,101,114,109,105,110,97,108)
+            draw_window_title(WIN0_X, WIN0_Y, WIN0_W, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, theme)
             draw_glass_window(WIN1_X, WIN1_Y - boff, WIN1_W, WIN1_H, 1, theme)
             draw_hello_content(WIN1_X, WIN1_Y - boff, WIN1_W, WIN1_H, theme)
+            # Window title: "Hello" (ASCII: 72,101,108,108,111)
+            draw_window_title(WIN1_X, WIN1_Y - boff, WIN1_W, pack8(72, 101, 108, 108, 111, 0, 0, 0), 5, theme)
         else:
             draw_glass_window(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, 0, theme)
             draw_terminal_content(WIN0_X, WIN0_Y, WIN0_W, WIN0_H, theme)
+            # Window title: "Terminal" (ASCII: 84,101,114,109,105,110,97,108)
+            draw_window_title(WIN0_X, WIN0_Y, WIN0_W, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, theme)
             draw_glass_window(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, 0, theme)
             draw_hello_content(WIN1_X, WIN1_Y, WIN1_W, WIN1_H, theme)
+            # Window title: "Hello" (ASCII: 72,101,108,108,111)
+            draw_window_title(WIN1_X, WIN1_Y, WIN1_W, pack8(72, 101, 108, 108, 111, 0, 0, 0), 5, theme)
             draw_glass_window(WIN2_X, WIN2_Y - boff, WIN2_W, WIN2_H, 1, theme)
             draw_files_content(WIN2_X, WIN2_Y - boff, WIN2_W, WIN2_H, theme)
+            # Window title: "Files" (ASCII: 70,105,108,101,115)
+            draw_window_title(WIN2_X, WIN2_Y - boff, WIN2_W, pack8(70, 105, 108, 101, 115, 0, 0, 0), 5, theme)
 
     # 4. System bar (glass, on top of everything)
     draw_glass_system_bar(theme)

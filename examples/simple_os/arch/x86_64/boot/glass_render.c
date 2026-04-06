@@ -887,6 +887,11 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw * 5 / 8, sh / 3, 150, 0x00E040FB, 16, sw, sh);   /* Neon purple (center-right) */
         draw_blob(sw / 2, sh * 4 / 5, 130, 0x00FF7043, 14, sw, sh);   /* Coral (bottom-center) */
 
+        /* Extra detail blobs for visual richness */
+        draw_blob(sw / 6, sh * 3 / 5, 100, 0x00FFFFFF, 8, sw, sh);    /* White highlight */
+        draw_blob(sw * 7 / 8, sh / 6, 90, 0x0064B5F6, 10, sw, sh);   /* Light blue accent */
+        draw_blob(sw * 2 / 5, sh / 10, 80, 0x00CE93D8, 10, sw, sh);   /* Light purple */
+
         /* Subtle blur pass to soften blobs */
         box_blur_h(0, 0, sw, sh, 8);
         box_blur_v(0, 0, sw, sh, 8);
@@ -899,6 +904,22 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
                 if (noise > 240) {
                     uint32_t dst = fb_read(col, row);
                     fb_write(col, row, alpha_blend(dst, 0x00FFFFFF, 6));
+                }
+            }
+        }
+
+        /* Vignette — darken edges for depth */
+        for (uint32_t row = 0; row < sh; row++) {
+            for (uint32_t col = 0; col < sw; col++) {
+                int32_t dx = (int32_t)col - (int32_t)(sw / 2);
+                int32_t dy = (int32_t)row - (int32_t)(sh / 2);
+                uint32_t dist2 = (uint32_t)(dx * dx + dy * dy);
+                uint32_t max_dist2 = (sw / 2) * (sw / 2) + (sh / 2) * (sh / 2);
+                if (dist2 > max_dist2 / 3) {
+                    uint32_t alpha = (dist2 - max_dist2 / 3) * 40 / (max_dist2 * 2 / 3);
+                    if (alpha > 40) alpha = 40;
+                    uint32_t dst = fb_read(col, row);
+                    fb_write(col, row, alpha_blend(dst, 0x00000000, (uint8_t)alpha));
                 }
             }
         }
@@ -923,6 +944,11 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw * 3 / 4, sh / 5, 160, 0x00B2EBF2, 16, sw, sh);   /* Ice blue (top-right) */
         draw_blob(sw / 3, sh * 4 / 5, 140, 0x00F8BBD0, 14, sw, sh);   /* Rose (bottom-left) */
 
+        /* Extra detail blobs */
+        draw_blob(sw / 2, sh / 6, 160, 0x00FFFFFF, 12, sw, sh);       /* Central white glow */
+        draw_blob(sw * 4 / 5, sh * 3 / 4, 120, 0x00E1BEE7, 10, sw, sh); /* Lilac accent */
+        draw_blob(sw / 8, sh * 4 / 5, 100, 0x00B3E5FC, 10, sw, sh);   /* Sky blue */
+
         /* Soften */
         box_blur_h(0, 0, sw, sh, 10);
         box_blur_v(0, 0, sw, sh, 10);
@@ -934,6 +960,22 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
                 if (noise > 240) {
                     uint32_t dst = fb_read(col, row);
                     fb_write(col, row, alpha_blend(dst, 0x00000000, 4));
+                }
+            }
+        }
+
+        /* Subtle vignette for depth */
+        for (uint32_t row = 0; row < sh; row++) {
+            for (uint32_t col = 0; col < sw; col++) {
+                int32_t dx = (int32_t)col - (int32_t)(sw / 2);
+                int32_t dy = (int32_t)row - (int32_t)(sh / 2);
+                uint32_t dist2 = (uint32_t)(dx * dx + dy * dy);
+                uint32_t max_dist2 = (sw / 2) * (sw / 2) + (sh / 2) * (sh / 2);
+                if (dist2 > max_dist2 / 2) {
+                    uint32_t alpha = (dist2 - max_dist2 / 2) * 20 / (max_dist2 / 2);
+                    if (alpha > 20) alpha = 20;
+                    uint32_t dst = fb_read(col, row);
+                    fb_write(col, row, alpha_blend(dst, 0x00000000, (uint8_t)alpha));
                 }
             }
         }
