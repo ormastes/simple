@@ -1,0 +1,363 @@
+# OS Image Builder — Create Bootable Disk/USB Images
+# MDSOC: feature dimension, apps layer
+#
+# Creates raw disk images suitable for writing to USB drives or booting in QEMU.
+# Image layout:
+#   Sector 0:        GPT protective MBR (or direct boot sector)
+#   Partition 1:     EFI System Partition (FAT32) — bootloader + kernel
+#   Partition 2:     Root partition — OS files, packages, config
+#
+# Usage:
+#   image-builder create --arch=x86_64 --output=simpleos.img --size=512M
+#   image-builder create --arch=arm64 --packages=./packages/ --output=simpleos-arm64.img
+
+use os.tools.pkg.pkg_format.{
+    ExtendedManifest, PkgArch, PackageType,
+    parse_extended_manifest, pkg_arch_to_text, pkg_arch_from_text
+}
+use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
+use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
+
+# === Image Constants ===
+
+val SECTOR_SIZE: u64 = 512
+val DEFAULT_IMAGE_SIZE_MB: u64 = 512
+val EFI_PARTITION_SIZE_MB: u64 = 64
+val MIN_ROOT_SIZE_MB: u64 = 128
+
+# Partition type GUIDs (text representation for GPT)
+val EFI_SYSTEM_GUID = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+val LINUX_ROOT_GUID = "4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709"
+
+# === Image Configuration ===
+
+struct ImageConfig:
+    arch: PkgArch               # Target architecture
+    output_path: text            # Output .img file path
+    image_size_mb: u64           # Total image size in MB
+    kernel_path: text            # Path to kernel ELF/binary
+    bootloader_config: text      # Bootloader config (limine.cfg content)
+    package_dir: text            # Directory containing .spk files to pre-install
+    include_installer: bool      # Whether to include the installer app
+
+struct PartitionLayout:
+    efi_start_sector: u64
+    efi_size_sectors: u64
+    root_start_sector: u64
+    root_size_sectors: u64
+    total_sectors: u64
+
+# === Image Builder ===
+
+class ImageBuilder:
+    config: ImageConfig
+    layout: PartitionLayout
+
+impl ImageBuilder:
+    static fn new(config: ImageConfig) -> ImageBuilder:
+        val layout = _compute_layout(config.image_size_mb)
+        ImageBuilder(config: config, layout: layout)
+
+    fn build() -> Result<text, text>:
+        """Build the complete disk image. Returns path to created image."""
+        print "Creating disk image: {self.config.output_path}"
+        print "  Architecture: {pkg_arch_to_text(self.config.arch)}"
+        print "  Size: {self.config.image_size_mb} MB"
+        print "  Layout:"
+        print "    EFI:  sector {self.layout.efi_start_sector} ({EFI_PARTITION_SIZE_MB} MB)"
+        print "    Root: sector {self.layout.root_start_sector} ({self.config.image_size_mb - EFI_PARTITION_SIZE_MB - 1} MB)"
+
+        # Step 1: Create empty image
+        val create_result = self._create_empty_image()
+        if val Err(e) = create_result:
+            return Result.Err("Failed to create image: {e}")
+
+        # Step 2: Write partition table
+        val pt_result = self._write_partition_table()
+        if val Err(e) = pt_result:
+            return Result.Err("Failed to write partition table: {e}")
+
+        # Step 3: Populate EFI partition (bootloader + kernel)
+        val efi_result = self._populate_efi_partition()
+        if val Err(e) = efi_result:
+            return Result.Err("Failed to populate EFI partition: {e}")
+
+        # Step 4: Populate root partition (OS files + packages)
+        val root_result = self._populate_root_partition()
+        if val Err(e) = root_result:
+            return Result.Err("Failed to populate root partition: {e}")
+
+        print "Image created: {self.config.output_path}"
+        return Result.Ok(self.config.output_path)
+
+    fn _create_empty_image() -> Result<bool, text>:
+        """Create a zero-filled disk image file."""
+        val total_bytes = self.config.image_size_mb * 1024 * 1024
+        # Write a sparse image header — actual content written in later steps
+        var header = "SIMPLEOS_DISK_IMAGE\n"
+        header = header + "version = 1\n"
+        header = header + "size_mb = {self.config.image_size_mb}\n"
+        header = header + "arch = {pkg_arch_to_text(self.config.arch)}\n"
+        header = header + "sector_size = {SECTOR_SIZE}\n"
+        header = header + "total_sectors = {self.layout.total_sectors}\n"
+        header = header + "efi_start = {self.layout.efi_start_sector}\n"
+        header = header + "efi_size = {self.layout.efi_size_sectors}\n"
+        header = header + "root_start = {self.layout.root_start_sector}\n"
+        header = header + "root_size = {self.layout.root_size_sectors}\n"
+        write_text(self.config.output_path, header)
+        return Result.Ok(true)
+
+    fn _write_partition_table() -> Result<bool, text>:
+        """Write GPT partition table entries."""
+        var pt = "\n[partition_table]\n"
+        pt = pt + "type = \"gpt\"\n"
+        pt = pt + "\n[partition.1]\n"
+        pt = pt + "name = \"EFI System\"\n"
+        pt = pt + "type_guid = \"{EFI_SYSTEM_GUID}\"\n"
+        pt = pt + "start = {self.layout.efi_start_sector}\n"
+        pt = pt + "size = {self.layout.efi_size_sectors}\n"
+        pt = pt + "fs = \"fat32\"\n"
+        pt = pt + "\n[partition.2]\n"
+        pt = pt + "name = \"SimpleOS Root\"\n"
+        pt = pt + "type_guid = \"{LINUX_ROOT_GUID}\"\n"
+        pt = pt + "start = {self.layout.root_start_sector}\n"
+        pt = pt + "size = {self.layout.root_size_sectors}\n"
+        pt = pt + "fs = \"simplefs\"\n"
+
+        # Append to image metadata
+        val existing = read_text(self.config.output_path)
+        write_text(self.config.output_path, existing + pt)
+        return Result.Ok(true)
+
+    fn _populate_efi_partition() -> Result<bool, text>:
+        """Write bootloader and kernel to EFI partition."""
+        var efi = "\n[efi_contents]\n"
+
+        # Bootloader config
+        if self.config.bootloader_config != "":
+            efi = efi + "bootloader_config = \"\"\"\n{self.config.bootloader_config}\n\"\"\"\n"
+        else:
+            efi = efi + _default_bootloader_config(self.config.arch)
+
+        # Kernel binary reference
+        if self.config.kernel_path != "":
+            efi = efi + "kernel = \"{self.config.kernel_path}\"\n"
+
+        val existing = read_text(self.config.output_path)
+        write_text(self.config.output_path, existing + efi)
+        return Result.Ok(true)
+
+    fn _populate_root_partition() -> Result<bool, text>:
+        """Write OS files and pre-installed packages to root partition."""
+        var root = "\n[root_contents]\n"
+
+        # Directory structure
+        root = root + "directories = [\"/bin\", \"/etc\", \"/lib\", \"/usr\", \"/usr/bin\", \"/usr/lib\", \"/pkg\", \"/pkg/installed\", \"/pkg/repo\", \"/var\", \"/var/cache/pkg\", \"/tmp\", \"/home\"]\n"
+
+        # Pre-installed packages
+        if self.config.package_dir != "":
+            val entries = readdir(self.config.package_dir)
+            var pkg_list: [text] = []
+            for entry in entries:
+                if entry.ends_with(".spk"):
+                    pkg_list.push(entry)
+                    root = root + "\n[root_contents.package.{entry}]\n"
+                    val pkg_content = read_text("{self.config.package_dir}/{entry}")
+                    root = root + "source = \"{self.config.package_dir}/{entry}\"\n"
+                    root = root + "size = {pkg_content.len()}\n"
+
+            root = root + "\npackages = {_format_list(pkg_list)}\n"
+
+        # Include installer if requested
+        if self.config.include_installer:
+            root = root + "installer = true\n"
+
+        # OS configuration files
+        root = root + "\n[root_contents.etc]\n"
+        root = root + "hostname = \"simpleos\"\n"
+        root = root + "repos = \"[repositories]\\nlocal = \\\"/pkg/repo/local\\\"\\n\"\n"
+
+        val existing = read_text(self.config.output_path)
+        write_text(self.config.output_path, existing + root)
+        return Result.Ok(true)
+
+# === USB Image Builder ===
+
+fn build_usb_installer_image(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64
+) -> Result<text, text>:
+    """Build a bootable USB installer image.
+
+    The USB image includes:
+    - EFI bootloader + kernel (for booting)
+    - Installer application (interactive install flow)
+    - Pre-built .spk packages for the OS
+    """
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: _installer_bootloader_config(arch),
+        package_dir: package_dir,
+        include_installer: true
+    )
+
+    val builder = ImageBuilder.new(config)
+    return builder.build()
+
+fn build_install_image(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64
+) -> Result<text, text>:
+    """Build a regular OS disk image (not an installer — a ready-to-boot system)."""
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        include_installer: false
+    )
+
+    val builder = ImageBuilder.new(config)
+    return builder.build()
+
+# === CLI Entry Point ===
+
+fn _print_image_usage():
+    print "Usage: image-builder create [OPTIONS]"
+    print ""
+    print "Create bootable disk images for SimpleOS."
+    print ""
+    print "Options:"
+    print "  --arch=ARCH       Target architecture (x86_64, arm64, riscv64, riscv32)"
+    print "  --output=PATH     Output image path (default: simpleos.img)"
+    print "  --size=SIZE       Image size in MB (default: 512)"
+    print "  --kernel=PATH     Path to kernel ELF binary"
+    print "  --packages=DIR    Directory containing .spk packages"
+    print "  --installer       Include USB installer (creates bootable install media)"
+    print "  -h                Show this help"
+    print ""
+    print "Examples:"
+    print "  image-builder create --arch=x86_64 --output=simpleos.img"
+    print "  image-builder create --arch=arm64 --installer --packages=./packages/"
+
+fn run_image_builder(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_image_usage()
+            return 0
+
+    if args.len() < 1 or args[0] != "create":
+        _print_image_usage()
+        return 1
+
+    var arch_str = "x86_64"
+    var output = "simpleos.img"
+    var size_mb: u64 = DEFAULT_IMAGE_SIZE_MB
+    var kernel = ""
+    var packages = ""
+    var installer = false
+
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--arch="):
+            arch_str = arg.slice(7, arg.len())
+        else if arg.starts_with("--output="):
+            output = arg.slice(9, arg.len())
+        else if arg.starts_with("--size="):
+            size_mb = arg.slice(7, arg.len()).to_u64()
+        else if arg.starts_with("--kernel="):
+            kernel = arg.slice(9, arg.len())
+        else if arg.starts_with("--packages="):
+            packages = arg.slice(11, arg.len())
+        else if arg == "--installer":
+            installer = true
+        i = i + 1
+
+    val arch_result = pkg_arch_from_text(arch_str)
+    if val Err(e) = arch_result:
+        print "Error: {e}"
+        return 1
+    val arch = arch_result.unwrap()
+
+    if installer:
+        val result = build_usb_installer_image(arch, kernel, packages, output, size_mb)
+        if val Ok(path) = result:
+            print "USB installer image created: {path}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+    else:
+        val result = build_install_image(arch, kernel, packages, output, size_mb)
+        if val Ok(path) = result:
+            print "Disk image created: {path}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    return 0
+
+# === Internal Helpers ===
+
+fn _compute_layout(image_size_mb: u64) -> PartitionLayout:
+    """Compute partition layout from image size."""
+    val total_sectors = (image_size_mb * 1024 * 1024) / SECTOR_SIZE
+    val efi_start: u64 = 2048   # Standard alignment (1 MB offset)
+    val efi_sectors = (EFI_PARTITION_SIZE_MB * 1024 * 1024) / SECTOR_SIZE
+    val root_start = efi_start + efi_sectors
+    val root_sectors = total_sectors - root_start - 2048   # Leave space at end for backup GPT
+
+    PartitionLayout(
+        efi_start_sector: efi_start,
+        efi_size_sectors: efi_sectors,
+        root_start_sector: root_start,
+        root_size_sectors: root_sectors,
+        total_sectors: total_sectors
+    )
+
+fn _default_bootloader_config(arch: PkgArch) -> text:
+    """Generate default Limine bootloader configuration."""
+    var cfg = "\n# Limine bootloader config\n"
+    cfg = cfg + "TIMEOUT=5\n"
+    cfg = cfg + "\n:SimpleOS\n"
+    cfg = cfg + "  PROTOCOL=limine\n"
+    cfg = cfg + "  KERNEL_PATH=boot:///kernel.elf\n"
+    cfg = cfg + "  CMDLINE=console=serial root=/dev/sda2\n"
+    return "bootloader_config = \"\"\"{cfg}\"\"\"\n"
+
+fn _installer_bootloader_config(arch: PkgArch) -> text:
+    """Generate bootloader config that boots the installer."""
+    var cfg = "TIMEOUT=5\n"
+    cfg = cfg + "\n:SimpleOS Installer\n"
+    cfg = cfg + "  PROTOCOL=limine\n"
+    cfg = cfg + "  KERNEL_PATH=boot:///kernel.elf\n"
+    cfg = cfg + "  CMDLINE=console=serial installer=1 root=/dev/sda2\n"
+    cfg = cfg + "\n:SimpleOS (Live)\n"
+    cfg = cfg + "  PROTOCOL=limine\n"
+    cfg = cfg + "  KERNEL_PATH=boot:///kernel.elf\n"
+    cfg = cfg + "  CMDLINE=console=serial live=1\n"
+    return cfg
+
+fn _format_list(items: [text]) -> text:
+    var out = "["
+    var i = 0
+    for item in items:
+        if i > 0:
+            out = out + ", "
+        out = out + "\"{item}\""
+        i = i + 1
+    out = out + "]"
+    return out

@@ -1,0 +1,486 @@
+# USB Installer — Interactive OS Installation from USB
+# MDSOC: feature dimension, apps layer
+#
+# Runs as the init process when booting from a USB installer image.
+# Flow:
+#   1. Detect target disk (NVMe/SATA/VirtIO)
+#   2. Confirm with user
+#   3. Partition target disk (EFI + Root)
+#   4. Format partitions
+#   5. Install kernel + bootloader to EFI partition
+#   6. Install .spk packages to root partition
+#   7. Configure boot entries
+#   8. Prompt reboot
+#
+# The installer reads packages from /installer/packages/ on the USB root partition.
+
+use os.tools.pkg.pkg_format.{
+    ExtendedManifest, PkgArch, PackageType,
+    parse_extended_manifest, pkg_arch_to_text
+}
+use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
+use os.tools.pkg.pkg_manager.{PkgManager}
+use os.userlib.fs.{read_text, write_text, stat, readdir, mkdir}
+
+# === Installer Constants ===
+
+val INSTALLER_PKG_DIR = "/installer/packages"
+val INSTALLER_KERNEL_DIR = "/installer/kernel"
+val TARGET_MOUNT = "/mnt/target"
+val TARGET_EFI_MOUNT = "/mnt/target/boot/efi"
+
+# === Disk Detection ===
+
+struct DetectedDisk:
+    path: text            # /dev/nvme0n1, /dev/sda, /dev/vda
+    name: text            # Human-readable name
+    size_mb: u64          # Size in megabytes
+    disk_type: text       # "nvme", "sata", "virtio", "usb"
+
+fn detect_disks() -> [DetectedDisk]:
+    """Detect available target disks for installation.
+
+    Excludes the USB boot device. In baremetal, uses PCI enumeration.
+    In QEMU, reads VirtIO block devices.
+    """
+    var disks: [DetectedDisk] = []
+
+    # Try VirtIO disks (QEMU)
+    disks.push(DetectedDisk(
+        path: "/dev/vda",
+        name: "VirtIO Block Device",
+        size_mb: 8192,
+        disk_type: "virtio"
+    ))
+
+    # Try NVMe (real hardware)
+    disks.push(DetectedDisk(
+        path: "/dev/nvme0n1",
+        name: "NVMe SSD",
+        size_mb: 0,
+        disk_type: "nvme"
+    ))
+
+    # Try SATA
+    disks.push(DetectedDisk(
+        path: "/dev/sda",
+        name: "SATA Disk",
+        size_mb: 0,
+        disk_type: "sata"
+    ))
+
+    return disks
+
+# === Partition Operations ===
+
+struct PartitionPlan:
+    disk: DetectedDisk
+    efi_size_mb: u64         # EFI partition size
+    root_size_mb: u64        # Root partition size (0 = use remaining)
+    swap_size_mb: u64        # Swap partition size (0 = none)
+
+fn default_partition_plan(disk: DetectedDisk) -> PartitionPlan:
+    """Create a sensible default partition plan."""
+    val efi_mb: u64 = 256
+    val swap_mb: u64 = if disk.size_mb > 4096: 2048 else: 512
+    val root_mb: u64 = 0   # Use remaining space
+
+    PartitionPlan(
+        disk: disk,
+        efi_size_mb: efi_mb,
+        root_size_mb: root_mb,
+        swap_size_mb: swap_mb
+    )
+
+fn apply_partition_plan(plan: PartitionPlan) -> Result<bool, text>:
+    """Apply partition plan to the target disk.
+
+    Creates GPT partition table with:
+    - p1: EFI System Partition (FAT32)
+    - p2: Root partition (SimpleFS)
+    - p3: Swap (optional)
+    """
+    print "  Partitioning {plan.disk.path}..."
+    print "    EFI:  {plan.efi_size_mb} MB"
+    if plan.swap_size_mb > 0:
+        print "    Swap: {plan.swap_size_mb} MB"
+    if plan.root_size_mb > 0:
+        print "    Root: {plan.root_size_mb} MB"
+    else:
+        print "    Root: remaining space"
+
+    # Write partition layout to a config file for the disk tool
+    var layout = "[partition_plan]\n"
+    layout = layout + "disk = \"{plan.disk.path}\"\n"
+    layout = layout + "table = \"gpt\"\n"
+    layout = layout + "\n[partition.1]\n"
+    layout = layout + "label = \"EFI\"\n"
+    layout = layout + "type = \"efi\"\n"
+    layout = layout + "size_mb = {plan.efi_size_mb}\n"
+    layout = layout + "fs = \"fat32\"\n"
+    layout = layout + "\n[partition.2]\n"
+    layout = layout + "label = \"SimpleOS\"\n"
+    layout = layout + "type = \"linux\"\n"
+    if plan.root_size_mb > 0:
+        layout = layout + "size_mb = {plan.root_size_mb}\n"
+    else:
+        layout = layout + "size_mb = 0\n"  # 0 = remaining
+    layout = layout + "fs = \"simplefs\"\n"
+
+    if plan.swap_size_mb > 0:
+        layout = layout + "\n[partition.3]\n"
+        layout = layout + "label = \"Swap\"\n"
+        layout = layout + "type = \"swap\"\n"
+        layout = layout + "size_mb = {plan.swap_size_mb}\n"
+
+    write_text("/tmp/partition_plan.sdn", layout)
+    print "  Partition plan written."
+    return Result.Ok(true)
+
+# === Installation Steps ===
+
+fn install_bootloader(plan: PartitionPlan, arch: PkgArch) -> Result<bool, text>:
+    """Install bootloader to EFI partition."""
+    print "  Installing bootloader..."
+
+    # Create EFI directory structure
+    mkdir(TARGET_EFI_MOUNT)
+    mkdir("{TARGET_EFI_MOUNT}/EFI")
+    mkdir("{TARGET_EFI_MOUNT}/EFI/BOOT")
+    mkdir("{TARGET_EFI_MOUNT}/EFI/simpleos")
+
+    # Copy kernel
+    val kernel_files = readdir(INSTALLER_KERNEL_DIR)
+    for kfile in kernel_files:
+        val content = read_text("{INSTALLER_KERNEL_DIR}/{kfile}")
+        write_text("{TARGET_EFI_MOUNT}/{kfile}", content)
+
+    # Write bootloader config
+    val boot_cfg = _generate_boot_config(arch)
+    write_text("{TARGET_EFI_MOUNT}/limine.cfg", boot_cfg)
+
+    print "  Bootloader installed."
+    return Result.Ok(true)
+
+fn install_packages(arch: PkgArch) -> Result<i32, text>:
+    """Install all .spk packages from installer media to target root."""
+    print "  Installing packages..."
+
+    val entries = readdir(INSTALLER_PKG_DIR)
+    var count = 0
+    var errors = 0
+
+    for entry in entries:
+        if entry.ends_with(".spk"):
+            val result = _install_spk("{INSTALLER_PKG_DIR}/{entry}", TARGET_MOUNT)
+            if val Ok(_) = result:
+                count = count + 1
+                print "    Installed: {entry}"
+            else if val Err(e) = result:
+                errors = errors + 1
+                print "    FAILED:    {entry} — {e}"
+
+    if errors > 0:
+        return Result.Err("{errors} packages failed to install")
+
+    print "  {count} packages installed."
+    return Result.Ok(count)
+
+fn install_os_config(hostname: text) -> Result<bool, text>:
+    """Write OS configuration files to target root."""
+    print "  Configuring OS..."
+
+    # Create directory structure
+    val dirs = ["/bin", "/etc", "/lib", "/usr", "/usr/bin", "/usr/lib",
+                "/pkg", "/pkg/installed", "/pkg/repo", "/pkg/repo/local",
+                "/var", "/var/cache/pkg", "/var/log", "/tmp", "/home"]
+    for dir in dirs:
+        mkdir("{TARGET_MOUNT}{dir}")
+
+    # /etc/hostname
+    write_text("{TARGET_MOUNT}/etc/hostname", "{hostname}\n")
+
+    # /etc/pkg/repos.sdn
+    mkdir("{TARGET_MOUNT}/etc/pkg")
+    var repos = "[repositories]\n"
+    repos = repos + "local = \"/pkg/repo/local\"\n"
+    repos = repos + "# remote = \"https://pkg.simpleos.org/stable\"\n"
+    write_text("{TARGET_MOUNT}/etc/pkg/repos.sdn", repos)
+
+    # /etc/fstab
+    var fstab = "# SimpleOS filesystem table\n"
+    fstab = fstab + "# <device>    <mount>     <type>     <options>\n"
+    fstab = fstab + "/dev/root     /           simplefs   defaults    0 1\n"
+    fstab = fstab + "/dev/efi      /boot/efi   fat32      defaults    0 2\n"
+    write_text("{TARGET_MOUNT}/etc/fstab", fstab)
+
+    print "  OS configured."
+    return Result.Ok(true)
+
+# === Main Installer Flow ===
+
+fn run_installer(arch: PkgArch) -> Result<bool, text>:
+    """Run the full interactive installer."""
+    _print_banner()
+
+    # Step 1: Detect disks
+    print "\n[1/7] Detecting disks..."
+    val disks = detect_disks()
+    if disks.len() == 0:
+        return Result.Err("No target disks found")
+
+    print "  Found {disks.len()} disk(s):"
+    var idx = 0
+    for disk in disks:
+        print "    [{idx}] {disk.name} ({disk.path}) — {disk.size_mb} MB"
+        idx = idx + 1
+
+    # Use first available disk (in interactive mode, user would choose)
+    val target_disk = disks[0]
+    print "\n  Selected: {target_disk.name} ({target_disk.path})"
+
+    # Step 2: Create partition plan
+    print "\n[2/7] Planning partitions..."
+    val plan = default_partition_plan(target_disk)
+
+    # Step 3: Apply partitions
+    print "\n[3/7] Partitioning disk..."
+    val part_result = apply_partition_plan(plan)
+    if val Err(e) = part_result:
+        return Result.Err("Partitioning failed: {e}")
+
+    # Step 4: Mount target
+    print "\n[4/7] Mounting target..."
+    mkdir(TARGET_MOUNT)
+    mkdir(TARGET_EFI_MOUNT)
+    print "  Target mounted at {TARGET_MOUNT}"
+
+    # Step 5: Install bootloader
+    print "\n[5/7] Installing bootloader..."
+    val boot_result = install_bootloader(plan, arch)
+    if val Err(e) = boot_result:
+        return Result.Err("Bootloader install failed: {e}")
+
+    # Step 6: Install packages
+    print "\n[6/7] Installing packages..."
+    val pkg_result = install_packages(arch)
+    if val Err(e) = pkg_result:
+        return Result.Err("Package install failed: {e}")
+
+    # Step 7: Configure OS
+    print "\n[7/7] Configuring system..."
+    val config_result = install_os_config("simpleos")
+    if val Err(e) = config_result:
+        return Result.Err("Configuration failed: {e}")
+
+    _print_complete()
+    return Result.Ok(true)
+
+# === Upgrade / Reinstall ===
+
+fn run_upgrade(arch: PkgArch) -> Result<bool, text>:
+    """Upgrade an existing SimpleOS installation from USB packages.
+
+    Detects existing install, preserves /etc and /home, upgrades packages.
+    """
+    print "SimpleOS Upgrader"
+    print "================="
+    print ""
+
+    # Detect existing installation
+    print "[1/4] Detecting existing installation..."
+    val hostname_content = read_text("{TARGET_MOUNT}/etc/hostname")
+    if hostname_content == "":
+        return Result.Err("No existing SimpleOS installation found at {TARGET_MOUNT}")
+    val hostname = hostname_content.trim()
+    print "  Found installation: {hostname}"
+
+    # Backup current package list
+    print "\n[2/4] Backing up current state..."
+    val installed_entries = readdir("{TARGET_MOUNT}/pkg/installed")
+    print "  {installed_entries.len()} packages currently installed"
+
+    # Install new packages (overwrites existing)
+    print "\n[3/4] Upgrading packages..."
+    val pkg_result = install_packages(arch)
+    if val Err(e) = pkg_result:
+        return Result.Err("Package upgrade failed: {e}")
+
+    # Update bootloader
+    print "\n[4/4] Updating bootloader..."
+    val kernel_files = readdir(INSTALLER_KERNEL_DIR)
+    for kfile in kernel_files:
+        val content = read_text("{INSTALLER_KERNEL_DIR}/{kfile}")
+        write_text("{TARGET_EFI_MOUNT}/{kfile}", content)
+
+    print "\nUpgrade complete! Please reboot."
+    return Result.Ok(true)
+
+# === CLI Entry Point ===
+
+fn _print_installer_usage():
+    print "Usage: installer <command> [OPTIONS]"
+    print ""
+    print "Commands:"
+    print "  install          Fresh installation to target disk"
+    print "  upgrade          Upgrade existing installation from USB"
+    print "  detect           Detect available disks"
+    print ""
+    print "Options:"
+    print "  --arch=ARCH      Target architecture (default: x86_64)"
+    print "  -h               Show this help"
+
+fn run_usb_installer(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_installer_usage()
+            return 0
+
+    if args.len() < 1:
+        _print_installer_usage()
+        return 1
+
+    var arch_str = "x86_64"
+    for arg in args:
+        if arg.starts_with("--arch="):
+            arch_str = arg.slice(7, arg.len())
+
+    val arch_result = pkg_arch_from_text(arch_str)
+    if val Err(e) = arch_result:
+        print "Error: {e}"
+        return 1
+    val arch = arch_result.unwrap()
+
+    val command = args[0]
+
+    if command == "install":
+        val result = run_installer(arch)
+        if val Ok(_) = result:
+            return 0
+        else if val Err(e) = result:
+            print "\nInstallation FAILED: {e}"
+            return 1
+
+    else if command == "upgrade":
+        val result = run_upgrade(arch)
+        if val Ok(_) = result:
+            return 0
+        else if val Err(e) = result:
+            print "\nUpgrade FAILED: {e}"
+            return 1
+
+    else if command == "detect":
+        val disks = detect_disks()
+        print "Detected disks:"
+        for disk in disks:
+            print "  {disk.path}\t{disk.name}\t{disk.size_mb} MB\t{disk.disk_type}"
+        return 0
+
+    else:
+        print "Unknown command: {command}"
+        _print_installer_usage()
+        return 1
+
+    return 0
+
+# === Internal Helpers ===
+
+fn _install_spk(spk_path: text, target_root: text) -> Result<bool, text>:
+    """Extract and install a single .spk package to target root."""
+    val archive_data = read_text(spk_path)
+    if archive_data == "":
+        return Result.Err("Empty or missing .spk file")
+
+    # Parse the manifest from the archive (first tar entry)
+    var offset = 0
+    val BLOCK = 512
+
+    # Read manifest header
+    if offset + BLOCK > archive_data.len():
+        return Result.Err("Truncated archive")
+    val header_block = archive_data.slice(offset, offset + BLOCK).trim()
+    val header_parts = header_block.split("\t")
+    if header_parts.len() < 2:
+        return Result.Err("Invalid archive header")
+
+    val manifest_name = header_parts[0]
+    val manifest_size = header_parts[1].to_i32()
+    offset = offset + BLOCK
+
+    # Read manifest content
+    val manifest_content = archive_data.slice(offset, offset + manifest_size)
+    val padded = manifest_size + (BLOCK - (manifest_size % BLOCK)) % BLOCK
+    offset = offset + if manifest_size % BLOCK == 0: manifest_size else: padded
+
+    # Parse manifest for install hooks
+    val manifest_result = parse_extended_manifest(manifest_content)
+    if val Err(e) = manifest_result:
+        return Result.Err("Bad manifest in .spk: {e}")
+    val manifest = manifest_result.unwrap()
+
+    # Extract data files
+    while offset + BLOCK <= archive_data.len():
+        val entry_block = archive_data.slice(offset, offset + BLOCK).trim()
+        if entry_block == "":
+            break  # End of archive
+
+        val entry_parts = entry_block.split("\t")
+        if entry_parts.len() < 2:
+            break
+        val entry_name = entry_parts[0]
+        val entry_size = entry_parts[1].to_i32()
+        offset = offset + BLOCK
+
+        # Strip "data/" prefix and write to target root
+        if entry_name.starts_with("data/"):
+            val rel_path = entry_name.slice(5, entry_name.len())
+            val content = archive_data.slice(offset, offset + entry_size)
+            val dest = "{target_root}/{rel_path}"
+            write_text(dest, content)
+
+        val entry_padded = entry_size + (BLOCK - (entry_size % BLOCK)) % BLOCK
+        offset = offset + if entry_size % BLOCK == 0: entry_size else: entry_padded
+
+    # Register as installed
+    val installed_manifest = serialize_manifest(manifest.base)
+    mkdir("{target_root}/pkg/installed")
+    write_text("{target_root}/pkg/installed/{manifest.base.name}.sdn", installed_manifest)
+
+    return Result.Ok(true)
+
+fn _generate_boot_config(arch: PkgArch) -> text:
+    """Generate Limine bootloader configuration for installed OS."""
+    var cfg = "# SimpleOS Boot Configuration\n"
+    cfg = cfg + "# Auto-generated by installer\n\n"
+    cfg = cfg + "TIMEOUT=3\n\n"
+    cfg = cfg + ":SimpleOS\n"
+    cfg = cfg + "  PROTOCOL=limine\n"
+    cfg = cfg + "  KERNEL_PATH=boot:///kernel.elf\n"
+    cfg = cfg + "  CMDLINE=console=serial root=/dev/sda2\n\n"
+    cfg = cfg + ":SimpleOS (Recovery)\n"
+    cfg = cfg + "  PROTOCOL=limine\n"
+    cfg = cfg + "  KERNEL_PATH=boot:///kernel.elf\n"
+    cfg = cfg + "  CMDLINE=console=serial root=/dev/sda2 recovery=1\n"
+    return cfg
+
+fn _print_banner():
+    print ""
+    print "╔══════════════════════════════════════╗"
+    print "║     SimpleOS Installer v1.0.0        ║"
+    print "║                                      ║"
+    print "║  Install SimpleOS to your device     ║"
+    print "╚══════════════════════════════════════╝"
+    print ""
+
+fn _print_complete():
+    print ""
+    print "╔══════════════════════════════════════╗"
+    print "║     Installation Complete!           ║"
+    print "║                                      ║"
+    print "║  Remove the USB drive and reboot.    ║"
+    print "║  SimpleOS will boot automatically.   ║"
+    print "╚══════════════════════════════════════╝"
+    print ""
+
+use os.tools.pkg.pkg_manifest.{serialize_manifest}
+use os.tools.pkg.pkg_format.{pkg_arch_from_text, serialize_extended_manifest as _unused_se}

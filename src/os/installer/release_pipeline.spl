@@ -1,0 +1,296 @@
+# Release Pipeline — End-to-End OS Build + Package + Image
+# MDSOC: feature dimension, apps layer
+#
+# Orchestrates the full release flow:
+#   1. Build kernel for target architecture
+#   2. Build all OS packages (.spk)
+#   3. Create bootable USB installer image
+#   4. Create ready-to-boot disk image
+#   5. Create upgrade package bundle
+#
+# Usage:
+#   release all --arch=x86_64 --output=release/
+#   release usb --arch=x86_64 --output=simpleos-installer.img
+#   release packages --arch=x86_64 --output=packages/
+
+use os.tools.pkg.pkg_format.{PkgArch, pkg_arch_from_text, pkg_arch_to_text}
+use os.packages.os_packages.{list_all_packages, os_version, kernel_package, os_meta_package}
+use os.tools.pkg.pkg_builder.{build_meta_package}
+use os.installer.image_builder.{build_usb_installer_image, build_install_image}
+use os.userlib.fs.{mkdir, write_text}
+
+# === Release Configuration ===
+
+struct ReleaseConfig:
+    arch: PkgArch
+    output_dir: text          # Top-level output directory
+    kernel_path: text         # Pre-built kernel ELF path (optional, built if empty)
+    image_size_mb: u64        # Disk image size
+
+fn default_release_config(arch: PkgArch) -> ReleaseConfig:
+    ReleaseConfig(
+        arch: arch,
+        output_dir: "release",
+        kernel_path: "",
+        image_size_mb: 512
+    )
+
+# === Full Release ===
+
+fn release_all(config: ReleaseConfig) -> Result<bool, text>:
+    """Run the complete release pipeline."""
+    val arch_name = pkg_arch_to_text(config.arch)
+    val version = os_version()
+    val ver_str = version.to_text()
+
+    print "╔══════════════════════════════════════╗"
+    print "║   SimpleOS Release Pipeline          ║"
+    print "║   Version: {ver_str}                     ║"
+    print "║   Architecture: {arch_name}               ║"
+    print "╚══════════════════════════════════════╝"
+    print ""
+
+    val release_dir = "{config.output_dir}/{arch_name}"
+    val pkg_dir = "{release_dir}/packages"
+    val img_dir = "{release_dir}/images"
+
+    mkdir(config.output_dir)
+    mkdir(release_dir)
+    mkdir(pkg_dir)
+    mkdir(img_dir)
+
+    # Step 1: Build kernel (or use provided)
+    print "[1/5] Kernel..."
+    var kernel = config.kernel_path
+    if kernel == "":
+        kernel = _locate_kernel(config.arch)
+        if kernel == "":
+            print "  WARNING: No kernel binary found. Using placeholder."
+            kernel = "{release_dir}/kernel.elf"
+            write_text(kernel, "# Placeholder kernel — build with: bin/simple run examples/simple_os/build.spl --arch={arch_name}\n")
+        else:
+            print "  Using kernel: {kernel}"
+    else:
+        print "  Using kernel: {kernel}"
+
+    # Step 2: Build packages
+    print "\n[2/5] Building packages..."
+    val packages = list_all_packages(config.arch)
+    var pkg_count = 0
+    for pkg in packages:
+        val result = build_meta_package(pkg, pkg_dir)
+        if val Ok(path) = result:
+            pkg_count = pkg_count + 1
+        else if val Err(e) = result:
+            print "  FAILED: {pkg.base.name} — {e}"
+    print "  Built {pkg_count} packages"
+
+    # Step 3: Create USB installer image
+    print "\n[3/5] Creating USB installer image..."
+    val usb_path = "{img_dir}/simpleos-{ver_str}-{arch_name}-installer.img"
+    val usb_result = build_usb_installer_image(config.arch, kernel, pkg_dir, usb_path, config.image_size_mb)
+    if val Ok(path) = usb_result:
+        print "  USB installer: {path}"
+    else if val Err(e) = usb_result:
+        print "  WARNING: USB image failed: {e}"
+
+    # Step 4: Create disk image
+    print "\n[4/5] Creating disk image..."
+    val disk_path = "{img_dir}/simpleos-{ver_str}-{arch_name}.img"
+    val disk_result = build_install_image(config.arch, kernel, pkg_dir, disk_path, config.image_size_mb)
+    if val Ok(path) = disk_result:
+        print "  Disk image: {path}"
+    else if val Err(e) = disk_result:
+        print "  WARNING: Disk image failed: {e}"
+
+    # Step 5: Write release manifest
+    print "\n[5/5] Writing release manifest..."
+    val manifest = _write_release_manifest(release_dir, config, pkg_count)
+    print "  Release manifest: {manifest}"
+
+    print ""
+    print "╔══════════════════════════════════════╗"
+    print "║   Release complete!                  ║"
+    print "║                                      ║"
+    print "║   Output: {release_dir}"
+    print "╚══════════════════════════════════════╝"
+    print ""
+    print "Files:"
+    print "  {pkg_dir}/                  — .spk packages"
+    print "  {usb_path} — USB installer"
+    print "  {disk_path}        — Disk image"
+
+    return Result.Ok(true)
+
+# === Individual Release Steps ===
+
+fn release_packages(config: ReleaseConfig) -> Result<i32, text>:
+    """Build only the .spk packages."""
+    val pkg_dir = "{config.output_dir}/packages"
+    mkdir(config.output_dir)
+    mkdir(pkg_dir)
+
+    val packages = list_all_packages(config.arch)
+    var count = 0
+    for pkg in packages:
+        val result = build_meta_package(pkg, pkg_dir)
+        if val Ok(_) = result:
+            count = count + 1
+        else if val Err(e) = result:
+            print "FAILED: {pkg.base.name} — {e}"
+
+    return Result.Ok(count)
+
+fn release_usb(config: ReleaseConfig) -> Result<text, text>:
+    """Build packages + USB installer image."""
+    val pkg_dir = "{config.output_dir}/packages"
+    mkdir(config.output_dir)
+    mkdir(pkg_dir)
+
+    # Build packages first
+    val pkg_result = release_packages(config)
+    if val Err(e) = pkg_result:
+        return Result.Err(e)
+
+    # Build USB image
+    val arch_name = pkg_arch_to_text(config.arch)
+    val ver_str = os_version().to_text()
+    var kernel = config.kernel_path
+    if kernel == "":
+        kernel = _locate_kernel(config.arch)
+    val usb_path = "{config.output_dir}/simpleos-{ver_str}-{arch_name}-installer.img"
+    return build_usb_installer_image(config.arch, kernel, pkg_dir, usb_path, config.image_size_mb)
+
+# === CLI Entry Point ===
+
+fn _print_release_usage():
+    print "Usage: release <command> [OPTIONS]"
+    print ""
+    print "Commands:"
+    print "  all              Full release (kernel + packages + images)"
+    print "  packages         Build .spk packages only"
+    print "  usb              Build USB installer image"
+    print "  disk             Build ready-to-boot disk image"
+    print ""
+    print "Options:"
+    print "  --arch=ARCH      Target architecture (default: x86_64)"
+    print "  --output=DIR     Output directory (default: release/)"
+    print "  --kernel=PATH    Pre-built kernel ELF path"
+    print "  --size=MB        Disk image size in MB (default: 512)"
+    print "  -h               Show this help"
+
+fn run_release(args: [text]) -> i32:
+    for arg in args:
+        if arg == "-h":
+            _print_release_usage()
+            return 0
+
+    if args.len() < 1:
+        _print_release_usage()
+        return 1
+
+    var arch_str = "x86_64"
+    var output = "release"
+    var kernel = ""
+    var size_mb: u64 = 512
+
+    for arg in args:
+        if arg.starts_with("--arch="):
+            arch_str = arg.slice(7, arg.len())
+        else if arg.starts_with("--output="):
+            output = arg.slice(9, arg.len())
+        else if arg.starts_with("--kernel="):
+            kernel = arg.slice(9, arg.len())
+        else if arg.starts_with("--size="):
+            size_mb = arg.slice(7, arg.len()).to_u64()
+
+    val arch_result = pkg_arch_from_text(arch_str)
+    if val Err(e) = arch_result:
+        print "Error: {e}"
+        return 1
+    val arch = arch_result.unwrap()
+
+    var config = ReleaseConfig(
+        arch: arch,
+        output_dir: output,
+        kernel_path: kernel,
+        image_size_mb: size_mb
+    )
+
+    val command = args[0]
+
+    if command == "all":
+        val result = release_all(config)
+        if val Err(e) = result:
+            print "Release failed: {e}"
+            return 1
+        return 0
+
+    else if command == "packages":
+        val result = release_packages(config)
+        if val Ok(count) = result:
+            print "Built {count} packages in {output}/"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if command == "usb":
+        val result = release_usb(config)
+        if val Ok(path) = result:
+            print "USB installer image: {path}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else if command == "disk":
+        val pkg_dir = "{output}/packages"
+        val ver_str = os_version().to_text()
+        val disk_path = "{output}/simpleos-{ver_str}-{arch_str}.img"
+        val result = build_install_image(arch, kernel, pkg_dir, disk_path, size_mb)
+        if val Ok(path) = result:
+            print "Disk image: {path}"
+            return 0
+        else if val Err(e) = result:
+            print "Error: {e}"
+            return 1
+
+    else:
+        print "Unknown command: {command}"
+        _print_release_usage()
+        return 1
+
+    return 0
+
+# === Internal Helpers ===
+
+fn _locate_kernel(arch: PkgArch) -> text:
+    """Try to find a pre-built kernel binary for the given architecture."""
+    val arch_name = pkg_arch_to_text(arch)
+    val candidates = [
+        "build/os/simpleos_{arch_name}.elf",
+        "build/os/{arch_name}/kernel.elf",
+        "examples/simple_os/build/{arch_name}/kernel.elf"
+    ]
+    for path in candidates:
+        val content = os.userlib.fs.read_text(path)
+        if content != "":
+            return path
+    return ""
+
+fn _write_release_manifest(release_dir: text, config: ReleaseConfig, pkg_count: i32) -> text:
+    """Write a release manifest summarizing the build."""
+    val arch_name = pkg_arch_to_text(config.arch)
+    val ver = os_version()
+    val path = "{release_dir}/release.sdn"
+
+    var content = "[release]\n"
+    content = content + "version = \"{ver.to_text()}\"\n"
+    content = content + "arch = \"{arch_name}\"\n"
+    content = content + "packages = {pkg_count}\n"
+    content = content + "image_size_mb = {config.image_size_mb}\n"
+    content = content + "kernel = \"{config.kernel_path}\"\n"
+
+    write_text(path, content)
+    return path
