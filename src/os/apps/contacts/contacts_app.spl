@@ -1,0 +1,502 @@
+# Contacts — Address Book
+#
+# Two-panel address book with alphabetic grouping, search,
+# and full CRUD operations. Left panel shows a filterable
+# contact list; right panel shows the selected contact's
+# detail view with an edit mode.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Contact
+# =========================================================================
+
+struct Contact:
+    """A single address book entry."""
+    id: i32
+    name: text
+    phone: text
+    email: text
+    address: text
+    notes: text
+
+# =========================================================================
+# Contacts App
+# =========================================================================
+
+class ContactsApp:
+    """Address book application.
+
+    Left panel: alphabetically grouped contact list with search.
+    Right panel: detail view for the selected contact, with
+    inline edit mode.
+    """
+    contacts: [Contact]
+    next_id: i32
+    selected_id: i32
+    search_text: text
+    editing: bool
+    edit_name: text
+    edit_phone: text
+    edit_email: text
+    edit_address: text
+    edit_notes: text
+    status_message: text
+
+impl ContactsApp:
+
+    static fn new() -> ContactsApp:
+        """Create a contacts app preloaded with sample entries."""
+        val samples = _sample_contacts()
+        ContactsApp(
+            contacts: samples,
+            next_id: samples.len() + 1,
+            selected_id: 1,
+            search_text: "",
+            editing: false,
+            edit_name: "",
+            edit_phone: "",
+            edit_email: "",
+            edit_address: "",
+            edit_notes: "",
+            status_message: "Ready"
+        )
+
+    # -- Querying ------------------------------------------------------------
+
+    fn _filtered_contacts() -> [Contact]:
+        """Return contacts matching the current search text, sorted by name."""
+        var result: [Contact] = []
+        val query = self.search_text.lower()
+        for c in self.contacts:
+            if query == "":
+                result = result.push(c)
+            else:
+                val lower_name = c.name.lower()
+                val lower_email = c.email.lower()
+                val lower_phone = c.phone.lower()
+                if (lower_name.contains(query) or
+                    lower_email.contains(query) or
+                    lower_phone.contains(query)):
+                    result = result.push(c)
+        # Simple insertion sort by name
+        result = _sort_contacts(result)
+        result
+
+    fn _selected_contact() -> Contact?:
+        """Return the currently selected contact, or nil."""
+        for c in self.contacts:
+            if c.id == self.selected_id:
+                return c
+        nil
+
+    fn _contact_index(id: i32) -> i32:
+        """Return the index of a contact by id, or -1."""
+        var i = 0
+        while i < self.contacts.len():
+            if self.contacts[i].id == id:
+                return i
+            i = i + 1
+        -1
+
+    # -- CRUD Operations -----------------------------------------------------
+
+    me add_contact():
+        """Add a new blank contact and enter edit mode."""
+        val new_contact = Contact(
+            id: self.next_id,
+            name: "New Contact",
+            phone: "",
+            email: "",
+            address: "",
+            notes: ""
+        )
+        self.contacts = self.contacts.push(new_contact)
+        self.selected_id = self.next_id
+        self.next_id = self.next_id + 1
+        self._start_edit()
+        self.edit_name = "New Contact"
+        self.status_message = "New contact added — edit details"
+
+    me delete_contact():
+        """Delete the currently selected contact."""
+        val idx = self._contact_index(self.selected_id)
+        if idx < 0:
+            self.status_message = "No contact selected"
+            return
+        var new_contacts: [Contact] = []
+        var i = 0
+        while i < self.contacts.len():
+            if i != idx:
+                new_contacts = new_contacts.push(self.contacts[i])
+            i = i + 1
+        self.contacts = new_contacts
+        self.editing = false
+        # Select nearest remaining contact
+        if self.contacts.len() > 0:
+            val new_idx = if idx >= self.contacts.len(): self.contacts.len() - 1 else: idx
+            self.selected_id = self.contacts[new_idx].id
+        else:
+            self.selected_id = -1
+        self.status_message = "Contact deleted"
+
+    me _start_edit():
+        """Enter edit mode for the selected contact."""
+        val contact = self._selected_contact()
+        if contact == nil:
+            return
+        self.editing = true
+        self.edit_name = contact.name
+        self.edit_phone = contact.phone
+        self.edit_email = contact.email
+        self.edit_address = contact.address
+        self.edit_notes = contact.notes
+        self.status_message = "Editing: {contact.name}"
+
+    me save_edit():
+        """Save edit-mode changes back to the contact."""
+        if not self.editing:
+            return
+        val idx = self._contact_index(self.selected_id)
+        if idx < 0:
+            return
+        self.contacts[idx].name = self.edit_name
+        self.contacts[idx].phone = self.edit_phone
+        self.contacts[idx].email = self.edit_email
+        self.contacts[idx].address = self.edit_address
+        self.contacts[idx].notes = self.edit_notes
+        self.editing = false
+        self.status_message = "Saved: {self.edit_name}"
+
+    me cancel_edit():
+        """Discard edit-mode changes."""
+        self.editing = false
+        self.status_message = "Edit cancelled"
+
+    # -- Navigation ----------------------------------------------------------
+
+    me select_next():
+        """Move selection down in the filtered list."""
+        val filtered = self._filtered_contacts()
+        if filtered.len() == 0:
+            return
+        var current_pos = -1
+        var i = 0
+        while i < filtered.len():
+            if filtered[i].id == self.selected_id:
+                current_pos = i
+            i = i + 1
+        if current_pos < filtered.len() - 1:
+            self.selected_id = filtered[current_pos + 1].id
+            self.status_message = "Selected: {filtered[current_pos + 1].name}"
+
+    me select_prev():
+        """Move selection up in the filtered list."""
+        val filtered = self._filtered_contacts()
+        if filtered.len() == 0:
+            return
+        var current_pos = -1
+        var i = 0
+        while i < filtered.len():
+            if filtered[i].id == self.selected_id:
+                current_pos = i
+            i = i + 1
+        if current_pos > 0:
+            self.selected_id = filtered[current_pos - 1].id
+            self.status_message = "Selected: {filtered[current_pos - 1].name}"
+
+    me clear_search():
+        """Clear the search filter."""
+        self.search_text = ""
+        self.status_message = "Search cleared"
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to contacts actions."""
+        match key:
+            "Up" => self.select_prev()
+            "Down" => self.select_next()
+            "Enter":
+                if self.editing:
+                    self.save_edit()
+                else:
+                    self._start_edit()
+            "Escape":
+                if self.editing:
+                    self.cancel_edit()
+                else:
+                    self.clear_search()
+            "/" => self.status_message = "Type search query"
+            "n" => self.add_contact()
+            "d" => self.delete_contact()
+            "e" => self._start_edit()
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button and list action strings."""
+        match action:
+            "add" => self.add_contact()
+            "delete" => self.delete_contact()
+            "edit" => self._start_edit()
+            "save" => self.save_edit()
+            "cancel" => self.cancel_edit()
+            "clear_search" => self.clear_search()
+            "search" => self.status_message = "Search active"
+            _ =>
+                # Handle contact selection: "select_N"
+                if action.starts_with("select_"):
+                    val id_str = action.slice(7, action.len())
+                    val id_num = id_str.parse_i32()
+                    self.selected_id = id_num
+                    val contact = self._selected_contact()
+                    if contact != nil:
+                        self.status_message = "Selected: {contact.name}"
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the contacts UI.
+
+        Layout:
+          Menu bar
+          Search bar
+          Row:
+            Left panel  (contact list with alpha headers, 35% width)
+            Right panel (detail view / edit form, flex)
+          Action buttons
+          Status bar
+        """
+        val filtered = self._filtered_contacts()
+        val total = self.contacts.len()
+        val shown = filtered.len()
+
+        val root = column("contacts_root", [
+            # Menu bar
+            menubar("contacts_menu", [
+                "File", "Edit", "View"
+            ]),
+
+            # Search bar
+            row("contacts_search_row", [
+                label("contacts_search_label", "Search:"),
+                with_flex(text_widget("contacts_search_input", self.search_text), 1),
+                button("contacts_search_clear", "Clear", "clear_search")
+            ]),
+
+            # Two-panel content
+            with_flex(row("contacts_content", [
+                with_width(
+                    panel("contacts_list_panel", "Contacts ({shown})", [
+                        self._build_contact_list(filtered)
+                    ]),
+                    35
+                ),
+                with_flex(
+                    panel("contacts_detail_panel", "Details", [
+                        self._build_detail_view()
+                    ]),
+                    1
+                )
+            ]), 1),
+
+            # Action buttons
+            row("contacts_actions", [
+                button("contacts_btn_add", "+ New", "add"),
+                button("contacts_btn_edit", "Edit", "edit"),
+                button("contacts_btn_delete", "Delete", "delete")
+            ]),
+
+            # Status bar
+            statusbar("contacts_status",
+                "{total} contacts | showing {shown}",
+                self.status_message
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Contacts", "dark")
+        UISession.new(tree)
+
+    fn _build_contact_list(filtered: [Contact]) -> WidgetNode:
+        """Build the scrollable contact list with alphabetic group headers."""
+        var widgets: [WidgetNode] = []
+        var last_letter = ""
+
+        var i = 0
+        while i < filtered.len():
+            val c = filtered[i]
+            val first_char = if c.name.len() > 0: c.name.slice(0, 1).upper() else: "#"
+
+            # Insert alpha group header when the letter changes
+            if first_char != last_letter:
+                last_letter = first_char
+                widgets = widgets.push(
+                    label("contacts_header_{first_char}", "--- {first_char} ---")
+                )
+
+            # Contact row: indicator + name + phone snippet
+            val indicator = if c.id == self.selected_id: "> " else: "  "
+            val phone_hint = if c.phone != "": "  ({c.phone})" else: ""
+            widgets = widgets.push(
+                button(
+                    "contacts_item_{c.id}",
+                    "{indicator}{c.name}{phone_hint}",
+                    "select_{c.id}"
+                )
+            )
+            i = i + 1
+
+        if filtered.len() == 0:
+            widgets = widgets.push(
+                label("contacts_empty", "No contacts found")
+            )
+
+        column("contacts_list", widgets)
+
+    fn _build_detail_view() -> WidgetNode:
+        """Build the right-panel detail or edit view."""
+        val contact = self._selected_contact()
+
+        if contact == nil:
+            return column("contacts_detail_empty", [
+                label("contacts_no_selection", "No contact selected")
+            ])
+
+        if self.editing:
+            return self._build_edit_form()
+
+        # Read-only detail view
+        column("contacts_detail", [
+            row("detail_name_row", [
+                label("detail_name_label", "Name:"),
+                with_flex(label("detail_name_value", contact.name), 1)
+            ]),
+            row("detail_phone_row", [
+                label("detail_phone_label", "Phone:"),
+                with_flex(label("detail_phone_value", if contact.phone != "": contact.phone else: "-"), 1)
+            ]),
+            row("detail_email_row", [
+                label("detail_email_label", "Email:"),
+                with_flex(label("detail_email_value", if contact.email != "": contact.email else: "-"), 1)
+            ]),
+            row("detail_address_row", [
+                label("detail_address_label", "Address:"),
+                with_flex(label("detail_address_value", if contact.address != "": contact.address else: "-"), 1)
+            ]),
+            row("detail_notes_row", [
+                label("detail_notes_label", "Notes:"),
+                with_flex(label("detail_notes_value", if contact.notes != "": contact.notes else: "-"), 1)
+            ])
+        ])
+
+    fn _build_edit_form() -> WidgetNode:
+        """Build the editable form for the selected contact."""
+        column("contacts_edit_form", [
+            row("edit_name_row", [
+                label("edit_name_label", "Name:"),
+                with_flex(text_widget("edit_name_input", self.edit_name), 1)
+            ]),
+            row("edit_phone_row", [
+                label("edit_phone_label", "Phone:"),
+                with_flex(text_widget("edit_phone_input", self.edit_phone), 1)
+            ]),
+            row("edit_email_row", [
+                label("edit_email_label", "Email:"),
+                with_flex(text_widget("edit_email_input", self.edit_email), 1)
+            ]),
+            row("edit_address_row", [
+                label("edit_address_label", "Address:"),
+                with_flex(text_widget("edit_address_input", self.edit_address), 1)
+            ]),
+            row("edit_notes_row", [
+                label("edit_notes_label", "Notes:"),
+                with_flex(text_widget("edit_notes_input", self.edit_notes), 1)
+            ]),
+            row("edit_actions_row", [
+                button("edit_save_btn", "Save", "save"),
+                button("edit_cancel_btn", "Cancel", "cancel")
+            ])
+        ])
+
+# =========================================================================
+# Sorting Helper
+# =========================================================================
+
+fn _sort_contacts(contacts: [Contact]) -> [Contact]:
+    """Sort contacts alphabetically by name (insertion sort)."""
+    var sorted: [Contact] = contacts
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j].name.lower() > key.name.lower():
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted
+
+# =========================================================================
+# Sample Data
+# =========================================================================
+
+fn _sample_contacts() -> [Contact]:
+    """Generate 16 sample contacts for initial state."""
+    [
+        Contact(id: 1, name: "Alice Anderson",
+            phone: "555-0101", email: "alice@example.com",
+            address: "123 Oak St, Springfield", notes: "College friend"),
+        Contact(id: 2, name: "Bob Baker",
+            phone: "555-0102", email: "bob.baker@example.com",
+            address: "456 Elm Ave, Shelbyville", notes: "Work colleague"),
+        Contact(id: 3, name: "Carol Chen",
+            phone: "555-0103", email: "carol.chen@example.com",
+            address: "789 Pine Rd, Capital City", notes: "Neighbor"),
+        Contact(id: 4, name: "David Diaz",
+            phone: "555-0104", email: "david.d@example.com",
+            address: "321 Maple Dr, Ogdenville", notes: ""),
+        Contact(id: 5, name: "Emma Evans",
+            phone: "555-0105", email: "emma.e@example.com",
+            address: "654 Birch Ln, North Haverbrook", notes: "Book club"),
+        Contact(id: 6, name: "Frank Foster",
+            phone: "555-0106", email: "frank.f@example.com",
+            address: "987 Cedar Ct, Brockway", notes: "Gym buddy"),
+        Contact(id: 7, name: "Grace Garcia",
+            phone: "555-0107", email: "grace.g@example.com",
+            address: "147 Walnut Way, Cypress Creek", notes: ""),
+        Contact(id: 8, name: "Henry Hall",
+            phone: "555-0108", email: "henry.h@example.com",
+            address: "258 Spruce Pl, Waverly Hills", notes: "Dentist"),
+        Contact(id: 9, name: "Irene Ishida",
+            phone: "555-0109", email: "irene.i@example.com",
+            address: "369 Ash Blvd, Terrace View", notes: "Art class"),
+        Contact(id: 10, name: "James Johnson",
+            phone: "555-0110", email: "james.j@example.com",
+            address: "480 Willow St, Riverside", notes: ""),
+        Contact(id: 11, name: "Karen Kim",
+            phone: "555-0111", email: "karen.k@example.com",
+            address: "591 Poplar Ave, Lakewood", notes: "Piano teacher"),
+        Contact(id: 12, name: "Leo Lopez",
+            phone: "555-0112", email: "leo.l@example.com",
+            address: "602 Redwood Dr, Summit Park", notes: ""),
+        Contact(id: 13, name: "Maria Martinez",
+            phone: "555-0113", email: "maria.m@example.com",
+            address: "713 Sequoia Ln, Green Valley", notes: "Yoga instructor"),
+        Contact(id: 14, name: "Nathan Nguyen",
+            phone: "555-0114", email: "nathan.n@example.com",
+            address: "824 Juniper Ct, Mountain View", notes: ""),
+        Contact(id: 15, name: "Olivia O'Brien",
+            phone: "555-0115", email: "olivia.o@example.com",
+            address: "935 Magnolia Way, Hilltop", notes: "Veterinarian"),
+        Contact(id: 16, name: "Paul Park",
+            phone: "555-0116", email: "paul.p@example.com",
+            address: "1046 Dogwood Pl, Fairview", notes: "Running partner")
+    ]

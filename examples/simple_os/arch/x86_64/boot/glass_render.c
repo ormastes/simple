@@ -2,8 +2,22 @@
  * Glass Rendering Primitives for SimpleOS
  *
  * Alpha blending, box blur, gradients, and shadows for glassmorphism UI.
- * All functions use the global framebuffer (g_fb_addr, g_fb_w) set by rt_gui_set_fb().
- * Args are RAW (untagged) u64 values from Cranelift.
+ *
+ * ACCELERATION STRATEGY:
+ *   All effects operate on a CPU-side shadow buffer (g_shadow_buf) in normal
+ *   RAM -- NOT on MMIO framebuffer directly. This avoids the massive penalty
+ *   of volatile MMIO reads (each one traps into QEMU host), which makes blur
+ *   (millions of reads) practical.
+ *
+ *   Rendering flow:
+ *     1. rt_gui_begin_frame() — copies MMIO framebuffer → shadow buffer
+ *        (or just clears if starting fresh)
+ *     2. All rt_gui_* effects operate on shadow buffer (fast RAM access)
+ *     3. rt_gui_present() — bulk-copies shadow buffer → MMIO framebuffer
+ *        (single memcpy, or dirty-rect transfer for partial updates)
+ *
+ *   For VirtIO-GPU: shadow buffer IS the DMA backing memory, so
+ *   present() just calls TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.
  *
  * Packing convention (same as rt_gui_fill4):
  *   xy = (x << 32) | y
@@ -18,24 +32,138 @@ typedef int64_t RuntimeValue;
 /* Globals from baremetal_stubs.c */
 extern uint64_t g_fb_addr;
 extern uint64_t g_fb_w;
+extern void *malloc(size_t);
 
-/* Screen height (fixed for now) */
+/* Screen dimensions */
+#define SCREEN_W_MAX 1024
 #define SCREEN_H 768
 
 /* ===================================================================
- * Pixel helpers
+ * Shadow buffer — CPU-side framebuffer for fast read/write
+ *
+ * The MMIO framebuffer (g_fb_addr) is mapped to device memory. Each
+ * read/write is a volatile operation that traps into QEMU. The shadow
+ * buffer lives in normal RAM where reads are ~100x faster.
+ *
+ * Dirty tracking: g_dirty_* records the bounding box of all writes
+ * since last present(), enabling partial MMIO transfer.
+ * =================================================================== */
+
+static uint32_t *g_shadow_buf = 0;
+static uint32_t  g_shadow_w = 0;
+static uint32_t  g_shadow_h = 0;
+static int       g_shadow_ready = 0;
+
+/* Dirty region tracking for partial present */
+static uint32_t g_dirty_x1 = 0xFFFFFFFF;
+static uint32_t g_dirty_y1 = 0xFFFFFFFF;
+static uint32_t g_dirty_x2 = 0;
+static uint32_t g_dirty_y2 = 0;
+
+static void dirty_mark(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    if (x < g_dirty_x1) g_dirty_x1 = x;
+    if (y < g_dirty_y1) g_dirty_y1 = y;
+    uint32_t x2 = x + w;
+    uint32_t y2 = y + h;
+    if (x2 > g_dirty_x2) g_dirty_x2 = x2;
+    if (y2 > g_dirty_y2) g_dirty_y2 = y2;
+}
+
+static void dirty_reset(void)
+{
+    g_dirty_x1 = 0xFFFFFFFF;
+    g_dirty_y1 = 0xFFFFFFFF;
+    g_dirty_x2 = 0;
+    g_dirty_y2 = 0;
+}
+
+/* ===================================================================
+ * Pixel helpers — operate on shadow buffer (fast) or MMIO (fallback)
  * =================================================================== */
 
 static inline uint32_t fb_read(uint32_t x, uint32_t y)
 {
+    if (g_shadow_ready && x < g_shadow_w && y < g_shadow_h)
+        return g_shadow_buf[y * g_shadow_w + x];
+    /* Fallback to MMIO (slow) */
     uint64_t off = ((uint64_t)y * g_fb_w + x) * 4;
     return *(volatile uint32_t *)(uintptr_t)(g_fb_addr + off);
 }
 
 static inline void fb_write(uint32_t x, uint32_t y, uint32_t color)
 {
+    if (g_shadow_ready && x < g_shadow_w && y < g_shadow_h) {
+        g_shadow_buf[y * g_shadow_w + x] = color;
+        return;
+    }
+    /* Fallback to MMIO (slow) */
     uint64_t off = ((uint64_t)y * g_fb_w + x) * 4;
     *(volatile uint32_t *)(uintptr_t)(g_fb_addr + off) = color;
+}
+
+/* ===================================================================
+ * Frame lifecycle — begin_frame / present
+ * =================================================================== */
+
+/* rt_gui_begin_frame(width, height, _, _)
+ * Allocates shadow buffer (once) and marks frame start.
+ * Call before any rendering. */
+RuntimeValue rt_gui_begin_frame(RuntimeValue w_rv, RuntimeValue h_rv,
+                                 RuntimeValue unused1, RuntimeValue unused2)
+{
+    (void)unused1; (void)unused2;
+    uint32_t w = (uint32_t)(uint64_t)w_rv;
+    uint32_t h = (uint32_t)(uint64_t)h_rv;
+    if (w > SCREEN_W_MAX) w = SCREEN_W_MAX;
+    if (h > SCREEN_H) h = SCREEN_H;
+
+    /* Allocate shadow buffer once */
+    if (!g_shadow_buf || g_shadow_w != w || g_shadow_h != h) {
+        g_shadow_buf = (uint32_t *)malloc((size_t)w * h * 4);
+        g_shadow_w = w;
+        g_shadow_h = h;
+    }
+    if (!g_shadow_buf) return 0;
+
+    g_shadow_ready = 1;
+    dirty_reset();
+    return 0;
+}
+
+/* rt_gui_present(_, _, _, _)
+ * Copies shadow buffer to MMIO framebuffer.
+ * Uses dirty rect tracking: only copies changed region.
+ * TODO: GPU_ACCEL — for VirtIO-GPU, call TRANSFER_TO_HOST_2D + FLUSH
+ *       with dirty rect bounds instead of MMIO memcpy. */
+RuntimeValue rt_gui_present(RuntimeValue unused1, RuntimeValue unused2,
+                             RuntimeValue unused3, RuntimeValue unused4)
+{
+    (void)unused1; (void)unused2; (void)unused3; (void)unused4;
+    if (!g_shadow_ready || !g_shadow_buf) return 0;
+
+    /* Determine transfer region */
+    uint32_t x1 = 0, y1 = 0, x2 = g_shadow_w, y2 = g_shadow_h;
+    if (g_dirty_x1 < g_dirty_x2 && g_dirty_y1 < g_dirty_y2) {
+        /* Use dirty rect (clamped) */
+        x1 = g_dirty_x1;
+        y1 = g_dirty_y1;
+        x2 = g_dirty_x2 < g_shadow_w ? g_dirty_x2 : g_shadow_w;
+        y2 = g_dirty_y2 < g_shadow_h ? g_dirty_y2 : g_shadow_h;
+    }
+
+    /* Bulk copy dirty region to MMIO framebuffer (row by row) */
+    for (uint32_t row = y1; row < y2; row++) {
+        uint64_t mmio_row = g_fb_addr + ((uint64_t)row * g_fb_w + x1) * 4;
+        uint32_t *src_row = &g_shadow_buf[row * g_shadow_w + x1];
+        uint32_t cols = x2 - x1;
+        for (uint32_t col = 0; col < cols; col++) {
+            *(volatile uint32_t *)(uintptr_t)(mmio_row + col * 4) = src_row[col];
+        }
+    }
+
+    dirty_reset();
+    return 0;
 }
 
 /* Alpha blend: dst over src with alpha [0..255]
@@ -99,6 +227,8 @@ RuntimeValue rt_gui_blend_fill(RuntimeValue xy, RuntimeValue wh,
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
     if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
+
+    dirty_mark(x, y, w, h);
 
     for (uint32_t row = 0; row < h; row++) {
         for (uint32_t col = 0; col < w; col++) {
@@ -478,6 +608,36 @@ RuntimeValue rt_gui_gradient_blend_v(RuntimeValue xy, RuntimeValue wh,
             uint32_t py = y + row;
             uint32_t dst = fb_read(px, py);
             fb_write(px, py, alpha_blend(dst, color, (uint8_t)alpha));
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 10. Shadow-buffer-aware solid fill
+ *     rt_gui_shadow_fill(xy, wh, color, _)
+ *     Like rt_gui_fill4 but writes to shadow buffer, not MMIO.
+ * =================================================================== */
+
+RuntimeValue rt_gui_shadow_fill(RuntimeValue xy, RuntimeValue wh,
+                                 RuntimeValue color_rv, RuntimeValue unused)
+{
+    (void)unused;
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t c = (uint32_t)(uint64_t)color_rv;
+
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+    if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
+    if (y + h > SCREEN_H) h = SCREEN_H - y;
+
+    dirty_mark(x, y, w, h);
+
+    for (uint32_t row = 0; row < h; row++) {
+        for (uint32_t col = 0; col < w; col++) {
+            fb_write(x + col, y + row, c);
         }
     }
     return 0;
