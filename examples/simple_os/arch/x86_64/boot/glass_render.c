@@ -339,10 +339,10 @@ RuntimeValue rt_gui_blend_pixel(RuntimeValue x_y, RuntimeValue color_alpha,
  * =================================================================== */
 
 /* Scratch buffer for blur passes — static to avoid stack overflow.
- * Max dimension = 1024 pixels. */
-static uint32_t blur_row_r[1024];
-static uint32_t blur_row_g[1024];
-static uint32_t blur_row_b[1024];
+ * Max dimension = 2048 pixels. */
+static uint32_t blur_row_r[2048];
+static uint32_t blur_row_g[2048];
+static uint32_t blur_row_b[2048];
 
 static void box_blur_h(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint32_t r)
 {
@@ -452,12 +452,14 @@ RuntimeValue rt_gui_box_blur(RuntimeValue xy, RuntimeValue wh,
     uint32_t r = (uint32_t)(uint64_t)radius_rv;
 
     if (r == 0 || w == 0 || h == 0) return 0;
-    if (r > 20) r = 20; /* Clamp kernel to 41 (radius 20) — prevents artifacts with large blurs */
+    if (r > 30) r = 30; /* Clamp kernel to 61 (radius 30) — prevents artifacts with large blurs */
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
     if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
 
-    /* 3-pass box blur: H -> V -> H (approximates Gaussian) */
+    /* 5-pass box blur: H -> V -> H -> V -> H (closer Gaussian approximation) */
+    box_blur_h(x, y, w, h, r);
+    box_blur_v(x, y, w, h, r);
     box_blur_h(x, y, w, h, r);
     box_blur_v(x, y, w, h, r);
     box_blur_h(x, y, w, h, r);
@@ -585,7 +587,7 @@ RuntimeValue rt_gui_shadow(RuntimeValue xy, RuntimeValue wh,
             for (uint32_t c = 0; c < ew && ex + c < g_fb_w; c++) {
                 if (ey < SCREEN_H) {
                     uint32_t dst = fb_read(ex + c, ey);
-                    fb_write(ex + c, ey, alpha_blend(dst, 0x00000000, alpha / 6));
+                    fb_write(ex + c, ey, alpha_blend(dst, 0x00000000, alpha / 4));
                 }
             }
             /* Bottom edge */
@@ -593,7 +595,7 @@ RuntimeValue rt_gui_shadow(RuntimeValue xy, RuntimeValue wh,
             if (bot < SCREEN_H) {
                 for (uint32_t c = 0; c < ew && ex + c < g_fb_w; c++) {
                     uint32_t dst = fb_read(ex + c, bot);
-                    fb_write(ex + c, bot, alpha_blend(dst, 0x00000000, alpha / 6));
+                    fb_write(ex + c, bot, alpha_blend(dst, 0x00000000, alpha / 4));
                 }
             }
         }
@@ -948,17 +950,23 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
-        /* Star field — scattered bright points (400 stars, brighter) */
-        for (uint32_t i = 0; i < 400; i++) {
+        /* Star field — scattered bright points (600 stars, with color variety) */
+        for (uint32_t i = 0; i < 600; i++) {
             uint32_t sx = ((i * 2654435761u) ^ (i * 340573321u)) % sw;
             uint32_t sy = ((i * 1103515245u) ^ (i * 12345u)) % sh;
             uint8_t brightness = 80 + (((i * 48271u) ^ (i * 65537u)) % 80);
-            fb_write(sx, sy, alpha_blend(fb_read(sx, sy), 0x00FFFFFF, brightness));
+            /* Color variety: most white, some blue-tinted, some warm-tinted */
+            uint32_t star_color = 0x00FFFFFF;
+            uint32_t color_seed = (i * 48271u) % 10;
+            if (color_seed == 0) star_color = 0x00C0D0FF;       /* Cool blue star */
+            else if (color_seed == 1) star_color = 0x00FFE8D0;  /* Warm amber star */
+            else if (color_seed == 2) star_color = 0x00D0E0FF;  /* Ice blue star */
+            fb_write(sx, sy, alpha_blend(fb_read(sx, sy), star_color, brightness));
             /* Every 3rd star is 3px for variation */
             if (i % 3 == 0 && sx + 1 < sw) {
-                fb_write(sx + 1, sy, alpha_blend(fb_read(sx + 1, sy), 0x00FFFFFF, brightness / 2));
+                fb_write(sx + 1, sy, alpha_blend(fb_read(sx + 1, sy), star_color, brightness / 2));
                 if (sx + 2 < sw) {
-                    fb_write(sx + 2, sy, alpha_blend(fb_read(sx + 2, sy), 0x00FFFFFF, brightness / 3));
+                    fb_write(sx + 2, sy, alpha_blend(fb_read(sx + 2, sy), star_color, brightness / 3));
                 }
             }
         }
@@ -991,10 +999,82 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw * 7 / 8, sh / 6, 135, 0x0064B5F6, 13, sw, sh);  /* Light blue accent */
         draw_blob(sw * 2 / 5, sh / 10, 120, 0x00CE93D8, 13, sw, sh);  /* Light purple */
 
+        /* Additional nebula blobs for photorealistic richness */
+        draw_blob(sw / 4, sh * 3 / 5, 100, 0x00FF4060, 8, sw, sh);   /* Red nebula */
+        draw_blob(sw * 2 / 3, sh / 3, 80, 0x0040A0FF, 10, sw, sh);   /* Cyan nebula */
+        draw_blob(sw / 2, sh * 4 / 5, 120, 0x00C060FF, 6, sw, sh);   /* Violet nebula near bottom */
+
         /* Extra bright nebula cores for dramatic effect */
         draw_blob(sw / 3, sh / 3, 200, 0x006020A0, 50, sw, sh);      /* Purple core */
         draw_blob(sw * 2 / 3, sh * 2 / 3, 180, 0x002040C0, 45, sw, sh);  /* Blue core */
         draw_blob(sw / 2, sh / 4, 150, 0x00A03060, 35, sw, sh);      /* Magenta accent */
+
+        /* Galaxy spiral — bright core + 2 spiral arms */
+        {
+            uint32_t gcx = sw * 3 / 5;   /* right of center */
+            uint32_t gcy = sh * 2 / 5;   /* upper area */
+            /* Warm bright core */
+            draw_blob(gcx, gcy, 60, 0x00FFFFFF, 20, sw, sh);
+            draw_blob(gcx, gcy, 35, 0x00FFE0B2, 35, sw, sh);
+            draw_blob(gcx, gcy, 18, 0x00FFFFFF, 50, sw, sh);
+            /* Spiral arm 1 */
+            for (int i = 0; i < 8; i++) {
+                int32_t ox = i * 22 - 20;
+                int32_t oy = i * 12 - 40 + (i * i * 2);
+                uint32_t ax = gcx + (uint32_t)(ox > 0 ? ox : 0);
+                uint32_t ay = gcy + (uint32_t)(oy > 0 ? oy : 0);
+                if (ax < sw && ay < sh)
+                    draw_blob(ax, ay, 35 - i * 3, 0x008080FF, 10 - i, sw, sh);
+            }
+            /* Spiral arm 2 (opposite) */
+            for (int i = 0; i < 8; i++) {
+                int32_t ox = -(i * 22 - 20);
+                int32_t oy = -(i * 12 - 40 + (i * i * 2));
+                int32_t raw_x = (int32_t)gcx + ox;
+                int32_t raw_y = (int32_t)gcy + oy;
+                if (raw_x > 0 && raw_x < (int32_t)sw && raw_y > 0 && raw_y < (int32_t)sh)
+                    draw_blob((uint32_t)raw_x, (uint32_t)raw_y, 35 - i * 3, 0x00C080FF, 8 - i, sw, sh);
+            }
+        }
+
+        /* Crescent moon — upper right */
+        {
+            uint32_t mx = sw * 7 / 8;
+            uint32_t my = sh / 6;
+            draw_blob(mx, my, 50, 0x00FFFFFF, 12, sw, sh);  /* glow halo */
+            draw_blob(mx, my, 25, 0x00F0E8D0, 70, sw, sh);  /* moon body */
+            draw_blob(mx + 12, my > 4 ? my - 4 : 0, 22, 0x00060612, 85, sw, sh);  /* shadow crescent */
+        }
+
+        /* Bright constellation stars */
+        {
+            uint32_t cstars[][2] = {{120,150},{140,170},{160,155},{130,200},{150,195},{140,240},{155,235}};
+            for (int i = 0; i < 7; i++) {
+                uint32_t sx = cstars[i][0], sy = cstars[i][1];
+                if (sx + 2 < sw && sy + 2 < sh) {
+                    /* 3x3 bright star with AA edges */
+                    uint32_t c = fb_read(sx, sy);
+                    fb_write(sx, sy, alpha_blend(c, 0x00FFFFFF, 220));
+                    fb_write(sx+1, sy, alpha_blend(fb_read(sx+1,sy), 0x00FFFFFF, 180));
+                    fb_write(sx > 0 ? sx-1 : 0, sy, alpha_blend(fb_read(sx > 0 ? sx-1 : 0,sy), 0x00FFFFFF, 140));
+                    fb_write(sx, sy+1, alpha_blend(fb_read(sx,sy+1), 0x00FFFFFF, 180));
+                    fb_write(sx, sy > 0 ? sy-1 : 0, alpha_blend(fb_read(sx, sy > 0 ? sy-1 : 0), 0x00FFFFFF, 140));
+                }
+            }
+        }
+
+        /* Atmospheric haze — blue band at horizon */
+        {
+            uint32_t haze_y = sh * 3 / 4;
+            uint32_t haze_h = 40;
+            for (uint32_t ay = haze_y; ay < haze_y + haze_h && ay < sh; ay++) {
+                uint32_t t = ay - haze_y;
+                uint8_t ha = (uint8_t)((haze_h - t) * 15 / haze_h);
+                for (uint32_t ax = 0; ax < sw; ax++) {
+                    fb_write(ax, ay, alpha_blend(fb_read(ax, ay), 0x004060C0, ha));
+                }
+            }
+        }
 
         /* Subtle blur pass to soften blobs */
         box_blur_h(0, 0, sw, sh, 8);
@@ -1072,10 +1152,22 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw * 4 / 5, sh * 3 / 4, 120, 0x00E1BEE7, 10, sw, sh); /* Lilac accent */
         draw_blob(sw / 8, sh * 4 / 5, 100, 0x00B3E5FC, 10, sw, sh);   /* Sky blue */
 
-        /* Soft pastel clouds for light theme */
-        draw_blob(sw / 4, sh / 3, 300, 0x00FFF0F8, 12, sw, sh);      /* White-pink cloud */
-        draw_blob(sw * 3 / 4, sh / 2, 250, 0x00F0F0FF, 10, sw, sh);  /* White-blue cloud */
-        draw_blob(sw / 2, sh * 2 / 3, 280, 0x00F8F0FF, 8, sw, sh);   /* Soft purple cloud */
+        /* Soft pastel clouds for light theme (boosted alpha) */
+        draw_blob(sw / 4, sh / 3, 300, 0x00FFF0F8, 18, sw, sh);      /* White-pink cloud */
+        draw_blob(sw * 3 / 4, sh / 2, 250, 0x00F0F0FF, 15, sw, sh);  /* White-blue cloud */
+        draw_blob(sw / 2, sh * 2 / 3, 280, 0x00F8F0FF, 12, sw, sh);  /* Soft purple cloud */
+
+        /* Sun glow */
+        draw_blob(sw / 2, sh / 4, 90, 0x00FFFFFF, 25, sw, sh);
+        draw_blob(sw / 2, sh / 4, 45, 0x00FFFDE0, 40, sw, sh);
+        /* Horizontal lens flare */
+        for (uint32_t fx = (sw/2 > 150 ? sw/2 - 150 : 0); fx < sw/2 + 150 && fx < sw; fx++) {
+            uint32_t dist = (fx > sw/2) ? fx - sw/2 : sw/2 - fx;
+            if (dist < 150) {
+                uint8_t fa = (uint8_t)((150 - dist) * 6 / 150);
+                fb_write(fx, sh/4, alpha_blend(fb_read(fx, sh/4), 0x00FFFFFF, fa));
+            }
+        }
 
         /* Soften */
         box_blur_h(0, 0, sw, sh, 10);

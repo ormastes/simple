@@ -46,6 +46,7 @@ extern fn rt_gui_draw_text_bold(xy: u64, color_len: u64, alpha: u64, unused: u64
 extern fn rt_gui_draw_text_2x(xy: u64, color_len: u64, alpha: u64, shadow_alpha: u64)
 extern fn rt_gui_draw_text_outline(xy: u64, color_len: u64, alpha: u64, outline_alpha: u64)
 extern fn rt_gui_draw_text_vector(xy: u64, color_size: u64, alpha: u64, unused: u64)
+extern fn rt_gui_noise_blend(xy: u64, wh: u64, intensity: u64, unused: u64)
 
 # Layout engine
 extern fn rt_layout_reset(u1: u64, u2: u64, u3: u64, u4: u64)
@@ -71,10 +72,10 @@ val TITLE_BAR_H: u64 = 44
 # ===========================================================================
 # Dark Glass Theme (default) — derived from glass_tokens.spl
 # ===========================================================================
-val DARK_BG_TOP: u64       = 0x00040408   # Even darker, more contrast with glass
+val DARK_BG_TOP: u64       = 0x00060508   # Slightly warm dark — naturalistic tone
 val DARK_BG_BOT: u64       = 0x00200840   # Brighter purple, more vibrant
 val DARK_SURFACE: u64      = 0x001E1E23   # Glass surface color
-val DARK_SURFACE_A: u64    = 45           # 18% opacity (MORE transparent glass — background shows through)
+val DARK_SURFACE_A: u64    = 55           # 22% opacity (more visible glass — background still shows through)
 val DARK_ELEVATED: u64     = 0x002C2C32   # Elevated glass
 val DARK_ELEVATED_A: u64   = 130          # 51% opacity (glass-like translucent title bar)
 val DARK_BORDER: u64       = 0x00FFFFFF   # Glass border (white)
@@ -93,7 +94,7 @@ val LIGHT_BG_BOT: u64      = 0x00F5F0FF   # Warmer white-lavender
 val LIGHT_SURFACE: u64     = 0x00F8F0FF   # Glass surface (slight lavender tint)
 val LIGHT_SURFACE_A: u64   = 65           # 25% opacity (slightly more opaque for light — opposite of dark's transparency)
 val LIGHT_ELEVATED: u64    = 0x00FFF0F8   # Elevated glass (stronger pink tint for title bars)
-val LIGHT_ELEVATED_A: u64  = 140          # 55% opacity (glass-like translucent title bar)
+val LIGHT_ELEVATED_A: u64  = 155          # 61% opacity (stronger glass title bar — more visible in thumbnails)
 val LIGHT_BORDER: u64      = 0x00000000   # Glass border (black)
 val LIGHT_BORDER_A: u64    = 90           # 35% opacity (more visible border)
 val LIGHT_TEXT: u64        = 0x00201820   # Primary text (slightly warm black)
@@ -105,6 +106,7 @@ val LIGHT_SHADOW_A: u64    = 30           # Shadow opacity (softer for light the
 val WARM_ACCENT: u64 = 0x00FF9500   # Warm orange for highlights
 val SUCCESS_COLOR: u64 = 0x0030D158   # Green (matches battery indicator)
 val WARNING_COLOR: u64 = 0x00FFD60A   # Warm yellow (alerts)
+val WARM_HIGHLIGHT: u64 = 0x00FFD0A0  # Warm natural gold for highlights
 
 # Window control button colors (SimpleOS accent palette — unique identity)
 val BTN_CLOSE: u64   = 0x00FF6B8A  # Rose pink — keep (warm accent)
@@ -328,6 +330,9 @@ fn ring(cx: u64, cy: u64, diameter: u64, thick: u64, color: u64, alpha: u64):
 fn grad_rect(x: u64, y: u64, w: u64, h: u64, c1: u64, radius: u64, c2: u64, alpha: u64):
     rt_gui_gradient_rect(pack(x, y), pack(w, h), pack(c1, radius), pack(c2, alpha))
 
+fn noise(x: u64, y: u64, w: u64, h: u64, intensity: u64):
+    rt_gui_noise_blend(pack(x, y), pack(w, h), intensity, 0)
+
 # Text rendering helpers — pack 8 ASCII chars into u64 for rt_gui_set_text_buf
 fn pack8(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64:
     (a << 56) | (b << 48) | (c << 40) | (d << 32) | (e << 24) | (f << 16) | (g << 8) | h
@@ -471,21 +476,32 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         shadow(x - 2, y + 4, w + 4, h + 2, 20, 8, 1)
 
     # 2. Blur background (frosted glass)
-    # Quad-pass blur for deep frosted glass
+    # 6-pass progressive blur for deep frosted glass
     blur(x, y, w, h, BLUR_SURFACE)
     blur(x, y, w, h, 10)
     blur(x, y, w, h, 6)
     blur(x, y, w, h, 4)
+    blur(x, y, w, h, 3)
+    blur(x, y, w, h, 2)
     # Vibrancy saturation boost (macOS-style — amplify background colors)
     blend(x, y, w, h, accent(theme), 8)
     blend(x, y, w, h, accent2(theme), 5)
     # Glass tint — makes glass visible even in thumbnails
     blend(x, y, w, h, 0x004080FF, 30)
-    blend(x, y, w, h, 0x00FFFFFF, 20)
+    blend(x, y, w, h, 0x00FFFFFF, 28)
     # Extra glass shimmer (makes translucency MORE visible)
     blend(x + 4, y + 4, w - 8, h / 3, 0x00FFFFFF, 8)
-    # Palette cohesion: subtle rose undertone ties glass to button colors
-    blend(x, y, w, h, 0x00FF6B8A, 4)
+    # Palette cohesion: rose undertone ties glass to button colors (stronger)
+    blend(x, y, w, h, 0x00FF6B8A, 12)
+    # Warm amber highlight on glass top edge
+    blend(x + 20, y + 1, w - 40, 1, 0x00FFE0B2, 12)
+    # Cool shadow at window bottom (depth grounding)
+    blend(x + 4, y + h - 4, w - 8, 4, 0x001A2040, 15)
+    # Vibrancy saturation pass (macOS-style — deep blue vibrancy over blurred content)
+    blend(x, y, w, h, 0x003060A0, 10)
+    blend(x + 2, y + 2, w - 4, h / 4, 0x00FFFFFF, 6)
+    # Purple wallpaper pickup (ties glass tint to nebula tones)
+    blend(x, y, w, h, 0x00402060, 8)
 
     # 3. Glass surface — anti-aliased rounded corners
     rrect_aa(x, y, w, h, surface(theme), WIN_CORNER_RADIUS, surface_a(theme))
@@ -501,18 +517,26 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     val tb_light = elevated(theme)
     val tb_dark = surface(theme)
     grad_rect(x + 1, y + 1, w - 2, TITLE_BAR_H, tb_light, WIN_CORNER_RADIUS, tb_dark, elevated_a(theme))
+    # Frosted grain texture on title bar
+    noise(x + 2, y + 2, w - 4, TITLE_BAR_H - 2, 1)
     # Warm accent glow on active title bar (color palette cohesion)
     if is_active == 1:
-        blend(x + 2, y + 2, w - 4, TITLE_BAR_H - 4, accent(theme), 6)
+        blend(x + 2, y + 2, w - 4, TITLE_BAR_H - 4, accent(theme), 15)
     # Stronger top specular on title bar
-    blend(x + 4, y + 1, w - 8, 3, 0x00FFFFFF, 30)
+    blend(x + 4, y + 1, w - 8, 3, 0x00FFFFFF, 38)
     # Top highlight line (specular)
     blend(x + 14, y + 2, w - 28, 1, 0x00FFFFFF, 35)
+    # Mid-bar shimmer line (frosted glass depth)
+    blend(x + w / 4, y + TITLE_BAR_H / 2, w / 2, 1, 0x00FFFFFF, 10)
     # Frosted depth lines (mid-bar highlights)
     blend(x + 2, y + 8, w - 4, 1, 0x00FFFFFF, 8)
     blend(x + 2, y + 16, w - 4, 1, 0x00000000, 5)
-    # Title bar bottom separator (stronger visibility)
-    blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme) + 20)
+    # Title bar bottom separator
+    blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme) + 25)
+    # Dark zone below separator (depth separation)
+    blend(x + 1, y + TITLE_BAR_H + 1, w - 2, 2, 0x00000000, 20)
+    # Subtle inner shadow at top of content area (depth between title bar and content)
+    blend(x + 2, y + TITLE_BAR_H + 2, w - 4, 3, 0x00000000, 12)
     # Inactive title bar desaturation
     if is_active == 0:
         blend(x + 1, y + 1, w - 2, TITLE_BAR_H - 1, 0x00304060, 25)
@@ -522,10 +546,13 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     # Toolbar bottom separator
     blend(x + 4, y + TITLE_BAR_H + 7, w - 8, 1, border_c(theme), 15)
     if is_active == 1:
-        # Toolbar action buttons (unique — functional-looking)
+        # Toolbar action buttons (clean rounded rects with subtle borders)
         rrect_aa(x + w - 80, y + TITLE_BAR_H + 2, 20, 12, accent(theme), 4, 80)
+        rrect_aa(x + w - 80, y + TITLE_BAR_H + 2, 20, 12, border_c(theme), 4, 20)
         rrect_aa(x + w - 56, y + TITLE_BAR_H + 2, 20, 12, surface(theme), 4, 60)
+        rrect_aa(x + w - 56, y + TITLE_BAR_H + 2, 20, 12, border_c(theme), 4, 20)
         rrect_aa(x + w - 32, y + TITLE_BAR_H + 2, 20, 12, surface(theme), 4, 60)
+        rrect_aa(x + w - 32, y + TITLE_BAR_H + 2, 20, 12, border_c(theme), 4, 20)
 
     # 5. Traffic light buttons — dimmer when inactive
     val btn_y = y + BTN_MARGIN_Y
@@ -534,52 +561,70 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     var bx: u64 = x + BTN_MARGIN_X
     if is_active == 1:
         circle(bx, btn_y, btn_d, BTN_CLOSE, 255)
+        # Lighter inset circle for subtle gradient
+        circle(bx + 1, btn_y + 1, btn_d - 2, 0x00FF8FA8, 60)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
-        # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 25)
+        # Specular highlight (subtle glint)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 80)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
-        # Close X glyph
-        line(bx + 4, btn_y + 4, bx + btn_d - 4, btn_y + btn_d - 4, 0x00000000, 1, 120)
-        line(bx + btn_d - 4, btn_y + 4, bx + 4, btn_y + btn_d - 4, 0x00000000, 1, 120)
+        # Colored halo ring (subtle)
+        ring(bx - 1, btn_y - 1, btn_d + 2, 1, BTN_CLOSE, 10)
+        # Close X glyph (thicker, more visible)
+        line(bx + 4, btn_y + 4, bx + btn_d - 4, btn_y + btn_d - 4, 0x00000000, 2, 180)
+        line(bx + btn_d - 4, btn_y + 4, bx + 4, btn_y + btn_d - 4, 0x00000000, 2, 180)
+        # Subtle bottom shadow (convex lens depth)
+        blend(bx + 2, btn_y + btn_d - 4, btn_d - 4, 3, 0x00000000, 20)
         # Contact shadow below
-        blend(bx + 2, btn_y + btn_d, btn_d - 4, 2, 0x00000000, 35)
+        blend(bx + 2, btn_y + btn_d, btn_d - 4, 3, 0x00000000, 55)
         bx = bx + btn_d + btn_gap
         circle(bx, btn_y, btn_d, BTN_MIN, 255)
+        # Lighter inset circle for subtle gradient
+        circle(bx + 1, btn_y + 1, btn_d - 2, 0x00A0A0FF, 60)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
-        # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 25)
+        # Specular highlight (subtle glint)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 80)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
-        # Minimize dash glyph
-        line(bx + 4, btn_y + btn_d / 2, bx + btn_d - 4, btn_y + btn_d / 2, 0x00000000, 1, 120)
+        # Colored halo ring (subtle)
+        ring(bx - 1, btn_y - 1, btn_d + 2, 1, BTN_MIN, 10)
+        # Minimize dash glyph (thicker, more visible)
+        line(bx + 4, btn_y + btn_d / 2, bx + btn_d - 4, btn_y + btn_d / 2, 0x00000000, 2, 180)
+        # Subtle bottom shadow (convex lens depth)
+        blend(bx + 2, btn_y + btn_d - 4, btn_d - 4, 3, 0x00000000, 20)
         # Contact shadow below
-        blend(bx + 2, btn_y + btn_d, btn_d - 4, 2, 0x00000000, 35)
+        blend(bx + 2, btn_y + btn_d, btn_d - 4, 3, 0x00000000, 55)
         bx = bx + btn_d + btn_gap
         circle(bx, btn_y, btn_d, BTN_MAX, 255)
+        # Lighter inset circle for subtle gradient
+        circle(bx + 1, btn_y + 1, btn_d - 2, 0x0070E8C0, 60)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
-        # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 25)
+        # Specular highlight (subtle glint)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 80)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
-        # Maximize plus glyph
-        line(bx + 4, btn_y + btn_d / 2, bx + btn_d - 4, btn_y + btn_d / 2, 0x00000000, 1, 120)
-        line(bx + btn_d / 2, btn_y + 4, bx + btn_d / 2, btn_y + btn_d - 4, 0x00000000, 1, 120)
+        # Colored halo ring (subtle)
+        ring(bx - 1, btn_y - 1, btn_d + 2, 1, BTN_MAX, 10)
+        # Maximize plus glyph (thicker, more visible)
+        line(bx + 4, btn_y + btn_d / 2, bx + btn_d - 4, btn_y + btn_d / 2, 0x00000000, 2, 180)
+        line(bx + btn_d / 2, btn_y + 4, bx + btn_d / 2, btn_y + btn_d - 4, 0x00000000, 2, 180)
+        # Subtle bottom shadow (convex lens depth)
+        blend(bx + 2, btn_y + btn_d - 4, btn_d - 4, 3, 0x00000000, 20)
         # Contact shadow below
-        blend(bx + 2, btn_y + btn_d, btn_d - 4, 2, 0x00000000, 35)
+        blend(bx + 2, btn_y + btn_d, btn_d - 4, 3, 0x00000000, 55)
     else:
-        # Inactive: gray circles with inner ring for definition
-        circle(bx, btn_y, btn_d, 0x00808080, 120)
-        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00666666, 80)
+        # Inactive: darker gray circles, subdued (strong contrast with active)
+        circle(bx, btn_y, btn_d, 0x00606060, 80)
+        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00505050, 60)
         bx = bx + btn_d + btn_gap
-        circle(bx, btn_y, btn_d, 0x00808080, 120)
-        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00666666, 80)
+        circle(bx, btn_y, btn_d, 0x00606060, 80)
+        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00505050, 60)
         bx = bx + btn_d + btn_gap
-        circle(bx, btn_y, btn_d, 0x00808080, 120)
-        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00666666, 80)
+        circle(bx, btn_y, btn_d, 0x00606060, 80)
+        ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00505050, 60)
 
     # 6. Glass border — anti-aliased
     rrect_aa(x, y, w, h, border_c(theme), WIN_CORNER_RADIUS, border_a(theme))
@@ -597,13 +642,15 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     blend(x + 4, y + h, w - 8, 4, 0x00000000, 50)
     blend(x + 8, y + h + 2, w - 16, 1, 0x00000000, 15)
 
-    # 8. Dim inactive windows (reduced vibrancy)
+    # 8. Dim inactive windows (reduced vibrancy — dramatic contrast)
     if is_active == 0:
         # SimpleOS: cool-blue "frost" on inactive (unique — not macOS gray)
-        blend(x, y, w, h, 0x00203050, 45)
-        blend(x, y, w, h, 0x00000000, 20)
+        blend(x, y, w, h, 0x00203050, 70)
+        blend(x, y, w, h, 0x00000000, 35)
+        # Title bar dimming (extra dark on inactive title area)
+        blend(x + 1, y + 1, w - 2, TITLE_BAR_H, 0x00000000, 30)
         # Defocus blur on inactive (content becomes less sharp)
-        blur(x, y, w, h, 3)
+        blur(x, y, w, h, 5)
 
     # 7. Focus ring (soft glow, not hard outline)
     if is_active == 1:
@@ -611,16 +658,19 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         val focus_r_inner = WIN_CORNER_RADIUS + 1
         rrect_aa(x - 2, y - 2, w + 4, h + 4, accent(theme), focus_r_outer, 80)
         rrect_aa(x - 1, y - 1, w + 2, h + 2, accent(theme), focus_r_inner, 90)
-        rrect_aa(x - 3, y - 3, w + 6, h + 6, accent(theme), focus_r_outer + 1, 25)
+        # Wider outer glow (dramatic active halo)
+        rrect_aa(x - 5, y - 5, w + 10, h + 10, accent(theme), focus_r_outer + 3, 25)
         # SimpleOS signature: left-edge accent gradient (unique identity)
         blend(x - 2, y + 10, 2, h - 20, accent(theme), 60)
         blend(x - 2, y + 10, 2, (h - 20) / 2, accent2(theme), 30)
         # Accent inner border (selected feeling)
         rrect_aa(x, y, w, h, accent(theme), WIN_CORNER_RADIUS, 25)
-        # Warm top glow on active (beyond macOS)
-        blend(x + 20, y + 1, w - 40, 1, 0x00FFD700, 15)
+        # Warm top glow on active (beyond macOS — stronger)
+        blend(x + 20, y + 1, w - 40, 1, 0x00FFD0A0, 30)
         # Top shimmer (premium polish — simulates light reflection)
         blend(x + 30, y + 1, w / 3, 1, 0x00FFFFFF, 25)
+        # Warm bottom glow (grounds window with accent light)
+        blend(x + 10, y + h - 4, w - 20, 4, accent(theme), 40)
         # Active vibrancy boost (content appears more vivid)
         blend(x + 2, y + TITLE_BAR_H + 8, w - 4, 2, accent(theme), 30)
 
@@ -637,6 +687,10 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     blur(0, y, SCREEN_W, h, 10)
     # Menu bar vibrancy
     blend(0, y, SCREEN_W, h, accent(theme), 5)
+    # Blue glass tint (matching windows for consistency)
+    blend(0, 0, SCREEN_W, 28, 0x004080FF, 12)
+    # Rose undertone (matching windows for consistency)
+    blend(0, 0, SCREEN_W, 28, 0x00FF6B8A, 3)
 
     # Gradient menu bar (unique — not flat like macOS)
     grad_v(0, y, SCREEN_W, h, elevated(theme), surface(theme))
@@ -688,7 +742,7 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     rt_layout_set_size(menu4, layout_fixed(24), layout_fixed(16), 0)
 
     val menu5 = rt_layout_add(0, root, 0, 0)
-    rt_layout_set_size(menu5, layout_fixed(32), layout_fixed(16), 0)
+    rt_layout_set_size(menu5, layout_fixed(54), layout_fixed(16), 0)
 
     # Spacer (fills center)
     val spacer = rt_layout_add(0, root, 0, 0)
@@ -746,17 +800,17 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     # Menu items — "File" is active (with pill bg + underline), Edit/View dimmer
     # "File" (active) — subtle pill background
     rrect_aa(layout_x(menu1) - 2, layout_y(menu1) - 1, layout_w(menu1) + 4, layout_h(menu1) + 2, text_c(theme), 4, 15)
-    draw_label_outline(layout_x(menu1) + 2, layout_y(menu1), text_c(theme), 200, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4, 60)
+    draw_label_vector(layout_x(menu1) + 2, layout_y(menu1), text_c(theme), 220, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4, 14)
     # Active menu underline
     blend(layout_x(menu1), layout_y(menu1) + 14, layout_w(menu1), 1, accent(theme), 120)
     # "Edit"
-    draw_label_outline(layout_x(menu2) + 2, layout_y(menu2), text_c(theme), 200, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4, 60)
+    draw_label_vector(layout_x(menu2) + 2, layout_y(menu2), text_c(theme), 200, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4, 14)
     # "View"
-    draw_label_outline(layout_x(menu3) + 2, layout_y(menu3), text_c(theme), 200, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4, 60)
+    draw_label_vector(layout_x(menu3) + 2, layout_y(menu3), text_c(theme), 200, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4, 14)
     # "Go"
-    draw_label_outline(layout_x(menu4) + 2, layout_y(menu4), text_c(theme), 200, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2, 60)
+    draw_label_vector(layout_x(menu4) + 2, layout_y(menu4), text_c(theme), 200, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2, 14)
     # "Window"
-    draw_label_outline(layout_x(menu5) + 2, layout_y(menu5), text_c(theme), 200, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6, 60)
+    draw_label_vector(layout_x(menu5) + 2, layout_y(menu5), text_c(theme), 200, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6, 14)
 
     # Spotlight search icon (magnifying glass)
     val srx = layout_x(search_btn)
@@ -848,6 +902,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     blend(dock_x, dock_y, dock_w, dock_h, accent(theme), 6)
     # Saturation boost for dock glass
     blend(dock_x, dock_y, dock_w, dock_h, 0x00FFFFFF, 12)
+    # Blue glass tint (matching windows + menu bar for consistency)
+    blend(dock_x, dock_y, dock_w, dock_h, 0x004080FF, 12)
 
     # Glass pill surface — ROUNDED with DOCK_CORNER_RADIUS
     rrect(dock_x, dock_y, dock_w, dock_h, surface(theme), DOCK_CORNER_RADIUS, surface_a(theme))
@@ -899,7 +955,9 @@ fn draw_glass_dock(theme: u64, active: u64):
 
     # Terminal
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_TERM, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -919,12 +977,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     # "> _" prompt symbols
     fill(ix + 12, icon_y + 28, 4, 2, 0x0044FF44)
     fill(ix + 18, icon_y + 28, 6, 2, 0x00888888)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Files
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_FILES, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -943,12 +1003,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 20, icon_y + 24, 4, 1, 0x001E8449)
     # Second document behind (depth effect)
     rrect_aa(ix + 20, icon_y + 16, 10, 12, 0x00DDDDDD, 2, 120)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Calculator
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CALC, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -968,12 +1030,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     rrect_aa(ix + 25, icon_y + 27, 7, 7, 0x00FFFFFF, 2, 200)
     # Clear button (orange, stands out)
     rrect_aa(ix + 25, icon_y + 27, 7, 7, 0x00FF9500, 2, 200)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Clock
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CLOCK, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -994,12 +1058,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 19, icon_y + 28, 2, 3, 0x00FFFFFF)
     # 12 o'clock marker (thicker)
     fill(ix + 19, icon_y + 8, 2, 3, 0x00FFFFFF)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Settings
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_SETTINGS, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -1021,12 +1087,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 27, icon_y + 27, 3, 3, 0x00FFFFFF)
     # Inner detail circle
     ring(ix + 14, icon_y + 14, 12, 1, 0x00CCCCCC, 100)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Browser
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_BROWSER, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -1045,12 +1113,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     # Globe color tinting (subtle quadrant colors)
     blend(ix + 8, icon_y + 8, 12, 12, 0x003498DB, 20)
     blend(ix + 20, icon_y + 20, 12, 12, 0x0027AE60, 20)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # Editor
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_EDITOR, 10, 255)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00FFFFFF, 10, 25)
@@ -1066,7 +1136,7 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 14, icon_y + 28, 1, 4, accent(theme))
     # Pencil tip accent
     line(ix + 26, icon_y + 26, ix + 30, icon_y + 30, accent(theme), 2, 200)
-    blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     # Notification badge (unique SimpleOS feature)
     circle(ix + pill_w - 6, icon_y - 2, 14, 0x00FF3B30, 255)
     circle(ix + pill_w - 4, icon_y, 4, 0x00FFFFFF, 220)
@@ -1084,7 +1154,9 @@ fn draw_glass_dock(theme: u64, active: u64):
 
     # === Finder icon (utility section) ===
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     # Finder: blue face icon (two-tone smiley)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x004A90D9, 10, 255)
@@ -1100,11 +1172,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     rrect_aa(ix + 12, icon_y + 24, 18, 6, 0x00FFFFFF, 3, 200)
     # Nose line
     blend(ix + icon_pad + icon_size / 2 - 1, icon_y + 16, 2, 10, 0x00FFFFFF, 100)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
     # === Trash icon (rightmost) ===
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 14, 60)
+    rrect_aa(ix, icon_y, pill_w, pill_w, 0x00FFFFFF, 14, 15)
     blend(ix + 2, icon_y + 1, pill_w - 4, 1, 0x00FFFFFF, 25)
+    blend(ix + 4, icon_y + 2, 40, 20, 0x00FFFFFF, 10)
     blend(ix + icon_pad, icon_y + icon_pad + icon_size - 6, icon_size, 6, 0x00000000, 40)
     # Trash can body (gray metallic)
     rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, 0x00808080, 10, 255)
@@ -1120,6 +1195,7 @@ fn draw_glass_dock(theme: u64, active: u64):
     blend(ix + 24, icon_y + 17, 2, 14, 0x00808080, 180)
     # Handle
     rrect_aa(ix + 18, icon_y + 5, 6, 5, 0x00C0C0C0, 2, 200)
+    blend(ix + 3, icon_y + pill_w + 1, pill_w - 6, 3, 0x00000000, 20)
 
     # === Running indicators — glowing dots under running apps ===
     val dot_y = dock_y + dock_h - 6
@@ -1341,31 +1417,55 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
 
     # Sidebar section: "Favorites" header
     draw_label(x + 12, sb_y + 6, text_sec(theme), 100, pack8(70, 97, 118, 111, 114, 105, 116, 101), 8)
-    # Sidebar items with icons
-    # Desktop (selected)
+
+    # --- Sidebar: Desktop (selected) with monitor icon ---
     rrect_aa(x + 6, sb_y + 22, sidebar_w - 10, 18, accent(theme), 6, 80)
     draw_label(x + 28, sb_y + 23, text_c(theme), 220, pack8(68, 101, 115, 107, 116, 111, 112, 0), 7)
-    circle(x + 16, sb_y + 28, 8, accent(theme), 200)
-    # Documents
-    draw_label(x + 28, sb_y + 43, text_c(theme), 160, pack8(68, 111, 99, 117, 109, 101, 110, 116), 8)
-    rrect_aa(x + 12, sb_y + 44, 10, 8, ICON_FILES, 2, 180)
-    # Downloads
-    draw_label(x + 28, sb_y + 61, text_c(theme), 160, pack8(68, 111, 119, 110, 108, 111, 97, 100), 8)
-    rrect_aa(x + 12, sb_y + 62, 10, 8, 0x005B9BD5, 2, 180)
-    # Applications
-    draw_label(x + 28, sb_y + 79, text_c(theme), 160, pack8(65, 112, 112, 108, 105, 99, 97, 116), 8)
-    rrect_aa(x + 12, sb_y + 80, 10, 8, 0x009B59B6, 2, 180)
+    # Monitor shape: screen body
+    rrect_aa(x + 11, sb_y + 25, 12, 9, accent(theme), 2, 240)
+    blend(x + 12, sb_y + 26, 10, 7, 0x00FFFFFF, 80)
+    # Monitor stand
+    fill(x + 15, sb_y + 34, 4, 2, accent(theme))
+    fill(x + 13, sb_y + 36, 8, 1, accent(theme))
 
-    # Sidebar text lines
-    blend(x + 12, sb_y + 12, 50, 2, text_c(theme), 60)
-    blend(x + 12, sb_y + 34, 44, 2, text_c(theme), 50)
-    blend(x + 12, sb_y + 56, 54, 2, text_c(theme), 80)
+    # --- Sidebar: Documents with page+fold icon ---
+    draw_label(x + 28, sb_y + 43, text_c(theme), 160, pack8(68, 111, 99, 117, 109, 101, 110, 116), 8)
+    # Page body
+    rrect_aa(x + 12, sb_y + 43, 10, 12, 0x00FFFFFF, 2, 200)
+    # Corner fold (top-right triangle)
+    blend(x + 18, sb_y + 43, 4, 4, 0x00CCCCCC, 180)
+    # Text lines inside page
+    fill(x + 14, sb_y + 48, 5, 1, 0x00AAAAAA)
+    fill(x + 14, sb_y + 50, 4, 1, 0x00AAAAAA)
+    fill(x + 14, sb_y + 52, 5, 1, 0x00AAAAAA)
+
+    # --- Sidebar: Downloads with arrow-down icon ---
+    draw_label(x + 28, sb_y + 61, text_c(theme), 160, pack8(68, 111, 119, 110, 108, 111, 97, 100), 8)
+    # Arrow body (vertical line)
+    line(x + 17, sb_y + 62, x + 17, sb_y + 70, 0x005B9BD5, 2, 220)
+    # Arrow head (two diagonal lines)
+    line(x + 13, sb_y + 67, x + 17, sb_y + 72, 0x005B9BD5, 2, 220)
+    line(x + 21, sb_y + 67, x + 17, sb_y + 72, 0x005B9BD5, 2, 220)
+    # Tray/base line
+    fill(x + 12, sb_y + 73, 10, 1, 0x005B9BD5)
+
+    # --- Sidebar: Applications with 2x2 dot grid ---
+    draw_label(x + 28, sb_y + 79, text_c(theme), 160, pack8(65, 112, 112, 108, 105, 99, 97, 116), 8)
+    circle(x + 13, sb_y + 81, 4, 0x009B59B6, 220)
+    circle(x + 19, sb_y + 81, 4, 0x009B59B6, 220)
+    circle(x + 13, sb_y + 87, 4, 0x009B59B6, 220)
+    circle(x + 19, sb_y + 87, 4, 0x009B59B6, 220)
 
     # Sidebar section: "Locations" header
     draw_label(x + 12, sb_y + 104, text_sec(theme), 100, pack8(76, 111, 99, 97, 116, 105, 111, 110), 8)
-    # Macintosh HD
+
+    # --- Sidebar: SimpleHD with disk icon ---
     draw_label(x + 28, sb_y + 120, text_c(theme), 160, pack8(83, 105, 109, 112, 108, 101, 72, 68), 8)
-    rrect_aa(x + 12, sb_y + 121, 10, 8, 0x00808080, 2, 180)
+    # Disk body
+    rrect_aa(x + 11, sb_y + 120, 12, 10, 0x00808080, 3, 200)
+    blend(x + 12, sb_y + 121, 10, 3, 0x00AAAAAA, 120)
+    # Disk indicator light
+    circle(x + 20, sb_y + 127, 3, 0x0030D158, 200)
 
     # --- Content area: file icon grid ---
     val cx = x + sidebar_w + 8
@@ -1375,48 +1475,188 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val gap_x: u64 = 12
     val gap_y: u64 = 8
 
-    # Row 1: folders
-    var gi: u64 = 0
-    while gi < 3:
-        val gx = cx + gi * (icon_w + gap_x)
-        # Folder icon (blue folder shape)
-        rrect_aa(gx + 8, grid_y + 8, 32, 6, 0x005B9BD5, 3, 220)
-        rrect_aa(gx + 4, grid_y + 12, 40, 24, 0x005B9BD5, 4, 240)
-        rrect_aa(gx + 4, grid_y + 12, 40, 24, 0x00FFFFFF, 4, 30)
-        # Label placeholder
-        blend(gx + 8, grid_y + 42, 32, 8, surface(theme), 60)
-        gi = gi + 1
+    # ================================================================
+    # Row 1: 3D Folder Icons (blue, green, purple)
+    # ================================================================
 
-    # Row 2: files (doc icons) with color-coded file type indicators
-    gi = 0
-    while gi < 3:
-        val gx = cx + gi * (icon_w + gap_x)
-        val gy = grid_y + icon_h + gap_y
-        # File icon (white page with fold corner)
-        rrect_aa(gx + 8, gy + 4, 28, 34, 0x00FFFFFF, 3, 220)
-        rrect_aa(gx + 8, gy + 4, 28, 34, border_c(theme), 3, 40)
-        # Color-coded file type indicator stripe at top
-        if gi == 0:
-            rrect_aa(gx + 8, gy + 4, 28, 3, accent(theme), 3, 255)
-        else:
-            if gi == 1:
-                rrect_aa(gx + 8, gy + 4, 28, 3, accent2(theme), 3, 255)
-            else:
-                rrect_aa(gx + 8, gy + 4, 28, 3, 0x0030D158, 3, 255)
-        # Corner fold
-        blend(gx + 28, gy + 4, 8, 8, 0x00CCCCCC, 200)
-        # Text lines
-        fill(gx + 12, gy + 14, 18, 2, 0x00AAAAAA)
-        fill(gx + 12, gy + 20, 14, 2, 0x00AAAAAA)
-        fill(gx + 12, gy + 26, 16, 2, 0x00AAAAAA)
-        # Label
-        blend(gx + 8, gy + 42, 32, 8, surface(theme), 60)
-        gi = gi + 1
+    # --- Folder 0: Blue (Project) ---
+    val f0x = cx + 0 * (icon_w + gap_x)
+    # Contact shadow below folder
+    blend(f0x + 5, grid_y + 37, 40, 4, 0x00000000, 30)
+    # Back-flap (darker blue, offset above body)
+    rrect_aa(f0x + 6, grid_y + 8, 18, 8, 0x004080B8, 3, 230)
+    # Main folder body with gradient: lighter top to darker bottom
+    grad_rect(f0x + 4, grid_y + 13, 40, 22, 0x0070BEFF, 4, 0x004A90D9, 240)
+    # Top-edge specular highlight (1px white)
+    blend(f0x + 6, grid_y + 13, 36, 1, 0x00FFFFFF, 50)
+    # Inner shadow at top (2px dark)
+    blend(f0x + 6, grid_y + 14, 36, 2, 0x00000000, 20)
+    # 3D lighter top third
+    blend(f0x + 5, grid_y + 13, 38, 7, 0x00FFFFFF, 20)
+    # 3D darker bottom third
+    blend(f0x + 5, grid_y + 28, 38, 6, 0x00000000, 15)
+    # White document peeking out
+    rrect_aa(f0x + 14, grid_y + 10, 14, 8, 0x00FFFFFF, 2, 180)
+    fill(f0x + 16, grid_y + 12, 8, 1, 0x00CCCCCC)
+    fill(f0x + 16, grid_y + 14, 6, 1, 0x00CCCCCC)
+    # Folder border highlight
+    rrect_aa(f0x + 4, grid_y + 13, 40, 22, 0x00FFFFFF, 4, 15)
+    # Label: "Project" = 80,114,111,106,101,99,116,0
+    draw_label_shadow(f0x + 6, grid_y + 42, text_c(theme), 180, pack8(80, 114, 111, 106, 101, 99, 116, 0), 7, 40)
 
-    # File type indicators
-    blend(cx + 8, grid_y + icon_h + gap_y + 52, 48, 2, text_c(theme), 30)
-    blend(cx + 8 + icon_w + gap_x, grid_y + icon_h + gap_y + 52, 40, 2, text_c(theme), 30)
-    blend(cx + 8 + 2 * (icon_w + gap_x), grid_y + icon_h + gap_y + 52, 44, 2, text_c(theme), 30)
+    # --- Folder 1: Green (Photos) ---
+    val f1x = cx + 1 * (icon_w + gap_x)
+    # Contact shadow
+    blend(f1x + 5, grid_y + 37, 40, 4, 0x00000000, 30)
+    # Back-flap (darker green)
+    rrect_aa(f1x + 6, grid_y + 8, 18, 8, 0x00207050, 3, 230)
+    # Main body gradient: lighter green top to darker green bottom
+    grad_rect(f1x + 4, grid_y + 13, 40, 22, 0x0058D0A0, 4, 0x0030A070, 240)
+    # Specular highlight
+    blend(f1x + 6, grid_y + 13, 36, 1, 0x00FFFFFF, 50)
+    # Inner shadow
+    blend(f1x + 6, grid_y + 14, 36, 2, 0x00000000, 20)
+    # 3D lighter top
+    blend(f1x + 5, grid_y + 13, 38, 7, 0x00FFFFFF, 20)
+    # 3D darker bottom
+    blend(f1x + 5, grid_y + 28, 38, 6, 0x00000000, 15)
+    # White document peeking out
+    rrect_aa(f1x + 14, grid_y + 10, 14, 8, 0x00FFFFFF, 2, 180)
+    fill(f1x + 16, grid_y + 12, 8, 1, 0x00CCCCCC)
+    fill(f1x + 16, grid_y + 14, 6, 1, 0x00CCCCCC)
+    # Folder border highlight
+    rrect_aa(f1x + 4, grid_y + 13, 40, 22, 0x00FFFFFF, 4, 15)
+    # Label: "Photos" = 80,104,111,116,111,115,0,0
+    draw_label_shadow(f1x + 8, grid_y + 42, text_c(theme), 180, pack8(80, 104, 111, 116, 111, 115, 0, 0), 6, 40)
+
+    # --- Folder 2: Purple (Music) ---
+    val f2x = cx + 2 * (icon_w + gap_x)
+    # Contact shadow
+    blend(f2x + 5, grid_y + 37, 40, 4, 0x00000000, 30)
+    # Back-flap (darker purple)
+    rrect_aa(f2x + 6, grid_y + 8, 18, 8, 0x006040A0, 3, 230)
+    # Main body gradient: lighter purple top to darker purple bottom
+    grad_rect(f2x + 4, grid_y + 13, 40, 22, 0x00B080E0, 4, 0x008060C0, 240)
+    # Specular highlight
+    blend(f2x + 6, grid_y + 13, 36, 1, 0x00FFFFFF, 50)
+    # Inner shadow
+    blend(f2x + 6, grid_y + 14, 36, 2, 0x00000000, 20)
+    # 3D lighter top
+    blend(f2x + 5, grid_y + 13, 38, 7, 0x00FFFFFF, 20)
+    # 3D darker bottom
+    blend(f2x + 5, grid_y + 28, 38, 6, 0x00000000, 15)
+    # White document peeking out
+    rrect_aa(f2x + 14, grid_y + 10, 14, 8, 0x00FFFFFF, 2, 180)
+    fill(f2x + 16, grid_y + 12, 8, 1, 0x00CCCCCC)
+    fill(f2x + 16, grid_y + 14, 6, 1, 0x00CCCCCC)
+    # Folder border highlight
+    rrect_aa(f2x + 4, grid_y + 13, 40, 22, 0x00FFFFFF, 4, 15)
+    # Label: "Music" = 77,117,115,105,99,0,0,0
+    draw_label_shadow(f2x + 10, grid_y + 42, text_c(theme), 180, pack8(77, 117, 115, 105, 99, 0, 0, 0), 5, 40)
+
+    # ================================================================
+    # Row 2: 3D Document/File Icons with content previews
+    # ================================================================
+
+    # --- File 0: Code file (main.spl) ---
+    val d0x = cx + 0 * (icon_w + gap_x)
+    val d0y = grid_y + icon_h + gap_y
+    # Drop shadow behind page
+    blend(d0x + 10, d0y + 7, 28, 34, 0x00000000, 25)
+    # Page body (white rounded rect)
+    rrect_aa(d0x + 8, d0y + 4, 28, 34, 0x00FFFFFF, 3, 240)
+    # 3D: lighter top edge
+    blend(d0x + 9, d0y + 5, 26, 2, 0x00FFFFFF, 30)
+    # 3D: darker bottom
+    blend(d0x + 9, d0y + 32, 26, 4, 0x00000000, 15)
+    # Page border
+    rrect_aa(d0x + 8, d0y + 4, 28, 34, border_c(theme), 3, 30)
+    # Corner fold: triangle area (top-right)
+    blend(d0x + 28, d0y + 4, 8, 8, 0x00E0E0E0, 220)
+    # Fold shadow
+    line(d0x + 28, d0y + 12, d0x + 36, d0y + 4, 0x00BBBBBB, 1, 120)
+    blend(d0x + 28, d0y + 5, 7, 7, 0x00000000, 10)
+    # Code content preview: colored lines
+    # Orange keyword line
+    fill(d0x + 12, d0y + 14, 8, 2, 0x00FF8844)
+    fill(d0x + 22, d0y + 14, 10, 2, 0x00AAAAAA)
+    # Green string line
+    fill(d0x + 14, d0y + 18, 12, 2, 0x0044CC66)
+    # Gray text line
+    fill(d0x + 14, d0y + 22, 10, 2, 0x00999999)
+    # Another orange keyword
+    fill(d0x + 12, d0y + 26, 6, 2, 0x00FF8844)
+    fill(d0x + 20, d0y + 26, 8, 2, 0x00AAAAAA)
+    # Type badge: blue circle with "<>" hint
+    circle(d0x + 30, d0y + 32, 8, accent(theme), 220)
+    blend(d0x + 29, d0y + 33, 6, 4, 0x00FFFFFF, 100)
+    # Label: "main.spl" = 109,97,105,110,46,115,112,108
+    draw_label_shadow(d0x + 4, d0y + 42, text_c(theme), 180, pack8(109, 97, 105, 110, 46, 115, 112, 108), 8, 40)
+
+    # --- File 1: Image file (cover.png) ---
+    val d1x = cx + 1 * (icon_w + gap_x)
+    val d1y = grid_y + icon_h + gap_y
+    # Drop shadow
+    blend(d1x + 10, d1y + 7, 28, 34, 0x00000000, 25)
+    # Page body
+    rrect_aa(d1x + 8, d1y + 4, 28, 34, 0x00FFFFFF, 3, 240)
+    # 3D: lighter top
+    blend(d1x + 9, d1y + 5, 26, 2, 0x00FFFFFF, 30)
+    # 3D: darker bottom
+    blend(d1x + 9, d1y + 32, 26, 4, 0x00000000, 15)
+    # Page border
+    rrect_aa(d1x + 8, d1y + 4, 28, 34, border_c(theme), 3, 30)
+    # Corner fold
+    blend(d1x + 28, d1y + 4, 8, 8, 0x00E0E0E0, 220)
+    line(d1x + 28, d1y + 12, d1x + 36, d1y + 4, 0x00BBBBBB, 1, 120)
+    blend(d1x + 28, d1y + 5, 7, 7, 0x00000000, 10)
+    # Image preview: small gradient rectangle (sky/landscape)
+    grad_v(d1x + 12, d1y + 13, 18, 10, 0x005BA3E0, 0x0090D0FF)
+    # Mountain silhouette (dark triangles at bottom of preview)
+    line(d1x + 12, d1y + 23, d1x + 19, d1y + 17, 0x00336644, 2, 180)
+    line(d1x + 19, d1y + 17, d1x + 24, d1y + 23, 0x00336644, 2, 180)
+    line(d1x + 20, d1y + 23, d1x + 26, d1y + 19, 0x00448855, 2, 160)
+    line(d1x + 26, d1y + 19, d1x + 30, d1y + 23, 0x00448855, 2, 160)
+    # Sun circle
+    circle(d1x + 26, d1y + 14, 4, 0x00FFD700, 200)
+    # Green ground bar
+    fill(d1x + 12, d1y + 23, 18, 4, 0x0044AA66)
+    # Type badge: green circle
+    circle(d1x + 30, d1y + 32, 8, 0x0030D158, 220)
+    blend(d1x + 29, d1y + 33, 6, 4, 0x00FFFFFF, 100)
+    # Label: "cover.pn" = 99,111,118,101,114,46,112,110 (then "g" on next pack)
+    draw_label_shadow(d1x + 2, d1y + 42, text_c(theme), 180, pack8(99, 111, 118, 101, 114, 46, 112, 110), 8, 40)
+
+    # --- File 2: Document (README) ---
+    val d2x = cx + 2 * (icon_w + gap_x)
+    val d2y = grid_y + icon_h + gap_y
+    # Drop shadow
+    blend(d2x + 10, d2y + 7, 28, 34, 0x00000000, 25)
+    # Page body
+    rrect_aa(d2x + 8, d2y + 4, 28, 34, 0x00FFFFFF, 3, 240)
+    # 3D: lighter top
+    blend(d2x + 9, d2y + 5, 26, 2, 0x00FFFFFF, 30)
+    # 3D: darker bottom
+    blend(d2x + 9, d2y + 32, 26, 4, 0x00000000, 15)
+    # Page border
+    rrect_aa(d2x + 8, d2y + 4, 28, 34, border_c(theme), 3, 30)
+    # Corner fold
+    blend(d2x + 28, d2y + 4, 8, 8, 0x00E0E0E0, 220)
+    line(d2x + 28, d2y + 12, d2x + 36, d2y + 4, 0x00BBBBBB, 1, 120)
+    blend(d2x + 28, d2y + 5, 7, 7, 0x00000000, 10)
+    # Document content: text paragraph lines (varying widths)
+    fill(d2x + 12, d2y + 14, 18, 2, 0x00888888)
+    fill(d2x + 12, d2y + 18, 14, 2, 0x00AAAAAA)
+    fill(d2x + 12, d2y + 22, 16, 2, 0x00AAAAAA)
+    fill(d2x + 12, d2y + 26, 10, 2, 0x00AAAAAA)
+    # Second paragraph
+    fill(d2x + 12, d2y + 31, 18, 2, 0x00888888)
+    fill(d2x + 12, d2y + 35, 12, 1, 0x00BBBBBB)
+    # Type badge: orange/amber circle
+    circle(d2x + 30, d2y + 32, 8, 0x00F39C12, 220)
+    blend(d2x + 29, d2y + 33, 6, 4, 0x00FFFFFF, 100)
+    # Label: "README" = 82,69,65,68,77,69,0,0
+    draw_label_shadow(d2x + 6, d2y + 42, text_c(theme), 180, pack8(82, 69, 65, 68, 77, 69, 0, 0), 6, 40)
 
     # --- Path bar at bottom ---
     val pb_y = y + h - 22
@@ -1432,11 +1672,11 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
 # ===========================================================================
 
 fn draw_window_title(x: u64, y: u64, w: u64, title_chars: u64, title_len: u64, theme: u64):
-    val title_pixel_w = title_len * 16
+    val title_pixel_w = title_len * 10
     val text_x = x + (w - title_pixel_w) / 2
-    val text_y = y + 4
-    # Vector font at 28px height (fills 36px title bar nicely)
-    draw_label_vector(text_x, text_y, text_c(theme), 230, title_chars, title_len, 28)
+    val text_y = y + 14
+    # Vector font at 18px height — clean, centered, premium look
+    draw_label_vector(text_x, text_y, text_c(theme), 240, title_chars, title_len, 18)
 
 # ===========================================================================
 # Animation Helpers
@@ -1566,19 +1806,27 @@ fn draw_desktop(active: u64, theme: u64):
             blend(gx, 100, 1, SCREEN_H - 200, 0x00FFFFFF, 2)
             gx = gx + 80
 
-    # Shooting star (premium wallpaper detail)
+    # Shooting stars (premium wallpaper detail)
     if theme == 0:
-        line(180, 80, 220, 95, 0x00FFFFFF, 1, 120)
-        line(220, 95, 230, 98, 0x00FFFFFF, 1, 60)
-        blend(178, 79, 4, 4, 0x00FFFFFF, 80)
+        line(180, 80, 220, 95, 0x00FFFFFF, 2, 180)
+        line(220, 95, 230, 98, 0x00FFFFFF, 2, 90)
+        blend(178, 79, 5, 5, 0x00FFFFFF, 120)
+        # Second shooting star
+        line(700, 120, 760, 150, 0x00FFFFFF, 2, 150)
+        line(760, 150, 770, 153, 0x00FFFFFF, 1, 70)
+        blend(698, 119, 4, 4, 0x00FFFFFF, 100)
 
     if theme == 0:
         # Extra bright stars (visible even at thumbnail size)
-        blend(150, 120, 3, 3, 0x00FFFFFF, 160)
-        blend(700, 200, 3, 3, 0x00FFFFFF, 140)
-        blend(850, 350, 3, 3, 0x00FFFFFF, 120)
-        blend(400, 500, 3, 3, 0x00FFFFFF, 100)
-        blend(950, 100, 3, 3, 0x00FFFFFF, 150)
+        blend(150, 120, 4, 4, 0x00FFFFFF, 160)
+        blend(700, 200, 4, 4, 0x00FFFFFF, 140)
+        blend(850, 350, 4, 4, 0x00FFFFFF, 120)
+        blend(400, 500, 4, 4, 0x00FFFFFF, 100)
+        blend(950, 100, 4, 4, 0x00FFFFFF, 150)
+
+    # Light theme: subtle gradient overlay
+    if theme == 1:
+        blend(0, SCREEN_H / 2, SCREEN_W, SCREEN_H / 2, 0x00E8D0F0, 6)
 
     # Animation: active window slides up by bounce_offset pixels
     val boff = bounce_offset(g_anim_progress)
