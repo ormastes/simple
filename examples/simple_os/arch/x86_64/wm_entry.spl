@@ -35,6 +35,10 @@ extern fn rt_gui_shadow_fill(xy: u64, wh: u64, color: u64, unused: u64)
 extern fn rt_gui_rounded_rect_top(xy: u64, wh: u64, color_radius: u64, alpha: u64)
 extern fn rt_gui_filled_circle(cx_cy: u64, diam_color: u64, alpha: u64, unused: u64)
 extern fn rt_gui_draw_wallpaper(wh: u64, style: u64, unused1: u64, unused2: u64)
+extern fn rt_gui_rounded_rect_aa(xy: u64, wh: u64, color_radius: u64, alpha: u64)
+extern fn rt_gui_line(p1: u64, p2: u64, color_thick: u64, alpha: u64)
+extern fn rt_gui_ring(cx_cy: u64, diam_thick: u64, color: u64, alpha: u64)
+extern fn rt_gui_gradient_rect(xy: u64, wh: u64, color_radius: u64, c2_alpha: u64)
 
 # Pack two u32 values into one u64 (high|low)
 fn pack(hi: u64, lo: u64) -> u64:
@@ -161,6 +165,18 @@ fn rrect_top(x: u64, y: u64, w: u64, h: u64, color: u64, radius: u64, alpha: u64
 fn circle(cx: u64, cy: u64, diameter: u64, color: u64, alpha: u64):
     rt_gui_filled_circle(pack(cx, cy), pack(diameter, color), alpha, 0)
 
+fn rrect_aa(x: u64, y: u64, w: u64, h: u64, color: u64, radius: u64, alpha: u64):
+    rt_gui_rounded_rect_aa(pack(x, y), pack(w, h), pack(color, radius), alpha)
+
+fn line(x1: u64, y1: u64, x2: u64, y2: u64, color: u64, thick: u64, alpha: u64):
+    rt_gui_line(pack(x1, y1), pack(x2, y2), pack(color, thick), alpha)
+
+fn ring(cx: u64, cy: u64, diameter: u64, thick: u64, color: u64, alpha: u64):
+    rt_gui_ring(pack(cx, cy), pack(diameter, thick), pack(color, 0), alpha)
+
+fn grad_rect(x: u64, y: u64, w: u64, h: u64, c1: u64, radius: u64, c2: u64, alpha: u64):
+    rt_gui_gradient_rect(pack(x, y), pack(w, h), pack(c1, radius), pack(c2, alpha))
+
 # === Theme-aware color getters ===
 
 fn bg_top(theme: u64) -> u64:
@@ -216,40 +232,53 @@ fn text_c(theme: u64) -> u64:
 # ===========================================================================
 
 fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64):
-    # 1. Drop shadow
-    shadow(x, y, w, h, 10, shadow_a(theme), 6)
+    # 1. Multi-layer shadows (ambient + directional)
+    # Ambient shadow (soft, large, subtle)
+    shadow(x, y, w, h, 16, 30, 2)
+    # Directional shadow (sharper, offset, stronger)
+    shadow(x, y, w, h, 8, shadow_a(theme), 6)
 
     # 2. Blur background (frosted glass)
     blur(x, y, w, h, BLUR_SURFACE)
 
-    # 3. Glass surface — ROUNDED 12px radius
-    rrect(x, y, w, h, surface(theme), 12, surface_a(theme))
+    # 3. Glass surface — anti-aliased rounded corners
+    rrect_aa(x, y, w, h, surface(theme), 12, surface_a(theme))
 
-    # 4. Title bar — rounded top only, flat bottom
-    rrect_top(x + 1, y + 1, w - 2, TITLE_BAR_H, elevated(theme), 12, elevated_a(theme))
+    # 4. Title bar with gradient depth (lighter top → darker bottom)
+    val tb_light = elevated(theme)
+    val tb_dark = surface(theme)
+    grad_rect(x + 1, y + 1, w - 2, TITLE_BAR_H, tb_light, 12, tb_dark, elevated_a(theme))
+    # Top highlight line (specular)
+    blend(x + 14, y + 2, w - 28, 1, 0x00FFFFFF, 20)
     # Title bar bottom separator
     blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme))
 
-    # 5. Traffic light buttons — CIRCLES (macOS style)
+    # 5. Traffic light buttons with inner symbols
     val btn_y = y + 10
     val btn_d: u64 = 12
     val btn_gap: u64 = 8
     var bx: u64 = x + 12
-    # Close (red circle)
+    # Close (red circle with X)
     circle(bx, btn_y, btn_d, BTN_CLOSE, 255)
+    line(bx + 3, btn_y + 3, bx + 9, btn_y + 9, 0x00800000, 2, 180)
+    line(bx + 9, btn_y + 3, bx + 3, btn_y + 9, 0x00800000, 2, 180)
     bx = bx + btn_d + btn_gap
-    # Minimize (yellow circle)
+    # Minimize (yellow circle with -)
     circle(bx, btn_y, btn_d, BTN_MIN, 255)
+    line(bx + 3, btn_y + 6, bx + 9, btn_y + 6, 0x00806000, 2, 180)
     bx = bx + btn_d + btn_gap
-    # Maximize (green circle)
+    # Maximize (green circle with +)
     circle(bx, btn_y, btn_d, BTN_MAX, 255)
+    line(bx + 3, btn_y + 6, bx + 9, btn_y + 6, 0x00005800, 2, 180)
+    line(bx + 6, btn_y + 3, bx + 6, btn_y + 9, 0x00005800, 2, 180)
 
-    # 6. Glass border overlay — rounded to match window
-    rrect(x, y, w, h, border_c(theme), 12, border_a(theme))
+    # 6. Glass border — anti-aliased
+    rrect_aa(x, y, w, h, border_c(theme), 12, border_a(theme))
 
-    # 7. Focus ring (active window)
+    # 7. Focus ring (soft glow, not hard outline)
     if is_active == 1:
-        rrect(x - 1, y - 1, w + 2, h + 2, accent(theme), 13, 100)
+        rrect_aa(x - 2, y - 2, w + 4, h + 4, accent(theme), 14, 40)
+        rrect_aa(x - 1, y - 1, w + 2, h + 2, accent(theme), 13, 60)
 
 # ===========================================================================
 # Glass System Bar (top)
@@ -259,36 +288,45 @@ fn draw_glass_system_bar(theme: u64):
     val y: u64 = 0
     val h = SYSTEM_BAR_H
 
-    # Blur background (strong blur for translucent menu bar)
+    # Blur background (strong frosted glass)
     blur(0, y, SCREEN_W, h, BLUR_ELEVATED)
 
-    # Glass surface — more transparent for visible frosted glass
+    # Glass surface — very transparent
     blend(0, y, SCREEN_W, h, surface(theme), 100)
 
-    # Bottom border
+    # Bottom border with subtle highlight
     blend(0, h - 1, SCREEN_W, 1, border_c(theme), border_a(theme) + 10)
 
-    # Left: Apple-like logo pill + app name
-    rrect(6, 5, 24, 18, accent(theme), 6, 180)
-    # "File  Edit  View" menu items (simulated with subtle pills)
-    rrect(38, 5, 32, 18, surface(theme), 6, 50)
-    rrect(76, 5, 28, 18, surface(theme), 6, 50)
-    rrect(110, 5, 30, 18, surface(theme), 6, 50)
+    # Left: App logo + menu items
+    rrect_aa(6, 5, 24, 18, accent(theme), 6, 180)
+    # Menu items (File, Edit, View simulated as text-weight pills)
+    rrect_aa(38, 6, 32, 16, surface(theme), 4, 40)
+    rrect_aa(76, 6, 28, 16, surface(theme), 4, 40)
+    rrect_aa(110, 6, 30, 16, surface(theme), 4, 40)
 
-    # Right: Status icons — Wi-Fi, battery, clock area
-    # Wi-Fi icon (circle)
-    circle(SCREEN_W - 148, 8, 10, accent(theme), 160)
-    # Battery indicator (small rounded rect)
-    rrect(SCREEN_W - 130, 8, 22, 12, 0x0030D158, 4, 180)
-    # Volume (small circle)
-    circle(SCREEN_W - 100, 9, 8, text_c(theme), 120)
+    # Right: Status icons
+    # Wi-Fi icon (3 arcs)
+    ring(SCREEN_W - 152, 4, 18, 2, text_c(theme), 100)
+    ring(SCREEN_W - 149, 7, 12, 2, text_c(theme), 120)
+    ring(SCREEN_W - 146, 10, 6, 2, text_c(theme), 140)
+
+    # Battery icon (outline rect + fill)
+    rrect_aa(SCREEN_W - 126, 8, 24, 12, text_c(theme), 3, 120)
+    rrect_aa(SCREEN_W - 124, 10, 16, 8, 0x0030D158, 2, 200)
+    rrect_aa(SCREEN_W - 102, 11, 3, 6, text_c(theme), 1, 100)
+
+    # Volume icon (speaker shape)
+    rrect_aa(SCREEN_W - 92, 9, 6, 10, text_c(theme), 2, 120)
+    line(SCREEN_W - 86, 9, SCREEN_W - 82, 6, text_c(theme), 2, 100)
+    line(SCREEN_W - 86, 19, SCREEN_W - 82, 22, text_c(theme), 2, 100)
+
     # Clock area
-    rrect(SCREEN_W - 84, 5, 76, 18, elevated(theme), 8, 90)
+    rrect_aa(SCREEN_W - 74, 5, 66, 18, elevated(theme), 8, 70)
 
     # Center status dots
-    circle(SCREEN_W / 2 - 12, 11, 6, accent(theme), 180)
-    circle(SCREEN_W / 2, 11, 6, accent2(theme), 180)
-    circle(SCREEN_W / 2 + 12, 11, 6, 0x0030D158, 180)
+    circle(SCREEN_W / 2 - 12, 11, 6, accent(theme), 160)
+    circle(SCREEN_W / 2, 11, 6, accent2(theme), 160)
+    circle(SCREEN_W / 2 + 12, 11, 6, 0x0030D158, 160)
 
 # ===========================================================================
 # Glass Dock (bottom)
@@ -325,43 +363,69 @@ fn draw_glass_dock(theme: u64):
 
     # Terminal
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_TERM, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_TERM, 10, 255)
+    rrect_aa(ix + 8, icon_y + 8, icon_size - 8, icon_size - 8, 0x001A1A2E, 6, 200)
+    line(ix + 12, icon_y + 18, ix + 18, icon_y + 18, 0x0044FF44, 2, 255)
+    fill(ix + 20, icon_y + 16, 2, 6, 0x0044FF44)
     ix = ix + pill_w + icon_gap
 
     # Files
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_FILES, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_FILES, 10, 255)
+    rrect_aa(ix + 8, icon_y + 12, 24, 20, 0x001E8449, 4, 220)
+    rrect_aa(ix + 8, icon_y + 10, 14, 6, 0x001E8449, 3, 220)
     ix = ix + pill_w + icon_gap
 
     # Calculator
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CALC, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CALC, 10, 255)
+    rrect_aa(ix + 8, icon_y + 8, 24, 8, 0x00FFFFFF, 3, 120)
+    fill(ix + 9, icon_y + 19, 6, 6, 0x00FFFFFF)
+    fill(ix + 17, icon_y + 19, 6, 6, 0x00FFFFFF)
+    fill(ix + 25, icon_y + 19, 6, 6, 0x00FFFFFF)
+    fill(ix + 9, icon_y + 27, 6, 6, 0x00FFFFFF)
+    fill(ix + 17, icon_y + 27, 6, 6, 0x00FFFFFF)
+    fill(ix + 25, icon_y + 27, 6, 6, 0x00FFFFFF)
     ix = ix + pill_w + icon_gap
 
     # Clock
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CLOCK, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CLOCK, 10, 255)
+    ring(ix + 8, icon_y + 8, 24, 2, 0x00FFFFFF, 180)
+    line(ix + 20, icon_y + 20, ix + 20, icon_y + 12, 0x00FFFFFF, 2, 200)
+    line(ix + 20, icon_y + 20, ix + 26, icon_y + 18, 0x00FFFFFF, 2, 200)
     ix = ix + pill_w + icon_gap
 
     # Settings
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_SETTINGS, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_SETTINGS, 10, 255)
+    ring(ix + 10, icon_y + 10, 20, 3, 0x00FFFFFF, 160)
+    circle(ix + 17, icon_y + 17, 8, 0x00FFFFFF, 180)
     ix = ix + pill_w + icon_gap
 
     # Browser
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_BROWSER, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_BROWSER, 10, 255)
+    ring(ix + 8, icon_y + 8, 24, 2, 0x00FFFFFF, 180)
+    line(ix + 8, icon_y + 20, ix + 32, icon_y + 20, 0x00FFFFFF, 1, 140)
+    line(ix + 20, icon_y + 8, ix + 20, icon_y + 32, 0x00FFFFFF, 1, 140)
     ix = ix + pill_w + icon_gap
 
     # Editor
     rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
-    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_EDITOR, 10, 255)
+    rrect_aa(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_EDITOR, 10, 255)
+    rrect_aa(ix + 10, icon_y + 8, 20, 24, 0x00FFFFFF, 3, 140)
+    fill(ix + 14, icon_y + 13, 12, 2, 0x00148F77)
+    fill(ix + 14, icon_y + 18, 10, 2, 0x00148F77)
+    fill(ix + 14, icon_y + 23, 14, 2, 0x00148F77)
 
-    # Running app indicators — CIRCLES
+    # Running indicators — glowing dots
     val dot_y = dock_y + dock_h - 6
     val first_ix = dock_x + dock_pad + pill_w / 2 - 2
-    circle(first_ix, dot_y, 4, accent(theme), 200)
-    circle(first_ix + pill_w + icon_gap, dot_y, 4, accent(theme), 200)
+    circle(first_ix - 1, dot_y - 1, 8, accent(theme), 40)
+    circle(first_ix, dot_y, 6, accent(theme), 220)
+    circle(first_ix + pill_w + icon_gap - 1, dot_y - 1, 8, accent(theme), 40)
+    circle(first_ix + pill_w + icon_gap, dot_y, 6, accent(theme), 220)
 
 # ===========================================================================
 # Application Window Content
@@ -372,14 +436,14 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val pad: u64 = 16
 
     # Greeting banner with accent stripe — ROUNDED
-    rrect(x + pad, cy + pad, w - pad * 2, 44, surface(theme), 8, 80)
-    rrect(x + pad, cy + pad, 4, 44, accent(theme), 2, 255)
+    rrect_aa(x + pad, cy + pad, w - pad * 2, 44, surface(theme), 8, 80)
+    rrect_aa(x + pad, cy + pad, 4, 44, accent(theme), 2, 255)
 
     # Color blocks — ROUNDED
     val block_y = cy + pad + 60
-    rrect(x + pad, block_y, 80, 28, 0x00FF6B6B, 8, 255)
-    rrect(x + pad + 90, block_y, 80, 28, 0x0051CF66, 8, 255)
-    rrect(x + pad + 180, block_y, 80, 28, 0x005B9BD5, 8, 255)
+    rrect_aa(x + pad, block_y, 80, 28, 0x00FF6B6B, 8, 255)
+    rrect_aa(x + pad + 90, block_y, 80, 28, 0x0051CF66, 8, 255)
+    rrect_aa(x + pad + 180, block_y, 80, 28, 0x005B9BD5, 8, 255)
 
     # Bottom accent line — keep as gradient
     grad_h(x + pad, y + h - 28, w - pad * 2, 2, accent(theme), accent2(theme))
