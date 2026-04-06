@@ -1190,8 +1190,8 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
                 /* Anti-aliasing: compute edge proximity
                  * Use the ratio dist4/r4 to determine alpha near edge
                  * Edge is at dist4 == r4, so closeness = (r4 - dist4) / r4
-                 * For AA band: when dist4 is within 85-100% of r4 */
-                uint64_t threshold = r4 - r4 / 5; /* 80% of r4 = start of AA band */
+                 * For AA band: when dist4 is within 70-100% of r4 */
+                uint64_t threshold = r4 - r4 * 3 / 10; /* 70% of r4 = start of AA band (wider for smoother corners) */
                 if (dist4 > threshold) {
                     /* In AA band — compute edge alpha */
                     uint64_t edge_range = r4 - threshold; /* size of AA band */
@@ -1820,9 +1820,9 @@ RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
     if (len > 256) len = 256;
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
 
-    /* Shadow pass at (x+2, y+2) */
+    /* Shadow pass at (x+1, y+1) — tighter shadow */
     if (shadow_alpha > 0) {
-        uint32_t cx = x + 2;
+        uint32_t cx = x + 1;
         for (uint32_t i = 0; i < len; i++) {
             uint8_t ch = (uint8_t)g_text_buf[i];
             if (ch < 32 || ch > 126) ch = '?';
@@ -1833,7 +1833,7 @@ RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
                     if (bits & (0x80 >> col)) {
                         /* 2x2 block for shadow */
                         for (int dy = 0; dy < 2; dy++) {
-                            uint32_t py = y + 2 + row * 2 + dy;
+                            uint32_t py = y + 1 + row * 2 + dy;
                             if (py >= SCREEN_H) continue;
                             for (int dx = 0; dx < 2; dx++) {
                                 uint32_t px = cx + col * 2 + dx;
@@ -1917,7 +1917,7 @@ RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
                                 uint32_t px = px_base + dx;
                                 if (px < g_fb_w) {
                                     uint32_t dst = fb_read(px, py + dy);
-                                    fb_write(px, py + dy, alpha_blend(dst, color, edge_alpha / 3));
+                                    fb_write(px, py + dy, alpha_blend(dst, color, edge_alpha / 4));
                                 }
                             }
                         }
