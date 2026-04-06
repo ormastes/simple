@@ -1101,15 +1101,17 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
     uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
     uint32_t color = (uint32_t)((uint64_t)color_radius >> 32);
     uint32_t radius = (uint32_t)((uint64_t)color_radius & 0xFFFFFFFF);
-    uint8_t base_alpha = (uint8_t)(uint64_t)alpha_rv;
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
 
     if (radius > w / 2) radius = w / 2;
     if (radius > h / 2) radius = h / 2;
-    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+    if (x >= g_fb_w || y >= SCREEN_H || w == 0 || h == 0) return 0;
 
     dirty_mark(x, y, w, h);
 
-    uint32_t r2 = radius * radius;
+    /* Pre-compute r^4 for superellipse test using 64-bit to avoid overflow */
+    uint64_t r2 = (uint64_t)radius * radius;
+    uint64_t r4 = r2 * r2;
 
     for (uint32_t row = 0; row < h; row++) {
         uint32_t py = y + row;
@@ -1119,60 +1121,71 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
             uint32_t px = x + col;
             if (px >= g_fb_w) break;
 
-            /* Determine if pixel is in a corner region */
-            uint8_t pixel_alpha = base_alpha;
+            /* Check which corner region this pixel is in */
             int in_corner = 0;
-            uint32_t cx = 0, cy_val = 0;
+            uint32_t cx = 0, cy = 0; /* distance from corner center */
 
             if (col < radius && row < radius) {
                 /* Top-left corner */
                 cx = radius - col;
-                cy_val = radius - row;
+                cy = radius - row;
                 in_corner = 1;
             } else if (col >= w - radius && row < radius) {
                 /* Top-right corner */
                 cx = col - (w - radius - 1);
-                cy_val = radius - row;
+                cy = radius - row;
                 in_corner = 1;
             } else if (col < radius && row >= h - radius) {
                 /* Bottom-left corner */
                 cx = radius - col;
-                cy_val = row - (h - radius - 1);
+                cy = row - (h - radius - 1);
                 in_corner = 1;
             } else if (col >= w - radius && row >= h - radius) {
                 /* Bottom-right corner */
                 cx = col - (w - radius - 1);
-                cy_val = row - (h - radius - 1);
+                cy = row - (h - radius - 1);
                 in_corner = 1;
             }
 
             if (in_corner) {
-                uint32_t dist2 = cx * cx + cy_val * cy_val;
-                if (dist2 > r2 + radius * 2) continue; /* Outside */
-                if (dist2 > r2) {
-                    /* Edge pixel — compute fractional coverage */
-                    /* Approximate: linear falloff over 1.5 pixel band */
-                    uint32_t d = dist2;
-                    /* Integer sqrt approximation */
-                    uint32_t s = radius;
-                    if (s > 0) {
-                        s = (s + d / s) / 2;
-                        s = (s + d / s) / 2;
-                    }
-                    uint32_t edge_dist = s - radius; /* pixels past edge */
-                    if (edge_dist >= 4) continue;
-                    /* Anti-alias: blend alpha based on distance */
-                    uint32_t aa = (uint32_t)base_alpha * (4 - edge_dist) / 4;
-                    pixel_alpha = (uint8_t)(aa > 255 ? 255 : aa);
+                /* Superellipse distance: (cx/r)^4 + (cy/r)^4 vs 1.0
+                 * Equivalent: cx^4 + cy^4 vs r^4 (all integer) */
+                uint64_t cx2 = (uint64_t)cx * cx;
+                uint64_t cy2 = (uint64_t)cy * cy;
+                uint64_t cx4 = cx2 * cx2;
+                uint64_t cy4 = cy2 * cy2;
+                uint64_t dist4 = cx4 + cy4;
+
+                if (dist4 > r4) {
+                    /* Outside — skip this pixel */
+                    continue;
                 }
-                /* else: fully inside corner circle */
+
+                /* Anti-aliasing: compute edge proximity
+                 * Use the ratio dist4/r4 to determine alpha near edge
+                 * Edge is at dist4 == r4, so closeness = (r4 - dist4) / r4
+                 * For AA band: when dist4 is within 85-100% of r4 */
+                uint64_t threshold = r4 - r4 / 5; /* 80% of r4 = start of AA band */
+                if (dist4 > threshold) {
+                    /* In AA band — compute edge alpha */
+                    uint64_t edge_range = r4 - threshold; /* size of AA band */
+                    uint64_t edge_pos = r4 - dist4;       /* distance from outer edge */
+                    uint32_t edge_alpha = (uint32_t)(edge_pos * alpha / edge_range);
+                    if (edge_alpha > alpha) edge_alpha = alpha;
+                    if (edge_alpha > 0) {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, color, (uint8_t)edge_alpha));
+                    }
+                    continue;
+                }
             }
 
-            if (pixel_alpha == 255) {
+            /* Inside the shape — draw pixel */
+            if (alpha == 255) {
                 fb_write(px, py, 0xFF000000u | color);
-            } else if (pixel_alpha > 0) {
+            } else {
                 uint32_t dst = fb_read(px, py);
-                fb_write(px, py, alpha_blend(dst, color, pixel_alpha));
+                fb_write(px, py, alpha_blend(dst, color, alpha));
             }
         }
     }
