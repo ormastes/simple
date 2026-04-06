@@ -23,6 +23,9 @@ use os.apps.shell.shell_job.{JobTable, JobState, Job}
 use os.apps.shell.shell_pipe.{parse_pipeline, has_pipeline, execute_pipeline}
 use os.apps.shell.shell_redirect.{parse_redirects, apply_redirects, restore_redirects, ParsedCommand, SavedFd}
 use os.apps.shell.shell_async.{spawn_command_async, spawn_command_bg, read_file_posix, read_file_async}
+use os.apps.shell.shell_tools.{tool_touch, tool_head, tool_tail, tool_wc, tool_sort, tool_uniq, tool_which, tool_date, tool_true, tool_false, tool_tee, tool_ln, tool_chmod, tool_stat}
+use os.apps.git.git_app.{git_run_cmd}
+use os.apps.jj.jj_app.{jj_run_cmd}
 use os.async.os_executor.{OsExecutor}
 use os.posix.process_compat.{posix_waitpid}
 
@@ -239,6 +242,22 @@ impl ShellApp:
             "fg":       self.cmd_fg(args)
             "bg":       self.cmd_bg(args)
             "readf":    self.cmd_readf(args)
+            "touch":    self.last_exit_code = tool_touch(self.vfs, self.cwd, args)
+            "head":     self.last_exit_code = tool_head(self.vfs, self.cwd, args, self.terminal)
+            "tail":     self.last_exit_code = tool_tail(self.vfs, self.cwd, args, self.terminal)
+            "wc":       self.last_exit_code = tool_wc(self.vfs, self.cwd, args, self.terminal)
+            "sort":     self.last_exit_code = tool_sort(self.vfs, self.cwd, args, self.terminal)
+            "uniq":     self.last_exit_code = tool_uniq(self.vfs, self.cwd, args, self.terminal)
+            "which":    self.last_exit_code = tool_which(args, self.tool_registry, self.terminal)
+            "date":     self.last_exit_code = tool_date(self.terminal)
+            "true":     self.last_exit_code = tool_true()
+            "false":    self.last_exit_code = tool_false()
+            "tee":      self.last_exit_code = tool_tee(self.vfs, self.cwd, args, self.terminal)
+            "ln":       self.last_exit_code = tool_ln(self.terminal)
+            "chmod":    self.last_exit_code = tool_chmod(args, self.terminal)
+            "stat":     self.last_exit_code = tool_stat(self.vfs, self.cwd, args, self.terminal)
+            "git":      self.cmd_git(args)
+            "jj":       self.cmd_jj(args)
             _:
                 # Try tool registry for external commands
                 if self.tool_registry != nil:
@@ -255,7 +274,9 @@ impl ShellApp:
         val builtins = ["cd", "ls", "pwd", "echo", "cat", "mkdir", "rm", "cp",
             "mv", "grep", "find", "ps", "kill", "mount", "clear", "help",
             "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
-            "jobs", "fg", "bg", "readf"]
+            "jobs", "fg", "bg", "readf", "touch", "head", "tail", "wc",
+            "sort", "uniq", "which", "date", "true", "false", "tee", "ln",
+            "chmod", "stat", "git", "jj"]
         var i = 0
         while i < builtins.len():
             if command == builtins[i]:
@@ -411,6 +432,7 @@ impl ShellApp:
             self._write_error("mkdir: missing operand")
             self.last_exit_code = 1
             return
+        self.last_exit_code = 0
         for dirname in args:
             val path = self._resolve_path(dirname)
             if self.vfs != nil:
@@ -421,7 +443,6 @@ impl ShellApp:
             else:
                 self._write_error("mkdir: no filesystem mounted")
                 self.last_exit_code = 1
-        self.last_exit_code = 0
 
     me cmd_rm(args: [text]):
         """Remove files."""
@@ -429,6 +450,7 @@ impl ShellApp:
             self._write_error("rm: missing operand")
             self.last_exit_code = 1
             return
+        self.last_exit_code = 0
         for filename in args:
             val path = self._resolve_path(filename)
             if self.vfs != nil:
@@ -439,7 +461,6 @@ impl ShellApp:
             else:
                 self._write_error("rm: no filesystem mounted")
                 self.last_exit_code = 1
-        self.last_exit_code = 0
 
     me cmd_cp(args: [text]):
         """Copy files."""
@@ -652,6 +673,22 @@ impl ShellApp:
         self._write_line("  help          Show this help")
         self._write_line("  exit          Exit shell")
         self._write_line("")
+        self._write_line("Extended Tools:")
+        self._write_line("  touch FILE    Create empty file / update timestamp")
+        self._write_line("  head [-n N]   Show first N lines (default 10)")
+        self._write_line("  tail [-n N]   Show last N lines (default 10)")
+        self._write_line("  wc [-lwc]     Word/line/char count")
+        self._write_line("  sort FILE     Sort lines alphabetically")
+        self._write_line("  uniq FILE     Remove consecutive duplicate lines")
+        self._write_line("  which CMD     Show command type/location")
+        self._write_line("  date          Show current date/time")
+        self._write_line("  true          Exit with code 0")
+        self._write_line("  false         Exit with code 1")
+        self._write_line("  tee FILE      Echo args to stdout and file")
+        self._write_line("  ln -s T L     Create symlink (not yet supported)")
+        self._write_line("  chmod M FILE  Change permissions (not yet supported)")
+        self._write_line("  stat FILE     Show file info (size, type)")
+        self._write_line("")
         self._write_line("Job Control:")
         self._write_line("  jobs          List background jobs")
         self._write_line("  fg [ID]       Bring job to foreground")
@@ -661,6 +698,10 @@ impl ShellApp:
         self._write_line("File Access:")
         self._write_line("  readf FILE         Read file (POSIX sync)")
         self._write_line("  readf --async FILE Read file (async VFS)")
+        self._write_line("")
+        self._write_line("Version Control:")
+        self._write_line("  git <cmd>     Git VCS (delegates to git binary)")
+        self._write_line("  jj <cmd>      Jujutsu VCS (delegates to jj binary)")
         self._write_line("")
         self._write_line("Redirection & Pipes:")
         self._write_line("  CMD > FILE    Redirect stdout to file")
@@ -886,6 +927,16 @@ impl ShellApp:
                 Err(msg):
                     self._write_error("readf: {msg}")
                     self.last_exit_code = 1
+
+    # -- Version Control ----------------------------------------------------
+
+    me cmd_git(args: [text]):
+        """Run git subcommand via git_app wrapper."""
+        self.last_exit_code = git_run_cmd(args) as i32
+
+    me cmd_jj(args: [text]):
+        """Run jj subcommand via jj_app wrapper."""
+        self.last_exit_code = jj_run_cmd(args) as i32
 
     # -- Job Reporting -------------------------------------------------------
 

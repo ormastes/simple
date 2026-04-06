@@ -470,11 +470,12 @@ RuntimeValue rt_gui_gradient_v(RuntimeValue xy, RuntimeValue wh,
     if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
 
+    dirty_mark(x, y, w, h);
+
     for (uint32_t row = 0; row < h; row++) {
         uint32_t color = lerp_color(c1, c2, row, h > 1 ? h - 1 : 1);
-        uint64_t base = g_fb_addr + ((uint64_t)(y + row) * g_fb_w + x) * 4;
         for (uint32_t col = 0; col < w; col++) {
-            *(volatile uint32_t *)(uintptr_t)(base + col * 4) = color;
+            fb_write(x + col, y + row, color);
         }
     }
     return 0;
@@ -698,5 +699,216 @@ RuntimeValue rt_gui_present_rect(RuntimeValue x_rv, RuntimeValue y_rv,
             *(volatile uint32_t *)(uintptr_t)(mmio_row + col * 4) = src[col];
         }
     }
+    return 0;
+}
+
+/* ===================================================================
+ * 12. Rounded rectangle — top corners only
+ *     rt_gui_rounded_rect_top(xy, wh, color_radius, alpha)
+ *     For title bars: rounded at top, flat at bottom.
+ *     Same pack as rt_gui_rounded_rect.
+ * =================================================================== */
+
+RuntimeValue rt_gui_rounded_rect_top(RuntimeValue xy, RuntimeValue wh,
+                                      RuntimeValue color_radius, RuntimeValue alpha_rv)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_radius >> 32);
+    uint32_t radius = (uint32_t)((uint64_t)color_radius & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h) radius = h;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    dirty_mark(x, y, w, h);
+
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t py = y + row;
+        if (py >= SCREEN_H) break;
+
+        uint32_t x_start = 0;
+        uint32_t x_end = w;
+
+        if (row < radius) {
+            /* Top corners only — bottom is flat */
+            uint32_t dy = radius - row;
+            uint32_t dx = 0;
+            while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) dx++;
+            x_start = radius - dx;
+            x_end = w - (radius - dx);
+        }
+        /* No bottom corner rounding — rows >= h-radius are full width */
+
+        for (uint32_t col = x_start; col < x_end; col++) {
+            uint32_t px = x + col;
+            if (px >= g_fb_w) break;
+            if (alpha == 255) {
+                fb_write(px, py, 0xFF000000u | color);
+            } else {
+                uint32_t dst = fb_read(px, py);
+                fb_write(px, py, alpha_blend(dst, color, alpha));
+            }
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 13. Filled circle (Bresenham midpoint)
+ *     rt_gui_filled_circle(pack(cx,cy), pack(diameter,color), alpha, _)
+ *     Draws a filled circle centered at (cx, cy) with given diameter.
+ * =================================================================== */
+
+RuntimeValue rt_gui_filled_circle(RuntimeValue cx_cy, RuntimeValue diam_color,
+                                   RuntimeValue alpha_rv, RuntimeValue unused)
+{
+    (void)unused;
+    uint32_t cx = (uint32_t)((uint64_t)cx_cy >> 32);
+    uint32_t cy = (uint32_t)((uint64_t)cx_cy & 0xFFFFFFFF);
+    uint32_t diameter = (uint32_t)((uint64_t)diam_color >> 32);
+    uint32_t color = (uint32_t)((uint64_t)diam_color & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (diameter == 0) return 0;
+    uint32_t r = diameter / 2;
+    /* Center of circle */
+    uint32_t ox = cx + r;
+    uint32_t oy = cy + r;
+
+    if (ox >= g_fb_w + r || oy >= SCREEN_H + r) return 0;
+    dirty_mark(cx, cy, diameter, diameter);
+
+    /* Filled circle via scanline: for each row, compute x span */
+    for (uint32_t row = 0; row < diameter; row++) {
+        int32_t dy = (int32_t)row - (int32_t)r;
+        /* x^2 + y^2 <= r^2 => x = sqrt(r^2 - y^2) */
+        int32_t r2 = (int32_t)(r * r);
+        int32_t dy2 = dy * dy;
+        if (dy2 > r2) continue;
+
+        /* Integer sqrt approximation */
+        uint32_t dx = 0;
+        while ((int32_t)((dx + 1) * (dx + 1)) <= r2 - dy2) dx++;
+
+        uint32_t py = cy + row;
+        if (py >= SCREEN_H) continue;
+
+        uint32_t x_left = ox > dx ? ox - dx : 0;
+        uint32_t x_right = ox + dx;
+        if (x_right >= g_fb_w) x_right = (uint32_t)g_fb_w - 1;
+
+        for (uint32_t px = x_left; px <= x_right; px++) {
+            if (alpha == 255) {
+                fb_write(px, py, 0xFF000000u | color);
+            } else {
+                uint32_t dst = fb_read(px, py);
+                fb_write(px, py, alpha_blend(dst, color, alpha));
+            }
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 14. Procedural wallpaper generator
+ *     rt_gui_draw_wallpaper(pack(width,height), style, _, _)
+ *     Generates macOS-like abstract gradient wallpaper with color blobs.
+ *     style: 0=dark aurora, 1=light pastel
+ * =================================================================== */
+
+static void draw_blob(uint32_t bx, uint32_t by, uint32_t br,
+                       uint32_t color, uint8_t max_alpha,
+                       uint32_t sw, uint32_t sh)
+{
+    /* Radial gradient blob — alpha falls off quadratically from center */
+    uint32_t x1 = bx > br ? bx - br : 0;
+    uint32_t y1 = by > br ? by - br : 0;
+    uint32_t x2 = bx + br < sw ? bx + br : sw;
+    uint32_t y2 = by + br < sh ? by + br : sh;
+
+    uint32_t r2 = br * br;
+    if (r2 == 0) return;
+
+    for (uint32_t row = y1; row < y2; row++) {
+        int32_t dy = (int32_t)row - (int32_t)by;
+        uint32_t dy2 = (uint32_t)(dy * dy);
+        for (uint32_t col = x1; col < x2; col++) {
+            int32_t dx = (int32_t)col - (int32_t)bx;
+            uint32_t dist2 = (uint32_t)(dx * dx) + dy2;
+            if (dist2 >= r2) continue;
+
+            /* Quadratic falloff: alpha = max_alpha * (1 - dist2/r2) */
+            uint32_t alpha = (uint32_t)max_alpha * (r2 - dist2) / r2;
+            if (alpha > 255) alpha = 255;
+            if (alpha < 2) continue;
+
+            uint32_t dst = fb_read(col, row);
+            fb_write(col, row, alpha_blend(dst, color, (uint8_t)alpha));
+        }
+    }
+}
+
+RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
+                                    RuntimeValue unused1, RuntimeValue unused2)
+{
+    (void)unused1; (void)unused2;
+    uint32_t sw = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t sh = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t style = (uint32_t)(uint64_t)style_rv;
+
+    if (sw > SCREEN_W_MAX) sw = SCREEN_W_MAX;
+    if (sh > SCREEN_H) sh = SCREEN_H;
+    if (sw == 0 || sh == 0) return 0;
+
+    dirty_mark(0, 0, sw, sh);
+
+    if (style == 0) {
+        /* Dark Aurora — deep space with colorful nebula blobs */
+
+        /* Base gradient: midnight blue → deep purple */
+        for (uint32_t row = 0; row < sh; row++) {
+            uint32_t color = lerp_color(0x00060612, 0x001A0830, row, sh > 1 ? sh - 1 : 1);
+            for (uint32_t col = 0; col < sw; col++) {
+                fb_write(col, row, 0xFF000000u | color);
+            }
+        }
+
+        /* Nebula blobs */
+        draw_blob(sw * 3 / 4, sh / 4, 220, 0x000A84FF, 30, sw, sh);   /* Blue (top-right) */
+        draw_blob(sw / 5, sh * 2 / 3, 200, 0x00BB86FC, 25, sw, sh);   /* Purple (bottom-left) */
+        draw_blob(sw / 2, sh / 2, 180, 0x0000D4AA, 18, sw, sh);       /* Teal (center) */
+        draw_blob(sw * 4 / 5, sh * 3 / 4, 160, 0x00FF6B9D, 20, sw, sh); /* Pink (bottom-right) */
+        draw_blob(sw / 3, sh / 5, 140, 0x00FFD700, 15, sw, sh);       /* Gold (top-left) */
+
+        /* Subtle blur pass to soften blobs */
+        box_blur_h(0, 0, sw, sh, 8);
+        box_blur_v(0, 0, sw, sh, 8);
+
+    } else {
+        /* Light Pastel — soft gradient with gentle color washes */
+
+        /* Base gradient: lavender → soft white */
+        for (uint32_t row = 0; row < sh; row++) {
+            uint32_t color = lerp_color(0x00C8B8E8, 0x00F0ECF5, row, sh > 1 ? sh - 1 : 1);
+            for (uint32_t col = 0; col < sw; col++) {
+                fb_write(col, row, 0xFF000000u | color);
+            }
+        }
+
+        /* Pastel blobs */
+        draw_blob(sw * 2 / 3, sh / 3, 250, 0x00FFB5C5, 25, sw, sh);   /* Pink (top-right) */
+        draw_blob(sw / 4, sh / 2, 220, 0x0099CCFF, 22, sw, sh);       /* Sky blue (left) */
+        draw_blob(sw / 2, sh * 3 / 4, 200, 0x00B5FFD9, 20, sw, sh);   /* Mint (bottom-center) */
+        draw_blob(sw * 3 / 4, sh * 2 / 3, 180, 0x00E8C5FF, 18, sw, sh); /* Lilac (right) */
+
+        /* Soften */
+        box_blur_h(0, 0, sw, sh, 10);
+        box_blur_v(0, 0, sw, sh, 10);
+    }
+
     return 0;
 }

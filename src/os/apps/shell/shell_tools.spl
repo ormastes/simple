@@ -1,0 +1,530 @@
+# Shell Extended Tools
+#
+# Additional built-in commands for the SimpleOS shell.
+# Each tool is a standalone function returning an i32 exit code.
+#
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.kernel.types.fs_types.{FsNode, FsNodeKind, FileFlags}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.tool_registry.{ToolRegistry}
+
+# =========================================================================
+# Path Resolution (shared helper)
+# =========================================================================
+
+fn _resolve_tool_path(cwd: text, path: text) -> text:
+    """Resolve a relative path against cwd for tool use."""
+    if path.starts_with("/"):
+        return _normalize(path)
+    if path == "..":
+        return _parent(cwd)
+    if path == ".":
+        return cwd
+    val full = if cwd == "/": "/{path}" else: "{cwd}/{path}"
+    return _normalize(full)
+
+fn _normalize(path: text) -> text:
+    """Normalize path by resolving . and .. components."""
+    var parts: [text] = []
+    var current = ""
+    for ch in path:
+        if ch == "/":
+            if current == "..":
+                if parts.len() > 0:
+                    var new_parts: [text] = []
+                    var j = 0
+                    while j < parts.len() - 1:
+                        new_parts = new_parts.push(parts[j])
+                        j = j + 1
+                    parts = new_parts
+            elif current != "." and current != "":
+                parts = parts.push(current)
+            current = ""
+        else:
+            current = "{current}{ch}"
+    if current == "..":
+        if parts.len() > 0:
+            var new_parts: [text] = []
+            var j = 0
+            while j < parts.len() - 1:
+                new_parts = new_parts.push(parts[j])
+                j = j + 1
+            parts = new_parts
+    elif current != "." and current != "":
+        parts = parts.push(current)
+    if parts.len() == 0:
+        return "/"
+    var result = ""
+    for part in parts:
+        result = "{result}/{part}"
+    return result
+
+fn _parent(path: text) -> text:
+    """Get parent directory of a path."""
+    if path == "/":
+        return "/"
+    var last_slash = 0
+    var i = 0
+    for ch in path:
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash == 0:
+        return "/"
+    return path.slice(0, last_slash)
+
+# =========================================================================
+# Output Helpers
+# =========================================================================
+
+fn _write_line(terminal: Terminal, line: text):
+    """Write a line with newline to terminal."""
+    terminal.write_string("{line}\n")
+
+fn _write_error(terminal: Terminal, msg: text):
+    """Write an error message in red."""
+    val esc = "\u{001b}"
+    terminal.write_string("{esc}[31m{msg}{esc}[0m\n")
+
+fn _parse_int(s: text) -> i32:
+    """Parse an i32 from text, returning -1 on failure."""
+    var result: i32 = 0
+    var found_digit = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            result = result * 10 + digit
+            found_digit = true
+        else:
+            return -1
+    if not found_digit:
+        return -1
+    return result
+
+# =========================================================================
+# touch — Create empty files or update timestamps
+# =========================================================================
+
+fn tool_touch(vfs: VfsManager?, cwd: text, args: [text]) -> i32:
+    """Create empty files. If file exists, this is a no-op (no timestamp update in VFS yet)."""
+    if args.len() == 0:
+        return 1
+    if vfs == nil:
+        return 1
+    var exit_code: i32 = 0
+    for filename in args:
+        val path = _resolve_tool_path(cwd, filename)
+        # Check if file already exists
+        val stat_result = vfs.stat(path)
+        if stat_result.is_ok():
+            # File exists — would update timestamp but VFS doesn't support it yet
+            pass_dn
+        else:
+            # Create empty file by writing empty content
+            val write_result = vfs.write_text(path, "")
+            if write_result.is_err():
+                exit_code = 1
+    return exit_code
+
+# =========================================================================
+# head — Show first N lines of a file
+# =========================================================================
+
+fn tool_head(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Show first N lines of a file (default 10)."""
+    if vfs == nil:
+        _write_error(terminal, "head: no filesystem mounted")
+        return 1
+    var n: i32 = 10
+    var file_path: text = ""
+
+    # Parse args: [-n N] FILE
+    var i = 0
+    while i < args.len():
+        if args[i] == "-n" and i + 1 < args.len():
+            val parsed = _parse_int(args[i + 1])
+            if parsed > 0:
+                n = parsed
+            i = i + 2
+        else:
+            file_path = args[i]
+            i = i + 1
+
+    if file_path == "":
+        _write_error(terminal, "head: missing file operand")
+        return 1
+
+    val path = _resolve_tool_path(cwd, file_path)
+    val result = vfs.read_text(path)
+    if result.is_err():
+        _write_error(terminal, "head: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    val lines = content.split("\n")
+    var count: i32 = 0
+    for line in lines:
+        if count >= n:
+            return 0
+        _write_line(terminal, line)
+        count = count + 1
+    return 0
+
+# =========================================================================
+# tail — Show last N lines of a file
+# =========================================================================
+
+fn tool_tail(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Show last N lines of a file (default 10)."""
+    if vfs == nil:
+        _write_error(terminal, "tail: no filesystem mounted")
+        return 1
+    var n: i32 = 10
+    var file_path: text = ""
+
+    # Parse args: [-n N] FILE
+    var i = 0
+    while i < args.len():
+        if args[i] == "-n" and i + 1 < args.len():
+            val parsed = _parse_int(args[i + 1])
+            if parsed > 0:
+                n = parsed
+            i = i + 2
+        else:
+            file_path = args[i]
+            i = i + 1
+
+    if file_path == "":
+        _write_error(terminal, "tail: missing file operand")
+        return 1
+
+    val path = _resolve_tool_path(cwd, file_path)
+    val result = vfs.read_text(path)
+    if result.is_err():
+        _write_error(terminal, "tail: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    val lines = content.split("\n")
+    val total = lines.len() as i32
+    val start = if total > n: total - n else: 0
+    var idx: i32 = 0
+    for line in lines:
+        if idx >= start:
+            _write_line(terminal, line)
+        idx = idx + 1
+    return 0
+
+# =========================================================================
+# wc — Word/line/char count
+# =========================================================================
+
+fn tool_wc(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Count lines, words, and characters in files."""
+    if vfs == nil:
+        _write_error(terminal, "wc: no filesystem mounted")
+        return 1
+
+    # Parse flags
+    var count_lines = false
+    var count_words = false
+    var count_chars = false
+    var files: [text] = []
+
+    for arg in args:
+        if arg == "-l":
+            count_lines = true
+        elif arg == "-w":
+            count_words = true
+        elif arg == "-c":
+            count_chars = true
+        else:
+            files = files.push(arg)
+
+    # Default: show all counts
+    if not count_lines and not count_words and not count_chars:
+        count_lines = true
+        count_words = true
+        count_chars = true
+
+    if files.len() == 0:
+        _write_error(terminal, "wc: missing file operand")
+        return 1
+
+    var exit_code: i32 = 0
+    var total_lines: i32 = 0
+    var total_words: i32 = 0
+    var total_chars: i32 = 0
+
+    for filename in files:
+        val path = _resolve_tool_path(cwd, filename)
+        val result = vfs.read_text(path)
+        if result.is_err():
+            _write_error(terminal, "wc: {path}: {result.unwrap_err()}")
+            exit_code = 1
+        else:
+            val content = result.unwrap()
+            val lines = content.split("\n")
+            val num_lines = lines.len() as i32
+            var num_words: i32 = 0
+            for line in lines:
+                # Count words by splitting on spaces
+                val words = line.split(" ")
+                for w in words:
+                    if w.trim() != "":
+                        num_words = num_words + 1
+            val num_chars = content.len() as i32
+
+            total_lines = total_lines + num_lines
+            total_words = total_words + num_words
+            total_chars = total_chars + num_chars
+
+            var output = ""
+            if count_lines:
+                output = "  {num_lines}"
+            if count_words:
+                output = "{output}  {num_words}"
+            if count_chars:
+                output = "{output}  {num_chars}"
+            _write_line(terminal, "{output}  {filename}")
+
+    # Print total if multiple files
+    if files.len() > 1:
+        var output = ""
+        if count_lines:
+            output = "  {total_lines}"
+        if count_words:
+            output = "{output}  {total_words}"
+        if count_chars:
+            output = "{output}  {total_chars}"
+        _write_line(terminal, "{output}  total")
+
+    return exit_code
+
+# =========================================================================
+# sort — Sort lines alphabetically
+# =========================================================================
+
+fn tool_sort(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Sort lines of a file alphabetically."""
+    if vfs == nil:
+        _write_error(terminal, "sort: no filesystem mounted")
+        return 1
+    if args.len() == 0:
+        _write_error(terminal, "sort: missing file operand")
+        return 1
+
+    val path = _resolve_tool_path(cwd, args[0])
+    val result = vfs.read_text(path)
+    if result.is_err():
+        _write_error(terminal, "sort: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    var lines = content.split("\n")
+
+    # Simple insertion sort (adequate for shell use)
+    var sorted: [text] = []
+    for line in lines:
+        sorted = _insert_sorted(sorted, line)
+    for s in sorted:
+        _write_line(terminal, s)
+    return 0
+
+fn _insert_sorted(list: [text], item: text) -> [text]:
+    """Insert an item into a sorted list maintaining order."""
+    var result: [text] = []
+    var inserted = false
+    for existing in list:
+        if not inserted and item < existing:
+            result = result.push(item)
+            inserted = true
+        result = result.push(existing)
+    if not inserted:
+        result = result.push(item)
+    return result
+
+# =========================================================================
+# uniq — Remove consecutive duplicate lines
+# =========================================================================
+
+fn tool_uniq(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Remove consecutive duplicate lines from a file."""
+    if vfs == nil:
+        _write_error(terminal, "uniq: no filesystem mounted")
+        return 1
+    if args.len() == 0:
+        _write_error(terminal, "uniq: missing file operand")
+        return 1
+
+    val path = _resolve_tool_path(cwd, args[0])
+    val result = vfs.read_text(path)
+    if result.is_err():
+        _write_error(terminal, "uniq: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    val lines = content.split("\n")
+    var prev: text = ""
+    var first = true
+    for line in lines:
+        if first or line != prev:
+            _write_line(terminal, line)
+        prev = line
+        first = false
+    return 0
+
+# =========================================================================
+# which — Show which tool/builtin would run for a command
+# =========================================================================
+
+fn tool_which(args: [text], tool_registry: ToolRegistry?, terminal: Terminal) -> i32:
+    """Show which built-in or tool would run for a command name."""
+    if args.len() == 0:
+        _write_error(terminal, "which: missing command name")
+        return 1
+
+    val builtins = ["cd", "ls", "pwd", "echo", "cat", "mkdir", "rm", "cp",
+        "mv", "grep", "find", "ps", "kill", "mount", "clear", "help",
+        "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
+        "jobs", "fg", "bg", "readf", "touch", "head", "tail", "wc",
+        "sort", "uniq", "which", "date", "true", "false", "tee", "ln",
+        "chmod", "stat"]
+
+    val cmd = args[0]
+    # Check builtins
+    for b in builtins:
+        if b == cmd:
+            _write_line(terminal, "{cmd}: shell built-in command")
+            return 0
+
+    # Check tool registry
+    if tool_registry != nil:
+        val tool = tool_registry.lookup(cmd)
+        if tool != nil:
+            _write_line(terminal, "{cmd}: registered tool")
+            return 0
+
+    _write_error(terminal, "{cmd}: not found")
+    return 1
+
+# =========================================================================
+# date — Show current date/time
+# =========================================================================
+
+fn tool_date(terminal: Terminal) -> i32:
+    """Show current date/time (placeholder — real RTC not available in VFS)."""
+    # SimpleOS doesn't have a real clock yet; show a placeholder
+    _write_line(terminal, "1970-01-01 00:00:00 UTC (no RTC available)")
+    return 0
+
+# =========================================================================
+# true / false — Exit with known code
+# =========================================================================
+
+fn tool_true() -> i32:
+    """Exit with code 0."""
+    return 0
+
+fn tool_false() -> i32:
+    """Exit with code 1."""
+    return 1
+
+# =========================================================================
+# tee — Echo args to stdout and write to file
+# =========================================================================
+
+fn tool_tee(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Simplified tee: write remaining args as content to the named file, echoing to terminal.
+
+    Usage: tee FILE [WORDS...]
+    Writes WORDS (space-joined) to both the terminal and FILE.
+    """
+    if args.len() == 0:
+        _write_error(terminal, "tee: missing file operand")
+        return 1
+    if vfs == nil:
+        _write_error(terminal, "tee: no filesystem mounted")
+        return 1
+
+    val filename = args[0]
+    # Collect remaining args as content
+    var content = ""
+    var i = 1
+    while i < args.len():
+        if i > 1:
+            content = "{content} "
+        content = "{content}{args[i]}"
+        i = i + 1
+
+    # Echo to terminal
+    _write_line(terminal, content)
+
+    # Write to file
+    val path = _resolve_tool_path(cwd, filename)
+    val result = vfs.write_text(path, content)
+    if result.is_err():
+        _write_error(terminal, "tee: {path}: {result.unwrap_err()}")
+        return 1
+    return 0
+
+# =========================================================================
+# ln — Create symlink (placeholder)
+# =========================================================================
+
+fn tool_ln(terminal: Terminal) -> i32:
+    """Symlink creation — not yet supported in VFS."""
+    _write_error(terminal, "ln: symbolic links not yet supported in SimpleOS VFS")
+    return 1
+
+# =========================================================================
+# chmod — Change permissions (placeholder)
+# =========================================================================
+
+fn tool_chmod(args: [text], terminal: Terminal) -> i32:
+    """Change file permissions — not yet supported in VFS.
+
+    Accepts arguments silently to avoid breaking scripts.
+    """
+    if args.len() < 2:
+        _write_error(terminal, "chmod: missing operand")
+        return 1
+    _write_line(terminal, "chmod: permission changes not yet supported in SimpleOS VFS")
+    return 0
+
+# =========================================================================
+# stat — Show file info
+# =========================================================================
+
+fn tool_stat(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Show file information (size, type, permissions)."""
+    if vfs == nil:
+        _write_error(terminal, "stat: no filesystem mounted")
+        return 1
+    if args.len() == 0:
+        _write_error(terminal, "stat: missing file operand")
+        return 1
+
+    var exit_code: i32 = 0
+    for filename in args:
+        val path = _resolve_tool_path(cwd, filename)
+        val result = vfs.stat(path)
+        if result.is_err():
+            _write_error(terminal, "stat: cannot stat '{path}': {result.unwrap_err()}")
+            exit_code = 1
+        else:
+            val node = result.unwrap()
+            val kind_str = match node.kind:
+                FsNodeKind.File => "regular file"
+                FsNodeKind.Directory => "directory"
+                FsNodeKind.Symlink => "symbolic link"
+                FsNodeKind.Device => "device"
+                FsNodeKind.Pipe => "pipe"
+                _ => "unknown"
+            _write_line(terminal, "  File: {path}")
+            _write_line(terminal, "  Size: {node.size}  Type: {kind_str}")
+            _write_line(terminal, "  Inode: {node.id}  Perms: {node.permissions}")
+            _write_line(terminal, "  Owner: {node.owner}  Group: {node.group}")
+    return exit_code

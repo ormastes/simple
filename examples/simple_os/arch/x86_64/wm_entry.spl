@@ -32,6 +32,9 @@ extern fn rt_gui_gradient_v(xy: u64, wh: u64, c1: u64, c2: u64)
 extern fn rt_gui_shadow(xy: u64, wh: u64, blur_alpha: u64, offset: u64)
 extern fn rt_gui_rounded_rect(xy: u64, wh: u64, color_radius: u64, alpha: u64)
 extern fn rt_gui_shadow_fill(xy: u64, wh: u64, color: u64, unused: u64)
+extern fn rt_gui_rounded_rect_top(xy: u64, wh: u64, color_radius: u64, alpha: u64)
+extern fn rt_gui_filled_circle(cx_cy: u64, diam_color: u64, alpha: u64, unused: u64)
+extern fn rt_gui_draw_wallpaper(wh: u64, style: u64, unused1: u64, unused2: u64)
 
 # Pack two u32 values into one u64 (high|low)
 fn pack(hi: u64, lo: u64) -> u64:
@@ -149,6 +152,15 @@ fn grad_h(x: u64, y: u64, w: u64, h: u64, c1: u64, c2: u64):
 fn shadow(x: u64, y: u64, w: u64, h: u64, blur_r: u64, alpha: u64, offset: u64):
     rt_gui_shadow(pack(x, y), pack(w, h), pack(blur_r, alpha), offset)
 
+fn rrect(x: u64, y: u64, w: u64, h: u64, color: u64, radius: u64, alpha: u64):
+    rt_gui_rounded_rect(pack(x, y), pack(w, h), pack(color, radius), alpha)
+
+fn rrect_top(x: u64, y: u64, w: u64, h: u64, color: u64, radius: u64, alpha: u64):
+    rt_gui_rounded_rect_top(pack(x, y), pack(w, h), pack(color, radius), alpha)
+
+fn circle(cx: u64, cy: u64, diameter: u64, color: u64, alpha: u64):
+    rt_gui_filled_circle(pack(cx, cy), pack(diameter, color), alpha, 0)
+
 # === Theme-aware color getters ===
 
 fn bg_top(theme: u64) -> u64:
@@ -204,50 +216,40 @@ fn text_c(theme: u64) -> u64:
 # ===========================================================================
 
 fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64):
-    # 1. Drop shadow (below and right)
+    # 1. Drop shadow
     shadow(x, y, w, h, 10, shadow_a(theme), 6)
 
-    # 2. Blur background behind window (frosted glass effect)
+    # 2. Blur background (frosted glass)
     blur(x, y, w, h, BLUR_SURFACE)
 
-    # 3. Glass surface overlay
-    blend(x, y, w, h, surface(theme), surface_a(theme))
+    # 3. Glass surface — ROUNDED 12px radius
+    rrect(x, y, w, h, surface(theme), 12, surface_a(theme))
 
-    # 4. Glass border (subtle 1px edge)
-    # Top
-    blend(x, y, w, 1, border_c(theme), border_a(theme) + 20)
-    # Left
-    blend(x, y, 1, h, border_c(theme), border_a(theme))
-    # Right
-    blend(x + w - 1, y, 1, h, border_c(theme), border_a(theme))
-    # Bottom
-    blend(x, y + h - 1, w, 1, border_c(theme), border_a(theme))
-
-    # 5. Title bar (elevated glass — more opaque)
-    blend(x + 1, y + 1, w - 2, TITLE_BAR_H, elevated(theme), elevated_a(theme))
+    # 4. Title bar — rounded top only, flat bottom
+    rrect_top(x + 1, y + 1, w - 2, TITLE_BAR_H, elevated(theme), 12, elevated_a(theme))
     # Title bar bottom separator
     blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme))
 
-    # 6. Traffic light buttons (macOS-style, left side)
+    # 5. Traffic light buttons — CIRCLES (macOS style)
     val btn_y = y + 10
-    val btn_size: u64 = 12
+    val btn_d: u64 = 12
     val btn_gap: u64 = 8
     var bx: u64 = x + 12
-    # Close (red)
-    fill(bx, btn_y, btn_size, btn_size, BTN_CLOSE)
-    bx = bx + btn_size + btn_gap
-    # Minimize (yellow)
-    fill(bx, btn_y, btn_size, btn_size, BTN_MIN)
-    bx = bx + btn_size + btn_gap
-    # Maximize (green)
-    fill(bx, btn_y, btn_size, btn_size, BTN_MAX)
+    # Close (red circle)
+    circle(bx, btn_y, btn_d, BTN_CLOSE, 255)
+    bx = bx + btn_d + btn_gap
+    # Minimize (yellow circle)
+    circle(bx, btn_y, btn_d, BTN_MIN, 255)
+    bx = bx + btn_d + btn_gap
+    # Maximize (green circle)
+    circle(bx, btn_y, btn_d, BTN_MAX, 255)
 
-    # 7. Focus ring (active window only)
+    # 6. Glass border overlay — rounded to match window
+    rrect(x, y, w, h, border_c(theme), 12, border_a(theme))
+
+    # 7. Focus ring (active window)
     if is_active == 1:
-        blend(x - 1, y - 1, w + 2, 1, accent(theme), 100)
-        blend(x - 1, y + h, w + 2, 1, accent(theme), 100)
-        blend(x - 1, y - 1, 1, h + 2, accent(theme), 100)
-        blend(x + w, y - 1, 1, h + 2, accent(theme), 100)
+        rrect(x - 1, y - 1, w + 2, h + 2, accent(theme), 13, 100)
 
 # ===========================================================================
 # Glass System Bar (top)
@@ -260,84 +262,92 @@ fn draw_glass_system_bar(theme: u64):
     # Blur background
     blur(0, y, SCREEN_W, h, BLUR_ELEVATED)
 
-    # Glass surface
+    # Glass surface (full width, no top rounding since it's screen edge)
     blend(0, y, SCREEN_W, h, surface(theme), surface_a(theme))
 
     # Bottom border
     blend(0, h - 1, SCREEN_W, 1, border_c(theme), border_a(theme))
 
-    # "SimpleOS" accent pill (left)
-    grad_h(8, 6, 72, 16, accent(theme), accent2(theme))
+    # "SimpleOS" accent pill — ROUNDED
+    rrect(8, 4, 72, 20, accent(theme), 10, 200)
 
-    # Clock area (right, subtle elevated glass)
-    blend(SCREEN_W - 90, 5, 82, 18, elevated(theme), 120)
+    # Clock area — ROUNDED pill
+    rrect(SCREEN_W - 90, 4, 82, 20, elevated(theme), 10, 120)
 
-    # Center status indicators (3 small dots)
-    blend(SCREEN_W / 2 - 12, 12, 4, 4, accent(theme), 180)
-    blend(SCREEN_W / 2, 12, 4, 4, accent2(theme), 180)
-    blend(SCREEN_W / 2 + 12, 12, 4, 4, 0x0030D158, 180)
+    # Center status indicators — CIRCLES
+    circle(SCREEN_W / 2 - 12, 11, 6, accent(theme), 200)
+    circle(SCREEN_W / 2, 11, 6, accent2(theme), 200)
+    circle(SCREEN_W / 2 + 12, 11, 6, 0x0030D158, 200)
 
 # ===========================================================================
 # Glass Dock (bottom)
 # ===========================================================================
 
 fn draw_glass_dock(theme: u64):
-    val bar_y = SCREEN_H - DOCK_H
+    # Floating pill dock — centered, raised from bottom
+    val num_icons: u64 = 7
+    val icon_size: u64 = 40
+    val icon_gap: u64 = 12
+    val icon_pad: u64 = 4
+    val pill_w: u64 = 48
+    val dock_pad: u64 = 16
+    val dock_w = num_icons * (pill_w + icon_gap) - icon_gap + dock_pad * 2
+    val dock_h: u64 = 56
+    val dock_x = (SCREEN_W - dock_w) / 2
+    val dock_y = SCREEN_H - dock_h - 8
 
     # Blur background
-    blur(0, bar_y, SCREEN_W, DOCK_H, BLUR_ELEVATED)
+    blur(dock_x, dock_y, dock_w, dock_h, BLUR_ELEVATED)
 
-    # Glass surface
-    blend(0, bar_y, SCREEN_W, DOCK_H, surface(theme), surface_a(theme))
+    # Glass pill surface — ROUNDED 16px
+    rrect(dock_x, dock_y, dock_w, dock_h, surface(theme), 16, surface_a(theme))
 
-    # Top border
-    blend(0, bar_y, SCREEN_W, 1, border_c(theme), border_a(theme) + 10)
+    # Glass border
+    rrect(dock_x, dock_y, dock_w, dock_h, border_c(theme), 16, border_a(theme))
 
-    # Dock icons with glass pill backgrounds
-    val icon_size: u64 = 32
-    val icon_y = bar_y + 10
-    val gap: u64 = 12
-    var ix: u64 = 16
+    # Icons
+    val icon_y = dock_y + 8
+    var ix: u64 = dock_x + dock_pad
 
-    # Each icon: glass pill background + colored icon
     # Terminal
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_TERM)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_TERM, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Files
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_FILES)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_FILES, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Calculator
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_CALC)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CALC, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Clock
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_CLOCK)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_CLOCK, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Settings
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_SETTINGS)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_SETTINGS, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Browser
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_BROWSER)
-    ix = ix + icon_size + gap
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_BROWSER, 8, 255)
+    ix = ix + pill_w + icon_gap
 
     # Editor
-    blend(ix - 4, icon_y - 4, icon_size + 8, icon_size + 8, surface(theme), 60)
-    fill(ix, icon_y, icon_size, icon_size, ICON_EDITOR)
+    rrect(ix, icon_y, pill_w, pill_w, surface(theme), 12, 60)
+    rrect(ix + icon_pad, icon_y + icon_pad, icon_size, icon_size, ICON_EDITOR, 8, 255)
 
-    # Running app indicators (small accent dots)
-    val dot_y = bar_y + DOCK_H - 6
-    fill(16 + 14, dot_y, 4, 3, accent(theme))
-    fill(16 + icon_size + gap + 14, dot_y, 4, 3, accent(theme))
+    # Running app indicators — CIRCLES
+    val dot_y = dock_y + dock_h - 6
+    val first_ix = dock_x + dock_pad + pill_w / 2 - 2
+    circle(first_ix, dot_y, 4, accent(theme), 200)
+    circle(first_ix + pill_w + icon_gap, dot_y, 4, accent(theme), 200)
 
 # ===========================================================================
 # Application Window Content
@@ -347,29 +357,29 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val cy = y + TITLE_BAR_H + 2
     val pad: u64 = 16
 
-    # Greeting banner with accent stripe
-    blend(x + pad, cy + pad, w - pad * 2, 44, surface(theme), 80)
-    fill(x + pad, cy + pad, 4, 44, accent(theme))
+    # Greeting banner with accent stripe — ROUNDED
+    rrect(x + pad, cy + pad, w - pad * 2, 44, surface(theme), 8, 80)
+    rrect(x + pad, cy + pad, 4, 44, accent(theme), 2, 255)
 
-    # Color blocks
+    # Color blocks — ROUNDED
     val block_y = cy + pad + 60
-    fill(x + pad, block_y, 80, 28, 0x00FF6B6B)
-    fill(x + pad + 90, block_y, 80, 28, 0x0051CF66)
-    fill(x + pad + 180, block_y, 80, 28, 0x005B9BD5)
+    rrect(x + pad, block_y, 80, 28, 0x00FF6B6B, 8, 255)
+    rrect(x + pad + 90, block_y, 80, 28, 0x0051CF66, 8, 255)
+    rrect(x + pad + 180, block_y, 80, 28, 0x005B9BD5, 8, 255)
 
-    # Bottom accent line
+    # Bottom accent line — keep as gradient
     grad_h(x + pad, y + h - 28, w - pad * 2, 2, accent(theme), accent2(theme))
 
 fn draw_terminal_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val cy = y + TITLE_BAR_H + 2
 
-    # Terminal dark interior (semi-transparent on glass)
-    blend(x + 1, cy, w - 2, h - TITLE_BAR_H - 3, 0x000A0A14, 200)
+    # Terminal dark interior — rounded bottom corners
+    rrect(x + 1, cy, w - 2, h - TITLE_BAR_H - 3, 0x000A0A14, 10, 200)
 
     # Cursor
-    fill(x + 14, cy + 14, 8, 16, 0x0044FF44)
+    rrect(x + 14, cy + 14, 8, 16, 0x0044FF44, 2, 255)
 
-    # Text lines
+    # Text lines (keep as fills — they're thin lines)
     fill(x + 26, cy + 14, 140, 2, 0x0044FF44)
     fill(x + 14, cy + 36, 220, 2, 0x00888888)
     fill(x + 14, cy + 52, 180, 2, 0x00888888)
@@ -382,25 +392,25 @@ fn draw_terminal_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
 fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val cy = y + TITLE_BAR_H + 2
 
-    # Sidebar (glass with higher opacity)
-    blend(x + 1, cy, 84, h - TITLE_BAR_H - 3, surface(theme), 100)
+    # Sidebar — rounded
+    rrect(x + 1, cy, 84, h - TITLE_BAR_H - 3, surface(theme), 8, 100)
     # Sidebar border
     blend(x + 85, cy, 1, h - TITLE_BAR_H - 3, border_c(theme), border_a(theme))
 
-    # Sidebar items
-    blend(x + 8, cy + 8, 68, 18, surface(theme), 60)
-    blend(x + 8, cy + 30, 68, 18, surface(theme), 60)
-    blend(x + 8, cy + 52, 68, 18, accent(theme), 80)  # Selected
+    # Sidebar items — rounded
+    rrect(x + 8, cy + 8, 68, 18, surface(theme), 6, 60)
+    rrect(x + 8, cy + 30, 68, 18, surface(theme), 6, 60)
+    rrect(x + 8, cy + 52, 68, 18, accent(theme), 6, 80)
 
-    # File grid
+    # File grid — rounded
     var fy: u64 = cy + 10
     var fx: u64 = x + 96
     var row: u64 = 0
     while row < 3:
         var col: u64 = 0
         while col < 3:
-            blend(fx + col * 72, fy + row * 50, 52, 38, surface(theme), 80)
-            fill(fx + col * 72, fy + row * 50, 52, 3, accent(theme))
+            rrect(fx + col * 72, fy + row * 50, 52, 38, surface(theme), 6, 80)
+            rrect(fx + col * 72, fy + row * 50, 52, 3, accent(theme), 6, 255)
             col = col + 1
         row = row + 1
 
@@ -409,19 +419,11 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
 # ===========================================================================
 
 fn draw_desktop(active: u64, theme: u64):
-    # Begin frame — all rendering goes to shadow buffer (fast RAM)
+    # Begin frame
     rt_gui_begin_frame(SCREEN_W, SCREEN_H, 0, 0)
 
-    # 1. Desktop gradient background
-    grad_v(0, 0, SCREEN_W, SCREEN_H, bg_top(theme), bg_bot(theme))
-
-    # 2. Decorative background elements (subtle)
-    # Large accent glow (top-right)
-    blend(SCREEN_W - 300, 40, 280, 280, accent(theme), 15)
-    blur(SCREEN_W - 300, 40, 280, 280, 30)
-    # Second glow (bottom-left)
-    blend(20, SCREEN_H - 320, 240, 240, accent2(theme), 12)
-    blur(20, SCREEN_H - 320, 240, 240, 30)
+    # 1. Procedural wallpaper (replaces gradient + manual blobs)
+    rt_gui_draw_wallpaper(pack(SCREEN_W, SCREEN_H), theme, 0, 0)
 
     # 3. Windows in z-order (active drawn last = on top)
     if active == 0:
