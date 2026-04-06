@@ -1492,6 +1492,150 @@ static const uint8_t font_8x16[95][16] = {
     /* '~' (126)*/ {0x00,0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
 };
 
+/* ===================================================================
+ * Vector Font Glyph Outlines
+ *
+ * Simplified sans-serif font inspired by Helvetica/SF Pro proportions.
+ * Each glyph is an array of path commands in a 16x24 design grid.
+ * Commands: {type, x, y} where type: 0=MOVE, 1=LINE, 2=CLOSE(ignored x,y)
+ *
+ * The rasterizer scales these to any pixel size using integer math.
+ * =================================================================== */
+
+#define VF_MOVE  0
+#define VF_LINE  1
+#define VF_CLOSE 2
+#define VF_END   3  /* End of glyph */
+
+typedef struct { int8_t type, x, y; } VfCmd;
+
+/* Glyph widths (in design units, out of 16) */
+static const uint8_t vf_widths[95] = {
+    5,  /* space */
+    3, 6, 9, 8, 10, 10, 3, 5, 5, 7, 8, 3, 6, 3, 7,  /* ! " # $ % & ' ( ) * + , - . / */
+    9, 7, 9, 9, 9, 9, 9, 9, 9, 9,  /* 0-9 */
+    3, 3, 7, 8, 7, 8,  /* : ; < = > ? */
+    14, /* @ */
+    11, 10, 10, 10, 9, 9, 11, 10, 3, 7, 10, 9, 12, 10, 11, 10, 11, 10, 9, 9, 10, 11, 14, 10, 10, 9,  /* A-Z */
+    5, 7, 5, 8, 8, 4,  /* [ \ ] ^ _ ` */
+    9, 9, 8, 9, 9, 6, 9, 9, 3, 5, 8, 3, 13, 9, 9, 9, 9, 6, 8, 6, 9, 8, 12, 8, 8, 8,  /* a-z */
+    5, 3, 5, 9  /* { | } ~ */
+};
+
+/* Glyph outline data — only define the most-used characters.
+ * Others fall back to the bitmap font. */
+
+static const VfCmd vf_glyph_A[] = {
+    {VF_MOVE, 0, 24}, {VF_LINE, 5, 0}, {VF_LINE, 6, 0},
+    {VF_LINE, 11, 24}, {VF_LINE, 9, 24}, {VF_LINE, 7, 16},
+    {VF_LINE, 4, 16}, {VF_LINE, 2, 24}, {VF_CLOSE, 0, 0},
+    /* Crossbar cutout */
+    {VF_MOVE, 4, 14}, {VF_LINE, 5, 8}, {VF_LINE, 6, 8},
+    {VF_LINE, 7, 14}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_E[] = {
+    {VF_MOVE, 1, 0}, {VF_LINE, 9, 0}, {VF_LINE, 9, 3},
+    {VF_LINE, 3, 3}, {VF_LINE, 3, 10}, {VF_LINE, 8, 10},
+    {VF_LINE, 8, 13}, {VF_LINE, 3, 13}, {VF_LINE, 3, 21},
+    {VF_LINE, 9, 21}, {VF_LINE, 9, 24}, {VF_LINE, 1, 24},
+    {VF_CLOSE, 0, 0}, {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_d[] = {
+    {VF_MOVE, 7, 0}, {VF_LINE, 9, 0}, {VF_LINE, 9, 24},
+    {VF_LINE, 7, 24}, {VF_LINE, 7, 22},
+    {VF_LINE, 5, 24}, {VF_LINE, 2, 24}, {VF_LINE, 0, 21},
+    {VF_LINE, 0, 11}, {VF_LINE, 2, 8}, {VF_LINE, 5, 8},
+    {VF_LINE, 7, 10}, {VF_CLOSE, 0, 0},
+    /* Inner cutout */
+    {VF_MOVE, 2, 11}, {VF_LINE, 3, 10}, {VF_LINE, 6, 10},
+    {VF_LINE, 7, 11}, {VF_LINE, 7, 21}, {VF_LINE, 6, 22},
+    {VF_LINE, 3, 22}, {VF_LINE, 2, 21}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_e[] = {
+    {VF_MOVE, 0, 14}, {VF_LINE, 9, 14}, {VF_LINE, 9, 11},
+    {VF_LINE, 7, 8}, {VF_LINE, 2, 8}, {VF_LINE, 0, 11},
+    {VF_LINE, 0, 21}, {VF_LINE, 2, 24}, {VF_LINE, 7, 24},
+    {VF_LINE, 9, 22}, {VF_LINE, 9, 20}, {VF_LINE, 7, 20},
+    {VF_LINE, 7, 22}, {VF_LINE, 2, 22}, {VF_LINE, 2, 14},
+    {VF_CLOSE, 0, 0},
+    /* Inner top cutout */
+    {VF_MOVE, 2, 12}, {VF_LINE, 2, 11}, {VF_LINE, 3, 10},
+    {VF_LINE, 6, 10}, {VF_LINE, 7, 11}, {VF_LINE, 7, 12},
+    {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_i[] = {
+    /* Dot */
+    {VF_MOVE, 0, 3}, {VF_LINE, 2, 3}, {VF_LINE, 2, 6},
+    {VF_LINE, 0, 6}, {VF_CLOSE, 0, 0},
+    /* Stem */
+    {VF_MOVE, 0, 8}, {VF_LINE, 2, 8}, {VF_LINE, 2, 24},
+    {VF_LINE, 0, 24}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_l[] = {
+    {VF_MOVE, 0, 0}, {VF_LINE, 2, 0}, {VF_LINE, 2, 24},
+    {VF_LINE, 0, 24}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_n[] = {
+    {VF_MOVE, 0, 8}, {VF_LINE, 2, 8}, {VF_LINE, 2, 10},
+    {VF_LINE, 4, 8}, {VF_LINE, 7, 8}, {VF_LINE, 9, 11},
+    {VF_LINE, 9, 24}, {VF_LINE, 7, 24}, {VF_LINE, 7, 12},
+    {VF_LINE, 5, 10}, {VF_LINE, 2, 12}, {VF_LINE, 2, 24},
+    {VF_LINE, 0, 24}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_o[] = {
+    {VF_MOVE, 2, 8}, {VF_LINE, 7, 8}, {VF_LINE, 9, 11},
+    {VF_LINE, 9, 21}, {VF_LINE, 7, 24}, {VF_LINE, 2, 24},
+    {VF_LINE, 0, 21}, {VF_LINE, 0, 11}, {VF_CLOSE, 0, 0},
+    /* Inner cutout */
+    {VF_MOVE, 2, 11}, {VF_LINE, 3, 10}, {VF_LINE, 6, 10},
+    {VF_LINE, 7, 11}, {VF_LINE, 7, 21}, {VF_LINE, 6, 22},
+    {VF_LINE, 3, 22}, {VF_LINE, 2, 21}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_r[] = {
+    {VF_MOVE, 0, 8}, {VF_LINE, 2, 8}, {VF_LINE, 2, 11},
+    {VF_LINE, 4, 8}, {VF_LINE, 6, 8}, {VF_LINE, 6, 10},
+    {VF_LINE, 3, 12}, {VF_LINE, 2, 12}, {VF_LINE, 2, 24},
+    {VF_LINE, 0, 24}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+static const VfCmd vf_glyph_t[] = {
+    {VF_MOVE, 1, 4}, {VF_LINE, 3, 4}, {VF_LINE, 3, 8},
+    {VF_LINE, 5, 8}, {VF_LINE, 5, 10}, {VF_LINE, 3, 10},
+    {VF_LINE, 3, 21}, {VF_LINE, 5, 24}, {VF_LINE, 6, 24},
+    {VF_LINE, 6, 22}, {VF_LINE, 5, 22}, {VF_LINE, 3, 21},
+    {VF_LINE, 1, 10}, {VF_LINE, 0, 10}, {VF_LINE, 0, 8},
+    {VF_LINE, 1, 8}, {VF_CLOSE, 0, 0},
+    {VF_END, 0, 0}
+};
+
+/* Lookup table — maps ASCII 32-126 to glyph data. NULL = use bitmap fallback. */
+static const VfCmd* vf_glyphs[95] = {
+    NULL, /* space */
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* ! to / */
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* 0-9 */
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* : to @ */
+    vf_glyph_A, NULL, NULL, NULL, vf_glyph_E, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* A-Z */
+    NULL, NULL, NULL, NULL, NULL, NULL, /* [ to ` */
+    NULL, NULL, NULL, vf_glyph_d, vf_glyph_e, NULL, NULL, NULL, vf_glyph_i, NULL, NULL, vf_glyph_l, NULL, vf_glyph_n, vf_glyph_o, NULL, NULL, vf_glyph_r, NULL, vf_glyph_t, NULL, NULL, NULL, NULL, NULL, NULL, /* a-z */
+    NULL, NULL, NULL, NULL /* { to ~ */
+};
+
 /* rt_gui_draw_text(pack(x,y), pack(ptr,len), pack(color,0), alpha)
  * Simple uses tagged RuntimeValue for strings. The caller must pass
  * the raw char pointer and byte length separately.
@@ -2018,6 +2162,170 @@ RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
     }
 
     dirty_mark(x, y, cx - x + 2, 34);
+    g_text_len = 0;
+    return 0;
+}
+
+/* ===================================================================
+ * 26. Vector font rasterizer — CPU-based AA text from glyph outlines
+ *
+ *   Uses ray-casting (even-odd rule) with 2x2 sub-pixel sampling for
+ *   anti-aliasing.  Each glyph is defined in a 16x24 design grid and
+ *   scaled to the requested pixel height with integer arithmetic.
+ *
+ *   rt_gui_draw_text_vector(pack(x,y), pack(color, (height<<16)|len),
+ *                           alpha, _)
+ * =================================================================== */
+
+/* Check if point (px, py) is inside the glyph outline using ray casting.
+ * Coordinates are in scaled space: design_coord * scale_num / scale_den. */
+static int vf_point_inside(const VfCmd *cmds, int px, int py,
+                            int scale_num, int scale_den)
+{
+    int crossings = 0;
+    int path_start_x = 0, path_start_y = 0;
+    int cur_x = 0, cur_y = 0;
+
+    for (int i = 0; cmds[i].type != VF_END; i++) {
+        int sx = cmds[i].x * scale_num / scale_den;
+        int sy = cmds[i].y * scale_num / scale_den;
+
+        if (cmds[i].type == VF_MOVE) {
+            cur_x = sx; cur_y = sy;
+            path_start_x = sx; path_start_y = sy;
+        } else if (cmds[i].type == VF_LINE || cmds[i].type == VF_CLOSE) {
+            int x1, y1, x2, y2;
+            if (cmds[i].type == VF_CLOSE) {
+                x1 = cur_x; y1 = cur_y;
+                x2 = path_start_x; y2 = path_start_y;
+                cur_x = path_start_x; cur_y = path_start_y;
+            } else {
+                x1 = cur_x; y1 = cur_y;
+                x2 = sx; y2 = sy;
+                cur_x = sx; cur_y = sy;
+            }
+
+            /* Ray casting: horizontal ray from (px, py) to the right */
+            if ((y1 <= py && y2 > py) || (y2 <= py && y1 > py)) {
+                /* Edge crosses this scanline -- compute X intersection */
+                int ix = x1 + (py - y1) * (x2 - x1) / (y2 - y1);
+                if (px < ix) crossings++;
+            }
+        }
+    }
+    return crossings & 1; /* Odd = inside */
+}
+
+/* Render a single vector glyph at framebuffer position (gx, gy). */
+static void vf_render_glyph(const VfCmd *cmds, uint8_t glyph_width,
+                              int gx, int gy, int pixel_height,
+                              uint32_t color, uint8_t alpha)
+{
+    int pixel_width = glyph_width * pixel_height / 24;
+    if (pixel_width < 1) pixel_width = 1;
+
+    /* For each pixel in the glyph bounding box, do 2x2 sub-sampling */
+    for (int row = 0; row < pixel_height; row++) {
+        int py_base = gy + row;
+        if (py_base < 0 || (uint32_t)py_base >= SCREEN_H) continue;
+
+        for (int col = 0; col < pixel_width; col++) {
+            int px_base = gx + col;
+            if (px_base < 0 || (uint32_t)px_base >= g_fb_w) continue;
+
+            /* 2x2 sub-sample grid for anti-aliasing */
+            int coverage = 0;
+            for (int sub_y = 0; sub_y < 2; sub_y++) {
+                for (int sub_x = 0; sub_x < 2; sub_x++) {
+                    /* Map sub-pixel to design space via doubled resolution.
+                     * Sub-pixel center = (col*2 + sub_x, row*2 + sub_y)
+                     * Design scale: pixel_height*2 / 48  (since design=24) */
+                    int sp_x = col * 2 + sub_x;
+                    int sp_y = row * 2 + sub_y;
+                    if (vf_point_inside(cmds, sp_x, sp_y,
+                                        pixel_height * 2, 48)) {
+                        coverage++;
+                    }
+                }
+            }
+
+            if (coverage > 0) {
+                uint8_t pixel_alpha = (uint8_t)((uint32_t)alpha * coverage / 4);
+                uint32_t dst = fb_read((uint32_t)px_base, (uint32_t)py_base);
+                fb_write((uint32_t)px_base, (uint32_t)py_base,
+                         alpha_blend(dst, color, pixel_alpha));
+            }
+        }
+    }
+}
+
+/* rt_gui_draw_text_vector(pack(x,y), pack(color, (height<<16)|len), alpha, _)
+ * Renders text using vector font outlines with anti-aliasing.
+ * Falls back to bitmap font for characters without vector outlines. */
+RuntimeValue rt_gui_draw_text_vector(RuntimeValue xy, RuntimeValue color_size,
+                                      RuntimeValue alpha_rv, RuntimeValue unused)
+{
+    (void)unused;
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_size >> 32);
+    uint32_t size_and_len = (uint32_t)((uint64_t)color_size & 0xFFFFFFFF);
+    uint32_t pixel_height = (size_and_len >> 16) & 0xFFFF;
+    uint32_t len = size_and_len & 0xFFFF;
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (pixel_height == 0) pixel_height = 16;
+    if (len == 0) len = g_text_len;
+    if (len > 256) len = 256;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    uint32_t cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+
+        const VfCmd *glyph = vf_glyphs[idx];
+        uint8_t gw = vf_widths[idx];
+
+        if (glyph != NULL) {
+            /* Vector rendering with AA */
+            vf_render_glyph(glyph, gw, (int)cx, (int)y, (int)pixel_height,
+                            color, alpha);
+            cx += (uint32_t)(gw * (int)pixel_height / 24) + 1;
+        } else {
+            /* Fallback to bitmap font (scaled) */
+            uint32_t bmp_idx = ch - 32;
+            uint32_t scale = pixel_height / 16;
+            if (scale < 1) scale = 1;
+            for (uint32_t row = 0; row < 16; row++) {
+                uint8_t bits = font_8x16[bmp_idx][row];
+                for (uint32_t col = 0; col < 8; col++) {
+                    if (bits & (0x80 >> col)) {
+                        for (uint32_t sy = 0; sy < scale; sy++) {
+                            uint32_t py = y + row * scale + sy;
+                            if (py >= SCREEN_H) continue;
+                            for (uint32_t sx = 0; sx < scale; sx++) {
+                                uint32_t px = cx + col * scale + sx;
+                                if (px >= g_fb_w) continue;
+                                if (alpha == 255) {
+                                    fb_write(px, py, 0xFF000000u | color);
+                                } else {
+                                    uint32_t dst = fb_read(px, py);
+                                    fb_write(px, py, alpha_blend(dst, color, alpha));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cx += 8 * scale + 1;
+        }
+
+        if (cx >= g_fb_w) break;
+    }
+
+    dirty_mark(x, y, cx - x, pixel_height);
     g_text_len = 0;
     return 0;
 }

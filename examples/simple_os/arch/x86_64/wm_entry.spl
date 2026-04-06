@@ -45,6 +45,7 @@ extern fn rt_gui_draw_text_shadow(xy: u64, color_len: u64, alpha: u64, shadow_al
 extern fn rt_gui_draw_text_bold(xy: u64, color_len: u64, alpha: u64, unused: u64)
 extern fn rt_gui_draw_text_2x(xy: u64, color_len: u64, alpha: u64, shadow_alpha: u64)
 extern fn rt_gui_draw_text_outline(xy: u64, color_len: u64, alpha: u64, outline_alpha: u64)
+extern fn rt_gui_draw_text_vector(xy: u64, color_size: u64, alpha: u64, unused: u64)
 
 # Layout engine
 extern fn rt_layout_reset(u1: u64, u2: u64, u3: u64, u4: u64)
@@ -351,6 +352,11 @@ fn draw_label_outline(x: u64, y: u64, color: u64, alpha: u64, chars: u64, len: u
     rt_gui_set_text_buf(chars, 0, 0, 0)
     rt_gui_draw_text_outline(pack(x, y), pack(color, len), alpha, outline_a)
 
+fn draw_label_vector(x: u64, y: u64, color: u64, alpha: u64, chars: u64, len: u64, pixel_height: u64):
+    rt_gui_set_text_buf(chars, 0, 0, 0)
+    val size_and_len = (pixel_height << 16) | (len & 0xFFFF)
+    rt_gui_draw_text_vector(pack(x, y), pack(color, size_and_len), alpha, 0)
+
 # Layout engine constants
 val LT_HSTACK: u64 = 1
 val LT_VSTACK: u64 = 2
@@ -634,18 +640,20 @@ fn draw_glass_system_bar(theme: u64, active: u64):
 
     # Gradient menu bar (unique — not flat like macOS)
     grad_v(0, y, SCREEN_W, h, elevated(theme), surface(theme))
-    blend(0, y, SCREEN_W, h, 0x00000000, 10)
+    blend(0, y, SCREEN_W, h / 2, 0x00FFFFFF, 8)
+    blend(0, y + h / 2, SCREEN_W, h / 2, 0x00000000, 8)
     # Inner top highlight (premium)
     blend(0, y + 1, SCREEN_W, 1, 0x00FFFFFF, 35)
 
     # Bright top edge highlight
     blend(0, 0, SCREEN_W, 1, 0x00FFFFFF, 30)
 
-    # Bottom border
-    blend(0, h - 1, SCREEN_W, 1, border_c(theme), border_a(theme) + 10)
+    # Bottom border (double-line for definition)
+    blend(0, h - 2, SCREEN_W, 1, border_c(theme), border_a(theme))
+    blend(0, h - 1, SCREEN_W, 1, 0x00000000, 40)
 
-    # Accent stripe at bottom of menu bar (2px tall for visibility)
-    grad_h(0, h - 2, SCREEN_W, 2, accent(theme), accent2(theme))
+    # Accent stripe at bottom of menu bar (3px tall for visibility)
+    grad_h(0, h - 3, SCREEN_W, 3, accent(theme), accent2(theme))
 
     # Side accent marks (unique SimpleOS menu bar identity)
     blend(4, y + 4, 2, h - 8, accent(theme), 40)
@@ -726,14 +734,14 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     val any_ = layout_y(app_name)
     if active == 0:
         # "Terminal" (84,101,114,109,105,110,97,108)
-        draw_label_outline(anx, any_, text_c(theme), 255, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, 60)
+        draw_label_vector(anx, any_, text_c(theme), 230, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, 18)
     else:
         if active == 1:
             # "Editor" (69,100,105,116,111,114,0,0)
-            draw_label_outline(anx, any_, text_c(theme), 255, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6, 60)
+            draw_label_vector(anx, any_, text_c(theme), 230, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6, 18)
         else:
             # "Finder" (70,105,110,100,101,114,0,0)
-            draw_label_outline(anx, any_, text_c(theme), 255, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6, 60)
+            draw_label_vector(anx, any_, text_c(theme), 230, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6, 18)
 
     # Menu items — "File" is active (with pill bg + underline), Edit/View dimmer
     # "File" (active) — subtle pill background
@@ -770,7 +778,7 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     # Wi-Fi icon (3 arcs)
     val wx = layout_x(wifi)
     val wy = layout_y(wifi)
-    ring(wx + 2, wy + 2, 16, 2, text_c(theme), 140)
+    ring(wx + 2, wy + 2, 16, 3, text_c(theme), 140)
     ring(wx + 5, wy + 5, 10, 2, text_c(theme), 160)
     circle(wx + 9, wy + 11, 4, text_c(theme), 200)
 
@@ -781,6 +789,7 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     rrect_aa(bx + 2, by + 2, 16, 8, 0x0030D158, 2, 200)
     rrect_aa(bx + 24, by + 3, 3, 6, text_c(theme), 1, 100)
     draw_label(bx + 30, by - 1, text_c(theme), 100, pack8(56, 53, 37, 0, 0, 0, 0, 0), 3)
+    blend(bx + 4, by + 4, 12, 1, 0x00FFFFFF, 40)
 
     # Volume
     val vx = layout_x(volume)
@@ -793,8 +802,9 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     val clx = layout_x(clock)
     val cly = layout_y(clock)
     rrect_aa(clx, cly, layout_w(clock), layout_h(clock), elevated(theme), 8, 100)
+    blend(clx - 2, cly - 1, layout_w(clock) + 4, layout_h(clock) + 2, accent(theme), 8)
     # "12:00 PM"
-    draw_label_outline(clx + 4, cly + 1, text_c(theme), 220, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8, 50)
+    draw_label_vector(clx + 4, cly + 1, text_c(theme), 220, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8, 16)
     # Notification dot (red) on clock — indicates unread notifications
     circle(clx + layout_w(clock) - 4, cly - 1, 7, 0x00FF3B30, 255)
     circle(clx + layout_w(clock) - 4, cly - 1, 5, 0x00FF3B30, 255)
@@ -904,6 +914,11 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 12, icon_y + 24, 16, 2, 0x00888888)
     # Blinking cursor highlight
     blend(ix + 12, icon_y + 16, 8, 2, 0x0044FF44, 200)
+    # Screen reflection (top-left bright area)
+    blend(ix + 10, icon_y + 10, 12, 6, 0x00FFFFFF, 15)
+    # "> _" prompt symbols
+    fill(ix + 12, icon_y + 28, 4, 2, 0x0044FF44)
+    fill(ix + 18, icon_y + 28, 6, 2, 0x00888888)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -926,6 +941,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     rrect_aa(ix + 18, icon_y + 18, 10, 12, 0x00FFFFFF, 2, 160)
     fill(ix + 20, icon_y + 21, 6, 1, 0x001E8449)
     fill(ix + 20, icon_y + 24, 4, 1, 0x001E8449)
+    # Second document behind (depth effect)
+    rrect_aa(ix + 20, icon_y + 16, 10, 12, 0x00DDDDDD, 2, 120)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -949,6 +966,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     rrect_aa(ix + 9, icon_y + 27, 7, 7, 0x00FFFFFF, 2, 200)
     rrect_aa(ix + 17, icon_y + 27, 7, 7, 0x00FFFFFF, 2, 200)
     rrect_aa(ix + 25, icon_y + 27, 7, 7, 0x00FFFFFF, 2, 200)
+    # Clear button (orange, stands out)
+    rrect_aa(ix + 25, icon_y + 27, 7, 7, 0x00FF9500, 2, 200)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -973,6 +992,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 9, icon_y + 19, 3, 2, 0x00FFFFFF)
     fill(ix + 28, icon_y + 19, 3, 2, 0x00FFFFFF)
     fill(ix + 19, icon_y + 28, 2, 3, 0x00FFFFFF)
+    # 12 o'clock marker (thicker)
+    fill(ix + 19, icon_y + 8, 2, 3, 0x00FFFFFF)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -998,6 +1019,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 27, icon_y + 10, 3, 3, 0x00FFFFFF)
     fill(ix + 12, icon_y + 27, 3, 3, 0x00FFFFFF)
     fill(ix + 27, icon_y + 27, 3, 3, 0x00FFFFFF)
+    # Inner detail circle
+    ring(ix + 14, icon_y + 14, 12, 1, 0x00CCCCCC, 100)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -1019,6 +1042,9 @@ fn draw_glass_dock(theme: u64, active: u64):
     line(ix + 8, icon_y + 26, ix + 32, icon_y + 26, 0x00FFFFFF, 1, 120)
     # Compass needle
     line(ix + 16, icon_y + 24, ix + 24, icon_y + 16, 0x00FF4444, 2, 200)
+    # Globe color tinting (subtle quadrant colors)
+    blend(ix + 8, icon_y + 8, 12, 12, 0x003498DB, 20)
+    blend(ix + 20, icon_y + 20, 12, 12, 0x0027AE60, 20)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
     ix = ix + pill_w + icon_gap
 
@@ -1036,6 +1062,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     fill(ix + 14, icon_y + 13, 12, 2, 0x00148F77)
     fill(ix + 14, icon_y + 18, 10, 2, 0x00148F77)
     fill(ix + 14, icon_y + 23, 14, 2, 0x00148F77)
+    # Cursor line (blinking indicator)
+    fill(ix + 14, icon_y + 28, 1, 4, accent(theme))
     # Pencil tip accent
     line(ix + 26, icon_y + 26, ix + 30, icon_y + 30, accent(theme), 2, 200)
     blend(ix + 4, icon_y + pill_w + 1, pill_w - 8, 2, 0x00000000, 20)
@@ -1404,9 +1432,11 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
 # ===========================================================================
 
 fn draw_window_title(x: u64, y: u64, w: u64, title_chars: u64, title_len: u64, theme: u64):
-    val text_x = x + 76
-    val text_y = y + 6
-    draw_label_2x(text_x, text_y, text_c(theme), 230, title_chars, title_len, 70)
+    val title_pixel_w = title_len * 16
+    val text_x = x + (w - title_pixel_w) / 2
+    val text_y = y + 4
+    # Vector font at 28px height (fills 36px title bar nicely)
+    draw_label_vector(text_x, text_y, text_c(theme), 230, title_chars, title_len, 28)
 
 # ===========================================================================
 # Animation Helpers
@@ -1622,8 +1652,8 @@ fn spl_start():
     blend(splash_x + 6, splash_y + 2, splash_w - 12, 1, 0x00FFFFFF, 20)
     rrect_aa(splash_x, splash_y, splash_w, splash_h, 0x00FFFFFF, 28, 25)
 
-    # "SimpleOS" text centered — 2x scaled (16x32 per char, 8 chars = 128px)
-    draw_label_2x(splash_x + 86, splash_y + 16, 0x00F5F5F7, 240, pack8(83, 105, 109, 112, 108, 101, 79, 83), 8, 60)
+    # "SimpleOS" in vector font at 40px
+    draw_label_vector(splash_x + 70, splash_y + 16, 0x00F5F5F7, 240, pack8(83, 105, 109, 112, 108, 101, 79, 83), 8, 40)
 
     # Version text below (regular size)
     draw_label_shadow(splash_x + 130, splash_y + 60, 0x00EBEBF5, 160, pack8(118, 49, 46, 48, 0, 0, 0, 0), 4, 40)
