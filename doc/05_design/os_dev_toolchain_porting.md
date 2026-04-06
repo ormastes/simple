@@ -4,7 +4,7 @@
 
 ### What SimpleOS Already Has
 - SSH server (Ed25519 auth, port 22)
-- Shell (50+ builtins, pipes, redirects, job control)
+- Shell (40+ builtins: 26 core + 14 extended tools, pipes, redirects, job control)
 - VFS with FAT32 driver
 - Full TCP/IP network stack (Ethernet, IPv4, TCP, UDP, ICMP)
 - Process management (spawn_binary, ELF loading, signals)
@@ -13,13 +13,33 @@
 - Vi-like text editor
 - POSIX compatibility layer (sockets, pipes, signals, FD table)
 - Cryptography (Ed25519, AES-GCM, SHA-256/512)
-- VCS app (file-level snapshots via VFS)
+- VCS: native file-level snapshots + **git wrapper** + **jj wrapper** (NEW)
+- **LLVM/Clang cross-build scripts** for 4 targets (NEW)
+- **Rust cross-build** with core/alloc for 4 targets (NEW)
+- **Minimal libc** with string/math extensions for toolchain bootstrap (NEW)
+- **4 Rust target specs**: x86_64, aarch64, riscv64gc, riscv32imac (NEW)
+- **CMake/Ninja/Make ports** under examples/ (NEW)
+- **Bootstrap verification & cross-compilation scripts** (NEW)
+- **Master verification script** (`verify_all.spl`) checking all layers (NEW)
 
 ### What's Missing for Self-Hosted Development
-- Full libc implementation
+- Full libc implementation (minimal libc exists, needs POSIX extensions)
 - Dynamic linker/loader
-- Cross-compilation toolchain on SimpleOS
+- Cross-compiled LLVM/Clang binary running ON SimpleOS (scripts ready, build needed)
+- Cross-compiled Rust seed binary for SimpleOS (scripts ready, build needed)
 - Larger memory support (currently 128MB QEMU default)
+
+### Verification
+
+```bash
+# Run full verification of all layers
+bin/simple run src/os/port/verify_all.spl
+
+# Quick check (skip toolchain builds)
+bin/simple run src/os/port/verify_all.spl -- --skip-slow --verbose
+```
+
+See: `doc/07_guide/platform/simpleos_dev_guide.md` for full usage guide.
 
 ## Phase 1: Self-Hosted Simple Compiler (1-2 months)
 
@@ -90,20 +110,21 @@ Compile Rust code on SimpleOS (needed for Cranelift/compiler backend).
 3. Ship pre-built rustc + cargo on SimpleOS disk image
 4. Incremental: start with no_std Rust, add std features as OS matures
 
-## Phase 5: Git/VCS (1-2 months, after Phase 3)
+## Phase 5: Git/VCS (DONE — wrapper approach)
 
-### Options
-- **SimpleOS VCS** (implemented) — file-level snapshots, adequate for local dev
-- **libgit2 port** — C library, ~100K LOC, needs libc + zlib + OpenSSL
-- **Partial git port** — only plumbing commands
+### Status: Implemented (2026-04-06)
+- **SimpleOS VCS** (`src/os/apps/vcs/`) — native file-level snapshots, works baremetal
+- **Git wrapper** (`src/os/apps/git/`) — delegates to host `git` binary, 15 commands
+- **JJ wrapper** (`src/os/apps/jj/`) — delegates to host `jj` binary, 14 commands
+- All three integrated into shell as `vcs`, `git`, `jj` commands
 
-### Recommendation
-Phase 5.1: Use SimpleOS VCS for immediate needs
-Phase 5.2: Port libgit2 after libc is available (Phase 3)
+### Future: Native Git (after Phase 3)
+- Port libgit2 (C, ~100K LOC) — requires libc + zlib + OpenSSL
+- Or: implement git plumbing in Simple (pack files, SHA-1, refs)
 
-## Phase 6: jj (Jujutsu) VCS (12+ months)
+## Phase 6: jj (Jujutsu) VCS — Native (12+ months)
 
-jj is Rust — requires Phase 4 completion. Long-term goal.
+Wrapper available now. Native port requires Rust (Phase 4).
 
 ## Gap Analysis: Bootstrap Self-Build
 
@@ -114,14 +135,38 @@ jj is Rust — requires Phase 4 completion. Long-term goal.
 | Memory allocation (heap) | Heap + mmap | May need >128MB |
 | Object file output | Cranelift backend | Ready |
 | ELF linking | Missing | Need minimal linker |
-| Shell for builds | 50+ builtins | Ready |
-| Build orchestration | simple_make | Ready |
+| Shell for builds | 40+ builtins | Ready |
+| Build orchestration | simple_make + cmake/ninja/make ports | Ready |
 | Source file discovery | VFS readdir | Ready |
 | Network (packages) | TCP/IP + HTTP | Ready |
+| VCS | Native + git/jj wrappers | Ready |
+| C compiler (host→target) | LLVM cross-build scripts | Scripts ready |
+| Rust core/alloc | Cross-build scripts | Scripts ready |
+| Libc | Minimal (string, math, printf, mmap) | Needs POSIX extensions |
+| Sysroot | Builder script (sysroot.shs) | Scripts ready |
+| Target specs | 4 arch (x86_64, aarch64, riscv64, riscv32) | Ready |
+| Bootstrap verification | verify + cross scripts | Ready |
 
 ## Recommended Bootstrap Path
 
-1. Cross-compile Simple compiler on host → ship on FAT32 image
-2. Boot SimpleOS in QEMU with disk image
-3. Run Simple compiler to compile hello_world.spl
-4. Gradually build up to self-hosting
+1. Build sysroot: `bin/simple run src/os/port/deploy_toolchains.spl -- --stage sysroot`
+2. Cross-compile LLVM/Clang for SimpleOS: `bin/simple run src/os/port/deploy_toolchains.spl -- --cross`
+3. Cross-compile Simple compiler: `bin/simple run src/os/port/bootstrap_cross.spl -- --target x86_64-simpleos --package`
+4. Ship compiler + sysroot + toolchain on FAT32 disk image
+5. Boot SimpleOS in QEMU
+6. Run `simple native-build` on SimpleOS to compile Simple programs
+7. Verify convergence with `bootstrap_verify.spl`
+
+## Scripts Reference
+
+| Script | Purpose |
+|--------|---------|
+| `src/os/port/verify_all.spl` | Master verification (all 5 phases) |
+| `src/os/port/deploy_toolchains.spl` | Sysroot + LLVM + Rust deployment |
+| `src/os/port/bootstrap_verify.spl` | 3-stage bootstrap verification |
+| `src/os/port/bootstrap_cross.spl` | Cross-compile Simple for SimpleOS |
+| `src/os/port/llvm/build.spl` | LLVM/Clang build (host + cross) |
+| `src/os/port/rust/build.spl` | Rust core/alloc build |
+| `src/os/port/llvm/test_smoke.spl` | LLVM smoke tests |
+
+Full guide: `doc/07_guide/platform/simpleos_dev_guide.md`

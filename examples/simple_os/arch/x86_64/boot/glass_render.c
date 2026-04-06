@@ -883,10 +883,25 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw / 2, sh / 2, 180, 0x0000D4AA, 18, sw, sh);       /* Teal (center) */
         draw_blob(sw * 4 / 5, sh * 3 / 4, 160, 0x00FF6B9D, 20, sw, sh); /* Pink (bottom-right) */
         draw_blob(sw / 3, sh / 5, 140, 0x00FFD700, 15, sw, sh);       /* Gold (top-left) */
+        draw_blob(sw / 8, sh / 8, 120, 0x004ECDC4, 12, sw, sh);       /* Teal-mint (top-left) */
+        draw_blob(sw * 5 / 8, sh / 3, 150, 0x00E040FB, 16, sw, sh);   /* Neon purple (center-right) */
+        draw_blob(sw / 2, sh * 4 / 5, 130, 0x00FF7043, 14, sw, sh);   /* Coral (bottom-center) */
 
         /* Subtle blur pass to soften blobs */
         box_blur_h(0, 0, sw, sh, 8);
         box_blur_v(0, 0, sw, sh, 8);
+
+        /* Subtle noise overlay for texture */
+        for (uint32_t row = 0; row < sh; row++) {
+            for (uint32_t col = 0; col < sw; col++) {
+                /* Simple hash-based noise */
+                uint32_t noise = ((col * 2654435761u) ^ (row * 2246822519u)) & 0xFF;
+                if (noise > 240) {
+                    uint32_t dst = fb_read(col, row);
+                    fb_write(col, row, alpha_blend(dst, 0x00FFFFFF, 6));
+                }
+            }
+        }
 
     } else {
         /* Light Pastel — soft gradient with gentle color washes */
@@ -904,10 +919,24 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw / 4, sh / 2, 220, 0x0099CCFF, 22, sw, sh);       /* Sky blue (left) */
         draw_blob(sw / 2, sh * 3 / 4, 200, 0x00B5FFD9, 20, sw, sh);   /* Mint (bottom-center) */
         draw_blob(sw * 3 / 4, sh * 2 / 3, 180, 0x00E8C5FF, 18, sw, sh); /* Lilac (right) */
+        draw_blob(sw / 6, sh / 4, 180, 0x00FFE0B2, 18, sw, sh);       /* Peach (top-left) */
+        draw_blob(sw * 3 / 4, sh / 5, 160, 0x00B2EBF2, 16, sw, sh);   /* Ice blue (top-right) */
+        draw_blob(sw / 3, sh * 4 / 5, 140, 0x00F8BBD0, 14, sw, sh);   /* Rose (bottom-left) */
 
         /* Soften */
         box_blur_h(0, 0, sw, sh, 10);
         box_blur_v(0, 0, sw, sh, 10);
+
+        /* Subtle noise overlay for texture */
+        for (uint32_t row = 0; row < sh; row++) {
+            for (uint32_t col = 0; col < sw; col++) {
+                uint32_t noise = ((col * 2654435761u) ^ (row * 2246822519u)) & 0xFF;
+                if (noise > 240) {
+                    uint32_t dst = fb_read(col, row);
+                    fb_write(col, row, alpha_blend(dst, 0x00000000, 4));
+                }
+            }
+        }
     }
 
     return 0;

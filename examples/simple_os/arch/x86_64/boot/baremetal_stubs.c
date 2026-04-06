@@ -236,7 +236,7 @@ void rt_print_value(RuntimeValue val);
  * 4. Heap allocator — bump allocator, 16 MB
  * =================================================================== */
 
-static char   _heap[256 * 1024 * 1024] __attribute__((aligned(16)));
+static char   _heap[512 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
