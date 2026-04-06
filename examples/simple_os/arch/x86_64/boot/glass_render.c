@@ -1438,3 +1438,374 @@ RuntimeValue rt_gui_draw_text_buf(RuntimeValue xy, RuntimeValue color_len,
     g_text_len = 0; /* Reset buffer */
     return 0;
 }
+
+/* ===================================================================
+ * 20. Layout Engine — Flexbox-style HStack/VStack
+ *
+ * Flat array of layout nodes. Simple side builds the tree via
+ * function calls, then runs compute_layout, then reads results.
+ *
+ * Usage from Simple:
+ *   rt_layout_reset(0, 0, 0, 0)
+ *   val root = rt_layout_add(LAYOUT_VSTACK, -1, 0, 0)  // parent=-1 = root
+ *   val bar = rt_layout_add(LAYOUT_HSTACK, root, 0, 0)
+ *   rt_layout_set_size(bar, pack(FIXED, 28), pack(FILL, 0))  // h=28 fixed, w=fill
+ *   rt_layout_set_padding(bar, pack(8, 8), pack(4, 4))       // lr=8, tb=4
+ *   rt_layout_compute(pack(1024, 768), 0, 0, 0)              // screen size
+ *   val bar_x = rt_layout_get(bar, 0, 0, 0) >> 32            // x in high bits
+ *   val bar_y = rt_layout_get(bar, 0, 0, 0) & 0xFFFFFFFF     // y in low bits
+ *   val bar_w = rt_layout_get_size(bar, 0, 0, 0) >> 32       // w
+ *   val bar_h = rt_layout_get_size(bar, 0, 0, 0) & 0xFFFFFFFF // h
+ * =================================================================== */
+
+#define MAX_LAYOUT_NODES 128
+
+typedef enum {
+    LT_NONE = 0,
+    LT_HSTACK = 1,    /* Horizontal: children laid out left-to-right */
+    LT_VSTACK = 2,    /* Vertical: children laid out top-to-bottom */
+    LT_ZSTACK = 3     /* Overlay: children stacked on top of each other */
+} LayoutType;
+
+typedef enum {
+    SM_FIXED = 0,       /* Fixed pixel size */
+    SM_FILL = 1,        /* Fill remaining space (weight-based) */
+    SM_AUTO = 2         /* Size to content */
+} SizeMode;
+
+typedef enum {
+    ALIGN_START = 0,
+    ALIGN_CENTER = 1,
+    ALIGN_END = 2
+} LayoutAlign;
+
+typedef struct {
+    int active;          /* 1 if node is in use */
+    int parent;          /* Parent node index (-1 = root) */
+    LayoutType type;
+
+    /* Size specification */
+    SizeMode w_mode, h_mode;
+    uint32_t w_value, h_value; /* Fixed size or weight */
+
+    /* Padding */
+    uint32_t pad_left, pad_right, pad_top, pad_bottom;
+
+    /* Spacing between children */
+    uint32_t spacing;
+
+    /* Alignment of children on cross axis */
+    LayoutAlign h_align, v_align;
+
+    /* Computed results */
+    int32_t cx, cy;       /* Position (relative to screen) */
+    uint32_t cw, ch;      /* Computed size */
+
+    /* Children tracking */
+    int children[32];     /* Child indices */
+    int child_count;
+
+    /* Intrinsic size (from content or children) */
+    uint32_t intrinsic_w, intrinsic_h;
+} LayoutNode;
+
+static LayoutNode g_layout[MAX_LAYOUT_NODES];
+static int g_layout_count = 0;
+
+/* Reset layout tree */
+RuntimeValue rt_layout_reset(RuntimeValue u1, RuntimeValue u2,
+                              RuntimeValue u3, RuntimeValue u4)
+{
+    (void)u1; (void)u2; (void)u3; (void)u4;
+    for (int i = 0; i < MAX_LAYOUT_NODES; i++) {
+        g_layout[i].active = 0;
+        g_layout[i].child_count = 0;
+    }
+    g_layout_count = 0;
+    return 0;
+}
+
+/* Add a node: rt_layout_add(type, parent_id, _, _) -> node_id */
+RuntimeValue rt_layout_add(RuntimeValue type_rv, RuntimeValue parent_rv,
+                            RuntimeValue u1, RuntimeValue u2)
+{
+    (void)u1; (void)u2;
+    if (g_layout_count >= MAX_LAYOUT_NODES) return (RuntimeValue)-1;
+
+    int id = g_layout_count++;
+    LayoutNode *n = &g_layout[id];
+    n->active = 1;
+    n->type = (LayoutType)(uint64_t)type_rv;
+    n->parent = (int)(int64_t)parent_rv;
+    n->w_mode = SM_AUTO;
+    n->h_mode = SM_AUTO;
+    n->w_value = 0;
+    n->h_value = 0;
+    n->pad_left = n->pad_right = n->pad_top = n->pad_bottom = 0;
+    n->spacing = 0;
+    n->h_align = ALIGN_START;
+    n->v_align = ALIGN_START;
+    n->cx = n->cy = 0;
+    n->cw = n->ch = 0;
+    n->child_count = 0;
+    n->intrinsic_w = n->intrinsic_h = 0;
+
+    /* Register as child of parent */
+    if (n->parent >= 0 && n->parent < MAX_LAYOUT_NODES) {
+        LayoutNode *p = &g_layout[n->parent];
+        if (p->child_count < 32) {
+            p->children[p->child_count++] = id;
+        }
+    }
+
+    return (RuntimeValue)id;
+}
+
+/* Set size: rt_layout_set_size(id, pack(w_mode, w_value), pack(h_mode, h_value), _) */
+RuntimeValue rt_layout_set_size(RuntimeValue id_rv, RuntimeValue w_spec,
+                                 RuntimeValue h_spec, RuntimeValue u)
+{
+    (void)u;
+    int id = (int)(int64_t)id_rv;
+    if (id < 0 || id >= g_layout_count) return 0;
+    LayoutNode *n = &g_layout[id];
+
+    n->w_mode = (SizeMode)((uint64_t)w_spec >> 32);
+    n->w_value = (uint32_t)((uint64_t)w_spec & 0xFFFFFFFF);
+    n->h_mode = (SizeMode)((uint64_t)h_spec >> 32);
+    n->h_value = (uint32_t)((uint64_t)h_spec & 0xFFFFFFFF);
+
+    return 0;
+}
+
+/* Set padding: rt_layout_set_padding(id, pack(left, right), pack(top, bottom), _) */
+RuntimeValue rt_layout_set_padding(RuntimeValue id_rv, RuntimeValue lr,
+                                    RuntimeValue tb, RuntimeValue u)
+{
+    (void)u;
+    int id = (int)(int64_t)id_rv;
+    if (id < 0 || id >= g_layout_count) return 0;
+    LayoutNode *n = &g_layout[id];
+
+    n->pad_left = (uint32_t)((uint64_t)lr >> 32);
+    n->pad_right = (uint32_t)((uint64_t)lr & 0xFFFFFFFF);
+    n->pad_top = (uint32_t)((uint64_t)tb >> 32);
+    n->pad_bottom = (uint32_t)((uint64_t)tb & 0xFFFFFFFF);
+
+    return 0;
+}
+
+/* Set spacing + alignment: rt_layout_set_props(id, spacing, pack(h_align, v_align), _) */
+RuntimeValue rt_layout_set_props(RuntimeValue id_rv, RuntimeValue spacing_rv,
+                                  RuntimeValue align_rv, RuntimeValue u)
+{
+    (void)u;
+    int id = (int)(int64_t)id_rv;
+    if (id < 0 || id >= g_layout_count) return 0;
+    LayoutNode *n = &g_layout[id];
+
+    n->spacing = (uint32_t)(uint64_t)spacing_rv;
+    n->h_align = (LayoutAlign)((uint64_t)align_rv >> 32);
+    n->v_align = (LayoutAlign)((uint64_t)align_rv & 0xFFFFFFFF);
+
+    return 0;
+}
+
+/* Measure pass (bottom-up): compute intrinsic sizes */
+static void layout_measure(int id)
+{
+    LayoutNode *n = &g_layout[id];
+    if (!n->active) return;
+
+    /* Measure children first */
+    for (int i = 0; i < n->child_count; i++) {
+        layout_measure(n->children[i]);
+    }
+
+    /* Compute intrinsic size based on children */
+    uint32_t content_w = 0, content_h = 0;
+
+    if (n->type == LT_HSTACK) {
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            if (c->w_mode == SM_FIXED) content_w += c->w_value;
+            else content_w += c->intrinsic_w;
+            uint32_t ch = (c->h_mode == SM_FIXED) ? c->h_value : c->intrinsic_h;
+            if (ch > content_h) content_h = ch;
+        }
+        if (n->child_count > 1) content_w += (n->child_count - 1) * n->spacing;
+    } else if (n->type == LT_VSTACK) {
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            if (c->h_mode == SM_FIXED) content_h += c->h_value;
+            else content_h += c->intrinsic_h;
+            uint32_t cw = (c->w_mode == SM_FIXED) ? c->w_value : c->intrinsic_w;
+            if (cw > content_w) content_w = cw;
+        }
+        if (n->child_count > 1) content_h += (n->child_count - 1) * n->spacing;
+    } else if (n->type == LT_ZSTACK) {
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            uint32_t cw = (c->w_mode == SM_FIXED) ? c->w_value : c->intrinsic_w;
+            uint32_t ch = (c->h_mode == SM_FIXED) ? c->h_value : c->intrinsic_h;
+            if (cw > content_w) content_w = cw;
+            if (ch > content_h) content_h = ch;
+        }
+    }
+
+    n->intrinsic_w = content_w + n->pad_left + n->pad_right;
+    n->intrinsic_h = content_h + n->pad_top + n->pad_bottom;
+}
+
+/* Layout pass (top-down): assign positions and final sizes */
+static void layout_arrange(int id, int32_t x, int32_t y, uint32_t w, uint32_t h)
+{
+    LayoutNode *n = &g_layout[id];
+    if (!n->active) return;
+
+    n->cx = x;
+    n->cy = y;
+    n->cw = w;
+    n->ch = h;
+
+    if (n->child_count == 0) return;
+
+    uint32_t content_w = w - n->pad_left - n->pad_right;
+    uint32_t content_h = h - n->pad_top - n->pad_bottom;
+    int32_t start_x = x + (int32_t)n->pad_left;
+    int32_t start_y = y + (int32_t)n->pad_top;
+
+    if (n->type == LT_HSTACK) {
+        /* Calculate fixed vs fill space */
+        uint32_t fixed_total = 0;
+        uint32_t fill_weight_total = 0;
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            if (c->w_mode == SM_FIXED) fixed_total += c->w_value;
+            else if (c->w_mode == SM_FILL) fill_weight_total += (c->w_value > 0 ? c->w_value : 1);
+            else fixed_total += c->intrinsic_w;
+        }
+        if (n->child_count > 1) fixed_total += (n->child_count - 1) * n->spacing;
+
+        uint32_t free_space = (content_w > fixed_total) ? content_w - fixed_total : 0;
+
+        int32_t cx = start_x;
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            uint32_t cw, ch;
+
+            if (c->w_mode == SM_FIXED) cw = c->w_value;
+            else if (c->w_mode == SM_FILL) {
+                uint32_t weight = (c->w_value > 0 ? c->w_value : 1);
+                cw = (fill_weight_total > 0) ? (free_space * weight / fill_weight_total) : 0;
+            } else cw = c->intrinsic_w;
+
+            if (c->h_mode == SM_FIXED) ch = c->h_value;
+            else if (c->h_mode == SM_FILL) ch = content_h;
+            else ch = c->intrinsic_h;
+
+            /* Cross-axis alignment */
+            int32_t cy = start_y;
+            if (n->v_align == ALIGN_CENTER) cy += (int32_t)(content_h - ch) / 2;
+            else if (n->v_align == ALIGN_END) cy += (int32_t)(content_h - ch);
+
+            layout_arrange(n->children[i], cx, cy, cw, ch);
+            cx += (int32_t)cw + (int32_t)n->spacing;
+        }
+    } else if (n->type == LT_VSTACK) {
+        uint32_t fixed_total = 0;
+        uint32_t fill_weight_total = 0;
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            if (c->h_mode == SM_FIXED) fixed_total += c->h_value;
+            else if (c->h_mode == SM_FILL) fill_weight_total += (c->h_value > 0 ? c->h_value : 1);
+            else fixed_total += c->intrinsic_h;
+        }
+        if (n->child_count > 1) fixed_total += (n->child_count - 1) * n->spacing;
+
+        uint32_t free_space = (content_h > fixed_total) ? content_h - fixed_total : 0;
+
+        int32_t cy = start_y;
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            uint32_t cw, ch;
+
+            if (c->h_mode == SM_FIXED) ch = c->h_value;
+            else if (c->h_mode == SM_FILL) {
+                uint32_t weight = (c->h_value > 0 ? c->h_value : 1);
+                ch = (fill_weight_total > 0) ? (free_space * weight / fill_weight_total) : 0;
+            } else ch = c->intrinsic_h;
+
+            if (c->w_mode == SM_FIXED) cw = c->w_value;
+            else if (c->w_mode == SM_FILL) cw = content_w;
+            else cw = c->intrinsic_w;
+
+            int32_t cx = start_x;
+            if (n->h_align == ALIGN_CENTER) cx += (int32_t)(content_w - cw) / 2;
+            else if (n->h_align == ALIGN_END) cx += (int32_t)(content_w - cw);
+
+            layout_arrange(n->children[i], cx, cy, cw, ch);
+            cy += (int32_t)ch + (int32_t)n->spacing;
+        }
+    } else if (n->type == LT_ZSTACK) {
+        for (int i = 0; i < n->child_count; i++) {
+            LayoutNode *c = &g_layout[n->children[i]];
+            uint32_t cw = (c->w_mode == SM_FIXED) ? c->w_value : content_w;
+            uint32_t ch = (c->h_mode == SM_FIXED) ? c->h_value : content_h;
+            int32_t cx = start_x, cy = start_y;
+            if (n->h_align == ALIGN_CENTER) cx += (int32_t)(content_w - cw) / 2;
+            if (n->v_align == ALIGN_CENTER) cy += (int32_t)(content_h - ch) / 2;
+            layout_arrange(n->children[i], cx, cy, cw, ch);
+        }
+    }
+}
+
+/* Compute layout: rt_layout_compute(pack(screen_w, screen_h), _, _, _) */
+RuntimeValue rt_layout_compute(RuntimeValue wh, RuntimeValue u1,
+                                RuntimeValue u2, RuntimeValue u3)
+{
+    (void)u1; (void)u2; (void)u3;
+    uint32_t sw = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t sh = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+
+    if (g_layout_count == 0) return 0;
+
+    /* Find root node (parent == -1) */
+    int root = -1;
+    for (int i = 0; i < g_layout_count; i++) {
+        if (g_layout[i].active && g_layout[i].parent == -1) {
+            root = i;
+            break;
+        }
+    }
+    if (root < 0) return 0;
+
+    layout_measure(root);
+    layout_arrange(root, 0, 0, sw, sh);
+
+    return 0;
+}
+
+/* Get computed position: rt_layout_get(id, _, _, _) -> pack(x, y) */
+RuntimeValue rt_layout_get(RuntimeValue id_rv, RuntimeValue u1,
+                            RuntimeValue u2, RuntimeValue u3)
+{
+    (void)u1; (void)u2; (void)u3;
+    int id = (int)(int64_t)id_rv;
+    if (id < 0 || id >= g_layout_count) return 0;
+    LayoutNode *n = &g_layout[id];
+    uint64_t x = (uint32_t)n->cx;
+    uint64_t y = (uint32_t)n->cy;
+    return (RuntimeValue)((x << 32) | y);
+}
+
+/* Get computed size: rt_layout_get_size(id, _, _, _) -> pack(w, h) */
+RuntimeValue rt_layout_get_size(RuntimeValue id_rv, RuntimeValue u1,
+                                 RuntimeValue u2, RuntimeValue u3)
+{
+    (void)u1; (void)u2; (void)u3;
+    int id = (int)(int64_t)id_rv;
+    if (id < 0 || id >= g_layout_count) return 0;
+    LayoutNode *n = &g_layout[id];
+    return (RuntimeValue)(((uint64_t)n->cw << 32) | (uint64_t)n->ch);
+}
