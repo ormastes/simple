@@ -7,9 +7,8 @@ use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_fi
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, get_cached, set_cached, csv_to_floats, floats_to_csv}
 use compiler.tools.duplicate_check.detector.{collect_files}
+use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
 use std.text.{levenshtein_distance}
-
-extern fn rt_math_sqrt(x: f64) -> f64
 
 struct SemanticMatch:
     entry_a: DocEntry
@@ -119,36 +118,6 @@ fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> Semant
         used_fallback: false
     )
 
-fn cosine_similarity_dense(a: [f64], b: [f64]) -> f64:
-    if a.len() == 0 or b.len() == 0:
-        return 0.0
-    if a.len() != b.len():
-        return 0.0
-
-    var dot_product = 0.0
-    var mag_a = 0.0
-    var mag_b = 0.0
-    var i = 0
-
-    while i < a.len():
-        dot_product = dot_product + a[i] * b[i]
-        mag_a = mag_a + a[i] * a[i]
-        mag_b = mag_b + b[i] * b[i]
-        i = i + 1
-
-    val mag_a_sqrt = rt_math_sqrt(mag_a)
-    val mag_b_sqrt = rt_math_sqrt(mag_b)
-
-    val either_zero = (mag_a_sqrt == 0.0 or mag_b_sqrt == 0.0)
-    if either_zero:
-        return 0.0
-
-    val sim = dot_product / (mag_a_sqrt * mag_b_sqrt)
-
-    # Clamp to [0, 1]
-    val clamped = sim.max(0.0).min(1.0)
-    clamped
-
 fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, drift_threshold: f64) -> [SemanticMatch]:
     var matches: [SemanticMatch] = []
 
@@ -186,20 +155,33 @@ fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, 
 
         i = i + 1
 
-    # Sort by similarity descending (bubble sort)
-    var n = matches.len()
-    var si = 0
-    while si < n - 1:
-        var sj = 0
-        while sj < n - si - 1:
-            if matches[sj].similarity < matches[sj + 1].similarity:
-                val tmp = matches[sj]
-                matches[sj] = matches[sj + 1]
-                matches[sj + 1] = tmp
-            sj = sj + 1
-        si = si + 1
+    # Sort by similarity descending (quicksort)
+    if matches.len() > 1:
+        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
 
     matches
+
+fn quicksort_matches_by_sim(arr: [SemanticMatch], low: i64, high: i64):
+    if low >= high:
+        return
+    val pivot_sim = arr[(low + high) / 2].similarity
+    var i = low
+    var j = high
+    while i <= j:
+        while arr[i].similarity > pivot_sim:
+            i = i + 1
+        while arr[j].similarity < pivot_sim:
+            j = j - 1
+        if i <= j:
+            val tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+            i = i + 1
+            j = j - 1
+    if low < j:
+        quicksort_matches_by_sim(arr, low, j)
+    if i < high:
+        quicksort_matches_by_sim(arr, i, high)
 
 fn classify_match(a: DocEntry, b: DocEntry, sim: f64) -> text:
     if sim >= 0.97:

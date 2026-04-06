@@ -1,0 +1,174 @@
+# LLM Diagnostics — JSON Formatter
+#
+# Outputs diagnostics as machine-readable JSON using
+# the jp/js/jo pattern from mcp_sdk.
+
+use std.nogc_async_mut.llm_diagnostics.types.{
+    SessionDiag, McpServerStats, ToolCall, AgentNode,
+    TokenUsage, DiagEvent, CacheAnalysis, TurnCache,
+    token_usage_total_input, mcp_stats_avg_latency
+}
+
+# --- JSON Primitives ---
+
+fn Q() -> text:
+    "\""
+
+fn LB() -> text:
+    (123 as char).to_text()
+
+fn RB() -> text:
+    (125 as char).to_text()
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn js(value: text) -> text:
+    Q() + escape_json_simple(value) + Q()
+
+fn jn(value: i64) -> text:
+    value.to_text()
+
+fn jf(value: f64) -> text:
+    value.to_text()
+
+fn jb(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn ja(items: [text]) -> text:
+    "[" + items.join(",") + "]"
+
+fn jo(pairs: [text]) -> text:
+    LB() + pairs.join(",") + RB()
+
+fn escape_json_simple(s: text) -> text:
+    """Escape quotes and backslashes for JSON strings."""
+    var result: [text] = []
+    for ch in s.chars():
+        if ch == Q():
+            result.push("\\")
+            result.push(Q())
+        elif ch == "\\":
+            result.push("\\\\")
+        elif ch == "\n":
+            result.push("\\n")
+        elif ch == "\r":
+            result.push("\\r")
+        elif ch == "\t":
+            result.push("\\t")
+        else:
+            result.push(ch)
+    result.join("")
+
+# --- Token Usage ---
+
+fn format_token_usage_json(u: TokenUsage) -> text:
+    jo([
+        jp("input_tokens", jn(u.input_tokens)),
+        jp("output_tokens", jn(u.output_tokens)),
+        jp("cache_read_input_tokens", jn(u.cache_read_input_tokens)),
+        jp("cache_creation_input_tokens", jn(u.cache_creation_input_tokens)),
+        jp("total_input", jn(token_usage_total_input(u)))
+    ])
+
+# --- Event ---
+
+fn format_event_json(e: DiagEvent) -> text:
+    jo([
+        jp("event_type", js(e.event_type)),
+        jp("timestamp", jn(e.timestamp)),
+        jp("session_id", js(e.session_id)),
+        jp("agent_id", js(e.agent_id))
+    ])
+
+# --- Tool Call ---
+
+fn format_tool_call_json(tc: ToolCall) -> text:
+    var pairs: [text] = []
+    pairs.push(jp("tool_use_id", js(tc.tool_use_id)))
+    pairs.push(jp("tool_name", js(tc.tool_name)))
+    pairs.push(jp("server_name", js(tc.server_name)))
+    pairs.push(jp("is_mcp", jb(tc.is_mcp)))
+    pairs.push(jp("start_time", jn(tc.start_time)))
+    pairs.push(jp("end_time", jn(tc.end_time)))
+    pairs.push(jp("estimated_request_tokens", jn(tc.estimated_request_tokens)))
+    pairs.push(jp("estimated_response_tokens", jn(tc.estimated_response_tokens)))
+    if tc.error.len() > 0:
+        pairs.push(jp("error", js(tc.error)))
+    jo(pairs)
+
+# --- MCP Stats ---
+
+fn format_mcp_stats_json(stats: [McpServerStats]) -> text:
+    var items: [text] = []
+    for s in stats:
+        var pairs: [text] = []
+        pairs.push(jp("server_name", js(s.server_name)))
+        pairs.push(jp("call_count", jn(s.call_count)))
+        pairs.push(jp("total_request_bytes", jn(s.total_request_bytes)))
+        pairs.push(jp("total_response_bytes", jn(s.total_response_bytes)))
+        pairs.push(jp("total_latency_ms", jn(s.total_latency_ms)))
+        pairs.push(jp("avg_latency_ms", jn(mcp_stats_avg_latency(s))))
+        pairs.push(jp("estimated_request_tokens", jn(s.estimated_request_tokens)))
+        pairs.push(jp("estimated_response_tokens", jn(s.estimated_response_tokens)))
+        # Inline calls array
+        var call_items: [text] = []
+        for tc in s.calls:
+            call_items.push(format_tool_call_json(tc))
+        pairs.push(jp("calls", ja(call_items)))
+        items.push(jo(pairs))
+    ja(items)
+
+# --- Agent Tree ---
+
+fn format_agent_tree_json(agents: [AgentNode]) -> text:
+    var items: [text] = []
+    for a in agents:
+        var pairs: [text] = []
+        pairs.push(jp("agent_id", js(a.agent_id)))
+        pairs.push(jp("agent_type", js(a.agent_type)))
+        pairs.push(jp("parent_tool_use_id", js(a.parent_tool_use_id)))
+        pairs.push(jp("transcript_path", js(a.transcript_path)))
+        pairs.push(jp("start_time", jn(a.start_time)))
+        pairs.push(jp("end_time", jn(a.end_time)))
+        pairs.push(jp("usage", format_token_usage_json(a.total_usage)))
+        var child_items: [text] = []
+        for c in a.children:
+            child_items.push(js(c))
+        pairs.push(jp("children", ja(child_items)))
+        items.push(jo(pairs))
+    ja(items)
+
+# --- Cache Analysis ---
+
+fn format_cache_analysis_json(ca: CacheAnalysis) -> text:
+    var turn_items: [text] = []
+    for tc in ca.per_turn:
+        turn_items.push(jo([
+            jp("turn", jn(tc.turn_index)),
+            jp("cache_read", jn(tc.cache_read)),
+            jp("cache_write", jn(tc.cache_write)),
+            jp("uncached", jn(tc.uncached)),
+            jp("was_hit", jb(tc.was_hit))
+        ]))
+    jo([
+        jp("total_cache_reads", jn(ca.total_cache_reads)),
+        jp("total_cache_writes", jn(ca.total_cache_writes)),
+        jp("total_uncached", jn(ca.total_uncached)),
+        jp("cache_efficiency", jf(ca.cache_efficiency)),
+        jp("per_turn", ja(turn_items))
+    ])
+
+# --- Full Session ---
+
+fn format_session_json(session: SessionDiag) -> text:
+    var pairs: [text] = []
+    pairs.push(jp("session_id", js(session.session_id)))
+    pairs.push(jp("session_type", js(session.session_type)))
+    pairs.push(jp("start_time", jn(session.start_time)))
+    pairs.push(jp("turn_count", jn(session.turn_count)))
+    pairs.push(jp("usage", format_token_usage_json(session.total_usage)))
+    pairs.push(jp("mcp_stats", format_mcp_stats_json(session.mcp_stats)))
+    pairs.push(jp("agent_tree", format_agent_tree_json(session.agent_tree)))
+    pairs.push(jp("event_count", jn(session.events.len())))
+    jo(pairs)
