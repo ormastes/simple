@@ -941,3 +941,254 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
 
     return 0;
 }
+
+/* ===================================================================
+ * 15. Anti-aliased rounded rectangle
+ *     Same signature as rt_gui_rounded_rect but with smooth edge blending.
+ *     At corner edges, computes distance to circle boundary and uses
+ *     fractional alpha for sub-pixel smoothing.
+ * =================================================================== */
+RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
+                                     RuntimeValue color_radius, RuntimeValue alpha_rv)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_radius >> 32);
+    uint32_t radius = (uint32_t)((uint64_t)color_radius & 0xFFFFFFFF);
+    uint8_t base_alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h / 2) radius = h / 2;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    dirty_mark(x, y, w, h);
+
+    uint32_t r2 = radius * radius;
+
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t py = y + row;
+        if (py >= SCREEN_H) break;
+
+        for (uint32_t col = 0; col < w; col++) {
+            uint32_t px = x + col;
+            if (px >= g_fb_w) break;
+
+            /* Determine if pixel is in a corner region */
+            uint8_t pixel_alpha = base_alpha;
+            int in_corner = 0;
+            uint32_t cx = 0, cy_val = 0;
+
+            if (col < radius && row < radius) {
+                /* Top-left corner */
+                cx = radius - col;
+                cy_val = radius - row;
+                in_corner = 1;
+            } else if (col >= w - radius && row < radius) {
+                /* Top-right corner */
+                cx = col - (w - radius - 1);
+                cy_val = radius - row;
+                in_corner = 1;
+            } else if (col < radius && row >= h - radius) {
+                /* Bottom-left corner */
+                cx = radius - col;
+                cy_val = row - (h - radius - 1);
+                in_corner = 1;
+            } else if (col >= w - radius && row >= h - radius) {
+                /* Bottom-right corner */
+                cx = col - (w - radius - 1);
+                cy_val = row - (h - radius - 1);
+                in_corner = 1;
+            }
+
+            if (in_corner) {
+                uint32_t dist2 = cx * cx + cy_val * cy_val;
+                if (dist2 > r2 + radius * 2) continue; /* Outside */
+                if (dist2 > r2) {
+                    /* Edge pixel — compute fractional coverage */
+                    /* Approximate: linear falloff over 1.5 pixel band */
+                    uint32_t d = dist2;
+                    /* Integer sqrt approximation */
+                    uint32_t s = radius;
+                    if (s > 0) {
+                        s = (s + d / s) / 2;
+                        s = (s + d / s) / 2;
+                    }
+                    uint32_t edge_dist = s - radius; /* pixels past edge */
+                    if (edge_dist >= 2) continue;
+                    /* Anti-alias: blend alpha based on distance */
+                    uint32_t aa = (uint32_t)base_alpha * (2 - edge_dist) / 2;
+                    pixel_alpha = (uint8_t)(aa > 255 ? 255 : aa);
+                }
+                /* else: fully inside corner circle */
+            }
+
+            if (pixel_alpha == 255) {
+                fb_write(px, py, 0xFF000000u | color);
+            } else if (pixel_alpha > 0) {
+                uint32_t dst = fb_read(px, py);
+                fb_write(px, py, alpha_blend(dst, color, pixel_alpha));
+            }
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 16. Line drawing (Bresenham)
+ *     rt_gui_line(pack(x1,y1), pack(x2,y2), pack(color,thickness), alpha)
+ * =================================================================== */
+RuntimeValue rt_gui_line(RuntimeValue p1, RuntimeValue p2,
+                          RuntimeValue color_thick, RuntimeValue alpha_rv)
+{
+    int32_t x1 = (int32_t)((uint64_t)p1 >> 32);
+    int32_t y1 = (int32_t)((uint64_t)p1 & 0xFFFFFFFF);
+    int32_t x2 = (int32_t)((uint64_t)p2 >> 32);
+    int32_t y2 = (int32_t)((uint64_t)p2 & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_thick >> 32);
+    uint32_t thick = (uint32_t)((uint64_t)color_thick & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (thick == 0) thick = 1;
+
+    int32_t dx = x2 > x1 ? x2 - x1 : x1 - x2;
+    int32_t dy = y2 > y1 ? y2 - y1 : y1 - y2;
+    int32_t sx = x1 < x2 ? 1 : -1;
+    int32_t sy = y1 < y2 ? 1 : -1;
+    int32_t err = dx - dy;
+
+    while (1) {
+        /* Draw thick pixel (square brush) */
+        for (uint32_t ty = 0; ty < thick; ty++) {
+            for (uint32_t tx = 0; tx < thick; tx++) {
+                int32_t px = x1 + (int32_t)tx - (int32_t)(thick / 2);
+                int32_t py = y1 + (int32_t)ty - (int32_t)(thick / 2);
+                if (px >= 0 && px < (int32_t)g_fb_w && py >= 0 && py < (int32_t)SCREEN_H) {
+                    if (alpha == 255) {
+                        fb_write((uint32_t)px, (uint32_t)py, 0xFF000000u | color);
+                    } else {
+                        uint32_t dst = fb_read((uint32_t)px, (uint32_t)py);
+                        fb_write((uint32_t)px, (uint32_t)py, alpha_blend(dst, color, alpha));
+                    }
+                }
+            }
+        }
+
+        if (x1 == x2 && y1 == y2) break;
+        int32_t e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x1 += sx; }
+        if (e2 < dx) { err += dx; y1 += sy; }
+    }
+
+    dirty_mark(x1 < x2 ? (uint32_t)x1 : (uint32_t)x2,
+               y1 < y2 ? (uint32_t)y1 : (uint32_t)y2,
+               (uint32_t)dx + thick, (uint32_t)dy + thick);
+    return 0;
+}
+
+/* ===================================================================
+ * 17. Circle outline (ring)
+ *     rt_gui_ring(pack(cx,cy), pack(diameter,thickness), pack(color,0), alpha)
+ * =================================================================== */
+RuntimeValue rt_gui_ring(RuntimeValue cx_cy, RuntimeValue diam_thick,
+                          RuntimeValue color_rv, RuntimeValue alpha_rv)
+{
+    uint32_t cx = (uint32_t)((uint64_t)cx_cy >> 32);
+    uint32_t cy = (uint32_t)((uint64_t)cx_cy & 0xFFFFFFFF);
+    uint32_t diameter = (uint32_t)((uint64_t)diam_thick >> 32);
+    uint32_t thick = (uint32_t)((uint64_t)diam_thick & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_rv >> 32);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (diameter == 0 || thick == 0) return 0;
+    uint32_t r_outer = diameter / 2;
+    uint32_t r_inner = r_outer > thick ? r_outer - thick : 0;
+    uint32_t r_outer2 = r_outer * r_outer;
+    uint32_t r_inner2 = r_inner * r_inner;
+
+    dirty_mark(cx, cy, diameter, diameter);
+
+    for (uint32_t row = 0; row < diameter; row++) {
+        int32_t dy = (int32_t)row - (int32_t)r_outer;
+        uint32_t dy2 = (uint32_t)(dy * dy);
+        for (uint32_t col = 0; col < diameter; col++) {
+            int32_t dx = (int32_t)col - (int32_t)r_outer;
+            uint32_t dist2 = (uint32_t)(dx * dx) + dy2;
+            if (dist2 <= r_outer2 && dist2 >= r_inner2) {
+                uint32_t px = cx + col;
+                uint32_t py = cy + row;
+                if (px < g_fb_w && py < SCREEN_H) {
+                    if (alpha == 255) {
+                        fb_write(px, py, 0xFF000000u | color);
+                    } else {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, color, alpha));
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 18. Rounded rectangle with vertical gradient
+ *     rt_gui_gradient_rect(xy, wh, color_radius, c2_alpha)
+ *     Draws rounded rect with vertical gradient from color (high bits of
+ *     color_radius) to c2 (high bits of c2_alpha). Alpha from low byte of c2_alpha.
+ * =================================================================== */
+RuntimeValue rt_gui_gradient_rect(RuntimeValue xy, RuntimeValue wh,
+                                   RuntimeValue color_radius, RuntimeValue c2_alpha)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t c1 = (uint32_t)((uint64_t)color_radius >> 32);
+    uint32_t radius = (uint32_t)((uint64_t)color_radius & 0xFFFFFFFF);
+    uint32_t c2 = (uint32_t)((uint64_t)c2_alpha >> 32);
+    uint8_t alpha = (uint8_t)(uint64_t)c2_alpha;
+
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h / 2) radius = h / 2;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    dirty_mark(x, y, w, h);
+
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t py = y + row;
+        if (py >= SCREEN_H) break;
+
+        uint32_t color = lerp_color(c1, c2, row, h > 1 ? h - 1 : 1);
+
+        uint32_t x_start = 0;
+        uint32_t x_end = w;
+
+        if (row < radius) {
+            uint32_t dy = radius - row;
+            uint32_t dx = 0;
+            while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) dx++;
+            x_start = radius - dx;
+            x_end = w - (radius - dx);
+        } else if (row >= h - radius) {
+            uint32_t dy = row - (h - radius - 1);
+            uint32_t dx = 0;
+            while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) dx++;
+            x_start = radius - dx;
+            x_end = w - (radius - dx);
+        }
+
+        for (uint32_t col = x_start; col < x_end; col++) {
+            uint32_t px = x + col;
+            if (px >= g_fb_w) break;
+            if (alpha == 255) {
+                fb_write(px, py, 0xFF000000u | color);
+            } else {
+                uint32_t dst = fb_read(px, py);
+                fb_write(px, py, alpha_blend(dst, color, alpha));
+            }
+        }
+    }
+    return 0;
+}
