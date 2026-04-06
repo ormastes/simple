@@ -1,0 +1,331 @@
+"""
+# Web Router
+
+Convention-based router that maps HTTP method+path to controller#action.
+Supports RESTful resources, namespaces, and SDN-based route files.
+Converts routes to LocationConfig[] for integration with HttpServer.
+
+## Usage
+
+```simple
+var router = WebRouter.new()
+router = router.get("/", "home", "index")
+router = router.resources("posts")
+router = router.namespace("/api", api_routes)
+
+val matched = router.match_route("GET", "/posts/42")
+match matched:
+    Some(m): print "Controller: {m.route.controller_name}, Action: {m.route.action_name}"
+    nil: print "No route matched"
+
+val locations = router.to_location_configs()
+```
+"""
+
+use std.web_framework.route_types.{
+    RouteMethod, RouteEntry, RouteMatch,
+    text_to_method, method_to_text, methods_match,
+    match_pattern, resource_routes, prefix_routes
+}
+use std.http_server.types.{LocationConfig}
+
+# ============================================================================
+# WebRouter
+# ============================================================================
+
+class WebRouter:
+    """Convention-based URL router.
+
+    Routes are matched in order of registration. The first match wins.
+    Supports dynamic segments (`:id`), RESTful resources, and
+    namespace grouping.
+    """
+    routes: [RouteEntry]
+
+impl WebRouter:
+    static fn new() -> WebRouter:
+        """Create an empty router."""
+        WebRouter(routes: [])
+
+    me get(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a GET route.
+
+        Args:
+            pattern: URL pattern (e.g., "/posts/:id")
+            controller: Controller name
+            action: Action name
+
+        Returns:
+            Self for chaining
+        """
+        self.routes.push(RouteEntry(
+            method: RouteMethod.GET,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me post(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a POST route."""
+        self.routes.push(RouteEntry(
+            method: RouteMethod.POST,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me put(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a PUT route."""
+        self.routes.push(RouteEntry(
+            method: RouteMethod.PUT,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me delete(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a DELETE route."""
+        self.routes.push(RouteEntry(
+            method: RouteMethod.DELETE,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me patch(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a PATCH route."""
+        self.routes.push(RouteEntry(
+            method: RouteMethod.PATCH,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me any(pattern: text, controller: text, action: text) -> WebRouter:
+        """Add a route matching any HTTP method."""
+        self.routes.push(RouteEntry(
+            method: RouteMethod.ANY,
+            pattern: pattern,
+            controller_name: controller,
+            action_name: action,
+            middlewares: []
+        ))
+        self
+
+    me resources(name: text) -> WebRouter:
+        """Add 7 RESTful routes for a resource.
+
+        Generates: index, new, create, show, edit, update, destroy
+
+        Args:
+            name: Resource name (plural, e.g., "posts")
+
+        Returns:
+            Self for chaining
+        """
+        val res_routes = resource_routes(name)
+        for route in res_routes:
+            self.routes.push(route)
+        self
+
+    me namespace(prefix: text, routes: [RouteEntry]) -> WebRouter:
+        """Add routes under a URL prefix.
+
+        Args:
+            prefix: URL prefix (e.g., "/api/v1")
+            routes: Routes to nest under the prefix
+
+        Returns:
+            Self for chaining
+        """
+        val prefixed = prefix_routes(prefix, routes)
+        for route in prefixed:
+            self.routes.push(route)
+        self
+
+    me add_route(route: RouteEntry) -> WebRouter:
+        """Add a single route entry directly."""
+        self.routes.push(route)
+        self
+
+    me add_routes(routes: [RouteEntry]) -> WebRouter:
+        """Add multiple route entries."""
+        for route in routes:
+            self.routes.push(route)
+        self
+
+    fn match_route(method: text, path: text) -> RouteMatch?:
+        """Match a request method and path against registered routes.
+
+        Routes are checked in registration order; first match wins.
+
+        Args:
+            method: HTTP method (e.g., "GET")
+            path: Request path (e.g., "/posts/42")
+
+        Returns:
+            RouteMatch with matched route and extracted params, or nil
+        """
+        for route in self.routes:
+            if methods_match(route.method, method):
+                val params = match_pattern(route.pattern, path)
+                if params != nil:
+                    return Some(RouteMatch(
+                        route: route,
+                        params: params ?? {}
+                    ))
+        nil
+
+    fn to_location_configs() -> [LocationConfig]:
+        """Convert all routes to LocationConfig list for HttpServer.
+
+        Each unique pattern gets a LocationConfig with handler_type="app".
+        The router itself handles method dispatch within the app handler.
+
+        Returns:
+            List of LocationConfig for HttpServer
+        """
+        var configs: [LocationConfig] = []
+        var seen_patterns: [text] = []
+
+        for route in self.routes:
+            var already_seen = false
+            for p in seen_patterns:
+                if p == route.pattern:
+                    already_seen = true
+            if not already_seen:
+                seen_patterns.push(route.pattern)
+                configs.push(LocationConfig(
+                    pattern: route.pattern,
+                    match_type: "exact",
+                    handler_type: "app",
+                    root: "",
+                    proxy_pass: "",
+                    middlewares: route.middlewares
+                ))
+
+        # Add a catch-all so the app handler receives all requests
+        configs.push(LocationConfig(
+            pattern: "/",
+            match_type: "prefix",
+            handler_type: "app",
+            root: "",
+            proxy_pass: "",
+            middlewares: []
+        ))
+
+        configs
+
+    fn route_count() -> i64:
+        """Get the number of registered routes."""
+        self.routes.len()
+
+    static fn from_sdn(path: text) -> Result<WebRouter, text>:
+        """Load routes from an SDN configuration file.
+
+        SDN format:
+        ```sdn
+        routes:
+          - method: GET
+            pattern: "/"
+            controller: home
+            action: index
+          - method: GET
+            pattern: "/about"
+            controller: pages
+            action: about
+          - resource: posts
+          - resource: comments
+        ```
+
+        Args:
+            path: Path to SDN routes file
+
+        Returns:
+            Ok(WebRouter) with loaded routes, or Err on failure
+        """
+        val content = rt_file_read_text(path)
+        if content.len() == 0:
+            return Err("Could not read routes file: {path}")
+
+        var router = WebRouter.new()
+        val lines = content.split("\n")
+        var current_method = ""
+        var current_pattern = ""
+        var current_controller = ""
+        var current_action = ""
+
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                pass_do_nothing
+            elif trimmed.starts_with("#"):
+                pass_do_nothing
+            elif trimmed.starts_with("- resource:"):
+                val resource_name = trimmed[11:].trim()
+                if resource_name.len() > 0:
+                    router = router.resources(resource_name)
+            elif trimmed.starts_with("method:"):
+                current_method = trimmed[7:].trim()
+            elif trimmed.starts_with("pattern:"):
+                current_pattern = trimmed[8:].trim().replace("\"", "")
+            elif trimmed.starts_with("controller:"):
+                current_controller = trimmed[11:].trim()
+            elif trimmed.starts_with("action:"):
+                current_action = trimmed[7:].trim()
+                # We have all four fields, create the route
+                if current_method.len() > 0 and current_pattern.len() > 0:
+                    router.routes.push(RouteEntry(
+                        method: text_to_method(current_method),
+                        pattern: current_pattern,
+                        controller_name: current_controller,
+                        action_name: current_action,
+                        middlewares: []
+                    ))
+                    current_method = ""
+                    current_pattern = ""
+                    current_controller = ""
+                    current_action = ""
+
+        Ok(router)
+
+extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# Query String Parsing
+# ============================================================================
+
+fn parse_query_params(query: text) -> Dict<text, text>:
+    """Parse query string into parameter dict.
+
+    Args:
+        query: Raw query string (e.g., "page=2&sort=name")
+
+    Returns:
+        Dict of query parameters
+    """
+    var result: Dict<text, text> = {}
+    if query.len() == 0:
+        return result
+
+    val pairs = query.split("&")
+    for pair in pairs:
+        val eq_pos = pair.index_of("=")
+        if eq_pos >= 0:
+            val key = pair[0:eq_pos]
+            val value = pair[eq_pos + 1:]
+            result[key] = value
+        elif pair.len() > 0:
+            result[pair] = ""
+
+    result

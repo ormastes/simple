@@ -1,0 +1,335 @@
+# Security Lint: Insecure Comparison Detection
+#
+# Flags == comparisons on security-sensitive variables, where timing
+# side-channels can leak information about the compared values.
+#
+# SEC-CMP001: Timing-vulnerable comparison on secret variable          WARN
+#
+# Triggers when either operand of an == comparison is a variable with
+# a security-sensitive name (password, token, secret, api_key, hash,
+# digest, signature, private_key, credential, etc.).
+#
+# Does NOT flag:
+# - Comparisons using constant_time_compare()
+# - Comparisons in test files (*_spec.spl, *_test.spl)
+# - Lines with @allow(insecure_comparison) annotation
+# - Comparisons against nil (null checks are safe)
+# - Comparisons against boolean literals
+#
+# Rationale: The == operator short-circuits on first mismatched byte,
+# revealing information about secret values through timing differences.
+# LLMs always generate == for string comparison because that is the
+# standard pattern, but security-sensitive comparisons must use
+# constant-time algorithms.
+#
+# Fix: Use constant_time_compare(provided, stored) from std.crypto
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct InsecureComparisonWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    variable_name: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} -- {self.message} (var: {self.variable_name}) -- {self.hint}"
+
+
+# ============================================================================
+# Sensitive Variable Names
+# ============================================================================
+
+fn _sensitive_names() -> [text]:
+    """Return list of variable name patterns that indicate security-sensitive values."""
+    ["password", "passwd", "pwd", "token", "secret", "api_key", "apikey",
+     "hash", "digest", "signature", "private_key", "credential",
+     "auth_token", "access_token", "refresh_token", "session_token",
+     "bearer_token", "jwt_token", "csrf_token", "hmac"]
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_insecure_comparison(source: text, path: text) -> [InsecureComparisonWarning]:
+    """Scan source text for == comparisons involving security-sensitive variables.
+
+    For each non-comment, non-docstring line, checks whether the line contains
+    an == comparison where either operand is a variable with a sensitive name.
+
+    Test files are skipped entirely.
+
+    Returns a list of InsecureComparisonWarning for each violation found.
+    """
+    var warnings: [InsecureComparisonWarning] = []
+
+    # Skip test files
+    if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
+        return warnings
+
+    val lines = source.split("\n")
+    val names = _sensitive_names()
+    var in_docstring = false
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Skip lines with allow annotation
+                if not trimmed.contains("@allow(insecure_comparison)"):
+                    # Skip lines using constant_time_compare
+                    if not trimmed.contains("constant_time_compare"):
+                        # Check for == comparison with sensitive variable
+                        if trimmed.contains(" == "):
+                            val matched_name = _find_sensitive_operand(trimmed, names)
+                            if matched_name != "":
+                                # Make sure it's not comparing to nil, true, or false
+                                if not _is_safe_comparison(trimmed, matched_name):
+                                    warnings.push(InsecureComparisonWarning(
+                                        code: "SEC-CMP001",
+                                        severity: "WARN",
+                                        message: "timing-vulnerable == comparison on '{matched_name}'",
+                                        hint: "use constant_time_compare({matched_name}, expected) from std.crypto instead of ==",
+                                        variable_name: matched_name,
+                                        line_num: li + 1,
+                                        file_path: path
+                                    ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _find_sensitive_operand(line: text, names: [text]) -> text:
+    """Find a sensitive variable name used as an operand of == in the line.
+
+    Splits the line on ' == ' and checks each side for sensitive names.
+    Returns the first matching sensitive name, or empty string if none found.
+    """
+    # Find the == operator
+    val eq_idx = _find_substring(line, " == ")
+    if eq_idx < 0:
+        return ""
+
+    # Extract left and right operands (rough: take last word before == and first word after ==)
+    val left_part = line.slice(0, eq_idx).trim()
+    val right_part = line.slice(eq_idx + 4).trim()
+
+    # Get the identifier nearest to == on each side
+    val left_ident = _extract_last_identifier(left_part)
+    val right_ident = _extract_first_identifier(right_part)
+
+    # Check if either identifier matches a sensitive name
+    var ni = 0
+    while ni < names.len():
+        val name = names[ni]
+        if _name_matches(left_ident, name):
+            return left_ident
+        if _name_matches(right_ident, name):
+            return right_ident
+        ni = ni + 1
+
+    ""
+
+fn _name_matches(identifier: text, sensitive_name: text) -> bool:
+    """Check if an identifier matches or contains a sensitive name.
+
+    Matches:
+    - Exact match: "password" == "password"
+    - Suffix: "user_password" contains "password"
+    - Prefix: "password_hash" contains "password"
+    - Case-insensitive for common patterns
+    """
+    if identifier == "":
+        return false
+
+    val lower_ident = identifier.to_lower()
+    val lower_name = sensitive_name.to_lower()
+
+    if lower_ident == lower_name:
+        return true
+    if lower_ident.contains(lower_name):
+        return true
+    false
+
+fn _is_safe_comparison(line: text, matched_name: text) -> bool:
+    """Check if the comparison is safe (comparing against nil, true, false, or a type check)."""
+    # Comparing to nil is safe (null check, not timing-sensitive)
+    val eq_idx = _find_substring(line, " == ")
+    if eq_idx < 0:
+        return false
+
+    val right = line.slice(eq_idx + 4).trim()
+    val left = line.slice(0, eq_idx).trim()
+
+    # Check right side
+    if right == "nil" or right == "true" or right == "false":
+        return true
+    if right.starts_with("nil ") or right.starts_with("nil)"):
+        return true
+
+    # Check left side
+    if left.ends_with("nil") or left.ends_with("true") or left.ends_with("false"):
+        return true
+
+    # Comparing to empty string is debatable but not a timing concern
+    if right == "\"\"" or left.ends_with("\"\""):
+        return true
+
+    false
+
+fn _extract_last_identifier(s: text) -> text:
+    """Extract the last identifier (word) from a string.
+
+    For "val x = foo.password", returns "password".
+    For "request.token", returns "token".
+    """
+    if s.len() == 0:
+        return ""
+
+    # Find end of last identifier
+    var end = s.len()
+    while end > 0:
+        val ch = s.slice(end - 1, end)
+        if _is_ident_char(ch):
+            break
+        end = end - 1
+
+    if end == 0:
+        return ""
+
+    # Find start of last identifier
+    var start = end
+    while start > 0:
+        val ch = s.slice(start - 1, start)
+        if _is_ident_char(ch):
+            start = start - 1
+        else:
+            break
+
+    s.slice(start, end)
+
+fn _extract_first_identifier(s: text) -> text:
+    """Extract the first identifier (word) from a string.
+
+    For "password == stored", returns "password".
+    For "user.token)", returns "user".
+    """
+    if s.len() == 0:
+        return ""
+
+    # Find start of first identifier
+    var start = 0
+    while start < s.len():
+        val ch = s.slice(start, start + 1)
+        if _is_ident_char(ch):
+            break
+        start = start + 1
+
+    if start >= s.len():
+        return ""
+
+    # Find end of first identifier (stop at dot for field access)
+    var end = start
+    while end < s.len():
+        val ch = s.slice(end, end + 1)
+        if _is_ident_char(ch) or ch == ".":
+            end = end + 1
+        else:
+            break
+
+    # If it contains dots, return the last segment (e.g., "user.password" -> "password")
+    val full = s.slice(start, end)
+    val dot_idx = _find_last_char(full, ".")
+    if dot_idx >= 0:
+        return full.slice(dot_idx + 1)
+    full
+
+
+# ============================================================================
+# Character and String Helpers
+# ============================================================================
+
+fn _is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid in an identifier."""
+    if ch.len() != 1:
+        return false
+    val c = ch.to_byte()
+    if c >= 97 and c <= 122:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 48 and c <= 57:
+        return true
+    if c == 95:
+        return true
+    false
+
+fn _find_last_char(s: text, ch: text) -> i64:
+    """Find the last occurrence of a character in a string."""
+    var last = -1
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ch:
+            last = i
+        i = i + 1
+    last
+
+fn _find_substring(haystack: text, needle: text) -> i64:
+    """Find the first occurrence of needle in haystack."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export InsecureComparisonWarning
+export check_insecure_comparison

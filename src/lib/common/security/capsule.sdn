@@ -49,7 +49,9 @@ dependencies = ["security.crypto"]
 exports = [
     "check_capability", "enforce_permission",
     "rate_limit_check", "csrf_token_validate",
-    "CapabilityGate", "PermissionResult"
+    "Capability", "CapabilityGrant", "CapabilityStore",
+    "CapabilityGate", "PermissionResolver", "PermissionResult",
+    "parse_capability", "is_granted"
 ]
 
 [capsule security.validation]
@@ -61,7 +63,11 @@ exports = [
     "sanitize_html", "sanitize_url", "sanitize_path",
     "sanitize_identifier", "sanitize_attribute",
     "validate_content_type", "validate_request_params",
-    "strip_html_tags", "truncate"
+    "strip_html_tags", "truncate",
+    "UrlValidator", "validate_url", "is_safe_url",
+    "is_private_ip", "is_localhost",
+    "PromptSanitizer", "sanitize_prompt_input",
+    "inject_canary", "check_canary_leaked"
 ]
 
 [capsule security.auth]
@@ -72,7 +78,11 @@ dependencies = ["security.enforcement", "security.crypto"]
 exports = [
     "authenticate", "create_session", "expire_session",
     "verify_csrf_token", "generate_csrf_token",
-    "SecurityContext", "SessionToken"
+    "SecurityContext", "SessionToken",
+    "SecurityContextStore", "current_security_context", "with_security_context",
+    "CredentialHandle", "CredentialStore", "resolve_credential", "credential_exists",
+    "SecureEnvConfig", "EnvVar", "load_env_config", "validate_env_at_startup",
+    "SecretRotation", "VersionedKey"
 ]
 
 [capsule security.audit]
@@ -165,6 +175,31 @@ predicate = "execution(*.handle_request) & within(std.http.**)"
 advice = "std.security.aspects.validation_advice.validate_request_input"
 form = "Before"
 priority = 180
+
+# --- Default-deny advice (Before) ---
+
+# Default-deny: handlers without any security annotation require auth.
+# The @public annotation prevents this rule from matching, so public
+# endpoints opt out explicitly. This ensures new handlers are secure
+# by default — developers must consciously choose @public.
+[weaving.default_auth_check]
+predicate = "execution(*.handle_request) & within(std.http.**) & !annotation(@public) & !annotation(@requires_auth) & !annotation(@requires_capability) & !annotation(@deny_all)"
+advice = "std.security.aspects.auth_advice.check_auth_before"
+form = "Before"
+priority = 200
+
+# Deny-all: unconditional reject for maintenance mode.
+# Higher priority than auth checks — no credentials are even inspected.
+[weaving.deny_all_check]
+predicate = "execution(*.handle_request) & within(std.http.**) & annotation(@deny_all)"
+advice = "std.security.aspects.deny_advice.deny_all_before"
+form = "Before"
+priority = 250
+
+# Public: explicitly opt-out of the default auth check.
+# The @public annotation works by preventing the default_auth_check
+# from matching (via the !annotation(@public) exclusion above).
+# No separate weaving rule is needed — absence of auth is the effect.
 
 # ============================================================================
 # RULES — Compile-time enforcement

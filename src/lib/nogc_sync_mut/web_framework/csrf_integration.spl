@@ -1,0 +1,165 @@
+"""
+# CSRF Protection Integration
+
+Generates and verifies CSRF tokens for form submissions.
+Tokens are bound to session IDs via HMAC-SHA256 signing.
+
+## Usage
+
+```simple
+# Generate token for a form
+val token = csrf_token_for_session("session_abc", "my-secret")
+val hidden_input = csrf_hidden_field(token)
+
+# Verify on POST
+val valid = verify_csrf_token(request, "session_abc", "my-secret")
+if not valid:
+    return render_error(403, "CSRF verification failed")
+```
+"""
+
+use std.http_server.types.{HttpRequestData}
+use std.crypto.hmac.{hmac_sha256}
+
+# ============================================================================
+# CSRF Token Generation
+# ============================================================================
+
+fn csrf_token_for_session(session_id: text, secret: text) -> text:
+    """Generate a CSRF token bound to a session.
+
+    The token is an HMAC-SHA256 of the session_id using the secret.
+    This ensures tokens are tied to specific sessions and cannot
+    be forged without the secret.
+
+    Args:
+        session_id: Session identifier
+        secret: Application secret key
+
+    Returns:
+        Hex-encoded CSRF token
+    """
+    val message = "csrf:{session_id}"
+    val hash_bytes = hmac_sha256(secret, message)
+    bytes_to_hex(hash_bytes)
+
+# ============================================================================
+# CSRF Token Verification
+# ============================================================================
+
+fn verify_csrf_token(request: HttpRequestData, session_id: text, secret: text) -> bool:
+    """Verify a CSRF token from a request.
+
+    Checks both the `_csrf_token` form field and the `X-CSRF-Token`
+    header. The token must match the expected value for the session.
+
+    Safe methods (GET, HEAD, OPTIONS) always pass.
+
+    Args:
+        request: HTTP request to verify
+        session_id: Session identifier for token generation
+        secret: Application secret key
+
+    Returns:
+        true if token is valid or method is safe
+    """
+    # Safe methods don't need CSRF protection
+    val method = request.method.to_upper()
+    if method == "GET" or method == "HEAD" or method == "OPTIONS":
+        return true
+
+    val expected = csrf_token_for_session(session_id, secret)
+
+    # Check form field
+    val form_token = request.params.get("_csrf_token") ?? ""
+    if form_token.len() > 0 and form_token == expected:
+        return true
+
+    # Check header
+    val header_token = get_csrf_header(request)
+    if header_token.len() > 0 and header_token == expected:
+        return true
+
+    false
+
+fn verify_csrf_from_body(body_params: Dict<text, text>, session_id: text, secret: text) -> bool:
+    """Verify CSRF token from parsed body parameters.
+
+    Args:
+        body_params: Parsed form body parameters
+        session_id: Session identifier
+        secret: Application secret key
+
+    Returns:
+        true if _csrf_token matches expected value
+    """
+    val expected = csrf_token_for_session(session_id, secret)
+    val token = body_params.get("_csrf_token") ?? ""
+    token.len() > 0 and token == expected
+
+# ============================================================================
+# HTML Helpers
+# ============================================================================
+
+fn csrf_hidden_field(token: text) -> text:
+    """Generate an HTML hidden input field for CSRF token.
+
+    Args:
+        token: CSRF token value
+
+    Returns:
+        HTML hidden input element
+    """
+    "<input type=\"hidden\" name=\"_csrf_token\" value=\"{token}\">"
+
+fn csrf_meta_tag(token: text) -> text:
+    """Generate an HTML meta tag for CSRF token (for JS-based forms).
+
+    Args:
+        token: CSRF token value
+
+    Returns:
+        HTML meta element
+    """
+    "<meta name=\"csrf-token\" content=\"{token}\">"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn get_csrf_header(request: HttpRequestData) -> text:
+    """Extract CSRF token from X-CSRF-Token header.
+
+    Args:
+        request: HTTP request
+
+    Returns:
+        Token value or empty string
+    """
+    for header in request.headers:
+        val name = header.0.to_lower()
+        if name == "x-csrf-token":
+            return header.1.trim()
+    ""
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    """Convert byte array to hex string."""
+    var parts: [text] = []
+    for b in bytes:
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        parts.push(hex_digit(hi))
+        parts.push(hex_digit(lo))
+    parts.join("")
+
+fn hex_digit(n: i64) -> text:
+    """Convert 0-15 to hex character."""
+    if n < 10:
+        return "{n}"
+    match n:
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        _: "f"

@@ -1,0 +1,306 @@
+# Security Lint: Raw HTML Output Detection
+#
+# Flags raw HTML output without sanitization, which can lead to XSS
+# (Cross-Site Scripting) vulnerabilities when user input is rendered
+# in HTML without encoding.
+#
+# SEC-XSS001: Triple-brace raw variable in template string              WARN
+# SEC-XSS002: Call to function with _raw_, _unsafe_, _unescaped_       WARN
+# SEC-XSS003: innerHTML or outerHTML assignment                         WARN
+#
+# Does NOT flag:
+# - Functions annotated with @allow(raw_html)
+# - Lines with @allow(raw_html) inline annotation
+# - Comment lines or docstrings
+# - Test files (*_spec.spl, *_test.spl)
+# - Calls to functions named *_raw_* inside sanitization modules
+#
+# Rationale: LLMs generate HTML by string concatenation without output
+# encoding. The Simple template engine auto-escapes by default, but
+# explicit raw insertion (triple-brace, _raw_ functions) bypasses this.
+# Every raw HTML insertion point is a potential XSS vector.
+#
+# Fix: Use auto-escaped template interpolation (single braces).
+#      If raw HTML is intentionally needed, add @allow(raw_html) to
+#      the containing function after manual security review.
+#
+# ============================================================================
+
+use std.io_runtime
+
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct RawHtmlWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} -- {self.message} -- {self.hint}"
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_raw_html(source: text, path: text) -> [RawHtmlWarning]:
+    """Scan source text for raw HTML output patterns that bypass auto-escaping.
+
+    Detects triple-brace raw interpolation ({{{ }}}), calls to functions
+    with _raw_, _unsafe_, or _unescaped_ in their names, and direct
+    innerHTML/outerHTML assignments.
+
+    Functions annotated with @allow(raw_html) are exempted. Test files
+    are skipped entirely.
+
+    Returns a list of RawHtmlWarning for each violation found.
+    """
+    var warnings: [RawHtmlWarning] = []
+
+    # Skip test files
+    if path.ends_with("_spec.spl") or path.ends_with("_test.spl"):
+        return warnings
+
+    val lines = source.split("\n")
+    var in_docstring = false
+    var in_allowed_function = false
+    var allowed_indent = 0
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+
+        # Track triple-quoted docstring regions
+        if _count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+
+        if not in_docstring:
+            val trimmed = line.trim()
+
+            # Track @allow(raw_html) annotation on function definitions
+            if trimmed.starts_with("@allow(raw_html)"):
+                in_allowed_function = true
+                allowed_indent = _leading_spaces(line)
+
+            # Detect function boundaries (reset allow state on de-indent)
+            if in_allowed_function:
+                if trimmed.len() > 0 and not trimmed.starts_with("#") and not trimmed.starts_with("@"):
+                    val current_indent = _leading_spaces(line)
+                    if current_indent <= allowed_indent and not trimmed.starts_with("fn ") and not trimmed.starts_with("me "):
+                        # Check if this is the function def line (same indent as annotation)
+                        if not (current_indent == allowed_indent and (trimmed.starts_with("fn ") or trimmed.starts_with("me "))):
+                            in_allowed_function = false
+
+            # Skip comment lines
+            if not trimmed.starts_with("#"):
+                # Skip lines with inline allow annotation
+                if not trimmed.contains("@allow(raw_html)"):
+                    # Skip if inside an allowed function
+                    if not in_allowed_function:
+                        # Check for triple-brace raw interpolation: {{{ }}}
+                        if _has_triple_brace(trimmed):
+                            warnings.push(RawHtmlWarning(
+                                code: "SEC-XSS001",
+                                severity: "WARN",
+                                message: "triple-brace raw interpolation bypasses HTML auto-escaping",
+                                hint: "use single-brace {var} for auto-escaped output, or add @allow(raw_html) after security review",
+                                line_num: li + 1,
+                                file_path: path
+                            ))
+
+                        # Check for calls to _raw_, _unsafe_, _unescaped_ functions
+                        val unsafe_fn = _find_unsafe_function_call(trimmed)
+                        if unsafe_fn != "":
+                            warnings.push(RawHtmlWarning(
+                                code: "SEC-XSS002",
+                                severity: "WARN",
+                                message: "call to unsafe HTML function '{unsafe_fn}' bypasses output encoding",
+                                hint: "use the safe variant without _raw_/_unsafe_/_unescaped_, or add @allow(raw_html) after review",
+                                line_num: li + 1,
+                                file_path: path
+                            ))
+
+                        # Check for innerHTML/outerHTML assignments
+                        if _has_inner_html_assign(trimmed):
+                            warnings.push(RawHtmlWarning(
+                                code: "SEC-XSS003",
+                                severity: "WARN",
+                                message: "direct innerHTML/outerHTML assignment bypasses output encoding",
+                                hint: "use textContent for safe text insertion, or add @allow(raw_html) after security review",
+                                line_num: li + 1,
+                                file_path: path
+                            ))
+
+        li = li + 1
+
+    warnings
+
+
+# ============================================================================
+# Detection Helpers
+# ============================================================================
+
+fn _has_triple_brace(line: text) -> bool:
+    """Check if line contains triple-brace raw interpolation {{{ }}}.
+
+    Looks for three consecutive opening braces followed eventually by
+    three consecutive closing braces.
+    """
+    var i = 0
+    while i + 2 < line.len():
+        if line.slice(i, i + 3) == "{{{":
+            # Found opening triple-brace, look for closing }}}
+            var j = i + 3
+            while j + 2 < line.len():
+                if line.slice(j, j + 3) == "}}}":
+                    return true
+                j = j + 1
+        i = i + 1
+    false
+
+fn _find_unsafe_function_call(line: text) -> text:
+    """Find a call to a function with _raw_, _unsafe_, or _unescaped_ in its name.
+
+    Returns the function name if found, empty string otherwise.
+    Matches patterns like: render_raw_html(, set_unsafe_content(, insert_unescaped(
+    """
+    val patterns = ["_raw_", "_unsafe_", "_unescaped_",
+                    "_raw(", "_unsafe(", "_unescaped("]
+
+    var pi = 0
+    while pi < patterns.len():
+        val pattern = patterns[pi]
+        val idx = _find_substring(line, pattern)
+        if idx >= 0:
+            # Extract the full function name around the pattern
+            val fn_name = _extract_function_name_at(line, idx)
+            if fn_name != "":
+                return fn_name
+        pi = pi + 1
+
+    # Also check for specific known dangerous functions
+    val dangerous_fns = ["set_inner_html(", "write_raw(", "html_raw(", "raw_output(",
+                         "unsafe_render(", "render_unescaped("]
+    var di = 0
+    while di < dangerous_fns.len():
+        if line.contains(dangerous_fns[di]):
+            val fn_name = dangerous_fns[di].slice(0, dangerous_fns[di].len() - 1)
+            return fn_name
+        di = di + 1
+
+    ""
+
+fn _has_inner_html_assign(line: text) -> bool:
+    """Check if line contains innerHTML or outerHTML assignment."""
+    if line.contains(".innerHTML") and line.contains("="):
+        return true
+    if line.contains(".outerHTML") and line.contains("="):
+        return true
+    if line.contains("inner_html") and line.contains("="):
+        return true
+    if line.contains("outer_html") and line.contains("="):
+        return true
+    false
+
+fn _extract_function_name_at(line: text, pattern_idx: i64) -> text:
+    """Extract the full function name at the given pattern index.
+
+    Walks backward from pattern_idx to find the start of the identifier,
+    and forward to find the opening parenthesis.
+    """
+    # Walk backward to find start of identifier
+    var start = pattern_idx
+    while start > 0:
+        val ch = line.slice(start - 1, start)
+        if _is_ident_char(ch):
+            start = start - 1
+        else:
+            break
+
+    # Walk forward to find end of identifier (stop at '(' or space)
+    var end = pattern_idx
+    while end < line.len():
+        val ch = line.slice(end, end + 1)
+        if _is_ident_char(ch):
+            end = end + 1
+        else:
+            break
+
+    if end <= start:
+        return ""
+
+    line.slice(start, end)
+
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+fn _leading_spaces(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    while count < line.len():
+        val ch = line.slice(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4  # Treat tab as 4 spaces
+        else:
+            break
+    count
+
+fn _is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid in an identifier."""
+    if ch.len() != 1:
+        return false
+    val c = ch.to_byte()
+    if c >= 97 and c <= 122:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 48 and c <= 57:
+        return true
+    if c == 95:
+        return true
+    false
+
+fn _find_substring(haystack: text, needle: text) -> i64:
+    """Find the first occurrence of needle in haystack."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _count_triple_quotes(line: text) -> i64:
+    """Count the number of triple-quote sequences in a line."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RawHtmlWarning
+export check_raw_html

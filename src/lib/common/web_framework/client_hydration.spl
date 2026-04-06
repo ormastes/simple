@@ -1,0 +1,171 @@
+"""
+# Client-Side Hydration
+
+Progressive enhancement via `data-spl-*` HTML attributes.
+Server renders HTML with component metadata; client-side JS
+reads the attributes and initializes interactive behavior.
+
+## Usage
+
+```simple
+# In a template:
+val attrs = hydrate_attr("counter", {"initial": "0", "step": "1"})
+# Returns: data-spl-component="counter" data-spl-props='{"initial":"0","step":"1"}'
+
+# Add to HTML element:
+# <div {{attrs}}>Count: 0</div>
+
+# Include the hydration script in your layout:
+val script = hydration_script()
+```
+"""
+
+# ============================================================================
+# Hydration Attributes
+# ============================================================================
+
+fn hydrate_attr(component_name: text, props: Dict<text, text>) -> text:
+    """Generate data attributes for client-side component hydration.
+
+    Produces `data-spl-component` and `data-spl-props` attributes
+    that the hydration script reads to initialize the component.
+
+    Args:
+        component_name: Name of the JS component to initialize
+        props: Properties to pass to the component
+
+    Returns:
+        HTML attribute string
+    """
+    val props_json = dict_to_json(props)
+    val escaped_props = html_escape_attr(props_json)
+    "data-spl-component=\"{component_name}\" data-spl-props=\"{escaped_props}\""
+
+fn hydrate_attr_simple(component_name: text) -> text:
+    """Generate hydration attributes with no props.
+
+    Args:
+        component_name: Name of the JS component
+
+    Returns:
+        HTML attribute string
+    """
+    "data-spl-component=\"{component_name}\""
+
+fn hydrate_attr_action(action_name: text, target: text) -> text:
+    """Generate a data-spl-action attribute for event handling.
+
+    Args:
+        action_name: Action name (e.g., "click->toggle")
+        target: Target element selector
+
+    Returns:
+        HTML attribute string
+    """
+    "data-spl-action=\"{action_name}\" data-spl-target=\"{target}\""
+
+# ============================================================================
+# Hydration Script
+# ============================================================================
+
+fn hydration_script() -> text:
+    """Generate the JavaScript hydration bootstrap script.
+
+    This script scans the DOM for elements with `data-spl-component`
+    attributes and calls the registered component initializer.
+
+    Returns:
+        HTML script tag with hydration bootstrap code
+    """
+    val js = """<script>
+(function() {
+  'use strict';
+
+  var _components = {};
+
+  window.SimpleHydration = {
+    register: function(name, initFn) {
+      _components[name] = initFn;
+    },
+
+    hydrate: function(root) {
+      root = root || document;
+      var elements = root.querySelectorAll('[data-spl-component]');
+      elements.forEach(function(el) {
+        var name = el.getAttribute('data-spl-component');
+        var propsStr = el.getAttribute('data-spl-props') || '{}';
+        var props = {};
+        try { props = JSON.parse(propsStr); } catch(e) {}
+
+        if (_components[name]) {
+          try {
+            _components[name](el, props);
+            el.setAttribute('data-spl-hydrated', 'true');
+          } catch(err) {
+            console.error('[SimpleHydration] Error hydrating ' + name + ':', err);
+          }
+        } else {
+          console.warn('[SimpleHydration] Component not registered: ' + name);
+        }
+      });
+    }
+  };
+
+  // Auto-hydrate on DOMContentLoaded
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() {
+      window.SimpleHydration.hydrate();
+    });
+  } else {
+    window.SimpleHydration.hydrate();
+  }
+
+  // Re-hydrate after Turbo/HTMX navigation
+  document.addEventListener('turbo:load', function() {
+    window.SimpleHydration.hydrate();
+  });
+})();
+</script>"""
+    js
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn dict_to_json(d: Dict<text, text>) -> text:
+    """Convert a Dict<text, text> to a simple JSON object string.
+
+    Values are always quoted strings.
+
+    Args:
+        d: Dict to convert
+
+    Returns:
+        JSON string representation
+    """
+    var parts: [text] = []
+    for key in d.keys():
+        val value = d.get(key) ?? ""
+        val escaped_key = json_escape(key)
+        val escaped_value = json_escape(value)
+        parts.push("\"{escaped_key}\":\"{escaped_value}\"")
+    "{" + parts.join(",") + "}"
+
+fn json_escape(s: text) -> text:
+    """Escape a string for JSON embedding."""
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result
+
+fn html_escape_attr(s: text) -> text:
+    """Escape a string for use in an HTML attribute value."""
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result
