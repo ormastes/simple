@@ -1585,6 +1585,131 @@ static const uint8_t font_8x16[95][16] = {
 };
 
 /* ===================================================================
+ * UTF-8 Decoder — for Unicode text rendering
+ *
+ * Returns the codepoint and number of bytes consumed.
+ * Invalid sequences return U+FFFD (replacement character) and advance 1 byte.
+ * =================================================================== */
+
+static uint32_t utf8_decode(const uint8_t *buf, uint32_t len, uint32_t pos, uint32_t *out_cp) {
+    if (pos >= len) { *out_cp = 0; return 0; }
+    uint8_t b0 = buf[pos];
+
+    /* 1-byte: 0xxxxxxx */
+    if (b0 < 0x80) { *out_cp = b0; return 1; }
+
+    /* Continuation byte as lead — invalid */
+    if (b0 < 0xC0) { *out_cp = 0xFFFD; return 1; }
+
+    /* 2-byte: 110xxxxx 10xxxxxx */
+    if (b0 < 0xE0) {
+        if (pos + 1 >= len) { *out_cp = 0xFFFD; return 1; }
+        uint8_t b1 = buf[pos + 1];
+        if ((b1 & 0xC0) != 0x80) { *out_cp = 0xFFFD; return 1; }
+        uint32_t cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F);
+        if (cp < 0x80) { *out_cp = 0xFFFD; return 2; } /* overlong */
+        *out_cp = cp; return 2;
+    }
+
+    /* 3-byte: 1110xxxx 10xxxxxx 10xxxxxx */
+    if (b0 < 0xF0) {
+        if (pos + 2 >= len) { *out_cp = 0xFFFD; return 1; }
+        uint8_t b1 = buf[pos + 1], b2 = buf[pos + 2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) { *out_cp = 0xFFFD; return 1; }
+        uint32_t cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+        if (cp < 0x800) { *out_cp = 0xFFFD; return 3; } /* overlong */
+        if (cp >= 0xD800 && cp <= 0xDFFF) { *out_cp = 0xFFFD; return 3; } /* surrogate */
+        *out_cp = cp; return 3;
+    }
+
+    /* 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
+    if (b0 < 0xF8) {
+        if (pos + 3 >= len) { *out_cp = 0xFFFD; return 1; }
+        uint8_t b1 = buf[pos + 1], b2 = buf[pos + 2], b3 = buf[pos + 3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) {
+            *out_cp = 0xFFFD; return 1;
+        }
+        uint32_t cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) |
+                      ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+        if (cp < 0x10000 || cp > 0x10FFFF) { *out_cp = 0xFFFD; return 4; }
+        *out_cp = cp; return 4;
+    }
+
+    *out_cp = 0xFFFD; return 1;
+}
+
+/* Check if a codepoint is East Asian Wide (CJK, Hangul syllables, fullwidth) */
+static int cp_is_wide(uint32_t cp) {
+    if (cp >= 0x4E00 && cp <= 0x9FFF) return 1;  /* CJK Unified Ideographs */
+    if (cp >= 0x3400 && cp <= 0x4DBF) return 1;  /* CJK Extension A */
+    if (cp >= 0xAC00 && cp <= 0xD7AF) return 1;  /* Hangul Syllables */
+    if (cp >= 0x3000 && cp <= 0x303F) return 1;  /* CJK Symbols */
+    if (cp >= 0x3040 && cp <= 0x30FF) return 1;  /* Hiragana + Katakana */
+    if (cp >= 0xFF01 && cp <= 0xFF60) return 1;  /* Fullwidth Forms */
+    if (cp >= 0xF900 && cp <= 0xFAFF) return 1;  /* CJK Compat Ideographs */
+    if (cp >= 0x3130 && cp <= 0x318F) return 1;  /* Hangul Compat Jamo */
+    if (cp >= 0x20000 && cp <= 0x2A6DF) return 1; /* CJK Extension B */
+    return 0;
+}
+
+/* ===================================================================
+ * TrueType Font Support — stb_truetype integration point
+ *
+ * Font registry for loaded TTF/OTF fonts. When a glyph is not in the
+ * built-in vector font, we look it up in loaded TrueType fonts.
+ * =================================================================== */
+
+#define MAX_FONTS 16
+#define GLYPH_CACHE_SIZE 256
+
+typedef struct {
+    const uint8_t *data;   /* Raw TTF/OTF file data */
+    uint32_t data_len;     /* Length of font data */
+    uint32_t active;       /* 1 if slot is in use */
+    uint32_t priority;     /* Lower = higher priority (0 = primary) */
+    /* Future: stbtt_fontinfo would go here */
+} FontSlot;
+
+static FontSlot g_fonts[MAX_FONTS];
+static int g_font_count = 0;
+
+/* Glyph bitmap cache — avoids re-rasterizing recently used glyphs */
+typedef struct {
+    uint32_t codepoint;     /* Unicode codepoint */
+    uint32_t pixel_height;  /* Rasterized height */
+    uint8_t *bitmap;        /* Alpha bitmap (pixel_width * pixel_height bytes) */
+    uint16_t bmp_width;     /* Bitmap width in pixels */
+    uint16_t bmp_height;    /* Bitmap height in pixels */
+    int16_t  bearing_x;     /* Left side bearing */
+    int16_t  advance;       /* Horizontal advance width */
+    uint32_t font_idx;      /* Which font produced this glyph */
+    uint32_t age;           /* LRU counter */
+} GlyphCacheEntry;
+
+static GlyphCacheEntry g_glyph_cache[GLYPH_CACHE_SIZE];
+static uint32_t g_glyph_cache_age = 0;
+
+/* rt_font_load_from_memory(data_ptr, data_len, priority, _)
+ * Register a TrueType font from memory. Returns font index or -1. */
+RuntimeValue rt_font_load_from_memory(RuntimeValue data_ptr_rv, RuntimeValue data_len_rv,
+                                       RuntimeValue priority_rv, RuntimeValue unused) {
+    (void)unused;
+    if (g_font_count >= MAX_FONTS) return (RuntimeValue)-1;
+
+    uint64_t ptr = (uint64_t)data_ptr_rv;
+    uint32_t len = (uint32_t)(uint64_t)data_len_rv;
+    uint32_t pri = (uint32_t)(uint64_t)priority_rv;
+
+    int idx = g_font_count++;
+    g_fonts[idx].data = (const uint8_t *)(uintptr_t)ptr;
+    g_fonts[idx].data_len = len;
+    g_fonts[idx].active = 1;
+    g_fonts[idx].priority = pri;
+
+    return (RuntimeValue)idx;
+}
+
+/* ===================================================================
  * Vector Font Glyph Outlines
  *
  * Simplified sans-serif font inspired by Helvetica/SF Pro proportions.

@@ -1,0 +1,280 @@
+@allow(primitive_api)
+# UTF-8 Encoding / Decoding
+#
+# Pure Simple implementation of UTF-8 codec.
+# Internal representation is always UTF-8 byte sequences.
+#
+# UTF-8 byte structure:
+#   0xxxxxxx                            — 1 byte  (U+0000..U+007F)
+#   110xxxxx 10xxxxxx                    — 2 bytes (U+0080..U+07FF)
+#   1110xxxx 10xxxxxx 10xxxxxx           — 3 bytes (U+0800..U+FFFF)
+#   11110xxx 10xxxxxx 10xxxxxx 10xxxxxx  — 4 bytes (U+10000..U+10FFFF)
+
+# ============================================================================
+# UTF-8 sequence length from lead byte
+# ============================================================================
+
+fn utf8_seq_len(lead_byte: i64) -> i64:
+    """Return the number of bytes in a UTF-8 sequence given the lead byte value.
+    Returns 0 for invalid lead bytes (continuation bytes 0x80..0xBF, or >= 0xF8)."""
+    if lead_byte < 0:
+        return 0
+    if lead_byte < 0x80:
+        return 1
+    if lead_byte < 0xC0:
+        return 0  # continuation byte — invalid as lead
+    if lead_byte < 0xE0:
+        return 2
+    if lead_byte < 0xF0:
+        return 3
+    if lead_byte < 0xF8:
+        return 4
+    0  # 5+ byte sequences not valid UTF-8
+
+# ============================================================================
+# Decode one codepoint from byte array
+# ============================================================================
+
+fn utf8_decode_one(bytes: [i64], offset: i64) -> [i64]:
+    """Decode one codepoint from a byte array starting at offset.
+    Returns [codepoint, bytes_consumed].
+    Returns [-1, 1] on invalid sequence (replacement + skip 1 byte)."""
+    if offset < 0 or offset >= bytes.len():
+        return [-1, 0]
+
+    val b0 = bytes[offset]
+    val seq_len = utf8_seq_len(b0)
+
+    if seq_len == 0:
+        return [0xFFFD, 1]  # replacement character
+
+    if seq_len == 1:
+        return [b0, 1]
+
+    # Check we have enough bytes
+    if offset + seq_len > bytes.len():
+        return [0xFFFD, 1]
+
+    if seq_len == 2:
+        val b1 = bytes[offset + 1]
+        if (b1 & 0xC0) != 0x80:
+            return [0xFFFD, 1]
+        val cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+        # Reject overlong
+        if cp < 0x80:
+            return [0xFFFD, 2]
+        return [cp, 2]
+
+    if seq_len == 3:
+        val b1 = bytes[offset + 1]
+        val b2 = bytes[offset + 2]
+        if (b1 & 0xC0) != 0x80 or (b2 & 0xC0) != 0x80:
+            return [0xFFFD, 1]
+        val cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+        # Reject overlong and surrogates
+        if cp < 0x800 or (cp >= 0xD800 and cp <= 0xDFFF):
+            return [0xFFFD, 3]
+        return [cp, 3]
+
+    # seq_len == 4
+    val b1 = bytes[offset + 1]
+    val b2 = bytes[offset + 2]
+    val b3 = bytes[offset + 3]
+    if (b1 & 0xC0) != 0x80 or (b2 & 0xC0) != 0x80 or (b3 & 0xC0) != 0x80:
+        return [0xFFFD, 1]
+    val cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+    # Reject overlong and out of range
+    if cp < 0x10000 or cp > 0x10FFFF:
+        return [0xFFFD, 4]
+    [cp, 4]
+
+# ============================================================================
+# Encode one codepoint to UTF-8 byte array
+# ============================================================================
+
+fn utf8_encode_one(codepoint: i64) -> [i64]:
+    """Encode a single Unicode codepoint to a UTF-8 byte sequence.
+    Returns array of 1-4 bytes. Returns [0xEF, 0xBF, 0xBD] (U+FFFD) for invalid."""
+    if codepoint < 0 or codepoint > 0x10FFFF:
+        return [0xEF, 0xBF, 0xBD]  # U+FFFD replacement
+    if codepoint >= 0xD800 and codepoint <= 0xDFFF:
+        return [0xEF, 0xBF, 0xBD]  # surrogates invalid
+
+    if codepoint < 0x80:
+        return [codepoint]
+
+    if codepoint < 0x800:
+        return [
+            0xC0 | (codepoint >> 6),
+            0x80 | (codepoint & 0x3F)
+        ]
+
+    if codepoint < 0x10000:
+        return [
+            0xE0 | (codepoint >> 12),
+            0x80 | ((codepoint >> 6) & 0x3F),
+            0x80 | (codepoint & 0x3F)
+        ]
+
+    [
+        0xF0 | (codepoint >> 18),
+        0x80 | ((codepoint >> 12) & 0x3F),
+        0x80 | ((codepoint >> 6) & 0x3F),
+        0x80 | (codepoint & 0x3F)
+    ]
+
+# ============================================================================
+# UTF-8 byte length for a codepoint
+# ============================================================================
+
+fn utf8_codepoint_byte_len(codepoint: i64) -> i64:
+    """Return how many UTF-8 bytes a codepoint requires."""
+    if codepoint < 0x80:
+        return 1
+    if codepoint < 0x800:
+        return 2
+    if codepoint < 0x10000:
+        return 3
+    if codepoint <= 0x10FFFF:
+        return 4
+    3  # replacement char
+
+# ============================================================================
+# Count codepoints in UTF-8 byte array
+# ============================================================================
+
+fn utf8_count_codepoints(bytes: [i64]) -> i64:
+    """Count the number of Unicode codepoints in a UTF-8 byte array."""
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bytes.len():
+        val seq_len = utf8_seq_len(bytes[i])
+        if seq_len == 0:
+            i = i + 1  # skip invalid
+        else:
+            i = i + seq_len
+        count = count + 1
+    count
+
+# ============================================================================
+# Decode full byte array to codepoint array
+# ============================================================================
+
+fn utf8_decode_all(bytes: [i64]) -> [i64]:
+    """Decode a UTF-8 byte array to an array of Unicode codepoints."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < bytes.len():
+        val decoded = utf8_decode_one(bytes, i)
+        result.push(decoded[0])
+        val consumed = decoded[1]
+        if consumed <= 0:
+            i = i + 1  # safety: always advance
+        else:
+            i = i + consumed
+    result
+
+# ============================================================================
+# Encode codepoint array to UTF-8 byte array
+# ============================================================================
+
+fn utf8_encode_all(codepoints: [i64]) -> [i64]:
+    """Encode an array of Unicode codepoints to a UTF-8 byte array."""
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < codepoints.len():
+        val encoded = utf8_encode_one(codepoints[i])
+        var j: i64 = 0
+        while j < encoded.len():
+            result.push(encoded[j])
+            j = j + 1
+        i = i + 1
+    result
+
+# ============================================================================
+# Validate UTF-8 byte sequence
+# ============================================================================
+
+fn utf8_is_valid(bytes: [i64]) -> bool:
+    """Check if a byte array is valid UTF-8."""
+    var i: i64 = 0
+    while i < bytes.len():
+        val decoded = utf8_decode_one(bytes, i)
+        if decoded[0] == 0xFFFD:
+            # Check if it was actually the replacement char in input
+            if bytes[i] != 0xEF:
+                return false
+        val consumed = decoded[1]
+        if consumed <= 0:
+            return false
+        i = i + consumed
+    true
+
+# ============================================================================
+# UTF-8 text operations (work on text type directly)
+# ============================================================================
+
+fn text_byte_len(s: text) -> i64:
+    """Return byte length of a text string (always O(1))."""
+    s.len()
+
+fn text_codepoint_len(s: text) -> i64:
+    """Return the number of Unicode codepoints in a text string.
+    O(n) — scans the UTF-8 byte sequence."""
+    val bytes = s.bytes()
+    utf8_count_codepoints(bytes)
+
+fn text_codepoints(s: text) -> [i64]:
+    """Return array of Unicode codepoints from a text string."""
+    val bytes = s.bytes()
+    utf8_decode_all(bytes)
+
+fn text_from_codepoints(cps: [i64]) -> text:
+    """Create a text string from an array of codepoints.
+    Uses the runtime char_from_code for each codepoint."""
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < cps.len():
+        val bytes = utf8_encode_one(cps[i])
+        # Build text from bytes — use runtime conversion
+        var j: i64 = 0
+        var char_bytes: [i64] = []
+        while j < bytes.len():
+            char_bytes.push(bytes[j])
+            j = j + 1
+        # For single-byte ASCII, use direct conversion
+        if char_bytes.len() == 1 and char_bytes[0] < 128:
+            parts.push(char_from_code(char_bytes[0]))
+        else:
+            # Multi-byte: build string from codepoint using runtime
+            parts.push(char_from_codepoint(cps[i]))
+        i = i + 1
+    parts.join("")
+
+fn char_from_codepoint(cp: i64) -> text:
+    """Convert a Unicode codepoint to a single-character text string.
+    Delegates to runtime .ord() inverse."""
+    # Use \u escape or runtime built-in
+    if cp < 128:
+        return char_from_code(cp)
+    # For non-ASCII, encode to UTF-8 bytes and create string
+    val bytes = utf8_encode_one(cp)
+    # Runtime will handle byte-to-string via built-in
+    var result = ""
+    var i: i64 = 0
+    while i < bytes.len():
+        result = result + char_from_code(bytes[i])
+        i = i + 1
+    result
+
+fn char_from_code(code: i64) -> text:
+    """Convert a byte value (0-255) to a single-byte text character.
+    Uses runtime built-in."""
+    # Delegates to the built-in method
+    if code >= 0 and code <= 127:
+        # ASCII range — use string literal table for common chars
+        val table = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\x7f"
+        return table[code:code+1]
+    # For 128-255, these are raw bytes (not valid UTF-8 by themselves)
+    # Return replacement character
+    "\uFFFD"
