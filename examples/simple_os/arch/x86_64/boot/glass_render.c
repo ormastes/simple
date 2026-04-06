@@ -991,9 +991,30 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw * 7 / 8, sh / 6, 135, 0x0064B5F6, 13, sw, sh);  /* Light blue accent */
         draw_blob(sw * 2 / 5, sh / 10, 120, 0x00CE93D8, 13, sw, sh);  /* Light purple */
 
+        /* Extra bright nebula cores for dramatic effect */
+        draw_blob(sw / 3, sh / 3, 200, 0x006020A0, 50, sw, sh);      /* Purple core */
+        draw_blob(sw * 2 / 3, sh * 2 / 3, 180, 0x002040C0, 45, sw, sh);  /* Blue core */
+        draw_blob(sw / 2, sh / 4, 150, 0x00A03060, 35, sw, sh);      /* Magenta accent */
+
         /* Subtle blur pass to soften blobs */
         box_blur_h(0, 0, sw, sh, 8);
         box_blur_v(0, 0, sw, sh, 8);
+
+        /* Aurora horizon glow — bright band across lower third */
+        for (uint32_t ay = sh * 2 / 3; ay < sh; ay++) {
+            uint32_t intensity = (ay - sh * 2 / 3) * 40 / (sh / 3);
+            for (uint32_t ax = 0; ax < sw; ax++) {
+                uint32_t pixel = fb_read(ax, ay);
+                uint8_t r = (pixel >> 16) & 0xFF;
+                uint8_t g = (pixel >> 8) & 0xFF;
+                uint8_t b = pixel & 0xFF;
+                /* Add warm purple-blue glow */
+                uint8_t gr = r + (intensity * 3 / 5 > 255 - r ? 255 - r : intensity * 3 / 5);
+                uint8_t gg = g + (intensity / 4 > 255 - g ? 255 - g : intensity / 4);
+                uint8_t gb = b + (intensity > 255 - b ? 255 - b : intensity);
+                fb_write(ax, ay, 0xFF000000u | ((uint32_t)gr << 16) | ((uint32_t)gg << 8) | gb);
+            }
+        }
 
         /* Subtle noise overlay for texture */
         for (uint32_t row = 0; row < sh; row++) {
@@ -1050,6 +1071,11 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         draw_blob(sw / 2, sh / 6, 160, 0x00FFFFFF, 12, sw, sh);       /* Central white glow */
         draw_blob(sw * 4 / 5, sh * 3 / 4, 120, 0x00E1BEE7, 10, sw, sh); /* Lilac accent */
         draw_blob(sw / 8, sh * 4 / 5, 100, 0x00B3E5FC, 10, sw, sh);   /* Sky blue */
+
+        /* Soft pastel clouds for light theme */
+        draw_blob(sw / 4, sh / 3, 300, 0x00FFF0F8, 12, sw, sh);      /* White-pink cloud */
+        draw_blob(sw * 3 / 4, sh / 2, 250, 0x00F0F0FF, 10, sw, sh);  /* White-blue cloud */
+        draw_blob(sw / 2, sh * 2 / 3, 280, 0x00F8F0FF, 8, sw, sh);   /* Soft purple cloud */
 
         /* Soften */
         box_blur_h(0, 0, sw, sh, 10);
