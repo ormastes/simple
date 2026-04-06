@@ -44,6 +44,7 @@ extern fn rt_gui_draw_text_buf(xy: u64, color_len: u64, alpha: u64, unused: u64)
 extern fn rt_gui_draw_text_shadow(xy: u64, color_len: u64, alpha: u64, shadow_alpha: u64)
 extern fn rt_gui_draw_text_bold(xy: u64, color_len: u64, alpha: u64, unused: u64)
 extern fn rt_gui_draw_text_2x(xy: u64, color_len: u64, alpha: u64, shadow_alpha: u64)
+extern fn rt_gui_draw_text_outline(xy: u64, color_len: u64, alpha: u64, outline_alpha: u64)
 
 # Layout engine
 extern fn rt_layout_reset(u1: u64, u2: u64, u3: u64, u4: u64)
@@ -89,16 +90,16 @@ val DARK_SHADOW_A: u64     = 80           # Shadow opacity
 val LIGHT_BG_TOP: u64      = 0x00E8E0F0   # Brighter lavender mist
 val LIGHT_BG_BOT: u64      = 0x00F5F0FF   # Warmer white-lavender
 val LIGHT_SURFACE: u64     = 0x00F8F0FF   # Glass surface (slight lavender tint)
-val LIGHT_SURFACE_A: u64   = 55           # 22% opacity (MORE transparent glass — background shows through)
-val LIGHT_ELEVATED: u64    = 0x00FFF8FF   # Elevated glass (slight pink tint for title bars)
+val LIGHT_SURFACE_A: u64   = 65           # 25% opacity (slightly more opaque for light — opposite of dark's transparency)
+val LIGHT_ELEVATED: u64    = 0x00FFF0F8   # Elevated glass (stronger pink tint for title bars)
 val LIGHT_ELEVATED_A: u64  = 140          # 55% opacity (glass-like translucent title bar)
 val LIGHT_BORDER: u64      = 0x00000000   # Glass border (black)
 val LIGHT_BORDER_A: u64    = 90           # 35% opacity (more visible border)
-val LIGHT_TEXT: u64        = 0x001D1D1F   # Primary text
+val LIGHT_TEXT: u64        = 0x00201820   # Primary text (slightly warm black)
 val LIGHT_TEXT_SEC: u64    = 0x003C3C43   # Secondary text
 val LIGHT_ACCENT: u64      = 0x00007AFF   # Blue accent
 val LIGHT_ACCENT2: u64     = 0x00AF6BC5   # Brighter purple accent
-val LIGHT_SHADOW_A: u64    = 40           # Shadow opacity (lighter)
+val LIGHT_SHADOW_A: u64    = 30           # Shadow opacity (softer for light theme)
 
 val WARM_ACCENT: u64 = 0x00FF9500   # Warm orange for highlights
 val SUCCESS_COLOR: u64 = 0x0030D158   # Green (matches battery indicator)
@@ -119,7 +120,7 @@ val BLUR_SUBTLE: u64   = 6    # Subtle effects
 # ===========================================================================
 
 # Window frame
-val WIN_CORNER_RADIUS: u64 = 20
+val WIN_CORNER_RADIUS: u64 = 22
 val WIN_BORDER_INSET: u64 = 1
 val CONTENT_MARGIN_TOP: u64 = 2
 val CONTENT_PAD: u64 = 16
@@ -346,6 +347,10 @@ fn draw_label_2x(x: u64, y: u64, color: u64, alpha: u64, chars: u64, len: u64, s
     rt_gui_set_text_buf(chars, 0, 0, 0)
     rt_gui_draw_text_2x(pack(x, y), pack(color, len), alpha, shadow_a)
 
+fn draw_label_outline(x: u64, y: u64, color: u64, alpha: u64, chars: u64, len: u64, outline_a: u64):
+    rt_gui_set_text_buf(chars, 0, 0, 0)
+    rt_gui_draw_text_outline(pack(x, y), pack(color, len), alpha, outline_a)
+
 # Layout engine constants
 val LT_HSTACK: u64 = 1
 val LT_VSTACK: u64 = 2
@@ -474,7 +479,7 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     # Extra glass shimmer (makes translucency MORE visible)
     blend(x + 4, y + 4, w - 8, h / 3, 0x00FFFFFF, 8)
     # Palette cohesion: subtle rose undertone ties glass to button colors
-    blend(x, y, w, h, 0x00FF6B8A, 2)
+    blend(x, y, w, h, 0x00FF6B8A, 4)
 
     # 3. Glass surface — anti-aliased rounded corners
     rrect_aa(x, y, w, h, surface(theme), WIN_CORNER_RADIUS, surface_a(theme))
@@ -490,10 +495,13 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     val tb_light = elevated(theme)
     val tb_dark = surface(theme)
     grad_rect(x + 1, y + 1, w - 2, TITLE_BAR_H, tb_light, WIN_CORNER_RADIUS, tb_dark, elevated_a(theme))
+    # Warm accent glow on active title bar (color palette cohesion)
+    if is_active == 1:
+        blend(x + 2, y + 2, w - 4, TITLE_BAR_H - 4, accent(theme), 6)
     # Stronger top specular on title bar
-    blend(x + 4, y + 1, w - 8, 2, 0x00FFFFFF, 25)
+    blend(x + 4, y + 1, w - 8, 3, 0x00FFFFFF, 30)
     # Top highlight line (specular)
-    blend(x + 14, y + 2, w - 28, 1, 0x00FFFFFF, 20)
+    blend(x + 14, y + 2, w - 28, 1, 0x00FFFFFF, 35)
     # Frosted depth lines (mid-bar highlights)
     blend(x + 2, y + 8, w - 4, 1, 0x00FFFFFF, 8)
     blend(x + 2, y + 16, w - 4, 1, 0x00000000, 5)
@@ -503,7 +511,8 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     if is_active == 0:
         blend(x + 1, y + 1, w - 2, TITLE_BAR_H - 1, 0x00304060, 25)
     # Toolbar area (lighter stripe below title bar — macOS integration)
-    blend(x + 1, y + TITLE_BAR_H + 1, w - 2, 6, 0x00FFFFFF, 12)
+    blend(x + 1, y + TITLE_BAR_H + 1, w - 2, 3, 0x00FFFFFF, 15)
+    blend(x + 1, y + TITLE_BAR_H + 4, w - 2, 3, 0x00FFFFFF, 6)
     # Toolbar bottom separator
     blend(x + 4, y + TITLE_BAR_H + 7, w - 8, 1, border_c(theme), 15)
     if is_active == 1:
@@ -520,9 +529,9 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     if is_active == 1:
         circle(bx, btn_y, btn_d, BTN_CLOSE, 255)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 30)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
         # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 5, 0x00FFFFFF, 100)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
         # Close X glyph
@@ -533,9 +542,9 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         bx = bx + btn_d + btn_gap
         circle(bx, btn_y, btn_d, BTN_MIN, 255)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 30)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
         # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 5, 0x00FFFFFF, 100)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
         # Minimize dash glyph
@@ -545,9 +554,9 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         bx = bx + btn_d + btn_gap
         circle(bx, btn_y, btn_d, BTN_MAX, 255)
         # Top-half lighter gradient
-        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 30)
+        blend(bx + 2, btn_y + 1, btn_d - 4, btn_d / 2 - 2, 0x00FFFFFF, 40)
         # Specular highlight (bigger, brighter)
-        circle(bx + 3, btn_y + 3, 5, 0x00FFFFFF, 100)
+        circle(bx + 3, btn_y + 3, 6, 0x00FFFFFF, 120)
         # Inner ring for definition
         ring(bx + 1, btn_y + 1, btn_d - 2, 1, 0x00000000, 30)
         # Maximize plus glyph
@@ -570,6 +579,8 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     rrect_aa(x, y, w, h, border_c(theme), WIN_CORNER_RADIUS, border_a(theme))
     # Corner softening glow (reduces pixelated appearance)
     rrect_aa(x - 1, y - 1, w + 2, h + 2, border_c(theme), WIN_CORNER_RADIUS + 1, border_a(theme) / 4)
+    # Inner corner smoothing (softens inside edge of squircle)
+    rrect_aa(x + 1, y + 1, w - 2, h - 2, surface(theme), WIN_CORNER_RADIUS - 1, 8)
 
     # Rainbow edge refraction (beyond macOS — prismatic glass)
     blend(x + 10, y, (w - 20) / 3, 1, 0x00FF6B6B, 12)
@@ -585,6 +596,8 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         # SimpleOS: cool-blue "frost" on inactive (unique — not macOS gray)
         blend(x, y, w, h, 0x00203050, 45)
         blend(x, y, w, h, 0x00000000, 20)
+        # Defocus blur on inactive (content becomes less sharp)
+        blur(x, y, w, h, 3)
 
     # 7. Focus ring (soft glow, not hard outline)
     if is_active == 1:
@@ -602,6 +615,8 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
         blend(x + 20, y + 1, w - 40, 1, 0x00FFD700, 15)
         # Top shimmer (premium polish — simulates light reflection)
         blend(x + 30, y + 1, w / 3, 1, 0x00FFFFFF, 25)
+        # Active vibrancy boost (content appears more vivid)
+        blend(x + 2, y + TITLE_BAR_H + 8, w - 4, 2, accent(theme), 30)
 
 # ===========================================================================
 # Glass System Bar (top)
@@ -619,9 +634,9 @@ fn draw_glass_system_bar(theme: u64, active: u64):
 
     # Gradient menu bar (unique — not flat like macOS)
     grad_v(0, y, SCREEN_W, h, elevated(theme), surface(theme))
-    blend(0, y, SCREEN_W, h, 0x00000000, 20)
+    blend(0, y, SCREEN_W, h, 0x00000000, 10)
     # Inner top highlight (premium)
-    blend(0, y + 1, SCREEN_W, 1, 0x00FFFFFF, 20)
+    blend(0, y + 1, SCREEN_W, 1, 0x00FFFFFF, 35)
 
     # Bright top edge highlight
     blend(0, 0, SCREEN_W, 1, 0x00FFFFFF, 30)
@@ -711,29 +726,29 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     val any_ = layout_y(app_name)
     if active == 0:
         # "Terminal" (84,101,114,109,105,110,97,108)
-        draw_label_bold(anx, any_, text_c(theme), 255, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8)
+        draw_label_outline(anx, any_, text_c(theme), 255, pack8(84, 101, 114, 109, 105, 110, 97, 108), 8, 60)
     else:
         if active == 1:
             # "Editor" (69,100,105,116,111,114,0,0)
-            draw_label_bold(anx, any_, text_c(theme), 255, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6)
+            draw_label_outline(anx, any_, text_c(theme), 255, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6, 60)
         else:
             # "Finder" (70,105,110,100,101,114,0,0)
-            draw_label_bold(anx, any_, text_c(theme), 255, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6)
+            draw_label_outline(anx, any_, text_c(theme), 255, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6, 60)
 
     # Menu items — "File" is active (with pill bg + underline), Edit/View dimmer
     # "File" (active) — subtle pill background
     rrect_aa(layout_x(menu1) - 2, layout_y(menu1) - 1, layout_w(menu1) + 4, layout_h(menu1) + 2, text_c(theme), 4, 15)
-    draw_label_shadow(layout_x(menu1) + 2, layout_y(menu1), text_c(theme), 160, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4, 30)
+    draw_label_outline(layout_x(menu1) + 2, layout_y(menu1), text_c(theme), 200, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4, 60)
     # Active menu underline
     blend(layout_x(menu1), layout_y(menu1) + 14, layout_w(menu1), 1, accent(theme), 120)
     # "Edit"
-    draw_label_shadow(layout_x(menu2) + 2, layout_y(menu2), text_c(theme), 130, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4, 20)
+    draw_label_outline(layout_x(menu2) + 2, layout_y(menu2), text_c(theme), 200, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4, 60)
     # "View"
-    draw_label_shadow(layout_x(menu3) + 2, layout_y(menu3), text_c(theme), 130, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4, 20)
+    draw_label_outline(layout_x(menu3) + 2, layout_y(menu3), text_c(theme), 200, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4, 60)
     # "Go"
-    draw_label(layout_x(menu4) + 2, layout_y(menu4), text_c(theme), 160, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2)
+    draw_label_outline(layout_x(menu4) + 2, layout_y(menu4), text_c(theme), 200, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2, 60)
     # "Window"
-    draw_label(layout_x(menu5) + 2, layout_y(menu5), text_c(theme), 160, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6)
+    draw_label_outline(layout_x(menu5) + 2, layout_y(menu5), text_c(theme), 200, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6, 60)
 
     # Spotlight search icon (magnifying glass)
     val srx = layout_x(search_btn)
@@ -779,7 +794,7 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     val cly = layout_y(clock)
     rrect_aa(clx, cly, layout_w(clock), layout_h(clock), elevated(theme), 8, 100)
     # "12:00 PM"
-    draw_label_shadow(clx + 4, cly + 1, text_c(theme), 220, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8, 60)
+    draw_label_outline(clx + 4, cly + 1, text_c(theme), 220, pack8(49, 50, 58, 48, 48, 32, 80, 77), 8, 50)
     # Notification dot (red) on clock — indicates unread notifications
     circle(clx + layout_w(clock) - 4, cly - 1, 7, 0x00FF3B30, 255)
     circle(clx + layout_w(clock) - 4, cly - 1, 5, 0x00FF3B30, 255)
@@ -830,6 +845,8 @@ fn draw_glass_dock(theme: u64, active: u64):
     rrect(dock_x + 1, dock_y + 1, dock_w - 2, dock_h - 2, 0x00FFFFFF, DOCK_CORNER_RADIUS - 1, 10)
     # White overlay for dock visibility
     blend(dock_x + 2, dock_y + 2, dock_w - 4, dock_h - 4, 0x00FFFFFF, 15)
+    # Warm accent undertone (color palette cohesion)
+    blend(dock_x + 4, dock_y + 4, dock_w - 8, dock_h - 8, 0x00FF6B8A, 3)
 
     # Extra glass vibrancy layer
     blend(dock_x + 4, dock_y + 1, dock_w - 8, 1, 0x00FFFFFF, 40)
@@ -1183,12 +1200,12 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Syntax-colored code lines
     val code_x = ed_x + gutter_w + 8
     # Line 1: "fn main():"
-    draw_label_shadow(code_x, ed_y + 4, 0x00CC7832, 220, pack8(102, 110, 0, 0, 0, 0, 0, 0), 2, 25)
-    draw_label_shadow(code_x + 24, ed_y + 4, 0x00FFC66D, 220, pack8(109, 97, 105, 110, 0, 0, 0, 0), 4, 20)
+    draw_label_outline(code_x, ed_y + 4, 0x00CC7832, 220, pack8(102, 110, 0, 0, 0, 0, 0, 0), 2, 40)
+    draw_label_outline(code_x + 24, ed_y + 4, 0x00FFC66D, 220, pack8(109, 97, 105, 110, 0, 0, 0, 0), 4, 40)
     draw_label(code_x + 56, ed_y + 4, 0x00CCCCCC, 200, pack8(40, 41, 58, 0, 0, 0, 0, 0), 3)
 
     # Line 2: "    val x = 42"
-    draw_label_shadow(code_x + 32, ed_y + 20, 0x00CC7832, 220, pack8(118, 97, 108, 0, 0, 0, 0, 0), 3, 25)
+    draw_label_outline(code_x + 32, ed_y + 20, 0x00CC7832, 220, pack8(118, 97, 108, 0, 0, 0, 0, 0), 3, 40)
     draw_label(code_x + 56, ed_y + 20, 0x00CCCCCC, 200, pack8(120, 32, 61, 32, 0, 0, 0, 0), 4)
     draw_label(code_x + 88, ed_y + 20, 0x006897BB, 220, pack8(52, 50, 0, 0, 0, 0, 0, 0), 2)
 

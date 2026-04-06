@@ -1801,6 +1801,94 @@ RuntimeValue rt_gui_draw_text_bold(RuntimeValue xy, RuntimeValue color_len,
 }
 
 /* ===================================================================
+ * 25. Outlined text — renders glyphs with 1px AA outline
+ *     rt_gui_draw_text_outline(pack(x,y), pack(color,len), alpha, outline_alpha)
+ *     For each ON pixel: draws normally.
+ *     For each OFF pixel adjacent to ON: draws at outline_alpha.
+ *     Creates smooth anti-aliased appearance for bitmap fonts.
+ * =================================================================== */
+RuntimeValue rt_gui_draw_text_outline(RuntimeValue xy, RuntimeValue color_len,
+                                       RuntimeValue alpha_rv, RuntimeValue outline_rv)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_len >> 32);
+    uint32_t len = (uint32_t)((uint64_t)color_len & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+    uint8_t outline_alpha = (uint8_t)(uint64_t)outline_rv;
+
+    if (len == 0) len = g_text_len;
+    if (len > 256) len = 256;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    /* Pass 1: Outline — draw fringe pixels at reduced alpha */
+    uint32_t cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint8_t bits_above = (row > 0) ? font_8x16[idx][row-1] : 0;
+            uint8_t bits_below = (row < 15) ? font_8x16[idx][row+1] : 0;
+            uint32_t py = y + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                uint8_t mask = 0x80 >> col;
+                if (!(bits & mask)) {
+                    /* OFF pixel — check 4 neighbors */
+                    int neighbor = 0;
+                    if (col > 0 && (bits & (mask << 1))) neighbor = 1;
+                    if (col < 7 && (bits & (mask >> 1))) neighbor = 1;
+                    if (bits_above & mask) neighbor = 1;
+                    if (bits_below & mask) neighbor = 1;
+                    if (neighbor) {
+                        uint32_t px = cx + col;
+                        if (px < g_fb_w) {
+                            uint32_t dst = fb_read(px, py);
+                            fb_write(px, py, alpha_blend(dst, color, outline_alpha));
+                        }
+                    }
+                }
+            }
+        }
+        cx += 8;
+        if (cx >= g_fb_w) break;
+    }
+
+    /* Pass 2: Foreground — draw ON pixels at full alpha */
+    cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px >= g_fb_w) break;
+                    if (alpha == 255) {
+                        fb_write(px, py, 0xFF000000u | color);
+                    } else {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, color, alpha));
+                    }
+                }
+            }
+        }
+        cx += 8;
+        if (cx >= g_fb_w) break;
+    }
+
+    dirty_mark(x, y, cx - x, 16);
+    g_text_len = 0;
+    return 0;
+}
+
+/* ===================================================================
  * 23. Scaled text (2x) — renders each font pixel as a 2x2 block
  *     rt_gui_draw_text_2x(pack(x,y), pack(color,len), alpha, shadow_alpha)
  *     Output: 16x32 per character (2x the 8x16 base font)
