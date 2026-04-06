@@ -1,0 +1,142 @@
+# Glass Effects -- Glassmorphism rendering helpers for compositor
+#
+# Wraps C glass_render.c helpers for use by compositor and decorations.
+# Uses GlassDesignTokens from glass_tokens.spl for theme-driven config.
+
+use common.ui.glass_tokens.{GlassColorTokens, GlassBlurTokens, GlassDesignTokens}
+
+extern fn rt_gui_begin_frame(width: u64, height: u64, unused1: u64, unused2: u64)
+extern fn rt_gui_present(unused1: u64, unused2: u64, unused3: u64, unused4: u64)
+extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64)
+extern fn rt_gui_box_blur(xy: u64, wh: u64, radius: u64, unused: u64)
+extern fn rt_gui_gradient_v(xy: u64, wh: u64, c1: u64, c2: u64)
+extern fn rt_gui_gradient_h(xy: u64, wh: u64, c1: u64, c2: u64)
+extern fn rt_gui_shadow(xy: u64, wh: u64, blur_alpha: u64, offset: u64)
+extern fn rt_gui_shadow_fill(xy: u64, wh: u64, color: u64, unused: u64)
+
+fn pack(hi: u64, lo: u64) -> u64:
+    (hi << 32) | (lo & 0xFFFFFFFF)
+
+struct GlassConfig:
+    surface_color: u64
+    surface_alpha: u64
+    blur_radius: u64
+    border_color: u64
+    border_alpha: u64
+    shadow_offset: u64
+    shadow_blur: u64
+    shadow_alpha: u64
+    accent_color: u64
+    accent2_color: u64
+    bg_top: u64
+    bg_bottom: u64
+
+impl GlassConfig:
+    static fn dark() -> GlassConfig:
+        GlassConfig(
+            surface_color: 0x001E1E23,
+            surface_alpha: 184,
+            blur_radius: 12,
+            border_color: 0x00FFFFFF,
+            border_alpha: 46,
+            shadow_offset: 6,
+            shadow_blur: 10,
+            shadow_alpha: 80,
+            accent_color: 0x000A84FF,
+            accent2_color: 0x00BB86FC,
+            bg_top: 0x00080810,
+            bg_bottom: 0x00180A28
+        )
+
+    static fn light() -> GlassConfig:
+        GlassConfig(
+            surface_color: 0x00FFFFFF,
+            surface_alpha: 184,
+            blur_radius: 12,
+            border_color: 0x00000000,
+            border_alpha: 20,
+            shadow_offset: 6,
+            shadow_blur: 10,
+            shadow_alpha: 40,
+            accent_color: 0x00007AFF,
+            accent2_color: 0x009B59B6,
+            bg_top: 0x00D8D0E8,
+            bg_bottom: 0x00F0F0F5
+        )
+
+# ============================================================================
+# Wrapper Functions
+# ============================================================================
+
+fn glass_fill(x: u64, y: u64, w: u64, h: u64, color: u64, alpha: u64):
+    """Blend-fill a rectangle with the given color and alpha."""
+    val xy = pack(x, y)
+    val wh = pack(w, h)
+    rt_gui_blend_fill(xy, wh, color, alpha)
+
+fn glass_blur(x: u64, y: u64, w: u64, h: u64, radius: u64):
+    """Apply a box blur to the rectangle region."""
+    val xy = pack(x, y)
+    val wh = pack(w, h)
+    rt_gui_box_blur(xy, wh, radius, 0)
+
+fn glass_gradient_v(x: u64, y: u64, w: u64, h: u64, c1: u64, c2: u64):
+    """Draw a vertical gradient from c1 (top) to c2 (bottom)."""
+    val xy = pack(x, y)
+    val wh = pack(w, h)
+    rt_gui_gradient_v(xy, wh, c1, c2)
+
+fn glass_shadow(x: u64, y: u64, w: u64, h: u64, config: GlassConfig):
+    """Draw a drop shadow below the rectangle using config parameters."""
+    val xy = pack(x, y)
+    val wh = pack(w, h)
+    val blur_alpha = pack(config.shadow_blur, config.shadow_alpha)
+    val offset = pack(config.shadow_offset, config.shadow_offset)
+    rt_gui_shadow(xy, wh, blur_alpha, offset)
+
+fn glass_solid_fill(x: u64, y: u64, w: u64, h: u64, color: u64):
+    """Shadow-buffer-aware solid fill for a rectangle."""
+    val xy = pack(x, y)
+    val wh = pack(w, h)
+    rt_gui_shadow_fill(xy, wh, color, 0)
+
+fn draw_glass_rect(x: u64, y: u64, w: u64, h: u64, config: GlassConfig):
+    """Draw a full glass rectangle: shadow + blur + blend + border.
+
+    Renders the complete glassmorphism effect in the correct order:
+    1. Drop shadow behind the rect
+    2. Box blur of the background content
+    3. Semi-transparent surface fill
+    4. 1px semi-transparent border
+    """
+    # 1. Drop shadow
+    glass_shadow(x, y, w, h, config)
+    # 2. Blur background behind the glass surface
+    glass_blur(x, y, w, h, config.blur_radius)
+    # 3. Semi-transparent surface fill
+    glass_fill(x, y, w, h, config.surface_color, config.surface_alpha)
+    # 4. Border
+    draw_glass_border(x, y, w, h, config)
+
+fn draw_glass_border(x: u64, y: u64, w: u64, h: u64, config: GlassConfig):
+    """Draw a 1px semi-transparent border around the rectangle."""
+    val bcolor = config.border_color
+    val balpha = config.border_alpha
+    # Top edge
+    glass_fill(x, y, w, 1, bcolor, balpha)
+    # Bottom edge
+    if h > 1:
+        glass_fill(x, y + h - 1, w, 1, bcolor, balpha)
+    # Left edge
+    glass_fill(x, y, 1, h, bcolor, balpha)
+    # Right edge
+    if w > 1:
+        glass_fill(x + w - 1, y, 1, h, bcolor, balpha)
+
+fn glass_begin_frame(w: u64, h: u64):
+    """Begin a new glass compositing frame."""
+    rt_gui_begin_frame(w, h, 0, 0)
+
+fn glass_present():
+    """Present the completed glass frame to the display."""
+    rt_gui_present(0, 0, 0, 0)

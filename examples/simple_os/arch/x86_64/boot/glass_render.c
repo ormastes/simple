@@ -60,6 +60,22 @@ static uint32_t g_dirty_y1 = 0xFFFFFFFF;
 static uint32_t g_dirty_x2 = 0;
 static uint32_t g_dirty_y2 = 0;
 
+/* VirtIO-GPU acceleration flag — set by Simple code when GPU detected.
+ * When enabled, present() uses the shadow buffer as DMA backing memory
+ * and skips the MMIO memcpy (QEMU reads from DMA directly). */
+static int g_use_virtio_gpu = 0;
+static uint64_t g_virtio_gpu_resource_id = 0;
+
+/* Called from Simple code to enable GPU-accelerated present */
+RuntimeValue rt_gui_set_gpu_mode(RuntimeValue enabled, RuntimeValue resource_id,
+                                  RuntimeValue unused1, RuntimeValue unused2)
+{
+    (void)unused1; (void)unused2;
+    g_use_virtio_gpu = (int)(uint64_t)enabled;
+    g_virtio_gpu_resource_id = (uint64_t)resource_id;
+    return 0;
+}
+
 static void dirty_mark(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     if (x < g_dirty_x1) g_dirty_x1 = x;
@@ -141,6 +157,19 @@ RuntimeValue rt_gui_present(RuntimeValue unused1, RuntimeValue unused2,
 {
     (void)unused1; (void)unused2; (void)unused3; (void)unused4;
     if (!g_shadow_ready || !g_shadow_buf) return 0;
+
+    /* GPU fast path: shadow buffer IS the DMA backing.
+     * Just signal the GPU to read from DMA (no copy needed).
+     * TODO: GPU_ACCEL — call VirtIO-GPU TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
+     * This requires the VirtIO controlq to be accessible from C.
+     * For now, the Simple-side GpuAccelerator.present_dirty() handles this. */
+    if (g_use_virtio_gpu) {
+        /* When GPU mode is active, the shadow buffer was allocated at the
+         * GPU DMA address. No MMIO copy needed — return immediately.
+         * The Simple code calls gpu.flush_rect() after present(). */
+        dirty_reset();
+        return 0;
+    }
 
     /* Determine transfer region */
     uint32_t x1 = 0, y1 = 0, x2 = g_shadow_w, y2 = g_shadow_h;
@@ -638,6 +667,35 @@ RuntimeValue rt_gui_shadow_fill(RuntimeValue xy, RuntimeValue wh,
     for (uint32_t row = 0; row < h; row++) {
         for (uint32_t col = 0; col < w; col++) {
             fb_write(x + col, y + row, c);
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
+ * 11. Partial present for dirty regions only
+ *     rt_gui_present_rect(x, y, w, h)
+ *     Copies a rectangular region from shadow buffer to MMIO framebuffer.
+ *     Used for incremental updates when only a small area changed.
+ * =================================================================== */
+
+RuntimeValue rt_gui_present_rect(RuntimeValue x_rv, RuntimeValue y_rv,
+                                  RuntimeValue w_rv, RuntimeValue h_rv)
+{
+    uint32_t x = (uint32_t)(uint64_t)x_rv;
+    uint32_t y = (uint32_t)(uint64_t)y_rv;
+    uint32_t w = (uint32_t)(uint64_t)w_rv;
+    uint32_t h = (uint32_t)(uint64_t)h_rv;
+
+    if (!g_shadow_ready || !g_shadow_buf) return 0;
+    if (x + w > g_shadow_w) w = g_shadow_w - x;
+    if (y + h > g_shadow_h) h = g_shadow_h - y;
+
+    for (uint32_t row = y; row < y + h; row++) {
+        uint64_t mmio_row = g_fb_addr + ((uint64_t)row * g_fb_w + x) * 4;
+        uint32_t *src = &g_shadow_buf[row * g_shadow_w + x];
+        for (uint32_t col = 0; col < w; col++) {
+            *(volatile uint32_t *)(uintptr_t)(mmio_row + col * 4) = src[col];
         }
     }
     return 0;

@@ -16,7 +16,8 @@ use common.ui.builder.{column, text_widget}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard, KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseEvent}
-use os.compositor.decorations.{draw_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
+use os.compositor.decorations.{draw_window_frame, draw_glass_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
+use os.compositor.glass_effects.{GlassConfig, glass_begin_frame, glass_present, glass_gradient_v, draw_glass_rect}
 use os.compositor.cursor.{CursorState, default_cursor_state, draw_cursor}
 use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
@@ -89,6 +90,8 @@ class Compositor:
     pending_remote_events: [WmInputEvent]
     saved_geometries: [SavedGeometry]
     taskbar_height: i32
+    glass_theme_active: bool
+    glass_config: GlassConfig
 
 impl Compositor:
 
@@ -134,7 +137,9 @@ impl Compositor:
             pending_shortcut_key: "",
             pending_remote_events: [],
             saved_geometries: [],
-            taskbar_height: 32
+            taskbar_height: 32,
+            glass_theme_active: false,
+            glass_config: GlassConfig.dark()
         )
 
     # -- Window Management ---------------------------------------------------
@@ -537,18 +542,45 @@ impl Compositor:
 
         Single rendering path for all platforms (baremetal + hosted).
         Draws desktop background, windows back-to-front, cursor on top.
+        When glass_theme_active is true, uses glassmorphism rendering path.
         """
-        self.backend.clear(self.desktop_bg)
+        if self.glass_theme_active:
+            # Glass compositing: begin frame, gradient background, windows, present
+            val sw = self.screen_width.to_u64()
+            val sh = self.screen_height.to_u64()
+            glass_begin_frame(sw, sh)
+            glass_gradient_v(0, 0, sw, sh, self.glass_config.bg_top, self.glass_config.bg_bottom)
 
-        var idx: i32 = 0
-        for surface in self.surfaces:
-            if surface.visible:
-                val is_focused = idx == self.focused_idx
-                _render_window(self.backend, surface, is_focused)
-            idx = idx + 1
+            var idx: i32 = 0
+            for surface in self.surfaces:
+                if surface.visible:
+                    val is_focused = idx == self.focused_idx
+                    _render_glass_window(self.backend, surface, is_focused, self.glass_config)
+                idx = idx + 1
 
-        draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
-        self.backend.present()
+            draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
+            glass_present()
+        else:
+            # Standard compositing path
+            self.backend.clear(self.desktop_bg)
+
+            var idx: i32 = 0
+            for surface in self.surfaces:
+                if surface.visible:
+                    val is_focused = idx == self.focused_idx
+                    _render_window(self.backend, surface, is_focused)
+                idx = idx + 1
+
+            draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
+            self.backend.present()
+
+    me set_glass_theme(active: bool):
+        """Enable or disable glassmorphism rendering."""
+        self.glass_theme_active = active
+
+    me set_glass_config(config: GlassConfig):
+        """Set the glass configuration for the compositor."""
+        self.glass_config = config
 
     # -- Input Handling ------------------------------------------------------
 
@@ -774,6 +806,35 @@ fn _render_window(backend: CompositorBackend, surface: WindowSurface, focused: b
     Uses CompositorBackend for all rendering — works on all platforms.
     """
     draw_window_frame(backend, surface.x, surface.y, surface.width, surface.height, surface.title, focused)
+
+    val cx = client_area_x(surface.x)
+    val cy = client_area_y(surface.y)
+    val cw = client_area_width(surface.width)
+    val ch = client_area_height(surface.height)
+
+    if cw <= 0 or ch <= 0:
+        return
+
+    val state = surface.session.current_state()
+    val tree_theme = state.tree.theme()
+    val theme = resolve_theme(tree_theme)
+    val root = state.tree.root_node()
+    val rects = compute_layout(root, cx, cy, cw, ch)
+
+    backend.fill_rect(cx, cy, cw, ch, theme.bg)
+    _render_tree(backend, root, rects, state.focused_id, theme)
+
+# ============================================================================
+# Internal: Render a Single Window with Glass Theme
+# ============================================================================
+
+fn _render_glass_window(backend: CompositorBackend, surface: WindowSurface, focused: bool, config: GlassConfig):
+    """Render a single window with glassmorphism decorations + client area.
+
+    Uses glass_effects for the window frame, then renders client content
+    on top of the glass surface.
+    """
+    draw_glass_window_frame(backend, surface.x, surface.y, surface.width, surface.height, surface.title, focused, config)
 
     val cx = client_area_x(surface.x)
     val cy = client_area_y(surface.y)

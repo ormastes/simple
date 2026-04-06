@@ -8,6 +8,7 @@
 # Border: 1px gray line around the window frame
 
 use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_effects.{GlassConfig, glass_fill, glass_blur, glass_shadow, glass_solid_fill, draw_glass_rect, draw_glass_border}
 
 # ============================================================================
 # Decoration Constants
@@ -161,6 +162,98 @@ fn draw_border(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, focus
     # Right
     if w > BORDER_WIDTH:
         backend.fill_rect(x + w - BORDER_WIDTH, y, BORDER_WIDTH, h, color)
+
+# ============================================================================
+# Glass Window Frame
+# ============================================================================
+
+val GLASS_TITLE_BAR_HEIGHT: i32 = 28
+val TRAFFIC_LIGHT_RADIUS: i32 = 6
+val TRAFFIC_LIGHT_Y_OFFSET: i32 = 8
+val TRAFFIC_LIGHT_X_START: i32 = 10
+val TRAFFIC_LIGHT_SPACING: i32 = 20
+val FOCUS_RING_WIDTH: i32 = 2
+
+fn draw_glass_window_frame(backend: CompositorBackend, x: i32, y: i32, width: i32, height: i32, title: text, focused: bool, config: GlassConfig):
+    """Draw a glassmorphism window frame with shadow, blur, border, title bar, and traffic lights."""
+    val ux = x.to_u64()
+    val uy = y.to_u64()
+    val uw = width.to_u64()
+    val uh = height.to_u64()
+
+    # 1. Drop shadow below the window
+    glass_shadow(ux, uy, uw, uh, config)
+
+    # 2. Blur the window region for glass effect
+    glass_blur(ux, uy, uw, uh, config.blur_radius)
+
+    # 3. Blend semi-transparent glass surface over the blurred area
+    glass_fill(ux, uy, uw, uh, config.surface_color, config.surface_alpha)
+
+    # 4. Draw glass border
+    draw_glass_border(ux, uy, uw, uh, config)
+
+    # 5. Elevated title bar (higher opacity for readability)
+    val title_alpha: u64 = config.surface_alpha + 40
+    val capped_alpha: u64 = if title_alpha > 255: 255 else: title_alpha
+    val title_h = GLASS_TITLE_BAR_HEIGHT.to_u64()
+    glass_fill(ux, uy, uw, title_h, config.surface_color, capped_alpha)
+
+    # Separator line below title bar
+    val sep_y = uy + title_h
+    glass_fill(ux, sep_y, uw, 1, config.border_color, config.border_alpha)
+
+    # 6. Title text (centered in title bar)
+    val text_fg: u32 = if focused: 0xFFFFFFFF else: 0xFFB0B0B0
+    val text_bg: u32 = 0x00000000
+    val text_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING * 3 + 8
+    val text_y = y + (GLASS_TITLE_BAR_HEIGHT - 16) / 2
+    backend.draw_text(text_x, text_y, title, text_fg, text_bg)
+
+    # 7. Traffic light buttons (close=red, minimize=yellow, maximize=green)
+    val btn_y = y + TRAFFIC_LIGHT_Y_OFFSET
+    val btn_r = TRAFFIC_LIGHT_RADIUS
+
+    # Close button (red)
+    val close_x = x + TRAFFIC_LIGHT_X_START
+    _draw_traffic_light_button(backend, close_x, btn_y, btn_r, 0xFFFF5F57)
+
+    # Minimize button (yellow)
+    val min_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING
+    _draw_traffic_light_button(backend, min_x, btn_y, btn_r, 0xFFFEBC2E)
+
+    # Maximize button (green)
+    val max_x = x + TRAFFIC_LIGHT_X_START + TRAFFIC_LIGHT_SPACING * 2
+    _draw_traffic_light_button(backend, max_x, btn_y, btn_r, 0xFF28C840)
+
+    # 8. Focus ring (accent-colored border when focused)
+    if focused:
+        val ring_alpha: u64 = 120
+        glass_fill(ux, uy, uw, FOCUS_RING_WIDTH.to_u64(), config.accent_color, ring_alpha)
+        if uh > FOCUS_RING_WIDTH.to_u64():
+            glass_fill(ux, uy + uh - FOCUS_RING_WIDTH.to_u64(), uw, FOCUS_RING_WIDTH.to_u64(), config.accent_color, ring_alpha)
+        glass_fill(ux, uy, FOCUS_RING_WIDTH.to_u64(), uh, config.accent_color, ring_alpha)
+        if uw > FOCUS_RING_WIDTH.to_u64():
+            glass_fill(ux + uw - FOCUS_RING_WIDTH.to_u64(), uy, FOCUS_RING_WIDTH.to_u64(), uh, config.accent_color, ring_alpha)
+
+fn _draw_traffic_light_button(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32):
+    """Draw a filled circle approximation for a traffic light button.
+
+    Uses concentric horizontal fill lines to approximate a circle.
+    cx, cy is the top-left corner; r is the radius (diameter = 2*r).
+    """
+    var dy: i32 = 0
+    while dy < r * 2:
+        # Distance from center (r) along y axis
+        val dist_y = dy - r
+        val abs_dy = if dist_y < 0: 0 - dist_y else: dist_y
+        # Horizontal half-width at this row (circular approximation)
+        val hw = r - abs_dy
+        if hw > 0:
+            val lx = cx + r - hw
+            val w = hw * 2
+            backend.fill_rect(lx, cy + dy, w, 1, color)
+        dy = dy + 1
 
 # ============================================================================
 # Hit Testing

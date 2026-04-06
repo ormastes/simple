@@ -1,0 +1,76 @@
+# GPU Acceleration — VirtIO-GPU 2D surface management
+#
+# Provides GPU-accelerated frame presentation via VirtIO-GPU.
+# Effects (blur, blend, gradient) remain CPU-side — VirtIO-GPU 2D
+# has no compute shaders. GPU acceleration is for present() only:
+# DMA transfer + flush instead of per-pixel MMIO copy.
+
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+
+struct GpuSurface:
+    """A GPU-side 2D resource with DMA-backed memory."""
+    resource_id: u32
+    width: u32
+    height: u32
+    backing_phys: u64
+    backing_virt: u64
+    backing_size: u64
+
+class GpuAccelerator:
+    """Manages GPU resources for accelerated frame presentation."""
+    gpu: VirtioGpuDriver
+    primary_surface: GpuSurface
+    next_id: u32
+    available: bool
+
+impl GpuAccelerator:
+    static fn new(gpu: VirtioGpuDriver) -> GpuAccelerator:
+        GpuAccelerator(
+            gpu: gpu,
+            primary_surface: GpuSurface(
+                resource_id: gpu.resource_id,
+                width: gpu.width,
+                height: gpu.height,
+                backing_phys: gpu.fb_phys,
+                backing_virt: gpu.fb_virt,
+                backing_size: (gpu.width * gpu.height * 4).to_u64()
+            ),
+            next_id: gpu.next_resource_id,
+            available: true
+        )
+
+    me present_full():
+        """Transfer full framebuffer to GPU and flush display."""
+        self.gpu.flush()
+
+    me present_dirty(x: u32, y: u32, w: u32, h: u32):
+        """Transfer only dirty region to GPU (partial update)."""
+        self.gpu.flush_rect(x, y, w, h)
+
+    fn is_available() -> bool:
+        self.available
+
+    fn primary_fb_virt() -> u64:
+        """Get virtual address of primary framebuffer for CPU rendering."""
+        self.primary_surface.backing_virt
+
+    fn primary_fb_phys() -> u64:
+        """Get physical address for DMA."""
+        self.primary_surface.backing_phys
+
+    fn screen_width() -> u32:
+        self.primary_surface.width
+
+    fn screen_height() -> u32:
+        self.primary_surface.height
+
+# GPU acceleration status for glass_render.c integration
+fn gpu_accel_supported() -> bool:
+    """Check if VirtIO-GPU is available for accelerated present.
+
+    When true, glass_render.c should use DMA transfer instead of
+    per-pixel MMIO copy in rt_gui_present().
+
+    # TODO: GPU_ACCEL — detect VirtIO-GPU at boot and set global flag
+    """
+    false  # Default: not available, use MMIO fallback
