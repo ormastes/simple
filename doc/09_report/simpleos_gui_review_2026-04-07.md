@@ -1,26 +1,28 @@
 # SimpleOS GUI Review — Beauty & Layout Analysis
 
 **Date**: 2026-04-07
-**Reviewed by**: Claude Opus 4.6
+**Reviewed by**: Claude Opus 4.6 + Codex (code-level analysis)
 **Resolution**: 1024x768x32 (BGA framebuffer in QEMU)
 **Entry**: `wm_entry.spl` (Glass Window Manager — stable)
 **Screenshots**: `build/os/screenshots/simpleos_wm_hires.png`
 
 ---
 
-## Scoring Summary
+## Scoring Summary (Opus + Codex Combined)
 
-| Category | Score | macOS Equivalent | Gap |
-|----------|-------|-----------------|-----|
-| Typography & Text Rendering | 3/10 | 9.5/10 | -6.5 |
-| Window Chrome & Decorations | 6/10 | 9/10 | -3 |
-| Color Palette & Harmony | 7/10 | 8.5/10 | -1.5 |
-| Glassmorphism / Transparency | 5/10 | 9/10 | -4 |
-| Layout & Spacing | 4/10 | 9/10 | -5 |
-| Dock / Taskbar | 7/10 | 9/10 | -2 |
-| UI Components (buttons, tabs) | 5/10 | 9/10 | -4 |
-| Overall Polish | 5.5/10 | 9.5/10 | -4 |
-| **Average** | **5.2/10** | **9.1/10** | **-3.9** |
+| Category | Opus | Codex | Combined | macOS |
+|----------|------|-------|----------|-------|
+| Typography & Text Rendering | 3/10 | 5/10 | 4/10 | 9.5/10 |
+| Window Chrome & Decorations | 6/10 | 7/10 | 6.5/10 | 9/10 |
+| Color Palette & Harmony | 7/10 | 8/10 | 7.5/10 | 8.5/10 |
+| Glassmorphism / Transparency | 5/10 | 7/10 | 6/10 | 9/10 |
+| Layout & Spacing | 4/10 | 6/10 | 5/10 | 9/10 |
+| Dock / Taskbar | 7/10 | — | 7/10 | 9/10 |
+| UI Components (buttons, tabs) | 5/10 | 6/10 | 5.5/10 | 9/10 |
+| Overall Polish | 5.5/10 | 6.5/10 | 6/10 | 9.5/10 |
+| **Average** | **5.2** | **6.5** | **5.9/10** | **9.1/10** |
+
+Note: Codex scored higher because it reviewed the source code (`glass_render.c` — 3,179 lines, `wm_entry.spl` — 2,072 lines) and found sophisticated infrastructure (5-pass box blur, AA distance-field rounding, vector font rasterizer, spring animations, layout engine) that isn't fully visible in the screenshot.
 
 ---
 
@@ -191,3 +193,31 @@
 - SimpleOS WM: `build/os/screenshots/simpleos_wm_hires.png`
 - macOS Desktop: `build/os/screenshots/macos_desktop.png`
 - Detail regions: `build/os/screenshots/region_*.png`
+
+---
+
+## Codex Code-Level Analysis (Supplementary)
+
+Codex reviewed the actual rendering source code and found the following infrastructure that isn't fully visible in screenshots:
+
+### Hidden Sophistication in glass_render.c (3,179 lines)
+
+1. **Anti-aliased rounded rectangles**: Uses `dist4/r4` proximity calculation with 70% threshold AA band — produces legitimately smooth corners
+2. **5-pass box blur**: H-V-H-V-H approximation of Gaussian blur (radius 16 for surfaces, 24 for elevated panels) — architecturally identical to macOS `NSVisualEffectView`
+3. **Vector font rasterizer**: Exists with ray-casting and 2x2 sub-sampling anti-aliasing, per-glyph width tables (`vf_glyph_widths`) — but only covers digits/punctuation, not full Latin
+4. **3-layer shadow system**: Shadow at 1.5x alpha, offset down-right, with blur — not as sophisticated as macOS's 3-shadow stack but functional
+5. **Noise texture blend**: `rt_gui_noise_blend()` adds ordered dither grain to glass surfaces, matching macOS frosted glass aesthetic
+6. **Text rendering modes**: Plain, shadow (3-pass), bold, outline (1px AA fringe), 2x scaled — the outline mode adds genuine anti-aliasing to bitmap glyphs
+7. **Animation system**: Spring easing for minimize, cubic easing for window open/close, dock bounce
+8. **Layout engine**: Full flexbox-style system (`rt_layout_reset/add/set_size/compute/get`) — exists but windows don't use it yet
+
+### Codex's Key Insight
+
+> "The rendering engine is production-quality infrastructure. The two highest-impact improvements are: (1) ship a pre-rasterized proportional font atlas as a compiled resource — even without TrueType parsing, this would transform every element; (2) increase resolution to 1280x800 or 1440x900 — the rendering code already parameterizes SCREEN_W and SCREEN_H."
+
+### Codex's Additional Scores Rationale
+
+- **Typography 5/10** (vs Opus 3/10): Codex found the vector font rasterizer, outline text mode, and shadow rendering provide more AA capability than visible in screenshots
+- **Glassmorphism 7/10** (vs Opus 5/10): Codex confirmed real 5-pass blur + alpha pipeline, noise texture, and proper glass material stack — the code is architecturally sound
+- **Window Chrome 7/10** (vs Opus 6/10): Distance-field AA on rounded rectangles, 3-layer shadows, and proper traffic light positioning confirmed in code
+- **Color Palette 8/10** (vs Opus 7/10): Codex verified zero banding in gradients, proper accent color system matching HIG, warm/cool theme variants

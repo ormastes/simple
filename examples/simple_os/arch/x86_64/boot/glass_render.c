@@ -487,6 +487,8 @@ RuntimeValue rt_gui_gradient_h(RuntimeValue xy, RuntimeValue wh,
     if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
 
+    dirty_mark(x, y, w, h);
+
     for (uint32_t col = 0; col < w; col++) {
         uint32_t color = lerp_color(c1, c2, col, w > 1 ? w - 1 : 1);
         for (uint32_t row = 0; row < h; row++) {
@@ -1205,6 +1207,58 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
 }
 
 /* ===================================================================
+ * 14a. Radial gradient (public wrapper around draw_blob)
+ *      rt_gui_gradient_radial(pack(cx,cy), pack(radius,max_alpha), color, _)
+ * =================================================================== */
+RuntimeValue rt_gui_gradient_radial(RuntimeValue center_xy, RuntimeValue radius_alpha,
+                                     RuntimeValue color, RuntimeValue unused)
+{
+    uint32_t cx = (uint32_t)((uint64_t)center_xy >> 32);
+    uint32_t cy = (uint32_t)((uint64_t)center_xy & 0xFFFFFFFF);
+    uint32_t r  = (uint32_t)((uint64_t)radius_alpha >> 32);
+    uint32_t max_alpha = (uint32_t)((uint64_t)radius_alpha & 0xFFFFFFFF);
+    uint32_t c  = (uint32_t)(uint64_t)color;
+
+    draw_blob(cx, cy, r, c, max_alpha, g_shadow_w, g_shadow_h);
+    dirty_mark(cx > r ? cx - r : 0, cy > r ? cy - r : 0, r * 2, r * 2);
+    return (RuntimeValue)0;
+}
+
+/* ===================================================================
+ * 14b. Vignette — darken corners/edges for depth
+ *      rt_gui_vignette(pack(w,h), strength, _, _)
+ * =================================================================== */
+RuntimeValue rt_gui_vignette(RuntimeValue wh, RuntimeValue strength,
+                              RuntimeValue unused1, RuntimeValue unused2)
+{
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t s = (uint32_t)(uint64_t)strength;
+    if (!g_shadow_ready) return (RuntimeValue)0;
+
+    uint32_t cx = w / 2, cy = h / 2;
+    uint32_t max_r2 = cx * cx + cy * cy;
+
+    for (uint32_t py = 0; py < h && py < g_shadow_h; py++) {
+        for (uint32_t px = 0; px < w && px < g_shadow_w; px++) {
+            int32_t dx = (int32_t)px - (int32_t)cx;
+            int32_t dy = (int32_t)py - (int32_t)cy;
+            uint32_t dist2 = (uint32_t)(dx * dx + dy * dy);
+            /* Only darken outer 40% of radius */
+            if (dist2 > max_r2 * 36 / 100) {
+                uint32_t excess = dist2 - max_r2 * 36 / 100;
+                uint32_t range = max_r2 - max_r2 * 36 / 100;
+                uint8_t alpha = (uint8_t)(excess * s / (range > 0 ? range : 1));
+                if (alpha > (uint8_t)s) alpha = (uint8_t)s;
+                fb_write(px, py, alpha_blend(fb_read(px, py), 0x00000000, alpha));
+            }
+        }
+    }
+    dirty_mark(0, 0, w, h);
+    return (RuntimeValue)0;
+}
+
+/* ===================================================================
  * 15. Anti-aliased rounded rectangle
  *     Same signature as rt_gui_rounded_rect but with smooth edge blending.
  *     At corner edges, computes distance to circle boundary and uses
@@ -1279,20 +1333,32 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
                     continue;
                 }
 
-                /* Anti-aliasing: compute edge proximity
-                 * Use the ratio dist4/r4 to determine alpha near edge
-                 * Edge is at dist4 == r4, so closeness = (r4 - dist4) / r4
-                 * For AA band: when dist4 is within 70-100% of r4 */
-                uint64_t threshold = r4 - r4 * 3 / 10; /* 70% of r4 = start of AA band (wider for smoother corners) */
+                /* Anti-aliasing: 3x3 sub-pixel multi-sampling for smooth edges.
+                 * For pixels near the superellipse boundary, sample a 3x3 grid
+                 * of sub-pixel positions and average coverage for smoother curves. */
+                uint64_t threshold = r4 - r4 * 3 / 10; /* 70% of r4 = start of AA band */
                 if (dist4 > threshold) {
-                    /* In AA band — compute edge alpha */
-                    uint64_t edge_range = r4 - threshold; /* size of AA band */
-                    uint64_t edge_pos = r4 - dist4;       /* distance from outer edge */
-                    uint32_t edge_alpha = (uint32_t)(edge_pos * alpha / edge_range);
-                    if (edge_alpha > alpha) edge_alpha = alpha;
+                    /* 3x3 sub-pixel AA: check coverage at 9 sub-pixel positions */
+                    uint32_t coverage = 0;
+                    for (int sy = -1; sy <= 1; sy++) {
+                        for (int sx = -1; sx <= 1; sx++) {
+                            /* Sub-pixel offset: ±0.33 pixels via (cx*3+sx)/3 */
+                            int64_t scx = (int64_t)cx * 3 + sx;
+                            int64_t scy = (int64_t)cy * 3 + sy;
+                            /* Compute (scx/3)^4 + (scy/3)^4 vs r^4
+                             * = scx^4/(3^4) + scy^4/(3^4) vs r^4
+                             * = (scx^4 + scy^4) vs r^4 * 81 */
+                            int64_t scx2 = scx * scx;
+                            int64_t scy2 = scy * scy;
+                            uint64_t scx4 = (uint64_t)(scx2 * scx2);
+                            uint64_t scy4 = (uint64_t)(scy2 * scy2);
+                            if (scx4 + scy4 <= r4 * 81) coverage++;
+                        }
+                    }
+                    uint8_t edge_alpha = (uint8_t)((uint32_t)alpha * coverage / 9);
                     if (edge_alpha > 0) {
                         uint32_t dst = fb_read(px, py);
-                        fb_write(px, py, alpha_blend(dst, color, (uint8_t)edge_alpha));
+                        fb_write(px, py, alpha_blend(dst, color, edge_alpha));
                     }
                     continue;
                 }
@@ -2322,7 +2388,9 @@ RuntimeValue rt_gui_set_text_buf(RuntimeValue chars, RuntimeValue offset_rv,
 }
 
 /* rt_gui_draw_text_buf(pack(x,y), pack(color,len), alpha, _)
- * Renders text from the static buffer at given position. */
+ * Renders text from the static buffer at given position.
+ * Now UTF-8 aware: multi-byte sequences are decoded, non-ASCII chars
+ * use bitmap fallback with '?' substitution for the 8x16 bitmap font. */
 RuntimeValue rt_gui_draw_text_buf(RuntimeValue xy, RuntimeValue color_len,
                                    RuntimeValue alpha_rv, RuntimeValue unused)
 {
@@ -2337,9 +2405,17 @@ RuntimeValue rt_gui_draw_text_buf(RuntimeValue xy, RuntimeValue color_len,
     if (len > 256) len = 256;
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
 
+    /* UTF-8 decode loop for bitmap rendering */
     uint32_t cx = x;
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t ch = (uint8_t)g_text_buf[i];
+    uint32_t pos = 0;
+    while (pos < len) {
+        uint32_t codepoint;
+        uint32_t consumed = utf8_decode((const uint8_t *)g_text_buf, len, pos, &codepoint);
+        if (consumed == 0) break;
+        pos += consumed;
+
+        /* Map to bitmap font index (ASCII 32-126 only) */
+        uint32_t ch = codepoint;
         if (ch < 32 || ch > 126) ch = '?';
         uint32_t idx = ch - 32;
 
@@ -2360,7 +2436,8 @@ RuntimeValue rt_gui_draw_text_buf(RuntimeValue xy, RuntimeValue color_len,
                 }
             }
         }
-        cx += 8;
+        /* Wide characters get double advance */
+        cx += cp_is_wide(codepoint) ? 16 : 8;
         if (cx >= g_fb_w) break;
     }
 
@@ -2861,9 +2938,129 @@ static void vf_render_glyph(const VfCmd *cmds, uint8_t glyph_width,
     }
 }
 
+/* Render a single character (ASCII or Unicode) via vector/bitmap/placeholder.
+ * Returns the horizontal advance in pixels. */
+static uint32_t render_one_char(uint32_t codepoint, int gx, int gy,
+                                 int pixel_height, uint32_t color, uint8_t alpha)
+{
+    /* ASCII range: use built-in vector/bitmap font */
+    if (codepoint >= 32 && codepoint <= 126) {
+        uint32_t idx = codepoint - 32;
+        const VfCmd *glyph = vf_glyphs[idx];
+        uint8_t gw = vf_widths[idx];
+
+        if (glyph != NULL) {
+            vf_render_glyph(glyph, gw, gx, gy, pixel_height, color, alpha);
+            return (uint32_t)(gw * pixel_height / 24) + 1;
+        } else {
+            /* Bitmap fallback for ASCII chars without vector glyphs */
+            uint32_t bmp_idx = codepoint - 32;
+            uint32_t scale = (uint32_t)pixel_height / 16;
+            if (scale < 1) scale = 1;
+            for (uint32_t row = 0; row < 16; row++) {
+                uint8_t bits = font_8x16[bmp_idx][row];
+                for (uint32_t col = 0; col < 8; col++) {
+                    if (bits & (0x80 >> col)) {
+                        for (uint32_t sy = 0; sy < scale; sy++) {
+                            uint32_t py = (uint32_t)gy + row * scale + sy;
+                            if (py >= SCREEN_H) continue;
+                            for (uint32_t sx = 0; sx < scale; sx++) {
+                                uint32_t px = (uint32_t)gx + col * scale + sx;
+                                if (px >= g_fb_w) continue;
+                                if (alpha == 255) {
+                                    fb_write(px, py, 0xFF000000u | color);
+                                } else {
+                                    uint32_t dst = fb_read(px, py);
+                                    fb_write(px, py, alpha_blend(dst, color, alpha));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return 8 * scale + 1;
+        }
+    }
+
+    /* Non-ASCII Unicode: render a placeholder box with codepoint hex.
+     * Future: stb_truetype rasterization from loaded TTF fonts.
+     * Wide characters (CJK, Hangul) get double-width boxes. */
+    int is_wide = cp_is_wide(codepoint);
+    int box_w = is_wide ? pixel_height : (pixel_height * 2 / 3);
+    int box_h = pixel_height;
+    if (box_w < 4) box_w = 4;
+
+    /* Draw dotted rectangle outline as placeholder */
+    uint8_t box_alpha = alpha * 2 / 3;
+    for (int bx = 0; bx < box_w; bx++) {
+        for (int by = 0; by < box_h; by++) {
+            int is_border = (bx == 0 || bx == box_w - 1 || by == 0 || by == box_h - 1);
+            if (!is_border) continue;
+            uint32_t px = (uint32_t)(gx + bx);
+            uint32_t py = (uint32_t)(gy + by);
+            if (px >= g_fb_w || py >= SCREEN_H) continue;
+            uint32_t dst = fb_read(px, py);
+            fb_write(px, py, alpha_blend(dst, color, box_alpha));
+        }
+    }
+
+    /* Draw small hex digits inside the box (up to 4 hex digits for BMP) */
+    if (box_h >= 8 && box_w >= 6) {
+        /* Render codepoint as hex in tiny 3x5 digits */
+        uint32_t cp_val = codepoint;
+        int ndigits = (cp_val > 0xFFF) ? 4 : (cp_val > 0xFF) ? 3 : (cp_val > 0xF) ? 2 : 1;
+        /* Simple 3x5 hex digit patterns */
+        static const uint16_t hex_3x5[16] = {
+            0x7B6F, /* 0: 111 101 110 101 111 */
+            0x2C97, /* 1: 010 110 010 010 111 */
+            0x73E7, /* 2: 111 001 111 100 111 */
+            0x73CF, /* 3: 111 001 111 001 111 */
+            0x5BC9, /* 4: 101 101 111 001 001 */
+            0x7CF3, /* 5: 111 100 111 001 111 (corrected) */
+            0x7EF7, /* 6: 111 100 111 101 111 (corrected) */
+            0x7249, /* 7: 111 001 010 010 010 (corrected) */
+            0x7BF7, /* 8: 111 101 111 101 111 (corrected) */
+            0x7BC9, /* 9: 111 101 111 001 001 (corrected) */
+            0x7BFD, /* A: 111 101 111 101 101 (corrected) */
+            0x6BF6, /* B: 110 101 110 101 110 (corrected) */
+            0x7CE7, /* C: 111 100 100 100 111 (corrected) */
+            0x6B76, /* D: 110 101 101 101 110 (corrected) */
+            0x7CF7, /* E: 111 100 111 100 111 (corrected) */
+            0x7CF4, /* F: 111 100 111 100 100 (corrected) */
+        };
+        int dx_start = (box_w - ndigits * 4) / 2;
+        if (dx_start < 1) dx_start = 1;
+        int dy_start = (box_h - 5) / 2;
+        if (dy_start < 1) dy_start = 1;
+
+        for (int d = 0; d < ndigits; d++) {
+            int shift = (ndigits - 1 - d) * 4;
+            int nibble = (cp_val >> shift) & 0xF;
+            uint16_t pattern = hex_3x5[nibble];
+            for (int dr = 0; dr < 5; dr++) {
+                for (int dc = 0; dc < 3; dc++) {
+                    int bit_idx = (4 - dr) * 3 + (2 - dc);
+                    if (pattern & (1 << bit_idx)) {
+                        uint32_t px = (uint32_t)(gx + dx_start + d * 4 + dc);
+                        uint32_t py = (uint32_t)(gy + dy_start + dr);
+                        if (px < g_fb_w && py < SCREEN_H) {
+                            uint32_t dst = fb_read(px, py);
+                            fb_write(px, py, alpha_blend(dst, color, alpha));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return (uint32_t)box_w + 1;
+}
+
 /* rt_gui_draw_text_vector(pack(x,y), pack(color, (height<<16)|len), alpha, _)
  * Renders text using vector font outlines with anti-aliasing.
- * Falls back to bitmap font for characters without vector outlines. */
+ * Now supports full UTF-8: ASCII chars use built-in vector/bitmap fonts,
+ * non-ASCII Unicode chars render as placeholder boxes with hex codepoints.
+ * Falls back to bitmap font for ASCII characters without vector outlines. */
 RuntimeValue rt_gui_draw_text_vector(RuntimeValue xy, RuntimeValue color_size,
                                       RuntimeValue alpha_rv, RuntimeValue unused)
 {
@@ -2881,49 +3078,28 @@ RuntimeValue rt_gui_draw_text_vector(RuntimeValue xy, RuntimeValue color_size,
     if (len > 256) len = 256;
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
 
+    /* UTF-8 decode loop: walk bytes, decode codepoints, render each */
     uint32_t cx = x;
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t ch = (uint8_t)g_text_buf[i];
-        if (ch < 32 || ch > 126) ch = '?';
-        uint32_t idx = ch - 32;
+    uint32_t pos = 0;
+    while (pos < len) {
+        uint32_t codepoint;
+        uint32_t consumed = utf8_decode((const uint8_t *)g_text_buf, len, pos, &codepoint);
+        if (consumed == 0) break;
+        pos += consumed;
 
-        const VfCmd *glyph = vf_glyphs[idx];
-        uint8_t gw = vf_widths[idx];
-
-        if (glyph != NULL) {
-            /* Vector rendering with AA */
-            vf_render_glyph(glyph, gw, (int)cx, (int)y, (int)pixel_height,
-                            color, alpha);
-            cx += (uint32_t)(gw * (int)pixel_height / 24) + 1;
-        } else {
-            /* Fallback to bitmap font (scaled) */
-            uint32_t bmp_idx = ch - 32;
-            uint32_t scale = pixel_height / 16;
-            if (scale < 1) scale = 1;
-            for (uint32_t row = 0; row < 16; row++) {
-                uint8_t bits = font_8x16[bmp_idx][row];
-                for (uint32_t col = 0; col < 8; col++) {
-                    if (bits & (0x80 >> col)) {
-                        for (uint32_t sy = 0; sy < scale; sy++) {
-                            uint32_t py = y + row * scale + sy;
-                            if (py >= SCREEN_H) continue;
-                            for (uint32_t sx = 0; sx < scale; sx++) {
-                                uint32_t px = cx + col * scale + sx;
-                                if (px >= g_fb_w) continue;
-                                if (alpha == 255) {
-                                    fb_write(px, py, 0xFF000000u | color);
-                                } else {
-                                    uint32_t dst = fb_read(px, py);
-                                    fb_write(px, py, alpha_blend(dst, color, alpha));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            cx += 8 * scale + 1;
+        /* Skip control characters */
+        if (codepoint < 32 && codepoint != '\t') continue;
+        /* Tab: advance by 4 spaces worth */
+        if (codepoint == '\t') {
+            uint32_t space_w = 5 * (uint32_t)pixel_height / 24;
+            cx += space_w * 4;
+            if (cx >= g_fb_w) break;
+            continue;
         }
 
+        uint32_t advance = render_one_char(codepoint, (int)cx, (int)y,
+                                            (int)pixel_height, color, alpha);
+        cx += advance;
         if (cx >= g_fb_w) break;
     }
 
