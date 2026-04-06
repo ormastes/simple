@@ -1644,7 +1644,7 @@ RuntimeValue rt_gui_draw_text_shadow(RuntimeValue xy, RuntimeValue color_len,
 
     /* Pass 0: Soft shadow at (x+1, y+1) with half alpha (pseudo-AA fringe) */
     uint32_t cx = x + 1;
-    uint8_t soft_alpha = shadow_alpha / 2;
+    uint8_t soft_alpha = shadow_alpha * 2 / 3;
     for (uint32_t i = 0; i < len; i++) {
         uint8_t ch = (uint8_t)g_text_buf[i];
         if (ch < 32 || ch > 126) ch = '?';
@@ -1873,6 +1873,51 @@ RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
                                 } else {
                                     uint32_t dst = fb_read(px, py);
                                     fb_write(px, py, alpha_blend(dst, color, alpha));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += 16;
+        if (cx >= g_fb_w) break;
+    }
+
+    /* Pass 3: Edge smoothing (sub-pixel AA approximation)
+     * For each font pixel that is ON, check if horizontal/vertical neighbors
+     * are OFF. If so, reduce edge pixels' alpha for smoother appearance. */
+    cx = x;
+    uint8_t edge_alpha = alpha * 2 / 3; /* 66% alpha for edge pixels */
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint8_t bits_above = (row > 0) ? font_8x16[idx][row-1] : 0;
+            uint8_t bits_below = (row < 15) ? font_8x16[idx][row+1] : 0;
+            for (uint32_t col = 0; col < 8; col++) {
+                uint8_t mask = 0x80 >> col;
+                if (!(bits & mask)) {
+                    /* This pixel is OFF — check if any neighbor is ON */
+                    int has_neighbor = 0;
+                    if (col > 0 && (bits & (mask << 1))) has_neighbor = 1;
+                    if (col < 7 && (bits & (mask >> 1))) has_neighbor = 1;
+                    if (bits_above & mask) has_neighbor = 1;
+                    if (bits_below & mask) has_neighbor = 1;
+
+                    if (has_neighbor) {
+                        /* Draw fringe pixel at reduced alpha */
+                        uint32_t py = y + row * 2;
+                        uint32_t px_base = cx + col * 2;
+                        for (int dy = 0; dy < 2; dy++) {
+                            if (py + dy >= SCREEN_H) continue;
+                            for (int dx = 0; dx < 2; dx++) {
+                                uint32_t px = px_base + dx;
+                                if (px < g_fb_w) {
+                                    uint32_t dst = fb_read(px, py + dy);
+                                    fb_write(px, py + dy, alpha_blend(dst, color, edge_alpha / 3));
                                 }
                             }
                         }
