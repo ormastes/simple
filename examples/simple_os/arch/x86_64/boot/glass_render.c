@@ -1543,6 +1543,159 @@ static const VfCmd vf_glyph_E[] = {
     {VF_CLOSE, 0, 0}, {VF_END, 0, 0}
 };
 
+static const VfCmd vf_glyph_B[] = {
+    {VF_MOVE,1,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,10},{VF_LINE,7,12},
+    {VF_LINE,9,14},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,1,24},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,9},{VF_LINE,6,10},
+    {VF_LINE,3,10},{VF_CLOSE,0,0},
+    {VF_MOVE,3,14},{VF_LINE,6,14},{VF_LINE,7,15},{VF_LINE,7,21},{VF_LINE,6,22},
+    {VF_LINE,3,22},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_C[] = {
+    {VF_MOVE,9,3},{VF_LINE,9,0},{VF_LINE,2,0},{VF_LINE,0,2},{VF_LINE,0,22},
+    {VF_LINE,2,24},{VF_LINE,9,24},{VF_LINE,9,21},{VF_LINE,3,21},{VF_LINE,2,20},
+    {VF_LINE,2,4},{VF_LINE,3,3},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_D[] = {
+    {VF_MOVE,1,0},{VF_LINE,7,0},{VF_LINE,10,3},{VF_LINE,10,21},{VF_LINE,7,24},
+    {VF_LINE,1,24},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,8,5},{VF_LINE,8,19},{VF_LINE,6,21},
+    {VF_LINE,3,21},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_F[] = {
+    {VF_MOVE,1,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,3,3},{VF_LINE,3,10},
+    {VF_LINE,8,10},{VF_LINE,8,13},{VF_LINE,3,13},{VF_LINE,3,24},{VF_LINE,1,24},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_G[] = {
+    {VF_MOVE,9,3},{VF_LINE,9,0},{VF_LINE,2,0},{VF_LINE,0,2},{VF_LINE,0,22},
+    {VF_LINE,2,24},{VF_LINE,9,24},{VF_LINE,11,22},{VF_LINE,11,12},{VF_LINE,6,12},
+    {VF_LINE,6,14},{VF_LINE,9,14},{VF_LINE,9,21},{VF_LINE,3,21},{VF_LINE,2,20},
+    {VF_LINE,2,4},{VF_LINE,3,3},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_H[] = {
+    {VF_MOVE,1,0},{VF_LINE,3,0},{VF_LINE,3,10},{VF_LINE,7,10},{VF_LINE,7,0},
+    {VF_LINE,9,0},{VF_LINE,9,24},{VF_LINE,7,24},{VF_LINE,7,13},{VF_LINE,3,13},
+    {VF_LINE,3,24},{VF_LINE,1,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_I[] = {
+    {VF_MOVE,0,0},{VF_LINE,3,0},{VF_LINE,3,24},{VF_LINE,0,24},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_J[] = {
+    {VF_MOVE,4,0},{VF_LINE,7,0},{VF_LINE,7,20},{VF_LINE,5,24},{VF_LINE,1,24},
+    {VF_LINE,0,22},{VF_LINE,0,18},{VF_LINE,2,18},{VF_LINE,2,21},{VF_LINE,3,22},
+    {VF_LINE,5,20},{VF_LINE,5,0},{VF_LINE,4,0},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_K[] = {
+    {VF_MOVE,1,0},{VF_LINE,3,0},{VF_LINE,3,9},{VF_LINE,7,0},{VF_LINE,10,0},
+    {VF_LINE,5,11},{VF_LINE,10,24},{VF_LINE,7,24},{VF_LINE,3,14},{VF_LINE,3,24},
+    {VF_LINE,1,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_L[] = {
+    {VF_MOVE,1,0},{VF_LINE,3,0},{VF_LINE,3,21},{VF_LINE,9,21},{VF_LINE,9,24},
+    {VF_LINE,1,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_M[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,6,10},{VF_LINE,10,0},{VF_LINE,12,0},
+    {VF_LINE,12,24},{VF_LINE,10,24},{VF_LINE,10,6},{VF_LINE,7,14},{VF_LINE,5,14},
+    {VF_LINE,2,6},{VF_LINE,2,24},{VF_LINE,0,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_N[] = {
+    {VF_MOVE,1,0},{VF_LINE,3,0},{VF_LINE,8,16},{VF_LINE,8,0},{VF_LINE,10,0},
+    {VF_LINE,10,24},{VF_LINE,8,24},{VF_LINE,3,8},{VF_LINE,3,24},{VF_LINE,1,24},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_O[] = {
+    {VF_MOVE,2,0},{VF_LINE,9,0},{VF_LINE,11,2},{VF_LINE,11,22},{VF_LINE,9,24},
+    {VF_LINE,2,24},{VF_LINE,0,22},{VF_LINE,0,2},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,8,3},{VF_LINE,9,4},{VF_LINE,9,20},{VF_LINE,8,21},
+    {VF_LINE,3,21},{VF_LINE,2,20},{VF_LINE,2,4},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_P[] = {
+    {VF_MOVE,1,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,12},{VF_LINE,7,14},
+    {VF_LINE,3,14},{VF_LINE,3,24},{VF_LINE,1,24},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,10},{VF_LINE,6,11},
+    {VF_LINE,3,11},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_Q[] = {
+    {VF_MOVE,2,0},{VF_LINE,9,0},{VF_LINE,11,2},{VF_LINE,11,19},{VF_LINE,10,20},
+    {VF_LINE,12,24},{VF_LINE,10,24},{VF_LINE,8,21},{VF_LINE,2,24},{VF_LINE,0,22},
+    {VF_LINE,0,2},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,8,3},{VF_LINE,9,4},{VF_LINE,9,18},{VF_LINE,7,20},
+    {VF_LINE,3,21},{VF_LINE,2,20},{VF_LINE,2,4},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_R[] = {
+    {VF_MOVE,1,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,10},{VF_LINE,7,12},
+    {VF_LINE,9,14},{VF_LINE,10,24},{VF_LINE,8,24},{VF_LINE,7,15},{VF_LINE,3,14},
+    {VF_LINE,3,24},{VF_LINE,1,24},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,10},{VF_LINE,6,11},
+    {VF_LINE,3,11},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_S[] = {
+    {VF_MOVE,8,3},{VF_LINE,3,3},{VF_LINE,2,4},{VF_LINE,2,10},{VF_LINE,3,11},
+    {VF_LINE,7,11},{VF_LINE,9,13},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,1,24},
+    {VF_LINE,1,21},{VF_LINE,7,21},{VF_LINE,7,14},{VF_LINE,6,13},{VF_LINE,2,13},
+    {VF_LINE,0,11},{VF_LINE,0,2},{VF_LINE,2,0},{VF_LINE,8,0},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_T[] = {
+    {VF_MOVE,0,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,6,3},{VF_LINE,6,24},
+    {VF_LINE,4,24},{VF_LINE,4,3},{VF_LINE,0,3},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_U[] = {
+    {VF_MOVE,1,0},{VF_LINE,3,0},{VF_LINE,3,20},{VF_LINE,4,21},{VF_LINE,7,21},
+    {VF_LINE,8,20},{VF_LINE,8,0},{VF_LINE,10,0},{VF_LINE,10,22},{VF_LINE,8,24},
+    {VF_LINE,3,24},{VF_LINE,1,22},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_V[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,5,18},{VF_LINE,9,0},{VF_LINE,11,0},
+    {VF_LINE,6,24},{VF_LINE,5,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_W[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,4,16},{VF_LINE,6,6},{VF_LINE,7,6},
+    {VF_LINE,9,16},{VF_LINE,11,0},{VF_LINE,13,0},{VF_LINE,10,24},{VF_LINE,9,24},
+    {VF_LINE,7,14},{VF_LINE,5,24},{VF_LINE,4,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_X[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,5,10},{VF_LINE,8,0},{VF_LINE,10,0},
+    {VF_LINE,6,12},{VF_LINE,10,24},{VF_LINE,8,24},{VF_LINE,5,14},{VF_LINE,2,24},
+    {VF_LINE,0,24},{VF_LINE,4,12},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_Y[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,5,10},{VF_LINE,8,0},{VF_LINE,10,0},
+    {VF_LINE,6,13},{VF_LINE,6,24},{VF_LINE,4,24},{VF_LINE,4,13},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_Z[] = {
+    {VF_MOVE,0,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,3,21},{VF_LINE,9,21},
+    {VF_LINE,9,24},{VF_LINE,0,24},{VF_LINE,0,21},{VF_LINE,6,3},{VF_LINE,0,3},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
 static const VfCmd vf_glyph_d[] = {
     {VF_MOVE, 7, 0}, {VF_LINE, 9, 0}, {VF_LINE, 9, 24},
     {VF_LINE, 7, 24}, {VF_LINE, 7, 22},
@@ -1624,16 +1777,248 @@ static const VfCmd vf_glyph_t[] = {
     {VF_END, 0, 0}
 };
 
+static const VfCmd vf_glyph_a[] = {
+    {VF_MOVE,7,8},{VF_LINE,9,8},{VF_LINE,9,24},{VF_LINE,7,24},{VF_LINE,7,22},
+    {VF_LINE,5,24},{VF_LINE,2,24},{VF_LINE,0,22},{VF_LINE,0,18},{VF_LINE,2,16},
+    {VF_LINE,7,16},{VF_LINE,7,14},{VF_LINE,5,14},{VF_LINE,2,14},{VF_LINE,0,12},
+    {VF_LINE,0,10},{VF_LINE,2,8},{VF_LINE,5,8},{VF_LINE,7,10},{VF_CLOSE,0,0},
+    {VF_MOVE,2,18},{VF_LINE,2,21},{VF_LINE,3,22},{VF_LINE,6,22},{VF_LINE,7,21},
+    {VF_LINE,7,18},{VF_LINE,6,17},{VF_LINE,3,17},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_b[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,2,10},{VF_LINE,4,8},{VF_LINE,7,8},
+    {VF_LINE,9,10},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,4,24},{VF_LINE,2,22},
+    {VF_LINE,2,24},{VF_LINE,0,24},{VF_CLOSE,0,0},
+    {VF_MOVE,2,12},{VF_LINE,3,10},{VF_LINE,6,10},{VF_LINE,7,12},{VF_LINE,7,21},
+    {VF_LINE,6,22},{VF_LINE,3,22},{VF_LINE,2,21},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_c[] = {
+    {VF_MOVE,8,10},{VF_LINE,8,8},{VF_LINE,2,8},{VF_LINE,0,10},{VF_LINE,0,22},
+    {VF_LINE,2,24},{VF_LINE,8,24},{VF_LINE,8,22},{VF_LINE,3,22},{VF_LINE,2,21},
+    {VF_LINE,2,11},{VF_LINE,3,10},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_f[] = {
+    {VF_MOVE,3,0},{VF_LINE,6,0},{VF_LINE,6,2},{VF_LINE,4,2},{VF_LINE,3,3},
+    {VF_LINE,3,8},{VF_LINE,6,8},{VF_LINE,6,10},{VF_LINE,3,10},{VF_LINE,3,24},
+    {VF_LINE,1,24},{VF_LINE,1,10},{VF_LINE,0,10},{VF_LINE,0,8},{VF_LINE,1,8},
+    {VF_LINE,1,3},{VF_LINE,2,1},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_g[] = {
+    {VF_MOVE,7,8},{VF_LINE,9,8},{VF_LINE,9,28},{VF_LINE,7,30},{VF_LINE,2,30},
+    {VF_LINE,0,28},{VF_LINE,0,26},{VF_LINE,2,26},{VF_LINE,2,28},{VF_LINE,3,29},
+    {VF_LINE,7,29},{VF_LINE,7,24},{VF_LINE,5,24},{VF_LINE,2,24},{VF_LINE,0,22},
+    {VF_LINE,0,10},{VF_LINE,2,8},{VF_LINE,5,8},{VF_LINE,7,10},{VF_CLOSE,0,0},
+    {VF_MOVE,2,11},{VF_LINE,3,10},{VF_LINE,6,10},{VF_LINE,7,11},{VF_LINE,7,21},
+    {VF_LINE,6,22},{VF_LINE,3,22},{VF_LINE,2,21},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_h[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,2,10},{VF_LINE,4,8},{VF_LINE,7,8},
+    {VF_LINE,9,10},{VF_LINE,9,24},{VF_LINE,7,24},{VF_LINE,7,12},{VF_LINE,5,10},
+    {VF_LINE,2,12},{VF_LINE,2,24},{VF_LINE,0,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_j[] = {
+    {VF_MOVE,3,3},{VF_LINE,5,3},{VF_LINE,5,6},{VF_LINE,3,6},{VF_CLOSE,0,0},
+    {VF_MOVE,3,8},{VF_LINE,5,8},{VF_LINE,5,28},{VF_LINE,3,30},{VF_LINE,0,30},
+    {VF_LINE,0,28},{VF_LINE,2,28},{VF_LINE,3,27},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_k[] = {
+    {VF_MOVE,0,0},{VF_LINE,2,0},{VF_LINE,2,14},{VF_LINE,6,8},{VF_LINE,8,8},
+    {VF_LINE,4,15},{VF_LINE,8,24},{VF_LINE,6,24},{VF_LINE,2,17},{VF_LINE,2,24},
+    {VF_LINE,0,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_m[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,2,10},{VF_LINE,4,8},{VF_LINE,6,8},
+    {VF_LINE,7,10},{VF_LINE,9,8},{VF_LINE,11,8},{VF_LINE,13,10},{VF_LINE,13,24},
+    {VF_LINE,11,24},{VF_LINE,11,12},{VF_LINE,9,10},{VF_LINE,8,10},{VF_LINE,7,12},
+    {VF_LINE,7,24},{VF_LINE,5,24},{VF_LINE,5,12},{VF_LINE,3,10},{VF_LINE,2,12},
+    {VF_LINE,2,24},{VF_LINE,0,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_p[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,2,10},{VF_LINE,4,8},{VF_LINE,7,8},
+    {VF_LINE,9,10},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,4,24},{VF_LINE,2,22},
+    {VF_LINE,2,30},{VF_LINE,0,30},{VF_CLOSE,0,0},
+    {VF_MOVE,2,12},{VF_LINE,3,10},{VF_LINE,6,10},{VF_LINE,7,12},{VF_LINE,7,21},
+    {VF_LINE,6,22},{VF_LINE,3,22},{VF_LINE,2,21},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_q[] = {
+    {VF_MOVE,7,8},{VF_LINE,9,8},{VF_LINE,9,30},{VF_LINE,7,30},{VF_LINE,7,22},
+    {VF_LINE,5,24},{VF_LINE,2,24},{VF_LINE,0,22},{VF_LINE,0,10},{VF_LINE,2,8},
+    {VF_LINE,5,8},{VF_LINE,7,10},{VF_CLOSE,0,0},
+    {VF_MOVE,2,11},{VF_LINE,3,10},{VF_LINE,6,10},{VF_LINE,7,11},{VF_LINE,7,21},
+    {VF_LINE,6,22},{VF_LINE,3,22},{VF_LINE,2,21},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_s[] = {
+    {VF_MOVE,7,10},{VF_LINE,3,10},{VF_LINE,2,11},{VF_LINE,2,14},{VF_LINE,3,15},
+    {VF_LINE,6,15},{VF_LINE,8,17},{VF_LINE,8,22},{VF_LINE,6,24},{VF_LINE,1,24},
+    {VF_LINE,1,22},{VF_LINE,6,22},{VF_LINE,6,18},{VF_LINE,5,17},{VF_LINE,2,17},
+    {VF_LINE,0,15},{VF_LINE,0,10},{VF_LINE,2,8},{VF_LINE,7,8},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_u[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,2,21},{VF_LINE,3,22},{VF_LINE,6,22},
+    {VF_LINE,7,21},{VF_LINE,7,8},{VF_LINE,9,8},{VF_LINE,9,24},{VF_LINE,7,24},
+    {VF_LINE,7,22},{VF_LINE,5,24},{VF_LINE,4,24},{VF_LINE,2,22},{VF_LINE,0,24},
+    {VF_LINE,0,22},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_v[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,4,20},{VF_LINE,6,8},{VF_LINE,8,8},
+    {VF_LINE,5,24},{VF_LINE,3,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_w[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,3,18},{VF_LINE,5,10},{VF_LINE,7,10},
+    {VF_LINE,9,18},{VF_LINE,10,8},{VF_LINE,12,8},{VF_LINE,10,24},{VF_LINE,8,24},
+    {VF_LINE,6,16},{VF_LINE,4,24},{VF_LINE,2,24},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_x[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,4,14},{VF_LINE,6,8},{VF_LINE,8,8},
+    {VF_LINE,5,16},{VF_LINE,8,24},{VF_LINE,6,24},{VF_LINE,4,18},{VF_LINE,2,24},
+    {VF_LINE,0,24},{VF_LINE,3,16},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_y[] = {
+    {VF_MOVE,0,8},{VF_LINE,2,8},{VF_LINE,5,18},{VF_LINE,7,8},{VF_LINE,9,8},
+    {VF_LINE,5,24},{VF_LINE,3,30},{VF_LINE,1,30},{VF_LINE,4,22},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_z[] = {
+    {VF_MOVE,0,8},{VF_LINE,8,8},{VF_LINE,8,10},{VF_LINE,2,22},{VF_LINE,8,22},
+    {VF_LINE,8,24},{VF_LINE,0,24},{VF_LINE,0,22},{VF_LINE,6,10},{VF_LINE,0,10},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+/* ── Digit glyphs 0-9 ───────────────────────────────────────────────── */
+
+static const VfCmd vf_glyph_0[] = {
+    {VF_MOVE,2,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,22},{VF_LINE,7,24},
+    {VF_LINE,2,24},{VF_LINE,0,22},{VF_LINE,0,2},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,20},{VF_LINE,6,21},
+    {VF_LINE,3,21},{VF_LINE,2,20},{VF_LINE,2,4},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_1[] = {
+    {VF_MOVE,2,4},{VF_LINE,4,0},{VF_LINE,6,0},{VF_LINE,6,21},{VF_LINE,8,21},
+    {VF_LINE,8,24},{VF_LINE,1,24},{VF_LINE,1,21},{VF_LINE,4,21},{VF_LINE,4,5},
+    {VF_LINE,2,7},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_2[] = {
+    {VF_MOVE,0,2},{VF_LINE,2,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,10},
+    {VF_LINE,3,21},{VF_LINE,9,21},{VF_LINE,9,24},{VF_LINE,0,24},{VF_LINE,0,21},
+    {VF_LINE,7,8},{VF_LINE,7,4},{VF_LINE,6,3},{VF_LINE,3,3},{VF_LINE,2,4},
+    {VF_LINE,2,6},{VF_LINE,0,6},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_3[] = {
+    {VF_MOVE,0,2},{VF_LINE,2,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,10},
+    {VF_LINE,7,12},{VF_LINE,9,14},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,2,24},
+    {VF_LINE,0,22},{VF_LINE,0,20},{VF_LINE,2,20},{VF_LINE,2,21},{VF_LINE,6,21},
+    {VF_LINE,7,20},{VF_LINE,7,15},{VF_LINE,5,13},{VF_LINE,5,11},{VF_LINE,7,9},
+    {VF_LINE,7,4},{VF_LINE,6,3},{VF_LINE,3,3},{VF_LINE,2,4},{VF_LINE,2,6},
+    {VF_LINE,0,6},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_4[] = {
+    {VF_MOVE,6,0},{VF_LINE,8,0},{VF_LINE,8,15},{VF_LINE,9,15},{VF_LINE,9,18},
+    {VF_LINE,8,18},{VF_LINE,8,24},{VF_LINE,6,24},{VF_LINE,6,18},{VF_LINE,0,18},
+    {VF_LINE,0,15},{VF_CLOSE,0,0},
+    {VF_MOVE,6,5},{VF_LINE,2,15},{VF_LINE,6,15},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_5[] = {
+    {VF_MOVE,0,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,2,3},{VF_LINE,2,10},
+    {VF_LINE,7,10},{VF_LINE,9,12},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,2,24},
+    {VF_LINE,0,22},{VF_LINE,0,20},{VF_LINE,2,20},{VF_LINE,2,21},{VF_LINE,6,21},
+    {VF_LINE,7,20},{VF_LINE,7,13},{VF_LINE,6,12},{VF_LINE,0,12},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_6[] = {
+    {VF_MOVE,7,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,3,3},{VF_LINE,2,4},
+    {VF_LINE,2,10},{VF_LINE,4,8},{VF_LINE,7,8},{VF_LINE,9,10},{VF_LINE,9,22},
+    {VF_LINE,7,24},{VF_LINE,2,24},{VF_LINE,0,22},{VF_LINE,0,2},{VF_LINE,2,0},
+    {VF_CLOSE,0,0},
+    {VF_MOVE,3,10},{VF_LINE,6,10},{VF_LINE,7,11},{VF_LINE,7,21},{VF_LINE,6,22},
+    {VF_LINE,3,22},{VF_LINE,2,21},{VF_LINE,2,11},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_7[] = {
+    {VF_MOVE,0,0},{VF_LINE,9,0},{VF_LINE,9,3},{VF_LINE,4,24},{VF_LINE,2,24},
+    {VF_LINE,7,3},{VF_LINE,0,3},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_8[] = {
+    {VF_MOVE,2,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,10},{VF_LINE,7,12},
+    {VF_LINE,9,14},{VF_LINE,9,22},{VF_LINE,7,24},{VF_LINE,2,24},{VF_LINE,0,22},
+    {VF_LINE,0,14},{VF_LINE,2,12},{VF_LINE,0,10},{VF_LINE,0,2},{VF_CLOSE,0,0},
+    {VF_MOVE,3,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,9},{VF_LINE,6,10},
+    {VF_LINE,3,10},{VF_LINE,2,9},{VF_LINE,2,4},{VF_CLOSE,0,0},
+    {VF_MOVE,3,14},{VF_LINE,6,14},{VF_LINE,7,15},{VF_LINE,7,21},{VF_LINE,6,22},
+    {VF_LINE,3,22},{VF_LINE,2,21},{VF_LINE,2,15},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_9[] = {
+    {VF_MOVE,2,0},{VF_LINE,7,0},{VF_LINE,9,2},{VF_LINE,9,22},{VF_LINE,7,24},
+    {VF_LINE,0,24},{VF_LINE,0,21},{VF_LINE,6,21},{VF_LINE,7,20},{VF_LINE,7,14},
+    {VF_LINE,5,16},{VF_LINE,2,16},{VF_LINE,0,14},{VF_LINE,0,2},{VF_CLOSE,0,0},
+    {VF_MOVE,2,3},{VF_LINE,6,3},{VF_LINE,7,4},{VF_LINE,7,13},{VF_LINE,6,14},
+    {VF_LINE,3,14},{VF_LINE,2,13},{VF_LINE,2,4},{VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+/* ── Punctuation glyphs ─────────────────────────────────────────────── */
+
+static const VfCmd vf_glyph_colon[] = {
+    {VF_MOVE,0,6},{VF_LINE,2,6},{VF_LINE,2,9},{VF_LINE,0,9},{VF_CLOSE,0,0},
+    {VF_MOVE,0,17},{VF_LINE,2,17},{VF_LINE,2,20},{VF_LINE,0,20},{VF_CLOSE,0,0},
+    {VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_period[] = {
+    {VF_MOVE,0,21},{VF_LINE,2,21},{VF_LINE,2,24},{VF_LINE,0,24},
+    {VF_CLOSE,0,0},{VF_END,0,0}
+};
+
+static const VfCmd vf_glyph_space[] = {
+    {VF_END,0,0}
+};
+
 /* Lookup table — maps ASCII 32-126 to glyph data. NULL = use bitmap fallback. */
 static const VfCmd* vf_glyphs[95] = {
-    NULL, /* space */
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* ! to / */
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* 0-9 */
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* : to @ */
-    vf_glyph_A, NULL, NULL, NULL, vf_glyph_E, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* A-Z */
-    NULL, NULL, NULL, NULL, NULL, NULL, /* [ to ` */
-    NULL, NULL, NULL, vf_glyph_d, vf_glyph_e, NULL, NULL, NULL, vf_glyph_i, NULL, NULL, vf_glyph_l, NULL, vf_glyph_n, vf_glyph_o, NULL, NULL, vf_glyph_r, NULL, vf_glyph_t, NULL, NULL, NULL, NULL, NULL, NULL, /* a-z */
-    NULL, NULL, NULL, NULL /* { to ~ */
+    vf_glyph_space, /* space (32) */
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, /* ! to - (33-45) */
+    vf_glyph_period, /* . (46) */
+    NULL, /* / (47) */
+    vf_glyph_0, vf_glyph_1, vf_glyph_2, vf_glyph_3, vf_glyph_4, /* 0-4 (48-52) */
+    vf_glyph_5, vf_glyph_6, vf_glyph_7, vf_glyph_8, vf_glyph_9, /* 5-9 (53-57) */
+    vf_glyph_colon, /* : (58) */
+    NULL, NULL, NULL, NULL, NULL, NULL, /* ; to @ (59-64) */
+    vf_glyph_A, vf_glyph_B, vf_glyph_C, vf_glyph_D, vf_glyph_E, vf_glyph_F,
+    vf_glyph_G, vf_glyph_H, vf_glyph_I, vf_glyph_J, vf_glyph_K, vf_glyph_L,
+    vf_glyph_M, vf_glyph_N, vf_glyph_O, vf_glyph_P, vf_glyph_Q, vf_glyph_R,
+    vf_glyph_S, vf_glyph_T, vf_glyph_U, vf_glyph_V, vf_glyph_W, vf_glyph_X,
+    vf_glyph_Y, vf_glyph_Z, /* A-Z (65-90) */
+    NULL, NULL, NULL, NULL, NULL, NULL, /* [ to ` (91-96) */
+    vf_glyph_a, vf_glyph_b, vf_glyph_c, vf_glyph_d, vf_glyph_e, vf_glyph_f,
+    vf_glyph_g, vf_glyph_h, vf_glyph_i, vf_glyph_j, vf_glyph_k, vf_glyph_l,
+    vf_glyph_m, vf_glyph_n, vf_glyph_o, vf_glyph_p, vf_glyph_q, vf_glyph_r,
+    vf_glyph_s, vf_glyph_t, vf_glyph_u, vf_glyph_v, vf_glyph_w, vf_glyph_x,
+    vf_glyph_y, vf_glyph_z, /* a-z (97-122) */
+    NULL, NULL, NULL, NULL /* { to ~ (123-126) */
 };
 
 /* rt_gui_draw_text(pack(x,y), pack(ptr,len), pack(color,0), alpha)
