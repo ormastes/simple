@@ -76,6 +76,13 @@ double fmin(double x, double y);
 double fmax(double x, double y);
 double hypot(double x, double y);
 
+/* Near-zero accurate variants */
+double log1p(double x);
+double expm1(double x);
+
+/* Scale by power of 2 */
+double scalbn(double x, int n);
+
 /* float functions */
 float fabsf(float x);
 float sqrtf(float x);
@@ -109,6 +116,13 @@ float copysignf(float x, float y);
 float fminf(float x, float y);
 float fmaxf(float x, float y);
 float hypotf(float x, float y);
+
+/* float near-zero variants */
+float log1pf(float x);
+float expm1f(float x);
+
+/* float scale by power of 2 */
+float scalbnf(float x, int n);
 
 #ifdef __cplusplus
 }

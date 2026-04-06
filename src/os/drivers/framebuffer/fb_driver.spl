@@ -7,7 +7,7 @@
 # Uses double buffering: draw to back buffer, swap to front on vsync.
 
 use os.kernel.boot.ports.{FramebufferInfo}
-use os.kernel.boot.mmio.{mmio_write32}
+use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 
 # ============================================================================
 # Color
@@ -70,17 +70,14 @@ impl FramebufferDriver:
         )
 
     static fn from_boot_info(fb: FramebufferInfo) -> FramebufferDriver:
-        """Create driver from Limine framebuffer info."""
-        val pixel_count = fb.width * fb.height
-        var back: [u32] = []
-        var i: u32 = 0
-        while i < pixel_count:
-            back.push(0)
-            i = i + 1
+        """Create driver from Limine framebuffer info.
 
+        Direct-write mode: no back buffer allocated. All rendering
+        writes directly to the hardware framebuffer via MMIO.
+        """
         FramebufferDriver(
             front_addr: fb.addr.addr,
-            back_buffer: back,
+            back_buffer: [],
             width: fb.width,
             height: fb.height,
             pitch: fb.pitch,
@@ -89,15 +86,15 @@ impl FramebufferDriver:
         )
 
     me put_pixel(x: u32, y: u32, color: Color):
-        """Set a single pixel in the back buffer."""
+        """Set a single pixel directly on the hardware framebuffer."""
         if x >= self.width or y >= self.height:
             return
-        val index = y * self.width + x
-        self.back_buffer[index] = color.to_u32()
+        val offset = (y * self.width + x) * 4
+        mmio_write32(self.front_addr + offset.to_u64(), color.to_u32())
         self.dirty = true
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: Color):
-        """Fill a rectangle in the back buffer."""
+        """Fill a rectangle directly on the hardware framebuffer."""
         val pixel = color.to_u32()
         var row: u32 = 0
         while row < h:
@@ -108,8 +105,8 @@ impl FramebufferDriver:
             while col < w:
                 val px = x + col
                 if px < self.width:
-                    val index = py * self.width + px
-                    self.back_buffer[index] = pixel
+                    val offset = (py * self.width + px) * 4
+                    mmio_write32(self.front_addr + offset.to_u64(), pixel)
                 col = col + 1
             row = row + 1
         self.dirty = true
@@ -143,27 +140,17 @@ impl FramebufferDriver:
             cx = cx + 8
 
     me swap_buffers():
-        """Copy back buffer to front (hardware framebuffer)."""
-        if not self.dirty:
-            return
-        # Copy pixel by pixel via MMIO writes
-        var i: u32 = 0
-        val total = self.width * self.height
-        while i < total:
-            val byte_offset = i * 4
-            val offset = byte_offset.to_u64()
-            val addr = self.front_addr + offset
-            mmio_write32(addr, self.back_buffer[i])
-            i = i + 1
+        """No-op in direct-write mode (already writing to hardware FB)."""
         self.dirty = false
 
     me clear(color: Color):
-        """Clear entire back buffer."""
+        """Clear entire framebuffer directly via MMIO."""
         val pixel = color.to_u32()
         var i: u32 = 0
         val total = self.width * self.height
         while i < total:
-            self.back_buffer[i] = pixel
+            val offset = (i * 4).to_u64()
+            mmio_write32(self.front_addr + offset, pixel)
             i = i + 1
         self.dirty = true
 
@@ -171,11 +158,11 @@ impl FramebufferDriver:
         self.width * self.height
 
     me blend_pixel(x: u32, y: u32, color: Color, alpha: u8):
-        """Alpha-blend a pixel onto the back buffer."""
+        """Alpha-blend a pixel directly on the hardware framebuffer."""
         if x >= self.width or y >= self.height:
             return
-        val idx = (y * self.width + x).to_u64()
-        val dst = self.back_buffer[idx]
+        val offset = ((y * self.width + x) * 4).to_u64()
+        val dst = mmio_read32(self.front_addr + offset)
         val inv = 255 - alpha.to_u32()
         val sr = color.r.to_u32()
         val sg = color.g.to_u32()
@@ -186,11 +173,11 @@ impl FramebufferDriver:
         val rr = (sr * alpha.to_u32() + dr * inv + 128) >> 8
         val rg = (sg * alpha.to_u32() + dg * inv + 128) >> 8
         val rb = (sb * alpha.to_u32() + db * inv + 128) >> 8
-        self.back_buffer[idx] = 0xFF000000 | (rr << 16) | (rg << 8) | rb
+        mmio_write32(self.front_addr + offset, 0xFF000000 | (rr << 16) | (rg << 8) | rb)
         self.dirty = true
 
     me blend_rect(x: u32, y: u32, w: u32, h: u32, color: Color, alpha: u8):
-        """Alpha-blend a filled rectangle onto the back buffer."""
+        """Alpha-blend a filled rectangle directly on the hardware framebuffer."""
         var row: u32 = 0
         while row < h:
             var col: u32 = 0
@@ -200,11 +187,11 @@ impl FramebufferDriver:
             row = row + 1
 
     fn read_pixel(x: u32, y: u32) -> u32:
-        """Read a pixel from the back buffer."""
+        """Read a pixel directly from the hardware framebuffer."""
         if x >= self.width or y >= self.height:
             return 0
-        val idx = (y * self.width + x).to_u64()
-        self.back_buffer[idx]
+        val offset = ((y * self.width + x) * 4).to_u64()
+        mmio_read32(self.front_addr + offset)
 
 # ============================================================================
 # VGA 8x16 Bitmap Font (stub — first 128 ASCII glyphs)

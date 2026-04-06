@@ -527,3 +527,40 @@ float fminf(float x, float y) { return (float)fmin((double)x, (double)y); }
 float fmaxf(float x, float y) { return (float)fmax((double)x, (double)y); }
 float hypotf(float x, float y) { return (float)hypot((double)x, (double)y); }
 float cbrtf(float x)           { return (float)cbrt((double)x); }
+
+/* ====================================================================
+ * 12. scalbn / scalbnf — multiply by power of 2 (needed by Rust core)
+ * ==================================================================== */
+
+double scalbn(double x, int n) {
+    return ldexp(x, n);
+}
+
+float scalbnf(float x, int n) {
+    return ldexpf(x, n);
+}
+
+/* ====================================================================
+ * 13. log1p / expm1 — accurate near-zero variants (needed by LLVM)
+ * ==================================================================== */
+
+double log1p(double x) {
+    /* For |x| < 1e-4, use Taylor: x - x^2/2 + x^3/3 - ... */
+    if (fabs(x) < 1e-4) {
+        double x2 = x * x;
+        return x - x2 * 0.5 + x2 * x / 3.0 - x2 * x2 * 0.25;
+    }
+    return log(1.0 + x);
+}
+
+double expm1(double x) {
+    /* For |x| < 1e-4, use Taylor: x + x^2/2 + x^3/6 + ... */
+    if (fabs(x) < 1e-4) {
+        double x2 = x * x;
+        return x + x2 * 0.5 + x2 * x / 6.0 + x2 * x2 / 24.0;
+    }
+    return exp(x) - 1.0;
+}
+
+float log1pf(float x) { return (float)log1p((double)x); }
+float expm1f(float x) { return (float)expm1((double)x); }

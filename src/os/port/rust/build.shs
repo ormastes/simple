@@ -15,8 +15,17 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-TARGET_SPEC="$REPO_ROOT/src/os/toolchain/rust/x86_64-unknown-simpleos.json"
+SIMPLEOS_ARCH="${SIMPLEOS_ARCH:-x86_64}"
+TARGET_SPEC="$REPO_ROOT/src/os/toolchain/rust/${SIMPLEOS_ARCH}-unknown-simpleos.json"
+
+# Handle riscv target spec naming
+case "$SIMPLEOS_ARCH" in
+    riscv64gc) TARGET_SPEC="$REPO_ROOT/src/os/toolchain/rust/riscv64gc-unknown-simpleos.json" ;;
+    riscv32imac) TARGET_SPEC="$REPO_ROOT/src/os/toolchain/rust/riscv32imac-unknown-simpleos.json" ;;
+esac
+
 LIBC_DIR="$REPO_ROOT/src/os/libc"
+SYSROOT_LIB="$REPO_ROOT/build/os/sysroot/lib"
 BUILD_DIR="$REPO_ROOT/build/os/rust"
 
 check_prereqs() {
@@ -43,6 +52,9 @@ check_prereqs() {
     # Check target spec
     if [ ! -f "$TARGET_SPEC" ]; then
         echo "ERROR: Target spec not found: $TARGET_SPEC"
+        echo "  Available specs:"
+        ls "$REPO_ROOT/src/os/toolchain/rust/"*.json 2>/dev/null || echo "    (none)"
+        echo "  Set SIMPLEOS_ARCH to one of: x86_64 aarch64 riscv64gc riscv32imac"
         exit 1
     fi
 
@@ -68,13 +80,19 @@ build_single() {
         return 1
     fi
 
-    echo "[rust-simpleos] Building $name..."
+    # Use sysroot lib directory if available, fall back to libc source dir
+    LIB_DIR="$LIBC_DIR"
+    if [ -d "$SYSROOT_LIB" ] && [ -f "$SYSROOT_LIB/libsimpleos_c.a" ]; then
+        LIB_DIR="$SYSROOT_LIB"
+    fi
+
+    echo "[rust-simpleos] Building $name (arch=$SIMPLEOS_ARCH)..."
     rustc +nightly \
         --target "$TARGET_SPEC" \
         --edition 2021 \
         -C panic=abort \
         -C opt-level=2 \
-        -C link-arg="-L$LIBC_DIR" \
+        -C link-arg="-L$LIB_DIR" \
         -C link-arg="-lsimpleos_c" \
         -C link-arg="-nostdlib" \
         -C link-arg="-fuse-ld=lld" \

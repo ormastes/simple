@@ -51,6 +51,13 @@ char  *strtok_r(char *str, const char *delim, char **saveptr);
 size_t strspn(const char *s, const char *accept);
 size_t strcspn(const char *s, const char *reject);
 
+/* Reverse memory search */
+void *memrchr(const void *s, int c, size_t n);
+
+/* BSD string functions (used by LLVM internals) */
+size_t strlcpy(char *dst, const char *src, size_t dstsize);
+size_t strlcat(char *dst, const char *src, size_t dstsize);
+
 /* Error string */
 char *strerror(int errnum);
 

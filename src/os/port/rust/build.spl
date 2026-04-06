@@ -21,7 +21,7 @@ val SUPPORTED_TARGETS = [
 
 val RUST_REPO = "https://github.com/ormastes/rust.git"
 val RUST_BRANCH = "simpleos"
-val TARGET_SPEC_DIR = "src/os/port/rust/target"
+val TARGET_SPEC_DIR = "src/os/toolchain/rust"
 val DEFAULT_INSTALL_PREFIX = "/opt/simpleos-rust"
 
 class BuildConfig:
@@ -84,17 +84,31 @@ fn parse_args(args: List<text>) -> BuildConfig:
         target_spec_only: false,
     )
 
+fn target_spec_path(target: text) -> text:
+    """Return the path to a target's JSON spec file."""
+    # Map short target names to full spec file names
+    if target == "x86_64-simpleos":
+        "{TARGET_SPEC_DIR}/x86_64-unknown-simpleos.json"
+    else if target == "aarch64-simpleos":
+        "{TARGET_SPEC_DIR}/aarch64-unknown-simpleos.json"
+    else if target == "riscv64gc-simpleos":
+        "{TARGET_SPEC_DIR}/riscv64gc-unknown-simpleos.json"
+    else if target == "riscv32imac-simpleos":
+        "{TARGET_SPEC_DIR}/riscv32imac-unknown-simpleos.json"
+    else:
+        "{TARGET_SPEC_DIR}/{target}.json"
+
 fn print_target_spec_info():
     print "Available target specs in {TARGET_SPEC_DIR}/:"
     for target in SUPPORTED_TARGETS:
-        val spec_path = "{TARGET_SPEC_DIR}/{target}.json"
+        val spec_path = target_spec_path(target)
         if fs.exists(spec_path):
             print "  {target} -> {spec_path}"
         else:
             print "  {target} -> MISSING ({spec_path})"
     print ""
     print "Usage with cargo:"
-    print "  cargo build -Z build-std=core,alloc --target {TARGET_SPEC_DIR}/x86_64-simpleos.json"
+    print "  cargo build -Z build-std=core,alloc --target {TARGET_SPEC_DIR}/x86_64-unknown-simpleos.json"
 
 fn check_prerequisites():
     val required_tools = ["python3", "git", "cmake", "ninja"]
@@ -199,10 +213,20 @@ impl RustExampleBuildConfig:
 fn rust_build_status() -> text:
     """Check Rust-on-SimpleOS example build status."""
     var status = "Rust-on-SimpleOS Build Status:\n"
-    if fs.exists("src/os/toolchain/rust/x86_64-unknown-simpleos.json"):
-        status = status + "  target spec: READY\n"
-    else:
-        status = status + "  target spec: MISSING\n"
+
+    # Check all target specs
+    val specs = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
+    var specs_found = 0
+    for spec in specs:
+        if fs.exists(spec):
+            specs_found = specs_found + 1
+    status = status + "  target specs: {specs_found}/{specs.len()} present\n"
+
     if fs.exists("src/os/libc/libsimpleos_c.a"):
         status = status + "  libc: BUILT\n"
     else:
@@ -262,30 +286,37 @@ fn has_tool(name: text) -> bool:
     result.exit_code == 0
 
 fn validate_target_spec() -> bool:
-    """Check target spec JSON exists and contains required fields."""
-    print "[validate] Checking target spec: {TOOLCHAIN_TARGET_SPEC}"
-
-    if not fs.exists(TOOLCHAIN_TARGET_SPEC):
-        print "[validate] FAIL: target spec not found"
-        return false
-
-    val content = fs.read_text(TOOLCHAIN_TARGET_SPEC)
-    if content.len() == 0:
-        print "[validate] FAIL: target spec is empty"
-        return false
+    """Check all target spec JSONs exist and contain required fields."""
+    val all_specs = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
 
     var ok = true
-    for field in TARGET_SPEC_REQUIRED_FIELDS:
-        # Check that the field name appears as a JSON key (quoted)
-        val key_pattern = "\"{field}\""
-        if not content.contains(key_pattern):
-            print "[validate] FAIL: target spec missing required field '{field}'"
+    for spec_path in all_specs:
+        print "[validate] Checking target spec: {spec_path}"
+
+        if not fs.exists(spec_path):
+            print "[validate] FAIL: target spec not found: {spec_path}"
             ok = false
         else:
-            print "[validate]   {field}: present"
+            val content = fs.read_text(spec_path)
+            if content.len() == 0:
+                print "[validate] FAIL: target spec is empty: {spec_path}"
+                ok = false
+            else:
+                for field in TARGET_SPEC_REQUIRED_FIELDS:
+                    val key_pattern = "\"{field}\""
+                    if not content.contains(key_pattern):
+                        print "[validate] FAIL: {spec_path} missing field '{field}'"
+                        ok = false
+                    else:
+                        print "[validate]   {field}: present"
 
     if ok:
-        print "[validate] PASS: target spec valid"
+        print "[validate] PASS: all target specs valid"
     ok
 
 fn validate_libc_linkage() -> bool:

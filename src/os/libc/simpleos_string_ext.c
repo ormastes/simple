@@ -168,7 +168,46 @@ void *memchr(const void *s, int c, size_t n) {
 }
 
 /* ====================================================================
- * 5. Case-insensitive comparison
+ * 5. memrchr — reverse memory search (used by LLVM internals)
+ * ==================================================================== */
+
+void *memrchr(const void *s, int c, size_t n) {
+    const unsigned char *p = (const unsigned char *)s + n;
+    unsigned char uc = (unsigned char)c;
+    while (n--) {
+        --p;
+        if (*p == uc) return (void *)p;
+    }
+    return NULL;
+}
+
+/* ====================================================================
+ * 6. strlcpy / strlcat — BSD string functions (used by LLVM)
+ * ==================================================================== */
+
+size_t strlcpy(char *dst, const char *src, size_t dstsize) {
+    size_t srclen = strlen(src);
+    if (dstsize > 0) {
+        size_t copylen = srclen < dstsize - 1 ? srclen : dstsize - 1;
+        memcpy(dst, src, copylen);
+        dst[copylen] = '\0';
+    }
+    return srclen;
+}
+
+size_t strlcat(char *dst, const char *src, size_t dstsize) {
+    size_t dstlen = strnlen(dst, dstsize);
+    size_t srclen = strlen(src);
+    if (dstlen == dstsize) return dstsize + srclen;
+    size_t remain = dstsize - dstlen - 1;
+    size_t copylen = srclen < remain ? srclen : remain;
+    memcpy(dst + dstlen, src, copylen);
+    dst[dstlen + copylen] = '\0';
+    return dstlen + srclen;
+}
+
+/* ====================================================================
+ * 7. Case-insensitive comparison
  * ==================================================================== */
 
 static int _tolower(int c) {

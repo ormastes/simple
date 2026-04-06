@@ -309,6 +309,148 @@ fn test_link_hello() -> bool:
     true
 
 # ===========================================================================
+# Advanced compilation tests
+# ===========================================================================
+
+fn test_compile_multifile() -> bool:
+    """Test: compile two C files and link them together."""
+    print "[smoke] Compiling multi-file test..."
+    ensure_build_dir()
+
+    val lib_source = "int add(int a, int b) { return a + b; }\n" +
+        "int multiply(int a, int b) { return a * b; }\n"
+    val main_source = "#include <simpleos_libc.h>\n" +
+        "extern int add(int, int);\n" +
+        "extern int multiply(int, int);\n" +
+        "void _start(void) {\n" +
+        "    int sum = add(3, 4);\n" +
+        "    int prod = multiply(5, 6);\n" +
+        "    printf(\"sum=%d prod=%d\\n\", sum, prod);\n" +
+        "    exit(0);\n" +
+        "}\n"
+
+    val lib_src = write_test_source("multi_lib", lib_source)
+    val main_src = write_test_source("multi_main", main_source)
+
+    val r1 = compile_for_simpleos(lib_src, "{BUILD_DIR}/multi_lib.o")
+    if r1.exit_code != 0:
+        print "[smoke] FAIL: multi_lib compile failed"
+        print r1.stderr
+        return false
+
+    val r2 = compile_for_simpleos(main_src, "{BUILD_DIR}/multi_main.o")
+    if r2.exit_code != 0:
+        print "[smoke] FAIL: multi_main compile failed"
+        print r2.stderr
+        return false
+
+    if not has_tool("ld.lld"):
+        print "[smoke] SKIP: multi-file link (ld.lld not found)"
+        return true
+
+    val link_result = link_for_simpleos(
+        ["{BUILD_DIR}/multi_main.o", "{BUILD_DIR}/multi_lib.o"],
+        "{BUILD_DIR}/multi_test"
+    )
+    if link_result.exit_code != 0:
+        print "[smoke] FAIL: multi-file link failed"
+        print link_result.stderr
+        return false
+
+    print "[smoke] PASS: multi-file compile+link"
+    true
+
+fn test_all_headers_compile() -> bool:
+    """Test: each standard header compiles standalone with clang."""
+    print "[smoke] Checking all headers compile..."
+    ensure_build_dir()
+
+    val headers = [
+        "stdio.h", "stdlib.h", "string.h", "unistd.h",
+        "errno.h", "fcntl.h", "signal.h", "time.h",
+        "math.h", "setjmp.h", "pthread.h", "limits.h",
+        "assert.h", "stdint.h", "stddef.h",
+        "sys/types.h", "sys/stat.h", "dirent.h",
+    ]
+    var ok = true
+
+    for header in headers:
+        val source = "#include <{header}>\nint _dummy_{header.replace("/", "_").replace(".", "_")};\n"
+        val src_path = "{BUILD_DIR}/hdr_test.c"
+        fs.write_text(src_path, source)
+        val result = compile_for_simpleos(src_path, "{BUILD_DIR}/hdr_test.o")
+        if result.exit_code != 0:
+            print "[smoke] FAIL: header <{header}> does not compile"
+            print result.stderr
+            ok = false
+        else:
+            print "[smoke]   <{header}>: OK"
+
+    if ok:
+        print "[smoke] PASS: all headers compile"
+    ok
+
+fn test_compile_string_ops() -> bool:
+    """Test: compile code using string and memory operations."""
+    print "[smoke] Compiling string/memory operations test..."
+    ensure_build_dir()
+
+    val source = "#include <string.h>\n" +
+        "#include <stdlib.h>\n" +
+        "int test_strings(void) {\n" +
+        "    char buf[64];\n" +
+        "    strlcpy(buf, \"hello\", sizeof(buf));\n" +
+        "    strlcat(buf, \" world\", sizeof(buf));\n" +
+        "    if (strlen(buf) != 11) return 1;\n" +
+        "    void *p = memrchr(buf, 'w', strlen(buf));\n" +
+        "    if (!p) return 2;\n" +
+        "    return 0;\n" +
+        "}\n"
+    val src = write_test_source("string_ops", source)
+    val result = compile_for_simpleos(src, "{BUILD_DIR}/string_ops.o")
+
+    if result.exit_code != 0:
+        print "[smoke] FAIL: string_ops compile failed"
+        print result.stderr
+        return false
+
+    print "[smoke] PASS: string/memory operations compile"
+    true
+
+fn test_rust_target_specs() -> bool:
+    """Test: all Rust target spec JSON files exist and contain required fields."""
+    print "[smoke] Checking Rust target spec files..."
+
+    val target_specs = [
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+        "src/os/toolchain/rust/aarch64-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv64gc-unknown-simpleos.json",
+        "src/os/toolchain/rust/riscv32imac-unknown-simpleos.json",
+    ]
+
+    val required_fields = ["arch", "data-layout", "llvm-target", "panic-strategy", "linker"]
+    var ok = true
+
+    for spec_path in target_specs:
+        if not fs.exists(spec_path):
+            print "[smoke] FAIL: missing target spec: {spec_path}"
+            ok = false
+        else:
+            val content = fs.read_text(spec_path)
+            var fields_ok = true
+            for field in required_fields:
+                if not content.contains("\"{field}\""):
+                    print "[smoke] FAIL: {spec_path} missing field '{field}'"
+                    fields_ok = false
+                    ok = false
+            if fields_ok:
+                print "[smoke]   {spec_path}: OK"
+
+    if ok:
+        print "[smoke] PASS: all Rust target specs valid"
+    ok
+
+# ===========================================================================
 # Runner
 # ===========================================================================
 
@@ -390,6 +532,38 @@ fn llvm_smoke_test_all() -> bool:
         else:
             print "[smoke] SKIP: link test (ld.lld not found)"
             skipped = skipped + 1
+
+    # --- Phase 3: Multi-file and header completeness tests ---
+    print ""
+    print "--- Phase 3: Advanced Tests ---"
+
+    if not has_clang or not sysroot_exists:
+        print "[smoke] SKIP: advanced tests (clang or sysroot unavailable)"
+        skipped = skipped + 3
+    else:
+        if test_compile_multifile():
+            passed = passed + 1
+        else:
+            failed = failed + 1
+
+        if test_all_headers_compile():
+            passed = passed + 1
+        else:
+            failed = failed + 1
+
+        if test_compile_string_ops():
+            passed = passed + 1
+        else:
+            failed = failed + 1
+
+    # --- Phase 4: Target spec validation ---
+    print ""
+    print "--- Phase 4: Rust Target Spec Validation ---"
+
+    if test_rust_target_specs():
+        passed = passed + 1
+    else:
+        failed = failed + 1
 
     print ""
     print "=== Results: {passed} passed, {failed} failed, {skipped} skipped ==="
