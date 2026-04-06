@@ -877,6 +877,19 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
+        /* Subtle horizon glow — brighter band in lower third */
+        for (uint32_t row = sh * 2 / 3; row < sh * 2 / 3 + sh / 8; row++) {
+            for (uint32_t col = 0; col < sw; col++) {
+                uint32_t dist = row - sh * 2 / 3;
+                uint32_t max_dist = sh / 8;
+                uint32_t alpha = 12 * (max_dist - dist) / max_dist;
+                if (alpha > 0) {
+                    uint32_t dst = fb_read(col, row);
+                    fb_write(col, row, alpha_blend(dst, 0x002040A0, (uint8_t)alpha));
+                }
+            }
+        }
+
         /* Nebula blobs */
         draw_blob(sw * 3 / 4, sh / 4, 220, 0x000A84FF, 30, sw, sh);   /* Blue (top-right) */
         draw_blob(sw / 5, sh * 2 / 3, 200, 0x00BB86FC, 25, sw, sh);   /* Purple (bottom-left) */
@@ -934,6 +947,9 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
                 fb_write(col, row, 0xFF000000u | color);
             }
         }
+
+        /* Sun glow — warm circle in upper area */
+        draw_blob(sw / 2, sh / 4, 300, 0x00FFFFFF, 15, sw, sh);
 
         /* Pastel blobs */
         draw_blob(sw * 2 / 3, sh / 3, 250, 0x00FFB5C5, 25, sw, sh);   /* Pink (top-right) */

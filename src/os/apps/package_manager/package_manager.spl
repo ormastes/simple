@@ -1,134 +1,64 @@
-# Package Manager — Software Package Management
+# Package Manager — Software Package Management GUI
 #
 # Browse, install, remove, and update software packages.
 # Tabbed interface with search, category filtering, and
 # a detail panel for inspecting selected packages.
+#
+# Uses pkg_core for all operations (shared with CLI and installer).
+# Glass-themed UI with the standard builder API.
 #
 # MDSOC: feature dimension, apps layer
 
 use common.ui.builder.{
     column, row, panel, button, text_widget, label,
     statusbar, menubar, table_widget, build_tree_with_title,
-    with_flex, with_width, tabs
+    with_flex, with_width, tabs, progress, divider,
+    text_field, dialog, scroll, list_widget
 }
 use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.session.{UISession}
-
-# =========================================================================
-# Data Models
-# =========================================================================
-
-enum PackageStatus:
-    """Installation status of a package."""
-    Installed
-    Available
-    Updatable
-
-struct Package:
-    """A software package with metadata."""
-    name: text
-    version: text
-    size: text
-    description: text
-    category: text
-    status: PackageStatus
-    installed_version: text
+use os.tools.pkg.pkg_core.{PkgCore, PackageInfo, PkgStatus, PkgOperationResult}
 
 # =========================================================================
 # Helpers
 # =========================================================================
 
-fn _status_label(status: PackageStatus) -> text:
-    """Format package status for display."""
+fn _status_label(status: PkgStatus) -> text:
     match status:
-        PackageStatus.Installed => "[installed]"
-        PackageStatus.Available => "[available]"
-        PackageStatus.Updatable => "[updatable]"
+        PkgStatus.Installed: "[installed]"
+        PkgStatus.Available: "[available]"
+        PkgStatus.Updatable: "[update available]"
 
-fn _status_short(status: PackageStatus) -> text:
-    """Short status tag for table rows."""
+fn _status_short(status: PkgStatus) -> text:
     match status:
-        PackageStatus.Installed => "Inst"
-        PackageStatus.Available => "Avail"
-        PackageStatus.Updatable => "Upd"
-
-fn _repeat_char(ch: text, count: i32) -> text:
-    """Repeat a character count times."""
-    var result = ""
-    var i = 0
-    while i < count:
-        result = "{result}{ch}"
-        i = i + 1
-    return result
-
-fn _progress_bar(percent: i32, width: i32) -> text:
-    """Build an ASCII progress bar like [########....] 67%."""
-    val clamped = if percent < 0: 0
-        elif percent > 100: 100
-        else: percent
-    val filled = (clamped * width) / 100
-    val empty = width - filled
-    var bar = "["
-    bar = bar + _repeat_char("#", filled)
-    bar = bar + _repeat_char(".", empty)
-    bar = bar + "] {clamped}%"
-    return bar
+        PkgStatus.Installed: "Inst"
+        PkgStatus.Available: "Avail"
+        PkgStatus.Updatable: "Upd"
 
 fn _tab_index(tab_name: text) -> i32:
-    """Convert tab name to index."""
     match tab_name:
         "Installed" => 0
         "Available" => 1
         "Updates" => 2
         _ => 0
 
-# =========================================================================
-# Sample Data
-# =========================================================================
-
-fn _default_packages() -> [Package]:
-    """Create 28 sample packages across all categories."""
-    var pkgs = []
-
-    # --- System (6) ---
-    pkgs = pkgs.push(Package(name: "simple-kernel", version: "1.2.0", size: "4.8 MB", description: "SimpleOS microkernel with scheduler and memory manager", category: "System", status: PackageStatus.Installed, installed_version: "1.2.0"))
-    pkgs = pkgs.push(Package(name: "simple-init", version: "1.0.3", size: "1.2 MB", description: "Init system and service manager for SimpleOS", category: "System", status: PackageStatus.Installed, installed_version: "1.0.3"))
-    pkgs = pkgs.push(Package(name: "simple-drivers", version: "1.3.0", size: "8.5 MB", description: "Hardware drivers bundle (VirtIO, framebuffer, PS/2)", category: "System", status: PackageStatus.Updatable, installed_version: "1.2.1"))
-    pkgs = pkgs.push(Package(name: "simple-fs", version: "1.1.0", size: "2.1 MB", description: "Filesystem utilities: ext4, fat32, VFS tools", category: "System", status: PackageStatus.Installed, installed_version: "1.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-net-stack", version: "0.9.0", size: "3.4 MB", description: "TCP/IP networking stack with socket API", category: "System", status: PackageStatus.Updatable, installed_version: "0.8.2"))
-    pkgs = pkgs.push(Package(name: "simple-firmware", version: "2.0.0", size: "12.0 MB", description: "UEFI firmware update package", category: "System", status: PackageStatus.Available, installed_version: ""))
-
-    # --- Development (6) ---
-    pkgs = pkgs.push(Package(name: "simple-compiler", version: "3.1.0", size: "18.2 MB", description: "Simple language compiler with Cranelift backend", category: "Development", status: PackageStatus.Installed, installed_version: "3.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-lsp", version: "2.0.1", size: "6.3 MB", description: "Language Server Protocol implementation for Simple", category: "Development", status: PackageStatus.Updatable, installed_version: "1.9.0"))
-    pkgs = pkgs.push(Package(name: "simple-debugger", version: "1.4.0", size: "5.1 MB", description: "DAP-compatible debugger with breakpoints and watchpoints", category: "Development", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-build-tools", version: "1.2.0", size: "3.8 MB", description: "Build system, linker wrapper, and native compilation tools", category: "Development", status: PackageStatus.Installed, installed_version: "1.2.0"))
-    pkgs = pkgs.push(Package(name: "simple-test-runner", version: "1.1.0", size: "2.4 MB", description: "SSpec test framework and runner with BDD matchers", category: "Development", status: PackageStatus.Installed, installed_version: "1.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-doc-gen", version: "0.5.0", size: "1.8 MB", description: "Documentation generator from doc comments", category: "Development", status: PackageStatus.Available, installed_version: ""))
-
-    # --- Utilities (6) ---
-    pkgs = pkgs.push(Package(name: "simple-editor", version: "2.1.0", size: "3.2 MB", description: "Modal text editor with syntax highlighting", category: "Utilities", status: PackageStatus.Installed, installed_version: "2.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-file-manager", version: "1.5.0", size: "2.0 MB", description: "Two-panel file manager with tree navigation", category: "Utilities", status: PackageStatus.Installed, installed_version: "1.5.0"))
-    pkgs = pkgs.push(Package(name: "simple-calculator", version: "1.0.0", size: "0.3 MB", description: "Scientific calculator with expression parser", category: "Utilities", status: PackageStatus.Installed, installed_version: "1.0.0"))
-    pkgs = pkgs.push(Package(name: "simple-screenshot", version: "1.0.1", size: "0.8 MB", description: "Screen capture tool with region selection", category: "Utilities", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-archive", version: "1.2.0", size: "1.5 MB", description: "Archive and compression tools (tar, gzip, zstd)", category: "Utilities", status: PackageStatus.Updatable, installed_version: "1.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-disk-manager", version: "1.0.0", size: "1.9 MB", description: "Disk and partition management utility", category: "Utilities", status: PackageStatus.Available, installed_version: ""))
-
-    # --- Network (5) ---
-    pkgs = pkgs.push(Package(name: "simple-browser", version: "0.7.0", size: "9.6 MB", description: "Minimal web browser with HTML/CSS rendering", category: "Network", status: PackageStatus.Installed, installed_version: "0.7.0"))
-    pkgs = pkgs.push(Package(name: "simple-sshd", version: "1.3.0", size: "4.2 MB", description: "SSH server daemon with key-based authentication", category: "Network", status: PackageStatus.Updatable, installed_version: "1.2.0"))
-    pkgs = pkgs.push(Package(name: "simple-curl", version: "1.0.0", size: "1.1 MB", description: "HTTP/HTTPS client for command-line transfers", category: "Network", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-dns", version: "0.3.0", size: "0.6 MB", description: "DNS resolver and local cache daemon", category: "Network", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-ftp", version: "1.0.0", size: "0.9 MB", description: "FTP client and server implementation", category: "Network", status: PackageStatus.Available, installed_version: ""))
-
-    # --- Games (5) ---
-    pkgs = pkgs.push(Package(name: "simple-snake", version: "1.0.0", size: "0.2 MB", description: "Classic snake game with arrow-key controls", category: "Games", status: PackageStatus.Installed, installed_version: "1.0.0"))
-    pkgs = pkgs.push(Package(name: "simple-minesweeper", version: "1.1.0", size: "0.4 MB", description: "Minesweeper with configurable grid sizes", category: "Games", status: PackageStatus.Installed, installed_version: "1.1.0"))
-    pkgs = pkgs.push(Package(name: "simple-tetris", version: "1.0.0", size: "0.3 MB", description: "Falling blocks puzzle game with scoring", category: "Games", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-chess", version: "0.8.0", size: "1.6 MB", description: "Chess game with basic AI opponent", category: "Games", status: PackageStatus.Available, installed_version: ""))
-    pkgs = pkgs.push(Package(name: "simple-2048", version: "1.0.0", size: "0.1 MB", description: "Number sliding puzzle game", category: "Games", status: PackageStatus.Available, installed_version: ""))
-
-    return pkgs
+fn _progress_bar(percent: i32, width: i32) -> text:
+    val clamped = if percent < 0: 0
+        elif percent > 100: 100
+        else: percent
+    val filled = (clamped * width) / 100
+    val empty = width - filled
+    var bar = "["
+    var i = 0
+    while i < filled:
+        bar = bar + "#"
+        i = i + 1
+    i = 0
+    while i < empty:
+        bar = bar + "."
+        i = i + 1
+    bar = bar + "] {clamped}%"
+    return bar
 
 # =========================================================================
 # Package Manager App
@@ -137,187 +67,178 @@ fn _default_packages() -> [Package]:
 class PackageManagerApp:
     """Software package management application.
 
-    Browse installed, available, and updatable packages.
-    Filter by category, search by name, and perform
-    install/remove/update operations.
+    Connects to the real package system via PkgCore.
+    Supports install, remove, update with dependency resolution.
+    Glass-themed UI with tabs, search, category filtering.
     """
-    packages: [Package]
+    core: PkgCore
+    packages: [PackageInfo]
     current_tab: text
     search_text: text
     selected_idx: i32
     category_filter: text
     operation_progress: i32
     operation_name: text
+    show_install_dialog: bool
+    install_dialog_deps: [text]
+    install_dialog_name: text
+    show_confirm_remove: bool
 
 impl PackageManagerApp:
 
     static fn new() -> PackageManagerApp:
-        """Create a package manager with sample packages."""
+        """Create a package manager connected to real package data."""
+        var core = PkgCore.new()
+        val init_result = core.init()
+        val packages = core.list_all()
+
         return PackageManagerApp(
-            packages: _default_packages(),
+            core: core,
+            packages: packages,
             current_tab: "Installed",
             search_text: "",
             selected_idx: 0,
             category_filter: "All",
             operation_progress: -1,
-            operation_name: ""
+            operation_name: "",
+            show_install_dialog: false,
+            install_dialog_deps: [],
+            install_dialog_name: "",
+            show_confirm_remove: false
         )
 
     # -- Filtering -----------------------------------------------------------
 
-    me _visible_packages() -> [Package]:
+    fn _visible_packages() -> [PackageInfo]:
         """Return packages filtered by current tab, search, and category."""
-        var result = []
+        var result: [PackageInfo] = []
         for pkg in self.packages:
-            # Tab filter
             val tab_match = match self.current_tab:
                 "Installed":
                     match pkg.status:
-                        PackageStatus.Installed => true
-                        PackageStatus.Updatable => true
-                        _ => false
+                        PkgStatus.Installed: true
+                        PkgStatus.Updatable: true
+                        _: false
                 "Available":
                     match pkg.status:
-                        PackageStatus.Available => true
-                        _ => false
+                        PkgStatus.Available: true
+                        _: false
                 "Updates":
                     match pkg.status:
-                        PackageStatus.Updatable => true
-                        _ => false
-                _ => true
+                        PkgStatus.Updatable: true
+                        _: false
+                _: true
             if not tab_match:
                 pass_dn
             else:
-                # Category filter
                 val cat_match = if self.category_filter == "All": true
                     else: pkg.category == self.category_filter
                 if not cat_match:
                     pass_dn
                 else:
-                    # Search filter
                     val search_match = if self.search_text == "": true
-                        else: pkg.name.contains(self.search_text) or pkg.description.contains(self.search_text)
+                        else: (pkg.name.to_lower().contains(self.search_text.to_lower()) or
+                               pkg.description.to_lower().contains(self.search_text.to_lower()))
                     if search_match:
-                        result = result.push(pkg)
+                        result.push(pkg)
         return result
 
-    me _count_by_status(status: PackageStatus) -> i32:
-        """Count packages matching a status."""
+    fn _count_by_status(status: PkgStatus) -> i32:
         var count = 0
         for pkg in self.packages:
-            match status:
-                PackageStatus.Installed:
-                    match pkg.status:
-                        PackageStatus.Installed => count = count + 1
-                        _ => pass_dn
-                PackageStatus.Available:
-                    match pkg.status:
-                        PackageStatus.Available => count = count + 1
-                        _ => pass_dn
-                PackageStatus.Updatable:
-                    match pkg.status:
-                        PackageStatus.Updatable => count = count + 1
-                        _ => pass_dn
+            if pkg.status == status:
+                count = count + 1
         return count
 
-    me _find_package_index(name: text) -> i32:
-        """Find a package index by name in the main list. Returns -1 if not found."""
-        var i = 0
-        while i < self.packages.len():
-            if self.packages[i].name == name:
-                return i
-            i = i + 1
-        return -1
-
-    # -- Package Operations --------------------------------------------------
+    # -- Package Operations (via PkgCore) ------------------------------------
 
     me install_package(idx: i32):
-        """Install the package at visible index."""
+        """Install the package at visible index — shows dependency dialog first."""
         val visible = self._visible_packages()
         if idx < 0 or idx >= visible.len():
             return
         val pkg = visible[idx]
-        val real_idx = self._find_package_index(pkg.name)
-        if real_idx < 0:
-            return
-        match self.packages[real_idx].status:
-            PackageStatus.Available:
-                self.packages[real_idx].status = PackageStatus.Installed
-                self.packages[real_idx].installed_version = self.packages[real_idx].version
-                self.operation_name = "Installing {pkg.name}..."
-                self.operation_progress = 100
-            _ => pass_dn
+
+        # Get dependencies and show dialog
+        val deps = self.core.get_dependencies(pkg.name)
+        if deps.len() > 0:
+            self.show_install_dialog = true
+            self.install_dialog_name = pkg.name
+            self.install_dialog_deps = deps
+        else:
+            self._do_install(pkg.name)
+
+    me confirm_install():
+        """User confirmed install in dialog."""
+        self.show_install_dialog = false
+        self._do_install(self.install_dialog_name)
+
+    me cancel_install():
+        """User cancelled install dialog."""
+        self.show_install_dialog = false
+        self.install_dialog_name = ""
+        self.install_dialog_deps = []
+
+    me _do_install(name: text):
+        """Execute the install operation via PkgCore."""
+        self.operation_name = "Installing {name}..."
+        self.operation_progress = 30
+        val result = self.core.install(name)
+        if result.success:
+            self.operation_name = result.message
+            self.operation_progress = 100
+            self._refresh_packages()
+        else:
+            self.operation_name = "FAILED: {result.message}"
+            self.operation_progress = 100
 
     me remove_package(idx: i32):
-        """Remove the package at visible index."""
         val visible = self._visible_packages()
         if idx < 0 or idx >= visible.len():
             return
         val pkg = visible[idx]
-        val real_idx = self._find_package_index(pkg.name)
-        if real_idx < 0:
-            return
-        match self.packages[real_idx].status:
-            PackageStatus.Installed:
-                self.packages[real_idx].status = PackageStatus.Available
-                self.packages[real_idx].installed_version = ""
-                self.operation_name = "Removing {pkg.name}..."
-                self.operation_progress = 100
-            PackageStatus.Updatable:
-                self.packages[real_idx].status = PackageStatus.Available
-                self.packages[real_idx].installed_version = ""
-                self.operation_name = "Removing {pkg.name}..."
-                self.operation_progress = 100
-            _ => pass_dn
+        self.operation_name = "Removing {pkg.name}..."
+        self.operation_progress = 50
+        val result = self.core.remove(pkg.name)
+        if result.success:
+            self.operation_name = result.message
+            self.operation_progress = 100
+            self._refresh_packages()
+        else:
+            self.operation_name = "FAILED: {result.message}"
+            self.operation_progress = 100
 
     me update_package(idx: i32):
-        """Update the package at visible index."""
         val visible = self._visible_packages()
         if idx < 0 or idx >= visible.len():
             return
         val pkg = visible[idx]
-        val real_idx = self._find_package_index(pkg.name)
-        if real_idx < 0:
-            return
-        match self.packages[real_idx].status:
-            PackageStatus.Updatable:
-                self.packages[real_idx].status = PackageStatus.Installed
-                self.packages[real_idx].installed_version = self.packages[real_idx].version
-                self.operation_name = "Updating {pkg.name}..."
-                self.operation_progress = 100
-            _ => pass_dn
+        self.operation_name = "Updating {pkg.name}..."
+        self.operation_progress = 50
+        val result = self.core.update(pkg.name)
+        if result.success:
+            self.operation_name = result.message
+            self.operation_progress = 100
+            self._refresh_packages()
+        else:
+            self.operation_name = "FAILED: {result.message}"
+            self.operation_progress = 100
 
     me update_all():
-        """Update all updatable packages."""
-        var i = 0
-        var count = 0
-        while i < self.packages.len():
-            match self.packages[i].status:
-                PackageStatus.Updatable:
-                    self.packages[i].status = PackageStatus.Installed
-                    self.packages[i].installed_version = self.packages[i].version
-                    count = count + 1
-                _ => pass_dn
-            i = i + 1
-        self.operation_name = "Updated {count} package(s)"
+        self.operation_name = "Updating all packages..."
+        self.operation_progress = 20
+        val result = self.core.update_all()
+        self.operation_name = result.message
         self.operation_progress = 100
+        self._refresh_packages()
 
-    # -- Input Handling ------------------------------------------------------
+    me _refresh_packages():
+        """Reload package list from PkgCore."""
+        self.packages = self.core.list_all()
+
+    # -- Input Handling -------------------------------------------------------
 
     me handle_key(key: text):
-        """Handle keyboard input.
-
-        Keys:
-          1/2/3   = switch tab (Installed/Available/Updates)
-          up/down = navigate package list
-          i       = install selected
-          r       = remove selected
-          u       = update selected
-          U       = update all
-          /       = toggle search mode
-          c       = cycle category filter
-          Escape  = clear search / reset filter
-        """
         match key:
             "1":
                 self.current_tab = "Installed"
@@ -343,65 +264,53 @@ impl PackageManagerApp:
                 self.update_package(self.selected_idx)
             "U":
                 self.update_all()
-            "/":
-                if self.search_text == "":
-                    self.search_text = ""
-                else:
-                    self.search_text = ""
-                    self.selected_idx = 0
             "c":
                 self._cycle_category()
+            "y":
+                if self.show_install_dialog:
+                    self.confirm_install()
+            "n":
+                if self.show_install_dialog:
+                    self.cancel_install()
             "Escape":
-                self.search_text = ""
-                self.category_filter = "All"
-                self.selected_idx = 0
-                self.operation_progress = -1
-                self.operation_name = ""
-            _ => pass_dn
+                if self.show_install_dialog:
+                    self.cancel_install()
+                else:
+                    self.search_text = ""
+                    self.category_filter = "All"
+                    self.selected_idx = 0
+                    self.operation_progress = -1
+            _: pass_dn
 
     me handle_action(action: text):
-        """Handle button/UI actions.
-
-        Actions:
-          tab_Installed, tab_Available, tab_Updates
-          install_N, remove_N, update_N (N = visible index)
-          update_all
-          search
-          category_X (X = category name or All)
-          refresh
-        """
         if action.starts_with("tab_"):
-            val tab_name = action.slice(4, action.len())
-            self.current_tab = tab_name
+            self.current_tab = action.slice(4, action.len())
             self.selected_idx = 0
         elif action.starts_with("install_"):
-            val idx_str = action.slice(8, action.len())
-            val idx = _parse_int(idx_str)
+            val idx = _parse_int(action.slice(8, action.len()))
             self.install_package(idx)
         elif action.starts_with("remove_"):
-            val idx_str = action.slice(7, action.len())
-            val idx = _parse_int(idx_str)
+            val idx = _parse_int(action.slice(7, action.len()))
             self.remove_package(idx)
         elif action == "update_all":
             self.update_all()
         elif action.starts_with("update_"):
-            val idx_str = action.slice(7, action.len())
-            val idx = _parse_int(idx_str)
+            val idx = _parse_int(action.slice(7, action.len()))
             self.update_package(idx)
         elif action.starts_with("category_"):
-            val cat = action.slice(9, action.len())
-            self.category_filter = cat
+            self.category_filter = action.slice(9, action.len())
             self.selected_idx = 0
-        elif action == "search":
-            pass_dn
+        elif action == "confirm_install":
+            self.confirm_install()
+        elif action == "cancel_install":
+            self.cancel_install()
         elif action == "refresh":
+            self._refresh_packages()
             self.operation_progress = -1
-            self.operation_name = ""
         else:
             pass_dn
 
     me _cycle_category():
-        """Cycle through category filters."""
         val categories = ["All", "System", "Development", "Utilities", "Network", "Games"]
         var current_idx = 0
         var i = 0
@@ -413,33 +322,38 @@ impl PackageManagerApp:
         self.category_filter = categories[next_idx]
         self.selected_idx = 0
 
-    # -- Detail View ---------------------------------------------------------
+    # -- Detail View ----------------------------------------------------------
 
-    me _get_selected_detail() -> text:
-        """Get detail text for the currently selected package."""
+    fn _get_selected_detail() -> text:
         val visible = self._visible_packages()
         if self.selected_idx < 0 or self.selected_idx >= visible.len():
             return "No package selected"
         val pkg = visible[self.selected_idx]
-        val status_str = _status_label(pkg.status)
         var detail = "Name: {pkg.name}\n"
         detail = "{detail}Version: {pkg.version}\n"
         detail = "{detail}Size: {pkg.size}\n"
         detail = "{detail}Category: {pkg.category}\n"
-        detail = "{detail}Status: {status_str}\n"
+        detail = "{detail}Architecture: {pkg.arch}\n"
+        detail = "{detail}Status: {_status_label(pkg.status)}\n"
         if pkg.installed_version != "":
             detail = "{detail}Installed: {pkg.installed_version}\n"
-            match pkg.status:
-                PackageStatus.Updatable:
-                    detail = "{detail}Update: {pkg.installed_version} -> {pkg.version}\n"
-                _ => pass_dn
+            if pkg.status == PkgStatus.Updatable:
+                detail = "{detail}Update: {pkg.installed_version} -> {pkg.version}\n"
+        if pkg.license != "":
+            detail = "{detail}License: {pkg.license}\n"
+        if pkg.maintainer != "":
+            detail = "{detail}Maintainer: {pkg.maintainer}\n"
+        if pkg.dependencies.len() > 0:
+            detail = "{detail}\nDependencies:\n"
+            for dep in pkg.dependencies:
+                detail = "{detail}  - {dep}\n"
         detail = "{detail}\n{pkg.description}"
         return detail
 
-    # -- UI Construction -----------------------------------------------------
+    # -- UI Construction ------------------------------------------------------
 
     me build_ui() -> UISession:
-        """Build the package manager UI.
+        """Build the package manager UI tree.
 
         Layout:
           Menubar: Package | View | Help
@@ -448,31 +362,27 @@ impl PackageManagerApp:
             Column (left, flex): toolbar + package table
             Panel (right, 35w): detail view
           Progress bar (if operation active)
-          Statusbar: installed count | available | updates
+          [Install Dialog overlay if active]
+          Statusbar: installed | available | updates
         """
-        # Tab bar
         val tab_names = ["Installed", "Available", "Updates"]
         val tab_idx = _tab_index(self.current_tab)
 
-        # Category buttons
+        # Category filter buttons
         val categories = ["All", "System", "Development", "Utilities", "Network", "Games"]
-        var cat_buttons = []
+        var cat_buttons: [WidgetNode] = []
         for cat in categories:
             val active = if cat == self.category_filter: "> " else: "  "
-            cat_buttons = cat_buttons.push(
-                button("pm_cat_{cat}", "{active}{cat}", "category_{cat}")
-            )
-
-        # Visible packages
-        val visible = self._visible_packages()
+            cat_buttons.push(button("pm_cat_{cat}", "{active}{cat}", "category_{cat}"))
 
         # Package table
+        val visible = self._visible_packages()
         val headers = ["Name", "Version", "Size", "Status", "Category"]
-        var rows = []
+        var rows: [[text]] = []
         var idx = 0
         for pkg in visible:
             val prefix = if idx == self.selected_idx: "> " else: "  "
-            rows = rows.push([
+            rows.push([
                 "{prefix}{pkg.name}",
                 pkg.version,
                 pkg.size,
@@ -483,32 +393,20 @@ impl PackageManagerApp:
 
         val pkg_table = table_widget("pm_pkg_table", headers, rows)
 
-        # Action buttons for selected package
-        var action_buttons = []
+        # Action buttons
+        var action_buttons: [WidgetNode] = []
         if self.selected_idx >= 0 and self.selected_idx < visible.len():
             val sel_pkg = visible[self.selected_idx]
             match sel_pkg.status:
-                PackageStatus.Available:
-                    action_buttons = action_buttons.push(
-                        button("pm_btn_install", "Install", "install_{self.selected_idx}")
-                    )
-                PackageStatus.Installed:
-                    action_buttons = action_buttons.push(
-                        button("pm_btn_remove", "Remove", "remove_{self.selected_idx}")
-                    )
-                PackageStatus.Updatable:
-                    action_buttons = action_buttons.push(
-                        button("pm_btn_update", "Update", "update_{self.selected_idx}")
-                    )
-                    action_buttons = action_buttons.push(
-                        button("pm_btn_remove2", "Remove", "remove_{self.selected_idx}")
-                    )
-        action_buttons = action_buttons.push(
-            button("pm_btn_update_all", "Update All", "update_all")
-        )
-        action_buttons = action_buttons.push(
-            button("pm_btn_refresh", "Refresh", "refresh")
-        )
+                PkgStatus.Available:
+                    action_buttons.push(button("pm_btn_install", "Install", "install_{self.selected_idx}"))
+                PkgStatus.Installed:
+                    action_buttons.push(button("pm_btn_remove", "Remove", "remove_{self.selected_idx}"))
+                PkgStatus.Updatable:
+                    action_buttons.push(button("pm_btn_update", "Update", "update_{self.selected_idx}"))
+                    action_buttons.push(button("pm_btn_remove2", "Remove", "remove_{self.selected_idx}"))
+        action_buttons.push(button("pm_btn_update_all", "Update All", "update_all"))
+        action_buttons.push(button("pm_btn_refresh", "Refresh", "refresh"))
 
         # Detail panel
         val detail_text = self._get_selected_detail()
@@ -522,21 +420,13 @@ impl PackageManagerApp:
         else:
             label("pm_search_label", "Filter: {self.category_filter}")
 
-        # Progress indicator
-        var progress_widgets = []
-        if self.operation_progress >= 0:
-            val bar = _progress_bar(self.operation_progress, 20)
-            progress_widgets = progress_widgets.push(
-                text_widget("pm_progress", "{self.operation_name} {bar}")
-            )
+        # Counts
+        val inst_count = self._count_by_status(PkgStatus.Installed)
+        val upd_count = self._count_by_status(PkgStatus.Updatable)
+        val avail_count = self._count_by_status(PkgStatus.Available)
 
-        # Counts for statusbar
-        val installed_count = self._count_by_status(PackageStatus.Installed)
-        val updatable_count = self._count_by_status(PackageStatus.Updatable)
-        val available_count = self._count_by_status(PackageStatus.Available)
-
-        # Build layout
-        var main_widgets = [
+        # Main layout
+        var main_widgets: [WidgetNode] = [
             menubar("pm_menu", ["Package", "View", "Help"]),
             tabs("pm_tabs", tab_names, tab_idx),
             row("pm_toolbar", cat_buttons),
@@ -550,21 +440,43 @@ impl PackageManagerApp:
             ]), 1),
             with_width(detail_panel, 35)
         ])
-        main_widgets = main_widgets.push(content)
+        main_widgets.push(content)
 
-        # Add progress if active
-        for pw in progress_widgets:
-            main_widgets = main_widgets.push(pw)
+        # Progress bar
+        if self.operation_progress >= 0:
+            main_widgets.push(
+                row("pm_progress_row", [
+                    label("pm_op_label", self.operation_name),
+                    progress("pm_progress_bar", self.operation_progress)
+                ])
+            )
 
-        main_widgets = main_widgets.push(
+        # Install confirmation dialog (overlay)
+        if self.show_install_dialog:
+            var dep_items: [text] = []
+            for dep in self.install_dialog_deps:
+                dep_items.push("  - {dep}")
+            main_widgets.push(
+                dialog("pm_install_dialog", "Install {self.install_dialog_name}?", [
+                    text_widget("pm_dialog_msg", "The following dependencies will also be installed:"),
+                    list_widget("pm_dialog_deps", dep_items),
+                    divider("pm_dialog_div"),
+                    row("pm_dialog_actions", [
+                        button("pm_dialog_yes", "Install (y)", "confirm_install"),
+                        button("pm_dialog_no", "Cancel (n)", "cancel_install")
+                    ])
+                ])
+            )
+
+        main_widgets.push(
             statusbar("pm_status",
-                "Installed: {installed_count} | Available: {available_count} | Updates: {updatable_count}",
+                "Installed: {inst_count} | Available: {avail_count} | Updates: {upd_count}",
                 "{visible.len()} shown"
             )
         )
 
         val root = column("pm_root", main_widgets)
-        val tree = build_tree_with_title(root, "Package Manager", "dark")
+        val tree = build_tree_with_title(root, "Package Manager", "glass_dark")
         return UISession.new(tree)
 
 # =========================================================================
@@ -572,7 +484,6 @@ impl PackageManagerApp:
 # =========================================================================
 
 fn _parse_int(s: text) -> i32:
-    """Parse a simple non-negative integer from text. Returns 0 on failure."""
     var result: i32 = 0
     for ch in s:
         if ch >= "0" and ch <= "9":
