@@ -310,6 +310,7 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
     # Pre-compute all feature vectors upfront (avoids closure capture bug with inner fns)
     var file_token_cache = {}
+    var file_line_index_cache = {}
     var feature_vectors = []
     var block_idx = 0
     while block_idx < blocks_to_analyze.len():
@@ -328,15 +329,38 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 set_cached_tokens(cache_manager, block.file, tokens)
             file_token_cache[block.file] = tokens
 
+            # Build line-to-token-index map once per file for O(1) lookups
+            var line_index = {}
+            var li = 0
+            var last_line = -1
+            while li < tokens.len():
+                val tline = tokens[li].line
+                if tline != last_line:
+                    val line_key = "{tline}"
+                    line_index[line_key] = li
+                    last_line = tline
+                li = li + 1
+            file_line_index_cache[block.file] = line_index
+
+        # O(1) lookup via line index
         var token_start = 0
         var found_start = false
-        var ti = 0
-        while ti < tokens.len():
-            if tokens[ti].line == block.line_start:
-                token_start = ti
+        val cached_line_index = file_line_index_cache[block.file]
+        if cached_line_index != nil:
+            val line_key = "{block.line_start}"
+            if cached_line_index.contains_key(line_key):
+                token_start = cached_line_index[line_key]
                 found_start = true
-                break
-            ti = ti + 1
+
+        if not found_start:
+            # Fallback to linear scan
+            var ti = 0
+            while ti < tokens.len():
+                if tokens[ti].line == block.line_start:
+                    token_start = ti
+                    found_start = true
+                    break
+                ti = ti + 1
 
         var feature_vec = FeatureVec(block_id: block_idx, features: {}, magnitude: 0.0)
         if found_start:

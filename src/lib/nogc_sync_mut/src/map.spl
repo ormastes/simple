@@ -103,6 +103,13 @@ struct Map<K, V> where K: Hash + Eq:
         """
         key.hash()
 
+    fn bucket_for(self, hash: i64) -> i32:
+        """Compute bucket index from hash, handling negative hashes."""
+        var bi = hash % (self.capacity as i64)
+        if bi < 0:
+            bi = 0 - bi
+        bi as i32
+
     me insert(self, key: K, value: V):
         """Insert or update a key-value pair.
 
@@ -114,14 +121,14 @@ struct Map<K, V> where K: Hash + Eq:
             map.insert("name", "Alice")
         """
         val hash = self.hash_key(key)
-        val bucket_idx = (hash % self.capacity as i64) as i32
+        val bucket_idx = self.bucket_for(hash)
 
         # Get the bucket - make a mutable copy
         var bucket_ = self.buckets[bucket_idx]
 
-        # Check if key already exists in bucket
+        # Check if key already exists in bucket (compare hash first to skip expensive key ==)
         for i in 0..bucket_.len():
-            if bucket_[i].key == key:
+            if bucket_[i].hash == hash and bucket_[i].key == key:
                 # Update existing entry
                 bucket_[i] = MapEntry(key: key, value: value, hash: hash)
                 # Write back the modified bucket
@@ -153,11 +160,11 @@ struct Map<K, V> where K: Hash + Eq:
                 nil: print "Not found"
         """
         val hash = self.hash_key(key)
-        val bucket_idx = (hash % self.capacity as i64) as i32
+        val bucket_idx = self.bucket_for(hash)
 
         val bucket = self.buckets[bucket_idx]
         for entry in bucket:
-            if entry.key == key:
+            if entry.hash == hash and entry.key == key:
                 return Some(entry.value)
 
         nil
@@ -210,11 +217,11 @@ struct Map<K, V> where K: Hash + Eq:
                 nil: print "Not found"
         """
         val hash = self.hash_key(key)
-        val bucket_idx = (hash % self.capacity as i64) as i32
+        val bucket_idx = self.bucket_for(hash)
 
         var bucket = self.buckets[bucket_idx]
         for i in 0..bucket.len():
-            if bucket[i].key == key:
+            if bucket[i].hash == hash and bucket[i].key == key:
                 val value = bucket[i].value
                 bucket.remove(i)
                 self.size = self.size - 1
@@ -293,7 +300,10 @@ struct Map<K, V> where K: Hash + Eq:
         # Rehash all entries
         for bucket in self.buckets:
             for entry in bucket:
-                val bucket_idx = (entry.hash % new_capacity as i64) as i32
+                var bi = entry.hash % (new_capacity as i64)
+                if bi < 0:
+                    bi = 0 - bi
+                val bucket_idx = bi as i32
                 new_buckets[bucket_idx].append(entry)
 
         self.buckets = new_buckets
