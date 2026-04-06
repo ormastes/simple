@@ -269,6 +269,50 @@ RuntimeValue rt_gui_blend_fill(RuntimeValue xy, RuntimeValue wh,
 }
 
 /* ===================================================================
+ * 24. Noise texture blend — adds ordered dither noise to glass surfaces
+ *     rt_gui_noise_blend(xy, wh, intensity, unused)
+ *     Adds a subtle noise pattern (like macOS frosted glass grain)
+ * =================================================================== */
+RuntimeValue rt_gui_noise_blend(RuntimeValue xy, RuntimeValue wh,
+                                 RuntimeValue intensity_rv, RuntimeValue unused)
+{
+    (void)unused;
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t w = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t h = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint8_t intensity = (uint8_t)(uint64_t)intensity_rv;
+
+    if (x >= g_fb_w || y >= SCREEN_H || w == 0 || h == 0) return 0;
+
+    dirty_mark(x, y, w, h);
+
+    /* Pseudo-random noise using hash function */
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t py = y + row;
+        if (py >= SCREEN_H) break;
+        for (uint32_t col = 0; col < w; col++) {
+            uint32_t px = x + col;
+            if (px >= g_fb_w) break;
+
+            /* Simple hash for pseudo-random noise */
+            uint32_t hash = (px * 2654435761u) ^ (py * 2246822519u);
+            hash = ((hash >> 16) ^ hash) * 0x45d9f3b;
+            hash = ((hash >> 16) ^ hash);
+
+            /* Only apply to ~30% of pixels for subtlety */
+            if ((hash & 7) < 3) {
+                uint32_t dst = fb_read(px, py);
+                uint8_t noise_val = (hash >> 8) & 1; /* 0 or 1 = darken or lighten */
+                uint32_t noise_color = noise_val ? 0x00FFFFFF : 0x00000000;
+                fb_write(px, py, alpha_blend(dst, noise_color, intensity));
+            }
+        }
+    }
+    return 0;
+}
+
+/* ===================================================================
  * 2. Single pixel alpha blend
  *    rt_gui_blend_pixel(pack(x,y), pack(color,alpha), _, _)
  * =================================================================== */
