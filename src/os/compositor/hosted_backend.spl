@@ -21,6 +21,12 @@ extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, co
 extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
 extern fn rt_winit_buffer_free(buf: i64) -> bool
 
+# Module-level state (interpreter-safe — struct fields can be nil through trait dispatch)
+var _hosted_window_id: i64 = 0
+var _hosted_buffer_id: i64 = 0
+var _hosted_w: i32 = 0
+var _hosted_h: i32 = 0
+
 # ============================================================================
 # HostedCompositorBackend
 # ============================================================================
@@ -47,88 +53,72 @@ class HostedCompositorBackend:
 impl CompositorBackend for HostedCompositorBackend:
 
     fn width() -> i32:
-        self.w
+        _hosted_w
 
     fn height() -> i32:
-        self.h
+        _hosted_h
 
     me clear(color: u32):
         """Fill the entire buffer with a solid color."""
-        rt_winit_buffer_fill_rect(
-            self.buffer_id,
-            0, 0,
-            self.w.to_i64(), self.h.to_i64(),
-            color.to_i64()
-        )
+        val w_i: i64 = _hosted_w
+        val h_i: i64 = _hosted_h
+        val c: i64 = color
+        rt_winit_buffer_fill_rect(_hosted_buffer_id, 0, 0, w_i, h_i, c)
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         """Fill a rectangle in the pixel buffer."""
-        rt_winit_buffer_fill_rect(
-            self.buffer_id,
-            x.to_i64(), y.to_i64(),
-            w.to_i64(), h.to_i64(),
-            color.to_i64()
-        )
+        val xi: i64 = x
+        val yi: i64 = y
+        val wi: i64 = w
+        val hi: i64 = h
+        val c: i64 = color
+        rt_winit_buffer_fill_rect(_hosted_buffer_id, xi, yi, wi, hi, c)
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
-        """Draw a string of text using the 8x16 bitmap font.
+        """Draw text using 8x16 bitmap font via native buffer.
 
-        Each character is 8 pixels wide. Characters are rendered
-        left-to-right with no spacing beyond the 8px glyph width.
+        Each character is 8 pixels wide, 16 pixels tall.
+        Iterates text as single-char strings and converts to ASCII code.
         """
         var cx = x
         for ch in text_str:
-            val ch_byte = ch.to_u8()
+            val code = ch.ord()
+            val ch_byte: u8 = code
             self.draw_char_8x16(cx, y, ch_byte, fg, bg)
             cx = cx + 8
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        """Draw a single 8x16 character glyph into the pixel buffer.
-
-        Uses the VGA 8x16 bitmap font from fb_driver. Each glyph row is
-        a byte where MSB = leftmost pixel. Set bits draw fg color,
-        clear bits draw bg color. Each pixel is rendered as a 1x1
-        fill_rect call into the native buffer.
-        """
+        """Draw a single 8x16 character glyph into the pixel buffer."""
         val glyph = get_glyph_8x16(ch)
-        var row: i32 = 0
+        val fg_i: i64 = fg
+        val bg_i: i64 = bg
+        var row: i64 = 0
         while row < 16:
-            val bits = glyph[row]
-            var col: i32 = 0
+            val bits: i64 = glyph[row]
+            var col: i64 = 0
             while col < 8:
-                val mask = 0x80 >> col
-                val color = if (bits & mask) != 0: fg else: bg
-                val px = x + col
-                val py = y + row
-                rt_winit_buffer_fill_rect(
-                    self.buffer_id,
-                    px.to_i64(), py.to_i64(),
-                    1, 1,
-                    color.to_i64()
-                )
+                val mask: i64 = 0x80 >> col
+                val color = if (bits & mask) != 0: fg_i else: bg_i
+                val px: i64 = x + col
+                val py: i64 = y + row
+                rt_winit_buffer_fill_rect(_hosted_buffer_id, px, py, 1, 1, color)
                 col = col + 1
             row = row + 1
 
     me put_pixel(x: i32, y: i32, color: u32):
         """Write a single pixel using a 1x1 fill_rect call."""
-        rt_winit_buffer_fill_rect(
-            self.buffer_id,
-            x.to_i64(), y.to_i64(),
-            1, 1,
-            color.to_i64()
-        )
+        val xi: i64 = x
+        val yi: i64 = y
+        val c: i64 = color
+        rt_winit_buffer_fill_rect(_hosted_buffer_id, xi, yi, 1, 1, c)
 
     me present():
         """Present the pixel buffer to the winit window (full frame)."""
-        rt_winit_buffer_present(self.window_id, self.buffer_id)
+        rt_winit_buffer_present(_hosted_window_id, _hosted_buffer_id)
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
-        """Present a rectangular region.
-
-        The winit buffer FFI only supports full-frame present, so this
-        degrades to a full present (same as FbCompositorBackend).
-        """
-        rt_winit_buffer_present(self.window_id, self.buffer_id)
+        """Present a rectangular region."""
+        rt_winit_buffer_present(_hosted_window_id, _hosted_buffer_id)
 
 # ============================================================================
 # Static Constructor
@@ -148,18 +138,16 @@ impl HostedCompositorBackend:
         HostedCompositorBackend(window_id: window_id, buffer_id: buffer_id, w: w, h: h)
 
     static fn create(window_id: i64, w: i32, h: i32, fill_color: u32) -> HostedCompositorBackend:
-        """Create a hosted compositor backend, allocating a new pixel buffer.
-
-        Calls rt_winit_buffer_create to allocate the native-side buffer,
-        then wraps it in a HostedCompositorBackend.
-
-        Args:
-            window_id: Opaque handle from rt_winit_window_new
-            w: Buffer width in pixels
-            h: Buffer height in pixels
-            fill_color: Initial fill color (ARGB u32)
-        """
-        val buf = rt_winit_buffer_create(w.to_i64(), h.to_i64(), fill_color.to_i64())
+        """Create a hosted compositor backend, allocating a new pixel buffer."""
+        val w64: i64 = w
+        val h64: i64 = h
+        val fc64: i64 = fill_color
+        val buf = rt_winit_buffer_create(w64, h64, fc64)
+        # Store in module-level vars (interpreter trait dispatch loses struct fields)
+        _hosted_window_id = window_id
+        _hosted_buffer_id = buf
+        _hosted_w = w
+        _hosted_h = h
         HostedCompositorBackend(window_id: window_id, buffer_id: buf, w: w, h: h)
 
     me free():

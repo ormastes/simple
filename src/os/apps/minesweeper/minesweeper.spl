@@ -1,0 +1,452 @@
+# Minesweeper — Classic Mine-Sweeping Puzzle Game
+#
+# A 9x9 beginner-difficulty minesweeper with 10 mines.
+# Left-click reveals cells, flag mode toggles flags.
+# Flood-fill auto-reveals cells with 0 adjacent mines.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Cell State
+# =========================================================================
+
+enum CellState:
+    """State of a single minesweeper cell."""
+    Hidden
+    Revealed
+    Flagged
+
+# =========================================================================
+# Cell
+# =========================================================================
+
+struct Cell:
+    """A single cell on the minesweeper board."""
+    mine: bool
+    adjacent: i32
+    state: CellState
+
+# =========================================================================
+# Minesweeper App
+# =========================================================================
+
+class MinesweeperApp:
+    """Classic minesweeper game application.
+
+    9x9 grid with 10 mines. Supports reveal, flag toggle,
+    flood-fill on zero cells, keyboard navigation, and
+    win/loss detection.
+    """
+    grid: [Cell]
+    rows: i32
+    cols: i32
+    mines_total: i32
+    flags_placed: i32
+    game_over: bool
+    won: bool
+    cursor_r: i32
+    cursor_c: i32
+    cells_revealed: i32
+    seed: i32
+
+impl MinesweeperApp:
+
+    static fn new() -> MinesweeperApp:
+        """Create a new 9x9 minesweeper board with 10 mines."""
+        val rows = 9
+        val cols = 9
+        val total = rows * cols
+        val mines_total = 10
+
+        # Initialize empty grid
+        var grid: [Cell] = []
+        var i = 0
+        while i < total:
+            grid = grid.push(Cell(mine: false, adjacent: 0, state: CellState.Hidden))
+            i = i + 1
+
+        var app = MinesweeperApp(
+            grid: grid,
+            rows: rows,
+            cols: cols,
+            mines_total: mines_total,
+            flags_placed: 0,
+            game_over: false,
+            won: false,
+            cursor_r: 4,
+            cursor_c: 4,
+            cells_revealed: 0,
+            seed: 42
+        )
+        app._place_mines()
+        app._compute_adjacency()
+        app
+
+    # -- Mine Placement ------------------------------------------------------
+
+    me _place_mines():
+        """Place mines using a deterministic seed-based approach."""
+        var placed = 0
+        var s = self.seed
+        val total = self.rows * self.cols
+
+        while placed < self.mines_total:
+            # Simple linear congruential generator
+            s = (s * 1103515245 + 12345) % 2147483647
+            var pos = s % total
+            if pos < 0:
+                pos = pos * -1
+
+            val cell = self.grid[pos]
+            if not cell.mine:
+                self.grid[pos] = Cell(mine: true, adjacent: 0, state: CellState.Hidden)
+                placed = placed + 1
+
+        self.seed = s
+
+    me _compute_adjacency():
+        """Compute adjacent mine counts for all cells."""
+        var r = 0
+        while r < self.rows:
+            var c = 0
+            while c < self.cols:
+                val idx = r * self.cols + c
+                val cell = self.grid[idx]
+                if not cell.mine:
+                    val count = self._count_adjacent_mines(r, c)
+                    self.grid[idx] = Cell(mine: false, adjacent: count, state: CellState.Hidden)
+                c = c + 1
+            r = r + 1
+
+    fn _count_adjacent_mines(r: i32, c: i32) -> i32:
+        """Count mines in the 8 cells surrounding (r, c)."""
+        var count = 0
+        var dr = -1
+        while dr <= 1:
+            var dc = -1
+            while dc <= 1:
+                if dr == 0 and dc == 0:
+                    dc = dc + 1
+                    continue
+                val nr = r + dr
+                val nc = c + dc
+                if nr >= 0 and nr < self.rows and nc >= 0 and nc < self.cols:
+                    val ni = nr * self.cols + nc
+                    val neighbor = self.grid[ni]
+                    if neighbor.mine:
+                        count = count + 1
+                dc = dc + 1
+            dr = dr + 1
+        count
+
+    # -- Game Actions --------------------------------------------------------
+
+    me reveal(r: i32, c: i32):
+        """Reveal a cell. Triggers flood-fill if adjacent count is 0.
+        Ends game if cell contains a mine."""
+        if self.game_over:
+            return
+        if r < 0 or r >= self.rows or c < 0 or c >= self.cols:
+            return
+
+        val idx = r * self.cols + c
+        val cell = self.grid[idx]
+
+        match cell.state:
+            CellState.Revealed:
+                return
+            CellState.Flagged:
+                return
+            CellState.Hidden:
+                pass_dn
+
+        # Reveal this cell
+        self.grid[idx] = Cell(mine: cell.mine, adjacent: cell.adjacent, state: CellState.Revealed)
+        self.cells_revealed = self.cells_revealed + 1
+
+        if cell.mine:
+            self.game_over = true
+            self.won = false
+            self._reveal_all_mines()
+            return
+
+        # Flood-fill if zero adjacent mines
+        if cell.adjacent == 0:
+            self._flood_fill(r, c)
+
+        # Check win condition
+        self._check_win()
+
+    me _flood_fill(r: i32, c: i32):
+        """Recursively reveal all adjacent cells around a zero-cell."""
+        var dr = -1
+        while dr <= 1:
+            var dc = -1
+            while dc <= 1:
+                if dr == 0 and dc == 0:
+                    dc = dc + 1
+                    continue
+                val nr = r + dr
+                val nc = c + dc
+                if nr >= 0 and nr < self.rows and nc >= 0 and nc < self.cols:
+                    val ni = nr * self.cols + nc
+                    val neighbor = self.grid[ni]
+                    match neighbor.state:
+                        CellState.Hidden:
+                            self.grid[ni] = Cell(
+                                mine: neighbor.mine,
+                                adjacent: neighbor.adjacent,
+                                state: CellState.Revealed
+                            )
+                            self.cells_revealed = self.cells_revealed + 1
+                            if neighbor.adjacent == 0:
+                                self._flood_fill(nr, nc)
+                        _:
+                            pass_dn
+                dc = dc + 1
+            dr = dr + 1
+
+    me toggle_flag(r: i32, c: i32):
+        """Toggle the flag on a hidden cell."""
+        if self.game_over:
+            return
+        if r < 0 or r >= self.rows or c < 0 or c >= self.cols:
+            return
+
+        val idx = r * self.cols + c
+        val cell = self.grid[idx]
+
+        match cell.state:
+            CellState.Hidden:
+                self.grid[idx] = Cell(mine: cell.mine, adjacent: cell.adjacent, state: CellState.Flagged)
+                self.flags_placed = self.flags_placed + 1
+            CellState.Flagged:
+                self.grid[idx] = Cell(mine: cell.mine, adjacent: cell.adjacent, state: CellState.Hidden)
+                self.flags_placed = self.flags_placed - 1
+            CellState.Revealed:
+                pass_dn
+
+    me _reveal_all_mines():
+        """Reveal all mine cells when the game is lost."""
+        var i = 0
+        val total = self.rows * self.cols
+        while i < total:
+            val cell = self.grid[i]
+            if cell.mine:
+                self.grid[i] = Cell(mine: true, adjacent: cell.adjacent, state: CellState.Revealed)
+            i = i + 1
+
+    me _check_win():
+        """Check if the player has revealed all non-mine cells."""
+        val total = self.rows * self.cols
+        val safe_cells = total - self.mines_total
+        if self.cells_revealed >= safe_cells:
+            self.game_over = true
+            self.won = true
+
+    me new_game():
+        """Reset the board and start a fresh game."""
+        val total = self.rows * self.cols
+        var grid: [Cell] = []
+        var i = 0
+        while i < total:
+            grid = grid.push(Cell(mine: false, adjacent: 0, state: CellState.Hidden))
+            i = i + 1
+
+        self.grid = grid
+        self.flags_placed = 0
+        self.game_over = false
+        self.won = false
+        self.cursor_r = 4
+        self.cursor_c = 4
+        self.cells_revealed = 0
+        self.seed = self.seed + 7
+        self._place_mines()
+        self._compute_adjacency()
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to minesweeper actions."""
+        match key:
+            "Up":
+                if self.cursor_r > 0:
+                    self.cursor_r = self.cursor_r - 1
+            "Down":
+                if self.cursor_r < self.rows - 1:
+                    self.cursor_r = self.cursor_r + 1
+            "Left":
+                if self.cursor_c > 0:
+                    self.cursor_c = self.cursor_c - 1
+            "Right":
+                if self.cursor_c < self.cols - 1:
+                    self.cursor_c = self.cursor_c + 1
+            "Enter" => self.reveal(self.cursor_r, self.cursor_c)
+            " " => self.reveal(self.cursor_r, self.cursor_c)
+            "f" => self.toggle_flag(self.cursor_r, self.cursor_c)
+            "F" => self.toggle_flag(self.cursor_r, self.cursor_c)
+            "n" => self.new_game()
+            "N" => self.new_game()
+            "Escape" => self.new_game()
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button action strings from the UI."""
+        match action:
+            "new_game" => self.new_game()
+            _:
+                if action.starts_with("cell_"):
+                    val coords = action.slice(5, action.len())
+                    val parts = _split_underscore(coords)
+                    if parts.len() == 2:
+                        val r = parts[0].parse_i32()
+                        val c = parts[1].parse_i32()
+                        self.reveal(r, c)
+                else:
+                    if action.starts_with("flag_"):
+                        val coords = action.slice(5, action.len())
+                        val parts = _split_underscore(coords)
+                        if parts.len() == 2:
+                            val r = parts[0].parse_i32()
+                            val c = parts[1].parse_i32()
+                            self.toggle_flag(r, c)
+
+    # -- Cell Display --------------------------------------------------------
+
+    fn _cell_display(r: i32, c: i32) -> text:
+        """Return the display text for a cell."""
+        val idx = r * self.cols + c
+        val cell = self.grid[idx]
+        val is_cursor = r == self.cursor_r and c == self.cursor_c
+
+        var content = match cell.state:
+            CellState.Hidden:
+                if is_cursor:
+                    "[ ]"
+                else:
+                    " . "
+            CellState.Flagged:
+                if is_cursor:
+                    "[F]"
+                else:
+                    " F "
+            CellState.Revealed:
+                if cell.mine:
+                    " * "
+                else:
+                    if cell.adjacent == 0:
+                        "   "
+                    else:
+                        " {cell.adjacent} "
+        content
+
+    fn _cell_action(r: i32, c: i32) -> text:
+        """Return the action string for a cell button."""
+        "cell_{r}_{c}"
+
+    # -- UI Construction -----------------------------------------------------
+
+    fn build_ui() -> UISession:
+        """Build the minesweeper UI.
+
+        Layout:
+          Menu bar
+          Status panel (mines remaining, game state)
+          9x9 button grid
+          Status bar
+        """
+        val mines_remaining = self.mines_total - self.flags_placed
+        val state_text = if self.game_over:
+            if self.won:
+                "YOU WIN!"
+            else:
+                "GAME OVER"
+        else:
+            "Playing"
+
+        var grid_rows: [WidgetNode] = []
+        var r = 0
+        while r < self.rows:
+            var cell_buttons: [WidgetNode] = []
+            var c = 0
+            while c < self.cols:
+                val display = self._cell_display(r, c)
+                val action = self._cell_action(r, c)
+                val btn_id = "btn_{r}_{c}"
+                cell_buttons = cell_buttons.push(
+                    with_flex(button(btn_id, display, action), 1)
+                )
+                c = c + 1
+            grid_rows = grid_rows.push(
+                row("grid_row_{r}", cell_buttons)
+            )
+            r = r + 1
+
+        # Build flag button row (one per column for current cursor row)
+        var flag_buttons: [WidgetNode] = []
+        var fc = 0
+        while fc < self.cols:
+            val flag_action = "flag_{self.cursor_r}_{fc}"
+            val flag_id = "flag_btn_{fc}"
+            flag_buttons = flag_buttons.push(
+                with_flex(button(flag_id, "F", flag_action), 1)
+            )
+            fc = fc + 1
+
+        val root = column("ms_root", [
+            # Menu bar
+            menubar("ms_menu", [
+                "Game", "Help"
+            ]),
+
+            # Info panel
+            row("ms_info_row", [
+                with_flex(label("ms_mines_label", "Mines: {mines_remaining}"), 1),
+                label("ms_state_label", state_text),
+                button("btn_new_game", "New Game", "new_game")
+            ]),
+
+            # Game grid
+            with_flex(column("ms_grid", grid_rows), 1),
+
+            # Flag row for current cursor row
+            row("ms_flag_row", [
+                label("ms_flag_hint", "Flag row {self.cursor_r}:"),
+                with_flex(row("ms_flag_buttons", flag_buttons), 1)
+            ]),
+
+            # Status bar
+            statusbar("ms_status",
+                "Cursor: ({self.cursor_r}, {self.cursor_c})",
+                "Mines: {mines_remaining} | {state_text}"
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Minesweeper", "dark")
+        UISession.new(tree)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _split_underscore(s: text) -> [text]:
+    """Split a string on the first underscore into two parts."""
+    var parts: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "_":
+            parts = parts.push(s.slice(0, i))
+            parts = parts.push(s.slice(i + 1, s.len()))
+            return parts
+        i = i + 1
+    parts = parts.push(s)
+    parts
