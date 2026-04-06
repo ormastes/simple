@@ -17,7 +17,7 @@ Successfully completed the Contract Testing feature implementation by:
 ## Implementation Details
 
 ### Phase 1: File I/O Implementation
-**File:** `/home/ormastes/dev/pub/simple/src/lib/std/src/testing/contract.spl`
+**File:** `src/lib/std/src/testing/contract.spl`
 
 #### Changes:
 - Added import: `use infra.file_io.write_file`
@@ -34,7 +34,7 @@ fn save(path: text) -> Result<(), text>:
 ```
 
 ### Phase 2: Test Conversion
-**File:** `/home/ormastes/dev/pub/simple/simple/std_lib/test/unit/testing/contract_spec.spl`
+**File:** `simple/std_lib/test/unit/testing/contract_spec.spl`
 
 #### Conversion Pattern:
 - Changed `skip "..."` → `it "..."`
@@ -82,7 +82,7 @@ fn save(path: text) -> Result<(), text>:
    - Counts contracts in broker
 
 ### Phase 3: Syntax Fixes
-**File:** `/home/ormastes/dev/pub/simple/src/lib/std/src/testing/contract.spl`
+**File:** `src/lib/std/src/testing/contract.spl`
 
 #### Fixes Applied:
 1. **Method Declarations:** Updated all `var fn` → `me` keyword (21 methods)
@@ -98,7 +98,7 @@ fn save(path: text) -> Result<(), text>:
    - Proper Simple language API usage
 
 ### Phase 4: Feature Specification
-**File:** `/home/ormastes/dev/pub/simple/src/lib/std/test/features/contract_persistence_feature_spec.spl`
+**File:** `src/lib/std/test/features/contract_persistence_feature_spec.spl`
 
 #### Specification Created:
 - Feature #2401: Contract Persistence - File I/O
@@ -152,7 +152,7 @@ fn save(path: text) -> Result<(), text>:
 ## Files Modified
 
 ### Implementation
-1. `/home/ormastes/dev/pub/simple/src/lib/std/src/testing/contract.spl`
+1. `src/lib/std/src/testing/contract.spl`
    - Added file I/O import
    - Implemented save() method
    - Fixed to_pact_json() method
@@ -160,14 +160,14 @@ fn save(path: text) -> Result<(), text>:
    - Fixed string methods
 
 ### Tests
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/test/unit/testing/contract_spec.spl`
+2. `simple/std_lib/test/unit/testing/contract_spec.spl`
    - Converted 22 skip tests to working tests
    - Added proper imports and module references
    - Fixed JSON string handling
    - Renamed variables to avoid conflicts
 
 ### Documentation
-3. `/home/ormastes/dev/pub/simple/src/lib/std/test/features/contract_persistence_feature_spec.spl`
+3. `src/lib/std/test/features/contract_persistence_feature_spec.spl`
    - Created feature specification
    - Added usage examples
    - Documented implementation details

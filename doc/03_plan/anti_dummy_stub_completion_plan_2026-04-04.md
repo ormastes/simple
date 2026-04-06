@@ -24,7 +24,7 @@ The feature is complete when:
 - `SSPEC004` for print-based skip placeholders
 - `SSPEC005` for examples with no real assertion or sanctioned skip
 - pure-Simple lint path switched to use real linter results instead of fix-only reporting
-- regression coverage in [sspec_quality_lint_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/sspec_quality_lint_spec.spl)
+- regression coverage in [sspec_quality_lint_spec.spl](test/integration/app/sspec_quality_lint_spec.spl)
 
 ## Remaining Work
 

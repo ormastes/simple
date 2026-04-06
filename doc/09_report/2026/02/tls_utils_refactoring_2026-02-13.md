@@ -2,8 +2,8 @@
 
 **Date:** 2026-02-13
 **Pattern:** Facade Pattern
-**Original File:** `/home/ormastes/dev/pub/simple/src/lib/tls_utils.spl` (1,505 lines)
-**Refactored Module:** `/home/ormastes/dev/pub/simple/src/lib/tls/`
+**Original File:** `src/lib/tls_utils.spl` (1,505 lines)
+**Refactored Module:** `src/lib/tls/`
 
 ## Summary
 

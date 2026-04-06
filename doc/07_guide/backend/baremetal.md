@@ -35,11 +35,11 @@ The repo uses three distinct baremetal proof classes:
 For remote baremetal specifically, keep these lanes separate:
 
 - CH32 composite-runner execution is covered by
-  [ch32v307_composite_runner_path_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/ch32v307_composite_runner_path_spec.md)
+  [ch32v307_composite_runner_path_spec.md](doc/06_spec/ch32v307_composite_runner_path_spec.md)
 - QEMU RV32 raw injected execution is covered by
-  [qemu_rv32_raw_injected_regression_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/qemu_rv32_raw_injected_regression_spec.md)
+  [qemu_rv32_raw_injected_regression_spec.md](doc/06_spec/qemu_rv32_raw_injected_regression_spec.md)
 - low-level remote runtime checks are covered by
-  [remote_baremetal_runtime_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/remote_baremetal_runtime_spec.md)
+  [remote_baremetal_runtime_spec.md](doc/06_spec/remote_baremetal_runtime_spec.md)
 
 ---
 

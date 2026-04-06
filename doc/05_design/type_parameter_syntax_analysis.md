@@ -580,4 +580,4 @@ Promise<Gpu<Tensor<Float>, GpuIndex::Gpu1>>
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-12 (Updated from 2026-01-10)
 **Recommendation**: Use `<>` (angle brackets) for type parameters
-**Status**: Migration in progress
+**Status**: In Progress

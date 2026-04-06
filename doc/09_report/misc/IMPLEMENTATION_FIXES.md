@@ -223,7 +223,7 @@ fn get_prompt(name: text, arguments: Dict<text, text>) -> Result<PromptResult, t
 
 ```bash
 # Verify files compile (syntax check)
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Check log.spl
 bin/simple check src/lib/log.spl

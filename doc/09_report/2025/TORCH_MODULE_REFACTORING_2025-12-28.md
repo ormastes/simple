@@ -238,10 +238,10 @@ The new structure makes the PyTorch module more maintainable, easier to test, an
 
 ## Files Modified
 
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/__init__.spl` (modified)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/device.spl` (created)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/dtype.spl` (created)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/tensor.spl` (created)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/factory.spl` (created)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/checkpoint.spl` (created)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/ml/torch/training.spl` (created)
+- `simple/std_lib/src/ml/torch/__init__.spl` (modified)
+- `simple/std_lib/src/ml/torch/device.spl` (created)
+- `simple/std_lib/src/ml/torch/dtype.spl` (created)
+- `simple/std_lib/src/ml/torch/tensor.spl` (created)
+- `simple/std_lib/src/ml/torch/factory.spl` (created)
+- `simple/std_lib/src/ml/torch/checkpoint.spl` (created)
+- `simple/std_lib/src/ml/torch/training.spl` (created)

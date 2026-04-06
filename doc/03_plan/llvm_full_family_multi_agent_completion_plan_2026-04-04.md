@@ -10,8 +10,8 @@
 
 The current LLVM work is real and substantial, but it is not yet a full-family completion:
 
-- [llvm_backend_completion_plan_2026-04-04.md](/home/ormastes/dev/pub/simple/doc/03_plan/llvm_backend_completion_plan_2026-04-04.md) completed the **promoted subset**
-- [llvm_support_matrix.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_support_matrix.spl) still contains non-final states:
+- [llvm_backend_completion_plan_2026-04-04.md](doc/03_plan/llvm_backend_completion_plan_2026-04-04.md) completed the **promoted subset**
+- [llvm_support_matrix.spl](src/compiler/70.backend/backend/llvm_support_matrix.spl) still contains non-final states:
   - `partial`
   - `supported (external toolchain)`
   - `unsupported`
@@ -44,7 +44,7 @@ For this plan, that means:
 
 ### Current matrix snapshot
 
-From [llvm_support_matrix.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_support_matrix.spl):
+From [llvm_support_matrix.spl](src/compiler/70.backend/backend/llvm_support_matrix.spl):
 
 | Target | llvm-lib | llvm | Current problem |
 |--------|----------|------|-----------------|
@@ -89,7 +89,7 @@ This program must resolve each remaining row:
 ### Agent A: Matrix Governance and Status Contract
 
 **Owns**
-- [llvm_support_matrix.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_support_matrix.spl)
+- [llvm_support_matrix.spl](src/compiler/70.backend/backend/llvm_support_matrix.spl)
 - status enums and matrix formatting
 - public status rules
 
@@ -218,9 +218,9 @@ This program must resolve each remaining row:
 ### Agent G: Capability, Version, and Toolchain Normalization
 
 **Owns**
-- [llvm_capability.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_capability.spl)
-- [llvm_version.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_version.spl)
-- [llvm_cross_target.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/llvm_cross_target.spl)
+- [llvm_capability.spl](src/compiler/70.backend/backend/llvm_capability.spl)
+- [llvm_version.spl](src/compiler/70.backend/backend/llvm_version.spl)
+- [llvm_cross_target.spl](src/compiler/70.backend/backend/llvm_cross_target.spl)
 
 **Tasks**
 - centralize final toolchain resolution for all target rows

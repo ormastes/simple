@@ -113,7 +113,7 @@ Analyze which of the 46 new tests actually exercised their target branches:
 
 ```bash
 llvm-cov-20 show ./seed_cpp -instr-profile=merged.profdata \
-  /home/ormastes/dev/pub/simple/src/compiler_seed/seed.cpp \
+  src/compiler_seed/seed.cpp \
   -format=html -output-dir=report
 
 # Check specific lines: 521, 678, 720, 757-765, 1093-1098, etc.
@@ -153,7 +153,7 @@ For each uncovered branch, create minimal test that explicitly exercises it:
 ### Running Coverage
 
 ```bash
-cd /home/ormastes/dev/pub/simple/seed/.build-coverage
+cd seed/.build-coverage
 
 # Clean build
 rm -rf * && cmake .. && make seed_test seed_cpp
@@ -165,11 +165,11 @@ SEED_CPP=./seed_cpp ./seed_test
 # Generate report
 llvm-profdata-20 merge -sparse profraw/*.profraw -o merged.profdata
 llvm-cov-20 report ./seed_cpp -instr-profile=merged.profdata \
-  /home/ormastes/dev/pub/simple/src/compiler_seed/seed.cpp
+  src/compiler_seed/seed.cpp
 
 # HTML report
 llvm-cov-20 show ./seed_cpp -instr-profile=merged.profdata \
-  /home/ormastes/dev/pub/simple/src/compiler_seed/seed.cpp \
+  src/compiler_seed/seed.cpp \
   -format=html -output-dir=report
 ```
 

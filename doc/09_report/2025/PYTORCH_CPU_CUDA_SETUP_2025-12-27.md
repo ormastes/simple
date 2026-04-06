@@ -22,7 +22,7 @@ error while loading shared libraries: libtorch_cpu.so: cannot open shared object
 ```toml
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
-    "-C", "link-arg=-Wl,-rpath,/home/ormastes/.local/lib/python3.12/site-packages/torch/lib",
+    "-C", "link-arg=-Wl,-rpath,~/.local/lib/python3.12/site-packages/torch/lib",
 ]
 ```
 

@@ -86,7 +86,7 @@ Fixed deprecated `List<T>` syntax to modern `[T]` array syntax in 4 critical sou
 ### Large-Scale Migration Needed
 
 ```bash
-$ grep -r "List<" /home/ormastes/dev/pub/simple/src --include="*.spl" | wc -l
+$ grep -r "List<" src --include="*.spl" | wc -l
 685
 ```
 

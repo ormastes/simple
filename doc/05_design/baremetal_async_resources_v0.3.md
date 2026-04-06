@@ -1,7 +1,7 @@
 # Simple Bare-Metal Async + Limited Resources v0.3
 
 **Date**: 2026-02-15
-**Status**: Design Specification
+**Status**: Draft
 **Prereqs**: `doc/05_design/baremetal_features_examples.md`, `src/lib/async_core.spl`, `src/lib/async_embedded.spl`
 
 ---

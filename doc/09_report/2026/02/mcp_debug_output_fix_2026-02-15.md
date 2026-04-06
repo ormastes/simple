@@ -52,16 +52,16 @@ exec "$@" 2>/dev/null
 Before:
 ```json
 {
-  "command": "/home/ormastes/dev/pub/simple/bin/release/simple",
-  "args": ["/home/ormastes/dev/pub/simple/src/app/mcp/main.spl"]
+  "command": "bin/release/simple",
+  "args": ["src/app/mcp/main.spl"]
 }
 ```
 
 After:
 ```json
 {
-  "command": "/home/ormastes/dev/pub/simple/bin/mcp_quiet.sh",
-  "args": ["/home/ormastes/dev/pub/simple/bin/release/simple", "/home/ormastes/dev/pub/simple/src/app/mcp/main.spl"]
+  "command": "bin/mcp_quiet.sh",
+  "args": ["bin/release/simple", "src/app/mcp/main.spl"]
 }
 ```
 

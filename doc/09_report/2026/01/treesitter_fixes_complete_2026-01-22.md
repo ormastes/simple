@@ -222,7 +222,7 @@ For now, `tree.spl` module is fully functional:
 
 ```simple
 # Run from project directory
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Use tree module
 cat > my_test.spl << 'EOF'

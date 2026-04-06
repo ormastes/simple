@@ -6,7 +6,7 @@
 
 **Swapchain Module Implementation**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs
+src/runtime/src/value/vulkan_ffi/swapchain.rs
 ```
 - Type: Rust source module
 - Size: 317 lines
@@ -17,7 +17,7 @@
 
 **Vulkan FFI Module Registry**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/mod.rs
+src/runtime/src/value/vulkan_ffi/mod.rs
 ```
 - Type: Module registry file
 - Size: 47 lines
@@ -31,7 +31,7 @@
 
 **Complete Extraction Report**
 ```
-/home/ormastes/dev/pub/simple/doc/09_report/VULKAN_FFI_SWAPCHAIN_EXTRACTION_2025-12-28.md
+doc/09_report/VULKAN_FFI_SWAPCHAIN_EXTRACTION_2025-12-28.md
 ```
 - Type: Markdown documentation
 - Size: 9.0 KB
@@ -39,7 +39,7 @@
 
 **Quick Reference Guide**
 ```
-/home/ormastes/dev/pub/simple/doc/09_report/SWAPCHAIN_MODULE_STRUCTURE.md
+doc/09_report/SWAPCHAIN_MODULE_STRUCTURE.md
 ```
 - Type: Markdown documentation
 - Size: 6.8 KB
@@ -47,7 +47,7 @@
 
 **File Index (This Document)**
 ```
-/home/ormastes/dev/pub/simple/doc/09_report/SWAPCHAIN_EXTRACTION_FILE_INDEX.md
+doc/09_report/SWAPCHAIN_EXTRACTION_FILE_INDEX.md
 ```
 - Type: Markdown documentation
 - Content: Complete file path reference
@@ -56,7 +56,7 @@
 
 **Original File (Functions Extracted From)**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/gpu_vulkan.rs
+src/runtime/src/value/gpu_vulkan.rs
 ```
 - Original lines: 422-671
 - Functions: 7 swapchain management functions
@@ -66,37 +66,37 @@
 
 **Swapchain Registry & Common Types**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/common.rs
+src/runtime/src/value/vulkan_ffi/common.rs
 ```
 - Provides: SWAPCHAIN_REGISTRY, VulkanFfiError, next_handle()
 
 **Device Management Module**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/device.rs
+src/runtime/src/value/vulkan_ffi/device.rs
 ```
 - Provides: Device creation and management (used by swapchain)
 
 **Buffer Management Module**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/buffer.rs
+src/runtime/src/value/vulkan_ffi/buffer.rs
 ```
 - Provides: Buffer operations (related GPU functionality)
 
 **Kernel Compilation Module**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/kernel.rs
+src/runtime/src/value/vulkan_ffi/kernel.rs
 ```
 - Provides: Compute kernel management (related GPU functionality)
 
 **Descriptor Management Module**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/descriptor.rs
+src/runtime/src/value/vulkan_ffi/descriptor.rs
 ```
 - Provides: Descriptor sets and layouts (related GPU functionality)
 
 **Window Management Module**
 ```
-/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/window.rs
+src/runtime/src/value/vulkan_ffi/window.rs
 ```
 - Provides: Window creation (used by swapchain)
 
@@ -104,32 +104,32 @@
 
 ### View Swapchain Module
 ```bash
-cat /home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs
+cat src/runtime/src/value/vulkan_ffi/swapchain.rs
 ```
 
 ### View Module Registry
 ```bash
-cat /home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/mod.rs
+cat src/runtime/src/value/vulkan_ffi/mod.rs
 ```
 
 ### View Extraction Report
 ```bash
-cat /home/ormastes/dev/pub/simple/doc/09_report/VULKAN_FFI_SWAPCHAIN_EXTRACTION_2025-12-28.md
+cat doc/09_report/VULKAN_FFI_SWAPCHAIN_EXTRACTION_2025-12-28.md
 ```
 
 ### View Module Structure Guide
 ```bash
-cat /home/ormastes/dev/pub/simple/doc/09_report/SWAPCHAIN_MODULE_STRUCTURE.md
+cat doc/09_report/SWAPCHAIN_MODULE_STRUCTURE.md
 ```
 
 ### Check Formatting
 ```bash
-rustfmt --check /home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs
+rustfmt --check src/runtime/src/value/vulkan_ffi/swapchain.rs
 ```
 
 ### View Function Definitions
 ```bash
-grep -n "^pub extern.*fn rt_vk_swapchain" /home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs
+grep -n "^pub extern.*fn rt_vk_swapchain" src/runtime/src/value/vulkan_ffi/swapchain.rs
 ```
 
 ## Verification Checklist

@@ -14,7 +14,7 @@ The runtime export issue was **NOT an interpreter bug**. The module system works
 ### ✅ What Works (Verified)
 
 ```simple
-# Run from project directory: /home/ormastes/dev/pub/simple
+# Run from project directory: 
 use parser.treesitter.tree.{Span, NodeId}
 
 val span = Span(
@@ -57,13 +57,13 @@ DEBUG path_resolution: Found stdlib file: "src/lib/std/src/parser/treesitter/tre
 When testing from `/tmp/test.spl`:
 - Base directory: `/tmp`
 - Path resolution walks up: `/tmp` → `/` looking for `src/lib/std/src`
-- Never reaches `/home/ormastes/dev/pub/simple/`
+- Never reaches ``
 - Fails to find stdlib modules
 
 ### Why It Actually Works
 
 When running from project directory:
-- Base directory: `/home/ormastes/dev/pub/simple`
+- Base directory: ``
 - Path resolution immediately finds: `./src/lib/std/src`
 - All stdlib modules resolve correctly
 - Exports work as designed
@@ -109,7 +109,7 @@ These are **parse errors**, not runtime export issues. They need separate fixes.
 
 ```bash
 # 1. Navigate to project directory
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # 2. Create test script
 cat > my_test.spl << 'EOF'

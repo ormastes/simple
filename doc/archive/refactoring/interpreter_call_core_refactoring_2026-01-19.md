@@ -221,8 +221,8 @@ For developers working on the interpreter:
 
 ## Related Documents
 
-- `/home/ormastes/dev/pub/simple/src/compiler/src/interpreter_call/core/REFACTORING_SUMMARY.md` - Detailed module documentation
-- `/home/ormastes/dev/pub/simple/src/compiler/src/interpreter_call/core.rs.bak` - Original file backup
+- `src/compiler/src/interpreter_call/core/REFACTORING_SUMMARY.md` - Detailed module documentation
+- `src/compiler/src/interpreter_call/core.rs.bak` - Original file backup
 
 ## Conclusion
 

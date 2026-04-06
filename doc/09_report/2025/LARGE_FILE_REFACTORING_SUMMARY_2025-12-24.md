@@ -334,9 +334,9 @@ This analysis provides a complete roadmap for refactoring three large compiler f
 Begin Phase 1 (HIR Expression Lowering) for highest immediate impact on code maintainability.
 
 **Files Ready for Review:**
-- `/home/ormastes/dev/pub/simple/src/compiler/src/mir/inst_types.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/mir/inst_enum.rs`
-- `/home/ormastes/dev/pub/simple/doc/09_report/FILE_REFACTORING_2025-12-24.md`
+- `src/compiler/src/mir/inst_types.rs`
+- `src/compiler/src/mir/inst_enum.rs`
+- `doc/09_report/FILE_REFACTORING_2025-12-24.md`
 - This summary document
 
 ---

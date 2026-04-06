@@ -164,7 +164,7 @@ simple sffi-gen --gen-intern src/app/ffi_gen/specs/treesitter.spl
 
 ### Step 1: Generate SFFI Bindings
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 simple sffi-gen --gen-intern src/app/ffi_gen/specs/treesitter.spl
 ```
 

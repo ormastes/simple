@@ -6,7 +6,7 @@
 ## Installation Status
 
 ### ✅ Server Binary
-- **Location:** `/home/ormastes/dev/pub/simple/bin/simple_mcp_server_optimized`
+- **Location:** `bin/simple_mcp_server_optimized`
 - **Status:** Executable, functional
 - **Type:** Bash wrapper script → Simple runtime → MCP server code
 - **Source:** `src/app/mcp/bootstrap/main_optimized.spl`
@@ -20,10 +20,10 @@
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_server_optimized",
+      "command": "bin/simple_mcp_server_optimized",
       "args": ["server"],
       "env": {
-        "SIMPLE_PROJECT_ROOT": "/home/ormastes/dev/pub/simple"
+        "SIMPLE_PROJECT_ROOT": ""
       }
     }
   }

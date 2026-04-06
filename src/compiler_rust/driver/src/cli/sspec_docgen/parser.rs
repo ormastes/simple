@@ -14,6 +14,50 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
     let mut feature_title = None;
     let mut feature_ids = Vec::new();
 
+    // Pre-scan: Extract comment-based documentation (# ## Section pattern)
+    // Many feature specs use comment-based docs instead of """ blocks.
+    let mut comment_doc_lines: Vec<String> = Vec::new();
+    let mut comment_scan_i = 0;
+    // Skip leading blank lines
+    while comment_scan_i < lines.len() && lines[comment_scan_i].trim().is_empty() {
+        comment_scan_i += 1;
+    }
+    // Collect consecutive comment lines
+    while comment_scan_i < lines.len() {
+        let cline = lines[comment_scan_i].trim();
+        if cline.starts_with("# ") && !cline.starts_with("#[") {
+            comment_doc_lines.push(cline[2..].to_string());
+        } else if cline == "#" {
+            comment_doc_lines.push(String::new());
+        } else {
+            break;
+        }
+        comment_scan_i += 1;
+    }
+
+    // If comment docs contain markdown structure, synthesize a DocBlock
+    if !comment_doc_lines.is_empty() {
+        let comment_content = comment_doc_lines.join("\n").trim().to_string();
+        if comment_content.contains("## ") || comment_content.contains("**Category:**") {
+            // Extract feature title from "# Title" pattern
+            if feature_title.is_none() {
+                for cl in &comment_doc_lines {
+                    let cl_trimmed = cl.trim();
+                    if cl_trimmed.starts_with("# ") {
+                        feature_title = Some(cl_trimmed[2..].trim().to_string());
+                        break;
+                    }
+                }
+            }
+
+            doc_blocks.push(DocBlock {
+                content: comment_content,
+                line_start: 0,
+                line_end: comment_scan_i,
+            });
+        }
+    }
+
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i].trim();

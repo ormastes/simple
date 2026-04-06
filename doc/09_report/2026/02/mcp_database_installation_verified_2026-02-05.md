@@ -132,7 +132,7 @@ testdb:///flaky   → Flaky tests (high variance)
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_runtime",
+      "command": "bin/simple_runtime",
       "args": ["src/app/mcp/main.spl", "server"]
     }
   }
@@ -145,10 +145,10 @@ testdb:///flaky   → Flaky tests (high variance)
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_runtime",
+      "command": "bin/simple_runtime",
       "args": ["src/app/mcp/main.spl", "server"],
       "env": {
-        "SIMPLE_PROJECT_ROOT": "/home/ormastes/dev/pub/simple"
+        "SIMPLE_PROJECT_ROOT": ""
       }
     }
   }

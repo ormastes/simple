@@ -225,10 +225,10 @@ Create comprehensive test coverage for utility libraries built in Parts 2-4 of t
 ### Build Status
 ```bash
 $ cargo build --workspace
-   Compiling simple-compiler v0.1.0 (/home/ormastes/dev/pub/simple/src/compiler)
-   Compiling simple-term-io v0.1.0 (/home/ormastes/dev/pub/simple/src/lib)
-   Compiling simple-lsp v0.1.0 (/home/ormastes/dev/pub/simple/src/lsp)
-   Compiling simple-dap v0.1.0 (/home/ormastes/dev/pub/simple/src/dap)
+   Compiling simple-compiler v0.1.0 (src/compiler)
+   Compiling simple-term-io v0.1.0 (src/lib)
+   Compiling simple-lsp v0.1.0 (src/lsp)
+   Compiling simple-dap v0.1.0 (src/dap)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.99s
 ```
 ✓ **Success** - Zero compilation errors

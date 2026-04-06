@@ -175,8 +175,8 @@ Consider implementing the stubbed advanced features:
 
 ## Related Files
 
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/physics/collision/__init__.spl`
-- All submodules in `/home/ormastes/dev/pub/simple/simple/std_lib/src/physics/collision/`
+- `simple/std_lib/src/physics/collision/__init__.spl`
+- All submodules in `simple/std_lib/src/physics/collision/`
 
 ## Statistics
 

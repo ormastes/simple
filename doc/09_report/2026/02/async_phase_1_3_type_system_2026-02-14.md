@@ -184,7 +184,7 @@ Created comprehensive status document covering:
 ### Build Status
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 bin/simple build
 # Output: Build succeeded in 0ms
 ```

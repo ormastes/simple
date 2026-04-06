@@ -36,7 +36,7 @@ $ timeout 30 bin/simple test test/unit/compiler_core/interpreter/factorial_spec.
 
 #### 1. shell.env Module (Created)
 
-**Location:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
+**Location:** `src/lib/shell/env.spl`
 
 **Functions implemented:**
 ```simple
@@ -53,8 +53,8 @@ fn cwd() -> text                # Get current working directory
 **Verification:**
 ```bash
 $ bin/simple test_direct.spl
-PATH from rt_env_get: /home/ormastes/.elan/bin:/home/ormastes/.local/bin:...
-HOME from rt_env_get: /home/ormastes
+PATH from rt_env_get: ~/.elan/bin:~/.local/bin:...
+HOME from rt_env_get: ~
 NONEXISTENT: nil
 ```
 
@@ -87,7 +87,7 @@ val path = get("PATH")  # Direct function call
 
 #### 3. log.spl Status
 
-**Current implementation:** `/home/ormastes/dev/pub/simple/src/lib/log.spl`
+**Current implementation:** `src/lib/log.spl`
 
 **Has:**
 - LOG_OFF, LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE constants
@@ -156,14 +156,14 @@ Action: Try running via full suite to see actual status.
 
 ## Files Created
 
-1. `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl` - Environment functions
-2. `/home/ormastes/dev/pub/simple/src/lib/shell/mod.spl` - Shell module index
+1. `src/lib/shell/env.spl` - Environment functions
+2. `src/lib/shell/mod.spl` - Shell module index
 
 ## Implementation Results
 
 ### 1. shell.env Module - COMPLETE ✓
 
-**Created:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
+**Created:** `src/lib/shell/env.spl`
 
 **Functions:**
 - `get(key: text) -> text` - Get env variable (returns "" if nil)
@@ -176,7 +176,7 @@ Action: Try running via full suite to see actual status.
 
 ### 2. Extended log.spl - COMPLETE ✓
 
-**Extended:** `/home/ormastes/dev/pub/simple/src/lib/log.spl`
+**Extended:** `src/lib/log.spl`
 
 **Added Constants:**
 - `LOG_FATAL = 1`

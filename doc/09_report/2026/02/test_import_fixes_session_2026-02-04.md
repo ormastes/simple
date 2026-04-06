@@ -278,13 +278,13 @@ Instead of full test suite (stack overflow), use:
 
 ```bash
 # Test individual files
-/home/ormastes/dev/pub/simple/bin/simple test test/compiler/lexer_comprehensive_spec.spl
+bin/simple test test/compiler/lexer_comprehensive_spec.spl
 
 # Test by directory
-/home/ormastes/dev/pub/simple/bin/simple test test/lib/std/unit/compiler/
+bin/simple test test/lib/std/unit/compiler/
 
 # Test specific categories
-/home/ormastes/dev/pub/simple/bin/simple test --tag=lexer
+bin/simple test --tag=lexer
 ```
 
 ---

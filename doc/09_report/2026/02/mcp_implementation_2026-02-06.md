@@ -93,7 +93,7 @@ Added 3 bugdb tools to `tools/list` response. Previously implemented but not lis
 
 ```bash
 # Add Simple MCP to Claude Code
-claude mcp add --transport stdio simple-mcp -- /home/ormastes/dev/pub/simple/bin/simple mcp server
+claude mcp add --transport stdio simple-mcp -- bin/simple mcp server
 ```
 
 ### Status: ⚠️ Partial
@@ -103,7 +103,7 @@ claude mcp add --transport stdio simple-mcp -- /home/ormastes/dev/pub/simple/bin
 **Evidence:**
 ```bash
 $ claude mcp list
-simple-mcp: /home/ormastes/dev/pub/simple/bin/simple mcp server - ✗ Failed to connect
+simple-mcp: bin/simple mcp server - ✗ Failed to connect
 ```
 
 **Root cause:** Runtime emits warnings like:

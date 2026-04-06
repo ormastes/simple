@@ -22,13 +22,13 @@ Feature answers: **How does the user experience the requirement?**
 ```
 PLAN (doc/03_plan/)
   ↓
-REQUIREMENTS (doc/requirement/)
+REQUIREMENTS (doc/02_requirements/)
   ↓
 FEATURE SPECIFICATION  ←  (this folder)
   ↓
 BDD TESTS (*_spec.spl in test/)
   ↓
-TEST RESULTS (doc/test/test_result.md)
+TEST RESULTS (doc/08_tracking/test/test_result.md)
 ```
 
 Requirements → generates → Feature Specification(s)
@@ -41,9 +41,9 @@ Feature Specification → verified by → BDD Tests
 ```markdown
 # Feature Specification – [Feature Name]
 
-**Requirements:** [doc/requirement/xxx.md](../plan/requirement/xxx.md)
-**Plan:** [doc/03_plan/xxx.md](../plan/xxx.md)
-**Design:** [doc/05_design/xxx.md](../design/xxx.md)
+**Requirements:** [doc/02_requirements/xxx.md](../xxx.md)
+**Plan:** [doc/03_plan/xxx.md](../../03_plan/xxx.md)
+**Design:** [doc/05_design/xxx.md](../../05_design/xxx.md)
 **Status:** Draft | In Progress | Implemented | Complete
 
 ## Feature Description
@@ -106,7 +106,7 @@ Examples:
 ## Cross-References
 
 Feature specs should link to:
-- `doc/requirement/` — the REQ-NNN statements driving this feature
+- `doc/02_requirements/` — the REQ-NNN statements driving this feature
 - `doc/03_plan/` — the plan for implementation
 - `doc/05_design/` — the technical design
 - `test/*_spec.spl` — the BDD test files that verify it

@@ -2,7 +2,7 @@
 
 **Goal**: Create `src/diagnostics/` crate that consolidates all error reporting, used by both Rust implementation and Simple language.
 
-**Status**: Design Phase
+**Status**: Draft
 **Approach**: Option 2 - Single unified crate with integrated i18n
 
 ---

@@ -190,6 +190,6 @@ Phase 2 (Wasmer Runtime) and Phase 3.1 (.sui Parser) are **production-ready** wi
 ---
 
 **Related Files:**
-- Plan: `/home/ormastes/.claude/plans/mossy-cooking-hammock.md`
+- Plan: `~/.claude/plans/mossy-cooking-hammock.md`
 - Phase 2 Reports: `doc/09_report/WASM_PHASE2_COMPLETION_2025-12-25.md`, `WASM_STDIO_CAPTURE_2025-12-25.md`, `BROWSER_MOCK_COMPLETE_2025-12-25.md`
 - Phase 3.1 Report: `doc/09_report/SUI_PARSER_PHASE3.1_2025-12-25.md`

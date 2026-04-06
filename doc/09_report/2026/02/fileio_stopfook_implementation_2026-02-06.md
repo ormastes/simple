@@ -196,7 +196,7 @@ Add to `.mcp.json`:
 {
   "mcpServers": {
     "simple-fileio": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_fileio",
+      "command": "bin/simple_mcp_fileio",
       "args": [],
       "env": {
         "SIMPLE_FILEIO_CONFIG": "fileio_protection.sdn"

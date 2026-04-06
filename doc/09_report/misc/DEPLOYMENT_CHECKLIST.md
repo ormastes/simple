@@ -41,7 +41,7 @@
 ### Day 1: Annotation Cleanup ⏳
 - [ ] **Morning:** Run remove_skip_annotations.spl script
   ```bash
-  cd /home/ormastes/dev/pub/simple
+  cd 
   bin/simple scripts/remove_skip_annotations.spl --dry-run
   bin/simple scripts/remove_skip_annotations.spl
   ```

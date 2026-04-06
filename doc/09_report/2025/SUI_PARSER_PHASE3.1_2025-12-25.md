@@ -583,4 +583,4 @@ public/
 **Related Documentation:**
 - WASM Phase 2 Completion: `doc/09_report/WASM_PHASE2_COMPLETION_2025-12-25.md`
 - Browser Mock Implementation: `doc/09_report/BROWSER_MOCK_COMPLETE_2025-12-25.md`
-- WASM Integration Plan: `/home/ormastes/.claude/plans/mossy-cooking-hammock.md`
+- WASM Integration Plan: `~/.claude/plans/mossy-cooking-hammock.md`

@@ -12,8 +12,8 @@ This report analyzes how Rust achieves high-performance, robust implementations 
 ### Current State in Simple
 
 Simple has test specifications for persistent collections at:
-- `/home/ormastes/dev/pub/simple/test/app/interpreter/collections/persistent_dict_spec.spl`
-- `/home/ormastes/dev/pub/simple/test/app/interpreter/collections/persistent_vec_spec.spl`
+- `test/app/interpreter/collections/persistent_dict_spec.spl`
+- `test/app/interpreter/collections/persistent_vec_spec.spl`
 
 Both marked with `@skip`, indicating planned but not yet implemented features.
 
@@ -226,9 +226,9 @@ impl Drop for PersistentDict:
 ### Current State in Simple
 
 Simple has sophisticated actor implementation at:
-- `/home/ormastes/dev/pub/simple/src/app/interpreter.async_runtime/actors.spl`
-- `/home/ormastes/dev/pub/simple/src/app/interpreter.async_runtime/mailbox.spl`
-- `/home/ormastes/dev/pub/simple/src/app/interpreter.async_runtime/actor_scheduler.spl`
+- `src/app/interpreter.async_runtime/actors.spl`
+- `src/app/interpreter.async_runtime/mailbox.spl`
+- `src/app/interpreter.async_runtime/actor_scheduler.spl`
 
 **Key Architecture Insights:**
 
@@ -490,8 +490,8 @@ me schedule_next() -> ActorRef?:
 ### Current State in Simple
 
 Simple has JIT infrastructure at:
-- `/home/ormastes/dev/pub/simple/src/compiler/loader/jit_instantiator.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler/loader/jit_context.spl`
+- `src/compiler/loader/jit_instantiator.spl`
+- `src/compiler/loader/jit_context.spl`
 
 **Architecture:**
 ```simple
@@ -872,7 +872,7 @@ impl JitCache:
 ### Current State in Simple
 
 Simple has parser error recovery at:
-- `/home/ormastes/dev/pub/simple/test/system/features/parser/parser_error_recovery_spec.spl`
+- `test/system/features/parser/parser_error_recovery_spec.spl`
 
 **Features Tested:**
 - Python syntax detection (`def`, `None`, `True`/`False`)

@@ -24,7 +24,7 @@ Phase 3.4 successfully implements wasm-bindgen binding generation for browser FF
 
 ### Files Created
 
-#### 1. `/home/ormastes/dev/pub/simple/src/compiler/src/codegen/wasm_bindgen_gen.rs` (~450 LOC)
+#### 1. `src/compiler/src/codegen/wasm_bindgen_gen.rs` (~450 LOC)
 
 **Purpose:** Core binding generation system
 
@@ -155,7 +155,7 @@ export { init };
 
 ### Files Modified
 
-#### `/home/ormastes/dev/pub/simple/src/compiler/src/codegen/mod.rs`
+#### `src/compiler/src/codegen/mod.rs`
 - Added `pub mod wasm_bindgen_gen;`
 
 ---

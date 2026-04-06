@@ -1,0 +1,174 @@
+# Room Map — TUI Renderer
+#
+# Renders a virtual office map with agent characters positioned inside rooms.
+# Each room is a box, agents appear as ASCII sprites at their desk slots.
+#
+# Layout (2×3 grid):
+#   ┌─ Research ──┐ ┌─ Code ──────┐ ┌─ Skills ───┐
+#   │  C*   G~    │ │  C>   X*    │ │  C]         │
+#   │ /|\ /|\    │ │ /|\ /|\    │ │ /|\         │
+#   └─────────────┘ └─────────────┘ └─────────────┘
+#   ┌─ Server ────┐ ┌─ Chat ──────┐ ┌─ TestLab ──┐
+#   │  X]         │ │  C* → G*    │ │  X>         │
+#   │ /|\         │ │ /|\ /|\    │ │ /|\         │
+#   └─────────────┘ └─────────────┘ └─────────────┘
+
+use app.ui.tui.screen.{Screen}
+use app.ui.render.ansi.{RESET, BOLD, DIM, FG_BLUE, FG_WHITE}
+use app.llm_dashboard.data.types.{RoomKind, AgentNode, LLMProvider, AgentActivity,
+    room_name, activity_label}
+use app.llm_dashboard.data.agent_position.{AgentPos, pos_agents_in_room, pos_update_from_nodes}
+use app.llm_dashboard.tui.agent_sprites.{agent_sprite, SPRITE_HEIGHT, SPRITE_WIDTH}
+use app.llm_dashboard.tui.colors.{provider_color}
+
+# =========================================================================
+# Room Map Constants
+# =========================================================================
+
+val MAP_COLS: i32 = 3           # rooms per row
+val MAP_ROWS: i32 = 2           # rows of rooms
+val ROOM_INNER_H: i32 = 5       # inner height (room content area)
+val ROOM_BORDER: i32 = 1        # border width
+
+# =========================================================================
+# Room Map Renderer
+# =========================================================================
+
+fn render_room_map(screen: Screen, start_row: i32, start_col: i32,
+                   map_width: i32, map_height: i32,
+                   agents: [AgentNode]) -> Screen:
+    """Render the full 2×3 room map with positioned agent characters."""
+    # Update positions from agent states
+    pos_update_from_nodes(agents)
+
+    var s = screen
+    val rooms_row1 = [RoomKind.Research, RoomKind.Code, RoomKind.Skills]
+    val rooms_row2 = [RoomKind.Server, RoomKind.Chat, RoomKind.TestLab]
+
+    val room_w = map_width / MAP_COLS
+    val room_h = map_height / MAP_ROWS
+
+    # Row 1
+    var col_offset = start_col
+    for room in rooms_row1:
+        s = render_room_box(s, start_row, col_offset, room_w, room_h, room, agents)
+        col_offset = col_offset + room_w
+
+    # Row 2
+    col_offset = start_col
+    for room in rooms_row2:
+        s = render_room_box(s, start_row + room_h, col_offset, room_w, room_h, room, agents)
+        col_offset = col_offset + room_w
+
+    s
+
+fn render_room_box(screen: Screen, row: i32, col: i32, w: i32, h: i32,
+                   room: RoomKind, agents: [AgentNode]) -> Screen:
+    """Render a single room box with border, title, and agent sprites inside."""
+    var s = screen
+    val name = room_name(room)
+    val agents_in = pos_agents_in_room(room)
+    val count = agents_in.len()
+
+    # Draw border
+    s = draw_room_border(s, row, col, w, h, name, count)
+
+    # Place agents inside the room
+    val inner_row = row + 1
+    val inner_col = col + 2
+    val inner_w = w - 4
+    val slots_per_row = if inner_w > 0: inner_w / (SPRITE_WIDTH + 1) else: 1
+    if slots_per_row < 1:
+        return s
+
+    var slot_idx = 0
+    for pos in agents_in:
+        # Find the agent node for this position
+        val agent = find_agent_by_id(agents, pos.agent_id)
+        if agent.id == "":
+            slot_idx = slot_idx + 1
+            continue
+
+        # Calculate sprite position within room
+        val sprite_col_offset = (slot_idx % slots_per_row) * (SPRITE_WIDTH + 1)
+        val sprite_row_offset = (slot_idx / slots_per_row) * (SPRITE_HEIGHT + 1)
+
+        val sprite_row = inner_row + sprite_row_offset
+        val sprite_col = inner_col + sprite_col_offset
+
+        # Only render if fits within room
+        if sprite_row + SPRITE_HEIGHT <= row + h - 1 and sprite_col + SPRITE_WIDTH <= col + w - 1:
+            # Draw activity bubble above sprite
+            if pos.activity_label.len() > 0:
+                val bubble = "[" + pos.activity_label + "]"
+                if sprite_row > row + 1:
+                    val bubble_trunc = if bubble.len() > (SPRITE_WIDTH + 2): bubble.slice(0, SPRITE_WIDTH + 2) else: bubble
+                    s = s.put_text(sprite_row - 1, sprite_col, DIM + bubble_trunc + RESET)
+
+            # Draw sprite lines
+            val sprite_lines = agent_sprite(agent.provider, agent.activity)
+            var line_idx = 0
+            for line in sprite_lines:
+                if sprite_row + line_idx < row + h - 1:
+                    s = s.put_text(sprite_row + line_idx, sprite_col, line)
+                line_idx = line_idx + 1
+
+        slot_idx = slot_idx + 1
+
+    s
+
+# =========================================================================
+# Border Drawing
+# =========================================================================
+
+fn draw_room_border(screen: Screen, row: i32, col: i32, w: i32, h: i32,
+                    title: text, agent_count: i64) -> Screen:
+    """Draw room box border with title and agent count badge."""
+    var s = screen
+
+    # Build title string with count
+    val count_str = if agent_count > 0: " (" + agent_count.to_text() + ")" else: ""
+    val full_title = " " + title + count_str + " "
+
+    # Top border: ┌─ Title (N) ──────┐
+    var top: [text] = []
+    top.push(FG_BLUE + "┌" + RESET)
+    top.push(FG_BLUE + "─" + RESET)
+    top.push(BOLD + full_title + RESET)
+    val remaining = w - 3 - full_title.len()
+    var r = 0
+    while r < remaining:
+        top.push(FG_BLUE + "─" + RESET)
+        r = r + 1
+    top.push(FG_BLUE + "┐" + RESET)
+    s = s.put_text(row, col, top.join(""))
+
+    # Side borders
+    var y = 1
+    while y < h - 1:
+        s = s.put_text(row + y, col, FG_BLUE + "│" + RESET)
+        s = s.put_text(row + y, col + w - 1, FG_BLUE + "│" + RESET)
+        y = y + 1
+
+    # Bottom border: └──────────────────┘
+    var bottom: [text] = []
+    bottom.push(FG_BLUE + "└" + RESET)
+    var b = 0
+    while b < w - 2:
+        bottom.push(FG_BLUE + "─" + RESET)
+        b = b + 1
+    bottom.push(FG_BLUE + "┘" + RESET)
+    s = s.put_text(row + h - 1, col, bottom.join(""))
+
+    s
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn find_agent_by_id(agents: [AgentNode], id: text) -> AgentNode:
+    """Find agent node by ID. Returns node with empty id if not found."""
+    for agent in agents:
+        if agent.id == id:
+            return agent
+    AgentNode.new("", LLMProvider.Unknown(name: ""), "")

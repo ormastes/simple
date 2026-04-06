@@ -22,7 +22,7 @@ This document provides step-by-step instructions for merging duplicate parser/le
 ### Step 1: Find All Imports of Duplicate Lexer
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Find all files importing app.parser.lexer
 grep -r "from.*app\.parser\.lexer" src/ test/
@@ -289,7 +289,7 @@ simple build --release
 ### Step 1.6: Commit Changes
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Add all changes
 jj bookmark set main -r @

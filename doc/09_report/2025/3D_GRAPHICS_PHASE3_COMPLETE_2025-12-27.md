@@ -3,7 +3,7 @@
 **Date:** 2025-12-27
 **Status:** ✅ Complete
 **Phase:** 3 - Vulkan Integration (Week 5-6)
-**Plan Reference:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
+**Plan Reference:** `~/.claude/plans/floating-booping-coral.md`
 
 ---
 
@@ -173,34 +173,34 @@ Successfully completed Phase 3 of the 3D Graphics Library implementation. The Vu
 
 ### Created Files (6 new files):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/__init__.spl`
+1. `simple/std_lib/src/graphics/render/__init__.spl`
    - Render module root
    - Re-exports device_manager, renderer, pipeline, buffer, texture
 
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/device_manager.spl` (150 lines)
+2. `simple/std_lib/src/graphics/render/device_manager.spl` (150 lines)
    - VulkanDeviceManager singleton
    - DeviceHandle RAII wrapper
 
-3. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/buffer.spl` (380 lines)
+3. `simple/std_lib/src/graphics/render/buffer.spl` (380 lines)
    - VertexBuffer3D, IndexBuffer3D, UniformBuffer[T]
    - CameraUniformData, LightingUniformData
    - DepthImage
 
-4. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/texture.spl` (280 lines)
+4. `simple/std_lib/src/graphics/render/texture.spl` (280 lines)
    - Texture2D, CubemapTexture
    - TextureFormat, TextureFilter, TextureWrap
 
-5. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/pipeline.spl` (380 lines)
+5. `simple/std_lib/src/graphics/render/pipeline.spl` (380 lines)
    - Pipeline3D, ShaderModule
    - PipelineConfig, embedded Phong/Unlit shaders
 
-6. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/render/renderer.spl` (450 lines)
+6. `simple/std_lib/src/graphics/render/renderer.spl` (450 lines)
    - Renderer3D, RenderTarget3D
    - Main rendering loop
 
 ### Modified Files (1):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/__init__.spl`
+1. `simple/std_lib/src/graphics/__init__.spl`
    - Added: `export use render.*`
 
 ---
@@ -552,10 +552,10 @@ Or we could implement asset loading before UI integration:
 
 ## References
 
-- **Implementation Plan:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
-- **Phase 1 Report:** `/home/ormastes/dev/pub/simple/doc/09_report/3D_GRAPHICS_PHASE1_COMPLETE_2025-12-27.md`
-- **Phase 2 Report:** `/home/ormastes/dev/pub/simple/doc/09_report/3D_GRAPHICS_PHASE2_COMPLETE_2025-12-27.md`
-- **Feature Documentation:** `/home/ormastes/dev/pub/simple/doc/features/feature.md` (#1780-1809)
+- **Implementation Plan:** `~/.claude/plans/floating-booping-coral.md`
+- **Phase 1 Report:** `doc/09_report/3D_GRAPHICS_PHASE1_COMPLETE_2025-12-27.md`
+- **Phase 2 Report:** `doc/09_report/3D_GRAPHICS_PHASE2_COMPLETE_2025-12-27.md`
+- **Feature Documentation:** `doc/features/feature.md` (#1780-1809)
 
 ---
 

@@ -1,6 +1,6 @@
 # Automatic C++ Wrapper Generator Design
 
-**Status**: Design Phase
+**Status**: Draft
 **Created**: 2026-02-08
 **Author**: Research & Design
 

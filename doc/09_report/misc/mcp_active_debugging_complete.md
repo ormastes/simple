@@ -287,7 +287,7 @@ Saves findings to bug database in SDN format.
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/home/ormastes/dev/pub/simple/target/debug/simple_old",
+      "command": "target/debug/simple_old",
       "args": ["src/app/mcp/main.spl", "server"]
     }
   }

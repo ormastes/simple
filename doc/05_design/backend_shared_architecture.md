@@ -1,7 +1,7 @@
 # Backend Shared Architecture - Refactoring Design
 
 **Date**: 2026-02-05
-**Status**: Design Proposal
+**Status**: Draft
 **Goal**: Eliminate duplication, create proper abstractions, simplify adding new backends
 
 ---
@@ -1232,6 +1232,6 @@ This refactoring design provides:
 
 ---
 
-**Status**: Design Proposal - Ready for Review
+**Status**: Draft
 **Next Steps**: Approve design → Begin Phase 1
 **Target Completion**: 4 weeks from approval

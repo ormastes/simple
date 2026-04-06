@@ -656,7 +656,7 @@ module dashboard:
 **Investigation First**:
 ```bash
 # Check if fuzzing exists
-find /home/ormastes/dev/pub/simple -name "*fuzz*" -o -name "*.fuzz" -o -name "afl*"
+find  -name "*fuzz*" -o -name "*.fuzz" -o -name "afl*"
 grep -r "cargo-fuzz\|libFuzzer\|afl" .
 ```
 

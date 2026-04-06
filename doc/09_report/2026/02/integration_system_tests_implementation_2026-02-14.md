@@ -430,13 +430,13 @@ Once all components are implemented:
 All test files created in project:
 
 ```
-/home/ormastes/dev/pub/simple/test/integration/
+test/integration/
   - advanced_types_spec.spl          (237 lines, 40 tests)
   - simd_stdlib_spec.spl             (201 lines, 30 tests)
   - baremetal_full_spec.spl          (311 lines, 40 tests)
   - thread_pool_async_spec.spl       (164 lines, 20 tests)
 
-/home/ormastes/dev/pub/simple/test/system/
+test/system/
   - compiler_full_spec.spl           (355 lines, 60 tests)
 
 Total: 5 files, 1,268 lines, 190 tests

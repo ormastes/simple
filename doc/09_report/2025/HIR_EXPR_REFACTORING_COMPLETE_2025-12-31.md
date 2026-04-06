@@ -199,18 +199,18 @@ sed -n '256,$p' "$INPUT" | sed 's/^    fn /    pub(super) fn /' >> "$OUTPUT"
 ## Files Modified (This Session)
 
 ### Created
-1. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/expr/simd.rs` (504 lines)
-2. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/expr/tensor.rs` (305 lines)
+1. `src/compiler/src/hir/lower/expr/simd.rs` (504 lines)
+2. `src/compiler/src/hir/lower/expr/tensor.rs` (305 lines)
 3. `/tmp/create_simd.sh` (extraction script)
 4. `/tmp/create_tensor.sh` (extraction script)
 
 ### Modified
-1. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/expr/mod.rs`
+1. `src/compiler/src/hir/lower/expr/mod.rs`
    - Added `mod simd;` and `mod tensor;` declarations
    - Removed 336 lines (struct init + tensor/grid functions)
    - Final size: 210 lines (from 1,699 original)
 
-2. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/expr/collections.rs`
+2. `src/compiler/src/hir/lower/expr/collections.rs`
    - Added `lower_struct_init()` function (44 lines)
    - Updated module documentation
    - Final size: 134 lines

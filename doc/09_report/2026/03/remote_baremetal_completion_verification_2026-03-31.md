@@ -15,13 +15,13 @@ Repo-side remote baremetal completion work is verified for the implemented scope
 
 ## Files Verified
 
-- [adapter_ch32v307.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/adapter_ch32v307.spl)
-- [test_executor_composite_jit_generic.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/test_runner/test_executor_composite_jit_generic.spl)
-- [ch32v307_adapter_spec.spl](/home/ormastes/dev/pub/simple/test/unit/lib/remote_exec/ch32v307_adapter_spec.spl)
-- [ch32v307_composite_runner_path_spec.spl](/home/ormastes/dev/pub/simple/test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl)
-- [qemu_rv32_raw_injected_regression_spec.spl](/home/ormastes/dev/pub/simple/test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl)
-- [remote_baremetal_remaining_without_trace32_2026-03-24.md](/home/ormastes/dev/pub/simple/doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
-- [remote_baremetal_runtime_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/remote_baremetal_runtime_spec.md)
+- [adapter_ch32v307.spl](src/lib/nogc_sync_mut/debug/remote/exec/adapter_ch32v307.spl)
+- [test_executor_composite_jit_generic.spl](src/lib/nogc_sync_mut/test_runner/test_executor_composite_jit_generic.spl)
+- [ch32v307_adapter_spec.spl](test/unit/lib/remote_exec/ch32v307_adapter_spec.spl)
+- [ch32v307_composite_runner_path_spec.spl](test/integration/remote_jit/ch32v307_composite_runner_path_spec.spl)
+- [qemu_rv32_raw_injected_regression_spec.spl](test/integration/remote_jit/qemu_rv32_raw_injected_regression_spec.spl)
+- [remote_baremetal_remaining_without_trace32_2026-03-24.md](doc/03_plan/remote_baremetal_remaining_without_trace32_2026-03-24.md)
+- [remote_baremetal_runtime_spec.md](doc/06_spec/remote_baremetal_runtime_spec.md)
 
 ## Verification Evidence
 

@@ -25,8 +25,8 @@ These do not fit naturally into BDD feature scenarios.
 ```markdown
 # NFR – [Feature / System Area]
 
-**Related requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
-**Related design:** [doc/05_design/xxx.md](../../design/xxx.md)
+**Related requirements:** [doc/02_requirements/xxx.md](../xxx.md)
+**Related design:** [doc/05_design/xxx.md](../../05_design/xxx.md)
 
 ## Performance
 

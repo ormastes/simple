@@ -246,8 +246,8 @@ Completed major refactoring of the doc/06_spec/ directory to improve navigation 
 ## Files Modified
 
 ### Created:
-1. `/home/ormastes/dev/pub/simple/doc/06_spec/testing_bdd_framework.md`
-2. `/home/ormastes/dev/pub/simple/doc/06_spec/sandboxing.md`
+1. `doc/06_spec/testing_bdd_framework.md`
+2. `doc/06_spec/sandboxing.md`
 
 ### Deleted:
 1. `doc/06_spec/sandboxing.md.backup`

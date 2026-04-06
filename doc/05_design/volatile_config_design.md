@@ -1,7 +1,7 @@
 # Volatile Memory Access: Configuration Design
 
 **Date**: 2026-02-05
-**Status**: Design
+**Status**: Draft
 **Related**: `doc/05_design/baremetal_features_examples.md`, `doc/05_design/bitfield_custom_type_design.md`
 
 ---

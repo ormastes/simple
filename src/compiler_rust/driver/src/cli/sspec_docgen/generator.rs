@@ -90,6 +90,9 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
         md.push('\n');
     }
 
+    // Related Documentation cross-reference section
+    append_related_docs_section(&mut md, sspec_doc);
+
     let output_path = output_dir.join(format!("{}.md", file_name));
     let mut file = fs::File::create(output_path)?;
     file.write_all(md.trim_end().as_bytes())?;
@@ -480,6 +483,40 @@ fn evidence_item_kind(group: &str, item: &str) -> String {
             Some(other) => format!("{} artifact", other.to_uppercase()),
             None => "Artifact".to_string(),
         },
+    }
+}
+
+fn append_related_docs_section(md: &mut String, sspec_doc: &SspecDoc) {
+    let mut links = Vec::new();
+
+    if let Some(req) = &sspec_doc.metadata.requirements {
+        if req != "N/A" && !req.is_empty() {
+            links.push(format!("- **Requirements:** [{}]({})", req, req));
+        }
+    }
+    if let Some(plan) = &sspec_doc.metadata.plan {
+        if plan != "N/A" && !plan.is_empty() {
+            links.push(format!("- **Plan:** [{}]({})", plan, plan));
+        }
+    }
+    if let Some(design) = &sspec_doc.metadata.design {
+        if design != "N/A" && !design.is_empty() {
+            links.push(format!("- **Design:** [{}]({})", design, design));
+        }
+    }
+    if let Some(research) = &sspec_doc.metadata.research {
+        if research != "N/A" && !research.is_empty() {
+            links.push(format!("- **Research:** [{}]({})", research, research));
+        }
+    }
+
+    if !links.is_empty() {
+        md.push_str("## Related Documentation\n\n");
+        for link in links {
+            md.push_str(&link);
+            md.push('\n');
+        }
+        md.push('\n');
     }
 }
 

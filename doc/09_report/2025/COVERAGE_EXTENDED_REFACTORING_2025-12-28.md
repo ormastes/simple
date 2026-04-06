@@ -99,7 +99,7 @@ All 7 tests continue to pass:
 
 ## Files Modified
 
-1. Created `/home/ormastes/dev/pub/simple/src/util/simple_mock_helper/src/coverage_extended/` directory
+1. Created `src/util/simple_mock_helper/src/coverage_extended/` directory
 2. Created 7 module files:
    - `mod.rs`
    - `types.rs`
@@ -108,7 +108,7 @@ All 7 tests continue to pass:
    - `analyzer.rs`
    - `display.rs`
    - `utils.rs`
-3. Deleted `/home/ormastes/dev/pub/simple/src/util/simple_mock_helper/src/coverage_extended.rs`
+3. Deleted `src/util/simple_mock_helper/src/coverage_extended.rs`
 
 ## Build Verification
 

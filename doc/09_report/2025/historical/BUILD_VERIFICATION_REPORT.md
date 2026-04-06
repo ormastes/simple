@@ -74,7 +74,7 @@ fn main() -> i64:
 **Problem found:**
 ```bash
 $ simple compile src/compiler_core_legacy/backend.spl
-error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/backend/interpreter.spl"
+error: compile failed: parse: in "src/compiler/backend/interpreter.spl"
 ```
 
 **Analysis:**

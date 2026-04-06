@@ -1,4 +1,4 @@
-*Source: `/home/ormastes/dev/pub/simple/test/system/features/ffi/rust_simple_ffi_spec.spl`*
+*Source: `test/system/features/ffi/rust_simple_ffi_spec.spl`*
 *Last Updated: 2026-01-21*
 
 ---

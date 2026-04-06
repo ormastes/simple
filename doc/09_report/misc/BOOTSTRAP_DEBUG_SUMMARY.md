@@ -80,7 +80,7 @@ The changes to `src/app/build/bootstrap.spl` won't take effect until `bin/simple
 bin/simple build --release
 
 # Option B: Manual bootstrap
-cd /home/ormastes/dev/pub/simple
+cd 
 ./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 ```
 
@@ -153,7 +153,7 @@ This is what I already implemented in the bootstrap script changes, but needs `b
 ### Immediate (To Test Fixes)
 1. **Rebuild bin/simple:**
    ```bash
-   cd /home/ormastes/dev/pub/simple
+   cd 
    bin/simple build --release
    ```
 

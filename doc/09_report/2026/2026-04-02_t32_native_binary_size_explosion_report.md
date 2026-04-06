@@ -107,8 +107,8 @@ binary.
 
 Changed:
 
-- [native_project.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/compiler/src/pipeline/native_project.rs)
-- [native_build.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/native_build.rs)
+- [native_project.rs](src/compiler_rust/compiler/src/pipeline/native_project.rs)
+- [native_build.rs](src/compiler_rust/driver/src/cli/native_build.rs)
 
 New behavior:
 
@@ -143,7 +143,7 @@ That keeps unresolved-symbol analysis aligned with the actual runtime bundle.
 ### 4. Regression tests
 
 Added compiler tests in
-[native_project.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/compiler/src/pipeline/native_project.rs):
+[native_project.rs](src/compiler_rust/compiler/src/pipeline/native_project.rs):
 
 - `test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry`
 - `test_runtime_bundle_auto_prefers_native_all_for_compiler_entry`
@@ -163,7 +163,7 @@ That was not a linker-size issue anymore. It was a frontend request-scanner issu
 
 Changed:
 
-- [frontend_cold.spl](/home/ormastes/dev/pub/simple/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl)
+- [frontend_cold.spl](examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl)
 
 What changed:
 
@@ -231,7 +231,7 @@ In other words, the repetition was systemic:
 1. Keep `runtime_bundle=auto` as the default behavior.
 2. Use `runtime_bundle=all` only for compiler/self-hosting binaries.
 3. Extend verification beyond the currently tested low-cost request set in
-   [frontend_cold.spl](/home/ormastes/dev/pub/simple/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl)
+   [frontend_cold.spl](examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl)
    so additional low-cost tools are covered in both native and source fallback paths.
 4. Add one end-to-end native smoke test for a non-compiler app that asserts:
    - binary size stays below a reasonable threshold

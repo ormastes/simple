@@ -11,7 +11,7 @@ Successfully extracted async file loading operations from the monolithic `file_i
 ## What Was Extracted
 
 ### New File Created
-- **Location:** `/home/ormastes/dev/pub/simple/src/runtime/src/value/file_io/async_file.rs`
+- **Location:** `src/runtime/src/value/file_io/async_file.rs`
 - **Size:** 441 lines
 - **Language:** Rust
 
@@ -216,10 +216,10 @@ Successfully extracted async file loading operations from the monolithic `file_i
 ## Files Modified/Created
 
 ### Created
-- `/home/ormastes/dev/pub/simple/src/runtime/src/value/file_io/async_file.rs` (441 lines)
+- `src/runtime/src/value/file_io/async_file.rs` (441 lines)
 
 ### Modified
-- `/home/ormastes/dev/pub/simple/src/runtime/src/value/file_io/mod.rs`
+- `src/runtime/src/value/file_io/mod.rs`
   - Added module declaration
   - Added re-exports
 
@@ -283,6 +283,6 @@ Successfully extracted async file loading operations from the monolithic `file_i
 - #1769: Progressive prefaulting (#1769)
 
 ## References
-- Architecture: `/home/ormastes/dev/pub/simple/doc/04_architecture/memory_model_implementation.md`
-- Specs: `/home/ormastes/dev/pub/simple/doc/06_spec/` (various)
+- Architecture: `doc/04_architecture/memory_model_implementation.md`
+- Specs: `doc/06_spec/` (various)
 - Related Work: File I/O optimization patterns from Mold linker

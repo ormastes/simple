@@ -9,10 +9,10 @@ Scope: `simple dashboard`, `simple dashboard agents`, dashboard crash containmen
 The current dashboard stack is split across Rust and Simple entrypoints.
 Research findings from the existing code:
 
-- Rust CLI routing for `simple dashboard` is still stubbed in [misc_commands.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/commands/misc_commands.rs#L467).
-- The richer Simple dashboard command surface already exists in [main.spl](/home/ormastes/dev/pub/simple/src/app/dashboard/main.spl#L20), but it is not reached by the Rust wrapper.
-- LLM dashboard entrypoints exist in [llm_dashboard/main.spl](/home/ormastes/dev/pub/simple/src/app/llm_dashboard/main.spl#L1), with watcher/parser/store plumbing already partially implemented.
-- Dashboard collectors still depend on fragile legacy paths in [dashboard_collectors.spl](/home/ormastes/dev/pub/simple/src/app/dashboard/dashboard_collectors.spl#L1).
+- Rust CLI routing for `simple dashboard` is still stubbed in [misc_commands.rs](src/compiler_rust/driver/src/cli/commands/misc_commands.rs#L467).
+- The richer Simple dashboard command surface already exists in [main.spl](src/app/dashboard/main.spl#L20), but it is not reached by the Rust wrapper.
+- LLM dashboard entrypoints exist in [llm_dashboard/main.spl](src/app/llm_dashboard/main.spl#L1), with watcher/parser/store plumbing already partially implemented.
+- Dashboard collectors still depend on fragile legacy paths in [dashboard_collectors.spl](src/app/dashboard/dashboard_collectors.spl#L1).
 - TODO collection currently depends mostly on prebuilt SDN databases and does not have a robust fallback when the DB is missing, stale, or incomplete.
 
 ## Goals

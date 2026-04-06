@@ -117,7 +117,7 @@ test result: ok. 2369 passed; 1 failed; 0 ignored
 - All freeze()-related code compiles and tests pass
 
 ### Manual Test Created: ✅
-**File**: `/home/ormastes/dev/pub/simple/test_freeze.spl`
+**File**: `test_freeze.spl`
 
 Tests:
 1. ✓ Freeze an array

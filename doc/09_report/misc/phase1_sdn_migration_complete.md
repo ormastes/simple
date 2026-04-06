@@ -71,7 +71,7 @@ error: semantic: method `len` not found on type `enum`
 - `sdn get` command
 - All SDN library functionality
 
-**Affected Code**: `/home/ormastes/dev/pub/simple/src/lib/std/src/sdn/lexer.spl`
+**Affected Code**: `src/lib/std/src/sdn/lexer.spl`
 - Line 230: `if self.pos < self.source.len():`
 - Line 237: `if idx < self.source.len():`
 - Line 243: `if self.pos < self.source.len():`

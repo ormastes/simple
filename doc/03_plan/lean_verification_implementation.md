@@ -38,9 +38,9 @@ The current public command contract is:
 - `simple gen-lean verify`: run Lean over supported generated artifacts and fail on errors or `sorry`
 
 Primary implementation references:
-- [verify.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/verify.rs)
-- [gen_lean.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/gen_lean.rs)
-- [main.spl](/home/ormastes/dev/pub/simple/src/compiler/90.tools/verify/main.spl)
+- [verify.rs](src/compiler_rust/driver/src/cli/verify.rs)
+- [gen_lean.rs](src/compiler_rust/driver/src/cli/gen_lean.rs)
+- [main.spl](src/compiler/90.tools/verify/main.spl)
 
 ### Generated-artifact inventory
 
@@ -60,8 +60,8 @@ That inventory is defined in the Rust driver and shared by status, regeneration,
 ### Test coverage already present
 
 Current evidence in-tree:
-- [lean_verify_cli_spec.spl](/home/ormastes/dev/pub/simple/test/system/compiler/lean_verify_cli_spec.spl) verifies status/list output and the clean missing-artifact failure mode.
-- [lean_verification_workflow_spec.spl](/home/ormastes/dev/pub/simple/test/system/compiler/lean_verification_workflow_spec.spl) verifies regeneration helpers and proof-summary formatting.
+- [lean_verify_cli_spec.spl](test/system/compiler/lean_verify_cli_spec.spl) verifies status/list output and the clean missing-artifact failure mode.
+- [lean_verification_workflow_spec.spl](test/system/compiler/lean_verification_workflow_spec.spl) verifies regeneration helpers and proof-summary formatting.
 
 ## Gaps Before This Can Be Advertised As Complete
 

@@ -1,6 +1,6 @@
 # Simple Language: Generic Syntax Migration Announcement
 
-**Status**: Draft Template
+**Status**: Draft
 **Target Audience**: Simple Language Community
 **Migration Timeline**: [TO BE DETERMINED]
 

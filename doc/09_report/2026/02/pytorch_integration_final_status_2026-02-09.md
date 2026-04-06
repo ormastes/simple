@@ -79,7 +79,7 @@ PyTorch (if available)  → Real GPU acceleration or stub ✅
 ```simple
 extern fn rt_env_get(key: text) -> text
 val home = rt_env_get("HOME")
-# Result: "/home/ormastes" ✅ WORKS
+# Result: "~" ✅ WORKS
 ```
 
 **Test 2: External library extern fn** ❌
@@ -323,7 +323,7 @@ nm -D target/release/libsimple_torch.so | grep " T rt_torch_"
 
 # 4. Built-in extern fn works
 bin/simple test_extern_direct.spl
-# Output: "HOME = /home/ormastes" ✅
+# Output: "HOME = ~" ✅
 ```
 
 ### What's Blocked ⏸️

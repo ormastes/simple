@@ -17,18 +17,18 @@
 
 ## Files Changed
 
-- [main.spl](/home/ormastes/dev/pub/simple/src/compiler/90.tools/lint/main.spl)
-- [stub_impl.spl](/home/ormastes/dev/pub/simple/src/compiler/35.semantics/lint/stub_impl.spl)
-- [test_quality_gate.spl](/home/ormastes/dev/pub/simple/src/app/verify/test_quality_gate.spl)
-- [cli_commands.spl](/home/ormastes/dev/pub/simple/src/app/io/cli_commands.spl)
-- [lint_entry.spl](/home/ormastes/dev/pub/simple/src/app/cli/lint_entry.spl)
-- [sspec_quality_lint_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/sspec_quality_lint_spec.spl)
-- [verify_test_quality_gate_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/verify_test_quality_gate_spec.spl)
-- [code_quality.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/code_quality.rs)
-- [verify.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/verify.rs)
-- [help.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/help.rs)
-- [anti_dummy_quality_cli_tests.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/tests/anti_dummy_quality_cli_tests.rs)
-- [lint.md](/home/ormastes/dev/pub/simple/doc/07_guide/tooling/lint.md)
+- [main.spl](src/compiler/90.tools/lint/main.spl)
+- [stub_impl.spl](src/compiler/35.semantics/lint/stub_impl.spl)
+- [test_quality_gate.spl](src/app/verify/test_quality_gate.spl)
+- [cli_commands.spl](src/app/io/cli_commands.spl)
+- [lint_entry.spl](src/app/cli/lint_entry.spl)
+- [sspec_quality_lint_spec.spl](test/integration/app/sspec_quality_lint_spec.spl)
+- [verify_test_quality_gate_spec.spl](test/integration/app/verify_test_quality_gate_spec.spl)
+- [code_quality.rs](src/compiler_rust/driver/src/cli/code_quality.rs)
+- [verify.rs](src/compiler_rust/driver/src/cli/verify.rs)
+- [help.rs](src/compiler_rust/driver/src/cli/help.rs)
+- [anti_dummy_quality_cli_tests.rs](src/compiler_rust/driver/tests/anti_dummy_quality_cli_tests.rs)
+- [lint.md](doc/07_guide/tooling/lint.md)
 
 ## Verification
 

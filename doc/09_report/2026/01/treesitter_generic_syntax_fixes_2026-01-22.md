@@ -39,10 +39,10 @@ Closing bracket replacements:
 
 ### 3. Module Declarations Added
 
-**File:** `/home/ormastes/dev/pub/simple/src/lib/std/src/parser/__init__.spl`
+**File:** `src/lib/std/src/parser/__init__.spl`
 - Added `mod parser` declaration to match pattern used by core module
 
-**File:** `/home/ormastes/dev/pub/simple/src/lib/std/src/parser/treesitter/__init__.spl`
+**File:** `src/lib/std/src/parser/treesitter/__init__.spl`
 - Added `mod treesitter` declaration
 
 ## Verification

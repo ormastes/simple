@@ -454,7 +454,7 @@ All core components are integrated:
 **Next Action:** Run tests
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 simple test test/compiler/visibility_spec.spl
 simple test test/compiler/visibility_integration_spec.spl
 ```

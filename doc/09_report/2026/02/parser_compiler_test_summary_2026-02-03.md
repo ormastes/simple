@@ -67,7 +67,7 @@ val error = Error(
 )
 ```
 
-**Implementation:** `/home/ormastes/dev/pub/simple/rust/parser/src/expressions/helpers.rs:240-302`
+**Implementation:** `rust/parser/src/expressions/helpers.rs:240-302`
 
 The parser handles both syntaxes via peek-ahead logic:
 - Line 293: Checks for `TokenKind::Assign` (`=`)
@@ -170,7 +170,7 @@ All FFI wrappers properly exposed through `src/app/io/mod.spl` using the two-tie
 
 ## Parser Implementation Details
 
-**Location:** `/home/ormastes/dev/pub/simple/rust/parser/src/expressions/helpers.rs`
+**Location:** `rust/parser/src/expressions/helpers.rs`
 
 **Key Function:** `parse_arguments()` (line 240)
 

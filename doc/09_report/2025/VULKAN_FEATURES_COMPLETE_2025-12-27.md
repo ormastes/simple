@@ -211,14 +211,14 @@ cargo build -p simple-runtime --features vulkan
 
 ## Files Modified
 
-1. `/home/ormastes/dev/pub/simple/src/runtime/src/value/gpu_vulkan.rs`
+1. `src/runtime/src/value/gpu_vulkan.rs`
    - Added descriptor registries (3 new)
    - Added descriptor FFI functions (8 new)
    - Refactored swapchain registry to Arc<Mutex<>>
    - Updated all swapchain FFI functions (6 modified)
    - **Total:** +260 lines of FFI code
 
-2. `/home/ormastes/dev/pub/simple/doc/features/feature.md`
+2. `doc/features/feature.md`
    - Marked #1468 as complete
    - Marked #1472 as complete
    - Marked #1509 as complete

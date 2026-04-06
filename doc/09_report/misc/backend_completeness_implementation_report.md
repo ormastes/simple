@@ -45,7 +45,7 @@ Line 551: "rt_path_basename" => file_io::rt_path_basename(&evaluated)
 ### Build Status
 
 - ✅ Rust runtime builds successfully with `cargo +nightly build`
-- ✅ Binary location: `/home/ormastes/dev/pub/simple/rust/target/debug/simple_runtime`
+- ✅ Binary location: `rust/target/debug/simple_runtime`
 - ⚠️ Old binary at `/target/debug/` is stale (not rebuilt by default)
 - ⚠️ Must use `./rust/target/debug/simple_runtime` for tests
 

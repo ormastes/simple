@@ -213,10 +213,10 @@ created_at: "2026-02-05T00:00:00"
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_runtime",
+      "command": "bin/simple_runtime",
       "args": ["src/app/mcp/main.spl", "server"],
       "env": {
-        "SIMPLE_PROJECT_ROOT": "/home/ormastes/dev/pub/simple"
+        "SIMPLE_PROJECT_ROOT": ""
       }
     }
   }

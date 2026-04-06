@@ -6,7 +6,7 @@ Feature: `crash_containment_framework`
 
 1. Keep the core failure taxonomy aligned across research, requirements, architecture, and code.
 2. Maintain `Result` for expected failure and panic-like exit for invariant failure; do not drift toward catchable exceptions.
-3. Keep hosted fault-domain defaults and restart policies centralized in [`src/os/crash_policy.spl`](/home/ormastes/dev/pub/simple/src/os/crash_policy.spl).
+3. Keep hosted fault-domain defaults and restart policies centralized in [`src/os/crash_policy.spl`](src/os/crash_policy.spl).
 4. Extend dashboard worker supervision as the proving-ground path, then lift it into generic launcher/app-host infrastructure.
 5. Standardize crash-record fields and logging paths for hosted worker exits.
 6. Preserve the resource-default rule:

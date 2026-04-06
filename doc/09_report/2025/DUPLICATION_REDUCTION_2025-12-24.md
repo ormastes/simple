@@ -10,7 +10,7 @@ Reduced code duplication from **3.31%** to **3.21%** (0.10 percentage point redu
 
 ### 1. Test Helper Consolidation
 
-**File:** `/home/ormastes/dev/pub/simple/src/parser/tests/test_decorator_helpers.rs`
+**File:** `src/parser/tests/test_decorator_helpers.rs`
 - **Before:** 203 lines, 72.5% duplication (21 clones)
 - **Changes:** Extracted common helper functions
   - `parse_and_get_function()` - Parse and extract first function
@@ -19,7 +19,7 @@ Reduced code duplication from **3.31%** to **3.21%** (0.10 percentage point redu
   - `has_arg_named()` - Check for argument by name
 - **Impact:** Eliminated ~150 lines of repetitive parsing code
 
-**File:** `/home/ormastes/dev/pub/simple/src/parser/tests/test_effect_annotations.rs`
+**File:** `src/parser/tests/test_effect_annotations.rs`
 - **Before:** 157 lines, 59% duplication (17 clones)
 - **Changes:** Extracted test helpers
   - `parse_and_get_function()` - Common parsing logic
@@ -30,10 +30,10 @@ Reduced code duplication from **3.31%** to **3.21%** (0.10 percentage point redu
 ### 2. HIR Lower Test Consolidation
 
 **Files:**
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/expression_tests.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/function_tests.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/control_flow_tests.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/class_tests.rs`
+- `src/compiler/src/hir/lower/tests/expression_tests.rs`
+- `src/compiler/src/hir/lower/tests/function_tests.rs`
+- `src/compiler/src/hir/lower/tests/control_flow_tests.rs`
+- `src/compiler/src/hir/lower/tests/class_tests.rs`
 
 **Changes:**
 - Created common `parse_and_lower()` function in `mod.rs`
@@ -42,7 +42,7 @@ Reduced code duplication from **3.31%** to **3.21%** (0.10 percentage point redu
 
 ### 3. Interpreter Option/Result Helpers
 
-**File:** `/home/ormastes/dev/pub/simple/src/compiler/src/interpreter_helpers_option_result.rs`
+**File:** `src/compiler/src/interpreter_helpers_option_result.rs`
 - **Before:** 186 lines, 76.5% duplication (18 clones)
 - **Changes:**
   - Extracted `apply_lambda_to_value()` - Common lambda application logic
@@ -139,14 +139,14 @@ Duplicated tokens: 57064 (3.99%)
 
 ## Files Modified
 
-1. `/home/ormastes/dev/pub/simple/src/parser/tests/test_decorator_helpers.rs` - Extracted helpers
-2. `/home/ormastes/dev/pub/simple/src/parser/tests/test_effect_annotations.rs` - Extracted helpers
-3. `/home/ormastes/dev/pub/simple/src/compiler/src/interpreter_helpers_option_result.rs` - Refactored patterns
-4. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/mod.rs` - Added common helper
-5. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/expression_tests.rs` - Use common helper
-6. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/function_tests.rs` - Use common helper
-7. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/control_flow_tests.rs` - Use common helper
-8. `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/class_tests.rs` - Use common helper
+1. `src/parser/tests/test_decorator_helpers.rs` - Extracted helpers
+2. `src/parser/tests/test_effect_annotations.rs` - Extracted helpers
+3. `src/compiler/src/interpreter_helpers_option_result.rs` - Refactored patterns
+4. `src/compiler/src/hir/lower/tests/mod.rs` - Added common helper
+5. `src/compiler/src/hir/lower/tests/expression_tests.rs` - Use common helper
+6. `src/compiler/src/hir/lower/tests/function_tests.rs` - Use common helper
+7. `src/compiler/src/hir/lower/tests/control_flow_tests.rs` - Use common helper
+8. `src/compiler/src/hir/lower/tests/class_tests.rs` - Use common helper
 
 ## Next Steps
 

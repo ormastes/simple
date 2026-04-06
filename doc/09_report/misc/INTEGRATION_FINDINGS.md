@@ -7,7 +7,7 @@
 **Built-in extern fn (works ✅):**
 ```simple
 extern fn rt_env_get(key: text) -> text
-val home = rt_env_get("HOME")  # Returns: /home/ormastes
+val home = rt_env_get("HOME")  # Returns: ~
 ```
 
 **External extern fn (fails ❌):**

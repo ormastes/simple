@@ -9,7 +9,7 @@ This file contains executable test cases extracted from concurrency.md. The orig
 | Status | Reference |
 | Type | Extracted Examples (Category B) |
 | Reference | concurrency.md |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/concurrency_spec.spl` |
+| Source | `test/specs/concurrency_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

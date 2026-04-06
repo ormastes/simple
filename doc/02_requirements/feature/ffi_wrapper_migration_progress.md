@@ -127,9 +127,9 @@ Found 90 files using `extern fn rt_file_read_text`:
 ---
 
 ## Files Created for Testing
-- `/home/ormastes/dev/pub/simple/test_import_wrapper.spl`
-- `/home/ormastes/dev/pub/simple/test_import_wrapper2.spl`
-- `/home/ormastes/dev/pub/simple/test_import_file_ops.spl`
+- `test_import_wrapper.spl`
+- `test_import_wrapper2.spl`
+- `test_import_file_ops.spl`
 
 All three tests FAILED due to interpreter limitation.
 

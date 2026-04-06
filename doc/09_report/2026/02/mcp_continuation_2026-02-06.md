@@ -71,7 +71,7 @@ Updated `.claude.json` to use wrapper script:
   "mcpServers": {
     "simple-mcp": {
       "type": "stdio",
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_server",
+      "command": "bin/simple_mcp_server",
       "args": [],
       "env": {}
     }
@@ -88,10 +88,10 @@ Updated `.claude.json` to use wrapper script:
 ### Error Messages
 
 ```
-ERROR Failed to parse module path="/home/ormastes/dev/pub/simple/src/lib/database/bug.spl"
+ERROR Failed to parse module path="src/lib/database/bug.spl"
   error=Unexpected token: expected expression, found Mod
 
-ERROR Failed to parse module path="/home/ormastes/dev/pub/simple/src/lib/database/feature.spl"
+ERROR Failed to parse module path="src/lib/database/feature.spl"
   error=Unexpected token: expected Colon, found Dot
 ```
 
@@ -222,7 +222,7 @@ Comment out database-related imports and tools:
 
 ```bash
 $ claude mcp list
-simple-mcp: /home/ormastes/dev/pub/simple/bin/simple_mcp_server - ✗ Failed to connect
+simple-mcp: bin/simple_mcp_server - ✗ Failed to connect
 ```
 
 **Reason:** Parse errors prevent runtime from starting

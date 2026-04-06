@@ -1,7 +1,7 @@
 # Generic Syntax Deprecation Plan: `[]` → `<>`
 
 **Date**: 2026-01-12
-**Status**: Implementation Guide
+**Status**: Draft
 **Related**: `type_parameter_syntax_analysis.md`, `unified_wrapper_unwrap_proposal.md`
 
 ---
@@ -14,7 +14,7 @@ Deprecate square bracket syntax `[]` for generic/template types in favor of angl
 
 ## Current State
 
-The parser in `/home/ormastes/dev/pub/simple/src/parser/src/parser_types.rs` (lines 204-287) **already supports both syntaxes**:
+The parser in `src/parser/src/parser_types.rs` (lines 204-287) **already supports both syntaxes**:
 
 ```rust
 // Line 205-206
@@ -412,4 +412,4 @@ This is a **breaking change** done carefully with:
 
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-12
-**Status**: Implementation guide ready for review
+**Status**: Draft

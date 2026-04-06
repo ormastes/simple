@@ -14,9 +14,9 @@
 
 ## MDSOC Reports
 
-- [Migration Status](../report/compiler_mdsoc_migration.md) - Implementation status, one-struct-per-file, symlink workarounds
-- [Design](../research/compiler_mdsoc_design.md) - MDSoC + Clean Architecture applied to compiler pipeline
-- [Feature Status](../feature/mdsoc_complete.md) - Current feature completion (288/288 tests)
+- [Migration Status](../09_report/compiler_mdsoc_migration.md) - Implementation status, one-struct-per-file, symlink workarounds
+- [Design](../01_research/compiler_mdsoc_design.md) - MDSoC + Clean Architecture applied to compiler pipeline
+- [Feature Status](../02_requirements/feature/mdsoc_complete.md) - Current feature completion (288/288 tests)
 
 ## Additional Resources
 

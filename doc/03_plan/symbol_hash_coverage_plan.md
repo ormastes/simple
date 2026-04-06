@@ -378,7 +378,7 @@ These modules share similar characteristics: pure functions, no state, critical 
 
 ## Appendix: Module Source Reference
 
-**File**: `/home/ormastes/dev/pub/simple/rust/lib/std/src/tooling/compiler/symbol_hash.spl`
+**File**: `rust/lib/std/src/tooling/compiler/symbol_hash.spl`
 
 **Key Algorithm**: Polynomial rolling hash using Horner's method
 **Type Tagging**: Bit 62 distinguishes symbol hashes from other hash types

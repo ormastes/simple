@@ -321,7 +321,7 @@ pub mod torch_ffi;
 
 **Verification**:
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 cargo build --manifest-path=rust/Cargo.toml
 ./rust/target/debug/simple_runtime test 2>&1 | grep "^Results:"
 # Expected: 8072+ passed (7622 + 450)
@@ -1944,7 +1944,7 @@ export class McpServer:
 
 **Run Full Test Suite**:
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Build with all features
 cd rust && cargo build --all-features
@@ -2152,7 +2152,7 @@ val last = arr.pop()  # Just works
 
 **Command to begin**:
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 jj commit -m "checkpoint: before implementation plan"
 # Ready to start implementation
 ```

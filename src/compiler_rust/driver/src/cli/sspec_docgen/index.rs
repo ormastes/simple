@@ -241,12 +241,13 @@ fn group_by_category(parsed_files: &[(SspecDoc, ValidationResult)]) -> Vec<Categ
 
 /// Infer category from file path
 fn infer_category_from_path(path: &std::path::Path) -> String {
-    // Try to extract category from path like "test/features/infrastructure/ast_spec.spl"
     let path_str = path.to_string_lossy();
 
-    if path_str.contains("/infrastructure/") {
+    if path_str.contains("/usage/") {
+        "Language Features".to_string()
+    } else if path_str.contains("/infrastructure/") {
         "Infrastructure".to_string()
-    } else if path_str.contains("/language/") {
+    } else if path_str.contains("/language/") || path_str.contains("/syntax/") {
         "Language Features".to_string()
     } else if path_str.contains("/types/") {
         "Type System".to_string()
@@ -260,12 +261,48 @@ fn infer_category_from_path(path: &std::path::Path) -> String {
         "Code Generation".to_string()
     } else if path_str.contains("/testing_framework/") {
         "Testing Framework".to_string()
-    } else if path_str.contains("/stdlib/") {
+    } else if path_str.contains("/stdlib/") || path_str.contains("/std/") || path_str.contains("/lib/") {
         "Standard Library".to_string()
     } else if path_str.contains("/ml/") {
         "ML/AI Infrastructure".to_string()
-    } else if path_str.contains("/syntax/") {
-        "Syntax Features".to_string()
+    } else if path_str.contains("/app/") {
+        "Application".to_string()
+    } else if path_str.contains("/compiler/") || path_str.contains("/compiler_core/") {
+        "Compiler".to_string()
+    } else if path_str.contains("/interpreter/") || path_str.contains("/runtime/") {
+        "Runtime".to_string()
+    } else if path_str.contains("/baremetal/") {
+        "Baremetal".to_string()
+    } else if path_str.contains("/dap/") {
+        "Developer Tools".to_string()
+    } else if path_str.contains("/ffi/") {
+        "FFI".to_string()
+    } else if path_str.contains("/io/") {
+        "I/O".to_string()
+    } else if path_str.contains("/platform/") {
+        "Platform".to_string()
+    } else if path_str.contains("/watcher/") {
+        "Tooling".to_string()
+    } else if path_str.contains("/bugs/") {
+        "Bug Regression".to_string()
+    } else if path_str.contains("/memleak/") {
+        "Memory Safety".to_string()
+    } else if path_str.contains("/hardware/") || path_str.contains("/os/") {
+        "Hardware & OS".to_string()
+    } else if path_str.contains("/security/") {
+        "Security".to_string()
+    } else if path_str.contains("/perf/") || path_str.contains("/performance/") {
+        "Performance".to_string()
+    } else if path_str.contains("/batch/") {
+        "Integration".to_string()
+    } else if path_str.contains("/edge_case/") || path_str.contains("/error_path/") {
+        "Edge Cases".to_string()
+    } else if path_str.contains("/gpu/") || path_str.contains("/cuda/") || path_str.contains("/simd/") {
+        "GPU & SIMD".to_string()
+    } else if path_str.contains("/mcp/") {
+        "MCP".to_string()
+    } else if path_str.contains("/lsp/") {
+        "LSP".to_string()
     } else {
         "Other".to_string()
     }

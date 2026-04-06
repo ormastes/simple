@@ -790,7 +790,7 @@ The infrastructure is now production-ready, comprehensively documented, and serv
 **Project Scope**: 8 sessions over 4 days (2026-01-17 to 2026-01-20)
 **Implementation**: Claude (AI pair programmer)
 **Language**: Simple programming language
-**Repository**: /home/ormastes/dev/pub/simple
+**Repository**: 
 
 ---
 

@@ -143,7 +143,7 @@
 ## Files Modified (Current State)
 
 **Value enum**:
-- `/home/ormastes/dev/pub/simple/rust/compiler/src/value.rs` (lines 495-511)
+- `rust/compiler/src/value.rs` (lines 495-511)
 
 **To be modified** (Option A):
 - `rust/compiler/src/value.rs` - revert to Vec/HashMap

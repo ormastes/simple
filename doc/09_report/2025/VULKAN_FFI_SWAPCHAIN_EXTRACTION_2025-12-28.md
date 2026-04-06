@@ -10,7 +10,7 @@ Extracted 7 swapchain management FFI functions into a new, well-documented modul
 
 ## Files Created
 
-### New File: `/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs` (294 lines)
+### New File: `src/runtime/src/value/vulkan_ffi/swapchain.rs` (294 lines)
 
 A new module containing all swapchain management functions extracted from `gpu_vulkan.rs` (original lines 422-671).
 
@@ -92,7 +92,7 @@ A new module containing all swapchain management functions extracted from `gpu_v
 
 ## Files Modified
 
-### Updated: `/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/mod.rs`
+### Updated: `src/runtime/src/value/vulkan_ffi/mod.rs`
 
 **Changes:**
 1. Added `pub mod swapchain;` declaration (line 20)
@@ -224,10 +224,10 @@ use runtime::value::vulkan_ffi::swapchain::rt_vk_swapchain_create;
 
 ## Related Files
 
-- **Original source**: `/home/ormastes/dev/pub/simple/src/runtime/src/value/gpu_vulkan.rs` (lines 422-671)
-- **New module**: `/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs`
-- **Module registry**: `/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/mod.rs`
-- **Common types**: `/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/common.rs`
+- **Original source**: `src/runtime/src/value/gpu_vulkan.rs` (lines 422-671)
+- **New module**: `src/runtime/src/value/vulkan_ffi/swapchain.rs`
+- **Module registry**: `src/runtime/src/value/vulkan_ffi/mod.rs`
+- **Common types**: `src/runtime/src/value/vulkan_ffi/common.rs`
 - **Related modules**:
   - `device.rs` - Device management
   - `buffer.rs` - Buffer management

@@ -12,7 +12,7 @@ Out of ~180 @skip/@pending tests, only **8 tests timeout** (120s). Root causes i
 ### 1. `test/unit/std/env_spec.spl` - TIMEOUT
 
 **Import:** `use shell.env`
-**Module:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
+**Module:** `src/lib/shell/env.spl`
 
 **Root Cause:** FFI hang in module initialization
 
@@ -35,7 +35,7 @@ fn cwd() -> text:
 ### 2. `test/unit/std/log_spec.spl` - TIMEOUT
 
 **Import:** `import std_lib.src.log as log` (old syntax)
-**Module:** `/home/ormastes/dev/pub/simple/src/lib/log.spl` (different path!)
+**Module:** `src/lib/log.spl` (different path!)
 
 **Root Cause:** Module-level FFI call during initialization
 
@@ -77,7 +77,7 @@ fn _parse_log_level() -> i64:
 ### 4. `test/unit/app/package/semver_spec.spl` - TIMEOUT
 
 **Imports:** `use package.types`, `use package.semver`
-**Module:** `/home/ormastes/dev/pub/simple/src/app/package/semver.spl`
+**Module:** `src/app/package/semver.spl`
 
 **Root Cause:** Generic types and Result<T, E> in interpreter
 
@@ -153,7 +153,7 @@ disable_ffi_recording()    # Not declared
 ### 8. `test/unit/app/mcp/prompts_spec.spl` - TIMEOUT
 
 **Import:** `import app.mcp.prompts` (old syntax)
-**Module:** `/home/ormastes/dev/pub/simple/src/app/mcp/prompts.spl`
+**Module:** `src/app/mcp/prompts.spl`
 
 **Root Cause:** Type name mismatch and old import syntax
 

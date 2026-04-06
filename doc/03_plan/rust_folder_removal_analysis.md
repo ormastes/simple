@@ -222,7 +222,7 @@ ls -lh src/compiler/hir*.spl src/compiler/mir*.spl
 **Low risk - these are completely replaced:**
 
 ```bash
-cd /home/ormastes/dev/pub/simple/rust
+cd rust
 
 # Backup first
 tar -czf ../rust_backup_$(date +%Y%m%d).tar.gz .

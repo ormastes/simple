@@ -30,13 +30,13 @@ Those documents describe the active blocker for true RV64 user-mode execution an
 
 ## Files Verified
 
-- [vhdl_backend.spl](/home/ormastes/dev/pub/simple/src/compiler/70.backend/backend/vhdl_backend.spl)
-- [test_executor_composite.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl)
-- [__init__.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/test_runner/__init__.spl)
-- [vhdl_backend_spec.spl](/home/ormastes/dev/pub/simple/test/unit/compiler/backend/vhdl_backend_spec.spl)
-- [remote_interpreter_backend_spec.spl](/home/ormastes/dev/pub/simple/test/system/remote_interpreter_backend_spec.spl)
-- [multi_mode_test_runner_spec.spl](/home/ormastes/dev/pub/simple/test/system/multi_mode_test_runner_spec.spl)
-- [remote_baremetal_qemu_hello_spec.spl](/home/ormastes/dev/pub/simple/test/feature/app/remote_baremetal/remote_baremetal_qemu_hello_spec.spl)
+- [vhdl_backend.spl](src/compiler/70.backend/backend/vhdl_backend.spl)
+- [test_executor_composite.spl](src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl)
+- [__init__.spl](src/lib/nogc_sync_mut/test_runner/__init__.spl)
+- [vhdl_backend_spec.spl](test/unit/compiler/backend/vhdl_backend_spec.spl)
+- [remote_interpreter_backend_spec.spl](test/system/remote_interpreter_backend_spec.spl)
+- [multi_mode_test_runner_spec.spl](test/system/multi_mode_test_runner_spec.spl)
+- [remote_baremetal_qemu_hello_spec.spl](test/feature/app/remote_baremetal/remote_baremetal_qemu_hello_spec.spl)
 
 ## Verification Evidence
 

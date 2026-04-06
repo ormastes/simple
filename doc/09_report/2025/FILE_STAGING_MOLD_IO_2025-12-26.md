@@ -402,7 +402,7 @@ fn copy_zero(src: FilePath, dst: FilePath) -> Result[ByteCount, IoError>
 ## Related Files
 
 ### Modified
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/host/async_nogc_mut/io/fs.spl` (+240 lines)
+- `simple/std_lib/src/host/async_nogc_mut/io/fs.spl` (+240 lines)
   - Added StageMode enum, StageState struct
   - Enhanced File struct with stage_state field
   - Implemented auto-staging in open()
@@ -413,7 +413,7 @@ fn copy_zero(src: FilePath, dst: FilePath) -> Result[ByteCount, IoError>
   - Updated close() and Drop trait
 
 ### Created
-- `/home/ormastes/dev/pub/simple/examples/file_staging.spl` (250 lines)
+- `examples/file_staging.spl` (250 lines)
   - 8 comprehensive examples
   - Performance benchmarking code
   - Real-world use cases (compiler, build system)

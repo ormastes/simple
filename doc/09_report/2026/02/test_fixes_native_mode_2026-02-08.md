@@ -326,4 +326,4 @@ bin/simple test --show-tags
 - **Test Execution:** `src/app/test_runner_new/test_runner_execute.spl`
 - **Test Arguments:** `src/app/test_runner_new/test_runner_args.spl`
 - **Memory Notes:** `.claude/projects/-home-ormastes-dev-pub-simple/memory/MEMORY.md`
-- **CLAUDE.md:** `/home/ormastes/dev/pub/simple/CLAUDE.md`
+- **CLAUDE.md:** `CLAUDE.md`

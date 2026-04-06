@@ -17,16 +17,16 @@ The AOP completion slice is verified for the implemented scope:
 
 ## Files Verified
 
-- [aop.spl](/home/ormastes/dev/pub/simple/src/compiler/90.tools/aop.spl)
-- [validation_advice.spl](/home/ormastes/dev/pub/simple/src/lib/common/security/aspects/validation_advice.spl)
-- [class_instantiation.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs)
-- [aop_runtime_init_interpreter.rs](/home/ormastes/dev/pub/simple/src/compiler_rust/compiler/tests/aop_runtime_init_interpreter.rs)
-- [aop_around_advice_spec.spl](/home/ormastes/dev/pub/simple/test/system/features/aop/aop_around_advice_spec.spl)
-- [aop_proceed_spec.spl](/home/ormastes/dev/pub/simple/test/unit/compiler/mdsoc/aop_proceed_spec.spl)
-- [aop_spec.spl](/home/ormastes/dev/pub/simple/test/feature/usage/aop_spec.spl)
-- [aop.md](/home/ormastes/dev/pub/simple/doc/02_requirements/feature/usage/aop.md)
-- [aop_spec.md](/home/ormastes/dev/pub/simple/doc/06_spec/app/compiler/feature/aop_spec.md)
-- [aop.md](/home/ormastes/dev/pub/simple/doc/01_research/local/aop.md)
+- [aop.spl](src/compiler/90.tools/aop.spl)
+- [validation_advice.spl](src/lib/common/security/aspects/validation_advice.spl)
+- [class_instantiation.rs](src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs)
+- [aop_runtime_init_interpreter.rs](src/compiler_rust/compiler/tests/aop_runtime_init_interpreter.rs)
+- [aop_around_advice_spec.spl](test/system/features/aop/aop_around_advice_spec.spl)
+- [aop_proceed_spec.spl](test/unit/compiler/mdsoc/aop_proceed_spec.spl)
+- [aop_spec.spl](test/feature/usage/aop_spec.spl)
+- [aop.md](doc/02_requirements/feature/usage/aop.md)
+- [aop_spec.md](doc/06_spec/app/compiler/feature/aop_spec.md)
+- [aop.md](doc/01_research/local/aop.md)
 
 ## Verification Evidence
 

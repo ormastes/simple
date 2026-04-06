@@ -22,9 +22,9 @@ Design answers: **How is it built?**
 ```
 RESEARCH (doc/01_research/)  →  informs  →  DESIGN  ←  (this folder)
                                                ↓
-REQUIREMENTS (doc/requirement/)  →  drives  →  DESIGN
+REQUIREMENTS (doc/02_requirements/)  →  drives  →  DESIGN
                                                ↓
-                                         ADR (doc/adr/)  ← major decisions extracted here
+                                         ADR (doc/04_architecture/adr/)  ← major decisions extracted here
 ```
 
 ---
@@ -36,8 +36,8 @@ REQUIREMENTS (doc/requirement/)  →  drives  →  DESIGN
 
 **Date:** YYYY-MM-DD
 **Status:** Draft | In Progress | Complete
-**Requirements:** [doc/requirement/xxx.md](../plan/requirement/xxx.md)
-**Research:** [doc/01_research/xxx.md](../research/xxx.md)
+**Requirements:** [doc/02_requirements/xxx.md](../02_requirements/xxx.md)
+**Research:** [doc/01_research/xxx.md](../01_research/xxx.md)
 
 ## 1. Context
 
@@ -58,7 +58,7 @@ Key data structures and their relationships.
 - Decision 1: [rationale]
 - Decision 2: [rationale]
 
-For major decisions → create an ADR in `doc/adr/`
+For major decisions → create an ADR in `doc/04_architecture/adr/`
 
 ## 5. Failure Handling
 
@@ -95,4 +95,4 @@ Create a design doc when:
 - Others need to understand *why* it was built this way
 - A major change to an existing system
 
-For decisions within design docs → extract significant ones to `doc/adr/`.
+For decisions within design docs → extract significant ones to `doc/04_architecture/adr/`.

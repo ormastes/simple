@@ -103,10 +103,10 @@ src/lib/cbor/
 ## Backup Files Created
 
 All original files have been safely backed up:
-- `/home/ormastes/dev/pub/simple/src/lib/geometry_utils.spl.old`
-- `/home/ormastes/dev/pub/simple/src/lib/bcrypt_utils.spl.old`
-- `/home/ormastes/dev/pub/simple/src/lib/bcrypt_utils.spl.original`
-- `/home/ormastes/dev/pub/simple/src/lib/cbor_utils.spl.original`
+- `src/lib/geometry_utils.spl.old`
+- `src/lib/bcrypt_utils.spl.old`
+- `src/lib/bcrypt_utils.spl.original`
+- `src/lib/cbor_utils.spl.original`
 
 ## Benefits Achieved
 

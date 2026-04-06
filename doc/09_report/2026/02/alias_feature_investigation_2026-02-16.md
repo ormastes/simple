@@ -53,7 +53,7 @@ it "parses function alias":
 
 **Attempted build error:**
 ```
-error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/lib/text.spl":
+error: compile failed: parse: in "src/lib/text.spl":
 Unexpected token: expected LParen, found Assign
 ```
 

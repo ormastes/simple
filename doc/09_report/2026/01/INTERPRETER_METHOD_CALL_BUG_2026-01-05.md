@@ -129,7 +129,7 @@ match load_and_merge_module(use_stmt, current_file.as_deref(), ...) {  // ✅ Pa
 ```
 
 **Why this caused the bug**:
-1. Test file at `/home/ormastes/dev/pub/simple/test_json_no_spec.spl` has `import core.json`
+1. Test file at `test_json_no_spec.spl` has `import core.json`
 2. `evaluate_module` is called without the file path being set
 3. `load_and_merge_module` receives `current_file: None`
 4. Module resolution uses `base_dir = "."` instead of the actual file directory

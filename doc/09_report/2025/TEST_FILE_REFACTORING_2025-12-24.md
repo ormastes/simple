@@ -13,10 +13,10 @@ Successfully refactored three large test files (3,988 lines total) into 18 small
 ### 1. parser_tests.rs (1,255 lines → 10 files)
 
 **Before:**
-- `/home/ormastes/dev/pub/simple/src/parser/src/parser_tests.rs` - 1,255 lines
+- `src/parser/src/parser_tests.rs` - 1,255 lines
 
 **After:**
-- `/home/ormastes/dev/pub/simple/src/parser/tests/`
+- `src/parser/tests/`
   - `mod.rs` - Module index
   - `expression_tests.rs` - Expression parsing tests (166 lines)
   - `statement_tests.rs` - Statement and control flow tests (227 lines)
@@ -29,10 +29,10 @@ Successfully refactored three large test files (3,988 lines total) into 18 small
 ### 2. lower_tests.rs (1,520 lines → 6 files)
 
 **Before:**
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/lower_tests.rs` - 1,520 lines
+- `src/compiler/src/hir/lower/lower_tests.rs` - 1,520 lines
 
 **After:**
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/`
+- `src/compiler/src/hir/lower/tests/`
   - `mod.rs` - Module index
   - `expression_tests.rs` - Expression lowering tests (149 lines)
   - `function_tests.rs` - Function lowering tests (70 lines)
@@ -45,10 +45,10 @@ Successfully refactored three large test files (3,988 lines total) into 18 small
 ### 3. interpreter_types.rs (1,213 lines → 2 files)
 
 **Before:**
-- `/home/ormastes/dev/pub/simple/src/driver/tests/interpreter_types.rs` - 1,213 lines
+- `src/driver/tests/interpreter_types.rs` - 1,213 lines
 
 **After:**
-- `/home/ormastes/dev/pub/simple/src/driver/tests/`
+- `src/driver/tests/`
   - `interpreter_primitive_types.rs` - Primitive types, unions, generics, enums (418 lines)
   - `interpreter_unit_types.rs` - Unit types, compound units, SI prefixes (838 lines)
 

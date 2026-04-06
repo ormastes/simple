@@ -28,7 +28,7 @@ All required FFI functions were **already implemented** in the codebase:
 
 **Build Status:** Runtime builds successfully
 ```bash
-cd /home/ormastes/dev/pub/simple/rust
+cd rust
 cargo +nightly build
 # Output: /rust/target/debug/simple_runtime (434 MB)
 ```
@@ -162,7 +162,7 @@ If parser is fixed, remaining work:
 ### Current Working Commands
 ```bash
 # Build runtime (nightly required for linkage feature)
-cd /home/ormastes/dev/pub/simple/rust
+cd rust
 cargo +nightly build
 
 # Use correct binary path

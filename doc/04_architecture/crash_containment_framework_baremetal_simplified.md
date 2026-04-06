@@ -126,4 +126,4 @@ where:
 
 See the main architecture doc:
 
-- [`doc/04_architecture/crash_containment_framework.md`](/home/ormastes/dev/pub/simple/doc/04_architecture/crash_containment_framework.md)
+- [`doc/04_architecture/crash_containment_framework.md`](doc/04_architecture/crash_containment_framework.md)

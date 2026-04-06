@@ -101,7 +101,7 @@ This document describes the proper workflow for implementing and verifying type 
 
 ```bash
 # Generate Lean4 code from Simple implementation
-cd /home/ormastes/dev/pub/simple
+cd 
 
 simple gen-lean generate \
   --file src/lib/std/src/type_checker/type_inference.spl \
@@ -132,7 +132,7 @@ lake build
 
 ```bash
 # Run intensive SSpec tests with coverage measurement
-cd /home/ormastes/dev/pub/simple
+cd 
 
 simple test \
   test/lib/std/type_checker/type_inference_spec.spl \

@@ -283,7 +283,7 @@ Phase 4: Phase3 + LLVM → simple_phase4 (production)
 
 #### 1. Basic Execution
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 ./scripts/bootstrap/bootstrap-from-scratch.sh
 ```
 

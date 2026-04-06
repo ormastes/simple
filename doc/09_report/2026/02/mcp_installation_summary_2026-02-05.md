@@ -31,7 +31,7 @@ All three database resources (BugDB, FeatureDB, TestDB) are integrated with the 
 **Configuration:**
 - ✅ Claude Desktop config: `~/.config/Claude/claude_desktop_config.json`
 - ✅ Server registered as: `simple-lang`
-- ✅ Command: `/home/ormastes/dev/pub/simple/bin/simple_runtime`
+- ✅ Command: `bin/simple_runtime`
 - ✅ Args: `["src/app/mcp/main.spl", "server"]`
 
 ### ✅ Tests Available

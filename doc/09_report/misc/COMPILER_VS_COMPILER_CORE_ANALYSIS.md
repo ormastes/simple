@@ -69,7 +69,7 @@ enum CodegenTarget:
 
 ## Parse Error Issue
 
-**Error**: `error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/lexer.spl": Unexpected token: expected expression, found Indent`
+**Error**: `error: compile failed: parse: in "src/compiler/lexer.spl": Unexpected token: expected expression, found Indent`
 
 This prevents using `bin/release/simple` to compile `src/compiler/main.spl`.
 

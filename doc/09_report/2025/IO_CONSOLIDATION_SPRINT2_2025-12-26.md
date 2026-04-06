@@ -285,6 +285,6 @@ Currently a TODO placeholder for full implementation.
 
 ## References
 
-- Planning document: `/home/ormastes/.claude/plans/peppy-toasting-quill.md`
+- Planning document: `~/.claude/plans/peppy-toasting-quill.md`
 - Implementation files: `simple/std_lib/src/io/`, `simple/std_lib/src/host/async_*_mut/net/`
 - Runtime integration: `doc/01_research/monoio_runtime_integration.md`

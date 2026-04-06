@@ -98,5 +98,5 @@ Owns:
 
 ## Related
 
-- Main rollout plan: [`doc/03_plan/crash_containment_framework_plan_2026-04-03.md`](/home/ormastes/dev/pub/simple/doc/03_plan/crash_containment_framework_plan_2026-04-03.md)
-- Bare-metal simplified model: [`doc/04_architecture/crash_containment_framework_baremetal_simplified.md`](/home/ormastes/dev/pub/simple/doc/04_architecture/crash_containment_framework_baremetal_simplified.md)
+- Main rollout plan: [`doc/03_plan/crash_containment_framework_plan_2026-04-03.md`](doc/03_plan/crash_containment_framework_plan_2026-04-03.md)
+- Bare-metal simplified model: [`doc/04_architecture/crash_containment_framework_baremetal_simplified.md`](doc/04_architecture/crash_containment_framework_baremetal_simplified.md)

@@ -72,7 +72,7 @@ Tests affected:
 
 **MCP Server Spawning:**
 - Multiple MCP server processes spawn at 100% CPU
-- Processes: `/home/ormastes/dev/pub/simple/bin/release/simple .../mcp/main.spl server`
+- Processes: `bin/release/simple .../mcp/main.spl server`
 - Keep respawning even after kill
 - Cause system slowdown and test hangs
 

@@ -178,7 +178,7 @@ Test must import: use compiler.blocks.{LexerMode}
 **What worked exceptionally well:**
 ```bash
 # Test by directory (discovers many passing tests fast)
-/home/ormastes/dev/pub/simple/bin/simple test test/system/features/arrays/
+bin/simple test test/system/features/arrays/
 
 # Result: Files: 6, Passed: 71, Failed: 0
 ```

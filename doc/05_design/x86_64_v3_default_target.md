@@ -2,7 +2,7 @@
 
 **Decision**: Use x86-64-v3 microarchitecture level as the default compilation target for x86_64
 **Date**: 2026-02-05
-**Status**: Design Decision
+**Status**: Draft
 
 ---
 
@@ -678,6 +678,6 @@ simple build --release --target-cpu=x86-64
 
 ---
 
-**Status**: Approved for Implementation ✅
+**Status**: Complete
 **Target Release**: v0.6.0 (with LLVM backend)
 **Estimated Implementation**: 1-2 weeks

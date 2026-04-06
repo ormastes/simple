@@ -367,7 +367,7 @@ fn LB() -> String:
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_server",
+      "command": "bin/simple_mcp_server",
       "args": [],
       "env": {}
     }

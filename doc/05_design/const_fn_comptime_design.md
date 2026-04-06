@@ -1,7 +1,7 @@
 # Const Functions and Compile-Time Evaluation: Configuration Design
 
 **Date**: 2026-02-05
-**Status**: Design
+**Status**: Draft
 **Related**: `doc/05_design/baremetal_features_examples.md`, `doc/01_research/const_contract_partial_const_2026-01-21.md`
 
 ---

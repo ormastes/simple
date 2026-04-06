@@ -8,7 +8,7 @@ Simple uses a Hindley-Milner-style type inference system that automatically dedu
 |-------|-------|
 | Feature IDs | #13 |
 | Status | Partial Implementation (Hindley-Milner scaffold working) |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/type_inference_spec.spl` |
+| Source | `test/specs/type_inference_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

@@ -1,6 +1,6 @@
 # Database Access Enforcement Design
 **Date**: 2026-02-05
-**Status**: Proposal
+**Status**: Draft
 **Goal**: Prevent manual database updates, enforce shared atomic library usage
 
 ---

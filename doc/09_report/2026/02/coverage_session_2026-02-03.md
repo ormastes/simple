@@ -396,7 +396,7 @@ pkill -9 simple
 pkill -9 simple_runtime
 
 # 3. Clean build
-cd /home/ormastes/dev/pub/simple
+cd 
 ./bin/simple build --clean
 ./bin/simple build
 

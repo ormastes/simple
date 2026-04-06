@@ -293,7 +293,7 @@ async fn main():
 
 ## References
 
-- Planning document: `/home/ormastes/.claude/plans/peppy-toasting-quill.md`
+- Planning document: `~/.claude/plans/peppy-toasting-quill.md`
 - Sprint 1 report: `doc/09_report/IO_CONSOLIDATION_SPRINT1_2025-12-26.md`
 - Sprint 2 report: `doc/09_report/IO_CONSOLIDATION_SPRINT2_2025-12-26.md`
 - Implementation files: `simple/app/formatter/`, `simple/app/lint/`

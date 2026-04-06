@@ -172,7 +172,7 @@ Build completed successfully (3 jobs).
 
 ```bash
 $ cargo build -p simple-type
-   Compiling simple-type v0.1.0 (/home/ormastes/dev/pub/simple/src/rust/type)
+   Compiling simple-type v0.1.0 (src/rust/type)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.15s
 ```
 

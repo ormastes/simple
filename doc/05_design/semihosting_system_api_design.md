@@ -1,7 +1,7 @@
 # Semihosting System API Design for Simple Language
 
 **Date**: 2026-02-05
-**Status**: Design
+**Status**: Draft
 **Author**: Claude (AI Research Assistant)
 
 ---

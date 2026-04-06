@@ -472,7 +472,7 @@ Result: ~500 lines combined.
 
 ## Phase 1 Cross-References
 
-**From:** `/home/ormastes/dev/pub/simple/doc/analysis/phase1_core_refactoring.md`
+**From:** `doc/analysis/phase1_core_refactoring.md`
 
 **Alignment:**
 
@@ -524,18 +524,18 @@ Result: ~500 lines combined.
 
 **High-Priority Review:**
 
-- `/home/ormastes/dev/pub/simple/src/compiler_core/test_core.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/test_lang_basics.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/value.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/ops.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/eval.spl`
+- `src/compiler_core/test_core.spl`
+- `src/compiler_core/test_lang_basics.spl`
+- `src/compiler_core/interpreter/value.spl`
+- `src/compiler_core/interpreter/ops.spl`
+- `src/compiler_core/interpreter/eval.spl`
 
 **Well-Designed (No Changes):**
 
-- `/home/ormastes/dev/pub/simple/src/compiler_core/ast_types.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/hir_types.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/mir_types.spl`
-- `/home/ormastes/dev/pub/simple/src/compiler_core/lexer.spl` + `lexer_struct.spl`
+- `src/compiler_core/ast_types.spl`
+- `src/compiler_core/hir_types.spl`
+- `src/compiler_core/mir_types.spl`
+- `src/compiler_core/lexer.spl` + `lexer_struct.spl`
 
 ---
 

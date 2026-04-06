@@ -2,10 +2,11 @@
 #
 # Provides utilities to measure and track performance across optimization phases.
 
-use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config}
+use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config, compute_config_hash}
 use compiler.tools.duplicate_check.detector.{find_duplicates, collect_files}
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
-use app.io.mod.{current_time_ms, file_write, file_read, file_exists, shell}
+use compiler.tools.duplicate_check.math_utils.{math_sqrt}
+use app.io.mod.{current_time_ms, file_write, file_read, file_exists}
 
 # Benchmark result for a single run
 struct BenchmarkResult:
@@ -48,12 +49,8 @@ fn run_benchmark(
         groups_found: groups.len(),
         duration_ms: duration,
         timestamp: current_time_ms(),
-        config_hash: compute_simple_config_hash(config)
+        config_hash: compute_config_hash(config)
     )
-
-# Compute simple hash of config for comparison
-fn compute_simple_config_hash(config: DuplicationConfig) -> text:
-    "{config.min_tokens}_{config.min_lines}_{config.ignore_identifiers}"
 
 # Run multiple iterations and compute statistics
 fn run_benchmark_iterations(
@@ -104,7 +101,8 @@ fn compute_stats(results: [BenchmarkResult]) -> BenchmarkStats:
         sum_squared_diff = sum_squared_diff + (diff * diff)
 
     val variance = sum_squared_diff / results.len()
-    val stddev_ms = sqrt_approx(variance)
+    val variance_f = variance * 1.0
+    val stddev_ms = math_sqrt(variance_f) as i64
 
     # Compute throughput (files per second)
     val total_files = results[0].files_count
@@ -121,20 +119,6 @@ fn compute_stats(results: [BenchmarkResult]) -> BenchmarkStats:
         stddev_ms: stddev_ms,
         throughput_files_per_sec: throughput
     )
-
-# Approximate integer square root
-fn sqrt_approx(n: i64) -> i64:
-    if n <= 0:
-        return 0
-
-    var x = n
-    var y = (x + 1) / 2
-
-    while y < x:
-        x = y
-        y = (x + n / x) / 2
-
-    x
 
 # Format benchmark result as text
 fn format_benchmark_result(result: BenchmarkResult) -> text:

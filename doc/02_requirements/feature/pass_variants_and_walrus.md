@@ -197,7 +197,7 @@ See [`doc/07_guide/tooling/lint.md`](../guide/tooling/lint.md) for full details,
 
 ## References
 
-- Implementation Plan: `/home/ormastes/.claude/plans/expressive-spinning-ember.md`
+- Implementation Plan: `~/.claude/plans/expressive-spinning-ember.md`
 - Test Files: `test/feature/pass_variants_spec.spl`, `test/feature/walrus_operator_spec.spl`
 - Core Modules: `src/compiler_core/{tokens,lexer,ast,parser}.spl`
 - Codegen: `src/compiler_core/{interpreter/eval,compiler/c_backend}.spl`

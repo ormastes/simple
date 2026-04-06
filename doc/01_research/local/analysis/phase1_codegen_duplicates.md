@@ -5,9 +5,9 @@
 Manual analysis of code generation and compilation files to identify duplication patterns using structural and semantic comparison.
 
 **Files Analyzed:**
-3. `/home/ormastes/dev/pub/simple/src/app/compile/c_translate.spl` (1,896 lines)
-4. `/home/ormastes/dev/pub/simple/src/compiler/mir_lowering.spl` (1,503 lines)
-5. `/home/ormastes/dev/pub/simple/src/compiler_core_legacy/mir_lowering.spl` (1,174 lines)
+3. `src/app/compile/c_translate.spl` (1,896 lines)
+4. `src/compiler/mir_lowering.spl` (1,503 lines)
+5. `src/compiler_core_legacy/mir_lowering.spl` (1,174 lines)
 
 **Total Lines:** 8,036 lines
 

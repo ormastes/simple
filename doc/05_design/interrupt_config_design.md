@@ -1,7 +1,7 @@
 # Interrupt Handling: Configuration Design
 
 **Date**: 2026-02-05
-**Status**: Design
+**Status**: Draft
 **Related**: `doc/05_design/baremetal_features_examples.md`, `doc/05_design/volatile_config_design.md`
 
 ---

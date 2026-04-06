@@ -1,7 +1,7 @@
 # Borrowing, Purity Inference, and Type System Design
 
 **Date**: 2026-02-07
-**Status**: Approved Design
+**Status**: Complete
 **Related**: `doc/05_design/memory.md`, `doc/05_design/val_mut_semantics.md`, `doc/05_design/type_inference.md`, `doc/09_report/effect_system_complete_2026-02-03.md`
 
 ---

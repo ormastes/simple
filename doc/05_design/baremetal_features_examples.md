@@ -1,7 +1,7 @@
 # Bare-Metal Features: Example Usage Code
 
 **Date**: 2026-02-05
-**Status**: Pre-Implementation Examples
+**Status**: Draft
 **Note**: Borrow checker deferred - pass for now
 
 ---

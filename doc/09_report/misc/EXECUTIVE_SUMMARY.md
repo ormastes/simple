@@ -311,7 +311,7 @@ A comprehensive 7-agent audit revealed that **95%+ of features work correctly**.
 7. **lsp_integration.md** - Editor setup
 8. **backend_capabilities.md** - Compiler options
 
-All located in: `/home/ormastes/dev/pub/simple/doc/`
+All located in: `doc/`
 
 ---
 
@@ -332,7 +332,7 @@ All located in: `/home/ormastes/dev/pub/simple/doc/`
 
 ## Contact for Questions
 
-**Documentation:** See `/home/ormastes/dev/pub/simple/doc/`
+**Documentation:** See `doc/`
 **Test Results:** See `TEST_STATUS_AUDIT.md`
 **Production Plan:** See `PRODUCTION_READINESS.md`
 

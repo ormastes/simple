@@ -1,7 +1,7 @@
 # Execution Context Types - User Enum Design
 
 **Feature ID**: #194
-**Status**: Designing
+**Status**: Draft
 **Pattern**: `Gpu[UserEnum, idx]` with custom type embedding
 **Date**: 2026-01-10
 

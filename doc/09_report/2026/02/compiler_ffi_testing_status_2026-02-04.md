@@ -22,10 +22,10 @@
 
 **Result:** Failed with parsing errors in app modules
 ```
-ERROR: Failed to parse module path="/home/ormastes/dev/pub/simple/bin/../src/app/parser/ast.spl"
+ERROR: Failed to parse module path="bin/../src/app/parser/ast.spl"
 error=Unexpected token: expected identifier, found Repr
 
-ERROR: Failed to parse module path="/home/ormastes/dev/pub/simple/bin/../src/app/parser/error.spl"
+ERROR: Failed to parse module path="bin/../src/app/parser/error.spl"
 error=Unexpected token: expected Comma, found Colon
 
 error: rt_cli_run_file is not supported in interpreter mode

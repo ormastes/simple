@@ -2,7 +2,7 @@
 
 ## Summary
 
-Successfully split `/home/ormastes/dev/pub/simple/src/parser/src/statements/mod.rs` (1,054 lines) into focused modules by statement type, improving maintainability and code organization.
+Successfully split `src/parser/src/statements/mod.rs` (1,054 lines) into focused modules by statement type, improving maintainability and code organization.
 
 ## Changes
 

@@ -1,7 +1,7 @@
 # Baremetal & Critical Application Safety Profile
 
 **Date**: 2026-02-15
-**Status**: Design Proposal
+**Status**: Draft
 **Extends**: `doc/05_design/baremetal_robustness_rules.md` (R1-R6)
 **Scope**: Compile-time + runtime enforced rules for safety-critical applications
 **Targets**: Baremetal, CUDA, VHDL/HLS, automotive (AUTOSAR), avionics (DO-178C), industrial control

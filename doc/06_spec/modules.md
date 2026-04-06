@@ -9,7 +9,7 @@ This file contains executable test cases extracted from modules.md. The original
 | Status | Reference |
 | Type | Extracted Examples (Category B) |
 | Reference | modules.md |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/modules_spec.spl` |
+| Source | `test/specs/modules_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

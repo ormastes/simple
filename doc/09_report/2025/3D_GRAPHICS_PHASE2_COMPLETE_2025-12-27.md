@@ -3,7 +3,7 @@
 **Date:** 2025-12-27
 **Status:** ✅ Complete
 **Phase:** 2 - Scene Graph (Week 3-4)
-**Plan Reference:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
+**Plan Reference:** `~/.claude/plans/floating-booping-coral.md`
 
 ---
 
@@ -198,28 +198,28 @@ Successfully completed Phase 2 of the 3D Graphics Library implementation. All sc
 
 ### Created Files (6 new files):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/__init__.spl`
+1. `simple/std_lib/src/graphics/scene/__init__.spl`
    - Scene module root
    - Re-exports node, camera, light, mesh, material
 
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/node.spl` (320 lines)
+2. `simple/std_lib/src/graphics/scene/node.spl` (320 lines)
    - SceneNode, NodeId, Component, Scene implementations
 
-3. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/camera.spl` (250 lines)
+3. `simple/std_lib/src/graphics/scene/camera.spl` (250 lines)
    - Camera, Projection, FpsCamera, CameraInput implementations
 
-4. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/light.spl` (200 lines)
+4. `simple/std_lib/src/graphics/scene/light.spl` (200 lines)
    - DirectionalLight, PointLight, SpotLight, Color, Attenuation
 
-5. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/mesh.spl` (280 lines)
+5. `simple/std_lib/src/graphics/scene/mesh.spl` (280 lines)
    - Mesh, MeshVertex, AABB, primitive generators
 
-6. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/scene/material.spl` (220 lines)
+6. `simple/std_lib/src/graphics/scene/material.spl` (220 lines)
    - PbrMaterial, PhongMaterial, UnlitMaterial, Material enum
 
 ### Modified Files (1):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/__init__.spl`
+1. `simple/std_lib/src/graphics/__init__.spl`
    - Added: `export use scene.*`
 
 ---
@@ -525,9 +525,9 @@ Based on the plan, the next phase will implement Vulkan rendering:
 
 ## References
 
-- **Implementation Plan:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
-- **Phase 1 Report:** `/home/ormastes/dev/pub/simple/doc/09_report/3D_GRAPHICS_PHASE1_COMPLETE_2025-12-27.md`
-- **Feature Documentation:** `/home/ormastes/dev/pub/simple/doc/features/feature.md` (#1780-1809)
+- **Implementation Plan:** `~/.claude/plans/floating-booping-coral.md`
+- **Phase 1 Report:** `doc/09_report/3D_GRAPHICS_PHASE1_COMPLETE_2025-12-27.md`
+- **Feature Documentation:** `doc/features/feature.md` (#1780-1809)
 
 ---
 

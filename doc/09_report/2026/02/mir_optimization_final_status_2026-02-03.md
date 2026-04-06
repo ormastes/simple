@@ -306,7 +306,7 @@ Run benchmarks to verify these expectations and tune thresholds if needed.
 ### 1. Run Tests
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 simple test test/compiler/mir_opt_spec.spl
 ```
 

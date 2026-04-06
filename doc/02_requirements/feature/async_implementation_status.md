@@ -85,7 +85,7 @@ From `test/feature/async_features_spec.spl`:
 
 ### Missing Constants (FIXED)
 
-Added to `/home/ormastes/dev/pub/simple/src/compiler_core/types.spl`:
+Added to `src/compiler_core/types.spl`:
 
 ```simple
 val TYPE_FUTURE = 20

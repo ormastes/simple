@@ -521,7 +521,7 @@ The following test files exercise effect infrastructure (all use standalone plac
 
 ## Appendix B: Key File Paths
 
-All paths are relative to the project root (`/home/ormastes/dev/pub/simple/`):
+All paths are relative to the project root (``):
 
 ```
 # HIR type definitions (canonical Effect/EffectKind)

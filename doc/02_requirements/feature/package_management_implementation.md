@@ -118,7 +118,7 @@ All tests are marked with `@skip` directive, indicating they are not ready for e
 
 ## Code Files Modified
 
-1. `/home/ormastes/dev/pub/simple/src/app/package/types.spl` - Fixed syntax errors
-2. `/home/ormastes/dev/pub/simple/src/app/package/semver.spl` - Fixed most syntax, one parse error remains
-3. `/home/ormastes/dev/pub/simple/src/app/package/manifest.spl` - Added parse_manifest_string stub
-4. `/home/ormastes/dev/pub/simple/src/app/package/lockfile.spl` - Fixed imports, commented incomplete code
+1. `src/app/package/types.spl` - Fixed syntax errors
+2. `src/app/package/semver.spl` - Fixed most syntax, one parse error remains
+3. `src/app/package/manifest.spl` - Added parse_manifest_string stub
+4. `src/app/package/lockfile.spl` - Fixed imports, commented incomplete code

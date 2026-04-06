@@ -306,7 +306,7 @@ Target directories:
 
 #### Existing specs to expand
 
-- [cli_dispatch_unit_spec.spl](/home/ormastes/dev/pub/simple/test/unit/app/cli_dispatch_unit_spec.spl)
+- [cli_dispatch_unit_spec.spl](test/unit/app/cli_dispatch_unit_spec.spl)
 - query specs under `test/unit/app/cli/`
 
 ### CLI Integration Tests
@@ -325,8 +325,8 @@ Target directory:
 
 #### Existing specs to expand
 
-- [cli_dispatch_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/cli_dispatch_spec.spl)
-- [app_cli_intensive_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/app_cli_intensive_spec.spl)
+- [cli_dispatch_spec.spl](test/integration/app/cli_dispatch_spec.spl)
+- [app_cli_intensive_spec.spl](test/integration/app/app_cli_intensive_spec.spl)
 
 ### MCP Unit Tests
 
@@ -361,8 +361,8 @@ Target directory:
 
 #### Existing specs to expand
 
-- [mcp_stdio_integration_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/mcp_stdio_integration_spec.spl)
-- [mcp_debug_log_tree_stdio_spec.spl](/home/ormastes/dev/pub/simple/test/integration/app/mcp_debug_log_tree_stdio_spec.spl)
+- [mcp_stdio_integration_spec.spl](test/integration/app/mcp_stdio_integration_spec.spl)
+- [mcp_debug_log_tree_stdio_spec.spl](test/integration/app/mcp_debug_log_tree_stdio_spec.spl)
 
 #### New specs
 

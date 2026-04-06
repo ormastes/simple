@@ -581,7 +581,7 @@ simple/std_lib/src/parser/treesitter/
 
 ## Alignment with Original Plan
 
-**Original Plan:** `/home/ormastes/.claude/plans/kind-spinning-cookie.md`
+**Original Plan:** `~/.claude/plans/kind-spinning-cookie.md`
 
 | Phase | Planned | Actual | Status |
 |-------|---------|--------|--------|

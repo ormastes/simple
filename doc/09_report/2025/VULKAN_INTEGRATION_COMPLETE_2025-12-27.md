@@ -635,38 +635,38 @@ The new integration features require manual testing:
 
 ### Rust Files (1)
 
-1. `/home/ormastes/dev/pub/simple/src/runtime/src/value/gpu_backend.rs` (420 lines)
+1. `src/runtime/src/value/gpu_backend.rs` (420 lines)
    - Backend selection and auto-detection
    - 5 FFI functions
    - 14 unit tests
 
 ### Simple Files (5)
 
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/sui.spl` (700 lines)
+2. `simple/std_lib/src/ui/sui.spl` (700 lines)
    - SUI framework core
    - State management
    - Layout containers
    - Built-in widgets
    - Modifiers
 
-3. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/sui_vulkan.spl` (600 lines)
+3. `simple/std_lib/src/ui/sui_vulkan.spl` (600 lines)
    - SUIVulkanRenderer
    - SUIVulkanApp
    - Layout calculation
    - Event handling
 
-4. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/gui/electron_vulkan.spl` (342 lines)
+4. `simple/std_lib/src/ui/gui/electron_vulkan.spl` (342 lines)
    - VulkanElectronRenderer
    - ElectronVulkanApp
    - IPC integration
 
-5. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/gui/vscode_vulkan.spl` (650 lines)
+5. `simple/std_lib/src/ui/gui/vscode_vulkan.spl` (650 lines)
    - VulkanVscodeRenderer
    - ShaderPreviewProvider
    - Model3DPreviewProvider
    - SimpleUIPreviewProvider
 
-6. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/tui/tui_vulkan.spl` (680 lines)
+6. `simple/std_lib/src/ui/tui/tui_vulkan.spl` (680 lines)
    - TuiVulkanRenderer
    - Monospace font metrics
    - Cell-based rendering
@@ -674,7 +674,7 @@ The new integration features require manual testing:
 
 ### Documentation (1)
 
-7. `/home/ormastes/dev/pub/simple/doc/features/feature.md`
+7. `doc/features/feature.md`
    - Marked #1504, #1505, #1506, #1507, #1508, #1509 as ✅ Complete
    - Updated Vulkan category: 30/36 → 36/36 (100%)
    - Updated overall progress: 678/894 → 684/894 (76%)

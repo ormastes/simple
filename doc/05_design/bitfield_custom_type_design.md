@@ -1,7 +1,7 @@
 # Bitfields with Custom Types: Design Document
 
 **Date**: 2026-02-05
-**Status**: Research & Design
+**Status**: Draft
 **Related**: `doc/06_spec/units_part2.md`, `doc/05_design/baremetal_features_examples.md`
 
 ---

@@ -101,7 +101,7 @@ Parser **supports both syntaxes** during transition:
 
 ### 4. Migration Script
 
-Created `/home/ormastes/dev/pub/simple/scripts/migrate_to_ll1.sh`:
+Created `scripts/migrate_to_ll1.sh`:
 
 ```bash
 # Transforms all .spl files

@@ -1,7 +1,7 @@
 # Execution Context Types - User Type Only Conversion
 
 **Feature ID**: #194
-**Status**: Designing
+**Status**: Draft
 **Pattern**: Enum embeds custom types, implicit conversion only for user types
 **Date**: 2026-01-10
 

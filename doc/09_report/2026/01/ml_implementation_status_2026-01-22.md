@@ -293,7 +293,7 @@ export LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
 ### Step 2: Build with PyTorch Feature
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 cargo build --release --features pytorch
 ```
 

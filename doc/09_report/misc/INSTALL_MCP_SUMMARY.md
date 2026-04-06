@@ -7,7 +7,7 @@ Installation Components:
   ✓ Server binary: bin/simple_mcp_server_optimized (executable)
   ✓ Source code: src/app/mcp/bootstrap/main_optimized.spl (11,687 bytes)
   ✓ Configuration: ~/.config/Claude/claude_desktop_config.json (configured)
-  ✓ Project root: /home/ormastes/dev/pub/simple
+  ✓ Project root: 
 
 Verification Tests:
   ✓ Binary exists and is executable

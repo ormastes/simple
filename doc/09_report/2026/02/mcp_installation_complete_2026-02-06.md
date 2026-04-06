@@ -15,7 +15,7 @@ The Simple MCP server has been successfully installed in Claude Code and all bac
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_server",
+      "command": "bin/simple_mcp_server",
       "args": [],
       "env": {}
     }

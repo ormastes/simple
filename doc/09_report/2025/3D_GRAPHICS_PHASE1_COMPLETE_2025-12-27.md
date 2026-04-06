@@ -3,7 +3,7 @@
 **Date:** 2025-12-27
 **Status:** ✅ Complete
 **Phase:** 1 - Math Foundation (Week 1-2)
-**Plan Reference:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
+**Plan Reference:** `~/.claude/plans/floating-booping-coral.md`
 
 ---
 
@@ -153,34 +153,34 @@ Successfully completed Phase 1 of the 3D Graphics Library implementation for Sim
 
 ### Created Files (7 new files):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/__init__.spl`
+1. `simple/std_lib/src/graphics/__init__.spl`
    - Graphics module root
    - Re-exports math module
 
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/math/__init__.spl`
+2. `simple/std_lib/src/graphics/math/__init__.spl`
    - Math module root
    - Re-exports vector, matrix, quaternion, transform
 
-3. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/math/vector.spl` (315 lines)
+3. `simple/std_lib/src/graphics/math/vector.spl` (315 lines)
    - Vec2, Vec3, Vec4 implementations
 
-4. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/math/matrix.spl` (450 lines)
+4. `simple/std_lib/src/graphics/math/matrix.spl` (450 lines)
    - Mat3, Mat4 implementations
 
-5. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/math/quaternion.spl` (280 lines)
+5. `simple/std_lib/src/graphics/math/quaternion.spl` (280 lines)
    - Quaternion implementation
 
-6. `/home/ormastes/dev/pub/simple/simple/std_lib/src/graphics/math/transform.spl` (220 lines)
+6. `simple/std_lib/src/graphics/math/transform.spl` (220 lines)
    - Transform implementation
 
-7. `/home/ormastes/dev/pub/simple/simple/std_lib/src/units/graphics.spl` (400 lines)
+7. `simple/std_lib/src/units/graphics.spl` (400 lines)
    - Angle units (Radians, Degrees)
    - Length units (Meters, Centimeters, etc.)
    - Position3D[U], Vector3D[U] semantic types
 
 ### Modified Files (1):
 
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/units/__init__.spl`
+1. `simple/std_lib/src/units/__init__.spl`
    - Added: `export use graphics.*`
 
 ---
@@ -426,11 +426,11 @@ Based on the plan, the next phase will implement:
 
 ## References
 
-- **Implementation Plan:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
-- **Feature Documentation:** `/home/ormastes/dev/pub/simple/doc/features/feature.md` (#1780-1809)
+- **Implementation Plan:** `~/.claude/plans/floating-booping-coral.md`
+- **Feature Documentation:** `doc/features/feature.md` (#1780-1809)
 - **Existing Patterns:**
-  - Units: `/home/ormastes/dev/pub/simple/simple/std_lib/src/units/size.spl`
-  - Vulkan: `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/gui/vulkan_renderer.spl`
+  - Units: `simple/std_lib/src/units/size.spl`
+  - Vulkan: `simple/std_lib/src/ui/gui/vulkan_renderer.spl`
 
 ---
 

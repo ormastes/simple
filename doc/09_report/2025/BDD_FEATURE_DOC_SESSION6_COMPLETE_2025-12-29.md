@@ -225,12 +225,12 @@ self.features.set(meta.id, meta)
 
 ## Files Modified in Session 6
 
-### 1. `/home/ormastes/dev/pub/simple/src/compiler/src/interpreter.rs`
+### 1. `src/compiler/src/interpreter.rs`
 **Change:** 2-pass environment capture for inter-function calls (lines 1693-1716)  
 **Lines Changed:** ~24 lines  
 **Impact:** CRITICAL - Enables module functions to call each other correctly
 
-### 2. `/home/ormastes/dev/pub/simple/simple/std_lib/src/spec/feature_doc.spl`
+### 2. `simple/std_lib/src/spec/feature_doc.spl`
 **Change 1:** Use dict literals instead of Dict.new() (line 31-32)  
 **Change 2:** Remove `has_key()` usage, simplify register method (lines 35-43)  
 **Lines Changed:** ~10 lines  

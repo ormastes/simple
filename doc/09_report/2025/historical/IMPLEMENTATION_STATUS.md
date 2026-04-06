@@ -70,7 +70,7 @@ fn lexer_next(self: Lexer) -> Token:
 ## Directory Structure Created
 
 ```
-/home/ormastes/dev/pub/simple/
+
 ├── DESUGARING_PLAN.md                    # ✅ Complete strategy
 ├── LEXER_DESUGARING_EXAMPLE.md           # ✅ Detailed examples
 ├── CORE_FULL_COMPILATION_PLAN.md         # ✅ Quick reference

@@ -290,7 +290,7 @@ To make the spec module fully functional:
 
 ## Files Created
 
-- `/home/ormastes/dev/pub/simple/doc/09_report/SPEC_MODULE_SYNTAX_FIXES_2026-01-06.md` (this file)
+- `doc/09_report/SPEC_MODULE_SYNTAX_FIXES_2026-01-06.md` (this file)
 
 ## Conclusion
 

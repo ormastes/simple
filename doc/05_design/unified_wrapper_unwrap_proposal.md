@@ -2,7 +2,7 @@
 
 **Feature**: Universal unwrapping with context-aware `?` operator
 **Date**: 2026-01-12
-**Status**: Design Proposal
+**Status**: Draft
 **Syntax**: Uses `<>` for all template/wrapper types
 
 ---
@@ -547,4 +547,4 @@ fn fetch() -> Data:
 
 **Prepared by**: Claude Code Assistant
 **Date**: 2026-01-12
-**Status**: Design Proposal - Ready for Review
+**Status**: Draft

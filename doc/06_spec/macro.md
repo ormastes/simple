@@ -9,7 +9,7 @@ This file contains executable test cases extracted from macro.md. The original s
 | Status | SPECIFICATION (Partially Implemented) |
 | Type | Extracted Examples (Category B) |
 | Reference | macro.md |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/macro_spec.spl` |
+| Source | `test/specs/macro_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

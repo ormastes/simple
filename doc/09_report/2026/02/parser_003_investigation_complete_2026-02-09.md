@@ -82,7 +82,7 @@ error: parse error: Unexpected token: expected expression, found Return
 ### Test 4: Full Parser Compilation Attempt
 ```bash
 $ bin/simple compile src/compiler/parser.spl -o build/bootstrap/parser_full.smf
-error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/linker/lib_smf.spl": Unexpected token: expected expression, found Newline
+error: compile failed: parse: in "src/compiler/linker/lib_smf.spl": Unexpected token: expected expression, found Newline
 ```
 **Result:** ❌ Chicken-and-egg problem - runtime parser can't parse dependencies
 

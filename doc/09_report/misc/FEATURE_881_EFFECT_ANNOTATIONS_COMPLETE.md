@@ -151,7 +151,7 @@ impl FunctionDef {
 - ✅ Confirmed helper methods work
 
 ### 2. Comprehensive Test Suite
-Created `/home/ormastes/dev/pub/simple/src/parser/tests/test_effect_annotations.rs` with 12 tests:
+Created `src/parser/tests/test_effect_annotations.rs` with 12 tests:
 
 ```rust
 #[test] fn test_pure_effect() { ... }

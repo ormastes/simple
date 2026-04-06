@@ -21,7 +21,7 @@ export use base.*       # ✅ Worked, but verbose
 **Parse Error:**
 ```
 compile failed: parse: Unexpected token: expected expression, found Dot
-Location: /home/ormastes/dev/pub/simple/src/lib/std/src/ml/torch/nn/__init__.spl
+Location: src/lib/std/src/ml/torch/nn/__init__.spl
 ```
 
 ---

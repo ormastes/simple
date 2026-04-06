@@ -8,7 +8,7 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 |-------|-------|
 | Feature IDs | #880-884 |
 | Status | Planned |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/capability_effects_spec.spl` |
+| Source | `test/specs/capability_effects_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

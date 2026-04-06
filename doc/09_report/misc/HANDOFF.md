@@ -153,7 +153,7 @@ A comprehensive 7-agent audit discovered that **95%+ of features work correctly*
 
 ### Day 1: Annotation Cleanup
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 bin/simple scripts/remove_skip_annotations.spl
 ```
 **Output:** 170+ test files updated
@@ -329,7 +329,7 @@ simple/
 
 ### Run Annotation Cleanup
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 bin/simple scripts/remove_skip_annotations.spl --dry-run  # Preview
 bin/simple scripts/remove_skip_annotations.spl             # Apply
 ```
@@ -405,7 +405,7 @@ cat EXECUTIVE_SUMMARY.md           # Quick overview
 ## 📝 Contact Information
 
 **Documentation Location:**
-`/home/ormastes/dev/pub/simple/doc/`
+`doc/`
 
 **Key Files:**
 - EXECUTIVE_SUMMARY.md
@@ -414,7 +414,7 @@ cat EXECUTIVE_SUMMARY.md           # Quick overview
 - INDEX.md
 
 **Scripts:**
-`/home/ormastes/dev/pub/simple/script/`
+`script/`
 
 ---
 

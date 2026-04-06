@@ -3,7 +3,7 @@
 **Date:** 2025-12-26
 **Type:** Research Report
 **Status:** Complete
-**Research Document:** [/home/ormastes/dev/pub/simple/doc/01_research/physics_simulation_integration.md](/home/ormastes/dev/pub/simple/doc/01_research/physics_simulation_integration.md)
+**Research Document:** [doc/01_research/physics_simulation_integration.md](doc/01_research/physics_simulation_integration.md)
 
 ## Summary
 
@@ -123,7 +123,7 @@ let energy: #Energy = force * distance          # Automatic unit composition
 
 ## Files Created
 
-- `/home/ormastes/dev/pub/simple/doc/01_research/physics_simulation_integration.md` (15,000+ lines)
+- `doc/01_research/physics_simulation_integration.md` (15,000+ lines)
   - Section 1: Genesis Physics Engine (architecture, API, performance)
   - Section 2: Isaac Lab/Gym (evolution, PhysX, tensor API)
   - Section 3: Common Interface Design (unified abstractions)

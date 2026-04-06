@@ -360,7 +360,7 @@ export LD_LIBRARY_PATH="$PWD/target/release:$LD_LIBRARY_PATH"
 ### Test Integration
 
 ```bash
-cd /home/ormastes/dev/pub/simple
+cd 
 
 # Test backend detection
 bin/simple -e "use lib.torch.{torch_available, torch_cuda_available}; print torch_available(); print torch_cuda_available()"
@@ -548,4 +548,4 @@ When the runtime parser blocker is resolved, the system will have complete GPU a
 - `doc/09_report/pytorch_examples_implementation_2026-02-09.md` - Examples status
 - `doc/03_plan/pytorch_examples_unblock_plan.md` - 3-phase unblock plan
 - `doc/09_report/parser_fix_blocked_2026-02-09.md` - Parser blocker analysis
-- Plan file: `/home/ormastes/.claude/plans/fizzy-booping-ocean.md` - Full FFI integration plan
+- Plan file: `~/.claude/plans/fizzy-booping-ocean.md` - Full FFI integration plan

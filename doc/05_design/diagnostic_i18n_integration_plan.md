@@ -1,6 +1,6 @@
 # Diagnostic I18n Integration Plan
 
-**Status**: Design Phase
+**Status**: Draft
 **Goal**: Integrate i18n with existing diagnostic system without major refactoring
 
 ---

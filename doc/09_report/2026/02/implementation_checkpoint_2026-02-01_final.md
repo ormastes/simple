@@ -194,13 +194,13 @@ pub enum Value {
   - Revert to Option A approach (~4-8 hours)
 
 **Test files location**:
-- `/home/ormastes/dev/pub/simple/test/system/features/arrays/`
-- `/home/ormastes/dev/pub/simple/test/system/features/collections/`
+- `test/system/features/arrays/`
+- `test/system/features/collections/`
 
 **Key documents**:
 - This checkpoint
-- `/home/ormastes/dev/pub/simple/doc/progress/array_implementation_status_2026-02-01.md`
-- `/home/ormastes/dev/pub/simple/doc/03_plan/test_fix_implementation_plan_2026-01-31.md`
+- `doc/progress/array_implementation_status_2026-02-01.md`
+- `doc/03_plan/test_fix_implementation_plan_2026-01-31.md`
 
 ---
 

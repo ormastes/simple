@@ -621,5 +621,5 @@ git reset --hard HEAD  # git
 ---
 
 **Last Updated**: 2026-01-12
-**Status**: Living document - updated as questions arise
+**Status**: In Progress
 **Feedback**: File issues or PRs to improve this FAQ

@@ -27,7 +27,7 @@ The original 5.2s measurement was from a run where the test was marked `@skip`. 
 
 **From baseline run:**
 ```
-5237 ms - /home/ormastes/dev/pub/simple/test/compiler/lexer_comprehensive_spec.spl
+5237 ms - test/compiler/lexer_comprehensive_spec.spl
 ```
 
 **Possible explanations for original time:**

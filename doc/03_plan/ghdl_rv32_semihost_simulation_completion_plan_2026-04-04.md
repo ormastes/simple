@@ -10,13 +10,13 @@
 
 The current repo already has substantial GHDL coverage:
 
-- a working GHDL adapter in [adapter_ghdl_rv32.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl)
-- a semihost-based feature proof in [ghdl_riscv32_semihost_spec.spl](/home/ormastes/dev/pub/simple/test/feature/baremetal/ghdl_riscv32_semihost_spec.spl)
-- a composite-runner proof in [ghdl_rv32_composite_runner_spec.spl](/home/ormastes/dev/pub/simple/test/integration/remote_jit/ghdl_rv32_composite_runner_spec.spl)
+- a working GHDL adapter in [adapter_ghdl_rv32.spl](src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl)
+- a semihost-based feature proof in [ghdl_riscv32_semihost_spec.spl](test/feature/baremetal/ghdl_riscv32_semihost_spec.spl)
+- a composite-runner proof in [ghdl_rv32_composite_runner_spec.spl](test/integration/remote_jit/ghdl_rv32_composite_runner_spec.spl)
 - lane registration and capability reporting in:
-  - [lane_registry.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/lane_registry.spl)
-  - [lane_status.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/lane_status.spl)
-  - [lane_matrix.md](/home/ormastes/dev/pub/simple/doc/08_tracking/lane_matrix.md)
+  - [lane_registry.spl](src/lib/nogc_sync_mut/debug/remote/exec/lane_registry.spl)
+  - [lane_status.spl](src/lib/nogc_sync_mut/debug/remote/exec/lane_status.spl)
+  - [lane_matrix.md](doc/08_tracking/lane_matrix.md)
 
 The reason the lane is still `in_progress` is narrower than the full GHDL stack:
 
@@ -84,7 +84,7 @@ This avoids keeping the working GHDL slice hidden behind the still-open mailbox 
 ### Agent A: Capability and Adapter Closure
 
 **Owns**
-- [adapter_ghdl_rv32.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl)
+- [adapter_ghdl_rv32.spl](src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl)
 - GHDL capability probes
 - GDB connection lifecycle behavior
 
@@ -113,7 +113,7 @@ This avoids keeping the working GHDL slice hidden behind the still-open mailbox 
 ### Agent B: Runner and Composite Execution Closure
 
 **Owns**
-- [ghdl_rv32_composite_runner_spec.spl](/home/ormastes/dev/pub/simple/test/integration/remote_jit/ghdl_rv32_composite_runner_spec.spl)
+- [ghdl_rv32_composite_runner_spec.spl](test/integration/remote_jit/ghdl_rv32_composite_runner_spec.spl)
 - compiler bridge integration
 - remote manager orchestration for GHDL
 
@@ -134,7 +134,7 @@ This avoids keeping the working GHDL slice hidden behind the still-open mailbox 
 ### Agent C: Semihost ELF Proof Pack
 
 **Owns**
-- [ghdl_riscv32_semihost_spec.spl](/home/ormastes/dev/pub/simple/test/feature/baremetal/ghdl_riscv32_semihost_spec.spl)
+- [ghdl_riscv32_semihost_spec.spl](test/feature/baremetal/ghdl_riscv32_semihost_spec.spl)
 - checked-in ELF fixtures
 - runner script assumptions
 
@@ -159,10 +159,10 @@ This avoids keeping the working GHDL slice hidden behind the still-open mailbox 
 ### Agent D: Lane Classification and Docs Split
 
 **Owns**
-- [lane_registry.spl](/home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/debug/remote/exec/lane_registry.spl)
-- [lane_matrix.md](/home/ormastes/dev/pub/simple/doc/08_tracking/lane_matrix.md)
-- [remote_baremetal_completion_2026-04-04.md](/home/ormastes/dev/pub/simple/doc/09_report/remote_baremetal_completion_2026-04-04.md)
-- GHDL-related public wording in [README.md](/home/ormastes/dev/pub/simple/README.md) and audit docs if touched
+- [lane_registry.spl](src/lib/nogc_sync_mut/debug/remote/exec/lane_registry.spl)
+- [lane_matrix.md](doc/08_tracking/lane_matrix.md)
+- [remote_baremetal_completion_2026-04-04.md](doc/09_report/remote_baremetal_completion_2026-04-04.md)
+- GHDL-related public wording in [README.md](README.md) and audit docs if touched
 
 **Tasks**
 - split current GHDL language into:

@@ -56,10 +56,10 @@
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_runtime",
+      "command": "bin/simple_runtime",
       "args": ["src/app/mcp/main.spl", "server"],
       "env": {
-        "SIMPLE_PROJECT_ROOT": "/home/ormastes/dev/pub/simple"
+        "SIMPLE_PROJECT_ROOT": ""
       }
     }
   }
@@ -212,7 +212,7 @@ Use prompt refactor/rename to rename BugDB to BugDatabase
 ### MCP Server
 
 - [x] Config file created: `~/.config/Claude/claude_desktop_config.json`
-- [x] Server path correct: `/home/ormastes/dev/pub/simple/bin/simple_runtime`
+- [x] Server path correct: `bin/simple_runtime`
 - [x] Server script exists: `src/app/mcp/main.spl`
 - [x] Environment variable set: `SIMPLE_PROJECT_ROOT`
 

@@ -173,9 +173,9 @@ Status: in progress
 ## Work Breakdown
 
 1. Fix the dashboard crash path and keep the fix in the dashboard proving-ground modules first.
-2. Keep policy definitions in [`src/os/crash_policy.spl`](/home/ormastes/dev/pub/simple/src/os/crash_policy.spl) as the single source of truth.
-3. Finish the proving-ground path in [`src/app/dashboard/framework_policy.spl`](/home/ormastes/dev/pub/simple/src/app/dashboard/framework_policy.spl).
-4. Add generic launcher integration from [`src/os/desktop/app_manifest.spl`](/home/ormastes/dev/pub/simple/src/os/desktop/app_manifest.spl) into a shared supervisor path.
+2. Keep policy definitions in [`src/os/crash_policy.spl`](src/os/crash_policy.spl) as the single source of truth.
+3. Finish the proving-ground path in [`src/app/dashboard/framework_policy.spl`](src/app/dashboard/framework_policy.spl).
+4. Add generic launcher integration from [`src/os/desktop/app_manifest.spl`](src/os/desktop/app_manifest.spl) into a shared supervisor path.
 5. Add crash-record plumbing to the Rust driver and runtime logging boundary.
 6. Add bare-metal-specific panic/watchdog policy docs and tests.
 7. Build, test, and validate only through Docker/container paths for this workstream.
@@ -191,6 +191,6 @@ Status: in progress
 
 ## Related Docs
 
-- Architecture: [`doc/04_architecture/crash_containment_framework.md`](/home/ormastes/dev/pub/simple/doc/04_architecture/crash_containment_framework.md)
-- Bare-metal simplified model: [`doc/04_architecture/crash_containment_framework_baremetal_simplified.md`](/home/ormastes/dev/pub/simple/doc/04_architecture/crash_containment_framework_baremetal_simplified.md)
-- Detail design: [`doc/05_design/crash_containment_framework.md`](/home/ormastes/dev/pub/simple/doc/05_design/crash_containment_framework.md)
+- Architecture: [`doc/04_architecture/crash_containment_framework.md`](doc/04_architecture/crash_containment_framework.md)
+- Bare-metal simplified model: [`doc/04_architecture/crash_containment_framework_baremetal_simplified.md`](doc/04_architecture/crash_containment_framework_baremetal_simplified.md)
+- Detail design: [`doc/05_design/crash_containment_framework.md`](doc/05_design/crash_containment_framework.md)

@@ -48,7 +48,7 @@ Successfully reduced code duplication in the Simple Language codebase from **4.4
 **Impact:** Reduced duplication from 3.51% to 3.51% (marginal, already counted in Phase 1)
 
 **Created:**
-- `/home/ormastes/dev/pub/simple/src/common/src/protocol/transport.rs` (72 lines)
+- `src/common/src/protocol/transport.rs` (72 lines)
 - Shared JSON-RPC transport logic for LSP and DAP servers
 
 **Files Refactored:**

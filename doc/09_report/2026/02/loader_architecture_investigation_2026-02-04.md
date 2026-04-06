@@ -1346,7 +1346,7 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 
 ### Simple Loader Components
 ```
-/home/ormastes/dev/pub/simple/src/compiler/loader/
+src/compiler/loader/
 ├── mod.spl (16 lines)
 ├── module_loader.spl (379 lines)
 ├── jit_instantiator.spl (409 lines)
@@ -1354,7 +1354,7 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 ├── smf_cache.spl (272 lines)
 └── jit_context.spl
 
-/home/ormastes/dev/pub/simple/src/compiler/linker/
+src/compiler/linker/
 ├── mod.spl
 ├── obj_taker.spl (400+ lines)
 ├── smf_reader.spl (400+ lines)
@@ -1365,7 +1365,7 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 
 ### SFFI Specs
 ```
-/home/ormastes/dev/pub/simple/src/app/ffi_gen/specs/
+src/app/ffi_gen/specs/
 ├── mmap.spl (40+ extern functions)
 ├── exec_memory.spl (10+ extern functions)
 └── ...
@@ -1373,7 +1373,7 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 
 ### Rust Runtime Components
 ```
-/home/ormastes/dev/pub/simple/rust/runtime/src/loader/
+rust/runtime/src/loader/
 ├── mod.rs
 ├── loader.rs (23 KB)
 ├── smf/
@@ -1390,7 +1390,7 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 
 ### Rust Compiler Components
 ```
-/home/ormastes/dev/pub/simple/rust/compiler/src/
+rust/compiler/src/
 ├── hir/lower/expr/inference.rs (type inference)
 ├── type_inference_config.rs
 └── ffi/ (TODO - needs implementation)
@@ -1401,13 +1401,13 @@ The architecture is sound and the implementation is nearly complete. The roadmap
 
 ### Documentation
 ```
-/home/ormastes/dev/pub/simple/doc/09_report/
+doc/09_report/
 └── jit_infrastructure_implementation_2026-02-04.md (recent work)
 ```
 
 ### Tests
 ```
-/home/ormastes/dev/pub/simple/test/lib/std/unit/compiler/loader/
+test/lib/std/unit/compiler/loader/
 └── jit_instantiator_spec.spl (44 tests)
 ```
 

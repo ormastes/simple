@@ -272,9 +272,9 @@ Files created during implementation (`lzma_stub.rs` and `self_extract.rs`) were 
 
 Multiple instances of file modifications noted in system reminders:
 ```
-Note: /home/ormastes/dev/pub/simple/rust/runtime/src/compress/mod.rs was modified
-Note: /home/ormastes/dev/pub/simple/rust/runtime/Cargo.toml was modified
-Note: /home/ormastes/dev/pub/simple/src/lib/compress/upx.spl was modified
+Note: rust/runtime/src/compress/mod.rs was modified
+Note: rust/runtime/Cargo.toml was modified
+Note: src/lib/compress/upx.spl was modified
 ```
 
 Files confirmed missing:

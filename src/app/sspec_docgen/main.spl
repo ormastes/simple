@@ -159,6 +159,44 @@ fn parse_sspec_file(path: text) -> Result<SspecDoc, text>:
     var feature_title = ""
     var feature_ids = []
 
+    # Pre-scan: Extract comment-based documentation (# ## Section pattern)
+    # Many feature specs use comment-based docs instead of """ blocks.
+    # Lines starting with "# " contain doc content; lines that are just "#" are blank lines.
+    var comment_doc_lines: [text] = []
+    var comment_scan_i = 0
+    # Skip leading blank lines
+    while comment_scan_i < lines.len() and lines[comment_scan_i].trim() == "":
+        comment_scan_i = comment_scan_i + 1
+    # Collect consecutive comment lines
+    while comment_scan_i < lines.len():
+        val cline = lines[comment_scan_i]
+        val ctrimmed = cline.trim()
+        if ctrimmed.starts_with("# ") and not ctrimmed.starts_with("#["):
+            comment_doc_lines.push(ctrimmed[2:])
+        elif ctrimmed == "#":
+            comment_doc_lines.push("")
+        else:
+            break
+        comment_scan_i = comment_scan_i + 1
+
+    # If comment docs contain markdown structure, synthesize a DocBlock
+    if comment_doc_lines.len() > 0:
+        val comment_content = comment_doc_lines.join("\n").trim()
+        if comment_content.contains("## ") or comment_content.contains("**Category:**"):
+            # Extract feature title from "# Title" pattern
+            for cl in comment_doc_lines:
+                val cl_trimmed = cl.trim()
+                if cl_trimmed.starts_with("# "):
+                    feature_title = cl_trimmed[2:].trim()
+                    break
+
+            doc_blocks.push(DocBlock(
+                content: comment_content,
+                line_start: 0,
+                line_end: comment_scan_i
+            ))
+            sspec_dbg("extracted comment-based doc block: {comment_doc_lines.len()} lines")
+
     var i = 0
     while i < lines.len():
         val line = lines[i]

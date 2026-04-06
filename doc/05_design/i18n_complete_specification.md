@@ -4,7 +4,7 @@
 
 This document provides the complete specification for Simple's internationalization (i18n) system, explaining how Rust compiler works with Simple language `__init__` files for multi-language error messages.
 
-**Status**: Design Complete, Implementation In Progress
+**Status**: In Progress
 
 ---
 

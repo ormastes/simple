@@ -315,7 +315,7 @@ Successfully implemented **20 comprehensive utility libraries** with **589+ func
 
 ## Module Registration
 
-All utilities registered in `/home/ormastes/dev/pub/simple/simple/std_lib/src/tooling/__init__.spl`:
+All utilities registered in `simple/std_lib/src/tooling/__init__.spl`:
 
 ```simple
 # Option and Result utilities

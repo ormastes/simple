@@ -293,7 +293,7 @@ let result = parser.parse(source)
 
 ## Alignment with Plan
 
-**Original Plan:** `/home/ormastes/.claude/plans/kind-spinning-cookie.md`
+**Original Plan:** `~/.claude/plans/kind-spinning-cookie.md`
 
 **Phase 1 Tasks (Planned vs Actual):**
 
@@ -343,7 +343,7 @@ let result = parser.parse(source)
 
 **Documentation:**
 - [Tree-sitter Official Docs](https://tree-sitter.github.io/tree-sitter/)
-- [Implementation Plan](/home/ormastes/.claude/plans/kind-spinning-cookie.md)
+- [Implementation Plan](~/.claude/plans/kind-spinning-cookie.md)
 - [Feature Catalog](doc/features/feature.md#tree-sitter-implementation-1156-1179-)
 
 **Related Features:**

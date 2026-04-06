@@ -845,7 +845,7 @@ pub struct ViewportConfig:
 
 ```bash
 $ cargo build -p simple-driver
-   Compiling simple-driver v0.1.0 (/home/ormastes/dev/pub/simple/src/driver)
+   Compiling simple-driver v0.1.0 (src/driver)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.57s
 ```
 
@@ -1072,4 +1072,4 @@ Phase 4 successfully delivers complete integration between 3D graphics and 2D UI
 
 **Report Author:** Claude Sonnet 4.5
 **Date:** 2025-12-27
-**Plan Reference:** `/home/ormastes/.claude/plans/floating-booping-coral.md`
+**Plan Reference:** `~/.claude/plans/floating-booping-coral.md`

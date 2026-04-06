@@ -1,0 +1,195 @@
+# Tail Call Optimization (TCO)
+#
+# Transforms self-recursive tail calls into loops to prevent stack overflow
+# and improve performance for recursive algorithms.
+#
+# Detects pattern:
+#   block:
+#       %result = Call(self_function, args...)
+#       Return(%result)
+#
+# Transforms into:
+#   entry_block:
+#       %param0 = arg0, %param1 = arg1, ...  (original params)
+#       Goto(body)
+#   body (original entry):
+#       ... (original code)
+#   tail_call_block:
+#       %param0 = new_arg0, %param1 = new_arg1, ...  (reassign params)
+#       Goto(body)                                     (loop back)
+#
+# This eliminates stack frame allocation for tail-recursive functions,
+# turning O(n) stack usage into O(1).
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+
+# ============================================================================
+# Tail Call Optimization Pass
+# ============================================================================
+
+class TailCallOptimization:
+    """
+    TCO pass — converts self-recursive tail calls into loops.
+
+    Only handles direct self-recursion (not mutual recursion).
+    Safe: only transforms calls in tail position (last instruction before Return).
+    """
+    optimized_calls: i64
+    analyzed_functions: i64
+
+impl TailCallOptimization:
+    static fn new() -> TailCallOptimization:
+        TailCallOptimization(
+            optimized_calls: 0,
+            analyzed_functions: 0
+        )
+
+    fn name() -> text:
+        "tail_call_optimization"
+
+    fn description() -> text:
+        "Converts self-recursive tail calls into loops"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn dependencies() -> [text]:
+        []
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run TCO on a function.
+
+        Algorithm:
+        1. Get function's own symbol for self-call detection
+        2. Scan all blocks for tail call pattern:
+           - Last instruction is Call to same function
+           - Terminator is Return of that call's result
+        3. Replace tail calls with parameter reassignment + Goto(entry)
+        """
+        self.analyzed_functions = self.analyzed_functions + 1
+
+        # Get function symbol for self-call detection
+        val func_name = func.name
+
+        # Find tail call blocks
+        var has_tail_calls = false
+        for block in func.blocks:
+            if self.is_tail_call_block(block, func_name):
+                has_tail_calls = true
+
+        if not has_tail_calls:
+            return func
+
+        # Transform: replace tail call blocks
+        var new_blocks: [MirBlock] = []
+        for block in func.blocks:
+            if self.is_tail_call_block(block, func_name):
+                val transformed = self.transform_tail_call(block, func)
+                new_blocks = new_blocks.push(transformed)
+                self.optimized_calls = self.optimized_calls + 1
+            else:
+                new_blocks = new_blocks.push(block)
+
+        MirFunction(..func, blocks: new_blocks)
+
+    fn is_tail_call_block(block: MirBlock, func_name: text) -> bool:
+        """Check if block ends with a self-recursive tail call + return."""
+        val insts = block.instructions
+        if insts.len() == 0:
+            return false
+
+        # Last instruction must be a Call
+        val last_inst = insts[insts.len() - 1]
+        match last_inst.kind:
+            case Call(dest, func_op, args):
+                # Check if call target is self (by function name match)
+                if not self.is_self_call(func_op, func_name):
+                    return false
+                # Terminator must be Return of call result
+                match block.terminator:
+                    case Return(ret_op):
+                        if ret_op.?:
+                            return self.operand_refers_to(ret_op.unwrap(), dest)
+                        false
+                    case _:
+                        false
+            case _:
+                false
+
+    fn is_self_call(func_op: MirOperand, func_name: text) -> bool:
+        """Check if function operand references the current function."""
+        match func_op.kind:
+            case Constant(val_):
+                # Check if constant is a function reference to self
+                match val_:
+                    case FunctionRef(name):
+                        name == func_name
+                    case _:
+                        false
+            case _:
+                false
+
+    fn operand_refers_to(operand: MirOperand, local: LocalId) -> bool:
+        """Check if operand references a specific local."""
+        match operand.kind:
+            case Copy(src): src.id == local.id
+            case Move(src): src.id == local.id
+            case _: false
+
+    me transform_tail_call(block: MirBlock, func: MirFunction) -> MirBlock:
+        """
+        Transform a tail call block into parameter reassignment + Goto(entry).
+
+        Replaces:  %r = Call(self, a1, a2) ; Return(%r)
+        With:      %p0 = a1 ; %p1 = a2 ; Goto(entry_block)
+        """
+        val insts = block.instructions
+        val last_inst = insts[insts.len() - 1]
+
+        # Build new instructions: keep all except the last Call
+        var new_insts: [MirInst] = []
+        var i = 0
+        while i < insts.len() - 1:
+            new_insts = new_insts.push(insts[i])
+            i = i + 1
+
+        # Extract call args and generate parameter reassignment
+        match last_inst.kind:
+            case Call(dest, func_op, args):
+                # Assign each arg to the corresponding parameter local
+                var param_idx = 0
+                while param_idx < args.len() and param_idx < func.params.len():
+                    val param_local = func.params[param_idx]
+                    val arg = args[param_idx]
+                    # Copy arg value to parameter local
+                    val assign_inst = MirInst(
+                        kind: Copy(param_local, arg),
+                        span: last_inst.span
+                    )
+                    new_insts = new_insts.push(assign_inst)
+                    param_idx = param_idx + 1
+            case _:
+                pass_do_nothing
+
+        # Replace terminator: Return -> Goto(entry)
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: new_insts,
+            terminator: MirTerminator.Goto(func.entry_block)
+        )
+
+    fn stats_summary() -> text:
+        "TCO: optimized {self.optimized_calls} tail calls in {self.analyzed_functions} functions"
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_tco_pass() -> TailCallOptimization:
+    TailCallOptimization.new()
+
+fn tco_run_on_function(pass: TailCallOptimization, func: MirFunction) -> MirFunction:
+    pass.run_on_function(func)

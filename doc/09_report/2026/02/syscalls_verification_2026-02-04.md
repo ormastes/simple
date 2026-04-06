@@ -84,8 +84,8 @@ Test 2: File operations (copy, append)
   Append: true
 
 Test 3: Environment
-  CWD: /home/ormastes/dev/pub/simple
-  PATH (first 50 chars): /home/ormastes/.elan/bin:...
+  CWD: 
+  PATH (first 50 chars): ~/.elan/bin:...
   HOME: (numeric representation)
 
 Test 4: System Info

@@ -1,7 +1,7 @@
 # Linker Script Generation from SDN: Configuration Design
 
 **Date**: 2026-02-05
-**Status**: Design
+**Status**: Draft
 **Related**: `doc/06_spec/layout.sdn`, `doc/format/smf_specification.md`
 
 ---

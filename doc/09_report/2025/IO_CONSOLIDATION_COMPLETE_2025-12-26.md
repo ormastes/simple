@@ -633,7 +633,7 @@ cargo test -p simple-driver async_tcp_echo_server
 - [Sprint 3 Report](IO_CONSOLIDATION_SPRINT3_2025-12-26.md) - Application migration
 
 ### Planning
-- Planning document: `/home/ormastes/.claude/plans/peppy-toasting-quill.md`
+- Planning document: `~/.claude/plans/peppy-toasting-quill.md`
 - Original plan: Merge diverse libraries into consistent one library
 
 ### Implementation

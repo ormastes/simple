@@ -199,6 +199,6 @@ All commits follow conventional commits format with detailed bodies.
 
 ## Related Documentation
 
-- Plan: `/home/ormastes/.claude/plans/glowing-hopping-hippo.md`
+- Plan: `~/.claude/plans/glowing-hopping-hippo.md`
 - Index: `doc/09_report/SPLIT_FILES_INDEX.md`
 - Analysis: `doc/09_report/RUST_LONG_FILES.md`

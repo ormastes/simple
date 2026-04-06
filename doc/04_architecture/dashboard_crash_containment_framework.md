@@ -22,11 +22,11 @@ is the proving ground for the broader hosted-app crash containment model.
 
 ## Main Modules
 
-- Policy model: [`src/os/crash_policy.spl`](/home/ormastes/dev/pub/simple/src/os/crash_policy.spl)
-- Dashboard worker launcher / supervisor: [`src/app/dashboard/framework_policy.spl`](/home/ormastes/dev/pub/simple/src/app/dashboard/framework_policy.spl)
-- Dashboard CLI entrypoint: [`src/app/dashboard/main.spl`](/home/ormastes/dev/pub/simple/src/app/dashboard/main.spl)
-- LLM dashboard entrypoint: [`src/app/llm_dashboard/main.spl`](/home/ormastes/dev/pub/simple/src/app/llm_dashboard/main.spl)
-- Rust watchdog and crash logging: [`src/compiler_rust/compiler/src/watchdog.rs`](/home/ormastes/dev/pub/simple/src/compiler_rust/compiler/src/watchdog.rs), [`src/compiler_rust/driver/src/cli/init.rs`](/home/ormastes/dev/pub/simple/src/compiler_rust/driver/src/cli/init.rs)
+- Policy model: [`src/os/crash_policy.spl`](src/os/crash_policy.spl)
+- Dashboard worker launcher / supervisor: [`src/app/dashboard/framework_policy.spl`](src/app/dashboard/framework_policy.spl)
+- Dashboard CLI entrypoint: [`src/app/dashboard/main.spl`](src/app/dashboard/main.spl)
+- LLM dashboard entrypoint: [`src/app/llm_dashboard/main.spl`](src/app/llm_dashboard/main.spl)
+- Rust watchdog and crash logging: [`src/compiler_rust/compiler/src/watchdog.rs`](src/compiler_rust/compiler/src/watchdog.rs), [`src/compiler_rust/driver/src/cli/init.rs`](src/compiler_rust/driver/src/cli/init.rs)
 
 ## Fault-Domain Rules
 

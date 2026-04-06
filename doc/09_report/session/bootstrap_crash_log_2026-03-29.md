@@ -160,7 +160,7 @@ To isolate deterministic warning sources, a direct stage2 build was run with:
 env RUST_LOG=error \
   src/compiler_rust/target/bootstrap/simple native-build \
   --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path /home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap \
+  --runtime-path src/compiler_rust/target/bootstrap \
   -o build/bootstrap-direct-stage2/simple
 ```
 
@@ -401,7 +401,7 @@ env RUST_LOG=error src/compiler_rust/target/bootstrap/simple native-build \
   --source src/app \
   --source src/lib \
   --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path /home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap \
+  --runtime-path src/compiler_rust/target/bootstrap \
   -o build/bootstrap-direct-stage2-resolverfix-long/simple
 ```
 

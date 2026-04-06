@@ -470,4 +470,4 @@ SIMPLE_COVERAGE=1 simple my_script.spl
 
 **Alternative**: Could check only when accessing global coverage storage, but that's after potential allocations/work.
 
-**Status**: Implemented and working effectively.
+**Status**: Complete

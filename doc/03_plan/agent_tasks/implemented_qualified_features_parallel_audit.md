@@ -95,4 +95,4 @@ The audit is complete when:
 1. all five features have evidence-backed wording
 2. every qualifier is tied to a concrete limitation
 3. no unproven capability remains in the “implemented and safe to advertise” section
-4. the merged wording can be applied to [`README.md`](/home/ormastes/dev/pub/simple/README.md) without inventing new claims
+4. the merged wording can be applied to [`README.md`](README.md) without inventing new claims

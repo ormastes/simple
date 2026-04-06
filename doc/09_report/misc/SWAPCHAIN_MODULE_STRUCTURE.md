@@ -23,7 +23,7 @@ simple/
 ## Swapchain Module Contents
 
 ### File Path
-`/home/ormastes/dev/pub/simple/src/runtime/src/value/vulkan_ffi/swapchain.rs`
+`src/runtime/src/value/vulkan_ffi/swapchain.rs`
 
 ### Size
 - **317 lines** total

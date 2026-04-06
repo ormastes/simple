@@ -20,7 +20,7 @@ This enables server-side rendered HTML to be "hydrated" with client-side WASM in
 
 ### 1. HydrationManifest Structure (~470 LOC)
 
-**File:** `/home/ormastes/dev/pub/simple/src/compiler/src/hydration_manifest.rs`
+**File:** `src/compiler/src/hydration_manifest.rs`
 
 **Core Types:**
 ```rust
@@ -59,7 +59,7 @@ let manifest = ManifestBuilder::new()
 
 ### 2. WebCompiler Integration (~130 LOC)
 
-**File:** `/home/ormastes/dev/pub/simple/src/compiler/src/web_compiler.rs`
+**File:** `src/compiler/src/web_compiler.rs`
 
 **Extended SuiCompilationResult:**
 ```rust

@@ -189,10 +189,10 @@ All tests follow these principles:
 
 ## Files Modified
 
-1. `/home/ormastes/dev/pub/simple/src/runtime/src/vulkan/swapchain.rs` - Added 12 tests
-2. `/home/ormastes/dev/pub/simple/src/runtime/src/vulkan/render_pass.rs` - Added 17 tests
-3. `/home/ormastes/dev/pub/simple/src/runtime/src/vulkan/descriptor.rs` - Added 16 tests
-4. `/home/ormastes/dev/pub/simple/src/runtime/src/vulkan/graphics_pipeline.rs` - Added 21 tests, fixed 4 Bool32 type errors
+1. `src/runtime/src/vulkan/swapchain.rs` - Added 12 tests
+2. `src/runtime/src/vulkan/render_pass.rs` - Added 17 tests
+3. `src/runtime/src/vulkan/descriptor.rs` - Added 16 tests
+4. `src/runtime/src/vulkan/graphics_pipeline.rs` - Added 21 tests, fixed 4 Bool32 type errors
 
 ## Test Execution
 

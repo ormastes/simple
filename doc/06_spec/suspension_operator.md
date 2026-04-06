@@ -8,7 +8,7 @@ The `~` operator marks expressions that may suspend (perform async operations). 
 |-------|-------|
 | Feature IDs | #270-275 |
 | Status | Draft |
-| Source | `/home/ormastes/dev/pub/simple/test/specs/suspension_operator_spec.spl` |
+| Source | `test/specs/suspension_operator_spec.spl` |
 | Updated | 2026-03-30 |
 | Generator | `simple sspec-docgen` (Rust) |
 

@@ -26,6 +26,8 @@ use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, stre
 use compiler.mir_opt.mir_opt.string_builder_opt (create_string_builder_opt_pass, string_builder_opt_run_on_function)
 use compiler.mir_opt.mir_opt.outline (create_outline_pass, outline_run_on_function, outline_run_on_module)
 use compiler.mir_opt.mir_opt.generator_sm (create_generator_sm_pass, generator_sm_run_on_function)
+use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
+use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 
 # ============================================================================
 # Optimization Level
@@ -199,7 +201,9 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "dead_code_elimination",    # Initial cleanup
                         "constant_folding",         # Fold constants
                         "copy_propagation",         # Propagate copies
-                        "common_subexpr_elim",      # Eliminate redundant computations
+                        "global_value_numbering",   # Eliminate redundant computations (subsumes CSE)
+                        "common_subexpr_elim",      # CSE for remaining local cases
+                        "tail_call_optimization",   # Convert tail recursion to loops
                         "inline_functions",         # Inline functions (threshold: 500 bytes)
                         "body_outlining",           # Extract cold paths after inlining
                         "loop_invariant_motion",    # Hoist invariants
@@ -218,7 +222,9 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "dead_code_elimination",
                         "constant_folding",
                         "copy_propagation",
+                        "global_value_numbering",   # GVN before inlining
                         "common_subexpr_elim",
+                        "tail_call_optimization",   # TCO before inlining
                         "inline_aggressive",        # Aggressive inlining (threshold: 2000 bytes)
                         "body_outlining",           # Extract cold paths after inlining
                         "loop_invariant_motion",
@@ -226,6 +232,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "string_builder_opt",       # String concat in loops -> push+join
                         "loop_unroll",              # Unroll small loops
                         "strength_reduction",       # Replace expensive ops with cheap ones
+                        "global_value_numbering",   # GVN again after inlining
                         "vectorization",            # Auto-vectorize loops
                         "dead_code_elimination",    # Cleanup
                         "constant_folding"          # Final constant folding
@@ -316,6 +323,12 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
         case "generator_state_machine":
             var gsm = create_generator_sm_pass()
             generator_sm_run_on_function(gsm, func)
+        case "tail_call_optimization":
+            var tco = create_tco_pass()
+            tco_run_on_function(tco, func)
+        case "global_value_numbering":
+            var gvn = create_gvn_pass()
+            gvn_run_on_function(gvn, func)
         case "vectorization":
             # Module-level pass, not per-function — no-op here
             func
@@ -410,6 +423,14 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
             for sym in module.functions.keys():
                 var p = create_generator_sm_pass()
                 result_module.functions[sym] = generator_sm_run_on_function(p, result_module.functions[sym])
+        case "tail_call_optimization":
+            for sym in module.functions.keys():
+                var p = create_tco_pass()
+                result_module.functions[sym] = tco_run_on_function(p, result_module.functions[sym])
+        case "global_value_numbering":
+            for sym in module.functions.keys():
+                var p = create_gvn_pass()
+                result_module.functions[sym] = gvn_run_on_function(p, result_module.functions[sym])
         case "vectorization":
             # Module-level pass, not per-function — no-op here
             pass_do_nothing

@@ -599,11 +599,11 @@ The Vulkan window stdlib wrapper successfully provides a **high-level, type-safe
 ## Files Modified/Created
 
 ### Created
-1. `/home/ormastes/dev/pub/simple/simple/std_lib/src/ui/gui/vulkan_window.spl`
-2. `/home/ormastes/dev/pub/simple/simple/std_lib/test/integration/ui/vulkan_window_spec.spl`
-3. `/home/ormastes/dev/pub/simple/simple/examples/vulkan_window_basic.spl`
-4. `/home/ormastes/dev/pub/simple/simple/examples/vulkan_event_driven.spl`
-5. `/home/ormastes/dev/pub/simple/doc/09_report/VULKAN_STDLIB_WRAPPER_2025-12-27.md`
+1. `simple/std_lib/src/ui/gui/vulkan_window.spl`
+2. `simple/std_lib/test/integration/ui/vulkan_window_spec.spl`
+3. `simple/examples/vulkan_window_basic.spl`
+4. `simple/examples/vulkan_event_driven.spl`
+5. `doc/09_report/VULKAN_STDLIB_WRAPPER_2025-12-27.md`
 
 ### Related Documentation
 - `VULKAN_EVENT_LOOP_FIX_2025-12-27.md` - Event loop architecture

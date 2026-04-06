@@ -184,6 +184,6 @@ The implementation includes comprehensive FFI function declarations that will be
 
 ## References
 
-- Planning document: `/home/ormastes/.claude/plans/peppy-toasting-quill.md`
+- Planning document: `~/.claude/plans/peppy-toasting-quill.md`
 - Implementation files: `simple/std_lib/src/io/`, `simple/std_lib/src/host/async_*_mut/io/`
 - Examples: `simple/std_lib/examples/file_*.spl`

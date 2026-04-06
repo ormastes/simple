@@ -1,7 +1,7 @@
 # Baremetal Robustness Rules for Simple Language
 
 **Date**: 2026-02-15
-**Status**: Design
+**Status**: Draft
 **Scope**: Compile-time enforced rules for safety-critical and resource-constrained targets
 **Targets**: Baremetal, CUDA kernels, VHDL/HLS, MISRA-like safety profiles
 

@@ -90,6 +90,6 @@ Blocked (mock_phase3_spec.spl): Cannot run due to module import limitation
 
 ## References
 
-- `/home/ormastes/dev/pub/simple/simple/std_lib/src/testing/mocking.spl` - Mock library
-- `/home/ormastes/dev/pub/simple/simple/std_lib/test/unit/testing/mock_spec.spl` - Working tests (local definitions)
-- `/home/ormastes/dev/pub/simple/simple/std_lib/test/unit/testing/mock_phase3_spec.spl` - Blocked tests (module imports)
+- `simple/std_lib/src/testing/mocking.spl` - Mock library
+- `simple/std_lib/test/unit/testing/mock_spec.spl` - Working tests (local definitions)
+- `simple/std_lib/test/unit/testing/mock_phase3_spec.spl` - Blocked tests (module imports)

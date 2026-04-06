@@ -78,7 +78,7 @@ ml/torch/
 export SIMPLE_PYTORCH_DEVICE=cpu
 export LIBTORCH_USE_PYTORCH=1
 export LIBTORCH_BYPASS_VERSION_CHECK=1
-export LD_LIBRARY_PATH="/home/ormastes/.local/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="~/.local/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH"
 ```
 
 ### Build Commands

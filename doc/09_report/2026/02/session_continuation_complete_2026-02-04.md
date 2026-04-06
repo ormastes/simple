@@ -292,12 +292,12 @@ With compiler rebuild deploying static method fix:
 **Effective pattern discovered:**
 ```bash
 # Run single file to find specific errors
-/home/ormastes/dev/pub/simple/bin/simple test test/compiler/FILE.spl
+bin/simple test test/compiler/FILE.spl
 
 # Fix errors (imports, syntax, names)
 
 # Verify fix
-/home/ormastes/dev/pub/simple/bin/simple test test/compiler/FILE.spl
+bin/simple test test/compiler/FILE.spl
 
 # Move to next file
 ```

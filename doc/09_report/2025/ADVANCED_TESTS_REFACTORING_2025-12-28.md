@@ -132,21 +132,21 @@ All 52 tests preserved and categorized correctly:
 ## Files Modified
 
 ### Created
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/mod.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/simd_intrinsics.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/simd_vectors.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/simd_swizzle.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/simd_memory.rs`
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced/gpu_ops.rs`
+- `src/compiler/src/hir/lower/tests/advanced/mod.rs`
+- `src/compiler/src/hir/lower/tests/advanced/simd_intrinsics.rs`
+- `src/compiler/src/hir/lower/tests/advanced/simd_vectors.rs`
+- `src/compiler/src/hir/lower/tests/advanced/simd_swizzle.rs`
+- `src/compiler/src/hir/lower/tests/advanced/simd_memory.rs`
+- `src/compiler/src/hir/lower/tests/advanced/gpu_ops.rs`
 
 ### Modified
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/mod.rs` - Updated module declaration
+- `src/compiler/src/hir/lower/tests/mod.rs` - Updated module declaration
 
 ### Deleted
-- `/home/ormastes/dev/pub/simple/src/compiler/src/hir/lower/tests/advanced_tests.rs` - Split into focused modules
+- `src/compiler/src/hir/lower/tests/advanced_tests.rs` - Split into focused modules
 
 ### Bug Fix (Pre-existing Issue)
-- `/home/ormastes/dev/pub/simple/src/compiler/src/codegen/backend_trait.rs` - Added feature flag guards for `BackendKind::Vulkan` in tests (lines 173-185, 194-206)
+- `src/compiler/src/codegen/backend_trait.rs` - Added feature flag guards for `BackendKind::Vulkan` in tests (lines 173-185, 194-206)
 
 ## Testing
 

@@ -1,6 +1,6 @@
 # Design Decision: No Exception Support in Simple Language
 
-**Status**: Decided
+**Status**: Complete
 **Date**: 2026-01-22
 **Decision**: Simple language does not support exceptions (try-catch-throw)
 
