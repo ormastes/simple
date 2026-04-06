@@ -1,0 +1,221 @@
+"""
+# Form Validation
+
+Declarative form validation with built-in rules and custom validators.
+Collects errors per field and supports multiple rules per field.
+
+## Usage
+
+```simple
+var v = validator_new()
+v = validator_add_rule(v, "email", ValidationRule.Required)
+v = validator_add_rule(v, "email", ValidationRule.Email)
+v = validator_add_rule(v, "name", ValidationRule.MinLength(2))
+v = validator_add_rule(v, "name", ValidationRule.MaxLength(100))
+
+val params = {"email": "", "name": "A"}
+val valid = validator_validate(v, params)
+
+if not valid:
+    val errs = validator_all_errors(v)
+    # errs["email"] = ["Field is required"]
+    # errs["name"]  = ["Must be at least 2 characters"]
+```
+"""
+
+use std.validation.{is_email_like, is_numeric, validate_length}
+
+# ============================================================================
+# Validation Rules
+# ============================================================================
+
+enum ValidationRule:
+    """Declarative validation rule for a form field."""
+    Required
+    MinLength(i64)
+    MaxLength(i64)
+    Email
+    Numeric
+    Matches(text)
+    Pattern(text)
+
+# ============================================================================
+# Validator
+# ============================================================================
+
+class Validator:
+    """Collects rules per field and validates request parameters.
+
+    Rules are added per field. When validate is called, every rule
+    for every field is checked. Errors accumulate per field.
+    """
+    rules: Dict<text, [ValidationRule]>
+    errors: Dict<text, [text]>
+
+fn validator_new() -> Validator:
+    """Create an empty validator."""
+    Validator(rules: {}, errors: {})
+
+fn validator_add_rule(v: Validator, field: text, rule: ValidationRule) -> Validator:
+    """Add a validation rule for a field.
+
+    Args:
+        v: Validator to update
+        field: Name of the form field
+        rule: Validation rule to apply
+
+    Returns:
+        Updated validator with the rule added
+    """
+    var result = v
+    val existing = result.rules.get(field)
+    if existing != nil:
+        var rules_list = existing ?? []
+        rules_list.push(rule)
+        result.rules[field] = rules_list
+    else:
+        result.rules[field] = [rule]
+    result
+
+fn validator_validate(v: Validator, params: Dict<text, text>) -> bool:
+    """Validate parameters against all rules.
+
+    Populates the errors dict in the validator. Returns true if no errors.
+
+    Args:
+        v: Validator with rules configured
+        params: Form parameters to validate
+
+    Returns:
+        true if all validations pass, false otherwise
+    """
+    var result_errors: Dict<text, [text]> = {}
+
+    for field in v.rules.keys():
+        val rules = v.rules.get(field) ?? []
+        val value = params.get(field) ?? ""
+        var field_errors: [text] = []
+
+        for rule in rules:
+            val error = apply_rule(rule, field, value)
+            if error != nil:
+                val err_msg = error ?? ""
+                field_errors.push(err_msg)
+
+        if field_errors.len() > 0:
+            result_errors[field] = field_errors
+
+    v.errors = result_errors
+    result_errors.len() == 0
+
+fn validator_errors_for(v: Validator, field: text) -> [text]:
+    """Get error messages for a specific field.
+
+    Args:
+        v: Validator after validate has been called
+        field: Field name to get errors for
+
+    Returns:
+        List of error messages (empty if field is valid)
+    """
+    v.errors.get(field) ?? []
+
+fn validator_all_errors(v: Validator) -> Dict<text, [text]>:
+    """Get all validation errors.
+
+    Returns:
+        Dict mapping field names to their error messages
+    """
+    v.errors
+
+fn validator_has_errors(v: Validator) -> bool:
+    """Check if the validator has any errors after validation."""
+    v.errors.len() > 0
+
+fn validator_first_error(v: Validator) -> text:
+    """Get the first error message found, or empty string if none."""
+    for field in v.errors.keys():
+        val errs = v.errors.get(field) ?? []
+        if errs.len() > 0:
+            return errs[0]
+    ""
+
+# ============================================================================
+# Rule Application
+# ============================================================================
+
+fn apply_rule(rule: ValidationRule, field: text, value: text) -> text?:
+    """Apply a single validation rule to a value.
+
+    Returns:
+        Error message if validation fails, nil if passes
+    """
+    match rule:
+        ValidationRule.Required:
+            if value.len() == 0:
+                return Some("Field is required")
+            nil
+
+        ValidationRule.MinLength(min):
+            if value.len() > 0 and value.len() < min:
+                return Some("Must be at least {min} characters")
+            nil
+
+        ValidationRule.MaxLength(max):
+            if value.len() > max:
+                return Some("Must be at most {max} characters")
+            nil
+
+        ValidationRule.Email:
+            if value.len() > 0 and not is_email_like(value):
+                return Some("Must be a valid email address")
+            nil
+
+        ValidationRule.Numeric:
+            if value.len() > 0 and not is_numeric(value):
+                return Some("Must contain only numbers")
+            nil
+
+        ValidationRule.Matches(pattern):
+            if value.len() > 0 and value != pattern:
+                return Some("Does not match expected value")
+            nil
+
+        ValidationRule.Pattern(regex_desc):
+            # Pattern is a descriptive name; actual regex matching
+            # would require runtime support. For now, pass through.
+            nil
+
+# ============================================================================
+# Convenience Builders
+# ============================================================================
+
+fn require_fields(fields: [text]) -> Validator:
+    """Create a validator that requires all given fields."""
+    var v = validator_new()
+    for field in fields:
+        v = validator_add_rule(v, field, ValidationRule.Required)
+    v
+
+fn validate_params(params: Dict<text, text>, required: [text]) -> [text]:
+    """Quick validation: check that all required fields are non-empty.
+
+    Returns list of missing field names.
+    """
+    var missing: [text] = []
+    for field in required:
+        val value = params.get(field) ?? ""
+        if value.len() == 0:
+            missing.push(field)
+    missing
+
+fn errors_to_html(errors: Dict<text, [text]>) -> text:
+    """Render validation errors as an HTML unordered list."""
+    var parts: [text] = []
+    parts.push("<ul class=\"validation-errors\">")
+    for field in errors.keys():
+        val field_errs = errors.get(field) ?? []
+        for err in field_errs:
+            parts.push("  <li><strong>{field}</strong>: {err}</li>")
+    parts.push("</ul>")
+    parts.join("\n")

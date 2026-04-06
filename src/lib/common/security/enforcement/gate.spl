@@ -1,0 +1,118 @@
+# CapabilityGate — the enforcement point for the default-deny security model.
+#
+# This module provides the runtime enforcement functions that AOP advice
+# and business code use to check and enforce permissions. Every access
+# check flows through the PermissionResolver, which implements the
+# direct grant -> role-based -> DENY chain.
+
+use std.security.types.{SecurityContext, SecurityEvent, AuditEntry, AuditConfig}
+use std.security.audit_log.{log_security_event}
+use std.security.enforcement.capability.{Capability, CapabilityStore, parse_capability}
+use std.security.enforcement.resolver.{PermissionResolver, PermissionResult, is_granted}
+
+## The enforcement gate combining resolver + audit integration.
+##
+## check_access returns a Result without logging; enforce also returns a Result
+## but is intended as the primary enforcement point; check_and_log adds
+## audit trail for both success and failure.
+class CapabilityGate:
+    resolver: PermissionResolver
+
+    ## Create a gate with the given resolver.
+    static fn new(resolver: PermissionResolver) -> CapabilityGate:
+        CapabilityGate(resolver: resolver)
+
+    ## Check whether the security context has the required capability.
+    ##
+    ## Returns Ok(()) if granted, Err with reason if denied.
+    ## Does NOT log — use check_and_log for audited access checks.
+    fn check_access(ctx: SecurityContext, required: Capability) -> Result<(), text>:
+        if not ctx.is_authenticated():
+            return Err("authentication required")
+
+        val result = self.resolver.resolve(ctx.user_id, required, ctx.capabilities)
+        if is_granted(result):
+            Ok(())
+        else:
+            match result:
+                Denied(reason): Err(reason)
+                _: Err("access denied")
+
+    ## Enforce that the security context holds the required capability.
+    ##
+    ## Functionally identical to check_access — provided as a distinct
+    ## entry point for semantic clarity in enforcement paths.
+    fn enforce(ctx: SecurityContext, required: Capability) -> Result<(), text>:
+        self.check_access(ctx, required)
+
+    ## Check access and log the result to the audit trail.
+    ##
+    ## Logs AccessDenied or CapabilityDenied events on failure.
+    fn check_and_log(ctx: SecurityContext, required: Capability, config: AuditConfig) -> Result<(), text>:
+        val result = self.check_access(ctx, required)
+
+        match result:
+            Err(reason):
+                val event = SecurityEvent.AccessDenied(
+                    resource: required.to_string(),
+                    capability: required.to_string(),
+                    peer: ctx.peer_addr
+                )
+
+                val entry = AuditEntry.new(
+                    event: event,
+                    correlation_id: ctx.correlation_id,
+                    module_path: "security.enforcement.gate"
+                )
+
+                log_security_event(entry, config)
+                Err(reason)
+
+            Ok(_):
+                Ok(())
+
+## Convenience: check capability by SecurityContext and text-format capability string.
+##
+## Uses the context's capabilities list (text-based) to check the given string.
+## Does NOT use the CapabilityStore — for simple annotation-driven checks.
+fn check_capability(ctx: SecurityContext, capability_str: text) -> bool:
+    """
+    Check capability from SecurityContext's text-based capabilities list.
+
+    sdoctest:
+        val ctx = SecurityContext(
+            peer_addr: "127.0.0.1",
+            session_id: "s1",
+            user_id: "alice",
+            correlation_id: "c1",
+            capabilities: ["read:users", "write:posts"]
+        )
+        expect(check_capability(ctx, "read:users")).to_equal(true)
+        expect(check_capability(ctx, "admin:*")).to_equal(false)
+    """
+    if not ctx.is_authenticated():
+        return false
+    ctx.has_capability(capability_str)
+
+## Convenience: enforce a text-format capability, returning Err on denial.
+fn enforce_permission(ctx: SecurityContext, capability_str: text) -> Result<(), text>:
+    """
+    Enforce permission using SecurityContext's text-based capabilities list.
+
+    sdoctest:
+        val ctx = SecurityContext(
+            peer_addr: "127.0.0.1",
+            session_id: "s1",
+            user_id: "alice",
+            correlation_id: "c1",
+            capabilities: ["read:users"]
+        )
+        expect(enforce_permission(ctx, "read:users").is_ok()).to_equal(true)
+        expect(enforce_permission(ctx, "admin:*").is_err()).to_equal(true)
+    """
+    if not ctx.is_authenticated():
+        return Err("authentication required")
+    if ctx.has_capability(capability_str):
+        Ok(())
+    else:
+        Err("capability '{capability_str}' not held by user '{ctx.user_id}'")

@@ -1,0 +1,104 @@
+# Request-scoped SecurityContext propagation.
+#
+# Provides a module-level store for associating SecurityContexts with
+# request correlation IDs. Each HTTP request or operation gets a unique
+# context keyed by its correlation_id.
+#
+# Thread-local context is simulated via a module-level variable
+# (current_correlation_id) that is set/cleared around request handling.
+
+use std.security.types.{SecurityContext}
+use std.time
+
+## Module-level storage for request-scoped security contexts.
+##
+## Contexts are keyed by correlation_id. The store provides set/get/clear
+## operations and a sweep for expired entries.
+class SecurityContextStore:
+    contexts: Dict<text, SecurityContext>
+    timestamps: Dict<text, i64>
+
+    ## Create an empty context store.
+    static fn new() -> SecurityContextStore:
+        SecurityContextStore(
+            contexts: {},
+            timestamps: {}
+        )
+
+    ## Associate a SecurityContext with a correlation ID.
+    me set_context(correlation_id: text, ctx: SecurityContext):
+        self.contexts = self.contexts.set(correlation_id, ctx)
+        self.timestamps = self.timestamps.set(correlation_id, time.now_ms())
+
+    ## Retrieve the SecurityContext for a correlation ID, if present.
+    fn get_context(correlation_id: text) -> SecurityContext?:
+        self.contexts.get(correlation_id)
+
+    ## Remove the context for a correlation ID (e.g., at request end).
+    me clear_context(correlation_id: text):
+        self.contexts = self.contexts.remove(correlation_id)
+        self.timestamps = self.timestamps.remove(correlation_id)
+
+    ## Remove all contexts older than max_age_ms.
+    ##
+    ## This prevents unbounded growth when requests complete without
+    ## explicitly clearing their context.
+    me clear_expired(max_age_ms: i64):
+        val now = time.now_ms()
+        var to_remove: List<text> = []
+
+        for entry in self.timestamps:
+            val id = entry.key
+            val ts = entry.value
+            if now - ts > max_age_ms:
+                to_remove = to_remove.push(id)
+
+        for id in to_remove:
+            self.contexts = self.contexts.remove(id)
+            self.timestamps = self.timestamps.remove(id)
+
+# ---------------------------------------------------------------------------
+# Module-level context accessor
+# ---------------------------------------------------------------------------
+
+## Module-level store instance for the current process.
+var _global_store = SecurityContextStore.new()
+
+## Module-level correlation ID for the current request scope.
+var _current_correlation_id: text = ""
+
+## Get the SecurityContext for the current request scope.
+##
+## Returns an anonymous context if no context has been set for the
+## current scope (default-deny: unauthenticated until proven otherwise).
+fn current_security_context() -> SecurityContext:
+    """
+    Returns the current request-scoped SecurityContext.
+    Falls back to anonymous if none is set.
+
+    sdoctest:
+        val ctx = current_security_context()
+        expect(ctx.is_authenticated()).to_equal(false)
+    """
+    if _current_correlation_id == "":
+        return SecurityContext.anonymous("unknown")
+
+    val maybe_ctx = _global_store.get_context(_current_correlation_id)
+    if val ctx = maybe_ctx:
+        ctx
+    else:
+        SecurityContext.anonymous("unknown")
+
+## Execute a block with a specific SecurityContext in scope.
+##
+## Sets the context before the block runs and clears it after,
+## ensuring cleanup even if the block fails.
+fn with_security_context(ctx: SecurityContext, block: fn()):
+    val prev_id = _current_correlation_id
+    _current_correlation_id = ctx.correlation_id
+    _global_store.set_context(ctx.correlation_id, ctx)
+
+    block()
+
+    _global_store.clear_context(ctx.correlation_id)
+    _current_correlation_id = prev_id

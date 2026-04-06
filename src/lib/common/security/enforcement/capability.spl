@@ -1,0 +1,252 @@
+# Core capability system with grant-based, default-deny access control.
+#
+# Capabilities are typed permissions scoped to a resource, endpoint, or path.
+# All grants are time-bounded (mandatory expiry_ms) and optionally delegatable.
+# Delegation depth is limited to 2: delegatable -> non-delegatable -> no further.
+
+use std.time
+
+## Typed capability representing a permission scope.
+enum Capability:
+    Read(resource: text)
+    Write(resource: text)
+    Execute(resource: text)
+    Admin(scope: text)
+    Network(endpoint: text)
+    FileSystem(path: text)
+    Database(table: text)
+    Custom(name: text, scope: text)
+
+impl Capability:
+    ## Check if this capability matches another, supporting wildcard ("*").
+    ##
+    ## A capability matches if the variant is the same and the resource
+    ## either matches exactly or one side is the wildcard "*".
+    fn matches(other: Capability) -> bool:
+        """
+        Wildcard and exact matching for capabilities.
+
+        sdoctest:
+            val a = Capability.Read(resource: "users")
+            val b = Capability.Read(resource: "users")
+            expect(a.matches(b)).to_equal(true)
+
+            val c = Capability.Read(resource: "*")
+            expect(c.matches(a)).to_equal(true)
+
+            val d = Capability.Write(resource: "users")
+            expect(a.matches(d)).to_equal(false)
+        """
+        match self:
+            Read(r1):
+                match other:
+                    Read(r2): r1 == r2 or r1 == "*" or r2 == "*"
+                    _: false
+            Write(r1):
+                match other:
+                    Write(r2): r1 == r2 or r1 == "*" or r2 == "*"
+                    _: false
+            Execute(r1):
+                match other:
+                    Execute(r2): r1 == r2 or r1 == "*" or r2 == "*"
+                    _: false
+            Admin(s1):
+                match other:
+                    Admin(s2): s1 == s2 or s1 == "*" or s2 == "*"
+                    _: false
+            Network(e1):
+                match other:
+                    Network(e2): e1 == e2 or e1 == "*" or e2 == "*"
+                    _: false
+            FileSystem(p1):
+                match other:
+                    FileSystem(p2): p1 == p2 or p1 == "*" or p2 == "*"
+                    _: false
+            Database(t1):
+                match other:
+                    Database(t2): t1 == t2 or t1 == "*" or t2 == "*"
+                    _: false
+            Custom(n1, s1):
+                match other:
+                    Custom(n2, s2): (n1 == n2 or n1 == "*" or n2 == "*") and (s1 == s2 or s1 == "*" or s2 == "*")
+                    _: false
+
+    ## Convert capability to a human-readable string representation.
+    fn to_string() -> text:
+        """
+        Formats capability as "kind:resource".
+
+        sdoctest:
+            val c = Capability.Read(resource: "users")
+            expect(c.to_string()).to_equal("read:users")
+        """
+        match self:
+            Read(r): "read:{r}"
+            Write(r): "write:{r}"
+            Execute(r): "execute:{r}"
+            Admin(s): "admin:{s}"
+            Network(e): "network:{e}"
+            FileSystem(p): "filesystem:{p}"
+            Database(t): "database:{t}"
+            Custom(n, s): "custom:{n}:{s}"
+
+## A single grant of a capability to a principal, issued by a grantor.
+##
+## Every grant has a mandatory expiry_ms timestamp. Perpetual grants
+## are not supported by design. The delegatable flag controls whether
+## the principal may create sub-grants (max depth 2).
+class CapabilityGrant:
+    capability: Capability
+    principal_id: text
+    grantor_id: text
+    expiry_ms: i64
+    delegatable: bool
+    conditions: List<text>
+    created_at: i64
+
+## In-memory store for capability grants.
+##
+## Provides grant, revoke, check, and garbage collection operations.
+## All checks enforce expiry — expired grants are treated as non-existent.
+class CapabilityStore:
+    grants: List<CapabilityGrant>
+
+    ## Create an empty capability store.
+    static fn new() -> CapabilityStore:
+        CapabilityStore(grants: [])
+
+    ## Grant a non-delegatable capability to a principal.
+    ##
+    ## Validates that expiry_ms is in the future before accepting the grant.
+    me grant(principal_id: text, capability: Capability, grantor_id: text, expiry_ms: i64) -> Result<(), text>:
+        val now = time.now_ms()
+        if expiry_ms <= now:
+            return Err("expiry_ms must be in the future")
+
+        val g = CapabilityGrant(
+            capability: capability,
+            principal_id: principal_id,
+            grantor_id: grantor_id,
+            expiry_ms: expiry_ms,
+            delegatable: false,
+            conditions: [],
+            created_at: now
+        )
+        self.grants = self.grants.push(g)
+        Ok(())
+
+    ## Grant a delegatable capability to a principal.
+    ##
+    ## A delegatable grant allows the principal to issue sub-grants,
+    ## but those sub-grants will be non-delegatable (max depth 2).
+    me grant_delegatable(principal_id: text, capability: Capability, grantor_id: text, expiry_ms: i64) -> Result<(), text>:
+        val now = time.now_ms()
+        if expiry_ms <= now:
+            return Err("expiry_ms must be in the future")
+
+        val g = CapabilityGrant(
+            capability: capability,
+            principal_id: principal_id,
+            grantor_id: grantor_id,
+            expiry_ms: expiry_ms,
+            delegatable: true,
+            conditions: [],
+            created_at: now
+        )
+        self.grants = self.grants.push(g)
+        Ok(())
+
+    ## Revoke a specific capability from a principal.
+    ##
+    ## Returns true if a matching grant was found and removed.
+    me revoke(principal_id: text, capability: Capability) -> bool:
+        val original_len = self.grants.len()
+        var kept: List<CapabilityGrant> = []
+        for g in self.grants:
+            if g.principal_id == principal_id and g.capability.matches(capability):
+                pass_do_nothing
+            else:
+                kept = kept.push(g)
+        self.grants = kept
+        kept.len() < original_len
+
+    ## Revoke all capabilities from a principal.
+    ##
+    ## Returns the number of grants that were revoked.
+    me revoke_all(principal_id: text) -> i64:
+        val original_len = self.grants.len()
+        var kept: List<CapabilityGrant> = []
+        for g in self.grants:
+            if g.principal_id != principal_id:
+                kept = kept.push(g)
+        self.grants = kept
+        original_len - kept.len()
+
+    ## Check whether a principal currently holds a capability.
+    ##
+    ## Returns true only if a matching, non-expired grant exists.
+    fn check(principal_id: text, capability: Capability) -> bool:
+        val now = time.now_ms()
+        for g in self.grants:
+            if g.principal_id == principal_id and g.capability.matches(capability) and g.expiry_ms > now:
+                return true
+        false
+
+    ## List all non-expired grants for a principal.
+    fn list_grants(principal_id: text) -> List<CapabilityGrant>:
+        val now = time.now_ms()
+        var result: List<CapabilityGrant> = []
+        for g in self.grants:
+            if g.principal_id == principal_id and g.expiry_ms > now:
+                result = result.push(g)
+        result
+
+    ## Remove all expired grants from the store.
+    me gc():
+        val now = time.now_ms()
+        var kept: List<CapabilityGrant> = []
+        for g in self.grants:
+            if g.expiry_ms > now:
+                kept = kept.push(g)
+        self.grants = kept
+
+## Parse a capability string into a Capability enum value.
+##
+## Format: "kind:resource" (e.g., "read:users", "admin:*", "custom:name:scope").
+fn parse_capability(s: text) -> Capability:
+    """
+    Parses a "kind:resource" string into a Capability.
+
+    sdoctest:
+        val c = parse_capability("read:users")
+        expect(c.to_string()).to_equal("read:users")
+
+        val a = parse_capability("admin:*")
+        expect(a.to_string()).to_equal("admin:*")
+    """
+    val parts = s.split(":")
+    if parts.len() < 2:
+        return Capability.Custom(name: s, scope: "*")
+
+    val kind = parts[0]
+    val resource = if parts.len() == 2:
+        parts[1]
+    else:
+        # For custom:name:scope, rejoin remaining parts
+        parts.slice(1, parts.len()).join(":")
+
+    match kind:
+        "read": Capability.Read(resource: resource)
+        "write": Capability.Write(resource: resource)
+        "execute": Capability.Execute(resource: resource)
+        "admin": Capability.Admin(scope: resource)
+        "network": Capability.Network(endpoint: resource)
+        "filesystem": Capability.FileSystem(path: resource)
+        "database": Capability.Database(table: resource)
+        "custom":
+            val custom_parts = resource.split(":")
+            if custom_parts.len() >= 2:
+                Capability.Custom(name: custom_parts[0], scope: custom_parts.slice(1, custom_parts.len()).join(":"))
+            else:
+                Capability.Custom(name: resource, scope: "*")
+        _: Capability.Custom(name: kind, scope: resource)

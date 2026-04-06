@@ -408,7 +408,7 @@ RuntimeValue rt_gui_box_blur(RuntimeValue xy, RuntimeValue wh,
     uint32_t r = (uint32_t)(uint64_t)radius_rv;
 
     if (r == 0 || w == 0 || h == 0) return 0;
-    if (r > 40) r = 40; /* Cap radius for performance */
+    if (r > 20) r = 20; /* Clamp kernel to 41 (radius 20) — prevents artifacts with large blurs */
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
     if (x + w > g_fb_w) w = (uint32_t)g_fb_w - x;
     if (y + h > SCREEN_H) h = SCREEN_H - y;
@@ -499,8 +499,10 @@ RuntimeValue rt_gui_shadow(RuntimeValue xy, RuntimeValue wh,
     uint32_t alpha = (uint32_t)((uint64_t)blur_alpha & 0xFFFFFFFF);
     uint32_t offset = (uint32_t)(uint64_t)offset_rv;
 
+    /* 1.5x stronger shadow alpha */
+    alpha = alpha * 3 / 2;
     if (alpha > 255) alpha = 255;
-    if (blur_r > 30) blur_r = 30;
+    if (blur_r > 45) blur_r = 45;
     if (offset == 0) offset = 6;
 
     /* Shadow position: offset down and right, slightly larger */
@@ -526,6 +528,31 @@ RuntimeValue rt_gui_shadow(RuntimeValue xy, RuntimeValue wh,
     if (blur_r > 0) {
         box_blur_h(sx, sy, sw, sh, blur_r);
         box_blur_v(sx, sy, sw, sh, blur_r);
+    }
+
+    /* Extra soft outer glow for diffusion */
+    if (blur_r > 4) {
+        uint32_t ex = (sx > 2) ? sx - 2 : 0;
+        uint32_t ey = (sy > 2) ? sy - 2 : 0;
+        uint32_t ew = sw + 4;
+        uint32_t eh = sh + 4;
+        if (ex + ew <= g_fb_w && ey + eh <= SCREEN_H) {
+            /* Top edge */
+            for (uint32_t c = 0; c < ew && ex + c < g_fb_w; c++) {
+                if (ey < SCREEN_H) {
+                    uint32_t dst = fb_read(ex + c, ey);
+                    fb_write(ex + c, ey, alpha_blend(dst, 0x00000000, alpha / 6));
+                }
+            }
+            /* Bottom edge */
+            uint32_t bot = ey + eh - 1;
+            if (bot < SCREEN_H) {
+                for (uint32_t c = 0; c < ew && ex + c < g_fb_w; c++) {
+                    uint32_t dst = fb_read(ex + c, bot);
+                    fb_write(ex + c, bot, alpha_blend(dst, 0x00000000, alpha / 6));
+                }
+            }
+        }
     }
 
     return 0;
@@ -877,6 +904,21 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
+        /* Star field — scattered bright points (400 stars, brighter) */
+        for (uint32_t i = 0; i < 400; i++) {
+            uint32_t sx = ((i * 2654435761u) ^ (i * 340573321u)) % sw;
+            uint32_t sy = ((i * 1103515245u) ^ (i * 12345u)) % sh;
+            uint8_t brightness = 80 + (((i * 48271u) ^ (i * 65537u)) % 80);
+            fb_write(sx, sy, alpha_blend(fb_read(sx, sy), 0x00FFFFFF, brightness));
+            /* Every 3rd star is 3px for variation */
+            if (i % 3 == 0 && sx + 1 < sw) {
+                fb_write(sx + 1, sy, alpha_blend(fb_read(sx + 1, sy), 0x00FFFFFF, brightness / 2));
+                if (sx + 2 < sw) {
+                    fb_write(sx + 2, sy, alpha_blend(fb_read(sx + 2, sy), 0x00FFFFFF, brightness / 3));
+                }
+            }
+        }
+
         /* Subtle horizon glow — brighter band in lower third */
         for (uint32_t row = sh * 2 / 3; row < sh * 2 / 3 + sh / 8; row++) {
             for (uint32_t col = 0; col < sw; col++) {
@@ -890,20 +932,20 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
-        /* Nebula blobs */
-        draw_blob(sw * 3 / 4, sh / 4, 220, 0x000A84FF, 30, sw, sh);   /* Blue (top-right) */
-        draw_blob(sw / 5, sh * 2 / 3, 200, 0x00BB86FC, 25, sw, sh);   /* Purple (bottom-left) */
-        draw_blob(sw / 2, sh / 2, 180, 0x0000D4AA, 18, sw, sh);       /* Teal (center) */
-        draw_blob(sw * 4 / 5, sh * 3 / 4, 160, 0x00FF6B9D, 20, sw, sh); /* Pink (bottom-right) */
-        draw_blob(sw / 3, sh / 5, 140, 0x00FFD700, 15, sw, sh);       /* Gold (top-left) */
-        draw_blob(sw / 8, sh / 8, 120, 0x004ECDC4, 12, sw, sh);       /* Teal-mint (top-left) */
-        draw_blob(sw * 5 / 8, sh / 3, 150, 0x00E040FB, 16, sw, sh);   /* Neon purple (center-right) */
-        draw_blob(sw / 2, sh * 4 / 5, 130, 0x00FF7043, 14, sw, sh);   /* Coral (bottom-center) */
+        /* Nebula blobs — larger (1.5x radius) and brighter (1.3x alpha) */
+        draw_blob(sw * 3 / 4, sh / 4, 330, 0x000A84FF, 39, sw, sh);   /* Blue (top-right) */
+        draw_blob(sw / 5, sh * 2 / 3, 300, 0x00BB86FC, 33, sw, sh);   /* Purple (bottom-left) */
+        draw_blob(sw / 2, sh / 2, 270, 0x0000D4AA, 23, sw, sh);       /* Teal (center) */
+        draw_blob(sw * 4 / 5, sh * 3 / 4, 240, 0x00FF6B9D, 26, sw, sh); /* Pink (bottom-right) */
+        draw_blob(sw / 3, sh / 5, 210, 0x00FFD700, 20, sw, sh);       /* Gold (top-left) */
+        draw_blob(sw / 8, sh / 8, 180, 0x004ECDC4, 16, sw, sh);       /* Teal-mint (top-left) */
+        draw_blob(sw * 5 / 8, sh / 3, 225, 0x00E040FB, 21, sw, sh);   /* Neon purple (center-right) */
+        draw_blob(sw / 2, sh * 4 / 5, 195, 0x00FF7043, 18, sw, sh);   /* Coral (bottom-center) */
 
-        /* Extra detail blobs for visual richness */
-        draw_blob(sw / 6, sh * 3 / 5, 100, 0x00FFFFFF, 8, sw, sh);    /* White highlight */
-        draw_blob(sw * 7 / 8, sh / 6, 90, 0x0064B5F6, 10, sw, sh);   /* Light blue accent */
-        draw_blob(sw * 2 / 5, sh / 10, 80, 0x00CE93D8, 10, sw, sh);   /* Light purple */
+        /* Extra detail blobs for visual richness — larger (1.5x) and brighter (1.3x) */
+        draw_blob(sw / 6, sh * 3 / 5, 150, 0x00FFFFFF, 10, sw, sh);   /* White highlight */
+        draw_blob(sw * 7 / 8, sh / 6, 135, 0x0064B5F6, 13, sw, sh);  /* Light blue accent */
+        draw_blob(sw * 2 / 5, sh / 10, 120, 0x00CE93D8, 13, sw, sh);  /* Light purple */
 
         /* Subtle blur pass to soften blobs */
         box_blur_h(0, 0, sw, sh, 8);
@@ -1074,9 +1116,9 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
                         s = (s + d / s) / 2;
                     }
                     uint32_t edge_dist = s - radius; /* pixels past edge */
-                    if (edge_dist >= 2) continue;
+                    if (edge_dist >= 4) continue;
                     /* Anti-alias: blend alpha based on distance */
-                    uint32_t aa = (uint32_t)base_alpha * (2 - edge_dist) / 2;
+                    uint32_t aa = (uint32_t)base_alpha * (4 - edge_dist) / 4;
                     pixel_alpha = (uint8_t)(aa > 255 ? 255 : aa);
                 }
                 /* else: fully inside corner circle */
@@ -1495,6 +1537,272 @@ RuntimeValue rt_gui_draw_text_buf(RuntimeValue xy, RuntimeValue color_len,
 
     dirty_mark(x, y, cx - x, 16);
     g_text_len = 0; /* Reset buffer */
+    return 0;
+}
+
+/* ===================================================================
+ * 21. Text with shadow (pseudo anti-aliased appearance)
+ *     rt_gui_draw_text_shadow(pack(x,y), pack(color,len), alpha, shadow_alpha)
+ *     Renders text twice: shadow at (x+1,y+1) then foreground at (x,y)
+ * =================================================================== */
+RuntimeValue rt_gui_draw_text_shadow(RuntimeValue xy, RuntimeValue color_len,
+                                      RuntimeValue alpha_rv, RuntimeValue shadow_rv)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_len >> 32);
+    uint32_t len = (uint32_t)((uint64_t)color_len & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+    uint8_t shadow_alpha = (uint8_t)(uint64_t)shadow_rv;
+
+    if (len == 0) len = g_text_len;
+    if (len > 256) len = 256;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    /* Pass 0: Soft shadow at (x+1, y+1) with half alpha (pseudo-AA fringe) */
+    uint32_t cx = x + 1;
+    uint8_t soft_alpha = shadow_alpha / 2;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + 1 + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px < g_fb_w) {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, 0x00000000, soft_alpha));
+                    }
+                }
+            }
+        }
+        cx += 8;
+    }
+
+    /* Pass 1: Main shadow at (x+2, y+2) in dark color (larger offset) */
+    cx = x + 2;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + 2 + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px < g_fb_w) {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, 0x00000000, shadow_alpha));
+                    }
+                }
+            }
+        }
+        cx += 8;
+    }
+
+    /* Pass 2: Foreground at (x, y) */
+    cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px < g_fb_w) {
+                        if (alpha == 255) {
+                            fb_write(px, py, 0xFF000000u | color);
+                        } else {
+                            uint32_t dst = fb_read(px, py);
+                            fb_write(px, py, alpha_blend(dst, color, alpha));
+                        }
+                    }
+                }
+            }
+        }
+        cx += 8;
+    }
+
+    dirty_mark(x, y, cx - x + 1, 18);
+    g_text_len = 0;
+    return 0;
+}
+
+/* ===================================================================
+ * 22. Bold text (pseudo-bold via double render at x and x+1)
+ *     rt_gui_draw_text_bold(pack(x,y), pack(color,len), alpha, _)
+ *     Renders text twice: once at (x,y), once at (x+1,y) for thickness.
+ *     Does NOT reset g_text_buf so caller can chain with shadow.
+ * =================================================================== */
+RuntimeValue rt_gui_draw_text_bold(RuntimeValue xy, RuntimeValue color_len,
+                                    RuntimeValue alpha_rv, RuntimeValue unused)
+{
+    (void)unused;
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_len >> 32);
+    uint32_t len = (uint32_t)((uint64_t)color_len & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+
+    if (len == 0) len = g_text_len;
+    if (len > 256) len = 256;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    /* Draw at (x, y) — first pass */
+    uint32_t cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px >= g_fb_w) break;
+                    if (alpha == 255) {
+                        fb_write(px, py, 0xFF000000u | color);
+                    } else {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, color, alpha));
+                    }
+                }
+            }
+        }
+        cx += 8;
+        if (cx >= g_fb_w) break;
+    }
+
+    /* Draw at (x+1, y) — bold effect (thicker strokes) */
+    cx = x + 1;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            uint32_t py = y + row;
+            if (py >= SCREEN_H) break;
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    uint32_t px = cx + col;
+                    if (px >= g_fb_w) break;
+                    if (alpha == 255) {
+                        fb_write(px, py, 0xFF000000u | color);
+                    } else {
+                        uint32_t dst = fb_read(px, py);
+                        fb_write(px, py, alpha_blend(dst, color, alpha));
+                    }
+                }
+            }
+        }
+        cx += 8;
+        if (cx >= g_fb_w) break;
+    }
+
+    dirty_mark(x, y, cx - x + 1, 16);
+    g_text_len = 0;
+    return 0;
+}
+
+/* ===================================================================
+ * 23. Scaled text (2x) — renders each font pixel as a 2x2 block
+ *     rt_gui_draw_text_2x(pack(x,y), pack(color,len), alpha, shadow_alpha)
+ *     Output: 16x32 per character (2x the 8x16 base font)
+ *     With drop shadow for readability.
+ * =================================================================== */
+RuntimeValue rt_gui_draw_text_2x(RuntimeValue xy, RuntimeValue color_len,
+                                  RuntimeValue alpha_rv, RuntimeValue shadow_rv)
+{
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t color = (uint32_t)((uint64_t)color_len >> 32);
+    uint32_t len = (uint32_t)((uint64_t)color_len & 0xFFFFFFFF);
+    uint8_t alpha = (uint8_t)(uint64_t)alpha_rv;
+    uint8_t shadow_alpha = (uint8_t)(uint64_t)shadow_rv;
+
+    if (len == 0) len = g_text_len;
+    if (len > 256) len = 256;
+    if (x >= g_fb_w || y >= SCREEN_H) return 0;
+
+    /* Shadow pass at (x+2, y+2) */
+    if (shadow_alpha > 0) {
+        uint32_t cx = x + 2;
+        for (uint32_t i = 0; i < len; i++) {
+            uint8_t ch = (uint8_t)g_text_buf[i];
+            if (ch < 32 || ch > 126) ch = '?';
+            uint32_t idx = ch - 32;
+            for (uint32_t row = 0; row < 16; row++) {
+                uint8_t bits = font_8x16[idx][row];
+                for (uint32_t col = 0; col < 8; col++) {
+                    if (bits & (0x80 >> col)) {
+                        /* 2x2 block for shadow */
+                        for (int dy = 0; dy < 2; dy++) {
+                            uint32_t py = y + 2 + row * 2 + dy;
+                            if (py >= SCREEN_H) continue;
+                            for (int dx = 0; dx < 2; dx++) {
+                                uint32_t px = cx + col * 2 + dx;
+                                if (px < g_fb_w) {
+                                    uint32_t dst = fb_read(px, py);
+                                    fb_write(px, py, alpha_blend(dst, 0x00000000, shadow_alpha));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cx += 16; /* 8 * 2 = 16 pixels per char */
+            if (cx >= g_fb_w) break;
+        }
+    }
+
+    /* Foreground pass at (x, y) — 2x scaled */
+    uint32_t cx = x;
+    for (uint32_t i = 0; i < len; i++) {
+        uint8_t ch = (uint8_t)g_text_buf[i];
+        if (ch < 32 || ch > 126) ch = '?';
+        uint32_t idx = ch - 32;
+        for (uint32_t row = 0; row < 16; row++) {
+            uint8_t bits = font_8x16[idx][row];
+            for (uint32_t col = 0; col < 8; col++) {
+                if (bits & (0x80 >> col)) {
+                    /* 2x2 block */
+                    for (int dy = 0; dy < 2; dy++) {
+                        uint32_t py = y + row * 2 + dy;
+                        if (py >= SCREEN_H) continue;
+                        for (int dx = 0; dx < 2; dx++) {
+                            uint32_t px = cx + col * 2 + dx;
+                            if (px < g_fb_w) {
+                                if (alpha == 255) {
+                                    fb_write(px, py, 0xFF000000u | color);
+                                } else {
+                                    uint32_t dst = fb_read(px, py);
+                                    fb_write(px, py, alpha_blend(dst, color, alpha));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += 16;
+        if (cx >= g_fb_w) break;
+    }
+
+    dirty_mark(x, y, cx - x + 2, 34);
+    g_text_len = 0;
     return 0;
 }
 

@@ -1,0 +1,129 @@
+# Secret rotation with multi-version active keys.
+#
+# Supports rolling key rotations where multiple key versions are active
+# simultaneously. Verification tries all active keys (for graceful rotation),
+# while signing always uses the newest key.
+#
+# Keys are stored using the opaque credential pattern — the raw key material
+# is only accessible through internal methods, never exposed as text.
+
+use std.time
+use std.io.crypto_ffi
+
+## A versioned key with expiry tracking.
+##
+## The key material is stored internally and not exposed as a text field.
+## Access to the raw key goes through the _key_data field which is
+## only used within this module's sign/verify operations.
+class VersionedKey:
+    version: text
+    created_at: i64
+    expiry_ms: i64
+    _key_data: text  # internal — NOT part of the public API
+
+    ## Check whether this key has expired.
+    fn is_expired() -> bool:
+        time.now_ms() > self.expiry_ms
+
+    ## Check whether this key is currently active (not expired).
+    fn is_active() -> bool:
+        not self.is_expired()
+
+## Secret rotation manager with multi-version active keys.
+##
+## During a rotation window, both old and new keys are active.
+## Verification tries all active keys; signing uses the newest.
+class SecretRotation:
+    active_keys: List<VersionedKey>
+
+    ## Create an empty rotation manager.
+    static fn new() -> SecretRotation:
+        SecretRotation(active_keys: [])
+
+    ## Add a new key version.
+    ##
+    ## The key is added to the active set. Expired keys remain until gc() is called.
+    me add_key(version: text, key: text, expiry_ms: i64):
+        val now = time.now_ms()
+        val vk = VersionedKey(
+            version: version,
+            created_at: now,
+            expiry_ms: expiry_ms,
+            _key_data: key
+        )
+        self.active_keys = self.active_keys.push(vk)
+
+    ## Rotate to a new key version.
+    ##
+    ## Adds the new key and removes any expired keys. Previous non-expired
+    ## keys remain active for the verification window.
+    me rotate(new_version: text, new_key: text, expiry_ms: i64):
+        # First, garbage collect expired keys
+        self.gc()
+
+        # Then add the new key
+        self.add_key(new_version, new_key, expiry_ms)
+
+    ## Verify a signature against any active key.
+    ##
+    ## Tries each non-expired key in order. Returns true if any key
+    ## successfully verifies the signature. This supports graceful
+    ## rotation where clients may have signed with an older key.
+    fn verify_with_any(data: text, signature: text) -> bool:
+        """
+        Verify using any active key.
+
+        sdoctest:
+            val rot = SecretRotation.new()
+            expect(rot.verify_with_any("data", "sig")).to_equal(false)
+        """
+        for key in self.active_keys:
+            if key.is_active():
+                val expected = crypto_ffi.hmac_sha256(key._key_data, data)
+                if crypto_ffi.constant_time_compare(expected, signature):
+                    return true
+        false
+
+    ## Sign data with the current (newest) active key.
+    ##
+    ## Returns the HMAC-SHA256 signature. Returns empty string if no
+    ## active keys are available.
+    fn sign_with_current(data: text) -> text:
+        val current = self._current_key()
+        if val key = current:
+            return crypto_ffi.hmac_sha256(key._key_data, data)
+        ""
+
+    ## Get the version identifier of the current (newest) active key.
+    fn current_version() -> text:
+        """
+        Returns the version of the newest active key, or empty string.
+
+        sdoctest:
+            val rot = SecretRotation.new()
+            expect(rot.current_version()).to_equal("")
+        """
+        val current = self._current_key()
+        if val key = current:
+            return key.version
+        ""
+
+    ## Remove all expired keys from the active set.
+    me gc():
+        var kept: List<VersionedKey> = []
+        for key in self.active_keys:
+            if key.is_active():
+                kept = kept.push(key)
+        self.active_keys = kept
+
+    ## Internal: find the newest active key.
+    fn _current_key() -> VersionedKey?:
+        var newest: VersionedKey? = nil
+        var newest_created: i64 = -1
+
+        for key in self.active_keys:
+            if key.is_active() and key.created_at > newest_created:
+                newest = key
+                newest_created = key.created_at
+
+        newest
