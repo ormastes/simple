@@ -115,6 +115,16 @@ class Compositor:
     close_active: bool
     close_progress: i32
     close_win: i32
+    # Snap state
+    snap_zone: i32          # 0=none, 1=left, 2=right, 3=full, 4=topL, 5=topR, 6=botL, 7=botR
+    snap_preview_active: bool
+    # Alt+Tab switcher overlay
+    switcher_active: bool
+    switcher_timer: i32     # frames to show overlay (counts down)
+    # Theme transition
+    theme_transitioning: bool
+    theme_progress: i32     # 0-100
+    theme_target_dark: bool
 
 impl Compositor:
 
@@ -172,7 +182,14 @@ impl Compositor:
             minimize_win: -1,
             close_active: false,
             close_progress: 0,
-            close_win: -1
+            close_win: -1,
+            snap_zone: 0,
+            snap_preview_active: false,
+            switcher_active: false,
+            switcher_timer: 0,
+            theme_transitioning: false,
+            theme_progress: 0,
+            theme_target_dark: true
         )
 
     # -- Window Management ---------------------------------------------------
@@ -680,6 +697,19 @@ impl Compositor:
         val is_dark = gc.bg_top < 0x00808080
         draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color)
 
+        # Snap zone preview overlay
+        if self.snap_preview_active and self.snap_zone > 0:
+            val bar_h = SYSTEM_BAR_HEIGHT
+            val dock_h: i32 = 68
+            val usable_h = self.screen_height - bar_h - dock_h
+            val half_w = self.screen_width / 2
+            if self.snap_zone == 1:
+                self.backend.blend_rect(0, bar_h, half_w, usable_h, gc.accent_color, 30)
+            else if self.snap_zone == 2:
+                self.backend.blend_rect(half_w, bar_h, half_w, usable_h, gc.accent_color, 30)
+            else if self.snap_zone == 3:
+                self.backend.blend_rect(0, bar_h, self.screen_width, usable_h, gc.accent_color, 30)
+
         # 2. Windows (back-to-front Z-order) with animation
         val active_idx = self.focused_idx
         val boff = bounce_offset(self.anim_progress)
@@ -747,8 +777,53 @@ impl Compositor:
         self.backend.blend_rect(0, self.screen_height - 2, self.screen_width, 2, 0x00000000, 20)
         self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, gc.accent_color, 2)
 
+        # Alt+Tab switcher overlay
+        if self.switcher_active and self.focused_idx >= 0:
+            val ow: i32 = 300
+            val oh: i32 = 60
+            val ox = (self.screen_width - ow) / 2
+            val oy = (self.screen_height - oh) / 2
+            # Glass background
+            self.backend.blur_region(ox, oy, ow, oh, 16)
+            self.backend.blend_rect(ox, oy, ow, oh, gc.surface_color, gc.surface_alpha)
+            # Border
+            self.backend.blend_rect(ox, oy, ow, 1, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(ox, oy + oh - 1, ow, 1, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(ox, oy, 1, oh, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(ox + ow - 1, oy, 1, oh, gc.border_color, gc.border_alpha)
+            # Window title
+            if self.focused_idx < self.surfaces.len():
+                val title = self.surfaces[self.focused_idx].title
+                self.backend.draw_text(ox + ow / 2 - 32, oy + 8, title, 0xFFFFFFFF, 0x00000000)
+            # Window index indicator
+            var wi: i32 = 0
+            val dot_y = oy + oh - 16
+            val dot_start = ox + ow / 2 - self.surfaces.len() * 8
+            while wi < self.surfaces.len():
+                val dot_x = dot_start + wi * 16
+                if wi == self.focused_idx:
+                    self.backend.blend_rect(dot_x, dot_y, 8, 8, gc.accent_color, 200)
+                else:
+                    self.backend.blend_rect(dot_x, dot_y, 8, 8, 0x00FFFFFF, 60)
+                wi = wi + 1
+
         # 5. Cursor + present
         draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
+
+        # Theme transition fade
+        if self.theme_transitioning:
+            val fade_alpha: u8 = if self.theme_progress < 50: self.theme_progress * 5 else: (100 - self.theme_progress) * 5
+            if self.theme_target_dark:
+                self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, 0x00000000, fade_alpha)
+            else:
+                self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, 0x00FFFFFF, fade_alpha)
+            # Switch theme at midpoint
+            if self.theme_progress >= 50 and self.theme_progress < 60:
+                if self.theme_target_dark:
+                    self.glass_config = GlassConfig.dark()
+                else:
+                    self.glass_config = GlassConfig.light()
+
         self.backend.present()
 
     me set_glass_theme(active: bool):
@@ -829,12 +904,16 @@ impl Compositor:
         val ch_val = self.input.key_to_char(key)
         if ch_val != nil:
             if self.glass_theme_active:
-                # T = toggle dark/light theme
+                # T = toggle dark/light theme (with transition animation)
                 if ch_val == "t" or ch_val == "T":
-                    if self.glass_config.bg_top < 0x00808080:
-                        self.glass_config = GlassConfig.light()
-                    else:
-                        self.glass_config = GlassConfig.dark()
+                    # Start theme transition animation
+                    if not self.theme_transitioning:
+                        self.theme_transitioning = true
+                        self.theme_progress = 0
+                        if self.glass_config.bg_top < 0x00808080:
+                            self.theme_target_dark = false  # currently dark -> go light
+                        else:
+                            self.theme_target_dark = true   # currently light -> go dark
                     return
                 # 1/2/3 = focus window by index
                 if ch_val == "1":
@@ -984,6 +1063,27 @@ impl Compositor:
 
         # Handle drag release
         if event.left_just_released:
+            # Apply snap if active
+            if self.snap_preview_active and self.snap_zone > 0:
+                val bar_h = SYSTEM_BAR_HEIGHT
+                val dock_h: i32 = 68   # dock height + margin
+                val usable_h = self.screen_height - bar_h - dock_h
+                val half_w = self.screen_width / 2
+                val drag_id = self.drag_window_id
+                if self.snap_zone == 1:
+                    # Left half
+                    self.move_window(drag_id, 0, bar_h)
+                    self.resize_window(drag_id, half_w, usable_h)
+                else if self.snap_zone == 2:
+                    # Right half
+                    self.move_window(drag_id, half_w, bar_h)
+                    self.resize_window(drag_id, half_w, usable_h)
+                else if self.snap_zone == 3:
+                    # Full screen
+                    self.move_window(drag_id, 0, bar_h)
+                    self.resize_window(drag_id, self.screen_width, usable_h)
+                self.snap_preview_active = false
+                self.snap_zone = 0
             self.dragging = false
             self.drag_window_id = 0
             return
@@ -994,6 +1094,17 @@ impl Compositor:
             val new_y = my - self.drag_offset_y
             val drag_id = self.drag_window_id
             self.move_window(drag_id, new_x, new_y)
+            # Detect snap zone during drag
+            val edge: i32 = 20
+            if mx < edge:
+                self.snap_zone = 1  # left half
+            else if mx > self.screen_width - edge:
+                self.snap_zone = 2  # right half
+            else if my < edge:
+                self.snap_zone = 3  # full screen
+            else:
+                self.snap_zone = 0  # no snap
+            self.snap_preview_active = self.snap_zone > 0
             return
 
         # Handle new left click — hit test windows back-to-front (topmost first)
@@ -1048,6 +1159,8 @@ impl Compositor:
         # Start bounce animation
         self.anim_active = true
         self.anim_progress = 0
+        self.switcher_active = true
+        self.switcher_timer = 30  # show for ~30 frames (~500ms)
 
     me _focus_by_index(idx: i32):
         """Focus a window by surface index (0, 1, 2). Starts bounce animation."""
@@ -1056,6 +1169,8 @@ impl Compositor:
             self.focus_window(target.id)
             self.anim_active = true
             self.anim_progress = 0
+            self.switcher_active = true
+            self.switcher_timer = 20
 
     me close_focused_window():
         """Close the currently focused window."""
@@ -1131,6 +1246,23 @@ impl Compositor:
                     val close_id = self.surfaces[self.close_win].id
                     self.destroy_window(close_id)
                 self.close_win = -1
+
+        # Switcher overlay countdown
+        if self.switcher_active:
+            self.switcher_timer = self.switcher_timer - 1
+            if self.switcher_timer <= 0:
+                self.switcher_active = false
+
+        # Theme transition animation
+        if self.theme_transitioning:
+            self.theme_progress = self.theme_progress + 10  # ~10 frames = 170ms
+            if self.theme_progress >= 100:
+                self.theme_transitioning = false
+                self.theme_progress = 0
+                if self.theme_target_dark:
+                    self.glass_config = GlassConfig.dark()
+                else:
+                    self.glass_config = GlassConfig.light()
 
     me consume_pending_shortcut() -> text:
         """Return and clear any pending Ctrl+Alt shortcut key.
