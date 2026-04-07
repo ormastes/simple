@@ -5,6 +5,7 @@ extern fn rt_http_request(method: text, url: text, headers: text, body: text) ->
 
 use std.text.{escape_json}
 use std.nogc_async_mut.mcp.helpers.{Q, LB, RB}
+use compiler.tools.duplicate_check.math_utils.{find_substr, parse_float_safe}
 
 struct EmbeddingResult:
     vector: [f64]
@@ -50,11 +51,11 @@ fn parse_embedding_response(json: text) -> [f64]:
     # Response format: {"embeddings":[[0.1, 0.2, ...]]}
     # Find the inner array
     val embed_key = Q() + "embeddings" + Q()
-    val key_idx = find_in_text(json, embed_key)
+    val key_idx = find_substr(json, embed_key)
     if key_idx < 0:
         # Try alternate key "embedding" (singular)
         val alt_key = Q() + "embedding" + Q()
-        val alt_idx = find_in_text(json, alt_key)
+        val alt_idx = find_substr(json, alt_key)
         if alt_idx < 0:
             return []
         return parse_first_float_array(json, alt_idx)
@@ -119,87 +120,4 @@ fn parse_float_array_from(json: text, start: i64) -> [f64]:
 
     result
 
-fn parse_float_safe(s: text) -> f64:
-    # Simple float parser
-    var result = 0.0
-    var negative = false
-    var decimal_place = 0
-    var decimal_divisor = 1.0
-    var i = 0
-
-    val trimmed = s.trim()
-    if trimmed.len() == 0:
-        return 0.0
-
-    if trimmed[0:1] == "-":
-        negative = true
-        i = 1
-
-    while i < trimmed.len():
-        val ch = trimmed[i:i+1]
-        val byte = trimmed.bytes()[i]
-        if byte >= 48 and byte <= 57:
-            val digit = (byte - 48) * 1.0
-            if decimal_place > 0:
-                decimal_divisor = decimal_divisor * 10.0
-                result = result + digit / decimal_divisor
-            else:
-                result = result * 10.0 + digit
-        elif ch == ".":
-            decimal_place = 1
-        elif ch == "e" or ch == "E":
-            # Handle scientific notation
-            val exp_str = trimmed[i+1:]
-            val exp_val = parse_exponent(exp_str)
-            var multiplier = 1.0
-            var e = 0
-            if exp_val >= 0:
-                while e < exp_val:
-                    multiplier = multiplier * 10.0
-                    e = e + 1
-                result = result * multiplier
-            else:
-                val abs_exp = -exp_val
-                while e < abs_exp:
-                    multiplier = multiplier * 10.0
-                    e = e + 1
-                result = result / multiplier
-            break
-        i = i + 1
-
-    if negative:
-        result = -result
-
-    result
-
-fn parse_exponent(s: text) -> i64:
-    var result = 0
-    var negative = false
-    var i = 0
-    if s.len() == 0:
-        return 0
-    if s[0:1] == "-":
-        negative = true
-        i = 1
-    elif s[0:1] == "+":
-        i = 1
-    while i < s.len():
-        val byte = s.bytes()[i]
-        if byte >= 48 and byte <= 57:
-            result = result * 10 + (byte - 48)
-        else:
-            break
-        i = i + 1
-    if negative:
-        return -result
-    result
-
-fn find_in_text(haystack: text, needle: text) -> i64:
-    var i = 0
-    val max_i = haystack.len() - needle.len()
-    while i <= max_i:
-        if haystack[i:i+needle.len()] == needle:
-            return i
-        i = i + 1
-    -1
 
