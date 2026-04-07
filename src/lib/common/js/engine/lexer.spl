@@ -1,0 +1,690 @@
+# JavaScript lexer/tokenizer for the Simple Browser Platform.
+# Converts JS source text into a stream of JsToken values.
+# Handles numbers (int, float, hex, binary, octal), strings (single/double/template),
+# identifiers, keywords, and multi-character operators.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+
+# ── Token kinds ──────────────────────────────────────────────────────────
+
+enum JsTokenKind:
+    # Literals
+    Number
+    String
+    Identifier
+    Boolean
+    Null
+    Undefined
+    TemplateLiteral
+
+    # Arithmetic
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    StarStar
+
+    # Assignment
+    Eq
+    PlusEq
+    MinusEq
+    StarEq
+    SlashEq
+
+    # Comparison / equality
+    EqEq
+    EqEqEq
+    BangEq
+    BangEqEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+
+    # Logical
+    AmpersandAmpersand
+    PipePipe
+    QuestionQuestion
+    Bang
+
+    # Bitwise
+    Tilde
+    Ampersand
+    Pipe
+    Caret
+
+    # Increment / decrement
+    PlusPlus
+    MinusMinus
+
+    # Dot variants
+    Dot
+    DotDotDot
+    QuestionDot
+
+    # Delimiters
+    OpenParen
+    CloseParen
+    OpenBrace
+    CloseBrace
+    OpenBracket
+    CloseBracket
+
+    # Punctuation
+    Semicolon
+    Comma
+    Colon
+    Arrow
+    Question
+
+    # Variable declarations
+    Var
+    Let
+    Const
+
+    # Control flow
+    Function
+    Return
+    If
+    Else
+    While
+    For
+    Do
+    Break
+    Continue
+    Switch
+    Case
+    Default
+
+    # Error handling
+    Throw
+    Try
+    Catch
+    Finally
+
+    # Operators as keywords
+    New
+    Delete
+    Typeof
+    Instanceof
+    In
+    Of
+    Void
+
+    # OOP
+    Class
+    Extends
+    Super
+    This
+
+    # Modules
+    Import
+    Export
+    From
+    As
+
+    # Async
+    Async
+    Await
+    Yield
+
+    # Boolean / null keywords
+    True
+    False
+    NullKw
+
+    # Special
+    Eof
+    Invalid
+
+# ── Token ────────────────────────────────────────────────────────────────
+
+class JsToken:
+    kind: JsTokenKind
+    value: text
+    line: i64
+    col: i64
+
+    static fn eof(line: i64, col: i64) -> JsToken:
+        JsToken(kind: JsTokenKind.Eof, value: "", line: line, col: col)
+
+    static fn invalid(value: text, line: i64, col: i64) -> JsToken:
+        JsToken(kind: JsTokenKind.Invalid, value: value, line: line, col: col)
+
+# ── Keyword table ────────────────────────────────────────────────────────
+
+fn is_keyword(word: text) -> Option<JsTokenKind>:
+    if word == "var":        return Some(JsTokenKind.Var)
+    if word == "let":        return Some(JsTokenKind.Let)
+    if word == "const":      return Some(JsTokenKind.Const)
+    if word == "function":   return Some(JsTokenKind.Function)
+    if word == "return":     return Some(JsTokenKind.Return)
+    if word == "if":         return Some(JsTokenKind.If)
+    if word == "else":       return Some(JsTokenKind.Else)
+    if word == "while":      return Some(JsTokenKind.While)
+    if word == "for":        return Some(JsTokenKind.For)
+    if word == "do":         return Some(JsTokenKind.Do)
+    if word == "break":      return Some(JsTokenKind.Break)
+    if word == "continue":   return Some(JsTokenKind.Continue)
+    if word == "switch":     return Some(JsTokenKind.Switch)
+    if word == "case":       return Some(JsTokenKind.Case)
+    if word == "default":    return Some(JsTokenKind.Default)
+    if word == "throw":      return Some(JsTokenKind.Throw)
+    if word == "try":        return Some(JsTokenKind.Try)
+    if word == "catch":      return Some(JsTokenKind.Catch)
+    if word == "finally":    return Some(JsTokenKind.Finally)
+    if word == "new":        return Some(JsTokenKind.New)
+    if word == "delete":     return Some(JsTokenKind.Delete)
+    if word == "typeof":     return Some(JsTokenKind.Typeof)
+    if word == "instanceof": return Some(JsTokenKind.Instanceof)
+    if word == "in":         return Some(JsTokenKind.In)
+    if word == "of":         return Some(JsTokenKind.Of)
+    if word == "void":       return Some(JsTokenKind.Void)
+    if word == "class":      return Some(JsTokenKind.Class)
+    if word == "extends":    return Some(JsTokenKind.Extends)
+    if word == "super":      return Some(JsTokenKind.Super)
+    if word == "this":       return Some(JsTokenKind.This)
+    if word == "import":     return Some(JsTokenKind.Import)
+    if word == "export":     return Some(JsTokenKind.Export)
+    if word == "from":       return Some(JsTokenKind.From)
+    if word == "as":         return Some(JsTokenKind.As)
+    if word == "async":      return Some(JsTokenKind.Async)
+    if word == "await":      return Some(JsTokenKind.Await)
+    if word == "yield":      return Some(JsTokenKind.Yield)
+    if word == "true":       return Some(JsTokenKind.True)
+    if word == "false":      return Some(JsTokenKind.False)
+    if word == "null":       return Some(JsTokenKind.NullKw)
+    if word == "undefined":  return Some(JsTokenKind.Undefined)
+    return None
+
+# ── Character predicates ─────────────────────────────────────────────────
+
+fn is_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+
+fn is_hex_digit(c: text) -> bool:
+    val is_d = is_digit(c)
+    val is_upper = c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F"
+    val is_lower = c == "a" or c == "b" or c == "c" or c == "d" or c == "e" or c == "f"
+    is_d or is_upper or is_lower
+
+fn is_octal_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7"
+
+fn is_binary_digit(c: text) -> bool:
+    c == "0" or c == "1"
+
+fn is_alpha(c: text) -> bool:
+    val code = c.char_code_at(0)
+    val is_upper = code >= 65 and code <= 90
+    val is_lower = code >= 97 and code <= 122
+    is_upper or is_lower
+
+fn is_ident_start(c: text) -> bool:
+    if c == "":
+        return false
+    val is_a = is_alpha(c)
+    c == "_" or c == "$" or is_a
+
+fn is_ident_part(c: text) -> bool:
+    if c == "":
+        return false
+    val is_a = is_alpha(c)
+    val is_d = is_digit(c)
+    c == "_" or c == "$" or is_a or is_d
+
+# ── Escape handling ──────────────────────────────────────────────────────
+
+fn unescape_string(raw: text) -> text:
+    var result = ""
+    var i = 0
+    val len = raw.len()
+    while i < len:
+        val c = raw.char_at(i)
+        if c == "\\":
+            i = i + 1
+            if i >= len:
+                result = result + "\\"
+                break
+            val next = raw.char_at(i)
+            if next == "n":
+                result = result + "\n"
+            else if next == "t":
+                result = result + "\t"
+            else if next == "r":
+                result = result + "\r"
+            else if next == "\\":
+                result = result + "\\"
+            else if next == "\"":
+                result = result + "\""
+            else if next == "'":
+                result = result + "'"
+            else if next == "0":
+                result = result + "\0"
+            else if next == "u":
+                # \uXXXX — parse 4 hex digits
+                if i + 4 < len:
+                    val hex = raw.slice(i + 1, i + 5)
+                    val code_val = parse_hex_int(hex)
+                    result = result + text.from_char_code(code_val)
+                    i = i + 4
+                else:
+                    result = result + "u"
+            else:
+                result = result + next
+        else:
+            result = result + c
+        i = i + 1
+    result
+
+fn parse_hex_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s.char_at(i)
+        val code = c.char_code_at(0)
+        result = result * 16
+        if code >= 48 and code <= 57:
+            result = result + (code - 48)
+        else if code >= 65 and code <= 70:
+            result = result + (code - 55)
+        else if code >= 97 and code <= 102:
+            result = result + (code - 87)
+        i = i + 1
+    result
+
+# ── Lexer ────────────────────────────────────────────────────────────────
+
+class JsLexer:
+    input: text
+    pos: i64
+    line: i64
+    col: i64
+    input_len: i64
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> JsLexer:
+        JsLexer(
+            input: input,
+            pos: 0,
+            line: 1,
+            col: 1,
+            input_len: input.len(),
+            logger: logger,
+        )
+
+    # Peek at the current character without consuming
+    fn peek() -> text:
+        if self.pos >= self.input_len:
+            return ""
+        self.input.char_at(self.pos)
+
+    # Peek at the character n positions ahead
+    fn peek_at(n: i64) -> text:
+        val target = self.pos + n
+        if target >= self.input_len:
+            return ""
+        self.input.char_at(target)
+
+    # Consume the current character and advance position
+    me consume() -> text:
+        if self.pos >= self.input_len:
+            return ""
+        val c = self.input.char_at(self.pos)
+        self.pos = self.pos + 1
+        if c == "\n":
+            self.line = self.line + 1
+            self.col = 1
+        else:
+            self.col = self.col + 1
+        c
+
+    # Skip whitespace (spaces, tabs, newlines, carriage returns)
+    me skip_whitespace():
+        while self.pos < self.input_len:
+            val c = self.peek()
+            val is_ws = c == " " or c == "\t" or c == "\n" or c == "\r"
+            if not is_ws:
+                break
+            self.consume()
+
+    # Skip single-line comment (// ...)
+    me skip_line_comment():
+        while self.pos < self.input_len:
+            val c = self.consume()
+            if c == "\n":
+                break
+
+    # Skip block comment (/* ... */)
+    me skip_block_comment():
+        while self.pos < self.input_len:
+            val c = self.consume()
+            if c == "*":
+                val next = self.peek()
+                if next == "/":
+                    self.consume()
+                    return
+
+    # Read a number literal — integer, float, hex, binary, octal
+    me read_number() -> JsToken:
+        val start_line = self.line
+        val start_col = self.col
+        var num_str = ""
+
+        val first = self.peek()
+        if first == "0":
+            num_str = num_str + self.consume()
+            val second = self.peek()
+            if second == "x" or second == "X":
+                # Hex literal 0x...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not is_hex_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return JsToken(kind: JsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+            if second == "b" or second == "B":
+                # Binary literal 0b...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not is_binary_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return JsToken(kind: JsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+            if second == "o" or second == "O":
+                # Octal literal 0o...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not is_octal_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return JsToken(kind: JsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+
+        # Regular decimal integer or float
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if not is_digit(c):
+                break
+            num_str = num_str + self.consume()
+
+        # Decimal part
+        if self.peek() == ".":
+            val after_dot = self.peek_at(1)
+            if is_digit(after_dot):
+                num_str = num_str + self.consume()  # consume '.'
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not is_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+
+        # Exponent part
+        val exp_c = self.peek()
+        if exp_c == "e" or exp_c == "E":
+            num_str = num_str + self.consume()
+            val sign = self.peek()
+            if sign == "+" or sign == "-":
+                num_str = num_str + self.consume()
+            while self.pos < self.input_len:
+                val c = self.peek()
+                if not is_digit(c):
+                    break
+                num_str = num_str + self.consume()
+
+        JsToken(kind: JsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+
+    # Read a string literal with given quote character
+    me read_string(quote: text) -> JsToken:
+        val start_line = self.line
+        val start_col = self.col
+        self.consume()  # consume opening quote
+        var raw = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if c == quote:
+                self.consume()  # consume closing quote
+                val unescaped = unescape_string(raw)
+                return JsToken(kind: JsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+            if c == "\\":
+                raw = raw + self.consume()  # consume backslash
+                if self.pos < self.input_len:
+                    raw = raw + self.consume()  # consume escaped char
+            else:
+                raw = raw + self.consume()
+        # Unterminated string
+        self.logger.warn("Unterminated string literal at line {start_line}")
+        val unescaped = unescape_string(raw)
+        JsToken(kind: JsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+
+    # Read a template literal (backtick)
+    me read_template_string() -> JsToken:
+        val start_line = self.line
+        val start_col = self.col
+        self.consume()  # consume opening backtick
+        var raw = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if c == "`":
+                self.consume()  # consume closing backtick
+                return JsToken(kind: JsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+            if c == "\\":
+                raw = raw + self.consume()
+                if self.pos < self.input_len:
+                    raw = raw + self.consume()
+            else:
+                raw = raw + self.consume()
+        self.logger.warn("Unterminated template literal at line {start_line}")
+        JsToken(kind: JsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+
+    # Read an identifier or keyword
+    me read_identifier() -> JsToken:
+        val start_line = self.line
+        val start_col = self.col
+        var ident = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if not is_ident_part(c):
+                break
+            ident = ident + self.consume()
+
+        # Check if it is a keyword
+        val kw = is_keyword(ident)
+        if val Some(kind) = kw:
+            return JsToken(kind: kind, value: ident, line: start_line, col: start_col)
+
+        JsToken(kind: JsTokenKind.Identifier, value: ident, line: start_line, col: start_col)
+
+    # Read an operator token — handles multi-character operators
+    me read_operator() -> JsToken:
+        val start_line = self.line
+        val start_col = self.col
+        val c = self.consume()
+        val next = self.peek()
+
+        # Two+ character operators
+        if c == "=":
+            if next == "=":
+                self.consume()
+                val third = self.peek()
+                if third == "=":
+                    self.consume()
+                    return JsToken(kind: JsTokenKind.EqEqEq, value: "===", line: start_line, col: start_col)
+                return JsToken(kind: JsTokenKind.EqEq, value: "==", line: start_line, col: start_col)
+            if next == ">":
+                self.consume()
+                return JsToken(kind: JsTokenKind.Arrow, value: "=>", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Eq, value: "=", line: start_line, col: start_col)
+
+        if c == "!":
+            if next == "=":
+                self.consume()
+                val third = self.peek()
+                if third == "=":
+                    self.consume()
+                    return JsToken(kind: JsTokenKind.BangEqEq, value: "!==", line: start_line, col: start_col)
+                return JsToken(kind: JsTokenKind.BangEq, value: "!=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Bang, value: "!", line: start_line, col: start_col)
+
+        if c == "<":
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.LtEq, value: "<=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Lt, value: "<", line: start_line, col: start_col)
+
+        if c == ">":
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.GtEq, value: ">=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Gt, value: ">", line: start_line, col: start_col)
+
+        if c == "+":
+            if next == "+":
+                self.consume()
+                return JsToken(kind: JsTokenKind.PlusPlus, value: "++", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.PlusEq, value: "+=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Plus, value: "+", line: start_line, col: start_col)
+
+        if c == "-":
+            if next == "-":
+                self.consume()
+                return JsToken(kind: JsTokenKind.MinusMinus, value: "--", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.MinusEq, value: "-=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Minus, value: "-", line: start_line, col: start_col)
+
+        if c == "*":
+            if next == "*":
+                self.consume()
+                return JsToken(kind: JsTokenKind.StarStar, value: "**", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.StarEq, value: "*=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Star, value: "*", line: start_line, col: start_col)
+
+        if c == "/":
+            if next == "=":
+                self.consume()
+                return JsToken(kind: JsTokenKind.SlashEq, value: "/=", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Slash, value: "/", line: start_line, col: start_col)
+
+        if c == "%":
+            return JsToken(kind: JsTokenKind.Percent, value: "%", line: start_line, col: start_col)
+
+        if c == "&":
+            if next == "&":
+                self.consume()
+                return JsToken(kind: JsTokenKind.AmpersandAmpersand, value: "&&", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Ampersand, value: "&", line: start_line, col: start_col)
+
+        if c == "|":
+            if next == "|":
+                self.consume()
+                return JsToken(kind: JsTokenKind.PipePipe, value: "||", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Pipe, value: "|", line: start_line, col: start_col)
+
+        if c == "?":
+            if next == "?":
+                self.consume()
+                return JsToken(kind: JsTokenKind.QuestionQuestion, value: "??", line: start_line, col: start_col)
+            if next == ".":
+                self.consume()
+                return JsToken(kind: JsTokenKind.QuestionDot, value: "?.", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Question, value: "?", line: start_line, col: start_col)
+
+        if c == ".":
+            if next == ".":
+                val third = self.peek_at(1)
+                if third == ".":
+                    self.consume()
+                    self.consume()
+                    return JsToken(kind: JsTokenKind.DotDotDot, value: "...", line: start_line, col: start_col)
+            return JsToken(kind: JsTokenKind.Dot, value: ".", line: start_line, col: start_col)
+
+        if c == "^":
+            return JsToken(kind: JsTokenKind.Caret, value: "^", line: start_line, col: start_col)
+
+        if c == "~":
+            return JsToken(kind: JsTokenKind.Tilde, value: "~", line: start_line, col: start_col)
+
+        # Delimiters
+        if c == "(":
+            return JsToken(kind: JsTokenKind.OpenParen, value: "(", line: start_line, col: start_col)
+        if c == ")":
+            return JsToken(kind: JsTokenKind.CloseParen, value: ")", line: start_line, col: start_col)
+        if c == "{":
+            return JsToken(kind: JsTokenKind.OpenBrace, value: "{", line: start_line, col: start_col)
+        if c == "}":
+            return JsToken(kind: JsTokenKind.CloseBrace, value: "}", line: start_line, col: start_col)
+        if c == "[":
+            return JsToken(kind: JsTokenKind.OpenBracket, value: "[", line: start_line, col: start_col)
+        if c == "]":
+            return JsToken(kind: JsTokenKind.CloseBracket, value: "]", line: start_line, col: start_col)
+
+        # Punctuation
+        if c == ";":
+            return JsToken(kind: JsTokenKind.Semicolon, value: ";", line: start_line, col: start_col)
+        if c == ",":
+            return JsToken(kind: JsTokenKind.Comma, value: ",", line: start_line, col: start_col)
+        if c == ":":
+            return JsToken(kind: JsTokenKind.Colon, value: ":", line: start_line, col: start_col)
+
+        # Unknown character
+        JsToken.invalid(c, start_line, start_col)
+
+    # Main tokenizer — returns the next token from the input
+    me next_token() -> JsToken:
+        # Skip whitespace and comments
+        while self.pos < self.input_len:
+            self.skip_whitespace()
+            if self.pos >= self.input_len:
+                break
+            val c = self.peek()
+            val next = self.peek_at(1)
+            if c == "/" and next == "/":
+                self.skip_line_comment()
+                continue
+            if c == "/" and next == "*":
+                self.consume()
+                self.consume()
+                self.skip_block_comment()
+                continue
+            break
+
+        # Check for end of input
+        if self.pos >= self.input_len:
+            return JsToken.eof(self.line, self.col)
+
+        val c = self.peek()
+
+        # Number literal
+        if is_digit(c):
+            return self.read_number()
+
+        # String literal — single or double quote
+        if c == "\"" or c == "'":
+            return self.read_string(c)
+
+        # Template literal — backtick
+        if c == "`":
+            return self.read_template_string()
+
+        # Identifier or keyword
+        if is_ident_start(c):
+            return self.read_identifier()
+
+        # Dot followed by digit is a number (.5 etc.)
+        if c == ".":
+            val next = self.peek_at(1)
+            if is_digit(next):
+                return self.read_number()
+
+        # Operators and punctuation
+        self.read_operator()

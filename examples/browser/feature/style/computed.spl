@@ -6,6 +6,7 @@
 use std.common.color.types.{from_rgb, from_rgba}
 use examples.browser.entity.dom.css_types.{CSSValue, CSSDeclaration, CSSRule, Specificity}
 use examples.browser.feature.style.cascade.{Cascade, CascadeEntry, CssOrigin}
+use examples.browser.feature.style.css_functions.{FunctionContext, resolve_css_function}
 use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ---------------------------------------------------------------------------
@@ -18,12 +19,18 @@ class ComputedStyle:
     display: text
     position: text
     float_val: text
+    top: CSSValue
+    right_val: CSSValue
+    bottom: CSSValue
+    left_val: CSSValue
 
     # Sizing
     width: CSSValue
     height: CSSValue
     min_width: CSSValue
     max_width: CSSValue
+    min_height: CSSValue
+    max_height: CSSValue
 
     # Margins
     margin_top: CSSValue
@@ -43,13 +50,28 @@ class ComputedStyle:
     border_bottom_width: CSSValue
     border_left_width: CSSValue
 
-    # Borders — color and style (top only for brevity; others follow same pattern)
+    # Borders — colors (all 4 sides)
     border_top_color: CSSValue
+    border_right_color: CSSValue
+    border_bottom_color: CSSValue
+    border_left_color: CSSValue
+
+    # Borders — styles (all 4 sides)
     border_top_style: text
+    border_right_style: text
+    border_bottom_style: text
+    border_left_style: text
+
+    # Border radius
+    border_top_left_radius: CSSValue
+    border_top_right_radius: CSSValue
+    border_bottom_right_radius: CSSValue
+    border_bottom_left_radius: CSSValue
 
     # Colors
     color: CSSValue
     background_color: CSSValue
+    background_image: CSSValue
 
     # Typography
     font_family: text
@@ -59,6 +81,11 @@ class ComputedStyle:
     line_height: CSSValue
     text_align: text
     text_decoration: text
+    text_indent: CSSValue
+    text_transform: text
+    letter_spacing: CSSValue
+    word_spacing: CSSValue
+    white_space: text
 
     # Overflow
     overflow_x: text
@@ -74,36 +101,64 @@ class ComputedStyle:
     flex_wrap: text
     justify_content: text
     align_items: text
+    align_content: text
+    flex_grow: CSSValue
+    flex_shrink: CSSValue
+    flex_basis: CSSValue
+    row_gap: CSSValue
+    column_gap: CSSValue
 
     # Grid
     grid_template_columns: text
     grid_template_rows: text
 
+    # Content (for generated content)
+    content: text
+
     static fn default_style() -> ComputedStyle:
+        val zero_px = CSSValue.Length(v: 0.0, unit: "px")
+        val black = CSSValue.Color(color: from_rgb(0, 0, 0))
         ComputedStyle(
             display: "inline",
             position: "static",
             float_val: "none",
+            top: CSSValue.Keyword(v: "auto"),
+            right_val: CSSValue.Keyword(v: "auto"),
+            bottom: CSSValue.Keyword(v: "auto"),
+            left_val: CSSValue.Keyword(v: "auto"),
             width: CSSValue.Keyword(v: "auto"),
             height: CSSValue.Keyword(v: "auto"),
             min_width: CSSValue.Keyword(v: "auto"),
             max_width: CSSValue.Keyword(v: "none"),
-            margin_top: CSSValue.Length(v: 0.0, unit: "px"),
-            margin_right: CSSValue.Length(v: 0.0, unit: "px"),
-            margin_bottom: CSSValue.Length(v: 0.0, unit: "px"),
-            margin_left: CSSValue.Length(v: 0.0, unit: "px"),
-            padding_top: CSSValue.Length(v: 0.0, unit: "px"),
-            padding_right: CSSValue.Length(v: 0.0, unit: "px"),
-            padding_bottom: CSSValue.Length(v: 0.0, unit: "px"),
-            padding_left: CSSValue.Length(v: 0.0, unit: "px"),
-            border_top_width: CSSValue.Length(v: 0.0, unit: "px"),
-            border_right_width: CSSValue.Length(v: 0.0, unit: "px"),
-            border_bottom_width: CSSValue.Length(v: 0.0, unit: "px"),
-            border_left_width: CSSValue.Length(v: 0.0, unit: "px"),
-            border_top_color: CSSValue.Color(color: from_rgb(0, 0, 0)),
+            min_height: CSSValue.Keyword(v: "auto"),
+            max_height: CSSValue.Keyword(v: "none"),
+            margin_top: zero_px,
+            margin_right: zero_px,
+            margin_bottom: zero_px,
+            margin_left: zero_px,
+            padding_top: zero_px,
+            padding_right: zero_px,
+            padding_bottom: zero_px,
+            padding_left: zero_px,
+            border_top_width: zero_px,
+            border_right_width: zero_px,
+            border_bottom_width: zero_px,
+            border_left_width: zero_px,
+            border_top_color: black,
+            border_right_color: black,
+            border_bottom_color: black,
+            border_left_color: black,
             border_top_style: "none",
-            color: CSSValue.Color(color: from_rgb(0, 0, 0)),
+            border_right_style: "none",
+            border_bottom_style: "none",
+            border_left_style: "none",
+            border_top_left_radius: zero_px,
+            border_top_right_radius: zero_px,
+            border_bottom_right_radius: zero_px,
+            border_bottom_left_radius: zero_px,
+            color: black,
             background_color: CSSValue.Color(color: from_rgba(0, 0, 0, 0)),
+            background_image: CSSValue.Keyword(v: "none"),
             font_family: "serif",
             font_size: CSSValue.Length(v: 16.0, unit: "px"),
             font_weight: CSSValue.Number(v: 400.0),
@@ -111,6 +166,11 @@ class ComputedStyle:
             line_height: CSSValue.Number(v: 1.2),
             text_align: "start",
             text_decoration: "none",
+            text_indent: zero_px,
+            text_transform: "none",
+            letter_spacing: CSSValue.Keyword(v: "normal"),
+            word_spacing: CSSValue.Keyword(v: "normal"),
+            white_space: "normal",
             overflow_x: "visible",
             overflow_y: "visible",
             opacity: 1.0,
@@ -120,8 +180,15 @@ class ComputedStyle:
             flex_wrap: "nowrap",
             justify_content: "flex-start",
             align_items: "stretch",
+            align_content: "stretch",
+            flex_grow: CSSValue.Number(v: 0.0),
+            flex_shrink: CSSValue.Number(v: 1.0),
+            flex_basis: CSSValue.Keyword(v: "auto"),
+            row_gap: zero_px,
+            column_gap: zero_px,
             grid_template_columns: "none",
-            grid_template_rows: "none"
+            grid_template_rows: "none",
+            content: "normal"
         )
 
 # ---------------------------------------------------------------------------
@@ -226,42 +293,61 @@ fn is_inherited_property(property: text) -> bool:
         "line-height", "text-align", "text-decoration", "text-indent",
         "text-transform", "letter-spacing", "word-spacing", "white-space",
         "visibility", "direction", "cursor", "list-style-type",
-        "list-style-position", "quotes"
+        "list-style-position", "quotes", "content"
     ]
     for p in inherited:
         if p == property:
             return true
-    return false
+    false
 
 # ---------------------------------------------------------------------------
 # Initial values — CSS specification defaults for each property.
 # ---------------------------------------------------------------------------
 
 fn initial_value(property: text) -> CSSValue:
+    val zero_px = CSSValue.Length(v: 0.0, unit: "px")
+    val black = CSSValue.Color(color: from_rgb(0, 0, 0))
     match property:
         "display": CSSValue.Keyword(v: "inline")
         "position": CSSValue.Keyword(v: "static")
         "float": CSSValue.Keyword(v: "none")
+        "top": CSSValue.Keyword(v: "auto")
+        "right": CSSValue.Keyword(v: "auto")
+        "bottom": CSSValue.Keyword(v: "auto")
+        "left": CSSValue.Keyword(v: "auto")
         "width": CSSValue.Keyword(v: "auto")
         "height": CSSValue.Keyword(v: "auto")
         "min-width": CSSValue.Keyword(v: "auto")
         "max-width": CSSValue.Keyword(v: "none")
-        "margin-top": CSSValue.Length(v: 0.0, unit: "px")
-        "margin-right": CSSValue.Length(v: 0.0, unit: "px")
-        "margin-bottom": CSSValue.Length(v: 0.0, unit: "px")
-        "margin-left": CSSValue.Length(v: 0.0, unit: "px")
-        "padding-top": CSSValue.Length(v: 0.0, unit: "px")
-        "padding-right": CSSValue.Length(v: 0.0, unit: "px")
-        "padding-bottom": CSSValue.Length(v: 0.0, unit: "px")
-        "padding-left": CSSValue.Length(v: 0.0, unit: "px")
-        "border-top-width": CSSValue.Length(v: 0.0, unit: "px")
-        "border-right-width": CSSValue.Length(v: 0.0, unit: "px")
-        "border-bottom-width": CSSValue.Length(v: 0.0, unit: "px")
-        "border-left-width": CSSValue.Length(v: 0.0, unit: "px")
-        "border-top-color": CSSValue.Color(color: from_rgb(0, 0, 0))
+        "min-height": CSSValue.Keyword(v: "auto")
+        "max-height": CSSValue.Keyword(v: "none")
+        "margin-top": zero_px
+        "margin-right": zero_px
+        "margin-bottom": zero_px
+        "margin-left": zero_px
+        "padding-top": zero_px
+        "padding-right": zero_px
+        "padding-bottom": zero_px
+        "padding-left": zero_px
+        "border-top-width": zero_px
+        "border-right-width": zero_px
+        "border-bottom-width": zero_px
+        "border-left-width": zero_px
+        "border-top-color": black
+        "border-right-color": black
+        "border-bottom-color": black
+        "border-left-color": black
         "border-top-style": CSSValue.Keyword(v: "none")
-        "color": CSSValue.Color(color: from_rgb(0, 0, 0))
+        "border-right-style": CSSValue.Keyword(v: "none")
+        "border-bottom-style": CSSValue.Keyword(v: "none")
+        "border-left-style": CSSValue.Keyword(v: "none")
+        "border-top-left-radius": zero_px
+        "border-top-right-radius": zero_px
+        "border-bottom-right-radius": zero_px
+        "border-bottom-left-radius": zero_px
+        "color": black
         "background-color": CSSValue.Color(color: from_rgba(0, 0, 0, 0))
+        "background-image": CSSValue.Keyword(v: "none")
         "font-family": CSSValue.Keyword(v: "serif")
         "font-size": CSSValue.Length(v: 16.0, unit: "px")
         "font-weight": CSSValue.Number(v: 400.0)
@@ -269,6 +355,11 @@ fn initial_value(property: text) -> CSSValue:
         "line-height": CSSValue.Number(v: 1.2)
         "text-align": CSSValue.Keyword(v: "start")
         "text-decoration": CSSValue.Keyword(v: "none")
+        "text-indent": zero_px
+        "text-transform": CSSValue.Keyword(v: "none")
+        "letter-spacing": CSSValue.Keyword(v: "normal")
+        "word-spacing": CSSValue.Keyword(v: "normal")
+        "white-space": CSSValue.Keyword(v: "normal")
         "overflow-x": CSSValue.Keyword(v: "visible")
         "overflow-y": CSSValue.Keyword(v: "visible")
         "opacity": CSSValue.Number(v: 1.0)
@@ -278,8 +369,15 @@ fn initial_value(property: text) -> CSSValue:
         "flex-wrap": CSSValue.Keyword(v: "nowrap")
         "justify-content": CSSValue.Keyword(v: "flex-start")
         "align-items": CSSValue.Keyword(v: "stretch")
+        "align-content": CSSValue.Keyword(v: "stretch")
+        "flex-grow": CSSValue.Number(v: 0.0)
+        "flex-shrink": CSSValue.Number(v: 1.0)
+        "flex-basis": CSSValue.Keyword(v: "auto")
+        "row-gap": zero_px
+        "column-gap": zero_px
         "grid-template-columns": CSSValue.Keyword(v: "none")
         "grid-template-rows": CSSValue.Keyword(v: "none")
+        "content": CSSValue.Keyword(v: "normal")
         _: CSSValue.Keyword(v: "initial")
 
 # ---------------------------------------------------------------------------
@@ -291,10 +389,16 @@ fn get_property_from_style(style: ComputedStyle, property: text) -> CSSValue:
         "display": CSSValue.Keyword(v: style.display)
         "position": CSSValue.Keyword(v: style.position)
         "float": CSSValue.Keyword(v: style.float_val)
+        "top": style.top
+        "right": style.right_val
+        "bottom": style.bottom
+        "left": style.left_val
         "width": style.width
         "height": style.height
         "min-width": style.min_width
         "max-width": style.max_width
+        "min-height": style.min_height
+        "max-height": style.max_height
         "margin-top": style.margin_top
         "margin-right": style.margin_right
         "margin-bottom": style.margin_bottom
@@ -308,9 +412,20 @@ fn get_property_from_style(style: ComputedStyle, property: text) -> CSSValue:
         "border-bottom-width": style.border_bottom_width
         "border-left-width": style.border_left_width
         "border-top-color": style.border_top_color
+        "border-right-color": style.border_right_color
+        "border-bottom-color": style.border_bottom_color
+        "border-left-color": style.border_left_color
         "border-top-style": CSSValue.Keyword(v: style.border_top_style)
+        "border-right-style": CSSValue.Keyword(v: style.border_right_style)
+        "border-bottom-style": CSSValue.Keyword(v: style.border_bottom_style)
+        "border-left-style": CSSValue.Keyword(v: style.border_left_style)
+        "border-top-left-radius": style.border_top_left_radius
+        "border-top-right-radius": style.border_top_right_radius
+        "border-bottom-right-radius": style.border_bottom_right_radius
+        "border-bottom-left-radius": style.border_bottom_left_radius
         "color": style.color
         "background-color": style.background_color
+        "background-image": style.background_image
         "font-family": CSSValue.Keyword(v: style.font_family)
         "font-size": style.font_size
         "font-weight": style.font_weight
@@ -318,6 +433,11 @@ fn get_property_from_style(style: ComputedStyle, property: text) -> CSSValue:
         "line-height": style.line_height
         "text-align": CSSValue.Keyword(v: style.text_align)
         "text-decoration": CSSValue.Keyword(v: style.text_decoration)
+        "text-indent": style.text_indent
+        "text-transform": CSSValue.Keyword(v: style.text_transform)
+        "letter-spacing": style.letter_spacing
+        "word-spacing": style.word_spacing
+        "white-space": CSSValue.Keyword(v: style.white_space)
         "overflow-x": CSSValue.Keyword(v: style.overflow_x)
         "overflow-y": CSSValue.Keyword(v: style.overflow_y)
         "opacity": CSSValue.Number(v: style.opacity)
@@ -327,29 +447,38 @@ fn get_property_from_style(style: ComputedStyle, property: text) -> CSSValue:
         "flex-wrap": CSSValue.Keyword(v: style.flex_wrap)
         "justify-content": CSSValue.Keyword(v: style.justify_content)
         "align-items": CSSValue.Keyword(v: style.align_items)
+        "align-content": CSSValue.Keyword(v: style.align_content)
+        "flex-grow": style.flex_grow
+        "flex-shrink": style.flex_shrink
+        "flex-basis": style.flex_basis
+        "row-gap": style.row_gap
+        "column-gap": style.column_gap
         "grid-template-columns": CSSValue.Keyword(v: style.grid_template_columns)
         "grid-template-rows": CSSValue.Keyword(v: style.grid_template_rows)
+        "content": CSSValue.Keyword(v: style.content)
         _: CSSValue.Keyword(v: "initial")
+
+fn _set_keyword(value: CSSValue, target: text) -> text:
+    match value:
+        CSSValue.Keyword(v): v
+        _: target
 
 fn set_property_on_style(style: ComputedStyle, property: text, value: CSSValue) -> ComputedStyle:
     var s = style
     match property:
-        "display":
-            match value:
-                CSSValue.Keyword(v): s.display = v
-                _: pass_dn
-        "position":
-            match value:
-                CSSValue.Keyword(v): s.position = v
-                _: pass_dn
-        "float":
-            match value:
-                CSSValue.Keyword(v): s.float_val = v
-                _: pass_dn
+        "display": s.display = _set_keyword(value, s.display)
+        "position": s.position = _set_keyword(value, s.position)
+        "float": s.float_val = _set_keyword(value, s.float_val)
+        "top": s.top = value
+        "right": s.right_val = value
+        "bottom": s.bottom = value
+        "left": s.left_val = value
         "width": s.width = value
         "height": s.height = value
         "min-width": s.min_width = value
         "max-width": s.max_width = value
+        "min-height": s.min_height = value
+        "max-height": s.max_height = value
         "margin-top": s.margin_top = value
         "margin-right": s.margin_right = value
         "margin-bottom": s.margin_bottom = value
@@ -363,72 +492,53 @@ fn set_property_on_style(style: ComputedStyle, property: text, value: CSSValue) 
         "border-bottom-width": s.border_bottom_width = value
         "border-left-width": s.border_left_width = value
         "border-top-color": s.border_top_color = value
-        "border-top-style":
-            match value:
-                CSSValue.Keyword(v): s.border_top_style = v
-                _: pass_dn
+        "border-right-color": s.border_right_color = value
+        "border-bottom-color": s.border_bottom_color = value
+        "border-left-color": s.border_left_color = value
+        "border-top-style": s.border_top_style = _set_keyword(value, s.border_top_style)
+        "border-right-style": s.border_right_style = _set_keyword(value, s.border_right_style)
+        "border-bottom-style": s.border_bottom_style = _set_keyword(value, s.border_bottom_style)
+        "border-left-style": s.border_left_style = _set_keyword(value, s.border_left_style)
+        "border-top-left-radius": s.border_top_left_radius = value
+        "border-top-right-radius": s.border_top_right_radius = value
+        "border-bottom-right-radius": s.border_bottom_right_radius = value
+        "border-bottom-left-radius": s.border_bottom_left_radius = value
         "color": s.color = value
         "background-color": s.background_color = value
-        "font-family":
-            match value:
-                CSSValue.Keyword(v): s.font_family = v
-                _: pass_dn
+        "background-image": s.background_image = value
+        "font-family": s.font_family = _set_keyword(value, s.font_family)
         "font-size": s.font_size = value
         "font-weight": s.font_weight = value
-        "font-style":
-            match value:
-                CSSValue.Keyword(v): s.font_style = v
-                _: pass_dn
+        "font-style": s.font_style = _set_keyword(value, s.font_style)
         "line-height": s.line_height = value
-        "text-align":
-            match value:
-                CSSValue.Keyword(v): s.text_align = v
-                _: pass_dn
-        "text-decoration":
-            match value:
-                CSSValue.Keyword(v): s.text_decoration = v
-                _: pass_dn
-        "overflow-x":
-            match value:
-                CSSValue.Keyword(v): s.overflow_x = v
-                _: pass_dn
-        "overflow-y":
-            match value:
-                CSSValue.Keyword(v): s.overflow_y = v
-                _: pass_dn
+        "text-align": s.text_align = _set_keyword(value, s.text_align)
+        "text-decoration": s.text_decoration = _set_keyword(value, s.text_decoration)
+        "text-indent": s.text_indent = value
+        "text-transform": s.text_transform = _set_keyword(value, s.text_transform)
+        "letter-spacing": s.letter_spacing = value
+        "word-spacing": s.word_spacing = value
+        "white-space": s.white_space = _set_keyword(value, s.white_space)
+        "overflow-x": s.overflow_x = _set_keyword(value, s.overflow_x)
+        "overflow-y": s.overflow_y = _set_keyword(value, s.overflow_y)
         "opacity":
             match value:
                 CSSValue.Number(v): s.opacity = v
                 _: pass_dn
-        "visibility":
-            match value:
-                CSSValue.Keyword(v): s.visibility = v
-                _: pass_dn
+        "visibility": s.visibility = _set_keyword(value, s.visibility)
         "z-index": s.z_index = value
-        "flex-direction":
-            match value:
-                CSSValue.Keyword(v): s.flex_direction = v
-                _: pass_dn
-        "flex-wrap":
-            match value:
-                CSSValue.Keyword(v): s.flex_wrap = v
-                _: pass_dn
-        "justify-content":
-            match value:
-                CSSValue.Keyword(v): s.justify_content = v
-                _: pass_dn
-        "align-items":
-            match value:
-                CSSValue.Keyword(v): s.align_items = v
-                _: pass_dn
-        "grid-template-columns":
-            match value:
-                CSSValue.Keyword(v): s.grid_template_columns = v
-                _: pass_dn
-        "grid-template-rows":
-            match value:
-                CSSValue.Keyword(v): s.grid_template_rows = v
-                _: pass_dn
+        "flex-direction": s.flex_direction = _set_keyword(value, s.flex_direction)
+        "flex-wrap": s.flex_wrap = _set_keyword(value, s.flex_wrap)
+        "justify-content": s.justify_content = _set_keyword(value, s.justify_content)
+        "align-items": s.align_items = _set_keyword(value, s.align_items)
+        "align-content": s.align_content = _set_keyword(value, s.align_content)
+        "flex-grow": s.flex_grow = value
+        "flex-shrink": s.flex_shrink = value
+        "flex-basis": s.flex_basis = value
+        "row-gap": s.row_gap = value
+        "column-gap": s.column_gap = value
+        "grid-template-columns": s.grid_template_columns = _set_keyword(value, s.grid_template_columns)
+        "grid-template-rows": s.grid_template_rows = _set_keyword(value, s.grid_template_rows)
+        "content": s.content = _set_keyword(value, s.content)
         _: pass_dn
     s
 
@@ -439,16 +549,23 @@ fn set_property_on_style(style: ComputedStyle, property: text, value: CSSValue) 
 fn all_property_names() -> [text]:
     [
         "display", "position", "float",
-        "width", "height", "min-width", "max-width",
+        "top", "right", "bottom", "left",
+        "width", "height", "min-width", "max-width", "min-height", "max-height",
         "margin-top", "margin-right", "margin-bottom", "margin-left",
         "padding-top", "padding-right", "padding-bottom", "padding-left",
         "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
-        "border-top-color", "border-top-style",
-        "color", "background-color",
+        "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+        "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
+        "border-top-left-radius", "border-top-right-radius",
+        "border-bottom-right-radius", "border-bottom-left-radius",
+        "color", "background-color", "background-image",
         "font-family", "font-size", "font-weight", "font-style",
         "line-height", "text-align", "text-decoration",
+        "text-indent", "text-transform", "letter-spacing", "word-spacing", "white-space",
         "overflow-x", "overflow-y",
         "opacity", "visibility", "z-index",
-        "flex-direction", "flex-wrap", "justify-content", "align-items",
-        "grid-template-columns", "grid-template-rows"
+        "flex-direction", "flex-wrap", "justify-content", "align-items", "align-content",
+        "flex-grow", "flex-shrink", "flex-basis", "row-gap", "column-gap",
+        "grid-template-columns", "grid-template-rows",
+        "content"
     ]

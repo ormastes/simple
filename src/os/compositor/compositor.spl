@@ -37,6 +37,31 @@ use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
 # reach in-process text editors and remote apps.
 
 # ============================================================================
+# Edge Resize Detection
+# ============================================================================
+
+fn _detect_resize_edge(mx: i32, my: i32, wx: i32, wy: i32, ww: i32, wh: i32) -> i32:
+    """Detect which resize edge the cursor is on (6px hit zone). Returns 0-8."""
+    val edge: i32 = 6
+    val on_left = mx >= wx - edge and mx < wx + edge
+    val on_right = mx >= wx + ww - edge and mx < wx + ww + edge
+    val on_top = my >= wy - edge and my < wy + edge
+    val on_bottom = my >= wy + wh - edge and my < wy + wh + edge
+    val in_x = mx >= wx - edge and mx < wx + ww + edge
+    val in_y = my >= wy - edge and my < wy + wh + edge
+    # Corners first
+    if on_left and on_top and in_x and in_y: return 5   # TL
+    if on_right and on_top and in_x and in_y: return 6  # TR
+    if on_left and on_bottom and in_x and in_y: return 7  # BL
+    if on_right and on_bottom and in_x and in_y: return 8  # BR
+    # Edges
+    if on_left and in_y: return 1   # left
+    if on_right and in_y: return 2  # right
+    if on_top and in_x: return 3    # top
+    if on_bottom and in_x: return 4 # bottom
+    0  # none
+
+# ============================================================================
 # Window Surface
 # ============================================================================
 
@@ -125,6 +150,20 @@ class Compositor:
     theme_transitioning: bool
     theme_progress: i32     # 0-100
     theme_target_dark: bool
+    # Edge resize state
+    resizing: bool
+    resize_window_id: u64
+    resize_edge: i32        # 0=none, 1=left, 2=right, 3=top, 4=bottom, 5=TL, 6=TR, 7=BL, 8=BR
+    resize_start_mx: i32    # mouse x at resize start
+    resize_start_my: i32    # mouse y at resize start
+    resize_orig_x: i32     # window x at resize start
+    resize_orig_y: i32     # window y at resize start
+    resize_orig_w: i32     # window width at resize start
+    resize_orig_h: i32     # window height at resize start
+    # Dock bounce animation
+    dock_bounce_active: bool
+    dock_bounce_progress: i32
+    dock_bounce_icon: i32   # dock icon index to bounce (-1 = none)
 
 impl Compositor:
 
@@ -189,7 +228,19 @@ impl Compositor:
             switcher_timer: 0,
             theme_transitioning: false,
             theme_progress: 0,
-            theme_target_dark: true
+            theme_target_dark: true,
+            resizing: false,
+            resize_window_id: 0,
+            resize_edge: 0,
+            resize_start_mx: 0,
+            resize_start_my: 0,
+            resize_orig_x: 0,
+            resize_orig_y: 0,
+            resize_orig_w: 0,
+            resize_orig_h: 0,
+            dock_bounce_active: false,
+            dock_bounce_progress: 0,
+            dock_bounce_icon: -1
         )
 
     # -- Window Management ---------------------------------------------------
@@ -224,6 +275,17 @@ impl Compositor:
         self.surfaces = self.surfaces.push(surface)
         self.app_states = self.app_states.push(app_state_new())
         self.focused_idx = self.surfaces.len() - 1
+
+        # Trigger dock bounce for the new window's icon
+        self.dock_bounce_active = true
+        self.dock_bounce_progress = 0
+        if title == "Terminal": self.dock_bounce_icon = 0
+        else if title == "File Manager" or title == "Finder": self.dock_bounce_icon = 1
+        else if title == "Calculator": self.dock_bounce_icon = 2
+        else if title == "Browser": self.dock_bounce_icon = 5
+        else if title == "Editor": self.dock_bounce_icon = 6
+        else: self.dock_bounce_icon = -1
+
         return id
 
     me add_surface(title: text, x: i32, y: i32, w: i32, h: i32) -> u64:
@@ -729,11 +791,27 @@ impl Compositor:
                 if is_focused and self.anim_active:
                     wy = wy - boff
 
-                # Minimize animation: shrink toward dock
+                # Minimize animation: shrink toward dock icon
                 if self.minimize_active and idx == self.minimize_win:
                     val prog = ease_out_cubic(self.minimize_progress)
                     val dock_y = self.screen_height - 58
-                    val dock_x = self.screen_width / 2
+                    # Target specific dock icon based on window title
+                    var icon_idx: i32 = 0
+                    if surface.title == "Terminal":
+                        icon_idx = 0
+                    else if surface.title == "File Manager" or surface.title == "Finder":
+                        icon_idx = 1
+                    else if surface.title == "Calculator":
+                        icon_idx = 2
+                    else if surface.title == "Browser":
+                        icon_idx = 5
+                    else if surface.title == "Editor":
+                        icon_idx = 6
+                    val dock_total_w: i32 = 520
+                    val dock_start = (self.screen_width - dock_total_w) / 2 + 16
+                    val dock_pill: i32 = 48
+                    val dock_gap: i32 = 16
+                    val dock_x = dock_start + icon_idx * (dock_pill + dock_gap) + dock_pill / 2
                     wx = surface.x + (dock_x - surface.x) * prog / 100
                     wy = surface.y + (dock_y - surface.y) * prog / 100
                     ww = surface.width - surface.width * prog / 120
@@ -771,7 +849,9 @@ impl Compositor:
 
         # 3. System bar (top) + Dock (bottom) — shared desktop chrome
         draw_system_bar(self.backend, cfg, active_idx)
-        draw_dock(self.backend, cfg, active_idx)
+        val bounce_icon = if self.dock_bounce_active: self.dock_bounce_icon else: -1
+        val bounce_prog = if self.dock_bounce_active: self.dock_bounce_progress else: 0
+        draw_dock(self.backend, cfg, active_idx, self.cursor.x, self.cursor.y, bounce_icon, bounce_prog)
 
         # 4. Global accent tint + bottom edge line
         self.backend.blend_rect(0, self.screen_height - 2, self.screen_width, 2, 0x00000000, 20)
@@ -1061,6 +1141,14 @@ impl Compositor:
         val mx = event.x.to_i32()
         val my = event.y.to_i32()
 
+        # Handle resize release
+        if event.left_just_released:
+            if self.resizing:
+                self.resizing = false
+                self.resize_window_id = 0
+                self.resize_edge = 0
+                return
+
         # Handle drag release
         if event.left_just_released:
             # Apply snap if active
@@ -1107,8 +1195,51 @@ impl Compositor:
             self.snap_preview_active = self.snap_zone > 0
             return
 
+        # Handle ongoing edge resize
+        if self.resizing and event.left_pressed:
+            val dx = mx - self.resize_start_mx
+            val dy = my - self.resize_start_my
+            var nx = self.resize_orig_x
+            var ny = self.resize_orig_y
+            var nw = self.resize_orig_w
+            var nh = self.resize_orig_h
+            val e = self.resize_edge
+            if e == 2 or e == 6 or e == 8: nw = nw + dx
+            if e == 4 or e == 7 or e == 8: nh = nh + dy
+            if e == 1 or e == 5 or e == 7:
+                nw = nw - dx
+                nx = nx + dx
+            if e == 3 or e == 5 or e == 6:
+                nh = nh - dy
+                ny = ny + dy
+            if nw < 100: nw = 100
+            if nh < 80: nh = 80
+            self.move_window(self.resize_window_id, nx, ny)
+            self.resize_window(self.resize_window_id, nw, nh)
+            return
+
         # Handle new left click — hit test windows back-to-front (topmost first)
         if event.left_just_pressed:
+            # Check for edge resize on any visible window
+            var ridx = self.surfaces.len() - 1
+            while ridx >= 0:
+                val rs = self.surfaces[ridx]
+                if rs.visible:
+                    val edge = _detect_resize_edge(mx, my, rs.x, rs.y, rs.width, rs.height)
+                    if edge > 0:
+                        self.focus_window(rs.id)
+                        self.resizing = true
+                        self.resize_window_id = rs.id
+                        self.resize_edge = edge
+                        self.resize_start_mx = mx
+                        self.resize_start_my = my
+                        self.resize_orig_x = rs.x
+                        self.resize_orig_y = rs.y
+                        self.resize_orig_w = rs.width
+                        self.resize_orig_h = rs.height
+                        return
+                ridx = ridx - 1
+
             # Iterate in reverse Z-order to find topmost hit
             var idx = self.surfaces.len() - 1
             while idx >= 0:
@@ -1252,6 +1383,14 @@ impl Compositor:
             self.switcher_timer = self.switcher_timer - 1
             if self.switcher_timer <= 0:
                 self.switcher_active = false
+
+        # Dock bounce animation
+        if self.dock_bounce_active:
+            self.dock_bounce_progress = self.dock_bounce_progress + 8
+            if self.dock_bounce_progress >= 100:
+                self.dock_bounce_active = false
+                self.dock_bounce_progress = 0
+                self.dock_bounce_icon = -1
 
         # Theme transition animation
         if self.theme_transitioning:

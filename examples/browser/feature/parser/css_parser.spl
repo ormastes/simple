@@ -28,47 +28,15 @@ use examples.browser.shared.error.parse_error
 use examples.browser.shared.logging.Logger
 use examples.browser.feature.parser.css_tokenizer.CssToken
 use examples.browser.feature.parser.css_tokenizer.CssTokenizer
+use examples.browser.shared.named_colors.named_color_lookup
+use examples.browser.feature.parser.css_shorthand.{expand_shorthand, is_shorthand}
 
 # ---------- Named color map ----------
 
 fn named_color_to_rgb(name: text) -> CSSValue?:
-    val lower = name.to_lower()
-    if lower == "black":
-        return CSSValue.Color(color: from_rgb(0, 0, 0))
-    if lower == "white":
-        return CSSValue.Color(color: from_rgb(255, 255, 255))
-    if lower == "red":
-        return CSSValue.Color(color: from_rgb(255, 0, 0))
-    if lower == "green":
-        return CSSValue.Color(color: from_rgb(0, 128, 0))
-    if lower == "blue":
-        return CSSValue.Color(color: from_rgb(0, 0, 255))
-    if lower == "yellow":
-        return CSSValue.Color(color: from_rgb(255, 255, 0))
-    if lower == "cyan" or lower == "aqua":
-        return CSSValue.Color(color: from_rgb(0, 255, 255))
-    if lower == "magenta" or lower == "fuchsia":
-        return CSSValue.Color(color: from_rgb(255, 0, 255))
-    if lower == "orange":
-        return CSSValue.Color(color: from_rgb(255, 165, 0))
-    if lower == "purple":
-        return CSSValue.Color(color: from_rgb(128, 0, 128))
-    if lower == "gray" or lower == "grey":
-        return CSSValue.Color(color: from_rgb(128, 128, 128))
-    if lower == "silver":
-        return CSSValue.Color(color: from_rgb(192, 192, 192))
-    if lower == "navy":
-        return CSSValue.Color(color: from_rgb(0, 0, 128))
-    if lower == "teal":
-        return CSSValue.Color(color: from_rgb(0, 128, 128))
-    if lower == "olive":
-        return CSSValue.Color(color: from_rgb(128, 128, 0))
-    if lower == "maroon":
-        return CSSValue.Color(color: from_rgb(128, 0, 0))
-    if lower == "lime":
-        return CSSValue.Color(color: from_rgb(0, 255, 0))
-    if lower == "transparent":
-        return CSSValue.Color(color: from_rgba(0, 0, 0, 0))
+    val color = named_color_lookup(name)
+    if val Some(c) = color:
+        return CSSValue.Color(color: c)
     nil
 
 # ---------- Hex color helpers ----------
@@ -564,7 +532,16 @@ class CssParser:
                 _:
                     val decl = self.parse_declaration()
                     if val Some(d) = decl:
-                        declarations.push(d)
+                        # Expand shorthands into longhands
+                        if is_shorthand(d.property):
+                            val expanded = expand_shorthand(d.property, d.value)
+                            for ed in expanded:
+                                var final_d = ed
+                                if d.important:
+                                    final_d = CSSDeclaration(property: ed.property, value: ed.value, important: true)
+                                declarations.push(final_d)
+                        else:
+                            declarations.push(d)
                     else:
                         # Error recovery: skip to next semicolon or close brace
                         self._skip_to_declaration_end()
@@ -876,6 +853,54 @@ class CssParser:
                     self.logger.warn("CSS url(): expected closing paren, skipping")
             return CSSValue.Url(v: url_val)
 
+        # Handle calc(), min(), max(), clamp()
+        if lower == "calc" or lower == "min" or lower == "max" or lower == "clamp":
+            var args = [CSSValue]()
+            self.skip_whitespace()
+            while true:
+                match self.current:
+                    CssToken.CloseParen:
+                        self.advance()
+                        break
+                    CssToken.Eof:
+                        break
+                    CssToken.Comma:
+                        self.advance()
+                        self.skip_whitespace()
+                    _:
+                        val arg = self.parse_value()
+                        args.push(arg)
+                        self.skip_whitespace()
+            return CSSValue.Function(name: lower, args: args)
+
+        # Handle var()
+        if lower == "var":
+            self.skip_whitespace()
+            var var_name = ""
+            match self.current:
+                CssToken.Ident(value: v):
+                    var_name = v
+                    self.advance()
+                _:
+                    # Try to collect custom property name like --foo
+                    var_name = self._collect_var_name()
+            self.skip_whitespace()
+            var fallback: CSSValue? = nil
+            match self.current:
+                CssToken.Comma:
+                    self.advance()
+                    self.skip_whitespace()
+                    fallback = self.parse_value()
+                    self.skip_whitespace()
+                _:
+                    pass_dn
+            match self.current:
+                CssToken.CloseParen:
+                    self.advance()
+                _:
+                    pass_dn
+            return CSSValue.Var(name: var_name, fallback: fallback)
+
         # Generic function: skip arguments, return keyword
         var depth = 1
         while depth > 0:
@@ -892,3 +917,31 @@ class CssParser:
                     self.advance()
 
         CSSValue.Keyword(v: "{fn_name}(...)")
+
+    me _collect_var_name() -> text:
+        # Collect a CSS custom property name (e.g. --my-color).
+        # Custom property names start with '--' which may be tokenized as two Delim('-').
+        var name = ""
+        # Consume up to close paren or comma
+        while true:
+            match self.current:
+                CssToken.CloseParen:
+                    break
+                CssToken.Comma:
+                    break
+                CssToken.Eof:
+                    break
+                CssToken.Whitespace:
+                    break
+                CssToken.Ident(value: v):
+                    name = "{name}{v}"
+                    self.advance()
+                CssToken.Delim(value: d):
+                    name = "{name}{d}"
+                    self.advance()
+                CssToken.Number(value: v, is_integer: _):
+                    name = "{name}{v}"
+                    self.advance()
+                _:
+                    self.advance()
+        name

@@ -8,6 +8,7 @@ use os.compositor.display_backend.{CompositorBackend}
 use os.compositor.glass_port.{GlassPortConfig}
 use os.compositor.rendering_primitives.{rounded_rect_aa, gradient_h, filled_circle, superellipse_rect}
 use os.compositor.flex_layout.{FlexItem, flex_fixed, flex_fill, flex_compute, flex_x, flex_w}
+use os.compositor.easing.{bounce_offset}
 
 # ============================================================================
 # Chrome Configuration
@@ -166,11 +167,26 @@ fn draw_system_bar(backend: CompositorBackend, config: GlassPortConfig, active_w
 # Dock (bottom)
 # ============================================================================
 
-fn draw_dock(backend: CompositorBackend, config: GlassPortConfig, active_win: i32):
+fn _dock_icon_scale(pill: i32, cursor_x: i32, cursor_y: i32, icon_cx: i32, dock_y: i32, dock_h: i32) -> i32:
+    """Compute magnified pill size based on cursor distance to icon center."""
+    val in_zone = cursor_y > dock_y - 30 and cursor_y < dock_y + dock_h + 30
+    if not in_zone:
+        return pill
+    val dx = cursor_x - icon_cx
+    val dist = if dx < 0: 0 - dx else: dx
+    if dist < 40:
+        return pill + 12
+    if dist < 80:
+        return pill + 6
+    pill
+
+fn draw_dock(backend: CompositorBackend, config: GlassPortConfig, active_win: i32, cursor_x: i32, cursor_y: i32, bounce_icon: i32, bounce_progress: i32):
     """Draw the macOS-style dock at the bottom of the screen.
 
     Includes: 7 app icons + separator + 2 utility icons + running indicators.
     Uses pill-shaped icon containers with gradient reflections.
+    bounce_icon: dock icon index to bounce (-1 = none).
+    bounce_progress: 0-100 animation progress.
     """
     val sw = backend.width()
     val sh = backend.height()
@@ -239,47 +255,71 @@ fn draw_dock(backend: CompositorBackend, config: GlassPortConfig, active_win: i3
     _draw_filled_circle(backend, notch_x + notch_w / 2 - 2, notch_y + 5, 3, 0xFF30D158)
     _draw_filled_circle(backend, notch_x + notch_w / 2 + 10, notch_y + 5, 3, 0xFFBB86FC)
 
-    # Draw icons
+    # Bounce offset for dock icon animation
+    val b_off = if bounce_icon >= 0: bounce_offset(bounce_progress) else: 0
+
+    # Draw icons (with hover magnification + bounce)
     val icon_y = dock_y + 4
     var ix: i32 = dock_x + pad
 
-    # 1. Terminal
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_TERM, config)
-    _draw_icon_terminal(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 1. Terminal (icon index 0)
+    var by = if bounce_icon == 0: 0 - b_off else: 0
+    var mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    var mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_TERM, config)
+    _draw_icon_terminal(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 2. Files
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_FILES, config)
-    _draw_icon_files(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 2. Files (icon index 1)
+    by = if bounce_icon == 1: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_FILES, config)
+    _draw_icon_files(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 3. Calculator
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_CALC, config)
-    _draw_icon_calc(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 3. Calculator (icon index 2)
+    by = if bounce_icon == 2: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_CALC, config)
+    _draw_icon_calc(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 4. Clock
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_CLOCK, config)
-    _draw_icon_clock(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 4. Clock (icon index 3)
+    by = if bounce_icon == 3: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_CLOCK, config)
+    _draw_icon_clock(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 5. Settings
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_SETTINGS, config)
-    _draw_icon_settings(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 5. Settings (icon index 4)
+    by = if bounce_icon == 4: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_SETTINGS, config)
+    _draw_icon_settings(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 6. Browser
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_BROWSER, config)
-    _draw_icon_browser(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 6. Browser (icon index 5)
+    by = if bounce_icon == 5: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_BROWSER, config)
+    _draw_icon_browser(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 7. Editor
-    _draw_dock_icon(backend, ix, icon_y, pill, ICON_EDITOR, config)
-    _draw_icon_editor(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 7. Editor (icon index 6)
+    by = if bounce_icon == 6: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, ICON_EDITOR, config)
+    _draw_icon_editor(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
 
     # Notification badge on Editor icon
-    val badge_x = ix + pill - 8
-    val badge_y = icon_y + 2
+    val badge_x = ix + mo + mag - 8
+    val badge_y = icon_y + mo + by + 2
     _draw_filled_circle(backend, badge_x, badge_y, 6, 0xFFFF3B30)
     _draw_filled_circle(backend, badge_x + 2, badge_y + 2, 2, 0xFFFFFFFF)
 
@@ -288,14 +328,20 @@ fn draw_dock(backend: CompositorBackend, config: GlassPortConfig, active_win: i3
     backend.blend_rect(sep_x, dock_y + 8, sep_w, dock_h - 16, config.border_color, config.border_alpha)
     ix = sep_x + sep_w + sep_gap
 
-    # 8. Finder
-    _draw_dock_icon(backend, ix, icon_y, pill, 0x004A90D9, config)
-    _draw_icon_finder(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 8. Finder (icon index 7)
+    by = if bounce_icon == 7: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, 0x004A90D9, config)
+    _draw_icon_finder(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
     ix = ix + pill + gap
 
-    # 9. Trash
-    _draw_dock_icon(backend, ix, icon_y, pill, 0x00808080, config)
-    _draw_icon_trash(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    # 9. Trash (icon index 8)
+    by = if bounce_icon == 8: 0 - b_off else: 0
+    mag = _dock_icon_scale(pill, cursor_x, cursor_y, ix + pill / 2, dock_y, dock_h)
+    mo = (pill - mag) / 2
+    _draw_dock_icon(backend, ix + mo, icon_y + mo + by, mag, 0x00808080, config)
+    _draw_icon_trash(backend, ix + mo + DOCK_ICON_PAD, icon_y + mo + by + DOCK_ICON_PAD, mag - DOCK_ICON_PAD * 2)
 
     # Running indicators (dots)
     val dot_y = dock_y + dock_h - 6

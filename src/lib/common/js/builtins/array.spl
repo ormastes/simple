@@ -1,0 +1,200 @@
+# Array higher-order methods for the JS engine.
+# Each method that takes a callback receives an `invoker` fn from the interpreter.
+# The invoker calls the JS callback with the interpreter's full scope chain.
+
+use std.js.types.js_types.{JsValue, JsObject, JsProperty}
+
+# Callback invoker signature: fn(fn_id: i64, args: [JsValue]) -> JsValue
+# This is provided by the interpreter at call time.
+
+fn array_map(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> [JsValue]:
+    """Array.prototype.map — transform each element."""
+    var result = [JsValue]()
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val mapped = invoker(callback_id, args)
+        result.push(mapped)
+        i = i + 1
+    result
+
+fn array_filter(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> [JsValue]:
+    """Array.prototype.filter — keep elements where callback returns truthy."""
+    var result = [JsValue]()
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val keep = invoker(callback_id, args)
+        match keep:
+            JsValue.Boolean(v):
+                if v:
+                    result.push(prop.value)
+            JsValue.Number(v):
+                if v != 0.0:
+                    result.push(prop.value)
+            JsValue.String(v):
+                if v.len() > 0:
+                    result.push(prop.value)
+            JsValue.Undefined: pass_dn
+            JsValue.Null: pass_dn
+            _:
+                result.push(prop.value)
+        i = i + 1
+    result
+
+fn array_reduce(arr: JsObject, callback_id: i64, initial: JsValue, invoker: fn(i64, [JsValue]) -> JsValue) -> JsValue:
+    """Array.prototype.reduce — fold elements with accumulator."""
+    var acc = initial
+    var i = 0
+    val len = arr.properties.len()
+    # If no initial value provided and array is non-empty, use first element
+    match initial:
+        JsValue.Undefined:
+            if len > 0:
+                acc = arr.properties.get(0).value
+                i = 1
+        _: pass_dn
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [acc, prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        acc = invoker(callback_id, args)
+        i = i + 1
+    acc
+
+fn array_forEach(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue):
+    """Array.prototype.forEach — execute callback for each element."""
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        invoker(callback_id, args)
+        i = i + 1
+
+fn array_find(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> JsValue:
+    """Array.prototype.find — return first element where callback is truthy."""
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val result = invoker(callback_id, args)
+        if _is_truthy(result):
+            return prop.value
+        i = i + 1
+    JsValue.Undefined
+
+fn array_findIndex(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> JsValue:
+    """Array.prototype.findIndex — return index of first truthy callback."""
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val result = invoker(callback_id, args)
+        if _is_truthy(result):
+            return JsValue.Number(v: i.to_f64())
+        i = i + 1
+    JsValue.Number(v: -1.0)
+
+fn array_some(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> JsValue:
+    """Array.prototype.some — true if any callback returns truthy."""
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val result = invoker(callback_id, args)
+        if _is_truthy(result):
+            return JsValue.Boolean(v: true)
+        i = i + 1
+    JsValue.Boolean(v: false)
+
+fn array_every(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> JsValue:
+    """Array.prototype.every — true if all callbacks return truthy."""
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        val args = [prop.value, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr.id)]
+        val result = invoker(callback_id, args)
+        if not _is_truthy(result):
+            return JsValue.Boolean(v: false)
+        i = i + 1
+    JsValue.Boolean(v: true)
+
+fn array_flat(arr: JsObject, depth: i64, get_arr_props: fn(i64) -> [JsValue]) -> [JsValue]:
+    """Array.prototype.flat — flatten nested arrays to given depth."""
+    var result = [JsValue]()
+    var i = 0
+    val len = arr.properties.len()
+    while i < len:
+        val prop = arr.properties.get(i)
+        match prop.value:
+            JsValue.Array(id):
+                if depth > 0:
+                    val inner = get_arr_props(id)
+                    var j = 0
+                    while j < inner.len():
+                        result.push(inner.get(j))
+                        j = j + 1
+                else:
+                    result.push(prop.value)
+            _:
+                result.push(prop.value)
+        i = i + 1
+    result
+
+fn array_sort_with(arr: JsObject, callback_id: i64, invoker: fn(i64, [JsValue]) -> JsValue) -> JsObject:
+    """Array.prototype.sort with custom comparator — insertion sort for simplicity."""
+    val len = arr.properties.len()
+    var i = 1
+    while i < len:
+        var j = i
+        while j > 0:
+            val a_val = arr.properties.get(j - 1).value
+            val b_val = arr.properties.get(j).value
+            val cmp_result = invoker(callback_id, [a_val, b_val])
+            var cmp = 0.0
+            match cmp_result:
+                JsValue.Number(v): cmp = v
+                _: pass_dn
+            if cmp > 0.0:
+                # Swap
+                val temp = arr.properties.get(j - 1)
+                arr.properties.set(j - 1, JsProperty.data(key: "{j - 1}", value: b_val))
+                arr.properties.set(j, JsProperty.data(key: "{j}", value: a_val))
+                j = j - 1
+            else:
+                break
+        i = i + 1
+    arr
+
+fn array_isArray(value: JsValue) -> JsValue:
+    """Array.isArray — check if value is an array."""
+    match value:
+        JsValue.Array(id): JsValue.Boolean(v: true)
+        _: JsValue.Boolean(v: false)
+
+fn array_from_values(values: [JsValue]) -> [JsProperty]:
+    """Create array properties from a list of JsValues."""
+    var props = [JsProperty]()
+    var i = 0
+    while i < values.len():
+        props.push(JsProperty.data(key: "{i}", value: values.get(i)))
+        i = i + 1
+    props
+
+# Internal truthy check
+fn _is_truthy(value: JsValue) -> bool:
+    match value:
+        JsValue.Undefined: false
+        JsValue.Null: false
+        JsValue.Boolean(v): v
+        JsValue.Number(v): v != 0.0
+        JsValue.String(v): v.len() > 0
+        _: true

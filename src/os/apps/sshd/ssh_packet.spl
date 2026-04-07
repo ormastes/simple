@@ -38,11 +38,13 @@ fn ssh_put_u32(buf: [u8], val_: u32):
     buf.push((val_ & 0xFF).to_u8())
 
 fn ssh_get_u32(data: [u8], offset: u64) -> u32:
-    """Read a big-endian u32 from data at offset."""
-    val b0 = data[offset].to_u32()
-    val b1 = data[offset + 1].to_u32()
-    val b2 = data[offset + 2].to_u32()
-    val b3 = data[offset + 3].to_u32()
+    """Read a big-endian u32 from data at offset.
+    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
+    """
+    var b0: u32 = data[offset].to_u32()
+    var b1: u32 = data[offset + 1].to_u32()
+    var b2: u32 = data[offset + 2].to_u32()
+    var b3: u32 = data[offset + 3].to_u32()
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 fn ssh_put_string(buf: [u8], data: [u8]):
@@ -55,15 +57,17 @@ fn ssh_put_string(buf: [u8], data: [u8]):
 
 fn ssh_put_text(buf: [u8], s: text):
     """Append SSH string from text: uint32 length + UTF-8 bytes."""
-    val bytes = s.to_bytes()
+    var bytes = s.to_bytes()
     ssh_put_string(buf, bytes)
 
 fn ssh_get_string(data: [u8], offset: u64) -> Result<([u8], u64), text>:
-    """Read SSH string at offset. Returns (bytes, next_offset)."""
+    """Read SSH string at offset. Returns (bytes, next_offset).
+    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
+    """
     if offset + 4 > data.len():
         return Err("ssh_get_string: truncated length")
-    val str_len = ssh_get_u32(data, offset).to_u64()
-    val start = offset + 4
+    var str_len: u64 = ssh_get_u32(data, offset).to_u64()
+    var start: u64 = offset + 4
     if start + str_len > data.len():
         return Err("ssh_get_string: truncated data")
     var result: [u8] = []
@@ -74,11 +78,16 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<([u8], u64), text>:
     Ok((result, start + str_len))
 
 fn ssh_get_text(data: [u8], offset: u64) -> Result<(text, u64), text>:
-    """Read SSH string as text at offset. Returns (text, next_offset)."""
-    val r = ssh_get_string(data, offset)
+    """Read SSH string as text at offset. Returns (text, next_offset).
+    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
+    """
+    var r = ssh_get_string(data, offset)
     if r.is_ok():
-        val pair = r.unwrap()
-        Ok((text.from_bytes(pair.0), pair.1))
+        var pair = r.unwrap()
+        var bytes = pair.0
+        var next_off: u64 = pair.1
+        var txt: text = text.from_bytes(bytes)
+        Ok((txt, next_off))
     else:
         Err("ssh_get_text: string decode failed")
 
@@ -98,9 +107,9 @@ fn ssh_put_mpint(buf: [u8], val_bytes: [u8]):
         ssh_put_u32(buf, 0)
         return
 
-    val needs_pad = (val_bytes[start] & 0x80) != 0
-    val body_len = val_bytes.len() - start
-    val total_len = body_len + (if needs_pad: 1 else: 0)
+    var needs_pad: bool = (val_bytes[start] & 0x80) != 0
+    var body_len: u64 = val_bytes.len() - start
+    var total_len: u64 = body_len + (if needs_pad: 1 else: 0)
     ssh_put_u32(buf, total_len.to_u32())
 
     if needs_pad:
@@ -182,8 +191,8 @@ fn ssh_packet_build(payload: [u8], sequence: u32) -> [u8]:
     Padding: total of (4 + 1 + payload_len + padding_len) must be
     a multiple of 8 (minimum block size). Padding >= 4 bytes.
     """
-    val block_size: u64 = 8
-    val payload_len = payload.len()
+    var block_size: u64 = 8
+    var payload_len: u64 = payload.len()
 
     # Calculate minimum padding
     # packet_length = 1 + payload_len + padding_len
@@ -193,7 +202,7 @@ fn ssh_packet_build(payload: [u8], sequence: u32) -> [u8]:
     if padding_len < SSH_MIN_PADDING.to_u64():
         padding_len = padding_len + block_size
 
-    val packet_length = 1 + payload_len + padding_len
+    var packet_length: u64 = 1 + payload_len + padding_len
 
     var buf: [u8] = []
 
