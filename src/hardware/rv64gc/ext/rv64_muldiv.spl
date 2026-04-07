@@ -13,6 +13,30 @@ fn _sign_extend_32(val_: i64) -> i64:
     else:
         low32
 
+fn _unsigned_div(a: i64, b: i64) -> i64:
+    """Unsigned 64-bit division using bit-by-bit long division."""
+    if b == 0: return 0xFFFFFFFFFFFFFFFF
+    # Both positive in signed → use normal division
+    if a >= 0 and b > 0: return a / b
+    # Bit-by-bit long division for unsigned semantics
+    var q: i64 = 0
+    var rem: i64 = 0
+    var i = 63
+    while i >= 0:
+        rem = rem << 1
+        rem = rem or ((a >> i) and 1)
+        if rem >= b and b > 0:
+            rem = rem - b
+            q = q or (1 << i)
+        elif b < 0:
+            # b has sign bit set → b is huge unsigned → a < b most likely
+            # Only one bit of quotient possible
+            if i == 0 and not _unsigned_lt(a, b):
+                q = 1
+                rem = a - b
+        i = i - 1
+    q
+
 fn _unsigned_lt(a: i64, b: i64) -> bool:
     val a_sign = (a >> 63) and 1
     val b_sign = (b >> 63) and 1
@@ -92,28 +116,24 @@ fn muldiv_execute(op: MulDivOp, a: i64, b: i64) -> i64:
                 a / b
 
         MulDivOp.Divu:
-            # Unsigned division (approximate via signed with careful handling)
             if b == 0:
-                0xFFFFFFFFFFFFFFFF  # Division by zero -> all 1s
+                0xFFFFFFFFFFFFFFFF
             else:
-                # Simple unsigned division using shifts for large values
-                pass_todo("precise unsigned 64-bit division")
-                a / b  # Approximate for now
+                _unsigned_div(a, b)
 
         MulDivOp.Rem:
             if b == 0:
-                a  # Remainder by zero -> dividend
+                a
             elif a == 0x8000000000000000 and b == 0xFFFFFFFFFFFFFFFF:
-                0  # Overflow -> 0
+                0
             else:
                 a - (a / b) * b
 
         MulDivOp.Remu:
             if b == 0:
-                a  # Remainder by zero -> dividend
+                a
             else:
-                pass_todo("precise unsigned 64-bit remainder")
-                a - (a / b) * b  # Approximate
+                a - _unsigned_div(a, b) * b
 
         _: 0
 
