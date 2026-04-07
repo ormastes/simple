@@ -379,28 +379,68 @@ fn mouse_cmd(cmd: u64):
 
 fn mouse_init():
     """Initialize PS/2 mouse with basic 3-byte packet mode."""
+    serial_println("[MOUSE] Initializing PS/2 mouse...")
+
+    # Flush any pending data
+    var flush: u64 = 0
+    while flush < 16:
+        if (io_inb(0x64) & 1) != 0:
+            io_inb(0x60)
+        flush = flush + 1
+
     # Enable auxiliary device
     mouse_wait_write()
     io_outb(0x64, 0xA8)
+    serial_println("[MOUSE] Aux device enabled (0xA8)")
 
-    # Enable interrupts — get controller config byte
+    # Get controller config byte
     mouse_wait_write()
-    io_outb(0x64, 0x20)  # Get compaq status
+    io_outb(0x64, 0x20)
     mouse_wait_read()
     val status = io_inb(0x60)
+    serial_println("[MOUSE] Config byte: {status}")
+
+    # Set config: enable IRQ12 (bit 1), enable aux clock (clear bit 5)
+    val new_config = (status | 2) & 0xDF
     mouse_wait_write()
-    io_outb(0x64, 0x60)  # Set compaq status
+    io_outb(0x64, 0x60)
     mouse_wait_write()
-    io_outb(0x60, (status | 2) & 0xDF)  # Enable IRQ12, disable clock disable
+    io_outb(0x60, new_config)
+    serial_println("[MOUSE] Config set to: {new_config}")
+
+    # Reset mouse
+    mouse_wait_write()
+    io_outb(0x64, 0xD4)
+    mouse_wait_write()
+    io_outb(0x60, 0xFF)  # Reset command
+    mouse_wait_read()
+    val reset_ack = io_inb(0x60)
+    serial_println("[MOUSE] Reset ACK: {reset_ack}")
+    # Wait for self-test result (0xAA) and device ID (0x00)
+    mouse_wait_read()
+    val self_test = io_inb(0x60)
+    serial_println("[MOUSE] Self-test: {self_test}")
+    mouse_wait_read()
+    val device_id = io_inb(0x60)
+    serial_println("[MOUSE] Device ID: {device_id}")
 
     # Set defaults
     mouse_cmd(0xF6)
+    serial_println("[MOUSE] Defaults set (0xF6)")
 
     # Enable data reporting
     mouse_cmd(0xF4)
+    serial_println("[MOUSE] Reporting enabled (0xF4)")
+
+    # Verify config byte after init
+    mouse_wait_write()
+    io_outb(0x64, 0x20)
+    mouse_wait_read()
+    val final_config = io_inb(0x60)
+    serial_println("[MOUSE] Final config: {final_config}")
 
     g_mouse_initialized = 1
-    serial_println("[WM] PS/2 mouse initialized")
+    serial_println("[MOUSE] PS/2 mouse ready")
 
 fn draw_mouse_cursor(mx: u64, my: u64, theme: u64):
     """Draw a simple arrow cursor at mouse position."""
@@ -2740,15 +2780,14 @@ fn spl_start():
             val m_status = io_inb(0x64)
             if (m_status & 0x21) == 0x21:  # Bit 0=data ready, bit 5=mouse data
                 val byte1 = io_inb(0x60)
-                # Wait for byte 2
-                mouse_wait_read()
-                val byte2 = io_inb(0x60)
-                # Wait for byte 3
-                mouse_wait_read()
-                val byte3 = io_inb(0x60)
-
-                # Parse mouse packet — bit 3 of byte1 always set in valid packets
                 if (byte1 & 0x08) != 0:
+                    # Valid packet header — read bytes 2+3
+                    mouse_wait_read()
+                    val byte2 = io_inb(0x60)
+                    mouse_wait_read()
+                    val byte3 = io_inb(0x60)
+
+                    # Process mouse packet
                     g_mouse_prev_buttons = g_mouse_buttons
                     g_mouse_buttons = byte1 & 0x07  # Button bits
 

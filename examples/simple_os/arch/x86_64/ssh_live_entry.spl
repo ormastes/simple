@@ -1,0 +1,58 @@
+# x86_64 SSH Live Entry — Full OS boot with SSH daemon accept loop
+#
+# Boots all services and starts the SSH daemon listening on port 22.
+# The daemon enters accept_loop() and blocks forever, allowing SSH clients
+# to connect from the host via QEMU port forwarding (-hostfwd=tcp::2222-:22).
+#
+# Usage:
+#   qemu-system-x86_64 ... -netdev user,id=n0,hostfwd=tcp::2222-:22 \
+#     -device virtio-net-pci,netdev=n0 ...
+#   ssh -p 2222 root@localhost  (password: simpleos)
+
+extern fn serial_println(msg: text)
+
+# POSIX layer
+use os.posix.fd_table.{fd_table_init}
+use os.posix.async_io.{async_io_init}
+use os.posix.signal_compat.{signal_init}
+
+# Services
+use os.kernel.boot.init_services.{init_all_services, services_network_ready, services_storage_ready}
+
+# SSH
+use os.apps.sshd.sshd.{SshDaemon}
+
+fn _start():
+    serial_println("")
+    serial_println("=== SimpleOS SSH Live Boot ===")
+    serial_println("")
+
+    # POSIX layer init
+    fd_table_init()
+    async_io_init()
+    signal_init()
+    serial_println("[boot] POSIX layer initialized")
+
+    # All services
+    init_all_services()
+
+    # Verify network is available (required for SSH)
+    if not services_network_ready():
+        serial_println("[FATAL] Network stack unavailable — cannot start SSH daemon")
+        serial_println("[FATAL] Ensure QEMU has: -netdev user,id=n0 -device virtio-net-pci,netdev=n0")
+        return
+
+    serial_println("[boot] Network ready")
+
+    if services_storage_ready():
+        serial_println("[boot] Storage ready")
+
+    # Start SSH daemon on port 22
+    serial_println("[boot] Starting SSH daemon on port 22...")
+    var daemon = SshDaemon.new(22)
+    serial_println("[boot] SSH daemon created (users: root/simpleos, user/password)")
+    serial_println("[boot] Entering accept loop — connect with: ssh -p 2222 root@localhost")
+    serial_println("")
+
+    # This blocks forever, accepting SSH connections
+    daemon.start()

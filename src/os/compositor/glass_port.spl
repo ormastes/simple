@@ -1,0 +1,148 @@
+# Glass Rendering Port — DI-based backend switching
+#
+# Typed port for glass effects — switchable between C FFI and pure Simple.
+# Uses module-level functions as port implementations.
+
+use os.compositor.display_backend.{CompositorBackend}
+
+# ============================================================================
+# Glass Port Config
+# ============================================================================
+
+struct GlassPortConfig:
+    surface_color: u32
+    surface_alpha: u8
+    blur_radius: u32
+    border_color: u32
+    border_alpha: u8
+    shadow_offset: i32
+    shadow_blur: u32
+    shadow_alpha: u8
+    accent_color: u32
+    accent2_color: u32
+    bg_top: u32
+    bg_bottom: u32
+
+impl GlassPortConfig:
+    static fn dark() -> GlassPortConfig:
+        GlassPortConfig(
+            surface_color: 0x001E1E23, surface_alpha: 184,
+            blur_radius: 12, border_color: 0x00FFFFFF, border_alpha: 46,
+            shadow_offset: 6, shadow_blur: 10, shadow_alpha: 80,
+            accent_color: 0x000A84FF, accent2_color: 0x00BB86FC,
+            bg_top: 0x00080810, bg_bottom: 0x00180A28
+        )
+
+    static fn light() -> GlassPortConfig:
+        GlassPortConfig(
+            surface_color: 0x00FFFFFF, surface_alpha: 184,
+            blur_radius: 12, border_color: 0x00000000, border_alpha: 20,
+            shadow_offset: 6, shadow_blur: 10, shadow_alpha: 40,
+            accent_color: 0x00007AFF, accent2_color: 0x009B59B6,
+            bg_top: 0x00D8D0E8, bg_bottom: 0x00F0F0F5
+        )
+
+# ============================================================================
+# Glass Port — struct with function references
+# ============================================================================
+
+struct GlassPort:
+    name: text
+    begin_frame_fn: any
+    present_fn: any
+    fill_fn: any
+    blur_fn: any
+    gradient_v_fn: any
+    shadow_fn: any
+    solid_fill_fn: any
+    draw_rect_fn: any
+    draw_border_fn: any
+
+# ============================================================================
+# Port registry (module-level)
+# ============================================================================
+
+var _gp_name: text = "noop"
+var _gp_backend: CompositorBackend? = nil
+
+fn register_glass_port(port: GlassPort):
+    _gp_name = port.name
+
+fn register_pure_glass(backend: CompositorBackend):
+    """Register pure Simple glass rendering using the given backend."""
+    _gp_name = "pure_simple"
+    _gp_backend = backend
+
+fn glass_port_name() -> text:
+    _gp_name
+
+# ============================================================================
+# Direct glass API — dispatches to the right implementation
+# ============================================================================
+
+fn gp_begin_frame(w: i32, h: i32):
+    """Begin glass frame — clears via backend or C FFI."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.clear(0xFF000000)
+
+fn gp_present():
+    """Present glass frame."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.present()
+
+fn gp_fill(x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+    """Alpha-blended fill."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.blend_rect(x, y, w, h, color, alpha)
+
+fn gp_blur(x: i32, y: i32, w: i32, h: i32, radius: u32):
+    """Box blur region."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.blur_region(x, y, w, h, radius)
+
+fn gp_gradient_v(x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32):
+    """Vertical gradient."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.gradient_v(x, y, w, h, c1, c2)
+
+fn gp_shadow(x: i32, y: i32, w: i32, h: i32, cfg: GlassPortConfig):
+    """Drop shadow."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            val sx = x + cfg.shadow_offset
+            val sy = y + cfg.shadow_offset
+            b.blend_rect(sx, sy, w, h, 0x00000000, cfg.shadow_alpha)
+            b.blur_region(sx, sy, w + cfg.shadow_offset, h + cfg.shadow_offset, cfg.shadow_blur)
+
+fn gp_solid_fill(x: i32, y: i32, w: i32, h: i32, color: u32):
+    """Solid fill."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.fill_rect(x, y, w, h, color)
+
+fn gp_draw_rect(x: i32, y: i32, w: i32, h: i32, cfg: GlassPortConfig):
+    """Full glass rect: shadow + blur + blend + border."""
+    gp_shadow(x, y, w, h, cfg)
+    gp_blur(x, y, w, h, cfg.blur_radius)
+    gp_fill(x, y, w, h, cfg.surface_color, cfg.surface_alpha)
+    gp_draw_border(x, y, w, h, cfg)
+
+fn gp_draw_border(x: i32, y: i32, w: i32, h: i32, cfg: GlassPortConfig):
+    """1px semi-transparent border."""
+    gp_fill(x, y, w, 1, cfg.border_color, cfg.border_alpha)
+    if h > 1:
+        gp_fill(x, y + h - 1, w, 1, cfg.border_color, cfg.border_alpha)
+    gp_fill(x, y, 1, h, cfg.border_color, cfg.border_alpha)
+    if w > 1:
+        gp_fill(x + w - 1, y, 1, h, cfg.border_color, cfg.border_alpha)
+
+fn gp_draw_text(x: i32, y: i32, text_str: text, fg: u32):
+    """Draw text on glass surface."""
+    if _gp_name == "pure_simple":
+        if val b = _gp_backend:
+            b.draw_text(x, y, text_str, fg, 0x00000000)
