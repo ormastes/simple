@@ -36,6 +36,25 @@ fn io_outw(port: u64, value: u64): rt_port_outw(port, value)
 fn io_inl(port: u64) -> u64: rt_port_inl(port)
 fn io_outl(port: u64, value: u64): rt_port_outl(port, value)
 
+# === RTC (Real-Time Clock) via CMOS ports 0x70/0x71 ===
+fn rtc_read(reg: u64) -> u64:
+    io_outb(0x70, reg)
+    io_inb(0x71)
+
+fn bcd_to_dec(bcd: u64) -> u64:
+    ((bcd >> 4) * 10) + (bcd & 0x0F)
+
+fn get_rtc_hours() -> u64: bcd_to_dec(rtc_read(4))
+fn get_rtc_minutes() -> u64: bcd_to_dec(rtc_read(2))
+fn get_rtc_seconds() -> u64: bcd_to_dec(rtc_read(0))
+fn get_rtc_day() -> u64: bcd_to_dec(rtc_read(7))
+fn get_rtc_month() -> u64: bcd_to_dec(rtc_read(8))
+fn get_rtc_year() -> u64: bcd_to_dec(rtc_read(9))
+
+# Convert a number 0-99 into two ASCII digit characters packed as (tens_char, ones_char)
+fn digit_tens(n: u64) -> u64: 48 + (n / 10)
+fn digit_ones(n: u64) -> u64: 48 + (n % 10)
+
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64)
 
 # Glass rendering primitives (from glass_render.c)
@@ -206,9 +225,21 @@ var g_term_input_3: u64 = 0
 var g_term_input_4: u64 = 0
 
 # Terminal output state — which command output to show
-# 0=none, 1=help, 2=uname, 3=ls, 4=whoami, 5=echo, 6=date, 7=unknown cmd
+# 0=none, 1=help, 2=uname, 3=ls, 4=whoami, 5=date, 6=uptime, 7=unknown cmd
+# 8=ps, 9=free, 10=hostname, 11=pwd, 12=echo
 var g_term_out_type: u64 = 0
 var g_term_out_count: u64 = 0     # Lines of output to display
+
+# Global frame counter for uptime calculation (~60fps)
+var g_frame_count: u64 = 0
+
+# Echo command saved input (packed, up to 35 chars after "echo ")
+var g_echo_buf_0: u64 = 0
+var g_echo_buf_1: u64 = 0
+var g_echo_buf_2: u64 = 0
+var g_echo_buf_3: u64 = 0
+var g_echo_buf_4: u64 = 0
+var g_echo_len: u64 = 0
 
 # Scroll offset for terminal output history
 var g_term_scroll_y: u64 = 0
@@ -218,6 +249,15 @@ var g_editor_cursor_x: u64 = 0    # Cursor column
 var g_editor_cursor_y: u64 = 3    # Cursor line (0-based)
 var g_editor_scroll_y: u64 = 0    # Scroll offset
 var g_editor_line_count: u64 = 8  # Total lines
+
+# Editor editable line buffer (current line only, packed u64, 8 chars each)
+var g_ed_buf_0: u64 = 0
+var g_ed_buf_1: u64 = 0
+var g_ed_buf_2: u64 = 0
+var g_ed_buf_3: u64 = 0
+var g_ed_buf_4: u64 = 0
+var g_ed_buf_len: u64 = 0
+var g_ed_editing: u64 = 0        # 1 when editor accepts keyboard input
 
 # Legacy file explorer state (still used by handle_files_click)
 var g_files_selected: u64 = 0     # Selected item index (0-5)
@@ -231,7 +271,7 @@ var g_browser_url_1: u64 = 0
 var g_browser_url_2: u64 = 0
 var g_browser_url_3: u64 = 0
 var g_browser_url_4: u64 = 0
-var g_browser_page: u64 = 0     # 0=home, 1=help, 2=sysinfo, 3=about
+var g_browser_page: u64 = 0     # 0=home, 1=help, 2=sysinfo, 3=about, 4=network
 var g_browser_scroll_y: u64 = 0
 var g_browser_input_active: u64 = 0  # 1 when address bar focused
 var g_browser_history_len: u64 = 0
@@ -269,6 +309,7 @@ var g_mouse_y: u64 = 384
 var g_mouse_buttons: u64 = 0
 var g_mouse_prev_buttons: u64 = 0
 var g_mouse_initialized: u64 = 0
+var g_cursor_shape: u64 = 0  # 0=arrow (default), 1=hand (over links), 2=text (over text input)
 
 # Drag state
 var g_dragging: u64 = 0         # 0=not dragging, 1/2/3=dragging window 0/1/2 (offset by 1)
@@ -461,7 +502,26 @@ fn mouse_init():
     serial_println("[MOUSE] PS/2 mouse ready")
 
 fn draw_mouse_cursor(mx: u64, my: u64, theme: u64):
-    """Draw a simple arrow cursor at mouse position."""
+    """Draw cursor at mouse position. Shape depends on g_cursor_shape."""
+    # Text cursor (I-beam) — shape 2
+    if g_cursor_shape == 2:
+        blend(mx, my, 8, 2, 0x00FFFFFF, 200)          # top bar
+        blend(mx + 3, my + 2, 2, 12, 0x00FFFFFF, 200)  # vertical bar
+        blend(mx, my + 14, 8, 2, 0x00FFFFFF, 200)      # bottom bar
+        return
+
+    # Hand cursor (pointing) — shape 1
+    if g_cursor_shape == 1:
+        blend(mx + 4, my, 4, 6, 0x00FFFFFF, 220)       # index finger
+        blend(mx + 2, my + 6, 8, 4, 0x00FFFFFF, 220)   # knuckles
+        blend(mx + 2, my + 10, 8, 6, 0x00FFFFFF, 200)  # palm
+        # Outline
+        blend(mx + 3, my - 1, 6, 1, 0x00000000, 180)   # finger top
+        blend(mx + 1, my + 5, 1, 12, 0x00000000, 180)  # left edge
+        blend(mx + 10, my + 5, 1, 12, 0x00000000, 180) # right edge
+        return
+
+    # Default arrow cursor — shape 0
     # Cursor: 16-row triangle, each row has width = row/2 + 1
     # Black outline on left edge, right edge, top, and bottom row
     # White fill interior
@@ -504,6 +564,28 @@ fn draw_mouse_cursor(mx: u64, my: u64, theme: u64):
                         blend(bx, by, 1, 1, 0x00000000, 220)
                 c2 = c2 + 1
         row = row + 1
+
+fn update_cursor_shape():
+    """Set cursor shape based on what's under the mouse pointer."""
+    g_cursor_shape = 0  # Default arrow
+    # Check if over browser address bar (window 2)
+    if g_mouse_x >= WIN2_X + 82 and g_mouse_x < WIN2_X + WIN2_W - 8:
+        if g_mouse_y >= WIN2_Y + TITLE_BAR_H + 5 and g_mouse_y < WIN2_Y + TITLE_BAR_H + 27:
+            g_cursor_shape = 2  # Text cursor
+            return
+    # Check if over links in browser content
+    if g_mouse_x >= WIN2_X + 38 and g_mouse_x < WIN2_X + WIN2_W - 20:
+        if g_browser_page == 0:
+            val link_base_y = WIN2_Y + TITLE_BAR_H + 32 + 128
+            if g_mouse_y >= link_base_y and g_mouse_y < link_base_y + 96:
+                g_cursor_shape = 1  # Hand cursor
+                return
+        if g_browser_page == 1 or g_browser_page == 2 or g_browser_page == 3 or g_browser_page == 4:
+            # Back link area
+            val back_base_y = WIN2_Y + TITLE_BAR_H + 32 + 140
+            if g_mouse_y >= back_base_y and g_mouse_y < back_base_y + 20:
+                g_cursor_shape = 1  # Hand cursor
+                return
 
 # === Rendering helpers ===
 
@@ -1620,6 +1702,40 @@ fn term_match_cmd(expected_0: u64, expected_len: u64) -> u64:
     if g_term_input_0 != expected_0: return 0
     return 1
 
+fn term_check_echo_prefix() -> u64:
+    """Check if input starts with 'echo ' (5 chars: e=101,c=99,h=104,o=111,space=32)."""
+    if g_term_input_len < 5: return 0
+    if term_get_input_char(0) != 101: return 0
+    if term_get_input_char(1) != 99: return 0
+    if term_get_input_char(2) != 104: return 0
+    if term_get_input_char(3) != 111: return 0
+    if term_get_input_char(4) != 32: return 0
+    return 1
+
+fn term_save_echo_buf():
+    """Save input chars after 'echo ' (positions 5..input_len) into g_echo_buf."""
+    g_echo_buf_0 = 0
+    g_echo_buf_1 = 0
+    g_echo_buf_2 = 0
+    g_echo_buf_3 = 0
+    g_echo_buf_4 = 0
+    val echo_len = g_term_input_len - 5
+    g_echo_len = echo_len
+    # Repack chars from position 5 onward into echo buffer
+    var i: u64 = 0
+    while i < echo_len:
+        val ch = term_get_input_char(i + 5)
+        val word = i / 8
+        val byte_idx = i % 8
+        val shift = (7 - byte_idx) * 8
+        val bits = ch << shift
+        if word == 0: g_echo_buf_0 = g_echo_buf_0 | bits
+        if word == 1: g_echo_buf_1 = g_echo_buf_1 | bits
+        if word == 2: g_echo_buf_2 = g_echo_buf_2 | bits
+        if word == 3: g_echo_buf_3 = g_echo_buf_3 | bits
+        if word == 4: g_echo_buf_4 = g_echo_buf_4 | bits
+        i = i + 1
+
 fn handle_terminal_enter():
     """Execute the current terminal input as a command."""
     serial_println("[Terminal] Enter pressed")
@@ -1635,12 +1751,20 @@ fn handle_terminal_enter():
     val cmd_whoami = pack8(119, 104, 111, 97, 109, 105, 0, 0)
     val cmd_date = pack8(100, 97, 116, 101, 0, 0, 0, 0)
     val cmd_uptime = pack8(117, 112, 116, 105, 109, 101, 0, 0)
+    # p=112, s=115
+    val cmd_ps = pack8(112, 115, 0, 0, 0, 0, 0, 0)
+    # f=102, r=114, e=101, e=101
+    val cmd_free = pack8(102, 114, 101, 101, 0, 0, 0, 0)
+    # h=104,o=111,s=115,t=116,n=110,a=97,m=109,e=101
+    val cmd_hostname = pack8(104, 111, 115, 116, 110, 97, 109, 101)
+    # p=112,w=119,d=100
+    val cmd_pwd = pack8(112, 119, 100, 0, 0, 0, 0, 0)
 
     var matched: u64 = 0
 
     if term_match_cmd(cmd_help, 4) == 1:
         g_term_out_type = 1
-        g_term_out_count = 8
+        g_term_out_count = 13
         matched = 1
 
     if term_match_cmd(cmd_clear, 5) == 1:
@@ -1657,7 +1781,7 @@ fn handle_terminal_enter():
 
     if term_match_cmd(cmd_ls, 2) == 1:
         g_term_out_type = 3
-        g_term_out_count = 5
+        g_term_out_count = 6
         matched = 1
 
     if term_match_cmd(cmd_whoami, 6) == 1:
@@ -1672,6 +1796,33 @@ fn handle_terminal_enter():
 
     if term_match_cmd(cmd_uptime, 6) == 1:
         g_term_out_type = 6
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_ps, 2) == 1:
+        g_term_out_type = 8
+        g_term_out_count = 3
+        matched = 1
+
+    if term_match_cmd(cmd_free, 4) == 1:
+        g_term_out_type = 9
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_hostname, 8) == 1:
+        g_term_out_type = 10
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_pwd, 3) == 1:
+        g_term_out_type = 11
+        g_term_out_count = 1
+        matched = 1
+
+    # Check echo prefix: "echo " followed by text
+    if matched == 0 and term_check_echo_prefix() == 1:
+        term_save_echo_buf()
+        g_term_out_type = 12
         g_term_out_count = 1
         matched = 1
 
@@ -1713,6 +1864,52 @@ fn handle_editor_click(local_x: u64, local_y: u64):
             g_editor_cursor_x = char_x
         else:
             g_editor_cursor_x = 29
+        # Enable editing mode and reset edit buffer for this line
+        g_ed_editing = 1
+        g_ed_buf_0 = 0
+        g_ed_buf_1 = 0
+        g_ed_buf_2 = 0
+        g_ed_buf_3 = 0
+        g_ed_buf_4 = 0
+        g_ed_buf_len = 0
+        g_editor_cursor_x = 0
+
+fn ed_set_char(pos: u64, ch: u64):
+    """Set character at position in editor edit buffer (little-endian byte order)."""
+    val word = pos / 8
+    val shift = (pos % 8) * 8
+    val mask = 0xFF << shift
+    if word == 0: g_ed_buf_0 = (g_ed_buf_0 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 1: g_ed_buf_1 = (g_ed_buf_1 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 2: g_ed_buf_2 = (g_ed_buf_2 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 3: g_ed_buf_3 = (g_ed_buf_3 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 4: g_ed_buf_4 = (g_ed_buf_4 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+
+fn ed_clear_char(pos: u64):
+    """Clear character at position in editor edit buffer."""
+    val word = pos / 8
+    val shift = (pos % 8) * 8
+    val mask = 0xFF << shift
+    val clear_mask = 0xFFFFFFFFFFFFFFFF ^ mask
+    if word == 0: g_ed_buf_0 = g_ed_buf_0 & clear_mask
+    if word == 1: g_ed_buf_1 = g_ed_buf_1 & clear_mask
+    if word == 2: g_ed_buf_2 = g_ed_buf_2 & clear_mask
+    if word == 3: g_ed_buf_3 = g_ed_buf_3 & clear_mask
+    if word == 4: g_ed_buf_4 = g_ed_buf_4 & clear_mask
+
+fn render_ed_buffer(rx: u64, ry: u64, color: u64):
+    """Render the editor edit buffer text from packed words."""
+    if g_ed_buf_len > 0:
+        rt_gui_set_text_buf(g_ed_buf_0, 0, 0, 0)
+    if g_ed_buf_len > 8:
+        rt_gui_set_text_buf(g_ed_buf_1, 8, 0, 0)
+    if g_ed_buf_len > 16:
+        rt_gui_set_text_buf(g_ed_buf_2, 16, 0, 0)
+    if g_ed_buf_len > 24:
+        rt_gui_set_text_buf(g_ed_buf_3, 24, 0, 0)
+    if g_ed_buf_len > 32:
+        rt_gui_set_text_buf(g_ed_buf_4, 32, 0, 0)
+    rt_gui_draw_text_buf(pack(rx, ry), pack(color, g_ed_buf_len), 220, 0)
 
 fn handle_browser_click(local_x: u64, local_y: u64):
     """Handle click in browser content area."""
@@ -1757,7 +1954,11 @@ fn handle_browser_click(local_x: u64, local_y: u64):
         if content_y >= 176 and content_y < 194:
             browser_navigate(1)
             serial_println("[Browser] -> about:help")
-    if g_browser_page == 1 or g_browser_page == 2 or g_browser_page == 3:
+        # Link 4: "Network Status" at ~y+200
+        if content_y >= 200 and content_y < 218:
+            browser_navigate(4)
+            serial_println("[Browser] -> about:network")
+    if g_browser_page == 1 or g_browser_page == 2 or g_browser_page == 3 or g_browser_page == 4:
         # "< Back to Home" link (last item on each page)
         if content_y >= 140 and content_y < 160:
             browser_navigate(0)
@@ -1867,6 +2068,17 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Thin insertion-style cursor line
     blend(ed_x + cursor_px_x, cursor_px_y, 2, line_h, 0x00FFFFFF, 200)
 
+    # If this line is being edited, overlay the edit buffer
+    if g_ed_editing == 1:
+        val edit_y = ed_y + 4 + g_editor_cursor_y * line_h
+        # Clear the line area (overwrite static code text)
+        blend(code_x - 4, edit_y, ed_w - gutter_w - 8, line_h, 0x000D0D14, 220)
+        # Render edit buffer contents
+        if g_ed_buf_len > 0:
+            render_ed_buffer(code_x, edit_y, 0x00CCCCCC)
+        # Blinking-style cursor at end of typed text
+        blend(code_x + g_ed_buf_len * 8, edit_y, 2, line_h, 0x00FFFFFF, 200)
+
     # Progress bar
     val prog_y = ed_y + ed_h - 24
     rrect_aa(ed_x + 4, prog_y, ed_w - 8, 8, surface(theme), 4, 60)
@@ -1950,7 +2162,37 @@ fn render_term_help(hx: u64, hy: u64, color: u64, dim: u64) -> u64:
     rt_gui_set_text_buf(pack8(32, 32, 45, 32, 117, 112, 116, 105), 8, 0, 0)
     rt_gui_set_text_buf(pack8(109, 101, 0, 0, 0, 0, 0, 0), 16, 0, 0)
     rt_gui_draw_text_buf(pack(hx, hy + 112), pack(dim, 18), 180, 0)
-    return 128
+    # "  ps      - processes"
+    # 32,32,112,115,32,32,32,32 | 32,32,45,32,112,114,111,99 | 101,115,115,101,115,0,0,0
+    rt_gui_set_text_buf(pack8(32, 32, 112, 115, 32, 32, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 112, 114, 111, 99), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(101, 115, 115, 101, 115, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 128), pack(dim, 21), 180, 0)
+    # "  free    - memory info"
+    # 32,32,102,114,101,101,32,32 | 32,32,45,32,109,101,109,111 | 114,121,32,105,110,102,111,0
+    rt_gui_set_text_buf(pack8(32, 32, 102, 114, 101, 101, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 109, 101, 109, 111), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(114, 121, 32, 105, 110, 102, 111, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 144), pack(dim, 23), 180, 0)
+    # "  hostname- host name"
+    # 32,32,104,111,115,116,110,97 | 109,101,45,32,104,111,115,116 | 32,110,97,109,101,0,0,0
+    rt_gui_set_text_buf(pack8(32, 32, 104, 111, 115, 116, 110, 97), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(109, 101, 45, 32, 104, 111, 115, 116), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 110, 97, 109, 101, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 160), pack(dim, 21), 180, 0)
+    # "  pwd     - working dir"
+    # 32,32,112,119,100,32,32,32 | 32,32,45,32,119,111,114,107 | 105,110,103,32,100,105,114,0
+    rt_gui_set_text_buf(pack8(32, 32, 112, 119, 100, 32, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 119, 111, 114, 107), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(105, 110, 103, 32, 100, 105, 114, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 176), pack(dim, 23), 180, 0)
+    # "  echo    - echo text"
+    # 32,32,101,99,104,111,32,32 | 32,32,45,32,101,99,104,111 | 32,116,101,120,116,0,0,0
+    rt_gui_set_text_buf(pack8(32, 32, 101, 99, 104, 111, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 101, 99, 104, 111), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 116, 101, 120, 116, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 192), pack(dim, 21), 180, 0)
+    return 208
 
 fn render_term_output(ox: u64, oy: u64, color: u64) -> u64:
     """Render the last command output. Returns pixel height used."""
@@ -1970,22 +2212,32 @@ fn render_term_output(ox: u64, oy: u64, color: u64) -> u64:
         return 16
 
     if g_term_out_type == 3:
-        # ls output
+        # ls output — realistic directory listing
         # "bin/"
         draw_label(ox, oy, cyan_c, 200, pack8(98, 105, 110, 47, 0, 0, 0, 0), 4)
         # "etc/"
         draw_label(ox, oy + 16, cyan_c, 200, pack8(101, 116, 99, 47, 0, 0, 0, 0), 4)
         # "home/"
         draw_label(ox, oy + 32, cyan_c, 200, pack8(104, 111, 109, 101, 47, 0, 0, 0), 5)
-        # "kernel.spl"
-        rt_gui_set_text_buf(pack8(107, 101, 114, 110, 101, 108, 46, 115), 0, 0, 0)
-        rt_gui_set_text_buf(pack8(112, 108, 0, 0, 0, 0, 0, 0), 8, 0, 0)
-        rt_gui_draw_text_buf(pack(ox, oy + 48), pack(color, 10), 200, 0)
-        # "README.md"
-        rt_gui_set_text_buf(pack8(82, 69, 65, 68, 77, 69, 46, 109), 0, 0, 0)
-        rt_gui_set_text_buf(pack8(100, 0, 0, 0, 0, 0, 0, 0), 8, 0, 0)
-        rt_gui_draw_text_buf(pack(ox, oy + 64), pack(color, 9), 200, 0)
-        return 80
+        # "boot/"
+        draw_label(ox, oy + 48, cyan_c, 200, pack8(98, 111, 111, 116, 47, 0, 0, 0), 5)
+        # "kernel.elf   91247K"
+        # k=107,e=101,r=114,n=110,e=101,l=108,46=.,e=101
+        rt_gui_set_text_buf(pack8(107, 101, 114, 110, 101, 108, 46, 101), 0, 0, 0)
+        # l=108,f=102, ,32, ,32, 57=9,49=1
+        rt_gui_set_text_buf(pack8(108, 102, 32, 32, 32, 57, 49, 50), 8, 0, 0)
+        # 52=4,55=7,75=K,0,0,0,0,0
+        rt_gui_set_text_buf(pack8(52, 55, 75, 0, 0, 0, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 64), pack(color, 19), 200, 0)
+        # "simpleos.cfg    4K"
+        # s=115,i=105,m=109,p=112,l=108,e=101,o=111,s=115
+        rt_gui_set_text_buf(pack8(115, 105, 109, 112, 108, 101, 111, 115), 0, 0, 0)
+        # .=46,c=99,f=102,g=103, , , ,52=4
+        rt_gui_set_text_buf(pack8(46, 99, 102, 103, 32, 32, 32, 32), 8, 0, 0)
+        # 52=4,75=K,0...
+        rt_gui_set_text_buf(pack8(52, 75, 0, 0, 0, 0, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 80), pack(color, 18), 200, 0)
+        return 96
 
     if g_term_out_type == 4:
         # whoami: "root"
@@ -1993,16 +2245,34 @@ fn render_term_output(ox: u64, oy: u64, color: u64) -> u64:
         return 16
 
     if g_term_out_type == 5:
-        # date: "2026-04-07 12:00"
-        rt_gui_set_text_buf(pack8(50, 48, 50, 54, 45, 48, 52, 45), 0, 0, 0)
-        rt_gui_set_text_buf(pack8(48, 55, 32, 49, 50, 58, 48, 48), 8, 0, 0)
-        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 16), 200, 0)
+        # date: read RTC and render "20YY-MM-DD HH:MM:SS"
+        val rtc_yr = get_rtc_year()
+        val rtc_mo = get_rtc_month()
+        val rtc_dy = get_rtc_day()
+        val rtc_hh = get_rtc_hours()
+        val rtc_mi = get_rtc_minutes()
+        val rtc_ss = get_rtc_seconds()
+        # "20YY-MM-DD" (10 chars)
+        # 50='2', 48='0', YY tens, YY ones, 45='-', MM tens, MM ones, 45='-'
+        rt_gui_set_text_buf(pack8(50, 48, digit_tens(rtc_yr), digit_ones(rtc_yr), 45, digit_tens(rtc_mo), digit_ones(rtc_mo), 45), 0, 0, 0)
+        # DD tens, DD ones, 32=' ', HH tens, HH ones, 58=':', MM tens, MM ones
+        rt_gui_set_text_buf(pack8(digit_tens(rtc_dy), digit_ones(rtc_dy), 32, digit_tens(rtc_hh), digit_ones(rtc_hh), 58, digit_tens(rtc_mi), digit_ones(rtc_mi)), 8, 0, 0)
+        # 58=':', SS tens, SS ones
+        rt_gui_set_text_buf(pack8(58, digit_tens(rtc_ss), digit_ones(rtc_ss), 0, 0, 0, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 19), 200, 0)
         return 16
 
     if g_term_out_type == 6:
-        # uptime: "up 0d 00:01:23"
-        rt_gui_set_text_buf(pack8(117, 112, 32, 48, 100, 32, 48, 48), 0, 0, 0)
-        rt_gui_set_text_buf(pack8(58, 48, 49, 58, 50, 51, 0, 0), 8, 0, 0)
+        # uptime: compute from g_frame_count (~60fps)
+        val total_secs = g_frame_count / 60
+        val up_hours = total_secs / 3600
+        val up_mins = (total_secs / 60) % 60
+        val up_secs = total_secs % 60
+        val up_days = up_hours / 24
+        val up_hrs_rem = up_hours % 24
+        # "up Xd HH:MM:SS" — format: u=117,p=112,32,days_digit,d=100,32,HH,:,MM,:,SS
+        rt_gui_set_text_buf(pack8(117, 112, 32, digit_ones(up_days), 100, 32, digit_tens(up_hrs_rem), digit_ones(up_hrs_rem)), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(58, digit_tens(up_mins), digit_ones(up_mins), 58, digit_tens(up_secs), digit_ones(up_secs), 0, 0), 8, 0, 0)
         rt_gui_draw_text_buf(pack(ox, oy), pack(color, 14), 200, 0)
         return 16
 
@@ -2012,6 +2282,60 @@ fn render_term_output(ox: u64, oy: u64, color: u64) -> u64:
         rt_gui_set_text_buf(pack8(110, 111, 116, 32, 102, 111, 117, 110), 8, 0, 0)
         rt_gui_set_text_buf(pack8(100, 0, 0, 0, 0, 0, 0, 0), 16, 0, 0)
         rt_gui_draw_text_buf(pack(ox, oy), pack(0x00FF4444, 17), 220, 0)
+        return 16
+
+    if g_term_out_type == 8:
+        # ps: show process list
+        # "PID 1  init"
+        rt_gui_set_text_buf(pack8(80, 73, 68, 32, 49, 32, 32, 105), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(110, 105, 116, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 11), 200, 0)
+        # "PID 2  wm"
+        rt_gui_set_text_buf(pack8(80, 73, 68, 32, 50, 32, 32, 119), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(109, 0, 0, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 16), pack(color, 9), 200, 0)
+        # "PID 3  shell"
+        rt_gui_set_text_buf(pack8(80, 73, 68, 32, 51, 32, 32, 115), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(104, 101, 108, 108, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 32), pack(color, 12), 200, 0)
+        return 48
+
+    if g_term_out_type == 9:
+        # free: "Total: 256MB  Used: 67MB  Free: 189MB"
+        rt_gui_set_text_buf(pack8(84, 111, 116, 97, 108, 58, 32, 50), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(53, 54, 77, 66, 32, 32, 85, 115), 8, 0, 0)
+        rt_gui_set_text_buf(pack8(101, 100, 58, 32, 54, 55, 77, 66), 16, 0, 0)
+        rt_gui_set_text_buf(pack8(32, 32, 70, 114, 101, 101, 58, 32), 24, 0, 0)
+        rt_gui_set_text_buf(pack8(49, 56, 57, 77, 66, 0, 0, 0), 32, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 37), 200, 0)
+        return 16
+
+    if g_term_out_type == 10:
+        # hostname: "simpleos"
+        draw_label(ox, oy, green_c, 220, pack8(115, 105, 109, 112, 108, 101, 111, 115), 8)
+        return 16
+
+    if g_term_out_type == 11:
+        # pwd: "/home/root"
+        rt_gui_set_text_buf(pack8(47, 104, 111, 109, 101, 47, 114, 111), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(111, 116, 0, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 10), 200, 0)
+        return 16
+
+    if g_term_out_type == 12:
+        # echo: render saved echo buffer
+        val words_needed = (g_echo_len + 7) / 8
+        if words_needed > 0:
+            rt_gui_set_text_buf(g_echo_buf_0, 0, 0, 0)
+        if words_needed > 1:
+            rt_gui_set_text_buf(g_echo_buf_1, 8, 0, 0)
+        if words_needed > 2:
+            rt_gui_set_text_buf(g_echo_buf_2, 16, 0, 0)
+        if words_needed > 3:
+            rt_gui_set_text_buf(g_echo_buf_3, 24, 0, 0)
+        if words_needed > 4:
+            rt_gui_set_text_buf(g_echo_buf_4, 32, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, g_echo_len), 200, 0)
         return 16
 
     return 0
@@ -2202,7 +2526,9 @@ fn browser_navigate_url():
             if ch6 == 115: browser_navigate(2)   # "about:sysinfo" (s=115)
             else:
                 if ch6 == 97: browser_navigate(3) # "about:about" (a=97)
-                else: browser_navigate(0)         # default to home
+                else:
+                    if ch6 == 110: browser_navigate(4) # "about:network" (n=110)
+                    else: browser_navigate(0)         # default to home
     else:
         browser_navigate(0)  # Unknown URL -> home
 
@@ -2232,6 +2558,8 @@ fn draw_browser_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
         draw_page_sysinfo(cx, cy, cw, ch, theme)
     if g_browser_page == 3:
         draw_page_about(cx, cy, cw, ch, theme)
+    if g_browser_page == 4:
+        draw_page_network(cx, cy, cw, ch, theme)
 
 fn draw_page_home(x: u64, y: u64, w: u64, h: u64, theme: u64):
     """Render the browser home page -- centered logo, search bar, quick links."""
@@ -2499,6 +2827,81 @@ fn draw_page_about(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label(x + 20, y + 140, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
     # "o Home" = 111,32,72,111,109,101
     draw_label(x + 84, y + 140, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+
+fn draw_page_network(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render the network status page (about:network)."""
+    val text_color = text_c(theme)
+    val dim_color = text_sec(theme)
+    val heading_color = text_color
+    val red: u64 = 0x00FF3B30
+
+    # Title: "Network " = 78,101,116,119,111,114,107,32
+    draw_label_bold(x + 10, y + 10, heading_color, 240, pack8(78, 101, 116, 119, 111, 114, 107, 32), 8)
+    # "Status" = 83,116,97,116,117,115
+    draw_label_bold(x + 74, y + 10, heading_color, 240, pack8(83, 116, 97, 116, 117, 115, 0, 0), 6)
+    blend(x + 10, y + 28, w - 20, 1, dim_color, 40)
+
+    # Interface status
+    val sy = y + 40
+    # "Interfac" = 73,110,116,101,114,102,97,99
+    draw_label(x + 20, sy, text_color, 180, pack8(73, 110, 116, 101, 114, 102, 97, 99), 8)
+    # "e: eth0" = 101,58,32,101,116,104,48
+    draw_label(x + 84, sy, text_color, 180, pack8(101, 58, 32, 101, 116, 104, 48, 0), 7)
+
+    # Status indicator (red circle = disconnected)
+    circle(x + 20, sy + 22, 8, red, 200)
+    # "Status: " = 83,116,97,116,117,115,58,32
+    draw_label(x + 34, sy + 20, red, 210, pack8(83, 116, 97, 116, 117, 115, 58, 32), 8)
+    # "Not conn" = 78,111,116,32,99,111,110,110
+    draw_label(x + 98, sy + 20, red, 210, pack8(78, 111, 116, 32, 99, 111, 110, 110), 8)
+    # "ected" = 101,99,116,101,100
+    draw_label(x + 162, sy + 20, red, 210, pack8(101, 99, 116, 101, 100, 0, 0, 0), 5)
+
+    # "Driver: " = 68,114,105,118,101,114,58,32
+    draw_label(x + 20, sy + 42, text_color, 180, pack8(68, 114, 105, 118, 101, 114, 58, 32), 8)
+    # "VirtIO-n" = 86,105,114,116,73,79,45,110
+    draw_label(x + 84, sy + 42, text_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8)
+    # "et" = 101,116
+    draw_label(x + 148, sy + 42, text_color, 180, pack8(101, 116, 0, 0, 0, 0, 0, 0), 2)
+
+    # "MAC: 52:" = 77,65,67,58,32,53,50,58
+    draw_label(x + 20, sy + 62, dim_color, 160, pack8(77, 65, 67, 58, 32, 53, 50, 58), 8)
+    # "54:00:12" = 53,52,58,48,48,58,49,50
+    draw_label(x + 84, sy + 62, dim_color, 160, pack8(53, 52, 58, 48, 48, 58, 49, 50), 8)
+    # ":34:56" = 58,51,52,58,53,54
+    draw_label(x + 148, sy + 62, dim_color, 160, pack8(58, 51, 52, 58, 53, 54, 0, 0), 6)
+
+    # Note about networking
+    val ny = sy + 92
+    # "To enabl" = 84,111,32,101,110,97,98,108
+    draw_label_bold(x + 10, ny, heading_color, 200, pack8(84, 111, 32, 101, 110, 97, 98, 108), 8)
+    # "e networ" = 101,32,110,101,116,119,111,114
+    draw_label_bold(x + 74, ny, heading_color, 200, pack8(101, 32, 110, 101, 116, 119, 111, 114), 8)
+    # "king:" = 107,105,110,103,58
+    draw_label_bold(x + 138, ny, heading_color, 200, pack8(107, 105, 110, 103, 58, 0, 0, 0), 5)
+
+    # "Add -net" = 65,100,100,32,45,110,101,116
+    draw_label(x + 20, ny + 20, text_color, 180, pack8(65, 100, 100, 32, 45, 110, 101, 116), 8)
+    # "dev user" = 100,101,118,32,117,115,101,114
+    draw_label(x + 84, ny + 20, text_color, 180, pack8(100, 101, 118, 32, 117, 115, 101, 114), 8)
+    # " to QEMU" = 32,116,111,32,81,69,77,85
+    draw_label(x + 148, ny + 20, text_color, 180, pack8(32, 116, 111, 32, 81, 69, 77, 85), 8)
+
+    # Packet counters
+    val py = ny + 50
+    # "Packets" = 80,97,99,107,101,116,115
+    draw_label_bold(x + 10, py, heading_color, 200, pack8(80, 97, 99, 107, 101, 116, 115, 0), 7)
+    # "TX: 0  R" = 84,88,58,32,48,32,32,82
+    draw_label(x + 20, py + 20, dim_color, 160, pack8(84, 88, 58, 32, 48, 32, 32, 82), 8)
+    # "X: 0  Dr" = 88,58,32,48,32,32,68,114
+    draw_label(x + 84, py + 20, dim_color, 160, pack8(88, 58, 32, 48, 32, 32, 68, 114), 8)
+    # "opped: 0" = 111,112,112,101,100,58,32,48
+    draw_label(x + 148, py + 20, dim_color, 160, pack8(111, 112, 112, 101, 100, 58, 32, 48), 8)
+
+    # Back link: "< Back t" = 60,32,66,97,99,107,32,116
+    draw_label(x + 20, py + 50, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    # "o Home" = 111,32,72,111,109,101
+    draw_label(x + 84, py + 50, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
 
 # ===========================================================================
 # Window Title Drawing
@@ -2834,8 +3237,8 @@ fn spl_start():
                 if scancode == 0x02: wm_shortcut = 2  # 1 always works
                 if scancode == 0x03: wm_shortcut = 3  # 2 always works
                 if scancode == 0x04: wm_shortcut = 4  # 3 always works
-                # T/Q/M/W/R only work as shortcuts when NOT typing in terminal
-                if g_term_input_active == 0:
+                # T/Q/M/W/R only work as shortcuts when NOT typing in terminal or editor
+                if g_term_input_active == 0 and g_ed_editing == 0:
                     if scancode == 0x14: wm_shortcut = 5  # T = theme
                     if scancode == 0x10: wm_shortcut = 6  # Q = quit
                     if scancode == 0x32: wm_shortcut = 7  # M = minimize
@@ -2916,6 +3319,11 @@ fn spl_start():
                             handle_terminal_enter()
                             key_handled = 1
                             needs_redraw = 1
+                        if active_win == 1 and g_ed_editing == 1:
+                            # Enter exits editing mode
+                            g_ed_editing = 0
+                            key_handled = 1
+                            needs_redraw = 1
                         if active_win == 2 and g_browser_input_active == 1:
                             browser_navigate_url()
                             g_browser_input_active = 0
@@ -2926,6 +3334,13 @@ fn spl_start():
                             handle_terminal_backspace()
                             key_handled = 1
                             needs_redraw = 1
+                        if active_win == 1 and g_ed_editing == 1:
+                            if g_ed_buf_len > 0:
+                                g_ed_buf_len = g_ed_buf_len - 1
+                                ed_clear_char(g_ed_buf_len)
+                                g_editor_cursor_x = g_ed_buf_len
+                            key_handled = 1
+                            needs_redraw = 1
                         if active_win == 2 and g_browser_input_active == 1:
                             if g_browser_url_len > 0:
                                 g_browser_url_len = g_browser_url_len - 1
@@ -2933,6 +3348,10 @@ fn spl_start():
                             key_handled = 1
                             needs_redraw = 1
                     if scancode == 0x01:  # Escape
+                        if active_win == 1 and g_ed_editing == 1:
+                            g_ed_editing = 0
+                            key_handled = 1
+                            needs_redraw = 1
                         if active_win == 2:
                             g_browser_input_active = 0
                             key_handled = 1
@@ -2943,6 +3362,14 @@ fn spl_start():
                             val ch = scancode_to_ascii(scancode)
                             if ch != 0:
                                 handle_terminal_char(ch)
+                                key_handled = 1
+                                needs_redraw = 1
+                        if active_win == 1 and g_ed_editing == 1:
+                            val ch = scancode_to_ascii(scancode)
+                            if ch != 0 and g_ed_buf_len < 40:
+                                ed_set_char(g_ed_buf_len, ch)
+                                g_ed_buf_len = g_ed_buf_len + 1
+                                g_editor_cursor_x = g_ed_buf_len
                                 key_handled = 1
                                 needs_redraw = 1
                         if active_win == 2 and g_browser_input_active == 1:
@@ -3123,6 +3550,10 @@ fn spl_start():
 
                     needs_redraw = 1
 
+        # Update cursor shape based on mouse position
+        if g_mouse_initialized == 1:
+            update_cursor_shape()
+
         # Update focus animation
         if animating == 1:
             val elapsed = anim_frame - anim_start
@@ -3173,6 +3604,7 @@ fn spl_start():
             idle_count = 0
 
         anim_frame = anim_frame + 1
+        g_frame_count = g_frame_count + 1
 
         # Throttle: simple busy-wait to avoid 100% CPU spin
         # ~60fps: waste some cycles between frames when idle

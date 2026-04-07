@@ -3238,7 +3238,7 @@ static void fe_frombytes(fe25519 *h, const uint8_t s[32])
     h->v[1] = (int64_t)(((lo >> 51) | (mid1 << 13)) & (uint64_t)FE_MASK51);
     h->v[2] = (int64_t)(((mid1 >> 38) | (mid2 << 26)) & (uint64_t)FE_MASK51);
     h->v[3] = (int64_t)(((mid2 >> 25) | (hi << 39)) & (uint64_t)FE_MASK51);
-    h->v[4] = (int64_t)((hi >> 12) & 0x7FFFFFFFFF);  /* 39 bits max (255-4*51=51, but top bit is sign) */
+    h->v[4] = (int64_t)((hi >> 12) & (uint64_t)FE_MASK51);
 }
 
 static void fe_tobytes(uint8_t s[32], const fe25519 *f)
@@ -3436,20 +3436,24 @@ static void ge_p3_to_cached(ge_cached *r, const ge_p3 *p)
     fe_mul(&r->T2d, &p->T, &_ed_2d);
 }
 
-/* Doubling: p2 -> p1p1 (ref10 ge_p2_dbl) */
+/* Doubling: p2 -> p1p1 (ref10 ge_p2_dbl)
+ * Uses local copies to avoid any aliasing issues between r and p. */
 static void ge_p2_dbl(ge_p1p1 *r, const ge_p2 *p)
 {
-    fe25519 t0;
-    fe_sq(&r->X, &p->X);
-    fe_sq(&r->Z, &p->Y);
-    fe_sq(&r->T, &p->Z);
-    fe_add(&r->T, &r->T, &r->T);
+    fe25519 A, B, C, t0;
+    fe_sq(&A, &p->X);              /* A = X^2 */
+    fe_sq(&B, &p->Y);              /* B = Y^2 */
+    fe_sq(&C, &p->Z);
+    fe_add(&C, &C, &C);            /* C = 2*Z^2 */
     fe_add(&t0, &p->X, &p->Y);
-    fe_sq(&t0, &t0);
-    fe_add(&r->Y, &r->Z, &r->X);
-    fe_sub(&r->Z, &r->Z, &r->X);
-    fe_sub(&r->X, &t0, &r->Y);
-    fe_sub(&r->T, &r->T, &r->Z);
+    fe_sq(&t0, &t0);               /* t0 = (X+Y)^2 */
+    fe25519 ApB, BmA;
+    fe_add(&ApB, &B, &A);          /* A+B */
+    fe_sub(&BmA, &B, &A);          /* B-A */
+    fe_sub(&r->X, &t0, &ApB);      /* E = (X+Y)^2 - (A+B) = 2XY */
+    fe_copy(&r->Y, &ApB);          /* A+B */
+    fe_copy(&r->Z, &BmA);          /* B-A */
+    fe_sub(&r->T, &C, &BmA);       /* 2Z^2 - (B-A) */
 }
 
 /* Doubling: p3 -> p1p1 */
@@ -4012,24 +4016,108 @@ int64_t rt_ed25519_self_test(void)
     };
 
     /* 1. Generate keypair */
+    serial_puts("[ed25519-c] step 1: keypair...\r\n");
+    /* Debug: minimal fe roundtrip test */
+    {
+        _ed25519_init_consts();
+        /* Test: encode 7, decode, check we get 7 back */
+        uint8_t seven[32] = {0}; seven[0] = 7;
+        fe25519 a; fe_frombytes(&a, seven);
+        uint8_t out[32]; fe_tobytes(out, &a);
+        serial_puts("[ed25519-c] fe roundtrip(7)=");
+        serial_puthex(out[0]); serial_puts(" exp=07\r\n");
+        /* Test: 7*7=49 mod p */
+        fe25519 sq; fe_sq(&sq, &a);
+        fe_tobytes(out, &sq);
+        serial_puts("[ed25519-c] fe 7^2=");
+        serial_puthex(out[0]); serial_puts(" exp=31\r\n");
+        /* Test: base point decode → encode roundtrip */
+        static const uint8_t base_enc[32] = {
+            0x58,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+            0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+            0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+            0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66
+        };
+        ge_p3 B;
+        ge_frombytes_negate_vartime(&B, base_enc);
+        fe_neg(&B.X, &B.X); fe_neg(&B.T, &B.T); /* undo negate */
+        uint8_t B_re[32]; ge_tobytes(B_re, &B);
+        serial_puts("[ed25519-c] B roundtrip=");
+        serial_puthex(B_re[0]); serial_puthex(B_re[1]);
+        serial_puthex(B_re[30]); serial_puthex(B_re[31]);
+        serial_puts(" exp=58666666\r\n");
+        /* Test: 2*B via dbl */
+        ge_p1p1 dbl; ge_p3 B2;
+        ge_p3_dbl(&dbl, &B); ge_p1p1_to_p3(&B2, &dbl);
+        uint8_t enc2B[32]; ge_tobytes(enc2B, &B2);
+        serial_puts("[ed25519-c] 2B=");
+        for(int k=0;k<4;k++) serial_puthex(enc2B[k]);
+        serial_puts(" exp=c9a3f86a\r\n");
+        /* Test: 3*B via dbl+add */
+        ge_p1p1 t3; ge_cached Bc; ge_p3 B3;
+        ge_p3_to_cached(&Bc, &B);
+        ge_add_cached(&t3, &B2, &Bc);
+        ge_p1p1_to_p3(&B3, &t3);
+        uint8_t enc3B[32]; ge_tobytes(enc3B, &B3);
+        serial_puts("[ed25519-c] 3B=");
+        for(int k=0;k<4;k++) serial_puthex(enc3B[k]);
+        serial_puts(" exp=d4b4f502\r\n");
+        /* Test: scalar mult [1]*B should give B */
+        uint8_t one[32] = {0}; one[0] = 1;
+        ge_p3 R1; ge_scalarmult_base(&R1, one);
+        uint8_t enc1B[32]; ge_tobytes(enc1B, &R1);
+        serial_puts("[ed25519-c] [1]*B=");
+        for(int k=0;k<4;k++) serial_puthex(enc1B[k]);
+        serial_puts(" exp=58666666\r\n");
+    }
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);
-    for (int i = 0; i < 32; i++)
-        if (pk[i] != expected_pk[i]) return -1;
+    for (int i = 0; i < 32; i++) {
+        if (pk[i] != expected_pk[i]) {
+            serial_puts("[ed25519-c] FAIL: pk mismatch at byte ");
+            serial_put_dec(i);
+            serial_puts(" got="); serial_puthex(pk[i]);
+            serial_puts(" exp="); serial_puthex(expected_pk[i]);
+            serial_puts("\r\n");
+            return -1;
+        }
+    }
+    serial_puts("[ed25519-c] step 1: keypair OK\r\n");
 
     /* 2. Sign empty message */
+    serial_puts("[ed25519-c] step 2: sign...\r\n");
     uint8_t sig[64];
     _ed25519_sign((const uint8_t *)"", 0, sk, sig);
-    for (int i = 0; i < 64; i++)
-        if (sig[i] != expected_sig[i]) return -1;
+    for (int i = 0; i < 64; i++) {
+        if (sig[i] != expected_sig[i]) {
+            serial_puts("[ed25519-c] FAIL: sig mismatch at byte ");
+            serial_put_dec(i);
+            serial_puts(" got="); serial_puthex(sig[i]);
+            serial_puts(" exp="); serial_puthex(expected_sig[i]);
+            serial_puts("\r\n");
+            return -1;
+        }
+    }
+    serial_puts("[ed25519-c] step 2: sign OK\r\n");
 
     /* 3. Verify valid signature */
-    if (_ed25519_verify((const uint8_t *)"", 0, pk, sig) != 0) return -1;
+    serial_puts("[ed25519-c] step 3: verify...\r\n");
+    if (_ed25519_verify((const uint8_t *)"", 0, pk, sig) != 0) {
+        serial_puts("[ed25519-c] FAIL: verify rejected valid sig\r\n");
+        return -1;
+    }
+    serial_puts("[ed25519-c] step 3: verify OK\r\n");
 
     /* 4. Verify tampered message fails */
+    serial_puts("[ed25519-c] step 4: verify-reject...\r\n");
     uint8_t bad_msg[1] = {0x42};
-    if (_ed25519_verify(bad_msg, 1, pk, sig) == 0) return -1;
+    if (_ed25519_verify(bad_msg, 1, pk, sig) == 0) {
+        serial_puts("[ed25519-c] FAIL: verify accepted bad msg\r\n");
+        return -1;
+    }
+    serial_puts("[ed25519-c] step 4: verify-reject OK\r\n");
 
+    serial_puts("[ed25519-c] ALL PASSED\r\n");
     return 0; /* All tests passed */
 }
 
