@@ -952,4 +952,10 @@ S1(rt_invlpg) S0(rt_rdtsc)
 S1(rt_lgdt) S1(rt_lidt) S1(rt_ltr)
 S1(rt_read_cr3) S1(rt_write_cr3) S1(rt_read_cr2)
 
+/* ===================================================================
+ * Crypto — shared portable implementation
+ * =================================================================== */
+#define RV_INT int32_t
+#include "../../shared/crypto_common.h"
+
 /* End of arm32 baremetal_stubs.c */

@@ -1313,3 +1313,13 @@ STUB2(ffi_regex_is_match)
 STUB2(ffi_regex_find)
 STUB2(ffi_regex_find_all)
 STUB2(ffi_regex_replace)
+
+/* ===================================================================
+ * Crypto — shared portable implementation
+ * =================================================================== */
+#define RV_INT int32_t
+#define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->header.type)
+#define CRYPTO_ARRAY_ITEMS(arr) ((arr)->data)
+#include "../../shared/crypto_common.h"
+
+/* End of riscv32 baremetal_stubs.c */

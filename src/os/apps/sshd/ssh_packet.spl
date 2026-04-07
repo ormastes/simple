@@ -87,7 +87,7 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
     var start: u64 = offset + 4
     if start + str_len > data.len():
         return Err("ssh_get_string: truncated data")
-    var result: [u8] = []
+    var result: [u8] = rt_array_new_with_cap(str_len.to_i64())
     var i: u64 = 0
     while i < str_len:
         result.push(data[start + i])
@@ -96,6 +96,7 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
 
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_string_to_byte_array(s: text) -> [u8]
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
 fn ssh_get_text(data: [u8], offset: u64) -> Result<SshTextResult, text>:
     """Read SSH string as text at offset. Returns SshTextResult(value, next_offset).
@@ -196,8 +197,8 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
         return Err("ssh_packet_read: padding exceeds packet")
     var payload_length: u64 = packet_length - padding_length - 1
 
-    # Extract payload
-    var payload: [u8] = []
+    # Extract payload (pre-allocate to avoid push growth bug)
+    var payload: [u8] = rt_array_new_with_cap(payload_length.to_i64())
     var i: u64 = 0
     while i < payload_length:
         payload.push(data[offset + 5 + i])
@@ -228,7 +229,10 @@ fn ssh_packet_build(payload: [u8], sequence: u32) -> [u8]:
 
     var packet_length: u64 = 1 + payload_len + padding_len
 
-    var buf: [u8] = []
+    # Pre-allocate buffer with enough capacity to avoid push reallocation bug.
+    # Total bytes = 4 (length) + 1 (pad_len) + payload_len + padding_len
+    var total_bytes: u64 = 4 + 1 + payload_len + padding_len
+    var buf: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
 
     # 4-byte length (big-endian)
     ssh_put_u32(buf, packet_length.to_u32())

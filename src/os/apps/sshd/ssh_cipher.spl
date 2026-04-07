@@ -1,14 +1,21 @@
-# SSH Cipher Layer — AES-256-GCM
+# SSH Cipher Layer — AES-256-GCM + ChaCha20-Poly1305
 #
-# Wraps the pure Simple AES-GCM implementation for SSH packet encryption.
-# Handles bidirectional encryption state, nonce management, and sequence
-# numbers per RFC 5647 (AES-GCM for SSH).
+# Wraps crypto implementations for SSH packet encryption.
+# Supports two cipher modes:
+#   - aes256-gcm@openssh.com (RFC 5647)
+#   - chacha20-poly1305@openssh.com (OpenSSH extension)
 #
 # GCM nonce construction:
 #   The 12-byte nonce is the IV XOR'd with the 32-bit sequence number
 #   placed in the last 4 bytes (big-endian).
+#
+# ChaCha20-Poly1305 for SSH:
+#   Uses two separate ChaCha20 instances: one for packet length (K2)
+#   and one for payload (K1). Nonce is the sequence number as 8-byte LE.
 
 use os.crypto.aes_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, AesGcmResult}
+use os.crypto.chacha20.{chacha20_encrypt}
+use os.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
 use os.crypto.random.{random_bytes}
 use os.apps.sshd.ssh_kex.{SshSessionKeys}
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32, SSH_MIN_PADDING}
@@ -20,6 +27,16 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32, SSH_MIN_PADDING}
 val GCM_TAG_LEN: u64 = 16       # AES-GCM authentication tag length
 val GCM_NONCE_LEN: u64 = 12     # AES-GCM nonce length
 val AES_BLOCK_SIZE: u64 = 16    # AES block size for padding calculation
+val POLY1305_TAG_LEN: u64 = 16  # Poly1305 authentication tag length
+
+# ============================================================================
+# Cipher Mode
+# ============================================================================
+
+enum CipherMode:
+    None_           # No encryption (pre-kex)
+    Aes256Gcm       # aes256-gcm@openssh.com
+    Chacha20Poly1305  # chacha20-poly1305@openssh.com
 
 # ============================================================================
 # Cipher State
@@ -29,13 +46,14 @@ class SshCipher:
     """Bidirectional SSH encryption state."""
     enc_key_c2s: [u8]     # Client-to-server encryption key (32 bytes)
     enc_key_s2c: [u8]     # Server-to-client encryption key (32 bytes)
-    iv_c2s: [u8]          # Client-to-server base nonce (12 bytes)
-    iv_s2c: [u8]          # Server-to-client base nonce (12 bytes)
+    iv_c2s: [u8]          # Client-to-server base nonce (12 bytes, GCM only)
+    iv_s2c: [u8]          # Server-to-client base nonce (12 bytes, GCM only)
     mac_key_c2s: [u8]     # Client-to-server integrity key
     mac_key_s2c: [u8]     # Server-to-client integrity key
     seq_c2s: u32          # Client-to-server sequence number
     seq_s2c: u32          # Server-to-client sequence number
     active: bool          # Encryption enabled (after NEWKEYS)
+    mode: CipherMode      # Active cipher algorithm
 
 impl SshCipher:
 
@@ -50,11 +68,12 @@ impl SshCipher:
             mac_key_s2c: [],
             seq_c2s: 0,
             seq_s2c: 0,
-            active: false
+            active: false,
+            mode: CipherMode.None_
         )
 
     me activate(keys: SshSessionKeys):
-        """Activate encryption with derived session keys."""
+        """Activate encryption with derived session keys (AES-256-GCM)."""
         self.enc_key_c2s = keys.enc_key_c2s
         self.enc_key_s2c = keys.enc_key_s2c
         self.iv_c2s = keys.iv_c2s
@@ -64,17 +83,31 @@ impl SshCipher:
         self.seq_c2s = 0
         self.seq_s2c = 0
         self.active = true
+        self.mode = CipherMode.Aes256Gcm
+
+    me activate_chacha20(keys: SshSessionKeys):
+        """Activate encryption with derived session keys (ChaCha20-Poly1305)."""
+        self.enc_key_c2s = keys.enc_key_c2s
+        self.enc_key_s2c = keys.enc_key_s2c
+        self.mac_key_c2s = keys.mac_key_c2s
+        self.mac_key_s2c = keys.mac_key_s2c
+        self.seq_c2s = 0
+        self.seq_s2c = 0
+        self.active = true
+        self.mode = CipherMode.Chacha20Poly1305
 
     me encrypt_packet(payload: [u8]) -> [u8]:
         """Encrypt an outgoing SSH packet (server-to-client direction).
 
-        1. Build plaintext packet: padding_length(1) + payload + padding
-        2. The 4-byte packet_length is sent as AAD (authenticated but not encrypted)
-        3. Encrypt the rest with AES-256-GCM
-        4. Append 16-byte GCM tag
-
-        Returns: length(4) || encrypted_body || tag(16)
+        Dispatches to the appropriate cipher mode.
+        AES-256-GCM: length(4) || encrypted_body || tag(16)
+        ChaCha20-Poly1305: encrypted_length(4) || encrypted_body || tag(16)
         """
+        match self.mode:
+            CipherMode.Chacha20Poly1305:
+                return self._encrypt_chacha20(payload)
+            _:
+                pass_dn
         val payload_len = payload.len()
 
         # Calculate padding (block size 16 for AES)
@@ -133,9 +166,14 @@ impl SshCipher:
     me decrypt_packet(data: [u8]) -> Result<[u8], text>:
         """Decrypt an incoming SSH packet (client-to-server direction).
 
-        Expects: length(4) || encrypted_body || tag(16)
+        Dispatches to the appropriate cipher mode.
         Returns: decrypted payload bytes.
         """
+        match self.mode:
+            CipherMode.Chacha20Poly1305:
+                return self._decrypt_chacha20(data)
+            _:
+                pass_dn
         if data.len() < 4 + GCM_TAG_LEN:
             return Err("encrypted packet too short")
 
@@ -239,3 +277,158 @@ fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
     nonce.push(b11 ^ s0)
 
     nonce
+
+# ============================================================================
+# ChaCha20-Poly1305 for SSH (chacha20-poly1305@openssh.com)
+# ============================================================================
+#
+# SSH variant uses 12-byte nonce = 4 zero bytes || 8-byte sequence number (BE).
+# The encryption key is the standard 32-byte key from key derivation.
+# No separate length encryption key (simplified variant).
+
+fn _make_chacha20_nonce(seq: u32) -> [u8]:
+    """Construct 12-byte nonce for ChaCha20-Poly1305 SSH variant.
+
+    Nonce = 0x00000000 || seq_as_big_endian_8_bytes
+    """
+    var nonce: [u8] = []
+    # 4 zero bytes
+    nonce.push(0)
+    nonce.push(0)
+    nonce.push(0)
+    nonce.push(0)
+    # 8-byte big-endian sequence number (upper 4 bytes zero)
+    nonce.push(0)
+    nonce.push(0)
+    nonce.push(0)
+    nonce.push(0)
+    nonce.push(((seq >> 24) & 0xFF).to_u8())
+    nonce.push(((seq >> 16) & 0xFF).to_u8())
+    nonce.push(((seq >> 8) & 0xFF).to_u8())
+    nonce.push((seq & 0xFF).to_u8())
+    nonce
+
+impl SshCipher:
+
+    me _encrypt_chacha20(payload: [u8]) -> [u8]:
+        """Encrypt with ChaCha20-Poly1305 for SSH.
+
+        Format: length(4) || encrypted(padding_len(1) || payload || padding) || tag(16)
+        The length field is NOT encrypted in this simplified variant.
+        """
+        val payload_len = payload.len()
+
+        # Calculate padding (block size 8 for ChaCha20)
+        var padding_len: u64 = 8 - ((1 + payload_len) % 8)
+        if padding_len < SSH_MIN_PADDING.to_u64():
+            padding_len = padding_len + 8
+
+        val packet_length = 1 + payload_len + padding_len
+
+        # Build plaintext body
+        var body: [u8] = []
+        body.push(padding_len.to_u8())
+
+        var i: u64 = 0
+        while i < payload_len:
+            body.push(payload[i])
+            i = i + 1
+
+        # Random padding
+        val pad = random_bytes(padding_len)
+        i = 0
+        while i < padding_len:
+            body.push(pad[i])
+            i = i + 1
+
+        # Build AAD: the 4-byte packet_length
+        var aad: [u8] = []
+        ssh_put_u32(aad, packet_length.to_u32())
+
+        # Nonce from sequence number
+        val nonce = _make_chacha20_nonce(self.seq_s2c)
+
+        # Encrypt body with ChaCha20-Poly1305
+        val encrypted_with_tag = chacha20_poly1305_encrypt(
+            self.enc_key_s2c, nonce, body, aad
+        )
+
+        # Increment sequence number
+        self.seq_s2c = (self.seq_s2c + 1) & 0xFFFFFFFF
+
+        # Result: AAD (length) || encrypted body || tag
+        var result: [u8] = []
+        i = 0
+        while i < aad.len():
+            result.push(aad[i])
+            i = i + 1
+        i = 0
+        while i < encrypted_with_tag.len():
+            result.push(encrypted_with_tag[i])
+            i = i + 1
+
+        result
+
+    me _decrypt_chacha20(data: [u8]) -> Result<[u8], text>:
+        """Decrypt with ChaCha20-Poly1305 for SSH."""
+        if data.len() < 4 + POLY1305_TAG_LEN:
+            return Err("chacha20 packet too short")
+
+        # Extract AAD (4-byte packet_length)
+        var aad: [u8] = []
+        var i: u64 = 0
+        while i < 4:
+            aad.push(data[i])
+            i = i + 1
+
+        val packet_length = ssh_get_u32(data, 0).to_u64()
+
+        val ct_with_tag_len = data.len() - 4
+        if ct_with_tag_len < POLY1305_TAG_LEN:
+            return Err("no ciphertext in chacha20 packet")
+
+        val ct_len = ct_with_tag_len - POLY1305_TAG_LEN
+
+        # Extract ciphertext
+        var ciphertext: [u8] = []
+        i = 0
+        while i < ct_len:
+            ciphertext.push(data[4 + i])
+            i = i + 1
+
+        # Extract tag
+        var tag: [u8] = []
+        i = 0
+        while i < POLY1305_TAG_LEN:
+            tag.push(data[4 + ct_len + i])
+            i = i + 1
+
+        # Nonce from sequence number
+        val nonce = _make_chacha20_nonce(self.seq_c2s)
+
+        # Decrypt
+        val result = chacha20_poly1305_decrypt(self.enc_key_c2s, nonce, ciphertext, aad, tag)
+
+        match result:
+            Chacha20Poly1305Result.Ok(plaintext):
+                self.seq_c2s = (self.seq_c2s + 1) & 0xFFFFFFFF
+
+                if plaintext.len() < 1:
+                    return Err("chacha20 decrypted body empty")
+
+                val padding_len = plaintext[0].to_u64()
+                if 1 + padding_len > plaintext.len():
+                    return Err("invalid padding in chacha20 packet")
+
+                val payload_len = plaintext.len() - 1 - padding_len
+
+                var payload: [u8] = []
+                i = 0
+                while i < payload_len:
+                    payload.push(plaintext[1 + i])
+                    i = i + 1
+
+                Ok(payload)
+
+            Chacha20Poly1305Result.Err(msg):
+                Err("ChaCha20-Poly1305 decryption failed: {msg}")

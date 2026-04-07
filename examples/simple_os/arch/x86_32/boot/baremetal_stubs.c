@@ -1099,4 +1099,10 @@ RuntimeValue rt_write_cr3(RuntimeValue)
 RuntimeValue rt_read_cr2(RuntimeValue)
     __attribute__((alias("rt_read_cr2_real")));
 
+/* ===================================================================
+ * Crypto — shared portable implementation
+ * =================================================================== */
+#define RV_INT int32_t
+#include "../../shared/crypto_common.h"
+
 /* End of x86_32 baremetal_stubs.c */
