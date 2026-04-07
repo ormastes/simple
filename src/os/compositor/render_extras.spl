@@ -25,38 +25,37 @@ fn gradient_rect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
     val r = if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
 
     # Draw gradient row-by-row with corner masking
-    val r1_r: i32 = ((color1 >> 16) & 0xFF).to_i32()
-    val r1_g: i32 = ((color1 >> 8) & 0xFF).to_i32()
-    val r1_b: i32 = (color1 & 0xFF).to_i32()
-    val r2_r: i32 = ((color2 >> 16) & 0xFF).to_i32()
-    val r2_g: i32 = ((color2 >> 8) & 0xFF).to_i32()
-    val r2_b: i32 = (color2 & 0xFF).to_i32()
-    val denom = if h > 1: h - 1 else: 1
+    # Uses segment-based blending to avoid .to_i32()/.to_u32() interpreter issues
+    val segs: i32 = 8
+    val seg_h = if h / segs > 0: h / segs else: 1
+    val max_seg = segs - 1
 
-    var row: i32 = 0
-    while row < h:
-        # Interpolate color for this row
-        val cr = (r1_r + (r2_r - r1_r) * row / denom).to_u32()
-        val cg = (r1_g + (r2_g - r1_g) * row / denom).to_u32()
-        val cb = (r1_b + (r2_b - r1_b) * row / denom).to_u32()
-        val color = 0xFF000000 | (cr << 16) | (cg << 8) | cb
+    var seg: i32 = 0
+    while seg < segs:
+        val seg_start = seg_h * seg
+        val seg_end = if seg == max_seg: h else: seg_h * (seg + 1)
+        val t: u8 = if max_seg > 0: 255 * seg / max_seg else: 0
 
-        # Calculate horizontal inset for rounded corners
-        var inset: i32 = 0
-        if row < r:
-            # Top corners
-            val dy = r - row
-            inset = r - isqrt(r * r - dy * dy)
-        else if row >= h - r:
-            # Bottom corners
-            val dy = row - (h - r - 1)
-            inset = r - isqrt(r * r - dy * dy)
+        var row: i32 = seg_start
+        while row < seg_end:
+            # Calculate horizontal inset for rounded corners
+            var inset: i32 = 0
+            if row < r:
+                val dy = r - row
+                inset = r - isqrt(r * r - dy * dy)
+            else if row >= h - r:
+                val dy = row - (h - r - 1)
+                inset = r - isqrt(r * r - dy * dy)
 
-        val rx = x + inset
-        val rw = w - inset * 2
-        if rw > 0:
-            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
-        row = row + 1
+            val rx = x + inset
+            val rw = w - inset * 2
+            if rw > 0:
+                # Base color1 then overlay color2 with increasing opacity
+                backend.blend_rect(rx, y + row, rw, 1, color1, alpha)
+                if t > 0:
+                    backend.blend_rect(rx, y + row, rw, 1, color2, t)
+            row = row + 1
+        seg = seg + 1
 
 # ============================================================================
 # Desktop Wallpaper

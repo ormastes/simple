@@ -109,27 +109,26 @@ fn gradient_h(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
               color1: u32, color2: u32):
     """Draw a horizontal gradient from color1 (left) to color2 (right).
 
-    Renders column-by-column with linear interpolation between colors.
+    Uses 8-segment approximation with alpha blending to avoid .to_i32()/.to_u32()
+    interpreter limitations. Paints color1 then overlays color2 with increasing alpha.
     """
     if w <= 0 or h <= 0:
         return
 
-    val r1: i32 = ((color1 >> 16) & 0xFF).to_i32()
-    val g1: i32 = ((color1 >> 8) & 0xFF).to_i32()
-    val b1: i32 = (color1 & 0xFF).to_i32()
-    val r2: i32 = ((color2 >> 16) & 0xFF).to_i32()
-    val g2: i32 = ((color2 >> 8) & 0xFF).to_i32()
-    val b2: i32 = (color2 & 0xFF).to_i32()
-    val denom = if w > 1: w - 1 else: 1
-
-    var col: i32 = 0
-    while col < w:
-        val cr = (r1 + (r2 - r1) * col / denom).to_u32()
-        val cg = (g1 + (g2 - g1) * col / denom).to_u32()
-        val cb = (b1 + (b2 - b1) * col / denom).to_u32()
-        val color = 0xFF000000 | (cr << 16) | (cg << 8) | cb
-        backend.fill_rect(x + col, y, 1, h, color)
-        col = col + 1
+    val segs: i32 = 8
+    val seg_w = if w / segs > 0: w / segs else: 1
+    val max_seg = segs - 1
+    var s: i32 = 0
+    while s < segs:
+        val sx = x + seg_w * s
+        val sw = if s == max_seg: w - seg_w * s else: seg_w
+        if sw > 0:
+            # Paint base color1, then overlay color2 with increasing opacity
+            val t: u8 = if max_seg > 0: 255 * s / max_seg else: 0
+            backend.fill_rect(sx, y, sw, h, color1)
+            if t > 0:
+                backend.blend_rect(sx, y, sw, h, color2, t)
+        s = s + 1
 
 # ============================================================================
 # Filled Circle
