@@ -5845,6 +5845,11 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    /* NO tagging here — values arrive in whatever format the compiler sends.
+     * For array literals, the compiler BoxInt's values before push.
+     * For .push(expr), the compiler's wrap_value is a no-op, so values are raw.
+     * The MIR's UnboxInt after IndexGet handles the tagged case.
+     * We keep values as-is for consistency. */
     if (a->len >= a->cap) {
         /* At capacity — grow by allocating a new, larger array and copying.
          * Bump allocator: old memory is leaked (free is no-op), but this
@@ -5879,7 +5884,13 @@ RuntimeValue rt_array_pop(RuntimeValue arr)
     return val;
 }
 
-/* rt_array_get: get element at index */
+/* rt_array_get: get element at index.
+ * Index arrives tagged (MIR BoxInt). DECODE_INT for raw index.
+ * Items may be stored in mixed format (tagged from literals, raw from push).
+ * Return as-is — MIR UnboxInt will decode if needed.
+ * For the Cranelift backend: push stores raw, so items are raw. MIR UnboxInt
+ * does >>3 on raw values which gives wrong results. To fix this, we detect
+ * raw integer items and ENCODE_INT them before returning, so UnboxInt works. */
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
