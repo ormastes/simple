@@ -1530,7 +1530,7 @@ RuntimeValue rt_fat32_file_size(RuntimeValue name_rv)
     }
     uint32_t cluster = 0, size = 0;
     int result = fat32_find_file(name, &cluster, &size);
-    if (result != 0) return ENCODE_INT(-1);
+    if (result != 0) return (RuntimeValue)(-1);
     return ENCODE_INT((int64_t)size);
 }
 
@@ -5134,8 +5134,8 @@ RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_array_first(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
-RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
-RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
+RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
+RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
 RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
@@ -5174,7 +5174,7 @@ RuntimeValue rt_value_compare(RuntimeValue a, RuntimeValue b) {
     /* Simple integer comparison for tagged values */
     int64_t va = (int64_t)a;
     int64_t vb = (int64_t)b;
-    if (va < vb) return ENCODE_INT(-1);
+    if (va < vb) return (RuntimeValue)(-1);
     if (va > vb) return ENCODE_INT(1);
     return ENCODE_INT(0);
 }
@@ -5875,8 +5875,8 @@ RuntimeValue rt_string_index_of(RuntimeValue str, RuntimeValue needle)
 {
     RuntimeString *s = decode_string(str);
     RuntimeString *n = decode_string(needle);
-    if (!s || !n || n->len == 0) return ENCODE_INT(-1);
-    if (n->len > s->len) return ENCODE_INT(-1);
+    if (!s || !n || n->len == 0) return (RuntimeValue)(-1);
+    if (n->len > s->len) return (RuntimeValue)(-1);
     for (uint32_t i = 0; i <= s->len - n->len; i++) {
         uint32_t j;
         for (j = 0; j < n->len; j++) {
@@ -5884,15 +5884,15 @@ RuntimeValue rt_string_index_of(RuntimeValue str, RuntimeValue needle)
         }
         if (j == n->len) return ENCODE_INT((int64_t)i);
     }
-    return ENCODE_INT(-1);
+    return (RuntimeValue)(-1);
 }
 
 RuntimeValue rt_string_last_index_of(RuntimeValue str, RuntimeValue needle)
 {
     RuntimeString *s = decode_string(str);
     RuntimeString *n = decode_string(needle);
-    if (!s || !n || n->len == 0) return ENCODE_INT(-1);
-    if (n->len > s->len) return ENCODE_INT(-1);
+    if (!s || !n || n->len == 0) return (RuntimeValue)(-1);
+    if (n->len > s->len) return (RuntimeValue)(-1);
     for (int64_t i = (int64_t)(s->len - n->len); i >= 0; i--) {
         uint32_t j;
         for (j = 0; j < n->len; j++) {
@@ -5900,7 +5900,7 @@ RuntimeValue rt_string_last_index_of(RuntimeValue str, RuntimeValue needle)
         }
         if (j == n->len) return ENCODE_INT(i);
     }
-    return ENCODE_INT(-1);
+    return (RuntimeValue)(-1);
 }
 
 RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start)
@@ -6229,7 +6229,7 @@ RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b)
     RuntimeString *sa = decode_string(a);
     RuntimeString *sb = decode_string(b);
     if (!sa && !sb) return ENCODE_INT(0);
-    if (!sa) return ENCODE_INT(-1);
+    if (!sa) return (RuntimeValue)(-1);
     if (!sb) return ENCODE_INT(1);
     uint32_t min_len = sa->len < sb->len ? sa->len : sb->len;
     for (uint32_t i = 0; i < min_len; i++) {
@@ -6237,7 +6237,7 @@ RuntimeValue rt_string_compare(RuntimeValue a, RuntimeValue b)
             return ENCODE_INT((int64_t)(unsigned char)sa->data[i]
                             - (int64_t)(unsigned char)sb->data[i]);
     }
-    if (sa->len < sb->len) return ENCODE_INT(-1);
+    if (sa->len < sb->len) return (RuntimeValue)(-1);
     if (sa->len > sb->len) return ENCODE_INT(1);
     return ENCODE_INT(0);
 }
@@ -6712,25 +6712,25 @@ RuntimeValue rt_array_contains(RuntimeValue arr, RuntimeValue val)
 /* rt_array_index_of(arr, val) — return first index or -1 */
 RuntimeValue rt_array_index_of(RuntimeValue arr, RuntimeValue val)
 {
-    if (!IS_HEAP(arr)) return ENCODE_INT(-1);
+    if (!IS_HEAP(arr)) return (RuntimeValue)(-1);
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    if (!a || a->hdr.type != HEAP_ARRAY) return (RuntimeValue)(-1);
     for (uint32_t i = 0; i < a->len; i++) {
         if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i);
     }
-    return ENCODE_INT(-1);
+    return (RuntimeValue)(-1);
 }
 
 /* rt_array_last_index_of(arr, val) */
 RuntimeValue rt_array_last_index_of(RuntimeValue arr, RuntimeValue val)
 {
-    if (!IS_HEAP(arr)) return ENCODE_INT(-1);
+    if (!IS_HEAP(arr)) return (RuntimeValue)(-1);
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
+    if (!a || a->hdr.type != HEAP_ARRAY) return (RuntimeValue)(-1);
     for (int64_t i = (int64_t)a->len - 1; i >= 0; i--) {
         if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i);
     }
-    return ENCODE_INT(-1);
+    return (RuntimeValue)(-1);
 }
 
 /* rt_array_remove(arr, idx) — remove at index, shift down */
@@ -7815,7 +7815,7 @@ RuntimeValue rt_auth_add_user(RuntimeValue uname_rv, RuntimeValue pass_rv)
 {
     RuntimeString *u = decode_string(uname_rv);
     RuntimeString *p = decode_string(pass_rv);
-    if (!u || !p || _auth_db_count >= 16) return ENCODE_INT(-1);
+    if (!u || !p || _auth_db_count >= 16) return (RuntimeValue)(-1);
     uint32_t ulen = u->len < 63 ? u->len : 63;
     uint32_t plen = p->len < 63 ? p->len : 63;
     memcpy(_auth_db[_auth_db_count].username, u->data, ulen);
@@ -7823,49 +7823,47 @@ RuntimeValue rt_auth_add_user(RuntimeValue uname_rv, RuntimeValue pass_rv)
     memcpy(_auth_db[_auth_db_count].password, p->data, plen);
     _auth_db[_auth_db_count].password[plen] = 0;
     _auth_db_count++;
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_auth_check(RuntimeValue uname_rv, RuntimeValue pass_rv)
 {
     RuntimeString *u = decode_string(uname_rv);
     RuntimeString *p = decode_string(pass_rv);
-    if (!u || !p) return ENCODE_INT(0);
+    if (!u || !p) return 0;
     for (int i = 0; i < _auth_db_count; i++) {
         if (strlen(_auth_db[i].username) == u->len &&
             memcmp(_auth_db[i].username, u->data, u->len) == 0 &&
             strlen(_auth_db[i].password) == p->len &&
             memcmp(_auth_db[i].password, p->data, p->len) == 0)
-            return ENCODE_INT(1);
+            return 1;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_auth_reset(void)
 {
     _auth_db_count = 0;
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_auth_find_user(RuntimeValue uname_rv)
 {
     RuntimeString *u = decode_string(uname_rv);
-    if (!u) return ENCODE_INT(0);
+    if (!u) return 0;
     for (int i = 0; i < _auth_db_count; i++) {
         if (strlen(_auth_db[i].username) == u->len &&
             memcmp(_auth_db[i].username, u->data, u->len) == 0)
-            return ENCODE_INT(1);
+            return 1;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_auth_check_key(RuntimeValue uname_rv, RuntimeValue key_blob_rv)
 {
-    /* Key auth not stored in C-side DB — always return 0 (not found).
-       Key blobs are managed on the Simple side via SshUserDb.authenticate_key. */
     (void)uname_rv;
     (void)key_blob_rv;
-    return ENCODE_INT(0);
+    return 0;
 }
 
 #endif /* __x86_64__ || __i386__ */
