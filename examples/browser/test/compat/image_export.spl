@@ -1,0 +1,189 @@
+# PPM Image Export for Browser Rendering Comparison
+#
+# Exports pixel buffers as PPM (Portable Pixmap) image files.
+# PPM is a simple uncompressed format readable by ImageMagick, GIMP,
+# and convertible to PNG for visual comparison with Chrome screenshots.
+#
+# Usage:
+#   val pixels = renderer.render_dom_to_pixels(dom)
+#   export_ppm("output.ppm", pixels.pixel_data, pixels.width, pixels.height)
+#
+# To compare with Chrome:
+#   1. Export Simple rendering as PPM
+#   2. Convert to PNG: `convert output.ppm output.png`
+#   3. Take Chrome screenshot: headless Chrome or Puppeteer
+#   4. Compare with pixelmatch or ImageMagick: `compare -metric RMSE simple.png chrome.png diff.png`
+
+# =========================================================================
+# PPM Export (P6 binary format)
+# =========================================================================
+
+fn export_ppm(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    """Export a pixel buffer as a PPM P6 (binary) file.
+    Pixel format: ARGB u32 (alpha in high byte).
+    PPM format: RGB 24-bit, no alpha.
+    """
+    # Build PPM header
+    var header = "P6\n{width} {height}\n255\n"
+
+    # Build pixel data as raw bytes (RGB, no alpha)
+    var data: [u8] = []
+    for pixel in pixels:
+        val r = ((pixel >> 16) & 0xFF).to_u8()
+        val g = ((pixel >> 8) & 0xFF).to_u8()
+        val b = (pixel & 0xFF).to_u8()
+        data = data + [r, g, b]
+
+    # Write file using runtime file I/O
+    rt_file_write_bytes(path, header, data)
+    true
+
+fn export_ppm_rgba(path: text, pixels: [u32], width: i32, height: i32) -> bool:
+    """Export as PPM from RGBA u32 pixels (alpha in low byte).
+    Used by the runtime renderer which uses RGBA format.
+    """
+    var header = "P6\n{width} {height}\n255\n"
+    var data: [u8] = []
+    for pixel in pixels:
+        val r = ((pixel >> 24) & 0xFF).to_u8()
+        val g = ((pixel >> 16) & 0xFF).to_u8()
+        val b = ((pixel >> 8) & 0xFF).to_u8()
+        data = data + [r, g, b]
+    rt_file_write_bytes(path, header, data)
+    true
+
+# =========================================================================
+# PPM Export (P3 text format — slower but portable)
+# =========================================================================
+
+fn export_ppm_text(path: text, pixels: [u32], width: i32, height: i32) -> text:
+    """Export a pixel buffer as PPM P3 (ASCII text) format.
+    Returns the PPM content as a string. Useful when binary I/O isn't available.
+    """
+    var ppm = "P3\n{width} {height}\n255\n"
+    var col = 0
+    for pixel in pixels:
+        val r = (pixel >> 16) & 0xFF
+        val g = (pixel >> 8) & 0xFF
+        val b = pixel & 0xFF
+        ppm = "{ppm}{r} {g} {b} "
+        col = col + 1
+        if col >= width:
+            ppm = "{ppm}\n"
+            col = 0
+    ppm
+
+# =========================================================================
+# Comparison Metrics
+# =========================================================================
+
+class ComparisonMetrics:
+    """Results of comparing two rendered images."""
+    total_pixels: i64
+    matching_pixels: i64
+    different_pixels: i64
+    max_channel_diff: i32
+    avg_channel_diff: f64
+    match_percentage: f64
+    rmse: f64  # Root Mean Square Error
+
+    fn summary() -> text:
+        "Match: {self.match_percentage}% ({self.matching_pixels}/{self.total_pixels}), RMSE: {self.rmse}, Max diff: {self.max_channel_diff}"
+
+fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonMetrics:
+    """Compare two ARGB pixel buffers and compute similarity metrics."""
+    val total = width.to_i64() * height.to_i64()
+    var matching = 0
+    var different = 0
+    var max_diff = 0
+    var sum_sq_diff = 0.0
+    var sum_diff = 0.0
+
+    val len = if a.len() < b.len(): a.len() else: b.len()
+    var i = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+        if pa == pb:
+            matching = matching + 1
+        else:
+            different = different + 1
+            # Per-channel difference
+            val dr = abs_i32(((pa >> 16) & 0xFF).to_i32() - ((pb >> 16) & 0xFF).to_i32())
+            val dg = abs_i32(((pa >> 8) & 0xFF).to_i32() - ((pb >> 8) & 0xFF).to_i32())
+            val db = abs_i32((pa & 0xFF).to_i32() - (pb & 0xFF).to_i32())
+            val pixel_max = max_i32(dr, max_i32(dg, db))
+            if pixel_max > max_diff:
+                max_diff = pixel_max
+            val sq = (dr * dr + dg * dg + db * db).to_f64()
+            sum_sq_diff = sum_sq_diff + sq
+            sum_diff = sum_diff + (dr + dg + db).to_f64()
+        i = i + 1
+
+    val match_pct = if total > 0: (matching.to_f64() / total.to_f64()) * 100.0 else: 0.0
+    val avg_diff = if different > 0: sum_diff / (different.to_f64() * 3.0) else: 0.0
+    val rmse = if total > 0: sqrt_approx(sum_sq_diff / (total.to_f64() * 3.0)) else: 0.0
+
+    ComparisonMetrics(
+        total_pixels: total,
+        matching_pixels: matching.to_i64(),
+        different_pixels: different.to_i64(),
+        max_channel_diff: max_diff,
+        avg_channel_diff: avg_diff,
+        match_percentage: match_pct,
+        rmse: rmse
+    )
+
+# =========================================================================
+# Generate Comparison Report
+# =========================================================================
+
+fn generate_comparison_report(test_name: text, simple_pixels: [u32], chrome_pixels: [u32],
+                              width: i32, height: i32) -> text:
+    """Generate a detailed comparison report between Simple and Chrome rendering."""
+    val metrics = compare_pixel_buffers(simple_pixels, chrome_pixels, width, height)
+
+    var report = "# Rendering Comparison: {test_name}\n\n"
+    report = "{report}## Metrics\n"
+    report = "{report}- Total pixels: {metrics.total_pixels}\n"
+    report = "{report}- Matching: {metrics.matching_pixels} ({metrics.match_percentage}%)\n"
+    report = "{report}- Different: {metrics.different_pixels}\n"
+    report = "{report}- Max channel diff: {metrics.max_channel_diff}/255\n"
+    report = "{report}- Avg channel diff: {metrics.avg_channel_diff}\n"
+    report = "{report}- RMSE: {metrics.rmse}\n\n"
+
+    if metrics.match_percentage >= 99.0:
+        report = "{report}## Verdict: EXCELLENT — pixel-perfect match\n"
+    else if metrics.match_percentage >= 95.0:
+        report = "{report}## Verdict: GOOD — minor differences (anti-aliasing, subpixel)\n"
+    else if metrics.match_percentage >= 85.0:
+        report = "{report}## Verdict: FAIR — noticeable differences, layout correct\n"
+    else if metrics.match_percentage >= 70.0:
+        report = "{report}## Verdict: PARTIAL — significant differences, some layout issues\n"
+    else:
+        report = "{report}## Verdict: POOR — major rendering differences\n"
+
+    report
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn abs_i32(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn max_i32(a: i32, b: i32) -> i32:
+    if a > b: a else: b
+
+fn sqrt_approx(v: f64) -> f64:
+    """Approximate square root using Newton's method."""
+    if v <= 0.0:
+        return 0.0
+    var guess = v / 2.0
+    var i = 0
+    while i < 10:
+        guess = (guess + v / guess) / 2.0
+        i = i + 1
+    guess
+
+extern fn rt_file_write_bytes(path: text, header: text, data: [u8])

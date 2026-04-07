@@ -7960,6 +7960,10 @@ RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
  * SSH Channel Table — C-side workaround for Cranelift array-of-structs
  * codegen bug where array[0] loads correctly but array[1+] returns NIL.
  * Tests D5, D6, D11 depend on this.
+ *
+ * Uses int64_t (raw) params/returns matching PCI cache pattern —
+ * Simple extern fn with i64 params passes raw integers, not tagged
+ * RuntimeValue.
  * ========================================================================= */
 struct _ssh_channel {
     uint32_t local_id;
@@ -7972,117 +7976,105 @@ struct _ssh_channel {
 static struct _ssh_channel _channels[32];
 static int _channel_count = 0;
 
-/* rt_channel_open(remote_id, window, max_pkt) -> local_id (raw int) */
-RuntimeValue rt_channel_open(RuntimeValue remote_id_rv, RuntimeValue window_rv,
-                             RuntimeValue max_pkt_rv)
+/* rt_ssh_ch_open(remote_id, remote_window, max_pkt) -> local_id (raw int)
+ * local_window always starts at DEFAULT_WINDOW_SIZE (2 MiB = 2097152). */
+#define SSH_DEFAULT_WINDOW_SIZE 2097152
+int64_t rt_ssh_ch_open(int64_t remote_id, int64_t remote_window, int64_t max_pkt)
 {
-    int64_t remote_id = DECODE_INT(remote_id_rv);
-    int64_t window    = DECODE_INT(window_rv);
-    int64_t max_pkt   = DECODE_INT(max_pkt_rv);
-
-    if (_channel_count >= 32) return ENCODE_INT(-1);
+    if (_channel_count >= 32) return -1;
     int id = _channel_count++;
     _channels[id].local_id      = (uint32_t)id;
     _channels[id].remote_id     = (uint32_t)remote_id;
-    _channels[id].local_window  = (uint32_t)window;
-    _channels[id].remote_window = (uint32_t)window;
+    _channels[id].local_window  = SSH_DEFAULT_WINDOW_SIZE;
+    _channels[id].remote_window = (uint32_t)remote_window;
     _channels[id].max_packet    = (uint32_t)max_pkt;
     _channels[id].active        = 1;
-    return ENCODE_INT(id);
+    return (int64_t)id;
 }
 
-/* rt_channel_find(local_id) -> 1 if found & active, 0 if not */
-RuntimeValue rt_channel_find(RuntimeValue local_id_rv)
+/* rt_ssh_ch_find(local_id) -> 1 if found & active, 0 if not */
+int64_t rt_ssh_ch_find(int64_t local_id)
 {
-    int64_t lid = DECODE_INT(local_id_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
-            return ENCODE_INT(1);
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active)
+            return 1;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_get_remote_id(local_id) -> remote_id (raw) */
-RuntimeValue rt_channel_get_remote_id(RuntimeValue local_id_rv)
+/* rt_ssh_ch_get_remote_id(local_id) -> remote_id (raw) */
+int64_t rt_ssh_ch_get_remote_id(int64_t local_id)
 {
-    int64_t lid = DECODE_INT(local_id_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
-            return ENCODE_INT((int64_t)_channels[i].remote_id);
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active)
+            return (int64_t)_channels[i].remote_id;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_get_local_window(local_id) -> local_window */
-RuntimeValue rt_channel_get_local_window(RuntimeValue local_id_rv)
+/* rt_ssh_ch_get_local_window(local_id) -> local_window */
+int64_t rt_ssh_ch_get_local_window(int64_t local_id)
 {
-    int64_t lid = DECODE_INT(local_id_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
-            return ENCODE_INT((int64_t)_channels[i].local_window);
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active)
+            return (int64_t)_channels[i].local_window;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_get_remote_window(local_id) -> remote_window */
-RuntimeValue rt_channel_get_remote_window(RuntimeValue local_id_rv)
+/* rt_ssh_ch_get_remote_window(local_id) -> remote_window */
+int64_t rt_ssh_ch_get_remote_window(int64_t local_id)
 {
-    int64_t lid = DECODE_INT(local_id_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
-            return ENCODE_INT((int64_t)_channels[i].remote_window);
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active)
+            return (int64_t)_channels[i].remote_window;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_close(local_id) -> 0 */
-RuntimeValue rt_channel_close(RuntimeValue local_id_rv)
+/* rt_ssh_ch_close(local_id) -> 0 */
+int64_t rt_ssh_ch_close(int64_t local_id)
 {
-    int64_t lid = DECODE_INT(local_id_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid) {
+        if (_channels[i].local_id == (uint32_t)local_id) {
             _channels[i].active = 0;
-            return ENCODE_INT(0);
+            return 0;
         }
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_adjust_window(local_id, bytes) -> 0 */
-RuntimeValue rt_channel_adjust_window(RuntimeValue local_id_rv, RuntimeValue bytes_rv)
+/* rt_ssh_ch_adjust_window(local_id, bytes) -> 0 */
+int64_t rt_ssh_ch_adjust_window(int64_t local_id, int64_t bytes)
 {
-    int64_t lid   = DECODE_INT(local_id_rv);
-    int64_t bytes = DECODE_INT(bytes_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active) {
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active) {
             _channels[i].local_window += (uint32_t)bytes;
-            return ENCODE_INT(0);
+            return 0;
         }
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_consume_window(local_id, bytes) -> 1 if ok, 0 if insufficient */
-RuntimeValue rt_channel_consume_window(RuntimeValue local_id_rv, RuntimeValue bytes_rv)
+/* rt_ssh_ch_consume_window(local_id, bytes) -> 1 if ok, 0 if insufficient */
+int64_t rt_ssh_ch_consume_window(int64_t local_id, int64_t bytes)
 {
-    int64_t lid   = DECODE_INT(local_id_rv);
-    int64_t bytes = DECODE_INT(bytes_rv);
     for (int i = 0; i < _channel_count; i++) {
-        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active) {
+        if (_channels[i].local_id == (uint32_t)local_id && _channels[i].active) {
             if (_channels[i].remote_window < (uint32_t)bytes)
-                return ENCODE_INT(0);
+                return 0;
             _channels[i].remote_window -= (uint32_t)bytes;
-            return ENCODE_INT(1);
+            return 1;
         }
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
-/* rt_channel_reset() -> 0   (for test isolation) */
-RuntimeValue rt_channel_reset(void)
+/* rt_ssh_ch_reset() -> 0   (for test isolation) */
+int64_t rt_ssh_ch_reset(void)
 {
     _channel_count = 0;
-    return ENCODE_INT(0);
+    return 0;
 }
 
 #endif /* __x86_64__ || __i386__ */
