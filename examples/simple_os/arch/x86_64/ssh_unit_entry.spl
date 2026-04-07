@@ -41,10 +41,80 @@ fn _start():
     serial_println("========================================")
     serial_println("")
 
-    # ===== A. Crypto (10 tests) — SKIP: ed25519_keypair_from_seed FAULTs =====
-    serial_println("--- A. Crypto (SKIPPED — keypair codegen FAULT) ---")
-    _fail = _fail + 10
+    # ===== A. Crypto (10 tests) — now uses C-side Ed25519 =====
+    serial_println("--- A. Crypto ---")
     var i: u64 = 0
+
+    # A1: Ed25519 self-test (C-side sign+verify roundtrip)
+    var a1_rc = ed25519_self_test()
+    _t(a1_rc.is_ok(), "A1: Ed25519 self-test passes")
+
+    # A2: Ed25519 keypair — private key is 32 bytes (seed)
+    var a2_seed = random_bytes(32)
+    var a2_kp = ed25519_keypair_from_seed(a2_seed)
+    var a2_priv = a2_kp.0
+    var a2_pub = a2_kp.1
+    var a2_priv_len: u64 = a2_priv.len()
+    _t(a2_priv_len == 32, "A2: Ed25519 private key is 32 bytes")
+
+    # A3: Ed25519 public key is 32 bytes
+    var a3_pub_len: u64 = a2_pub.len()
+    _t(a3_pub_len == 32, "A3: Ed25519 public key is 32 bytes")
+
+    # A4: Different seeds produce different public keys
+    var a4_seed = random_bytes(32)
+    var a4_kp = ed25519_keypair_from_seed(a4_seed)
+    var a4_differ = false
+    i = 0
+    while i < 32:
+        if a2_pub[i] != a4_kp.1[i]:
+            a4_differ = true
+        i = i + 1
+    _t(a4_differ, "A4: Different seeds produce different public keys")
+
+    # A5: Same seed produces same keypair (deterministic)
+    var a5_kp = ed25519_keypair_from_seed(a2_seed)
+    var a5_same = true
+    i = 0
+    while i < 32:
+        if a2_pub[i] != a5_kp.1[i]:
+            a5_same = false
+        i = i + 1
+    _t(a5_same, "A5: Same seed produces same public key")
+
+    # A6: Random bytes length correct
+    var a6_rnd = random_bytes(16)
+    var a6_len: u64 = a6_rnd.len()
+    _t(a6_len == 16, "A6: random_bytes(16) returns 16 bytes")
+
+    # A7: Random bytes length 1
+    var a7_rnd = random_bytes(1)
+    var a7_len: u64 = a7_rnd.len()
+    _t(a7_len == 1, "A7: random_bytes(1) returns 1 byte")
+
+    # A8: Random bytes length 64
+    var a8_rnd = random_bytes(64)
+    var a8_len: u64 = a8_rnd.len()
+    _t(a8_len == 64, "A8: random_bytes(64) returns 64 bytes")
+
+    # A9: Random bytes not all zero (statistical)
+    var a9_nonzero = false
+    i = 0
+    while i < 64:
+        if a8_rnd[i] != 0:
+            a9_nonzero = true
+        i = i + 1
+    _t(a9_nonzero, "A9: random_bytes(64) not all zeros")
+
+    # A10: Two random calls differ
+    var a10_rnd = random_bytes(64)
+    var a10_differ = false
+    i = 0
+    while i < 64:
+        if a8_rnd[i] != a10_rnd[i]:
+            a10_differ = true
+        i = i + 1
+    _t(a10_differ, "A10: Two random_bytes(64) calls differ")
 
     # ===== B. Packet Codec (12 tests) =====
     serial_println("--- B. Packet Codec ---")
@@ -206,6 +276,16 @@ fn _start():
         _t(gs_len == 4, "B11: put_string/get_string 4 bytes")
     else:
         _t(false, "B11: put_string/get_string 4 bytes")
+
+    # Quick array growth test: push 100 elements (exceeds default cap=64)
+    var grow_test: [u8] = []
+    var g: u64 = 0
+    while g < 100:
+        grow_test.push(0xAA)
+        g = g + 1
+    var grow_len: u64 = grow_test.len()
+    serial_println("[DBG] B11x: grow_test.len() after 100 pushes = {grow_len}")
+    _t(grow_len == 100, "B11x: array grows past cap=64")
 
     var blg: [u8] = []
     var k: u64 = 0

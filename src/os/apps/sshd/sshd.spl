@@ -88,25 +88,23 @@ impl SshDaemon:
         the accept loop. This method does not return until stop() is called.
         """
         # Validate Ed25519 implementation before ANY crypto use
-        # NOTE: Ed25519 self-test skipped in baremetal — the test uses
-        # .len() which is unreliable in baremetal Cranelift. The actual
-        # crypto operations work correctly.
-        # NOTE: Ed25519 self-test skipped in baremetal — .len() unreliable
-        # after many pushes in baremetal Cranelift, which breaks the test
-        # vector comparison. The actual crypto operations work correctly.
-        serial_println("[sshd] Skipping Ed25519 self-test (baremetal mode)")
+        # Uses C-side Ed25519 which works reliably on baremetal.
+        serial_println("[sshd] Running Ed25519 self-test (C-side)...")
+        val self_test = ed25519_self_test()
+        if self_test.is_err():
+            serial_println("[sshd] FATAL: Ed25519 self-test FAILED")
+            return Err("Ed25519 self-test failed")
+        serial_println("[sshd] Ed25519 self-test passed")
 
-        # Generate host keypair
-        # NOTE: Ed25519 field arithmetic (modular multiplication, inversion)
-        # is unreliable in baremetal Cranelift. Use C random for both keys
-        # as a placeholder. Real SSH negotiation would need working Ed25519.
+        # Generate host keypair (Ed25519)
+        # Uses C-side Ed25519 implementation via extern fn wrappers,
+        # which avoids the baremetal Cranelift codegen bugs with pure Simple
+        # extended-coordinate point arithmetic.
         var seed = random_bytes(32)
         serial_println("[sshd] Seed: {seed.len()} bytes")
-        # Use seed as both private and public key (placeholder)
-        # The SSH session will use these for key exchange
-        self.host_private_key = seed
-        var pubkey = random_bytes(32)
-        self.host_public_key = pubkey
+        val keypair = ed25519_keypair_from_seed(seed)
+        self.host_private_key = keypair.0   # 32-byte seed
+        self.host_public_key = keypair.1    # 32-byte Ed25519 public key
         serial_println("[sshd] Host keys: priv={self.host_private_key.len()} pub={self.host_public_key.len()}")
 
         # Create TCP socket

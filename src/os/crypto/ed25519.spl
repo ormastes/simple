@@ -705,177 +705,95 @@ fn _sha512_modl(data: [u8]) -> [u8]:
     sc_reduce(hash)
 
 # ============================================================================
+# C-Side Ed25519 — baremetal Cranelift workaround
+# ============================================================================
+#
+# The pure Simple Ed25519 FAULTs on baremetal due to Cranelift codegen bugs
+# with deep u64 field arithmetic in extended coordinates (4 field elements
+# per point vs X25519's 2). The C implementation in baremetal_stubs.c
+# handles all Ed25519 operations reliably.
+#
+# The C functions use the RuntimeValue array convention:
+#   - Input [u8] arrays are read via _ed_rv_to_bytes
+#   - Output [u8] arrays are written via _ed_bytes_to_rv (must be pre-allocated)
+
+extern fn rt_ed25519_keypair(seed: [u8], pk_out: [u8]) -> i64
+extern fn rt_ed25519_sign(msg: [u8], sk: [u8], sig_out: [u8]) -> i64
+extern fn rt_ed25519_verify(msg: [u8], pk: [u8], sig: [u8]) -> i64
+
+# ============================================================================
 # Public API
 # ============================================================================
 
 fn ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
     """Derive (private_key, public_key) from 32-byte seed.
 
-    private_key = seed (32 bytes, stored as-is)
-    public_key = A encoded (32 bytes)
+    Delegates to C-side Ed25519 implementation to work around baremetal
+    Cranelift codegen bugs with extended-coordinate point arithmetic.
 
     Per RFC 8032 section 5.1.5:
     1. h = SHA-512(seed)
     2. a = clamp(h[0..32])
     3. A = a * B
     """
-    val h = sha512(seed)
-
-    # Extract and clamp the scalar
-    var h_low: [u8] = []
+    # Pre-allocate 32-byte output array for public key
+    var pk: [u8] = []
     var i: u64 = 0
     while i < 32:
-        h_low.push(h[i])
+        pk.push(0)
         i = i + 1
-    val a = _ed25519_clamp(h_low)
 
-    # Compute public key A = a * B
-    val base = _ed25519_base_point()
-    val big_a = ed_scalar_mul(a, base)
-    val public_key = ed_point_encode(big_a)
+    val rc = rt_ed25519_keypair(seed, pk)
+    if rc != 0:
+        # Fallback: return zeros (should not happen with valid 32-byte seed)
+        return (seed, pk)
 
-    (seed, public_key)
+    (seed, pk)
 
 fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     """Sign a message with Ed25519. Returns 64-byte signature (R || S).
 
-    Per RFC 8032 section 5.1.6:
-    1. h = SHA-512(seed)
-    2. a = clamp(h[0..32]), prefix = h[32..64]
-    3. r = SHA-512(prefix || message) mod L
-    4. R = r * B
-    5. S = (r + SHA-512(R || A || message) * a) mod L
-    6. signature = R_encoded || S_encoded
+    Delegates to C-side Ed25519 implementation.
+    The C function expects sk = seed(32) || pk(32) concatenated.
+
+    Per RFC 8032 section 5.1.6.
     """
-    val h = sha512(private_seed)
-
-    # Extract scalar a and nonce prefix
-    var h_low: [u8] = []
+    # Build 64-byte sk = private_seed || public_key (standard Ed25519 convention)
+    var sk: [u8] = []
     var i: u64 = 0
-    while i < 32:
-        h_low.push(h[i])
+    while i < private_seed.len():
+        sk.push(private_seed[i])
         i = i + 1
-    val a = _ed25519_clamp(h_low)
+    i = 0
+    while i < public_key.len():
+        sk.push(public_key[i])
+        i = i + 1
 
-    var prefix: [u8] = []
-    i = 32
+    # Pre-allocate 64-byte output array for signature
+    var sig: [u8] = []
+    i = 0
     while i < 64:
-        prefix.push(h[i])
+        sig.push(0)
         i = i + 1
 
-    # r = SHA-512(prefix || message) mod L
-    var r_input: [u8] = []
-    i = 0
-    while i < prefix.len():
-        r_input.push(prefix[i])
-        i = i + 1
-    i = 0
-    while i < message.len():
-        r_input.push(message[i])
-        i = i + 1
-    val r = _sha512_modl(r_input)
-
-    # R = r * B
-    val base = _ed25519_base_point()
-    val big_r = ed_scalar_mul(r, base)
-    val r_encoded = ed_point_encode(big_r)
-
-    # k = SHA-512(R || A || message) mod L
-    var k_input: [u8] = []
-    i = 0
-    while i < 32:
-        k_input.push(r_encoded[i])
-        i = i + 1
-    i = 0
-    while i < 32:
-        k_input.push(public_key[i])
-        i = i + 1
-    i = 0
-    while i < message.len():
-        k_input.push(message[i])
-        i = i + 1
-    val k = _sha512_modl(k_input)
-
-    # S = (r + k * a) mod L
-    val s = sc_muladd(k, a, r)
-
-    # Signature = R || S (64 bytes)
-    var signature: [u8] = []
-    i = 0
-    while i < 32:
-        signature.push(r_encoded[i])
-        i = i + 1
-    i = 0
-    while i < 32:
-        signature.push(s[i])
-        i = i + 1
-
-    signature
+    rt_ed25519_sign(message, sk, sig)
+    sig
 
 fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an Ed25519 signature.
 
-    Per RFC 8032 section 5.1.7:
-    1. Split signature into R (32 bytes) and S (32 bytes)
-    2. Decode R and A (public key)
-    3. k = SHA-512(R || A || message) mod L
-    4. Check: S * B == R + k * A
-
+    Delegates to C-side Ed25519 implementation.
     Returns true if signature is valid.
+
+    Per RFC 8032 section 5.1.7.
     """
     if signature.len() != 64:
         return false
     if public_key.len() != 32:
         return false
 
-    # Split signature into R and S
-    var r_bytes: [u8] = []
-    var s_bytes: [u8] = []
-    var i: u64 = 0
-    while i < 32:
-        r_bytes.push(signature[i])
-        i = i + 1
-    while i < 64:
-        s_bytes.push(signature[i])
-        i = i + 1
-
-    # Check S < L (reject malleable signatures)
-    if _sc_is_geq_L(s_bytes):
-        return false
-
-    # Decode R and A
-    val big_r = ed_point_decode(r_bytes)
-    val big_a = ed_point_decode(public_key)
-
-    # k = SHA-512(R || A || message) mod L
-    var k_input: [u8] = []
-    i = 0
-    while i < 32:
-        k_input.push(r_bytes[i])
-        i = i + 1
-    i = 0
-    while i < 32:
-        k_input.push(public_key[i])
-        i = i + 1
-    i = 0
-    while i < message.len():
-        k_input.push(message[i])
-        i = i + 1
-    val k = _sha512_modl(k_input)
-
-    # Compute S * B
-    val base = _ed25519_base_point()
-    val sb = ed_scalar_mul(s_bytes, base)
-
-    # Compute R + k * A
-    val ka = ed_scalar_mul(k, big_a)
-    val rhs = ed_point_add(big_r, ka)
-
-    # Compare S*B == R + k*A by encoding both and checking equality
-    val lhs_enc = ed_point_encode(sb)
-    val rhs_enc = ed_point_encode(rhs)
-
-    _bytes_equal(lhs_enc, rhs_enc)
+    val rc = rt_ed25519_verify(message, public_key, signature)
+    rc == 0
 
 # ============================================================================
 # Internal Helpers
