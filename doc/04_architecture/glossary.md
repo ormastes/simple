@@ -226,6 +226,29 @@ It impled with seed simple grammar.
 It impled with core simple grammar.
 Development is cmake/ninja based.
 
+## SStack
+SStack (Superpowers + GSD + GStack) is the unified development pipeline orchestrator.
+It combines BDD/TDD spec-first workflow (Superpowers), sub-40% context budget per phase with fresh agents (GSD), and specialized role agents with data flow pipeline and quality gates (GStack).
+Runs 8 phases: dev, research, arch, spec, implement, refactor, verify, ship.
+State file at `.sstack/<feature>/state.md` is the sole communication channel between phases.
+
+## SStack Profile
+A profile selects which SStack phases to run and how they execute (inline vs spawned, merged vs separate).
+- **full** (default, `/sstack`): All 8 phases, each in a fresh spawned agent.
+- **quick** (`/dev`): 5 merged phases for lightweight tasks. Merges dev+research, arch+spec, refactor+verify. Runs mostly inline.
+
+Both profiles share the same state file format, quality gates, SSpec integration, and stub prevention rules.
+
+## Dev Workflow
+`/dev` is the SStack quick profile. Originally a standalone 5-phase skill, now unified as an sstack plugin.
+Maps 5 lightweight phases (Research, Plan, Implement, Verify, Sync) onto sstack's 8-phase pipeline by merging adjacent phases.
+Use for bug fixes, small features, refactors. Escalates to full `/sstack` or `/impl` when complexity grows.
+
+## SSpec
+SSpec is the BDD (Behavior-Driven Development) test framework for Simple.
+Uses `describe`/`it`/`expect` blocks with built-in matchers. Integrated into sstack Phase 4 (spec-first, before implementation).
+Coverage markers: `# @cover src/path/to/impl.spl <pct>%`.
+
 ## Deployment Coverage check
 "@deplyment_coverage" is tagged testcase.
 It run 2 times.

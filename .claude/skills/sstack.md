@@ -8,8 +8,33 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 ## Invocation
 
 ```
-/sstack <user request>
+/sstack <user request>                    # full profile (default)
+/sstack --profile quick <user request>    # quick profile (same as /dev)
+/dev <user request>                       # alias for --profile quick
 ```
+
+## Profiles
+
+SStack supports **profiles** that select which phases to run and how:
+
+| Profile | Alias | Phases | Use Case |
+|---------|-------|--------|----------|
+| `full` (default) | `/sstack` | All 8 phases, each in fresh agent | Large features, BDD/TDD, multi-module |
+| `quick` | `/dev` | 5 merged phases, mostly inline | Bug fixes, small features, refactors |
+
+### Quick Profile Phase Mapping
+
+The quick profile merges sstack phases for speed while keeping the same state file and quality gates:
+
+| Quick Phase | SStack Phases Covered | Execution |
+|-------------|----------------------|-----------|
+| 1. Research | 1-dev + 2-research | Inline |
+| 2. Plan | 3-arch + 4-spec | Inline |
+| 3. Implement | 5-implement | Inline or spawned |
+| 4. Verify | 6-refactor + 7-verify | Inline or spawned |
+| 5. Sync | 8-ship | Inline |
+
+See `.claude/skills/dev.md` for quick profile details.
 
 ## How It Works
 
@@ -187,3 +212,15 @@ SStack agents may invoke existing skills internally:
 - Phase 6 (refactor): may use `/refactor` checklist
 - Phase 7 (verify): may use `/verify` checklist
 - Phase 8 (ship): may use `/sync` for VCS and `/release` for versioning
+
+## Relationship to Other Workflows
+
+| Workflow | Relationship |
+|----------|-------------|
+| `/dev` | SStack quick profile — same pipeline, merged phases, inline execution |
+| `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/sspec`, `/verify`) |
+| `/research` | Standalone research skill — can feed into sstack Phase 2 or run independently |
+| `/design` | Standalone design skill — can feed into sstack Phase 3 or run independently |
+| `/verify` | Standalone verification — used within sstack Phase 7 or run independently |
+
+**Underlying shared components:** All workflows share SSpec for BDD testing, `/coding` for language rules, and jj-based VCS sync. SStack unifies them under one state-file-driven orchestrator.

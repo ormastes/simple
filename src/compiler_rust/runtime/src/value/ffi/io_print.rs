@@ -57,8 +57,13 @@ pub unsafe extern "C" fn rt_print_str(ptr: *const u8, len: u64) {
     if is_stdout_capturing() {
         append_stdout(s);
     } else {
-        print!("{}", s);
-        let _ = std::io::stdout().flush();
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = write!(out, "{}", s) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
+        let _ = out.flush();
     }
 }
 
@@ -72,7 +77,12 @@ pub unsafe extern "C" fn rt_println_str(ptr: *const u8, len: u64) {
     if is_stdout_capturing() {
         append_stdout("\n");
     } else {
-        println!();
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = writeln!(out) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
     }
 }
 
@@ -91,8 +101,13 @@ pub unsafe extern "C" fn rt_eprint_str(ptr: *const u8, len: u64) {
     if is_stderr_capturing() {
         append_stderr(s);
     } else {
-        eprint!("{}", s);
-        let _ = std::io::stderr().flush();
+        let mut err = std::io::stderr().lock();
+        if let Err(e) = write!(err, "{}", s) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
+        let _ = err.flush();
     }
 }
 

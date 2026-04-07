@@ -62,13 +62,7 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
         use std::backtrace::Backtrace;
         use std::io::Write;
 
-        let backtrace = Backtrace::force_capture();
-
-        let location = panic_info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown".to_string());
-
+        // Extract message early so we can check for broken pipe
         let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
             s.to_string()
         } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
@@ -76,6 +70,18 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
         } else {
             "unknown panic".to_string()
         };
+
+        // Broken pipe is normal MCP/CLI shutdown — exit cleanly without crash log
+        if message.contains("Broken pipe") || message.contains("os error 32") {
+            std::process::exit(0);
+        }
+
+        let backtrace = Backtrace::force_capture();
+
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
 
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let pid = std::process::id();

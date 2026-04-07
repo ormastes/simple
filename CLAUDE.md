@@ -65,7 +65,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
-| `sstack` | SStack pipeline — 8-phase BDD/TDD + fresh orchestrators + specialized roles (sub-40% context) |
+| `sstack` | SStack orchestrator — 8-phase BDD/TDD pipeline with profiles (full/quick), fresh agents, quality gates |
+| `dev` | SStack quick profile — 5 merged phases for lightweight tasks (alias for `sstack --profile quick`) |
 | `sync` | Pull/rebase/push with file-count safety, worktree-aware |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
@@ -80,7 +81,6 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `research_codex` | Step 2: Forked agent research + requirement selection (Codex plugin) |
 | `gemini_ui_design` | Step 3: TUI/GUI design generation (Gemini plugin) |
 | `verify` | Production readiness verification (Claude + MCP agent plugin) |
-| `dev` | Streamlined 5-phase dev workflow: research, plan, implement, verify, sync |
 | `debug` | Debugging, tracing, fault detection |
 | `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
 | `refactor` | Code quality refactoring workflow and verification checklist |
@@ -95,7 +95,6 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
-| `sstack` | SStack orchestrator -- Superpowers+GSD+GStack 8-phase pipeline |
 
 **Full Syntax Reference:** `doc/07_guide/quick_reference/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`

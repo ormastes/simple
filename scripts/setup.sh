@@ -329,6 +329,9 @@ STDERR_LOG="\${REPO_ROOT}/.simple/logs/${name}_stderr.log"
 mkdir -p "\$(dirname "\$STDERR_LOG")"
 export SIMPLE_LIB="\${REPO_ROOT}/src"
 export SIMPLE_LOG=error
+export SIMPLE_BINARY="\$RUNTIME"
+export SIMPLE_TIMEOUT_SECONDS=86400
+export SIMPLE_MEMORY_LIMIT_MB=\${SIMPLE_MEMORY_LIMIT_MB:-\${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 ${extra_env}
 RUST_LOG=error exec "\$RUNTIME" "\$ENTRY" "\$@" 2>>"\$STDERR_LOG"
 LAUNCHER_EOF
