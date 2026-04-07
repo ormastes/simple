@@ -1898,14 +1898,16 @@ S1(rt_weak_ref) S1(rt_weak_deref) S1(rt_closure_new) S2(rt_closure_call) S1(rt_c
  * 16. Real ARM64 MMIO and CPU overrides
  * =================================================================== */
 
-RuntimeValue rt_mmio_read_u8(RuntimeValue addr) { return ENCODE_INT(*(volatile uint8_t *)(uintptr_t)DECODE_INT(addr)); }
-RuntimeValue rt_mmio_read_u16(RuntimeValue addr) { return ENCODE_INT(*(volatile uint16_t *)(uintptr_t)DECODE_INT(addr)); }
-RuntimeValue rt_mmio_read_u32(RuntimeValue addr) { return ENCODE_INT(*(volatile uint32_t *)(uintptr_t)DECODE_INT(addr)); }
-RuntimeValue rt_mmio_read_u64(RuntimeValue addr) { return ENCODE_INT((int64_t)*(volatile uint64_t *)(uintptr_t)DECODE_INT(addr)); }
-RuntimeValue rt_mmio_write_u8(RuntimeValue addr, RuntimeValue val) { *(volatile uint8_t *)(uintptr_t)DECODE_INT(addr) = (uint8_t)DECODE_INT(val); return NIL_VALUE; }
-RuntimeValue rt_mmio_write_u16(RuntimeValue addr, RuntimeValue val) { *(volatile uint16_t *)(uintptr_t)DECODE_INT(addr) = (uint16_t)DECODE_INT(val); return NIL_VALUE; }
-RuntimeValue rt_mmio_write_u32(RuntimeValue addr, RuntimeValue val) { *(volatile uint32_t *)(uintptr_t)DECODE_INT(addr) = (uint32_t)DECODE_INT(val); return NIL_VALUE; }
-RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) { *(volatile uint64_t *)(uintptr_t)DECODE_INT(addr) = (uint64_t)DECODE_INT(val); return NIL_VALUE; }
+/* MMIO — use RAW addresses (not DECODE_INT) to match x86_64 convention.
+ * Simple code passes MMIO addresses as raw u64 values. */
+RuntimeValue rt_mmio_read_u8(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr; }
+RuntimeValue rt_mmio_read_u16(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr; }
+RuntimeValue rt_mmio_read_u32(RuntimeValue addr) { return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr; }
+RuntimeValue rt_mmio_read_u64(RuntimeValue addr) { return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr; }
+RuntimeValue rt_mmio_write_u8(RuntimeValue addr, RuntimeValue val) { *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)val; return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u16(RuntimeValue addr, RuntimeValue val) { *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)val; return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u32(RuntimeValue addr, RuntimeValue val) { *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)val; return NIL_VALUE; }
+RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val) { *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)val; return NIL_VALUE; }
 
 /* ARM64-specific CPU operations */
 RuntimeValue rt_wfe(void) { __asm__ volatile("wfe"); return NIL_VALUE; }
@@ -1918,10 +1920,57 @@ RuntimeValue rt_enable_interrupts(void) { __asm__ volatile("msr daifclr, #0xF");
 RuntimeValue rt_disable_interrupts(void) { __asm__ volatile("msr daifset, #0xF"); return NIL_VALUE; }
 S1(rt_read_sysreg) S2(rt_write_sysreg)
 
-/* GUI stubs (no framebuffer on ARM64 QEMU virt without VGA) */
-RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w) { (void)addr; (void)w; return 0; }
+/* ===================================================================
+ * GUI support — framebuffer globals for glass_render.c
+ *
+ * glass_render.c (architecture-independent) references these externs:
+ *   extern uint64_t g_fb_addr;
+ *   extern uint64_t g_fb_w;
+ *
+ * rt_gui_set_fb() is called from Simple code to set the framebuffer
+ * base address and width. On ARM64 QEMU virt, the framebuffer is
+ * provided by the ramfb device or virtio-gpu.
+ * =================================================================== */
+
+uint64_t g_fb_addr = 0;
+uint64_t g_fb_w = 0;
+
+RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
+{
+    g_fb_addr = (uint64_t)addr;
+    g_fb_w = (uint64_t)w;
+    serial_puts("[GUI] set_fb addr=");
+    serial_put_hex(g_fb_addr);
+    serial_puts(" w=");
+    serial_put_dec((int64_t)g_fb_w);
+    serial_puts("\r\n");
+    return 0;
+}
+
 RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, RuntimeValue color) { (void)y;(void)x;(void)count;(void)color; return 0; }
-RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
+
+RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
+{
+    /* Basic fill implementation for when glass_render.c is not linked */
+    if (!g_fb_addr || !g_fb_w) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
+    uint32_t px = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t py = (uint32_t)((uint64_t)xy & 0xFFFFFFFF);
+    uint32_t pw = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t ph = (uint32_t)((uint64_t)wh & 0xFFFFFFFF);
+    uint32_t c = (uint32_t)(uint64_t)color;
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)g_fb_addr;
+    for (uint32_t row = 0; row < ph; row++) {
+        for (uint32_t col = 0; col < pw; col++) {
+            uint32_t fx = px + col;
+            uint32_t fy = py + row;
+            if (fx < (uint32_t)g_fb_w && fy < 768) {
+                fb[fy * (uint32_t)g_fb_w + fx] = c;
+            }
+        }
+    }
+    return 0;
+}
+
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
 /* End of ARM64 baremetal_stubs.c */
