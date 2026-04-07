@@ -1,0 +1,101 @@
+# Text Rendering — Pure Simple text effects via CompositorBackend
+#
+# Provides text rendering with visual effects (shadow, bold, 2x scale,
+# outline) using the CompositorBackend trait. Works on all backends
+# (hosted, browser, framebuffer, GPU).
+#
+# Uses 8x16 VGA bitmap font from fb_driver.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+
+val CHAR_W: i32 = 8
+val CHAR_H: i32 = 16
+
+fn draw_text_at(backend: CompositorBackend, x: i32, y: i32, text_str: text, fg: u32):
+    """Draw text with transparent background (no bg fill)."""
+    var cx = x
+    for ch in text_str:
+        val ch_byte = ch.to_u8()
+        val glyph = get_glyph_8x16(ch_byte)
+        var row: i32 = 0
+        while row < CHAR_H:
+            val bits = glyph[row]
+            var col: i32 = 0
+            while col < CHAR_W:
+                val mask = 0x80 >> col
+                if (bits & mask) != 0:
+                    backend.put_pixel(cx + col, y + row, fg)
+                col = col + 1
+            row = row + 1
+        cx = cx + CHAR_W
+
+fn draw_text_shadow(backend: CompositorBackend, x: i32, y: i32, text_str: text, fg: u32, shadow_color: u32, shadow_alpha: u8):
+    """Draw text with a drop shadow behind it."""
+    # Draw shadow offset by (1,1) with alpha blending
+    val sx = x + 1
+    val sy = y + 1
+    var cx = sx
+    for ch in text_str:
+        val ch_byte = ch.to_u8()
+        val glyph = get_glyph_8x16(ch_byte)
+        var row: i32 = 0
+        while row < CHAR_H:
+            val bits = glyph[row]
+            var col: i32 = 0
+            while col < CHAR_W:
+                val mask = 0x80 >> col
+                if (bits & mask) != 0:
+                    backend.blend_rect(cx + col, sy + row, 1, 1, shadow_color, shadow_alpha)
+                col = col + 1
+            row = row + 1
+        cx = cx + CHAR_W
+    # Draw foreground text on top
+    draw_text_at(backend, x, y, text_str, fg)
+
+fn draw_text_bold(backend: CompositorBackend, x: i32, y: i32, text_str: text, fg: u32):
+    """Draw bold text by rendering twice offset by 1 pixel."""
+    draw_text_at(backend, x, y, text_str, fg)
+    draw_text_at(backend, x + 1, y, text_str, fg)
+
+fn draw_text_2x(backend: CompositorBackend, x: i32, y: i32, text_str: text, fg: u32):
+    """Draw text at 2x scale (16x32 per character)."""
+    var cx = x
+    for ch in text_str:
+        val ch_byte = ch.to_u8()
+        val glyph = get_glyph_8x16(ch_byte)
+        var row: i32 = 0
+        while row < CHAR_H:
+            val bits = glyph[row]
+            var col: i32 = 0
+            while col < CHAR_W:
+                val mask = 0x80 >> col
+                if (bits & mask) != 0:
+                    val px = cx + col * 2
+                    val py = y + row * 2
+                    backend.fill_rect(px, py, 2, 2, fg)
+                col = col + 1
+            row = row + 1
+        cx = cx + CHAR_W * 2
+
+fn draw_text_outline(backend: CompositorBackend, x: i32, y: i32, text_str: text, fg: u32, outline_color: u32):
+    """Draw text with a 1px outline around each glyph."""
+    # Draw outline by rendering text at 8 offset positions
+    draw_text_at(backend, x - 1, y - 1, text_str, outline_color)
+    draw_text_at(backend, x,     y - 1, text_str, outline_color)
+    draw_text_at(backend, x + 1, y - 1, text_str, outline_color)
+    draw_text_at(backend, x - 1, y,     text_str, outline_color)
+    draw_text_at(backend, x + 1, y,     text_str, outline_color)
+    draw_text_at(backend, x - 1, y + 1, text_str, outline_color)
+    draw_text_at(backend, x,     y + 1, text_str, outline_color)
+    draw_text_at(backend, x + 1, y + 1, text_str, outline_color)
+    # Draw foreground text on top
+    draw_text_at(backend, x, y, text_str, fg)
+
+fn text_width(text_str: text) -> i32:
+    """Calculate pixel width of text string (8px per character)."""
+    text_str.len() * CHAR_W
+
+fn text_width_2x(text_str: text) -> i32:
+    """Calculate pixel width of 2x text string (16px per character)."""
+    text_str.len() * CHAR_W * 2

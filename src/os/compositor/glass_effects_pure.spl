@@ -1,0 +1,133 @@
+# Glass Effects Pure -- Glassmorphism via CompositorBackend trait
+#
+# Pure Simple implementation of glass effects that works on all backends
+# (hosted winit, browser engine, framebuffer, GPU).
+# Replaces C FFI rt_gui_* calls with CompositorBackend trait methods.
+#
+# Same API as glass_effects.spl but takes a CompositorBackend parameter
+# instead of calling extern C functions directly.
+
+use os.compositor.display_backend.{CompositorBackend}
+
+# ============================================================================
+# Glass Configuration
+# ============================================================================
+
+struct GlassConfig:
+    surface_color: u32
+    surface_alpha: u8
+    blur_radius: u32
+    border_color: u32
+    border_alpha: u8
+    shadow_offset: i32
+    shadow_blur: u32
+    shadow_alpha: u8
+    accent_color: u32
+    accent2_color: u32
+    bg_top: u32
+    bg_bottom: u32
+
+impl GlassConfig:
+    static fn dark() -> GlassConfig:
+        GlassConfig(
+            surface_color: 0x001E1E23,
+            surface_alpha: 184,
+            blur_radius: 12,
+            border_color: 0x00FFFFFF,
+            border_alpha: 46,
+            shadow_offset: 6,
+            shadow_blur: 10,
+            shadow_alpha: 80,
+            accent_color: 0x000A84FF,
+            accent2_color: 0x00BB86FC,
+            bg_top: 0x00080810,
+            bg_bottom: 0x00180A28
+        )
+
+    static fn light() -> GlassConfig:
+        GlassConfig(
+            surface_color: 0x00FFFFFF,
+            surface_alpha: 184,
+            blur_radius: 12,
+            border_color: 0x00000000,
+            border_alpha: 20,
+            shadow_offset: 6,
+            shadow_blur: 10,
+            shadow_alpha: 40,
+            accent_color: 0x00007AFF,
+            accent2_color: 0x009B59B6,
+            bg_top: 0x00D8D0E8,
+            bg_bottom: 0x00F0F0F5
+        )
+
+# ============================================================================
+# Wrapper Functions (CompositorBackend-routed)
+# ============================================================================
+
+fn glass_fill_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+    """Blend-fill a rectangle with the given color and alpha."""
+    backend.blend_rect(x, y, w, h, color, alpha)
+
+fn glass_blur_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, radius: u32):
+    """Apply a box blur to the rectangle region."""
+    backend.blur_region(x, y, w, h, radius)
+
+fn glass_gradient_v_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32):
+    """Draw a vertical gradient from c1 (top) to c2 (bottom)."""
+    backend.gradient_v(x, y, w, h, c1, c2)
+
+fn glass_shadow_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a drop shadow below the rectangle using config parameters.
+
+    Renders a semi-transparent black rectangle offset by shadow_offset,
+    then blurs it to create a soft shadow effect.
+    """
+    val sx = x + config.shadow_offset
+    val sy = y + config.shadow_offset
+    backend.blend_rect(sx, sy, w, h, 0x00000000, config.shadow_alpha)
+    backend.blur_region(sx, sy, w + config.shadow_offset, h + config.shadow_offset, config.shadow_blur)
+
+fn glass_solid_fill_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
+    """Opaque solid fill for a rectangle."""
+    backend.fill_rect(x, y, w, h, color)
+
+fn draw_glass_rect_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a full glass rectangle: shadow + blur + blend + border.
+
+    Renders the complete glassmorphism effect in the correct order:
+    1. Drop shadow behind the rect
+    2. Box blur of the background content
+    3. Semi-transparent surface fill
+    4. 1px semi-transparent border
+    """
+    # 1. Drop shadow
+    glass_shadow_pure(backend, x, y, w, h, config)
+    # 2. Blur background behind the glass surface
+    glass_blur_pure(backend, x, y, w, h, config.blur_radius)
+    # 3. Semi-transparent surface fill
+    glass_fill_pure(backend, x, y, w, h, config.surface_color, config.surface_alpha)
+    # 4. Border
+    draw_glass_border_pure(backend, x, y, w, h, config)
+
+fn draw_glass_border_pure(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassConfig):
+    """Draw a 1px semi-transparent border around the rectangle."""
+    val bcolor = config.border_color
+    val balpha = config.border_alpha
+    # Top edge
+    backend.blend_rect(x, y, w, 1, bcolor, balpha)
+    # Bottom edge
+    if h > 1:
+        backend.blend_rect(x, y + h - 1, w, 1, bcolor, balpha)
+    # Left edge
+    backend.blend_rect(x, y, 1, h, bcolor, balpha)
+    # Right edge
+    if w > 1:
+        backend.blend_rect(x + w - 1, y, 1, h, bcolor, balpha)
+
+fn glass_begin_frame_pure(backend: CompositorBackend, w: i32, h: i32):
+    """Begin a new glass compositing frame by clearing the entire surface."""
+    backend.clear(0x00000000)
+
+fn glass_present_pure(backend: CompositorBackend):
+    """Present the completed glass frame to the display."""
+    backend.present()

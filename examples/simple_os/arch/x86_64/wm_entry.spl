@@ -1589,7 +1589,8 @@ fn handle_terminal_enter():
         g_term_out_type = 0
         g_term_out_count = 0
         g_term_cmd_history = 0
-        matched = 1
+        term_clear_input()
+        return
 
     if term_match_cmd(cmd_uname, 5) == 1:
         g_term_out_type = 2
@@ -1637,30 +1638,58 @@ fn handle_terminal_char(ch: u64):
         g_term_input_len = g_term_input_len + 1
 
 fn handle_editor_click(local_x: u64, local_y: u64):
-    """Handle click in editor content area."""
-    # Move cursor to clicked position
-    val char_x = local_x / 8   # 8px per character
-    val char_y = local_y / 16  # 16px per line
-    g_editor_cursor_x = char_x
-    g_editor_cursor_y = char_y
+    """Handle click in editor content area -- maps pixel coords to cursor position."""
+    # Editor layout: gutter_w=30, code starts at gutter_w+8, char width=8, line_h=16
+    val gutter_w: u64 = 30
+    val code_start: u64 = gutter_w + 8
+    # Only reposition if click is in the code area (past the gutter)
+    if local_x > code_start:
+        val char_x = (local_x - code_start) / 8
+        val char_y = local_y / 16
+        # Clamp to valid range (8 visible lines, max ~30 columns)
+        if char_y < 8:
+            g_editor_cursor_y = char_y
+        else:
+            g_editor_cursor_y = 7
+        if char_x < 30:
+            g_editor_cursor_x = char_x
+        else:
+            g_editor_cursor_x = 29
 
 fn handle_files_click(local_x: u64, local_y: u64):
     """Handle click in file explorer content area."""
-    # Check if click is in sidebar (left 70px) or icon grid
-    if local_x < 70:
-        # Sidebar click -- select item based on Y position
-        val item = local_y / 20
-        if item < 5:
-            g_files_sidebar_sel = item
-            serial_println("[Files] Sidebar item selected")
+    # Sidebar width is 110px (matching draw_files_content)
+    if local_x < 110:
+        # Sidebar click -- map Y to sidebar item index
+        # Items at sb_y offsets: 22(Desktop), 41(Documents), 59(Downloads), 77(Apps), 118(SimpleHD)
+        if local_y >= 118 and local_y < 140:
+            g_files_sidebar_sel = 4
+            serial_println("[Files] Sidebar: SimpleHD")
+        else:
+            if local_y >= 77 and local_y < 97:
+                g_files_sidebar_sel = 3
+                serial_println("[Files] Sidebar: Apps")
+            else:
+                if local_y >= 59 and local_y < 77:
+                    g_files_sidebar_sel = 2
+                    serial_println("[Files] Sidebar: Downloads")
+                else:
+                    if local_y >= 41 and local_y < 59:
+                        g_files_sidebar_sel = 1
+                        serial_println("[Files] Sidebar: Documents")
+                    else:
+                        if local_y >= 22 and local_y < 41:
+                            g_files_sidebar_sel = 0
+                            serial_println("[Files] Sidebar: Desktop")
     else:
-        # Icon grid click -- determine which icon
-        val grid_x = (local_x - 70) / 56  # ~56px per icon column
-        val grid_y = local_y / 60          # ~60px per icon row
-        val idx = grid_y * 3 + grid_x
-        if idx < 6:
-            g_files_selected = idx
-            serial_println("[Files] Item selected")
+        # Icon grid click -- icon_w=56, gap_x=12, icon_h=60, gap_y=8
+        val grid_x = (local_x - 110) / 68  # 56 + 12 = 68px per column
+        val grid_y = local_y / 68           # 60 + 8 = 68px per row
+        if grid_x < 3:
+            val idx = grid_y * 3 + grid_x
+            if idx < 6:
+                g_files_selected = idx
+                serial_println("[Files] Item selected")
 
 # ===========================================================================
 # Application Window Content
@@ -1792,30 +1821,175 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # "Simple" on right
     draw_label_shadow(x + w - 56, st_y + 3, 0x00FFFFFF, 200, pack8(83, 105, 109, 112, 108, 101, 0, 0), 6, 60)
 
+fn render_term_input(tx: u64, ty: u64, color: u64):
+    """Render the current input line from packed buffer."""
+    val words_needed = (g_term_input_len + 7) / 8
+    if words_needed > 0:
+        rt_gui_set_text_buf(g_term_input_0, 0, 0, 0)
+    if words_needed > 1:
+        rt_gui_set_text_buf(g_term_input_1, 8, 0, 0)
+    if words_needed > 2:
+        rt_gui_set_text_buf(g_term_input_2, 16, 0, 0)
+    if words_needed > 3:
+        rt_gui_set_text_buf(g_term_input_3, 24, 0, 0)
+    if words_needed > 4:
+        rt_gui_set_text_buf(g_term_input_4, 32, 0, 0)
+    rt_gui_draw_text_buf(pack(tx, ty), pack(color, g_term_input_len), 220, 0)
+
+fn render_term_help(hx: u64, hy: u64, color: u64, dim: u64) -> u64:
+    """Render help command output. Returns pixel height used."""
+    # "Built-in commands:"
+    rt_gui_set_text_buf(pack8(66, 117, 105, 108, 116, 45, 105, 110), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 99, 111, 109, 109, 97, 110, 100), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(115, 58, 0, 0, 0, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy), pack(color, 18), 220, 0)
+    # "  help    - show this"
+    rt_gui_set_text_buf(pack8(32, 32, 104, 101, 108, 112, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 115, 104, 111, 119), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 116, 104, 105, 115, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 16), pack(dim, 21), 180, 0)
+    # "  clear   - clear screen"
+    rt_gui_set_text_buf(pack8(32, 32, 99, 108, 101, 97, 114, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 45, 32, 99, 108, 101, 97, 114), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 115, 99, 114, 101, 101, 110, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 32), pack(dim, 23), 180, 0)
+    # "  uname   - system info"
+    rt_gui_set_text_buf(pack8(32, 32, 117, 110, 97, 109, 101, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 45, 32, 115, 121, 115, 116, 101), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(109, 32, 105, 110, 102, 111, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 48), pack(dim, 22), 180, 0)
+    # "  ls      - list files"
+    rt_gui_set_text_buf(pack8(32, 32, 108, 115, 32, 32, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 108, 105, 115, 116), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 102, 105, 108, 101, 115, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 64), pack(dim, 22), 180, 0)
+    # "  whoami  - current user"
+    rt_gui_set_text_buf(pack8(32, 32, 119, 104, 111, 97, 109, 105), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 99, 117, 114, 114), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(101, 110, 116, 32, 117, 115, 101, 114), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 80), pack(dim, 24), 180, 0)
+    # "  date    - show date"
+    rt_gui_set_text_buf(pack8(32, 32, 100, 97, 116, 101, 32, 32), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 115, 104, 111, 119), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 100, 97, 116, 101, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 96), pack(dim, 21), 180, 0)
+    # "  uptime  - system uptime"
+    rt_gui_set_text_buf(pack8(32, 32, 117, 112, 116, 105, 109, 101), 0, 0, 0)
+    rt_gui_set_text_buf(pack8(32, 32, 45, 32, 117, 112, 116, 105), 8, 0, 0)
+    rt_gui_set_text_buf(pack8(109, 101, 0, 0, 0, 0, 0, 0), 16, 0, 0)
+    rt_gui_draw_text_buf(pack(hx, hy + 112), pack(dim, 18), 180, 0)
+    return 128
+
+fn render_term_output(ox: u64, oy: u64, color: u64) -> u64:
+    """Render the last command output. Returns pixel height used."""
+    val dim_c = 0x00AAAAAA
+    val green_c = 0x0044FF44
+    val cyan_c = 0x005588CC
+
+    if g_term_out_type == 1:
+        return render_term_help(ox, oy, color, dim_c)
+
+    if g_term_out_type == 2:
+        # uname: "SimpleOS x86_64 v1.0"
+        rt_gui_set_text_buf(pack8(83, 105, 109, 112, 108, 101, 79, 83), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(32, 120, 56, 54, 95, 54, 52, 32), 8, 0, 0)
+        rt_gui_set_text_buf(pack8(118, 49, 46, 48, 0, 0, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(green_c, 20), 220, 0)
+        return 16
+
+    if g_term_out_type == 3:
+        # ls output
+        # "bin/"
+        draw_label(ox, oy, cyan_c, 200, pack8(98, 105, 110, 47, 0, 0, 0, 0), 4)
+        # "etc/"
+        draw_label(ox, oy + 16, cyan_c, 200, pack8(101, 116, 99, 47, 0, 0, 0, 0), 4)
+        # "home/"
+        draw_label(ox, oy + 32, cyan_c, 200, pack8(104, 111, 109, 101, 47, 0, 0, 0), 5)
+        # "kernel.spl"
+        rt_gui_set_text_buf(pack8(107, 101, 114, 110, 101, 108, 46, 115), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(112, 108, 0, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 48), pack(color, 10), 200, 0)
+        # "README.md"
+        rt_gui_set_text_buf(pack8(82, 69, 65, 68, 77, 69, 46, 109), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(100, 0, 0, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy + 64), pack(color, 9), 200, 0)
+        return 80
+
+    if g_term_out_type == 4:
+        # whoami: "root"
+        draw_label(ox, oy, green_c, 220, pack8(114, 111, 111, 116, 0, 0, 0, 0), 4)
+        return 16
+
+    if g_term_out_type == 5:
+        # date: "2026-04-07 12:00"
+        rt_gui_set_text_buf(pack8(50, 48, 50, 54, 45, 48, 52, 45), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(48, 55, 32, 49, 50, 58, 48, 48), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 16), 200, 0)
+        return 16
+
+    if g_term_out_type == 6:
+        # uptime: "up 0d 00:01:23"
+        rt_gui_set_text_buf(pack8(117, 112, 32, 48, 100, 32, 48, 48), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(58, 48, 49, 58, 50, 51, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(color, 14), 200, 0)
+        return 16
+
+    if g_term_out_type == 7:
+        # Unknown: "command not found"
+        rt_gui_set_text_buf(pack8(99, 111, 109, 109, 97, 110, 100, 32), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(110, 111, 116, 32, 102, 111, 117, 110), 8, 0, 0)
+        rt_gui_set_text_buf(pack8(100, 0, 0, 0, 0, 0, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(ox, oy), pack(0x00FF4444, 17), 220, 0)
+        return 16
+
+    return 0
+
 fn draw_terminal_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render interactive terminal with command prompt and output."""
     val cy = y + TITLE_BAR_H + 2
+    val content_x = x + 10
+    val text_color = 0x0044FF44
+    val prompt_color = 0x0044FF44
+    val output_color = 0x00CCCCCC
+    val bg_color = 0x000A0A14
 
-    # Terminal dark interior — rounded bottom corners
-    rrect(x + 1, cy, w - 2, h - TITLE_BAR_H - 3, 0x000A0A14, 10, 200)
+    # Terminal dark interior -- rounded bottom corners
+    rrect(x + 1, cy, w - 2, h - TITLE_BAR_H - 3, bg_color, 10, 200)
 
-    # Cursor
-    rrect(x + 14, cy + 14, 8, 16, 0x0044FF44, 2, 255)
+    var line_y = cy + 8
 
-    # Text lines (keep as fills — they're thin lines)
-    fill(x + 26, cy + 14, 140, 3, 0x0044FF44)
-    fill(x + 14, cy + 36, 220, 3, 0x00888888)
-    fill(x + 14, cy + 52, 180, 3, 0x00888888)
-    fill(x + 14, cy + 68, 260, 3, 0x005588CC)
-    fill(x + 14, cy + 84, 120, 3, 0x00888888)
-    fill(x + 14, cy + 100, 200, 3, 0x0044FF44)
-    fill(x + 14, cy + 116, 160, 3, 0x00888888)
-    fill(x + 14, cy + 132, 100, 3, 0x005588CC)
-    # More terminal output for professional look
-    fill(x + 14, cy + 148, 90, 3, 0x005588CC)
-    fill(x + 14, cy + 164, 150, 3, 0x0044FF44)
-    fill(x + 14, cy + 180, 80, 3, 0x00FF8844)
-    # Second cursor block (shows activity)
-    rrect(x + 14, cy + 196, 8, 16, 0x0044FF44, 2, 180)
+    # Welcome header (shown before any command is executed)
+    if g_term_cmd_history == 0:
+        # "SimpleOS Terminal v1.0"
+        rt_gui_set_text_buf(pack8(83, 105, 109, 112, 108, 101, 79, 83), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(32, 84, 101, 114, 109, 105, 110, 97), 8, 0, 0)
+        rt_gui_set_text_buf(pack8(108, 32, 118, 49, 46, 48, 0, 0), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(content_x, line_y), pack(0x0088FF88, 22), 200, 0)
+        line_y = line_y + 16
+        # "Type 'help' for commands"
+        rt_gui_set_text_buf(pack8(84, 121, 112, 101, 32, 39, 104, 101), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(108, 112, 39, 32, 102, 111, 114, 32), 8, 0, 0)
+        rt_gui_set_text_buf(pack8(99, 111, 109, 109, 97, 110, 100, 115), 16, 0, 0)
+        rt_gui_draw_text_buf(pack(content_x, line_y), pack(output_color, 24), 160, 0)
+        line_y = line_y + 16
+        line_y = line_y + 8
+
+    # Show command output (from last executed command)
+    if g_term_cmd_history > 0 and g_term_out_count > 0:
+        val out_h = render_term_output(content_x, line_y, output_color)
+        line_y = line_y + out_h
+        line_y = line_y + 8
+
+    # Current prompt line: "$ " prefix in green
+    draw_label(content_x, line_y, prompt_color, 220, pack8(36, 32, 0, 0, 0, 0, 0, 0), 2)
+
+    # Render typed input text
+    if g_term_input_len > 0:
+        render_term_input(content_x + 16, line_y, text_color)
+
+    # Blinking cursor block
+    val cursor_x = content_x + 16 + g_term_input_len * 8
+    blend(cursor_x, line_y, 8, 14, text_color, 180)
 
 fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val cy = y + TITLE_BAR_H + 2
@@ -2534,11 +2708,32 @@ fn spl_start():
                         serial_println("[WM] Closing window")
                 if wm_shortcut == 9:
                     # R = restore
-                    if scancode == 0x13:
                     if g_minimize_states != 0:
                         g_minimize_states = 0
                         needs_redraw = 1
                         serial_println("[WM] Restored all windows")
+
+                # Forward non-shortcut key presses to active app
+                if wm_shortcut == 0:
+                    var key_handled: u64 = 0
+                    if scancode == 0x1C:  # Enter
+                        if active_win == 0:
+                            handle_terminal_enter()
+                            key_handled = 1
+                            needs_redraw = 1
+                    if scancode == 0x0E:  # Backspace
+                        if active_win == 0:
+                            handle_terminal_backspace()
+                            key_handled = 1
+                            needs_redraw = 1
+                    # Letter/symbol keys forwarded to active app
+                    if key_handled == 0:
+                        if active_win == 0:
+                            val ch = scancode_to_ascii(scancode)
+                            if ch != 0:
+                                handle_terminal_char(ch)
+                                key_handled = 1
+                                needs_redraw = 1
 
         # Poll mouse (PS/2 auxiliary device)
         if g_mouse_initialized == 1:

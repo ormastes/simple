@@ -1,0 +1,106 @@
+# Render Extras — Pure Simple implementations of missing C FFI rendering functions
+#
+# Provides gradient_rect (gradient + rounded corners) and wallpaper rendering
+# via the CompositorBackend trait. Works on all backends.
+
+use os.compositor.display_backend.{CompositorBackend}
+
+# ============================================================================
+# Gradient Rectangle with Rounded Corners
+# ============================================================================
+
+fn gradient_rect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
+                 color1: u32, color2: u32, radius: i32, alpha: u8):
+    """Fill a rectangle with a vertical gradient and rounded corners.
+
+    Combines gradient_v with corner masking for rounded rectangle appearance.
+    Uses alpha blending for smooth edges.
+    """
+    if radius <= 0:
+        # No rounding — simple gradient
+        backend.gradient_v(x, y, w, h, color1, color2)
+        return
+
+    val r = if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
+
+    # Draw gradient row-by-row with corner masking
+    val r1_r: i32 = ((color1 >> 16) & 0xFF).to_i32()
+    val r1_g: i32 = ((color1 >> 8) & 0xFF).to_i32()
+    val r1_b: i32 = (color1 & 0xFF).to_i32()
+    val r2_r: i32 = ((color2 >> 16) & 0xFF).to_i32()
+    val r2_g: i32 = ((color2 >> 8) & 0xFF).to_i32()
+    val r2_b: i32 = (color2 & 0xFF).to_i32()
+    val denom = if h > 1: h - 1 else: 1
+
+    var row: i32 = 0
+    while row < h:
+        # Interpolate color for this row
+        val cr = (r1_r + (r2_r - r1_r) * row / denom).to_u32()
+        val cg = (r1_g + (r2_g - r1_g) * row / denom).to_u32()
+        val cb = (r1_b + (r2_b - r1_b) * row / denom).to_u32()
+        val color = 0xFF000000 | (cr << 16) | (cg << 8) | cb
+
+        # Calculate horizontal inset for rounded corners
+        var inset: i32 = 0
+        if row < r:
+            # Top corners
+            val dy = r - row
+            inset = r - isqrt(r * r - dy * dy)
+        else if row >= h - r:
+            # Bottom corners
+            val dy = row - (h - r - 1)
+            inset = r - isqrt(r * r - dy * dy)
+
+        val rx = x + inset
+        val rw = w - inset * 2
+        if rw > 0:
+            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
+        row = row + 1
+
+# ============================================================================
+# Desktop Wallpaper
+# ============================================================================
+
+fn draw_wallpaper(backend: CompositorBackend, style: i32):
+    """Draw a decorative desktop wallpaper.
+
+    Styles:
+      0 — Midnight gradient (dark purple → black)
+      1 — Ocean gradient (dark blue → teal)
+      2 — Sunset gradient (dark orange → purple)
+      3 — Forest gradient (dark green → black)
+    """
+    val sw = backend.width()
+    val sh = backend.height()
+
+    if style == 0:
+        # Midnight: dark purple to black with subtle noise
+        backend.gradient_v(0, 0, sw, sh, 0xFF100820, 0xFF020208)
+    else if style == 1:
+        # Ocean: dark blue to teal
+        backend.gradient_v(0, 0, sw, sh, 0xFF0A1628, 0xFF082018)
+    else if style == 2:
+        # Sunset: dark orange to purple
+        backend.gradient_v(0, 0, sw, sh, 0xFF281008, 0xFF180828)
+    else:
+        # Forest: dark green to black
+        backend.gradient_v(0, 0, sw, sh, 0xFF082010, 0xFF040408)
+
+    # Add subtle horizontal accent stripe at 30% height
+    val stripe_y = sh * 3 / 10
+    backend.blend_rect(0, stripe_y, sw, 2, 0x00FFFFFF, 15)
+
+# ============================================================================
+# Integer Square Root (for rounded corner calculation)
+# ============================================================================
+
+fn isqrt(n: i32) -> i32:
+    """Integer square root via Newton's method."""
+    if n <= 0: return 0
+    if n == 1: return 1
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
