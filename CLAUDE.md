@@ -191,8 +191,8 @@ bin/simple test --list              # List tests
 bin/simple test --only-slow         # Slow tests
 
 # Container Testing (safe/isolated) - see `/test` skill for full details
-scripts/local-container-test.sh unit                     # Unit tests in container
-scripts/local-container-test.sh quick path/to/spec.spl  # Single test
+scripts/local-container-test.shs unit                     # Unit tests in container
+scripts/local-container-test.shs quick path/to/spec.spl  # Single test
 scripts/ci-test.sh                                       # CI-style execution
 
 # Quality

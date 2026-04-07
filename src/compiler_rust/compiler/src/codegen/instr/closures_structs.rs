@@ -635,8 +635,38 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // Build call arguments: receiver first, then other args
     let mut call_args = vec![receiver_val];
-    for arg in args {
-        call_args.push(get_vreg_or_default(ctx, builder, arg));
+    for (i, arg) in args.iter().enumerate() {
+        let mut val = get_vreg_or_default(ctx, builder, arg);
+        // For rt_array_push, the value argument (index 0 in args, index 1 in call_args)
+        // must be a tagged RuntimeValue.  MIR lowering emits BoxInt for MethodCall,
+        // but some paths (MethodCallStatic fallback) may skip it.  We defensively box
+        // integer-width values here.  Heap pointers (tag 0x1) and already-boxed ints
+        // (tag 0x0 with high bits set) must NOT be double-boxed.
+        //
+        // Heuristic: if the Cranelift value was produced by an ishl with shift=3,
+        // it's already boxed.  Otherwise box it for push.
+        if runtime_func == "rt_array_push" && i == 0 {
+            // Check if this value is already the result of a BoxInt (ishl by 3).
+            // We do this by checking the instruction that produced the value.
+            let already_boxed = {
+                if let cranelift_codegen::ir::ValueDef::Result(inst, _) = builder.func.dfg.value_def(val) {
+                    matches!(builder.func.dfg.insts[inst], cranelift_codegen::ir::InstructionData::BinaryImm64 { .. })
+                        || matches!(builder.func.dfg.insts[inst],
+                            cranelift_codegen::ir::InstructionData::Binary { opcode: cranelift_codegen::ir::Opcode::Ishl, .. })
+                } else {
+                    false
+                }
+            };
+            if !already_boxed {
+                let val_type = builder.func.dfg.value_type(val);
+                if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
+                    val = builder.ins().uextend(types::I64, val);
+                }
+                let three = builder.ins().iconst(types::I64, 3);
+                val = builder.ins().ishl(val, three);
+            }
+        }
+        call_args.push(val);
     }
 
     let call = adapted_call(builder, func_ref, &call_args);

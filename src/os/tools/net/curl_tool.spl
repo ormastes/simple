@@ -1,0 +1,74 @@
+# curl — HTTP client
+# MDSOC: feature dimension, apps layer
+
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect, send, recv}
+
+fn run_curl(args: [text]) -> i32:
+    """Simple HTTP GET client.
+
+    Usage: curl URL
+           curl -o OUTPUT URL
+    """
+    var output_file = ""
+    var url = ""
+    var i = 0
+
+    while i < args.len():
+        if args[i] == "-o" and i + 1 < args.len():
+            i = i + 1
+            output_file = args[i]
+        elif not args[i].starts_with("-"):
+            url = args[i]
+        i = i + 1
+
+    if url == "":
+        print "curl: missing URL"
+        return 1
+
+    # Parse URL: extract host and path
+    var host = ""
+    var path = "/"
+    var port: i32 = 80
+
+    # Strip http:// prefix
+    var rest = url
+    if rest.starts_with("http://"):
+        rest = rest.slice(7, rest.len())
+
+    # Split host/path
+    val slash_idx = rest.find("/")
+    if slash_idx >= 0:
+        host = rest.slice(0, slash_idx)
+        path = rest.slice(slash_idx, rest.len())
+    else:
+        host = rest
+
+    # Build HTTP request
+    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+
+    # Connect and send
+    val sock = socket("tcp")
+    val addr = SockAddr(host: host, port: port)
+    connect(sock, addr)
+    send(sock, addr, request.as_bytes())
+
+    # Receive response
+    val response = recv(sock, 65536, 5000)
+    if response.len() == 0:
+        print "curl: empty response from {host}"
+        return 1
+
+    val body = _extract_body(response.as_text())
+    if output_file != "":
+        print "curl: -o not yet implemented (VFS write needed)"
+        return 1
+    print body
+    return 0
+
+fn _extract_body(response: text) -> text:
+    """Extract body from HTTP response (after blank line)."""
+    val separator = "\r\n\r\n"
+    val idx = response.find(separator)
+    if idx >= 0:
+        return response.slice(idx + 4, response.len())
+    return response

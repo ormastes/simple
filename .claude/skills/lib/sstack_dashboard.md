@@ -8,10 +8,10 @@ SStack emits JSONL events that the LLM Agent Dashboard (`JsonlWatcher` + `AgentD
 
 ```bash
 # 1. Start the orchestrator (emits events directly)
-scripts/sstack-orchestrator.sh &
+scripts/sstack-orchestrator.shs &
 
 # 2. Optionally start the bridge for richer state-transition events
-scripts/sstack-dashboard-bridge.sh &
+scripts/sstack-dashboard-bridge.shs &
 
 # 3. Launch the dashboard
 bin/simple llm-dashboard --dir .agent/events --gui --port 3001
@@ -98,11 +98,11 @@ Emitted when the dashboard bridge process starts.
 ## Architecture
 
 ```
-sstack-orchestrator.sh
+sstack-orchestrator.shs
   |-- writes STATUS.json
   |-- emits events -> .agent/events/sstack.jsonl  (direct)
   |
-sstack-dashboard-bridge.sh  (optional, richer transitions)
+sstack-dashboard-bridge.shs  (optional, richer transitions)
   |-- watches STATUS.json
   |-- emits events -> .agent/events/sstack.jsonl  (state diffs)
   |

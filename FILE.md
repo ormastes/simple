@@ -89,7 +89,7 @@ Current version string used by:
 
 ---
 
-### install.sh
+### install.shs
 **Automated installation script**
 
 **Purpose:** Install Simple system-wide
@@ -97,13 +97,13 @@ Current version string used by:
 **Usage:**
 ```bash
 # Default installation
-./install.sh
+./install.shs
 
 # Custom prefix
-PREFIX=/usr/local ./install.sh
+PREFIX=/usr/local ./install.shs
 
 # See installation options
-./install.sh --help
+./install.shs --help
 ```
 
 **Features:**
@@ -299,19 +299,19 @@ cd simple
 bin/simple build --release
 
 # Install system-wide
-./install.sh
+./install.shs
 ```
 
-### Using install.sh (Recommended)
+### Using install.shs (Recommended)
 ```bash
 # Automated installation with platform detection
-./install.sh
+./install.shs
 
 # Custom installation prefix
-PREFIX=/usr/local ./install.sh
+PREFIX=/usr/local ./install.shs
 
 # See available options
-./install.sh --help
+./install.shs --help
 ```
 
 **Note:** Use `bin/simple build` commands directly (no Makefile).

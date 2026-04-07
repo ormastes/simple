@@ -52,8 +52,8 @@ tools/docker/
   Dockerfile.tauri-gui           # Desktop GUI test container (Xvfb + VNC)
   Dockerfile.tauri-android       # Android build container (SDK + NDK)
   Dockerfile.tauri-android-test  # Android emulator test container
-  run-tauri-gui.sh               # Desktop container entry script
-  run-android-test.sh            # Android emulator test script
+  run-tauri-gui.shs              # Desktop container entry script
+  run-android-test.shs           # Android emulator test script
 ```
 
 ## Platform Status

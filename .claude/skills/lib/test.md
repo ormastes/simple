@@ -29,8 +29,8 @@ docker-compose -f config/docker-compose.yml up unit-tests
 docker-compose -f config/docker-compose.yml up all-tests
 
 # Helper scripts
-scripts/local-container-test.sh unit                       # Unit tests
-scripts/local-container-test.sh quick path/to/spec.spl    # Single test
+scripts/local-container-test.shs unit                       # Unit tests
+scripts/local-container-test.shs quick path/to/spec.spl    # Single test
 scripts/ci-test.sh                                         # CI-style
 ```
 

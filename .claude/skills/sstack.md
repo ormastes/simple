@@ -159,10 +159,10 @@ Between every phase transition, verify:
 
 ## Autonomous Mode
 
-SStack can run autonomously via `scripts/sstack-orchestrator.sh`.
+SStack can run autonomously via `scripts/sstack-orchestrator.shs`.
 - Reads tasks from `.sstack/TASKS.md`
 - Runs full pipeline for each task
-- Monitor: `scripts/sstack-monitor.sh`
+- Monitor: `scripts/sstack-monitor.shs`
 - Status: `.agent/STATUS.json`
 
 ## Language Dispatch

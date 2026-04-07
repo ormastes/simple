@@ -8,6 +8,7 @@ Development and integration tools for the Simple Language project.
 
 | Directory | Description |
 |-----------|-------------|
+| `shell/` | Coreutils/shell tools for SimpleOS (cat, ls, grep, sed, cut, tr, diff, base64, hexdump, etc.) |
 | `claude-plugin/` | Claude Code plugin bundles, local marketplace, and MCP configuration |
 
 ### `claude-plugin/simple-codex/`

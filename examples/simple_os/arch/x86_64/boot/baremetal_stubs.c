@@ -4226,7 +4226,7 @@ static void ge_scalarmult_base(ge_p3 *result, const uint8_t s[32])
             }
         }
         /* Periodic carry to prevent limb growth in extended coordinates */
-        if (started && (i & 15) == 0) {
+        if (started && (i & 3) == 0) {
             fe_carry(&result->X); fe_carry(&result->Y);
             fe_carry(&result->Z); fe_carry(&result->T);
         }
@@ -4253,6 +4253,11 @@ static void ge_scalarmult(ge_p3 *result, const uint8_t s[32], const ge_p3 *P)
                 ge_add_cached(&t, result, &Pc);
                 ge_p1p1_to_p3(result, &t);
             }
+        }
+        /* Periodic carry to prevent limb growth in extended coordinates */
+        if (started && (i & 3) == 0) {
+            fe_carry(&result->X); fe_carry(&result->Y);
+            fe_carry(&result->Z); fe_carry(&result->T);
         }
     }
     if (!started) ge_p3_0(result);
@@ -4282,9 +4287,18 @@ static void _sc_load21(int64_t out[24], const uint8_t in[], int nbytes)
     out[ 8] = (int64_t)( in[21]       | ((int64_t)in[22] << 8) | ((int64_t)in[23] << 16)) & 0x1FFFFF;
     out[ 9] = (int64_t)((in[23] >> 5) | ((int64_t)in[24] << 3) | ((int64_t)in[25] << 11) | ((int64_t)in[26] << 19)) & 0x1FFFFF;
     out[10] = (int64_t)((in[26] >> 2) | ((int64_t)in[27] << 6) | ((int64_t)in[28] << 14)) & 0x1FFFFF;
+    /* For 32-byte inputs, limb 11 is the LAST limb. A 256-bit scalar needs
+     * 12*21=252 bits + 4 extra, so the top limb holds up to 25 bits
+     * (bits 231..255). Masking to 21 bits would lose the clamped private-key
+     * bit 254, breaking sc_muladd.
+     * For 64-byte inputs, limb 12 picks up at byte 31 bit 4 (=bit 252), so
+     * limb 11 MUST be masked to avoid double-counting bits 252-255. */
+    if (nbytes <= 32) {
+        out[11] = (int64_t)((in[28] >> 7) | ((int64_t)in[29] << 1) | ((int64_t)in[30] << 9) | ((int64_t)in[31] << 17));
+        return;
+    }
     out[11] = (int64_t)((in[28] >> 7) | ((int64_t)in[29] << 1) | ((int64_t)in[30] << 9) | ((int64_t)in[31] << 17)) & 0x1FFFFF;
 
-    if (nbytes < 34) return;
     out[12] = (int64_t)((in[31] >> 4) | ((int64_t)in[32] << 4) | ((int64_t)in[33] << 12) | ((int64_t)in[34] << 20)) & 0x1FFFFF;
     out[13] = (int64_t)((in[34] >> 1) | ((int64_t)in[35] << 7) | ((int64_t)in[36] << 15)) & 0x1FFFFF;
     out[14] = (int64_t)((in[36] >> 6) | ((int64_t)in[37] << 2) | ((int64_t)in[38] << 10) | ((int64_t)in[39] << 18)) & 0x1FFFFF;
@@ -4342,6 +4356,8 @@ static void _sc_pack(uint8_t out[32], const int64_t s[12])
 static void _sc_reduce_limbs(int64_t s[24])
 {
     int64_t carry;
+
+    /* --- Round 1: fold high limbs (s[23]..s[12]) into s[0..11] --- */
     for (int i = 23; i >= 12; i--) {
         int64_t si = s[i]; s[i] = 0;
         s[i-12] += si * 666643;
@@ -4351,30 +4367,62 @@ static void _sc_reduce_limbs(int64_t s[24])
         s[i-8]  += si * 136657;
         s[i-7]  -= si * 683901;
     }
-    /* Carry-propagate to [0..11] */
+
+    /* --- Round 1 carry propagation (ref10 pattern) --- */
+    /* Even limbs first */
+    for (int i = 0; i < 12; i += 2) {
+        carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        if (i + 1 < 12) s[i+1] += carry;
+    }
+    /* Odd limbs */
+    for (int i = 1; i < 12; i += 2) {
+        carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        if (i + 1 < 12) s[i+1] += carry;
+    }
+
+    /* --- L-wrap: carry out of s[11] wraps back via L --- */
+    {
+        int64_t s12 = (s[11] + (1LL << 20)) >> 21;
+        s[11] -= s12 << 21;
+        s[0] += s12 * 666643;
+        s[1] += s12 * 470296;
+        s[2] += s12 * 654183;
+        s[3] -= s12 * 997805;
+        s[4] += s12 * 136657;
+        s[5] -= s12 * 683901;
+    }
+
+    /* --- Round 2 carry propagation --- */
+    for (int i = 0; i < 12; i += 2) {
+        carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        if (i + 1 < 12) s[i+1] += carry;
+    }
+    for (int i = 1; i < 12; i += 2) {
+        carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        if (i + 1 < 12) s[i+1] += carry;
+    }
+
+    /* --- Second L-wrap --- */
+    {
+        int64_t s12 = (s[11] + (1LL << 20)) >> 21;
+        s[11] -= s12 << 21;
+        s[0] += s12 * 666643;
+        s[1] += s12 * 470296;
+        s[2] += s12 * 654183;
+        s[3] -= s12 * 997805;
+        s[4] += s12 * 136657;
+        s[5] -= s12 * 683901;
+    }
+
+    /* Final carry propagation to normalize all limbs */
     for (int i = 0; i < 11; i++) {
         carry = (s[i] + (1LL << 20)) >> 21;
         s[i] -= carry << 21;
         s[i+1] += carry;
-    }
-    /* Conditional final subtraction of L */
-    {
-        int64_t t[12]; int64_t c;
-        for (int i = 0; i < 12; i++) t[i] = s[i];
-        /* Subtract L_low = c from t. c in signed 21-bit limbs = -(-c) =
-         * -[666643, 470296, 654183, -997805, 136657, -683901].
-         * So subtracting c means: t[j] += (-c)_j */
-        t[0] += 666643; t[1] += 470296; t[2] += 654183;
-        t[3] -= 997805; t[4] += 136657; t[5] -= 683901;
-        for (int i = 0; i < 11; i++) {
-            c = t[i] >> 21; t[i] -= c << 21; t[i+1] += c;
-        }
-        /* If result is non-negative, use it */
-        if (t[11] >= 0) {
-            int ok = 1;
-            for (int i = 0; i < 12; i++) if (t[i] < 0) { ok = 0; break; }
-            if (ok) for (int i = 0; i < 12; i++) s[i] = t[i];
-        }
     }
 }
 
@@ -4662,8 +4710,17 @@ int64_t rt_ed25519_self_test(void)
 
     /* 3. Verify valid signature */
     serial_puts("[ed25519-c] step 3: verify...\r\n");
+    serial_puts("[ed25519-c]   sig R=");
+    for (int i = 0; i < 4; i++) serial_puthex(sig[i]);
+    serial_puts("... S=");
+    for (int i = 32; i < 36; i++) serial_puthex(sig[i]);
+    serial_puts("...\r\n");
     if (_ed25519_verify((const uint8_t *)"", 0, pk, sig) != 0) {
         serial_puts("[ed25519-c] FAIL: verify rejected valid sig\r\n");
+        /* Dump full sig for post-mortem */
+        serial_puts("[ed25519-c]   full sig: ");
+        for (int i = 0; i < 64; i++) serial_puthex(sig[i]);
+        serial_puts("\r\n");
         return -1;
     }
     serial_puts("[ed25519-c] step 3: verify OK\r\n");

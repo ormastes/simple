@@ -125,3 +125,306 @@ fn text_width(text_str: text) -> i32:
 fn text_width_2x(text_str: text) -> i32:
     """Calculate pixel width of 2x text string (16px per character)."""
     text_str.len() * CHAR_W * 2
+
+# ============================================================================
+# Vector Font Rasterizer (ported from QEMU glass_render.c)
+# ============================================================================
+
+val VF_MOVE: i32 = 0
+val VF_LINE: i32 = 1
+val VF_CLOSE: i32 = 2
+val VF_END: i32 = 3
+
+fn _vf_point_inside(cmds: [i32], px: i32, py: i32, scale_n: i32, scale_d: i32) -> bool:
+    """Ray-casting point-in-polygon test (even-odd rule).
+    Tests if point (px, py) is inside the outline defined by cmds.
+    Coordinates scaled by scale_n/scale_d from design space to pixel space.
+    """
+    var crossings: i32 = 0
+    var i: i32 = 0
+    var move_x: i32 = 0
+    var move_y: i32 = 0
+    var cur_x: i32 = 0
+    var cur_y: i32 = 0
+    val cmd_len = cmds.len()
+    while i + 2 < cmd_len:
+        val cmd = cmds[i]
+        val raw_x = cmds[i + 1]
+        val raw_y = cmds[i + 2]
+        val cx = raw_x * scale_n / scale_d
+        val cy = raw_y * scale_n / scale_d
+        if cmd == VF_MOVE:
+            move_x = cx
+            move_y = cy
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_LINE:
+            # Test edge cur→(cx,cy) against horizontal ray from (px,py)
+            val y1 = cur_y
+            val y2 = cy
+            val x1 = cur_x
+            val x2 = cx
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = x1 + (py - y1) * (x2 - x1) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = cx
+            cur_y = cy
+        else if cmd == VF_CLOSE:
+            # Close: edge from cur back to move point
+            val y1 = cur_y
+            val y2 = move_y
+            val x1 = cur_x
+            val x2 = move_x
+            if (y1 <= py and py < y2) or (y2 <= py and py < y1):
+                val dy = y2 - y1
+                if dy != 0:
+                    val ix = x1 + (py - y1) * (x2 - x1) / dy
+                    if px < ix:
+                        crossings = crossings + 1
+            cur_x = move_x
+            cur_y = move_y
+        else if cmd == VF_END:
+            return crossings % 2 == 1
+        i = i + 3
+    crossings % 2 == 1
+
+fn _vf_render_glyph(backend: CompositorBackend, cmds: [i32], glyph_w: i32,
+                    gx: i32, gy: i32, pixel_h: i32, color: u32, alpha: u8):
+    """Render a single vector glyph with 2x2 sub-pixel AA."""
+    val pixel_w = glyph_w * pixel_h / 24
+    if pixel_w <= 0 or pixel_h <= 0:
+        return
+    val scale_n = pixel_h * 2
+    val scale_d: i32 = 48
+    var row: i32 = 0
+    while row < pixel_h:
+        var col: i32 = 0
+        while col < pixel_w:
+            var coverage: i32 = 0
+            # 2x2 sub-pixel sampling
+            if _vf_point_inside(cmds, col * 2, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if _vf_point_inside(cmds, col * 2 + 1, row * 2, scale_n, scale_d):
+                coverage = coverage + 1
+            if _vf_point_inside(cmds, col * 2, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            if _vf_point_inside(cmds, col * 2 + 1, row * 2 + 1, scale_n, scale_d):
+                coverage = coverage + 1
+            if coverage > 0:
+                val a: u8 = alpha * coverage / 4
+                backend.blend_rect(gx + col, gy + row, 1, 1, color, a)
+            col = col + 1
+        row = row + 1
+
+# ============================================================================
+# Glyph Outline Data (design space: 24 units tall)
+# ============================================================================
+
+fn _vf_glyph(ch: i32) -> [i32]:
+    """Return outline commands for a character, or empty array for bitmap fallback."""
+    if ch == 65: return _vf_A()    # A
+    if ch == 66: return _vf_B()    # B
+    if ch == 67: return _vf_C()    # C
+    if ch == 68: return _vf_D()    # D
+    if ch == 69: return _vf_E()    # E
+    if ch == 70: return _vf_F()    # F
+    if ch == 72: return _vf_H()    # H
+    if ch == 73: return _vf_I()    # I
+    if ch == 76: return _vf_L()    # L
+    if ch == 77: return _vf_M()    # M
+    if ch == 78: return _vf_N()    # N
+    if ch == 79: return _vf_O()    # O
+    if ch == 80: return _vf_P()    # P
+    if ch == 82: return _vf_R()    # R
+    if ch == 83: return _vf_S()    # S
+    if ch == 84: return _vf_T()    # T
+    if ch == 87: return _vf_W()    # W
+    if ch == 97: return _vf_a()    # a
+    if ch == 100: return _vf_d()   # d
+    if ch == 101: return _vf_e()   # e
+    if ch == 105: return _vf_i()   # i
+    if ch == 108: return _vf_l()   # l
+    if ch == 109: return _vf_m()   # m
+    if ch == 110: return _vf_n()   # n
+    if ch == 111: return _vf_o()   # o
+    if ch == 114: return _vf_r()   # r
+    if ch == 115: return _vf_s()   # s
+    if ch == 116: return _vf_t()   # t
+    []
+
+# Uppercase glyphs
+fn _vf_A() -> [i32]:
+    [0,0,24, 1,5,0, 1,6,0, 1,11,24, 1,9,24, 1,7,16, 1,4,16, 1,2,24, 2,0,0,
+     0,4,14, 1,5,8, 1,6,8, 1,7,14, 2,0,0, 3,0,0]
+
+fn _vf_B() -> [i32]:
+    [0,0,24, 1,0,0, 1,8,0, 1,10,2, 1,10,10, 1,8,12, 1,10,14, 1,10,22, 1,8,24, 1,0,24, 2,0,0,
+     0,2,2, 1,7,2, 1,8,4, 1,8,10, 1,7,11, 1,2,11, 2,0,0,
+     0,2,13, 1,7,13, 1,8,15, 1,8,21, 1,7,22, 1,2,22, 2,0,0, 3,0,0]
+
+fn _vf_C() -> [i32]:
+    [0,10,4, 1,8,0, 1,3,0, 1,0,4, 1,0,20, 1,3,24, 1,8,24, 1,10,20,
+     1,8,20, 1,5,22, 1,2,20, 1,2,4, 1,5,2, 1,8,4, 2,0,0, 3,0,0]
+
+fn _vf_D() -> [i32]:
+    [0,0,24, 1,0,0, 1,6,0, 1,10,4, 1,10,20, 1,6,24, 1,0,24, 2,0,0,
+     0,2,2, 1,5,2, 1,8,5, 1,8,19, 1,5,22, 1,2,22, 2,0,0, 3,0,0]
+
+fn _vf_E() -> [i32]:
+    [0,0,0, 1,0,24, 1,9,24, 1,9,22, 1,2,22, 1,2,13, 1,7,13, 1,7,11, 1,2,11, 1,2,2, 1,9,2, 1,9,0, 2,0,0, 3,0,0]
+
+fn _vf_F() -> [i32]:
+    [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,7,13, 1,7,11, 1,2,11, 1,2,2, 1,9,2, 1,9,0, 2,0,0, 3,0,0]
+
+fn _vf_H() -> [i32]:
+    [0,0,0, 1,0,24, 1,2,24, 1,2,13, 1,8,13, 1,8,24, 1,10,24, 1,10,0, 1,8,0, 1,8,11, 1,2,11, 1,2,0, 2,0,0, 3,0,0]
+
+fn _vf_I() -> [i32]:
+    [0,1,0, 1,1,24, 1,3,24, 1,3,0, 2,0,0, 3,0,0]
+
+fn _vf_L() -> [i32]:
+    [0,0,0, 1,0,24, 1,9,24, 1,9,22, 1,2,22, 1,2,0, 2,0,0, 3,0,0]
+
+fn _vf_M() -> [i32]:
+    [0,0,24, 1,0,0, 1,2,0, 1,6,10, 1,10,0, 1,12,0, 1,12,24, 1,10,24, 1,10,6, 1,6,16, 1,2,6, 1,2,24, 2,0,0, 3,0,0]
+
+fn _vf_N() -> [i32]:
+    [0,0,24, 1,0,0, 1,2,0, 1,8,18, 1,8,0, 1,10,0, 1,10,24, 1,8,24, 1,2,6, 1,2,24, 2,0,0, 3,0,0]
+
+fn _vf_O() -> [i32]:
+    [0,3,0, 1,8,0, 1,11,4, 1,11,20, 1,8,24, 1,3,24, 1,0,20, 1,0,4, 2,0,0,
+     0,3,2, 1,7,2, 1,9,5, 1,9,19, 1,7,22, 1,3,22, 1,2,19, 1,2,5, 2,0,0, 3,0,0]
+
+fn _vf_P() -> [i32]:
+    [0,0,24, 1,0,0, 1,8,0, 1,10,2, 1,10,10, 1,8,12, 1,2,12, 1,2,24, 2,0,0,
+     0,2,2, 1,7,2, 1,8,4, 1,8,10, 1,7,11, 1,2,11, 2,0,0, 3,0,0]
+
+fn _vf_R() -> [i32]:
+    [0,0,24, 1,0,0, 1,8,0, 1,10,2, 1,10,10, 1,8,12, 1,6,12, 1,10,24, 1,8,24, 1,4,12, 1,2,12, 1,2,24, 2,0,0,
+     0,2,2, 1,7,2, 1,8,4, 1,8,10, 1,7,11, 1,2,11, 2,0,0, 3,0,0]
+
+fn _vf_S() -> [i32]:
+    [0,9,4, 1,7,0, 1,3,0, 1,0,3, 1,0,9, 1,3,12, 1,7,12, 1,9,14, 1,9,21, 1,7,24, 1,3,24, 1,0,20,
+     1,2,20, 1,3,22, 1,7,22, 1,7,15, 1,3,13, 1,2,11, 1,2,4, 1,3,2, 1,7,2, 1,7,4, 2,0,0, 3,0,0]
+
+fn _vf_T() -> [i32]:
+    [0,0,0, 1,10,0, 1,10,2, 1,6,2, 1,6,24, 1,4,24, 1,4,2, 1,0,2, 2,0,0, 3,0,0]
+
+fn _vf_W() -> [i32]:
+    [0,0,0, 1,2,24, 1,4,24, 1,6,8, 1,8,24, 1,10,24, 1,12,0, 1,10,0, 1,8,18, 1,6,4, 1,4,18, 1,2,0, 2,0,0, 3,0,0]
+
+# Lowercase glyphs (start at y=8 for x-height baseline)
+fn _vf_a() -> [i32]:
+    [0,1,8, 1,6,8, 1,8,10, 1,8,24, 1,6,24, 1,6,22, 1,3,24, 1,1,22, 1,1,16, 1,3,14, 1,6,14, 1,6,10, 1,3,10, 1,1,12, 2,0,0,
+     0,3,16, 1,5,16, 1,6,17, 1,6,20, 1,4,22, 1,3,22, 1,2,20, 1,2,17, 2,0,0, 3,0,0]
+
+fn _vf_d() -> [i32]:
+    [0,6,0, 1,8,0, 1,8,24, 1,2,24, 1,0,22, 1,0,10, 1,2,8, 1,6,8, 2,0,0,
+     0,2,10, 1,6,10, 1,6,22, 1,2,22, 1,2,10, 2,0,0, 3,0,0]
+
+fn _vf_e() -> [i32]:
+    [0,1,15, 1,7,15, 1,7,10, 1,4,8, 1,1,10, 1,1,22, 1,4,24, 1,7,22,
+     1,5,22, 1,3,23, 1,2,21, 1,2,11, 1,4,10, 1,6,11, 1,6,14, 1,2,14, 2,0,0, 3,0,0]
+
+fn _vf_i() -> [i32]:
+    [0,1,8, 1,3,8, 1,3,24, 1,1,24, 2,0,0,
+     0,1,3, 1,3,3, 1,3,6, 1,1,6, 2,0,0, 3,0,0]
+
+fn _vf_l() -> [i32]:
+    [0,1,0, 1,3,0, 1,3,24, 1,1,24, 2,0,0, 3,0,0]
+
+fn _vf_m() -> [i32]:
+    [0,0,8, 1,2,8, 1,2,24, 1,0,24, 2,0,0,
+     0,2,8, 1,5,8, 1,7,10, 1,7,24, 1,5,24, 1,5,10, 1,3,10, 2,0,0,
+     0,7,8, 1,10,8, 1,12,10, 1,12,24, 1,10,24, 1,10,10, 1,8,10, 2,0,0, 3,0,0]
+
+fn _vf_n() -> [i32]:
+    [0,0,8, 1,2,8, 1,2,24, 1,0,24, 2,0,0,
+     0,2,8, 1,6,8, 1,8,10, 1,8,24, 1,6,24, 1,6,10, 1,3,10, 2,0,0, 3,0,0]
+
+fn _vf_o() -> [i32]:
+    [0,1,8, 1,7,8, 1,8,10, 1,8,22, 1,7,24, 1,1,24, 1,0,22, 1,0,10, 2,0,0,
+     0,2,10, 1,6,10, 1,7,12, 1,7,20, 1,6,22, 1,2,22, 1,1,20, 1,1,12, 2,0,0, 3,0,0]
+
+fn _vf_r() -> [i32]:
+    [0,0,8, 1,2,8, 1,2,24, 1,0,24, 2,0,0,
+     0,2,8, 1,4,8, 1,6,10, 1,6,12, 1,4,12, 1,2,10, 2,0,0, 3,0,0]
+
+fn _vf_s() -> [i32]:
+    [0,7,10, 1,5,8, 1,2,8, 1,0,10, 1,0,14, 1,2,16, 1,5,16, 1,7,18, 1,7,22, 1,5,24, 1,2,24, 1,0,22,
+     1,2,22, 1,4,23, 1,6,21, 1,6,19, 1,4,17, 1,3,17, 1,1,15, 1,1,11, 1,3,10, 1,5,10, 1,6,11, 2,0,0, 3,0,0]
+
+fn _vf_t() -> [i32]:
+    [0,1,0, 1,3,0, 1,3,7, 1,5,7, 1,5,9, 1,3,9, 1,3,22, 1,5,24, 1,5,24, 1,3,24, 1,1,22, 1,1,9, 2,0,0, 3,0,0]
+
+# ============================================================================
+# Width Table (design units out of 24)
+# ============================================================================
+
+fn _vf_width(ch: i32) -> i32:
+    """Get proportional width in design units."""
+    if ch == 32: return 5     # space
+    if ch == 65: return 11    # A
+    if ch == 66: return 10    # B
+    if ch == 67: return 10    # C
+    if ch == 68: return 10    # D
+    if ch == 69: return 9     # E
+    if ch == 70: return 9     # F
+    if ch == 72: return 10    # H
+    if ch == 73: return 4     # I
+    if ch == 76: return 9     # L
+    if ch == 77: return 12    # M
+    if ch == 78: return 10    # N
+    if ch == 79: return 11    # O
+    if ch == 80: return 10    # P
+    if ch == 82: return 10    # R
+    if ch == 83: return 9     # S
+    if ch == 84: return 10    # T
+    if ch == 87: return 12    # W
+    if ch == 97: return 8     # a
+    if ch == 100: return 8    # d
+    if ch == 101: return 7    # e
+    if ch == 105: return 4    # i
+    if ch == 108: return 4    # l
+    if ch == 109: return 12   # m
+    if ch == 110: return 8    # n
+    if ch == 111: return 8    # o
+    if ch == 114: return 6    # r
+    if ch == 115: return 7    # s
+    if ch == 116: return 5    # t
+    8   # default width
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn draw_text_vector(backend: CompositorBackend, x: i32, y: i32,
+                    text_str: text, color: u32, alpha: u8, pixel_height: i32):
+    """Draw text using vector font with proportional widths and 2x2 sub-pixel AA.
+
+    Falls back to bitmap font for characters without vector outlines.
+    Shared between hosted and QEMU window managers.
+    """
+    if pixel_height <= 0:
+        return
+    var cx = x
+    for ch in text_str:
+        val code = ch.to_u8()
+        val code_i = code.to_i32()
+        val cmds = _vf_glyph(code_i)
+        if cmds.len() > 0:
+            val gw = _vf_width(code_i)
+            _vf_render_glyph(backend, cmds, gw, cx, y, pixel_height, color, alpha)
+            cx = cx + gw * pixel_height / 24
+        else if code_i > 126:
+            # Unicode placeholder: draw box
+            val box_w = pixel_height / 3
+            backend.blend_rect(cx, y, box_w, pixel_height, color, 80)
+            cx = cx + box_w + 2
+        else:
+            # Bitmap fallback
+            backend.draw_text(cx, y, ch.to_text(), color, 0x00000000)
+            cx = cx + 8
