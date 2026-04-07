@@ -81,6 +81,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `research_codex` | Step 2: Forked agent research + requirement selection (Codex plugin) |
 | `gemini_ui_design` | Step 3: TUI/GUI design generation (Gemini plugin) |
 | `verify` | Production readiness verification (Claude + MCP agent plugin) |
+| `dev` | Streamlined 5-phase dev workflow: research, plan, implement, verify, sync |
 | `debug` | Debugging, tracing, fault detection |
 | `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
 | `refactor` | Code quality refactoring workflow and verification checklist |
