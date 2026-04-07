@@ -3144,7 +3144,8 @@ static void fe_add(fe25519 *h, const fe25519 *f, const fe25519 *g)
 static void fe_sub(fe25519 *h, const fe25519 *f, const fe25519 *g)
 {
     /* Add 2*p split into limbs to keep result positive.
-     * 2p limbs: (2^52 - 38, 2^52 - 2, 2^52 - 2, 2^52 - 2, 2^52 - 2) */
+     * p = 2^255-19 in radix-2^51: (2^51-19, 2^51-1, 2^51-1, 2^51-1, 2^51-1)
+     * 2p = (2^52-38, 2^52-2, 2^52-2, 2^52-2, 2^52-2) */
     h->v[0] = f->v[0] + ((1LL<<52) - 38) - g->v[0];
     h->v[1] = f->v[1] + ((1LL<<52) - 2)  - g->v[1];
     h->v[2] = f->v[2] + ((1LL<<52) - 2)  - g->v[2];
@@ -3600,6 +3601,11 @@ static void ge_scalarmult_base(ge_p3 *result, const uint8_t s[32])
                 ge_p1p1_to_p3(result, &t);
             }
         }
+        /* Periodic carry to prevent limb growth in extended coordinates */
+        if (started && (i & 15) == 0) {
+            fe_carry(&result->X); fe_carry(&result->Y);
+            fe_carry(&result->Z); fe_carry(&result->T);
+        }
     }
     if (!started) ge_p3_0(result);
 }
@@ -3719,7 +3725,7 @@ static void _sc_reduce_limbs(int64_t s[24])
         s[i-10] += si * 654183;
         s[i-9]  -= si * 997805;
         s[i-8]  += si * 136657;
-        s[i-7]  -= si * 683564;
+        s[i-7]  -= si * 683901;
     }
     /* Carry-propagate to [0..11] */
     for (int i = 0; i < 11; i++) {
@@ -3732,7 +3738,7 @@ static void _sc_reduce_limbs(int64_t s[24])
         int64_t t[12]; int64_t c;
         for (int i = 0; i < 12; i++) t[i] = s[i];
         t[0] -= 666643; t[1] -= 470296; t[2] -= 654183;
-        t[3] += 997805; t[4] -= 136657; t[5] += 683564;
+        t[3] += 997805; t[4] -= 136657; t[5] += 683901;
         for (int i = 0; i < 11; i++) {
             c = t[i] >> 21; t[i] -= c << 21; t[i+1] += c;
         }
@@ -4068,19 +4074,35 @@ int64_t rt_ed25519_self_test(void)
         serial_puts("[ed25519-c] 3B=");
         for(int k=0;k<4;k++) serial_puthex(enc3B[k]);
         serial_puts(" exp=d4b4f502\r\n");
-        /* Test: B+B via addition (not doubling) */
-        ge_p1p1 t_add; ge_cached Bc2; ge_p3 B_plus_B;
-        ge_p3_to_cached(&Bc2, &B);
-        ge_add_cached(&t_add, &B, &Bc2);
-        ge_p1p1_to_p3(&B_plus_B, &t_add);
-        uint8_t enc_BpB[32]; ge_tobytes(enc_BpB, &B_plus_B);
-        serial_puts("[ed25519-c] B+B(add)=");
-        for(int k=0;k<4;k++) serial_puthex(enc_BpB[k]);
-        serial_puts("\r\n");
-        /* Compare with 2B from dbl */
-        serial_puts("[ed25519-c] 2B(dbl) =");
-        for(int k=0;k<4;k++) serial_puthex(enc2B[k]);
-        serial_puts("\r\n");
+        /* Test: [2]*B via scalarmult */
+        uint8_t two[32] = {0}; two[0] = 2;
+        ge_p3 R2; ge_scalarmult_base(&R2, two);
+        uint8_t enc_sm2[32]; ge_tobytes(enc_sm2, &R2);
+        serial_puts("[ed25519-c] sm[2]*B=");
+        for(int k=0;k<4;k++) serial_puthex(enc_sm2[k]);
+        serial_puts(" exp=c9a3f86a\r\n");
+        /* Test: [8]*B via scalarmult (cofactor mult) */
+        uint8_t eight[32] = {0}; eight[0] = 8;
+        ge_p3 R8; ge_scalarmult_base(&R8, eight);
+        uint8_t enc_sm8[32]; ge_tobytes(enc_sm8, &R8);
+        serial_puts("[ed25519-c] sm[8]*B=");
+        for(int k=0;k<4;k++) serial_puthex(enc_sm8[k]);
+        serial_puts(" exp=b4b937fc\r\n");
+        /* Test: print the clamped scalar from the test vector seed */
+        {
+            uint8_t h_test[64];
+            _ed25519_sha512(seed, 32, h_test);
+            h_test[0] &= 248; h_test[31] &= 127; h_test[31] |= 64;
+            serial_puts("[ed25519-c] clamped=");
+            for(int k=0;k<32;k++) serial_puthex(h_test[k]);
+            serial_puts("\r\n");
+            /* Now scalarmult with this and check byte 21 */
+            ge_p3 Rpk; ge_scalarmult_base(&Rpk, h_test);
+            uint8_t pk_test[32]; ge_tobytes(pk_test, &Rpk);
+            serial_puts("[ed25519-c] pk=");
+            for(int k=0;k<32;k++) serial_puthex(pk_test[k]);
+            serial_puts("\r\nexp=d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b0b8d183f8e3\r\n");
+        }
     }
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);

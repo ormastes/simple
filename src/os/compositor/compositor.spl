@@ -26,6 +26,7 @@ use os.compositor.desktop_chrome.{draw_system_bar, draw_dock, SYSTEM_BAR_HEIGHT,
 use os.compositor.window_effects.{draw_glass_window_enhanced}
 use os.compositor.render_extras.{draw_wallpaper_enhanced}
 use os.compositor.app_content.{render_app_content}
+use os.compositor.easing.{bounce_offset, ease_out_cubic, ease_in_cubic}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
@@ -104,6 +105,15 @@ class Compositor:
     taskbar_height: i32
     glass_theme_active: bool
     glass_config: GlassConfig
+    # Animation state (integer easing, QEMU-compatible)
+    anim_progress: i32
+    anim_active: bool
+    minimize_active: bool
+    minimize_progress: i32
+    minimize_win: i32
+    close_active: bool
+    close_progress: i32
+    close_win: i32
 
 impl Compositor:
 
@@ -152,7 +162,15 @@ impl Compositor:
             saved_geometries: [],
             taskbar_height: 32,
             glass_theme_active: false,
-            glass_config: GlassConfig.dark()
+            glass_config: GlassConfig.dark(),
+            anim_progress: 100,
+            anim_active: false,
+            minimize_active: false,
+            minimize_progress: 0,
+            minimize_win: -1,
+            close_active: false,
+            close_progress: 0,
+            close_win: -1
         )
 
     # -- Window Management ---------------------------------------------------
@@ -632,23 +650,60 @@ impl Compositor:
         val is_dark = gc.bg_top < 0x00808080
         draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color)
 
-        # 2. Windows (back-to-front Z-order)
+        # 2. Windows (back-to-front Z-order) with animation
         val active_idx = self.focused_idx
+        val boff = bounce_offset(self.anim_progress)
         var idx: i32 = 0
         for surface in self.surfaces:
             if surface.visible:
                 val is_focused = idx == self.focused_idx
-                # Enhanced glass window frame (shared window_effects)
-                draw_glass_window_enhanced(self.backend, surface.x, surface.y,
-                    surface.width, surface.height, surface.title, is_focused, cfg, 28)
 
-                # App content (shared app_content)
-                val cx = client_area_x(surface.x)
-                val cy = client_area_y(surface.y)
-                val cw = client_area_width(surface.width)
-                val ch = client_area_height(surface.height)
-                if cw > 0 and ch > 0:
-                    render_app_content(self.backend, surface.title, cx, cy, cw, ch)
+                # Apply animation offsets
+                var wy = surface.y
+                var wx = surface.x
+                var ww = surface.width
+                var wh = surface.height
+                var skip_render = false
+
+                # Focused window gets bounce offset
+                if is_focused and self.anim_active:
+                    wy = wy - boff
+
+                # Minimize animation: shrink toward dock
+                if self.minimize_active and idx == self.minimize_win:
+                    val prog = ease_out_cubic(self.minimize_progress)
+                    val dock_y = self.screen_height - 58
+                    val dock_x = self.screen_width / 2
+                    wx = surface.x + (dock_x - surface.x) * prog / 100
+                    wy = surface.y + (dock_y - surface.y) * prog / 100
+                    ww = surface.width - surface.width * prog / 120
+                    wh = surface.height - surface.height * prog / 120
+                    if ww < 10 or wh < 10:
+                        skip_render = true
+
+                # Close animation: shrink inward
+                if self.close_active and idx == self.close_win:
+                    val prog = ease_in_cubic(self.close_progress)
+                    val shrink = prog * 15 / 100
+                    wx = surface.x + shrink
+                    wy = surface.y + shrink
+                    ww = surface.width - shrink * 2
+                    wh = surface.height - shrink * 2
+                    if ww < 10 or wh < 10:
+                        skip_render = true
+
+                if not skip_render:
+                    # Enhanced glass window frame (shared window_effects)
+                    draw_glass_window_enhanced(self.backend, wx, wy,
+                        ww, wh, surface.title, is_focused, cfg, 28)
+
+                    # App content (shared app_content)
+                    val cx = client_area_x(wx)
+                    val cy = client_area_y(wy)
+                    val cw = client_area_width(ww)
+                    val ch_val = client_area_height(wh)
+                    if cw > 0 and ch_val > 0:
+                        render_app_content(self.backend, surface.title, cx, cy, cw, ch_val)
             idx = idx + 1
 
         # 3. System bar (top) + Dock (bottom) — shared desktop chrome
@@ -723,15 +778,56 @@ impl Compositor:
                     return
             _: pass_dn
 
-        # T key toggles dark/light glass theme (like QEMU WM)
+        # Glass theme shortcuts (like QEMU WM)
         val ch_val = self.input.key_to_char(key)
         if ch_val != nil:
-            if ch_val == "t" or ch_val == "T":
-                if self.glass_theme_active:
+            if self.glass_theme_active:
+                # T = toggle dark/light theme
+                if ch_val == "t" or ch_val == "T":
                     if self.glass_config.bg_top < 0x00808080:
                         self.glass_config = GlassConfig.light()
                     else:
                         self.glass_config = GlassConfig.dark()
+                    return
+                # 1/2/3 = focus window by index
+                if ch_val == "1":
+                    self._focus_by_index(0)
+                    return
+                if ch_val == "2":
+                    self._focus_by_index(1)
+                    return
+                if ch_val == "3":
+                    self._focus_by_index(2)
+                    return
+                # M = minimize active window
+                if ch_val == "m" or ch_val == "M":
+                    if self.focused_idx >= 0 and not self.minimize_active:
+                        self.minimize_active = true
+                        self.minimize_progress = 0
+                        self.minimize_win = self.focused_idx
+                    return
+                # W = close active window (with animation)
+                if ch_val == "w" or ch_val == "W":
+                    if self.focused_idx >= 0 and not self.close_active:
+                        self.close_active = true
+                        self.close_progress = 0
+                        self.close_win = self.focused_idx
+                    return
+                # R = restore all minimized windows
+                if ch_val == "r" or ch_val == "R":
+                    var restored: [WindowSurface] = []
+                    for s in self.surfaces:
+                        if not s.visible:
+                            restored = restored.push(WindowSurface(
+                                id: s.id, title: s.title,
+                                x: s.x, y: s.y,
+                                width: s.width, height: s.height,
+                                visible: true, session: s.session,
+                                dirty: true, owner_port: s.owner_port
+                            ))
+                        else:
+                            restored = restored.push(s)
+                    self.surfaces = restored
                     return
 
         # Compositor-level shortcuts (Alt held)
@@ -855,14 +951,23 @@ impl Compositor:
         """Cycle focus to the next window (Alt+Tab behavior)."""
         if self.surfaces.len() <= 1:
             return
-        # Move to the next window, wrapping around
         var next = self.focused_idx + 1
         if next >= self.surfaces.len():
             next = 0
-        # Re-order: bring the new focused window to front
         val target = self.surfaces[next]
         val target_id = target.id
         self.focus_window(target_id)
+        # Start bounce animation
+        self.anim_active = true
+        self.anim_progress = 0
+
+    me _focus_by_index(idx: i32):
+        """Focus a window by surface index (0, 1, 2). Starts bounce animation."""
+        if idx >= 0 and idx < self.surfaces.len():
+            val target = self.surfaces[idx]
+            self.focus_window(target.id)
+            self.anim_active = true
+            self.anim_progress = 0
 
     me close_focused_window():
         """Close the currently focused window."""
@@ -894,11 +999,50 @@ impl Compositor:
     # -- Main Loop -----------------------------------------------------------
 
     me run_loop():
-        """Main compositor loop: handle input, render, repeat."""
+        """Main compositor loop: handle input, render, repeat.
+
+        Includes animation ticking for focus bounce, minimize, and close.
+        """
         self.running = true
         while self.running:
             self.handle_input()
+            self._tick_animations()
             self.render_all()
+
+    me _tick_animations():
+        """Update all active animations by one frame step."""
+        # Focus bounce animation (12 frames, 0-100 progress)
+        if self.anim_active:
+            self.anim_progress = self.anim_progress + 8
+            if self.anim_progress >= 100:
+                self.anim_progress = 100
+                self.anim_active = false
+
+        # Minimize animation (shrink toward dock)
+        if self.minimize_active:
+            self.minimize_progress = self.minimize_progress + 12
+            if self.minimize_progress >= 100:
+                self.minimize_progress = 100
+                self.minimize_active = false
+                # Actually minimize the window
+                if self.minimize_win >= 0 and self.minimize_win < self.surfaces.len():
+                    val min_id = self.surfaces[self.minimize_win].id
+                    self.minimize_window(min_id)
+                    # Focus next visible window
+                    self.cycle_focus()
+                self.minimize_win = -1
+
+        # Close animation (shrink and fade)
+        if self.close_active:
+            self.close_progress = self.close_progress + 16
+            if self.close_progress >= 100:
+                self.close_progress = 100
+                self.close_active = false
+                # Actually close the window
+                if self.close_win >= 0 and self.close_win < self.surfaces.len():
+                    val close_id = self.surfaces[self.close_win].id
+                    self.destroy_window(close_id)
+                self.close_win = -1
 
     me consume_pending_shortcut() -> text:
         """Return and clear any pending Ctrl+Alt shortcut key.
