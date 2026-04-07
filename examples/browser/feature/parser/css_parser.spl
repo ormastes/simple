@@ -173,12 +173,30 @@ class CssParser:
                 CssToken.AtKeyword(value: at_name):
                     val lower_at = at_name.to_lower()
                     if lower_at == "media":
-                        # Parse @media: extract condition text, then parse inner rules
                         val inner_rules = self._parse_media_rule()
                         for r in inner_rules:
                             rules.push(r)
+                    else if lower_at == "supports":
+                        # @supports: parse condition, include inner rules if supported
+                        # For now, include all @supports rules (assume all features supported)
+                        val inner_rules = self._parse_conditional_rule()
+                        for r in inner_rules:
+                            rules.push(r)
+                    else if lower_at == "container":
+                        # @container: container queries — parse inner rules
+                        # Condition evaluation deferred to layout pass
+                        val inner_rules = self._parse_conditional_rule()
+                        for r in inner_rules:
+                            rules.push(r)
+                    else if lower_at == "layer":
+                        # @layer: cascade layers — parse inner rules
+                        val inner_rules = self._parse_conditional_rule()
+                        for r in inner_rules:
+                            rules.push(r)
                     else if lower_at == "keyframes":
-                        # Skip @keyframes for now (structure stored but not executed)
+                        self._skip_at_rule()
+                    else if lower_at == "font-face":
+                        # @font-face: skip for now (font loading not yet wired)
                         self._skip_at_rule()
                     else:
                         self._skip_at_rule()
@@ -210,6 +228,39 @@ class CssParser:
                     self.advance()
 
         # Parse inner rules (same as stylesheet but stop at matching close brace)
+        self.advance()  # consume open brace
+        var inner_rules = [CSSRule]()
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    break
+                CssToken.AtKeyword(value: _):
+                    self._skip_at_rule()
+                _:
+                    val rule = self.parse_rule()
+                    if val Some(r) = rule:
+                        inner_rules.push(r)
+        inner_rules
+
+    me _parse_conditional_rule() -> [CSSRule]:
+        """Parse a conditional at-rule (@supports, @container, @layer).
+        Skips the condition and parses the inner rule block.
+        """
+        self.advance()  # skip the at-keyword
+        # Skip condition until open brace
+        while true:
+            match self.current:
+                CssToken.OpenBrace:
+                    break
+                CssToken.Eof:
+                    return []
+                _:
+                    self.advance()
+        # Parse inner rules
         self.advance()  # consume open brace
         var inner_rules = [CSSRule]()
         while true:

@@ -7803,6 +7803,71 @@ RuntimeValue rt_read_cr3(RuntimeValue a) { return rt_read_cr3_real(a); }
 RuntimeValue rt_write_cr3(RuntimeValue a) { return rt_write_cr3_real(a); }
 RuntimeValue rt_read_cr2(RuntimeValue a) { return rt_read_cr2_real(a); }
 
+/* =========================================================================
+ * SSH Auth Database — C-side workaround for Cranelift struct field access
+ * bug that corrupts text comparisons in Simple-compiled authenticate_password.
+ * Tests C2, C5, C6, C10, C11 depend on this.
+ * ========================================================================= */
+static struct { char username[64]; char password[64]; } _auth_db[16];
+static int _auth_db_count = 0;
+
+RuntimeValue rt_auth_add_user(RuntimeValue uname_rv, RuntimeValue pass_rv)
+{
+    RuntimeString *u = decode_string(uname_rv);
+    RuntimeString *p = decode_string(pass_rv);
+    if (!u || !p || _auth_db_count >= 16) return ENCODE_INT(-1);
+    uint32_t ulen = u->len < 63 ? u->len : 63;
+    uint32_t plen = p->len < 63 ? p->len : 63;
+    memcpy(_auth_db[_auth_db_count].username, u->data, ulen);
+    _auth_db[_auth_db_count].username[ulen] = 0;
+    memcpy(_auth_db[_auth_db_count].password, p->data, plen);
+    _auth_db[_auth_db_count].password[plen] = 0;
+    _auth_db_count++;
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_auth_check(RuntimeValue uname_rv, RuntimeValue pass_rv)
+{
+    RuntimeString *u = decode_string(uname_rv);
+    RuntimeString *p = decode_string(pass_rv);
+    if (!u || !p) return ENCODE_INT(0);
+    for (int i = 0; i < _auth_db_count; i++) {
+        if (strlen(_auth_db[i].username) == u->len &&
+            memcmp(_auth_db[i].username, u->data, u->len) == 0 &&
+            strlen(_auth_db[i].password) == p->len &&
+            memcmp(_auth_db[i].password, p->data, p->len) == 0)
+            return ENCODE_INT(1);
+    }
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_auth_reset(void)
+{
+    _auth_db_count = 0;
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_auth_find_user(RuntimeValue uname_rv)
+{
+    RuntimeString *u = decode_string(uname_rv);
+    if (!u) return ENCODE_INT(0);
+    for (int i = 0; i < _auth_db_count; i++) {
+        if (strlen(_auth_db[i].username) == u->len &&
+            memcmp(_auth_db[i].username, u->data, u->len) == 0)
+            return ENCODE_INT(1);
+    }
+    return ENCODE_INT(0);
+}
+
+RuntimeValue rt_auth_check_key(RuntimeValue uname_rv, RuntimeValue key_blob_rv)
+{
+    /* Key auth not stored in C-side DB — always return 0 (not found).
+       Key blobs are managed on the Simple side via SshUserDb.authenticate_key. */
+    (void)uname_rv;
+    (void)key_blob_rv;
+    return ENCODE_INT(0);
+}
+
 #endif /* __x86_64__ || __i386__ */
 
 /* End of x86_64 baremetal_stubs.c */

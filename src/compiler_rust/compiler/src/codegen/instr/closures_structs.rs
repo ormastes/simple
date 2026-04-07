@@ -189,6 +189,13 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
+        // For push: rt_array_push may return a new (grown) array pointer.
+        // We must update the receiver vreg so subsequent uses of the same
+        // variable see the new array.  Extract the plain method name first.
+        let method = func_name.rsplit('.').next().unwrap_or(func_name);
+        if method == "push" {
+            ctx.vreg_values.insert(receiver, result);
+        }
         return Ok(());
     }
 
@@ -672,14 +679,28 @@ fn try_compile_builtin_method_call<M: Module>(
     let call = adapted_call(builder, func_ref, &call_args);
     let results = builder.inst_results(call);
 
-    // Methods that mutate in-place (push, clear, reverse, sort) should return the receiver
-    // so that chaining like `self.items = self.items.push(x)` works correctly.
-    let in_place_mutating = matches!(
+    // Methods that mutate in-place (clear, reverse, sort) return the receiver.
+    // push is special: rt_array_push may return a NEW pointer when the array
+    // grows, so we must use the actual return value from the call.
+    let in_place_mutating_no_push = matches!(
         runtime_func,
-        "rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort"
+        "rt_array_clear" | "rt_array_reverse" | "rt_array_sort"
     );
 
-    if in_place_mutating {
+    if runtime_func == "rt_array_push" {
+        // rt_array_push returns the (possibly reallocated) array pointer.
+        if results.is_empty() {
+            Ok(Some(receiver_val))
+        } else {
+            let new_arr = results[0];
+            let result_type = builder.func.dfg.value_type(new_arr);
+            if result_type != types::I64 {
+                Ok(Some(super::helpers::safe_extend_to_i64(builder, new_arr)))
+            } else {
+                Ok(Some(new_arr))
+            }
+        }
+    } else if in_place_mutating_no_push {
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))

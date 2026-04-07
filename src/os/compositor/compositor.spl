@@ -178,6 +178,8 @@ class Compositor:
     open_anim_active: bool
     open_anim_progress: i32
     open_anim_win: i32      # surface index of opening window
+    # Spotlight search overlay
+    spotlight_active: bool
 
 impl Compositor:
 
@@ -266,7 +268,8 @@ impl Compositor:
             context_menu_sel: 0,
             open_anim_active: false,
             open_anim_progress: 0,
-            open_anim_win: -1
+            open_anim_win: -1,
+            spotlight_active: false
         )
 
     # -- Window Management ---------------------------------------------------
@@ -372,10 +375,16 @@ impl Compositor:
     me destroy_window(id: u64):
         """Remove a window by ID."""
         var updated: [WindowSurface] = []
-        for s in self.surfaces:
-            if s.id != id:
-                updated = updated.push(s)
+        var updated_states: [AppState] = []
+        var i: i32 = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id != id:
+                updated = updated.push(self.surfaces[i])
+                if i < self.app_states.len():
+                    updated_states = updated_states.push(self.app_states[i])
+            i = i + 1
         self.surfaces = updated
+        self.app_states = updated_states
 
         # Fix focused index
         if self.surfaces.len() == 0:
@@ -395,14 +404,22 @@ impl Compositor:
         if target_idx < 0:
             return
 
-        # Move target to end of list (topmost Z-order)
+        # Move target to end of list (topmost Z-order), keeping app_states aligned
         val target = self.surfaces[target_idx]
+        val target_state = if target_idx < self.app_states.len(): self.app_states[target_idx] else: app_state_new()
         var reordered: [WindowSurface] = []
-        for s in self.surfaces:
-            if s.id != id:
-                reordered = reordered.push(s)
+        var reordered_states: [AppState] = []
+        var j: i32 = 0
+        while j < self.surfaces.len():
+            if self.surfaces[j].id != id:
+                reordered = reordered.push(self.surfaces[j])
+                if j < self.app_states.len():
+                    reordered_states = reordered_states.push(self.app_states[j])
+            j = j + 1
         reordered = reordered.push(target)
+        reordered_states = reordered_states.push(target_state)
         self.surfaces = reordered
+        self.app_states = reordered_states
         self.focused_idx = self.surfaces.len() - 1
 
     me move_window(id: u64, new_x: i32, new_y: i32):
@@ -789,7 +806,7 @@ impl Compositor:
         val is_dark = gc.bg_top < 0x00808080
         draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color, self.frame_count)
 
-        # Snap zone preview overlay
+        # Snap zone preview overlay (blue=left, purple=right, green=fullscreen)
         if self.snap_preview_active and self.snap_zone > 0:
             val bar_h = SYSTEM_BAR_HEIGHT
             val dock_h: i32 = 68
@@ -797,10 +814,16 @@ impl Compositor:
             val half_w = self.screen_width / 2
             if self.snap_zone == 1:
                 self.backend.blend_rect(0, bar_h, half_w, usable_h, gc.accent_color, 30)
+                # Left edge highlight
+                self.backend.blend_rect(0, bar_h, 3, usable_h, gc.accent_color, 80)
             else if self.snap_zone == 2:
-                self.backend.blend_rect(half_w, bar_h, half_w, usable_h, gc.accent_color, 30)
+                self.backend.blend_rect(half_w, bar_h, half_w, usable_h, gc.accent2_color, 30)
+                # Right edge highlight
+                self.backend.blend_rect(self.screen_width - 3, bar_h, 3, usable_h, gc.accent2_color, 80)
             else if self.snap_zone == 3:
-                self.backend.blend_rect(0, bar_h, self.screen_width, usable_h, gc.accent_color, 30)
+                self.backend.blend_rect(0, bar_h, self.screen_width, usable_h, 0x0030D158, 20)
+                # Top edge highlight
+                self.backend.blend_rect(0, bar_h, self.screen_width, 3, 0x0030D158, 80)
 
         # 2. Windows (back-to-front Z-order) with animation
         val active_idx = self.focused_idx
@@ -955,6 +978,24 @@ impl Compositor:
             self.backend.blend_rect(cm_x + 4, cm_y + 54, cm_w - 8, 1, gc.border_color, gc.border_alpha)
             self.backend.draw_text(cm_x + 12, cm_y + 60, "About", 0xFFA0A0B0, 0x00000000)
 
+        # Spotlight search overlay
+        if self.spotlight_active:
+            val sp_w: i32 = 400
+            val sp_h: i32 = 44
+            val sp_x = (self.screen_width - sp_w) / 2
+            val sp_y = self.screen_height / 4
+            self.backend.blur_region(sp_x, sp_y, sp_w, sp_h, 16)
+            self.backend.blend_rect(sp_x, sp_y, sp_w, sp_h, gc.surface_color, gc.surface_alpha)
+            # Border
+            self.backend.blend_rect(sp_x, sp_y, sp_w, 1, gc.accent_color, 120)
+            self.backend.blend_rect(sp_x, sp_y + sp_h - 1, sp_w, 1, gc.accent_color, 120)
+            self.backend.blend_rect(sp_x, sp_y, 1, sp_h, gc.accent_color, 120)
+            self.backend.blend_rect(sp_x + sp_w - 1, sp_y, 1, sp_h, gc.accent_color, 120)
+            # Search icon + text
+            self.backend.draw_text(sp_x + 12, sp_y + 14, "Search...", 0xFF808090, 0x00000000)
+            # Accent underline
+            self.backend.blend_rect(sp_x + 8, sp_y + sp_h - 4, sp_w - 16, 2, gc.accent_color, 80)
+
         # 5. Cursor + present
         draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
 
@@ -1025,6 +1066,14 @@ impl Compositor:
                 pass_dn
 
         val key = key_event.key
+
+        # Spotlight dismiss on Escape
+        if self.spotlight_active:
+            match key:
+                Key.Escape:
+                    self.spotlight_active = false
+                    return
+                _: pass_dn
 
         # Context menu keyboard navigation
         if self.context_menu_active:
@@ -1366,6 +1415,19 @@ impl Compositor:
                             else:
                                 self.theme_target_dark = true
                 return  # consume click whether on menu or not
+
+            # Spotlight: dismiss on click outside, consume click inside
+            if self.spotlight_active:
+                val sp_x = (self.screen_width - 400) / 2
+                val sp_y = self.screen_height / 4
+                if not (mx >= sp_x and mx < sp_x + 400 and my >= sp_y and my < sp_y + 44):
+                    self.spotlight_active = false
+                return
+
+            # Search icon click in system bar (top-right area, ~28px tall)
+            if my < 28 and mx > self.screen_width - 210 and mx < self.screen_width - 180:
+                self.spotlight_active = not self.spotlight_active
+                return
 
             # Dock icon click — launch or focus window
             val dock_h_click: i32 = 52
