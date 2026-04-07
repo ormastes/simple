@@ -173,6 +173,11 @@ class Compositor:
     context_menu_active: bool
     context_menu_x: i32
     context_menu_y: i32
+    context_menu_sel: i32   # selected item: 0, 1, or 2
+    # Window open animation
+    open_anim_active: bool
+    open_anim_progress: i32
+    open_anim_win: i32      # surface index of opening window
 
 impl Compositor:
 
@@ -257,7 +262,11 @@ impl Compositor:
             frame_count: 0,
             context_menu_active: false,
             context_menu_x: 0,
-            context_menu_y: 0
+            context_menu_y: 0,
+            context_menu_sel: 0,
+            open_anim_active: false,
+            open_anim_progress: 0,
+            open_anim_win: -1
         )
 
     # -- Window Management ---------------------------------------------------
@@ -302,6 +311,10 @@ impl Compositor:
         else if title == "Browser": self.dock_bounce_icon = 5
         else if title == "Editor": self.dock_bounce_icon = 6
         else: self.dock_bounce_icon = -1
+
+        self.open_anim_active = true
+        self.open_anim_progress = 0
+        self.open_anim_win = self.surfaces.len() - 1
 
         return id
 
@@ -774,7 +787,7 @@ impl Compositor:
         # 1. Enhanced wallpaper with stars, vignette, tech grid
         self.backend.clear(0xFF000000)
         val is_dark = gc.bg_top < 0x00808080
-        draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color)
+        draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color, self.frame_count)
 
         # Snap zone preview overlay
         if self.snap_preview_active and self.snap_zone > 0:
@@ -847,10 +860,24 @@ impl Compositor:
                     if ww < 10 or wh < 10:
                         skip_render = true
 
+                # Open animation: scale up from center
+                if self.open_anim_active and idx == self.open_anim_win:
+                    val open_prog = ease_out_cubic(self.open_anim_progress)
+                    val scale = 30 + open_prog * 70 / 100  # 30% -> 100%
+                    val orig_w = ww
+                    val orig_h = wh
+                    ww = orig_w * scale / 100
+                    wh = orig_h * scale / 100
+                    wx = wx + (orig_w - ww) / 2
+                    wy = wy + (orig_h - wh) / 2
+                    if ww < 20 or wh < 20:
+                        skip_render = true
+
                 if not skip_render:
                     # Enhanced glass window frame (shared window_effects)
+                    val is_dragging = self.dragging and self.drag_window_id == surface.id
                     draw_glass_window_enhanced(self.backend, wx, wy,
-                        ww, wh, surface.title, is_focused, cfg, 28)
+                        ww, wh, surface.title, is_focused, cfg, 28, is_dragging)
 
                     # App content (shared app_content)
                     val cx = client_area_x(wx)
@@ -918,6 +945,9 @@ impl Compositor:
             self.backend.blend_rect(cm_x, cm_y + cm_h - 1, cm_w, 1, gc.border_color, gc.border_alpha)
             self.backend.blend_rect(cm_x, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
             self.backend.blend_rect(cm_x + cm_w - 1, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
+            # Highlight selected item
+            val sel_y = cm_y + 4 + self.context_menu_sel * 26
+            self.backend.blend_rect(cm_x + 2, sel_y, cm_w - 4, 22, gc.accent_color, 40)
             # Menu items
             self.backend.draw_text(cm_x + 12, cm_y + 8, "New Window", 0xFFE0E0F0, 0x00000000)
             self.backend.blend_rect(cm_x + 4, cm_y + 28, cm_w - 8, 1, gc.border_color, gc.border_alpha)
@@ -995,6 +1025,30 @@ impl Compositor:
                 pass_dn
 
         val key = key_event.key
+
+        # Context menu keyboard navigation
+        if self.context_menu_active:
+            match key:
+                Key.Up:
+                    self.context_menu_sel = if self.context_menu_sel > 0: self.context_menu_sel - 1 else: 2
+                    return
+                Key.Down:
+                    self.context_menu_sel = if self.context_menu_sel < 2: self.context_menu_sel + 1 else: 0
+                    return
+                Key.Enter:
+                    if self.context_menu_sel == 0:
+                        self.create_window("Terminal", self.context_menu_x - 200, self.context_menu_y, 400, 280)
+                    else if self.context_menu_sel == 1:
+                        if not self.theme_transitioning:
+                            self.theme_transitioning = true
+                            self.theme_progress = 0
+                            self.theme_target_dark = self.glass_config.bg_top >= 0x00808080
+                    self.context_menu_active = false
+                    return
+                Key.Escape:
+                    self.context_menu_active = false
+                    return
+                _: pass_dn
 
         # Escape: cancel drag/resize first, then quit glass theme
         match key:
@@ -1313,6 +1367,46 @@ impl Compositor:
                                 self.theme_target_dark = true
                 return  # consume click whether on menu or not
 
+            # Dock icon click — launch or focus window
+            val dock_h_click: i32 = 52
+            val dock_margin: i32 = 6
+            val dock_y_click = self.screen_height - dock_h_click - dock_margin
+            if my >= dock_y_click and my < dock_y_click + dock_h_click:
+                val dock_pill: i32 = 48
+                val dock_gap: i32 = 16
+                val dock_pad: i32 = 16
+                val num_icons: i32 = 9
+                val dock_w = 7 * (dock_pill + dock_gap) + 2 + 10 * 2 + 2 * (dock_pill + dock_gap) - dock_gap + dock_pad * 2
+                val dock_x_start = (self.screen_width - dock_w) / 2 + dock_pad
+                # Determine which icon was clicked
+                val rel_x = mx - dock_x_start
+                if rel_x >= 0:
+                    val icon_idx = rel_x / (dock_pill + dock_gap)
+                    if icon_idx >= 0 and icon_idx < 7:
+                        # Map dock icon to window title
+                        var target_title: text = ""
+                        if icon_idx == 0: target_title = "Terminal"
+                        else if icon_idx == 1: target_title = "File Manager"
+                        else if icon_idx == 2: target_title = "Calculator"
+                        else if icon_idx == 5: target_title = "Browser"
+                        else if icon_idx == 6: target_title = "Editor"
+                        if target_title != "":
+                            # Try to find and focus existing window
+                            var found = false
+                            var fi: i32 = 0
+                            while fi < self.surfaces.len():
+                                if self.surfaces[fi].title == target_title and self.surfaces[fi].visible:
+                                    self.focus_window(self.surfaces[fi].id)
+                                    self.anim_active = true
+                                    self.anim_progress = 0
+                                    found = true
+                                    fi = self.surfaces.len()  # break
+                                fi = fi + 1
+                            if not found:
+                                # Create new window
+                                self.create_window(target_title, 100 + icon_idx * 40, 100 + icon_idx * 30, 400, 280)
+                            return
+
             # Check for edge resize on any visible window
             var ridx = self.surfaces.len() - 1
             while ridx >= 0:
@@ -1433,6 +1527,7 @@ impl Compositor:
                 self.context_menu_x = mx
                 self.context_menu_y = my
                 self.context_menu_active = true
+                self.context_menu_sel = 0
 
     me cycle_focus():
         """Cycle focus to the next window (Alt+Tab behavior)."""
@@ -1535,6 +1630,13 @@ impl Compositor:
                     val close_id = self.surfaces[self.close_win].id
                     self.destroy_window(close_id)
                 self.close_win = -1
+
+        # Open animation (scale up from center)
+        if self.open_anim_active:
+            self.open_anim_progress = self.open_anim_progress + 12
+            if self.open_anim_progress >= 100:
+                self.open_anim_active = false
+                self.open_anim_progress = 100
 
         # Switcher overlay countdown
         if self.switcher_active:

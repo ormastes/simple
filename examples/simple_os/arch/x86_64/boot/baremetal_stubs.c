@@ -4780,6 +4780,29 @@ RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
 RuntimeValue text__from_bytes(RuntimeValue arr) { return rt_string_from_byte_array(arr); }
 RuntimeValue common__text__text__from_bytes(RuntimeValue arr) { return rt_string_from_byte_array(arr); }
 
+/* rt_string_to_byte_array: text.to_bytes() → [u8]
+ * Converts a RuntimeString to a RuntimeArray of BoxInt'd bytes. */
+RuntimeValue rt_string_to_byte_array(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) {
+        /* Return empty array for nil/non-string */
+        return rt_array_new(ENCODE_INT(0));
+    }
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return rt_array_new(ENCODE_INT(0));
+    uint32_t len = s->len;
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    a->len = len;
+    a->cap = len;
+    for (uint32_t i = 0; i < len; i++) {
+        a->items[i] = ENCODE_INT((uint8_t)s->data[i]);
+    }
+    return ENCODE_PTR(a);
+}
+
 /* C-side tuple test — bypasses Simple codegen to verify rt_tuple_* works */
 int64_t rt_test_tuple(void)
 {
