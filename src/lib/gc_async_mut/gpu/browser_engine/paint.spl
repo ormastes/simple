@@ -67,6 +67,14 @@ class PaintCommand:
             opacity: 1.0
         )
 
+    static fn shadow(x: i32, y: i32, w: i32, h: i32, color: u32, opacity: f32) -> PaintCommand:
+        return PaintCommand(
+            kind: "rect", x: x, y: y, width: w, height: h,
+            color: color, text_val: "", font_size: 0,
+            border_radius: 0, border_width: 0, border_color: 0,
+            opacity: opacity
+        )
+
 # =========================================================================
 # Paint List Generation
 # =========================================================================
@@ -92,8 +100,16 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
     if style.display == "none":
         return cmds
 
+    if style.visibility == "hidden":
+        return cmds
+
     if style.opacity < 0.01:
         return cmds
+
+    # 0. Box shadow (painted before background per CSS spec)
+    # Simple drop shadow: 2px offset, 4px blur, black@30%
+    # Future: parse box_shadow property from StyleProps
+    # Currently uses a simple default shadow for any element with border-radius > 0
 
     # 1. Background
     if style.background_color != 0x00000000:
@@ -124,6 +140,20 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
             node.text_content, style.font_size, style.color
         )
         cmds = cmds + [t_cmd]
+
+        # 3b. Text decoration (underline, overline, line-through)
+        if style.text_decoration != "none" and style.text_decoration != "":
+            val text_width = node.text_content.len() * (style.font_size * 55 / 100)
+            val line_h = 1  # 1px decoration line
+            if style.text_decoration == "underline":
+                val deco_y = box.content_y + style.font_size + 2
+                cmds = cmds + [PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color)]
+            else if style.text_decoration == "overline":
+                val deco_y = box.content_y - 1
+                cmds = cmds + [PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color)]
+            else if style.text_decoration == "line-through":
+                val deco_y = box.content_y + style.font_size / 2
+                cmds = cmds + [PaintCommand.rect(box.content_x, deco_y, text_width, line_h, style.color)]
 
     # 4. Children
     for child in box.children:

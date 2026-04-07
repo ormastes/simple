@@ -4752,6 +4752,34 @@ int64_t rt_ed25519_self_test(void)
     return 0;
 }
 
+/* rt_string_from_byte_array: text.from_bytes([u8]) → text
+ * Reads byte values from a RuntimeArray, creates a RuntimeString.
+ * Byte values may be tagged (ENCODE_INT) from BoxInt push. */
+RuntimeValue rt_string_from_byte_array(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return rt_string_new(0, 0); /* empty string for nil */
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return rt_string_new(0, 0);
+    uint32_t len = a->len;
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->len = len;
+    for (uint32_t i = 0; i < len; i++) {
+        RuntimeValue v = a->items[i];
+        /* Items may be tagged (from BoxInt push) or raw */
+        int64_t byte_val = IS_INT(v) ? DECODE_INT(v) : (int64_t)v;
+        s->data[i] = (char)(byte_val & 0xFF);
+    }
+    s->data[len] = '\0';
+    return ENCODE_PTR(s);
+}
+
+/* Also provide the name that the codegen might use for text.from_bytes */
+RuntimeValue text__from_bytes(RuntimeValue arr) { return rt_string_from_byte_array(arr); }
+RuntimeValue common__text__text__from_bytes(RuntimeValue arr) { return rt_string_from_byte_array(arr); }
+
 /* C-side tuple test — bypasses Simple codegen to verify rt_tuple_* works */
 int64_t rt_test_tuple(void)
 {
