@@ -2839,6 +2839,31 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
 }
 
+/* Direct PCI cache access — bypasses syscall for pcimgr */
+int64_t rt_pci_device_count(void)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    return (int64_t)_pci_cache_count;
+}
+
+int64_t rt_pci_get_field(int64_t index, int64_t field)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    if (index < 0 || index >= _pci_cache_count) return -1;
+    int i = (int)index;
+    switch ((int)field) {
+        case 0: return (int64_t)_pci_cache[i].bus;
+        case 1: return (int64_t)_pci_cache[i].dev;
+        case 2: return (int64_t)_pci_cache[i].func;
+        case 3: return (int64_t)_pci_cache[i].cls;
+        case 4: return (int64_t)_pci_cache[i].sub;
+        case 5: return (int64_t)_pci_cache[i].vendor;
+        case 6: return (int64_t)_pci_cache[i].devid;
+        case 7: return (int64_t)_pci_cache[i].irq;
+        default: return -1;
+    }
+}
+
 /* ===================================================================
  * 9. _start — serial init, spl_start, isa-debug-exit
  * =================================================================== */

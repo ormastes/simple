@@ -49,31 +49,31 @@ var dev_grant_owner: [u64; 64]  # Task ID that holds the grant
 
 extern fn serial_println(msg: text)
 
+# Direct C PCI cache access (bypasses syscall tagging issues)
+extern fn rt_pci_device_count() -> i64
+extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+
 # ============================================================================
 # Initialization — PCI Device Enumeration
 # ============================================================================
 
 fn pcimgr_init():
-    """Initialize PCI manager: enumerate devices via syscall 80."""
+    """Initialize PCI manager: read devices from C PCI cache."""
     serial_println("[pcimgr] Starting PCI device enumeration...")
 
-    # Mode 0: get device count
-    val count_result = syscall(80, 0, 0, 0, 0, 0)
+    val count_result = rt_pci_device_count()
     serial_println("[pcimgr] PCI scan done")
 
-    # Populate device arrays using single-field mode (syscall 80 mode 4)
-    # Mode 4 args: (80, 4, device_index, field_selector, 0, 0) -> field_value
-    # Fields: 0=bus, 1=device, 2=func, 3=class, 4=subclass, 5=vendor, 6=devid
     dev_count = count_result
     var i: i64 = 0
     while i < count_result:
-        dev_bus[i] = syscall(80, 4, i, 0, 0, 0)
-        dev_device[i] = syscall(80, 4, i, 1, 0, 0)
-        dev_func[i] = syscall(80, 4, i, 2, 0, 0)
-        dev_class[i] = syscall(80, 4, i, 3, 0, 0)
-        dev_subclass[i] = syscall(80, 4, i, 4, 0, 0)
-        dev_vendor[i] = syscall(80, 4, i, 5, 0, 0)
-        dev_devid[i] = syscall(80, 4, i, 6, 0, 0)
+        dev_bus[i] = rt_pci_get_field(i, 0).to_u8()
+        dev_device[i] = rt_pci_get_field(i, 1).to_u8()
+        dev_func[i] = rt_pci_get_field(i, 2).to_u8()
+        dev_class[i] = rt_pci_get_field(i, 3).to_u8()
+        dev_subclass[i] = rt_pci_get_field(i, 4).to_u8()
+        dev_vendor[i] = rt_pci_get_field(i, 5).to_u16()
+        dev_devid[i] = rt_pci_get_field(i, 6).to_u16()
         dev_state[i] = DEV_STATE_AVAILABLE
         dev_grant_owner[i] = 0
         i = i + 1
@@ -85,24 +85,19 @@ fn pcimgr_init():
 # ============================================================================
 
 fn pcimgr_find_by_class(class_code: u8, subclass: u8) -> i64:
-    """Find first device by PCI class/subclass via C-side cache. Returns index or -1."""
+    """Find first device by PCI class/subclass. Returns index or -1."""
     var i: i64 = 0
     while i < dev_count:
-        # Read class (field 3) and subclass (field 4) from C PCI cache
-        val cls = syscall(80, 4, i, 3, 0, 0)
-        val sub = syscall(80, 4, i, 4, 0, 0)
-        if cls == class_code and sub == subclass:
+        if dev_class[i] == class_code and dev_subclass[i] == subclass:
             return i
         i = i + 1
     -1
 
 fn pcimgr_find_by_vendor(vendor: u16, device_id: u16) -> i64:
-    """Find first device by vendor/device ID via C-side cache. Returns index or -1."""
+    """Find first device by vendor/device ID. Returns index or -1."""
     var i: i64 = 0
     while i < dev_count:
-        val ve = syscall(80, 4, i, 5, 0, 0)
-        val di = syscall(80, 4, i, 6, 0, 0)
-        if ve == vendor and di == device_id:
+        if dev_vendor[i] == vendor and dev_devid[i] == device_id:
             return i
         i = i + 1
     -1

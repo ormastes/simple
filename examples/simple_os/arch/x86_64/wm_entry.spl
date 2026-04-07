@@ -11,7 +11,11 @@
 # 8. Focus ring effect on active window
 # 9. PS/2 keyboard input for window management
 
-# === Input handling (local — no external imports to avoid ABI conflicts) ===
+# === Input handling ===
+# Shared modules exist at os.gui.input_event + os.gui.shortcut but
+# using imported classes in --entry-closure baremetal builds causes
+# FAULT (class instantiation fails). Using local scancode mapping
+# with matching action code convention from the shared modules.
 
 # === Extern FFI declarations ===
 extern fn serial_println(msg: text)
@@ -2161,18 +2165,7 @@ fn spl_start():
     # Initialize PS/2 mouse
     mouse_init()
 
-    # Initialize shortcut handler (shared module)
-    # Shortcut action codes (matching os.gui.input_event.WmAction layout)
-    val ACT_NONE: u64 = 0
-    val ACT_CYCLE: u64 = 1
-    val ACT_FOCUS0: u64 = 10
-    val ACT_FOCUS1: u64 = 11
-    val ACT_FOCUS2: u64 = 12
-    val ACT_THEME: u64 = 2
-    val ACT_QUIT: u64 = 3
-    val ACT_MINIMIZE: u64 = 4
-    val ACT_CLOSE: u64 = 5
-    val ACT_RESTORE: u64 = 6
+    # Local scancode-to-action mapping (matches os.gui.shortcut convention)
 
     serial_println("[WM] Rendering glass desktop (dark theme)...")
     draw_desktop(active_win, theme)
@@ -2183,52 +2176,40 @@ fn spl_start():
     # 4. Continuous render loop with animation
     var running: u64 = 1
     while running == 1:
-        # Poll keyboard (scancode → action code)
+        # Poll keyboard — scancode to action (shared convention from os.gui.shortcut)
         val kb_status = io_inb(0x64)
         if (kb_status & 1) != 0:
-            val raw = io_inb(0x60)
-            if (raw & 0x80) == 0:
-                # Press event — map scancode to action
-                var action: u64 = ACT_NONE
-                if raw == 0x0F: action = ACT_CYCLE    # Tab
-                if raw == 0x02: action = ACT_FOCUS0   # 1
-                if raw == 0x03: action = ACT_FOCUS1   # 2
-                if raw == 0x04: action = ACT_FOCUS2   # 3
-                if raw == 0x14: action = ACT_THEME    # T
-                if raw == 0x10: action = ACT_QUIT     # Q
-                if raw == 0x32: action = ACT_MINIMIZE # M
-                if raw == 0x11: action = ACT_CLOSE    # W
-                if raw == 0x13: action = ACT_RESTORE  # R
-
-                if action == ACT_CYCLE:
+            val scancode = io_inb(0x60)
+            if (scancode & 0x80) == 0:
+                # Tab = cycle focus
+                if scancode == 0x0F:
                     active_win = (active_win + 1) % 3
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus cycled")
-                if action == ACT_FOCUS0:
+                # 1/2/3 = direct focus
+                if scancode == 0x02:
                     active_win = 0
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                    serial_println("[WM] Focus: Terminal")
-                if action == ACT_FOCUS1:
+                if scancode == 0x03:
                     active_win = 1
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                    serial_println("[WM] Focus: Editor")
-                if action == ACT_FOCUS2:
+                if scancode == 0x04:
                     active_win = 2
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                    serial_println("[WM] Focus: Finder")
-                if action == ACT_THEME:
+                # T = toggle theme
+                if scancode == 0x14:
                     theme = (theme + 1) % 2
                     animating = 1
                     anim_start = anim_frame
@@ -2238,10 +2219,12 @@ fn spl_start():
                         serial_println("[WM] Theme: Dark Glass")
                     else:
                         serial_println("[WM] Theme: White Glass")
-                if action == ACT_QUIT:
+                # Q = quit
+                if scancode == 0x10:
                     running = 0
                     serial_println("[WM] Quit requested")
-                if action == ACT_MINIMIZE:
+                # M = minimize
+                if scancode == 0x32:
                     val already_minimized = (g_minimize_states >> active_win) & 1
                     if g_minimize_active == 0 and already_minimized == 0:
                         g_minimize_active = 1
@@ -2249,14 +2232,16 @@ fn spl_start():
                         g_minimize_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Minimizing window")
-                if action == ACT_CLOSE:
+                # W = close
+                if scancode == 0x11:
                     if g_close_active == 0:
                         g_close_active = 1
                         g_close_progress = 0
                         g_close_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Closing window")
-                if action == ACT_RESTORE:
+                # R = restore
+                if scancode == 0x13:
                     if g_minimize_states != 0:
                         g_minimize_states = 0
                         needs_redraw = 1

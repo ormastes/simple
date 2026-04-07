@@ -8,7 +8,7 @@
 #   - 3 app windows: Terminal, Hello World, File Manager
 #   - Z-order management (focused window drawn on top)
 #   - Window decorations (title bar, close/min/max buttons, borders)
-#   - Keyboard: Alt+Tab=cycle, 1/2/3=focus, S=screenshot, Escape=quit
+#   - Keyboard: Alt+Tab=cycle, S=screenshot, Escape=quit
 #
 # Run with:
 #   SIMPLE_GUI=1 bin/simple examples/simple_os/hosted/hosted_wm.spl
@@ -19,9 +19,7 @@
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
 extern fn rt_winit_buffer_save_bmp(buf: i64, path: text) -> bool
-extern fn rt_winit_buffer_free(buf: i64) -> bool
 extern fn rt_winit_window_free(win: i64)
 extern fn rt_winit_event_loop_free(el: i64)
 
@@ -35,7 +33,7 @@ use os.compositor.compositor.{Compositor}
 
 val SCREEN_W: i64 = 1024
 val SCREEN_H: i64 = 768
-val BG_COLOR: i64 = 0xFF1A1B26   # Dark navy (ARGB)
+val BG_COLOR: u32 = 0xFF1A1B26   # Dark navy (ARGB)
 
 # ============================================================================
 # Entry Point
@@ -43,7 +41,7 @@ val BG_COLOR: i64 = 0xFF1A1B26   # Dark navy (ARGB)
 
 fn main() -> i64:
     print "SimpleOS Window Manager — Hosted ({SCREEN_W}x{SCREEN_H})"
-    print "Controls: Alt+Tab=cycle, 1/2/3=focus, S=screenshot, Escape=quit"
+    print "Controls: Alt+Tab=cycle, Escape=quit"
     print ""
 
     # --- Step 1: Create winit event loop and window ---
@@ -54,35 +52,31 @@ fn main() -> i64:
         return 1
     print "Window created: {SCREEN_W}x{SCREEN_H}"
 
-    # --- Step 2: Create native pixel buffer ---
-    val buf = rt_winit_buffer_create(SCREEN_W, SCREEN_H, BG_COLOR)
-    if buf == 0:
-        print "ERROR: Buffer creation failed"
-        return 1
-
-    # --- Step 3: Create backends ---
+    # --- Step 2: Create backends ---
+    # HostedCompositorBackend.create() allocates its own pixel buffer internally
     val w32: i32 = 1024
     val h32: i32 = 768
-    val bg_u32: u32 = 0xFF1A1B26
-    var backend = HostedCompositorBackend.create(win, w32, h32, bg_u32)
+    var backend = HostedCompositorBackend.create(win, w32, h32, BG_COLOR)
     var input = HostedInputBackend.create(el)
 
-    # --- Step 4: Create compositor ---
+    # --- Step 3: Create compositor ---
     var compositor = Compositor.with_backends(backend, input, w32, h32)
 
-    # --- Step 5: Launch 3 demo windows ---
+    # --- Step 4: Launch 3 demo windows ---
     print "Creating windows..."
     compositor.create_window("Terminal", 60, 80, 400, 280)
     compositor.create_window("Hello World", 320, 140, 360, 240)
     compositor.create_window("File Manager", 520, 320, 320, 200)
 
-    # --- Step 6: Save initial screenshot ---
+    # --- Step 5: Render and save initial screenshot ---
     compositor.render_all()
-    val saved = rt_winit_buffer_save_bmp(buf, "/tmp/simpleos_wm.bmp")
+    # Save from the backend's buffer (same buffer the compositor renders to)
+    val buf_id: i64 = backend.buffer_id
+    val saved = rt_winit_buffer_save_bmp(buf_id, "/tmp/simpleos_wm.bmp")
     if saved:
         print "Initial screenshot: /tmp/simpleos_wm.bmp"
 
-    # --- Step 7: Enter compositor event loop ---
+    # --- Step 6: Enter compositor event loop ---
     print "Desktop ready!"
     print "  Alt+Tab     = cycle windows"
     print "  Alt+F4      = close focused window"
@@ -93,7 +87,7 @@ fn main() -> i64:
 
     # --- Cleanup ---
     print "Desktop closed"
-    rt_winit_buffer_free(buf)
+    backend.free()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
     return 0
