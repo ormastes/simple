@@ -224,6 +224,24 @@ var g_files_selected: u64 = 0     # Selected item index (0-5)
 var g_files_view_mode: u64 = 0    # 0=icon, 1=list
 var g_files_sidebar_sel: u64 = 0  # Selected sidebar item (0-4)
 
+# Browser (Window 2) state
+var g_browser_url_len: u64 = 0
+var g_browser_url_0: u64 = 0    # Packed URL chars (8 per word)
+var g_browser_url_1: u64 = 0
+var g_browser_url_2: u64 = 0
+var g_browser_url_3: u64 = 0
+var g_browser_url_4: u64 = 0
+var g_browser_page: u64 = 0     # 0=home, 1=help, 2=sysinfo, 3=about
+var g_browser_scroll_y: u64 = 0
+var g_browser_input_active: u64 = 0  # 1 when address bar focused
+var g_browser_history_len: u64 = 0
+var g_browser_history_0: u64 = 0  # Page IDs for back/forward
+var g_browser_history_1: u64 = 0
+var g_browser_history_2: u64 = 0
+var g_browser_history_3: u64 = 0
+var g_browser_history_4: u64 = 0
+var g_browser_history_pos: u64 = 0
+
 # Animation globals (module-level state for focus transitions)
 var g_anim_progress: u64 = 100  # 0-100 (0=start, 100=done)
 
@@ -1016,8 +1034,8 @@ fn draw_glass_system_bar(theme: u64, active: u64):
             # "Editor" (69,100,105,116,111,114,0,0)
             draw_label_vector(anx, any_, text_c(theme), 230, pack8(69, 100, 105, 116, 111, 114, 0, 0), 6, 18)
         else:
-            # "Finder" (70,105,110,100,101,114,0,0)
-            draw_label_vector(anx, any_, text_c(theme), 230, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6, 18)
+            # "Browser" (66,114,111,119,115,101,114,0)
+            draw_label_vector(anx, any_, text_c(theme), 230, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7, 18)
 
     # App running indicator (green dot next to app name — exceeds macOS)
     circle(anx + 68, any_ + 6, 4, 0x0030D158, 180)
@@ -1481,7 +1499,7 @@ fn draw_glass_dock(theme: u64, active: u64):
     circle(first_ix - 1, dot_y - 1, 8, accent(theme), 40)
     circle(first_ix, dot_y, 6, accent(theme), 220)
 
-    # Files/Finder is always running (window 2) — dot at 2nd icon
+    # Browser is always running (window 2) — dot at 2nd icon
     val files_dot_x = first_ix + (pill_w + icon_gap)
     circle(files_dot_x - 1, dot_y - 1, 8, accent(theme), 40)
     circle(files_dot_x, dot_y, 6, accent(theme), 220)
@@ -1504,7 +1522,7 @@ fn draw_glass_dock(theme: u64, active: u64):
             # Editor is focused
             circle(editor_dot_x, dot_y, 6, 0x00FFFFFF, 140)
         else:
-            # Finder is focused
+            # Browser is focused
             circle(files_dot_x, dot_y, 6, 0x00FFFFFF, 140)
 
     # Dock reflection (beyond macOS — mirror effect)
@@ -2031,25 +2049,444 @@ fn draw_terminal_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val cursor_x = content_x + 16 + g_term_input_len * 8
     blend(cursor_x, line_y, 8, 14, text_color, 180)
 
-fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
-    val cy = y + TITLE_BAR_H + 2
-    val content_h = h - TITLE_BAR_H - 3
-    val sidebar_w: u64 = 110
+# ===========================================================================
+# Browser Functions (Window 2)
+# ===========================================================================
 
-    # --- Toolbar (below title bar) ---
-    val tb_y = cy
+fn render_browser_url(x: u64, y: u64, color: u64):
+    """Render URL from packed buffer."""
+    if g_browser_url_len > 0:
+        rt_gui_set_text_buf(g_browser_url_0, 0, 0, 0)
+    if g_browser_url_len > 8:
+        rt_gui_set_text_buf(g_browser_url_1, 8, 0, 0)
+    if g_browser_url_len > 16:
+        rt_gui_set_text_buf(g_browser_url_2, 16, 0, 0)
+    if g_browser_url_len > 24:
+        rt_gui_set_text_buf(g_browser_url_3, 24, 0, 0)
+    if g_browser_url_len > 32:
+        rt_gui_set_text_buf(g_browser_url_4, 32, 0, 0)
+    rt_gui_draw_text_buf(pack(x, y), pack(color, g_browser_url_len), 200, 0)
+
+fn draw_browser_toolbar(x: u64, y: u64, w: u64, theme: u64):
+    """Draw browser toolbar with back/forward/reload and URL bar."""
+    val tb_y = y + TITLE_BAR_H + 2
     val tb_h: u64 = 28
-    blend(x + 1, tb_y, w - 2, tb_h, surface(theme), 60)
-    blend(x + 1, tb_y + tb_h - 1, w - 2, 1, border_c(theme), border_a(theme))
-    # Back/Forward arrows
-    line(x + 12, tb_y + 14, x + 18, tb_y + 9, text_c(theme), 2, 140)
-    line(x + 12, tb_y + 14, x + 18, tb_y + 19, text_c(theme), 2, 140)
-    line(x + 28, tb_y + 9, x + 34, tb_y + 14, text_c(theme), 2, 140)
-    line(x + 28, tb_y + 19, x + 34, tb_y + 14, text_c(theme), 2, 140)
-    # View mode buttons (icon view / list view / column view)
-    rrect_aa(x + w - 80, tb_y + 6, 22, 16, accent(theme), 4, 120)
-    rrect_aa(x + w - 56, tb_y + 6, 22, 16, surface(theme), 4, 60)
-    rrect_aa(x + w - 32, tb_y + 6, 22, 16, surface(theme), 4, 60)
+
+    # Toolbar background
+    blend(x + 2, tb_y, w - 4, tb_h, surface(theme), 40)
+
+    # Back button (left arrow)
+    val btn_y = tb_y + 4
+    val btn_d: u64 = 20
+    circle(x + 10, btn_y, btn_d, surface(theme), 60)
+    # Arrow glyph: <
+    line(x + 18, btn_y + 4, x + 14, btn_y + 10, text_c(theme), 2, 160)
+    line(x + 14, btn_y + 10, x + 18, btn_y + 16, text_c(theme), 2, 160)
+
+    # Forward button
+    circle(x + 34, btn_y, btn_d, surface(theme), 60)
+    # Arrow glyph: >
+    line(x + 40, btn_y + 4, x + 44, btn_y + 10, text_c(theme), 2, 160)
+    line(x + 44, btn_y + 10, x + 40, btn_y + 16, text_c(theme), 2, 160)
+
+    # Reload button (circle arrow)
+    circle(x + 58, btn_y, btn_d, surface(theme), 60)
+    ring(x + 62, btn_y + 4, 12, 2, text_c(theme), 140)
+
+    # URL bar (rounded rect)
+    val url_x = x + 82
+    val url_w = w - 90
+    rrect_aa(url_x, tb_y + 3, url_w, 22, surface(theme), 8, 80)
+    # URL bar border
+    rrect_aa(url_x, tb_y + 3, url_w, 22, border_c(theme), 8, 30)
+
+    # Focus highlight on URL bar
+    if g_browser_input_active == 1:
+        rrect_aa(url_x - 1, tb_y + 2, url_w + 2, 24, accent(theme), 9, 40)
+
+    # URL text
+    if g_browser_url_len > 0:
+        render_browser_url(url_x + 6, tb_y + 6, text_c(theme))
+    else:
+        # Placeholder text: "Enter URL" (69,110,116,101,114,32,85,82,76)
+        rt_gui_set_text_buf(pack8(69, 110, 116, 101, 114, 32, 85, 82), 0, 0, 0)
+        rt_gui_set_text_buf(pack8(76, 0, 0, 0, 0, 0, 0, 0), 8, 0, 0)
+        rt_gui_draw_text_buf(pack(url_x + 6, tb_y + 6), pack(text_sec(theme), 9), 100, 0)
+
+    # Cursor in URL bar
+    if g_browser_input_active == 1:
+        blend(url_x + 6 + g_browser_url_len * 8, tb_y + 6, 2, 14, accent(theme), 200)
+
+    # Toolbar bottom separator
+    blend(x + 2, tb_y + tb_h, w - 4, 1, border_c(theme), 20)
+
+fn browser_navigate(page: u64):
+    """Navigate to a page and push to history."""
+    g_browser_page = page
+    g_browser_scroll_y = 0
+    # Push to history
+    if g_browser_history_pos < 5:
+        if g_browser_history_pos == 0: g_browser_history_0 = page
+        if g_browser_history_pos == 1: g_browser_history_1 = page
+        if g_browser_history_pos == 2: g_browser_history_2 = page
+        if g_browser_history_pos == 3: g_browser_history_3 = page
+        if g_browser_history_pos == 4: g_browser_history_4 = page
+        g_browser_history_pos = g_browser_history_pos + 1
+        g_browser_history_len = g_browser_history_pos
+
+fn browser_go_back():
+    if g_browser_history_pos > 1:
+        g_browser_history_pos = g_browser_history_pos - 1
+        val pos = g_browser_history_pos - 1
+        if pos == 0: g_browser_page = g_browser_history_0
+        if pos == 1: g_browser_page = g_browser_history_1
+        if pos == 2: g_browser_page = g_browser_history_2
+        if pos == 3: g_browser_page = g_browser_history_3
+        g_browser_scroll_y = 0
+
+fn browser_go_forward():
+    if g_browser_history_pos < g_browser_history_len:
+        val pos = g_browser_history_pos
+        if pos == 0: g_browser_page = g_browser_history_0
+        if pos == 1: g_browser_page = g_browser_history_1
+        if pos == 2: g_browser_page = g_browser_history_2
+        if pos == 3: g_browser_page = g_browser_history_3
+        g_browser_history_pos = g_browser_history_pos + 1
+        g_browser_scroll_y = 0
+
+fn browser_get_url_char(pos: u64) -> u64:
+    val word = pos / 8
+    val shift = (pos % 8) * 8
+    var packed: u64 = 0
+    if word == 0: packed = g_browser_url_0
+    if word == 1: packed = g_browser_url_1
+    if word == 2: packed = g_browser_url_2
+    if word == 3: packed = g_browser_url_3
+    if word == 4: packed = g_browser_url_4
+    (packed >> shift) & 0xFF
+
+fn browser_set_url_char(pos: u64, ch: u64):
+    val word = pos / 8
+    val shift = (pos % 8) * 8
+    val mask = 0xFF << shift
+    if word == 0: g_browser_url_0 = (g_browser_url_0 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 1: g_browser_url_1 = (g_browser_url_1 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 2: g_browser_url_2 = (g_browser_url_2 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 3: g_browser_url_3 = (g_browser_url_3 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+    if word == 4: g_browser_url_4 = (g_browser_url_4 & (0xFFFFFFFFFFFFFFFF ^ mask)) | (ch << shift)
+
+fn browser_navigate_url():
+    """Navigate based on URL text. Match against built-in pages."""
+    # Check first chars of URL
+    val ch0 = browser_get_url_char(0)
+    val ch1 = browser_get_url_char(1)
+    # "about:" prefix check (a=97, b=98, o=111, u=117, t=116, :=58)
+    if ch0 == 97 and ch1 == 98:  # "ab..."
+        val ch6 = browser_get_url_char(6)
+        if ch6 == 104: browser_navigate(1)      # "about:help" (h=104)
+        else:
+            if ch6 == 115: browser_navigate(2)   # "about:sysinfo" (s=115)
+            else:
+                if ch6 == 97: browser_navigate(3) # "about:about" (a=97)
+                else: browser_navigate(0)         # default to home
+    else:
+        browser_navigate(0)  # Unknown URL -> home
+
+fn draw_browser_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render browser window: toolbar + page content."""
+    # Draw toolbar (navigation buttons + URL bar)
+    draw_browser_toolbar(x, y, w, theme)
+
+    # Content area below title bar and toolbar (toolbar is 28px)
+    val cx = x + 4
+    val cy = y + TITLE_BAR_H + 32
+    val cw = w - 8
+    val ch = h - TITLE_BAR_H - 36
+
+    # Content background
+    if theme == 0:
+        blend(cx, cy, cw, ch, 0x001A1A2E, 230)
+    else:
+        blend(cx, cy, cw, ch, 0x00FFFFFF, 230)
+
+    # Render current page
+    if g_browser_page == 0:
+        draw_page_home(cx, cy, cw, ch, theme)
+    if g_browser_page == 1:
+        draw_page_help(cx, cy, cw, ch, theme)
+    if g_browser_page == 2:
+        draw_page_sysinfo(cx, cy, cw, ch, theme)
+    if g_browser_page == 3:
+        draw_page_about(cx, cy, cw, ch, theme)
+
+fn draw_page_home(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render the browser home page -- centered logo, search bar, quick links."""
+    val text_color = text_c(theme)
+    val dim_color = text_sec(theme)
+    val link_color: u64 = 0x000A84FF
+    val accent_c = accent(theme)
+
+    # Centered title "Simple" using vector font
+    val title_x = x + w / 2 - 70
+    val title_y = y + 30
+    # "Simple" = 83,105,109,112,108,101
+    draw_label_vector(title_x, title_y, text_color, 240, pack8(83, 105, 109, 112, 108, 101, 0, 0), 6, 24)
+    # "Browser" = 66,114,111,119,115,101,114
+    draw_label_vector(title_x + 80, title_y, accent_c, 240, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7, 24)
+
+    # Globe icon (ring)
+    ring(x + w / 2 - 20, title_y - 5, 16, 2, accent_c, 180)
+
+    # Subtitle: "Welcome " = 87,101,108,99,111,109,101,32
+    val sub_y = title_y + 36
+    draw_label(x + w / 2 - 72, sub_y, dim_color, 160, pack8(87, 101, 108, 99, 111, 109, 101, 32), 8)
+    # "to Simpl" = 116,111,32,83,105,109,112,108
+    draw_label(x + w / 2 - 8, sub_y, dim_color, 160, pack8(116, 111, 32, 83, 105, 109, 112, 108), 8)
+    # "eOS" = 101,79,83
+    draw_label(x + w / 2 + 56, sub_y, dim_color, 160, pack8(101, 79, 83, 0, 0, 0, 0, 0), 3)
+
+    # Search/URL input hint box
+    val box_x = x + 30
+    val box_y = sub_y + 30
+    val box_w = w - 60
+    if theme == 0:
+        rrect_aa(box_x, box_y, box_w, 28, 0x00252540, 10, 180)
+    else:
+        rrect_aa(box_x, box_y, box_w, 28, 0x00F0F0F0, 10, 180)
+    rrect_aa(box_x, box_y, box_w, 28, border_c(theme), 10, 20)
+    # "Type a U" = 84,121,112,101,32,97,32,85
+    draw_label(box_x + 10, box_y + 6, dim_color, 120, pack8(84, 121, 112, 101, 32, 97, 32, 85), 8)
+    # "RL above" = 82,76,32,97,98,111,118,101
+    draw_label(box_x + 74, box_y + 6, dim_color, 120, pack8(82, 76, 32, 97, 98, 111, 118, 101), 8)
+    # "..." = 46,46,46
+    draw_label(box_x + 138, box_y + 6, dim_color, 120, pack8(46, 46, 46, 0, 0, 0, 0, 0), 3)
+
+    # Quick links section
+    val links_y = box_y + 50
+    # "Quick Li" = 81,117,105,99,107,32,76,105
+    draw_label_bold(x + 20, links_y, text_color, 200, pack8(81, 117, 105, 99, 107, 32, 76, 105), 8)
+    # "nks" = 110,107,115
+    draw_label_bold(x + 84, links_y, text_color, 200, pack8(110, 107, 115, 0, 0, 0, 0, 0), 3)
+    # Separator line
+    blend(x + 20, links_y + 18, w - 40, 1, dim_color, 40)
+
+    # Link items (blue text with bullet dots)
+    val link_start_y = links_y + 28
+
+    # Link 1: "About Si" = 65,98,111,117,116,32,83,105
+    circle(x + 24, link_start_y + 2, 8, accent_c, 160)
+    draw_label(x + 38, link_start_y, link_color, 220, pack8(65, 98, 111, 117, 116, 32, 83, 105), 8)
+    # "mpleOS" = 109,112,108,101,79,83
+    draw_label(x + 102, link_start_y, link_color, 220, pack8(109, 112, 108, 101, 79, 83, 0, 0), 6)
+
+    # Link 2: "System I" = 83,121,115,116,101,109,32,73
+    val l2y = link_start_y + 24
+    circle(x + 24, l2y + 2, 8, accent_c, 160)
+    draw_label(x + 38, l2y, link_color, 220, pack8(83, 121, 115, 116, 101, 109, 32, 73), 8)
+    # "nfo" = 110,102,111
+    draw_label(x + 102, l2y, link_color, 220, pack8(110, 102, 111, 0, 0, 0, 0, 0), 3)
+
+    # Link 3: "Help" = 72,101,108,112
+    val l3y = l2y + 24
+    circle(x + 24, l3y + 2, 8, accent_c, 160)
+    draw_label(x + 38, l3y, link_color, 220, pack8(72, 101, 108, 112, 0, 0, 0, 0), 4)
+
+    # Link 4: "Network " = 78,101,116,119,111,114,107,32
+    val l4y = l3y + 24
+    circle(x + 24, l4y + 2, 8, 0x0030D158, 160)
+    draw_label(x + 38, l4y, link_color, 220, pack8(78, 101, 116, 119, 111, 114, 107, 32), 8)
+    # "Status" = 83,116,97,116,117,115
+    draw_label(x + 102, l4y, link_color, 220, pack8(83, 116, 97, 116, 117, 115, 0, 0), 6)
+
+fn draw_page_help(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render browser help page."""
+    val text_color = text_c(theme)
+    val dim_color = text_sec(theme)
+    val heading_color = text_color
+
+    # Title: "SimpleBr" = 83,105,109,112,108,101,66,114
+    draw_label_bold(x + 10, y + 10, heading_color, 240, pack8(83, 105, 109, 112, 108, 101, 66, 114), 8)
+    # "owser He" = 111,119,115,101,114,32,72,101
+    draw_label_bold(x + 74, y + 10, heading_color, 240, pack8(111, 119, 115, 101, 114, 32, 72, 101), 8)
+    # "lp" = 108,112
+    draw_label_bold(x + 138, y + 10, heading_color, 240, pack8(108, 112, 0, 0, 0, 0, 0, 0), 2)
+    blend(x + 10, y + 28, w - 20, 1, dim_color, 40)
+
+    # Navigation section
+    val ny = y + 40
+    # "Navigati" = 78,97,118,105,103,97,116,105
+    draw_label_bold(x + 10, ny, heading_color, 220, pack8(78, 97, 118, 105, 103, 97, 116, 105), 8)
+    # "on" = 111,110
+    draw_label_bold(x + 74, ny, heading_color, 220, pack8(111, 110, 0, 0, 0, 0, 0, 0), 2)
+
+    # "Click ad" = 67,108,105,99,107,32,97,100
+    draw_label(x + 20, ny + 20, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 97, 100), 8)
+    # "dress ba" = 100,114,101,115,115,32,98,97
+    draw_label(x + 84, ny + 20, text_color, 180, pack8(100, 114, 101, 115, 115, 32, 98, 97), 8)
+    # "r to typ" = 114,32,116,111,32,116,121,112
+    draw_label(x + 148, ny + 20, text_color, 180, pack8(114, 32, 116, 111, 32, 116, 121, 112), 8)
+    # "e URL" = 101,32,85,82,76
+    draw_label(x + 212, ny + 20, text_color, 180, pack8(101, 32, 85, 82, 76, 0, 0, 0), 5)
+
+    # "Press En" = 80,114,101,115,115,32,69,110
+    draw_label(x + 20, ny + 38, text_color, 180, pack8(80, 114, 101, 115, 115, 32, 69, 110), 8)
+    # "ter to n" = 116,101,114,32,116,111,32,110
+    draw_label(x + 84, ny + 38, text_color, 180, pack8(116, 101, 114, 32, 116, 111, 32, 110), 8)
+    # "avigate" = 97,118,105,103,97,116,101
+    draw_label(x + 148, ny + 38, text_color, 180, pack8(97, 118, 105, 103, 97, 116, 101, 0), 7)
+
+    # "Click li" = 67,108,105,99,107,32,108,105
+    draw_label(x + 20, ny + 56, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 108, 105), 8)
+    # "nks to f" = 110,107,115,32,116,111,32,102
+    draw_label(x + 84, ny + 56, text_color, 180, pack8(110, 107, 115, 32, 116, 111, 32, 102), 8)
+    # "ollow" = 111,108,108,111,119
+    draw_label(x + 148, ny + 56, text_color, 180, pack8(111, 108, 108, 111, 119, 0, 0, 0), 5)
+
+    # Built-in pages section
+    val py = ny + 84
+    # "Built-in" = 66,117,105,108,116,45,105,110
+    draw_label_bold(x + 10, py, heading_color, 220, pack8(66, 117, 105, 108, 116, 45, 105, 110), 8)
+    # " Pages" = 32,80,97,103,101,115
+    draw_label_bold(x + 74, py, heading_color, 220, pack8(32, 80, 97, 103, 101, 115, 0, 0), 6)
+
+    # "about:ho" = 97,98,111,117,116,58,104,111
+    draw_label(x + 20, py + 20, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 111), 8)
+    # "me  Star" = 109,101,32,32,83,116,97,114
+    draw_label(x + 84, py + 20, text_color, 180, pack8(109, 101, 32, 32, 83, 116, 97, 114), 8)
+    # "t page" = 116,32,112,97,103,101
+    draw_label(x + 148, py + 20, text_color, 180, pack8(116, 32, 112, 97, 103, 101, 0, 0), 6)
+
+    # "about:he" = 97,98,111,117,116,58,104,101
+    draw_label(x + 20, py + 38, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 101), 8)
+    # "lp  This" = 108,112,32,32,84,104,105,115
+    draw_label(x + 84, py + 38, text_color, 180, pack8(108, 112, 32, 32, 84, 104, 105, 115), 8)
+    # " page" = 32,112,97,103,101
+    draw_label(x + 148, py + 38, text_color, 180, pack8(32, 112, 97, 103, 101, 0, 0, 0), 5)
+
+    # "about:sy" = 97,98,111,117,116,58,115,121
+    draw_label(x + 20, py + 56, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 115, 121), 8)
+    # "sinfo Sy" = 115,105,110,102,111,32,83,121
+    draw_label(x + 84, py + 56, text_color, 180, pack8(115, 105, 110, 102, 111, 32, 83, 121), 8)
+    # "stem inf" = 115,116,101,109,32,105,110,102
+    draw_label(x + 148, py + 56, text_color, 180, pack8(115, 116, 101, 109, 32, 105, 110, 102), 8)
+    # "o" = 111
+    draw_label(x + 212, py + 56, text_color, 180, pack8(111, 0, 0, 0, 0, 0, 0, 0), 1)
+
+    # "about:ab" = 97,98,111,117,116,58,97,98
+    draw_label(x + 20, py + 74, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 97, 98), 8)
+    # "out  Abo" = 111,117,116,32,32,65,98,111
+    draw_label(x + 84, py + 74, text_color, 180, pack8(111, 117, 116, 32, 32, 65, 98, 111), 8)
+    # "ut" = 117,116
+    draw_label(x + 148, py + 74, text_color, 180, pack8(117, 116, 0, 0, 0, 0, 0, 0), 2)
+
+    # Back link: "< Back t" = 60,32,66,97,99,107,32,116
+    val by = py + 104
+    draw_label(x + 20, by, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    # "o Home" = 111,32,72,111,109,101
+    draw_label(x + 84, by, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+
+fn draw_page_sysinfo(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render system information page."""
+    val text_color = text_c(theme)
+    val dim_color = text_sec(theme)
+    val heading_color = text_color
+
+    # Title: "System I" = 83,121,115,116,101,109,32,73
+    draw_label_bold(x + 10, y + 10, heading_color, 240, pack8(83, 121, 115, 116, 101, 109, 32, 73), 8)
+    # "nformati" = 110,102,111,114,109,97,116,105
+    draw_label_bold(x + 74, y + 10, heading_color, 240, pack8(110, 102, 111, 114, 109, 97, 116, 105), 8)
+    # "on" = 111,110
+    draw_label_bold(x + 138, y + 10, heading_color, 240, pack8(111, 110, 0, 0, 0, 0, 0, 0), 2)
+    blend(x + 10, y + 28, w - 20, 1, dim_color, 40)
+
+    val sy = y + 40
+    # "CPU: x86" = 67,80,85,58,32,120,56,54
+    draw_label(x + 20, sy, text_color, 180, pack8(67, 80, 85, 58, 32, 120, 56, 54), 8)
+    # "_64" = 95,54,52
+    draw_label(x + 84, sy, text_color, 180, pack8(95, 54, 52, 0, 0, 0, 0, 0), 3)
+
+    # "Display:" = 68,105,115,112,108,97,121,58
+    draw_label(x + 20, sy + 20, text_color, 180, pack8(68, 105, 115, 112, 108, 97, 121, 58), 8)
+    # " 1024x76" = 32,49,48,50,52,120,55,54
+    draw_label(x + 84, sy + 20, text_color, 180, pack8(32, 49, 48, 50, 52, 120, 55, 54), 8)
+    # "8x32" = 56,120,51,50
+    draw_label(x + 148, sy + 20, text_color, 180, pack8(56, 120, 51, 50, 0, 0, 0, 0), 4)
+
+    # "Heap: 16" = 72,101,97,112,58,32,49,54
+    draw_label(x + 20, sy + 40, text_color, 180, pack8(72, 101, 97, 112, 58, 32, 49, 54), 8)
+    # " MB" = 32,77,66
+    draw_label(x + 84, sy + 40, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3)
+
+    # "Stack: 8" = 83,116,97,99,107,58,32,56
+    draw_label(x + 20, sy + 60, text_color, 180, pack8(83, 116, 97, 99, 107, 58, 32, 56), 8)
+    # " MB" = 32,77,66
+    draw_label(x + 84, sy + 60, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3)
+
+    # "Network" = 78,101,116,119,111,114,107
+    draw_label_bold(x + 10, sy + 90, heading_color, 220, pack8(78, 101, 116, 119, 111, 114, 107, 0), 7)
+
+    # "VirtIO-n" = 86,105,114,116,73,79,45,110
+    draw_label(x + 20, sy + 110, dim_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8)
+    # "et: not " = 101,116,58,32,110,111,116,32
+    draw_label(x + 84, sy + 110, dim_color, 180, pack8(101, 116, 58, 32, 110, 111, 116, 32), 8)
+    # "connecte" = 99,111,110,110,101,99,116,101
+    draw_label(x + 148, sy + 110, dim_color, 180, pack8(99, 111, 110, 110, 101, 99, 116, 101), 8)
+    # "d" = 100
+    draw_label(x + 212, sy + 110, dim_color, 180, pack8(100, 0, 0, 0, 0, 0, 0, 0), 1)
+
+    # Back link: "< Back t" = 60,32,66,97,99,107,32,116
+    draw_label(x + 20, sy + 150, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    # "o Home" = 111,32,72,111,109,101
+    draw_label(x + 84, sy + 150, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+
+fn draw_page_about(x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Render about page."""
+    val text_color = text_c(theme)
+    val heading_color = text_color
+
+    # Title: "About Si" = 65,98,111,117,116,32,83,105
+    draw_label_bold(x + 10, y + 10, heading_color, 240, pack8(65, 98, 111, 117, 116, 32, 83, 105), 8)
+    # "mpleBrow" = 109,112,108,101,66,114,111,119
+    draw_label_bold(x + 74, y + 10, heading_color, 240, pack8(109, 112, 108, 101, 66, 114, 111, 119), 8)
+    # "ser" = 115,101,114
+    draw_label_bold(x + 138, y + 10, heading_color, 240, pack8(115, 101, 114, 0, 0, 0, 0, 0), 3)
+
+    # "Version " = 86,101,114,115,105,111,110,32
+    draw_label(x + 20, y + 40, text_color, 180, pack8(86, 101, 114, 115, 105, 111, 110, 32), 8)
+    # "0.1" = 48,46,49
+    draw_label(x + 84, y + 40, text_color, 180, pack8(48, 46, 49, 0, 0, 0, 0, 0), 3)
+
+    # "Built fo" = 66,117,105,108,116,32,102,111
+    draw_label(x + 20, y + 60, text_color, 180, pack8(66, 117, 105, 108, 116, 32, 102, 111), 8)
+    # "r Simple" = 114,32,83,105,109,112,108,101
+    draw_label(x + 84, y + 60, text_color, 180, pack8(114, 32, 83, 105, 109, 112, 108, 101), 8)
+    # "OS" = 79,83
+    draw_label(x + 148, y + 60, text_color, 180, pack8(79, 83, 0, 0, 0, 0, 0, 0), 2)
+
+    # "Renderin" = 82,101,110,100,101,114,105,110
+    draw_label(x + 20, y + 80, text_color, 180, pack8(82, 101, 110, 100, 101, 114, 105, 110), 8)
+    # "g: glass" = 103,58,32,103,108,97,115,115
+    draw_label(x + 84, y + 80, text_color, 180, pack8(103, 58, 32, 103, 108, 97, 115, 115), 8)
+    # ".render." = 46,114,101,110,100,101,114,46
+    draw_label(x + 148, y + 80, text_color, 180, pack8(46, 114, 101, 110, 100, 101, 114, 46), 8)
+    # "c" = 99
+    draw_label(x + 212, y + 80, text_color, 180, pack8(99, 0, 0, 0, 0, 0, 0, 0), 1)
+
+    # "Font: 8x" = 70,111,110,116,58,32,56,120
+    draw_label(x + 20, y + 100, text_color, 180, pack8(70, 111, 110, 116, 58, 32, 56, 120), 8)
+    # "16 bitma" = 49,54,32,98,105,116,109,97
+    draw_label(x + 84, y + 100, text_color, 180, pack8(49, 54, 32, 98, 105, 116, 109, 97), 8)
+    # "p + vect" = 112,32,43,32,118,101,99,116
+    draw_label(x + 148, y + 100, text_color, 180, pack8(112, 32, 43, 32, 118, 101, 99, 116), 8)
+    # "or" = 111,114
+    draw_label(x + 212, y + 100, text_color, 180, pack8(111, 114, 0, 0, 0, 0, 0, 0), 2)
+
+    # Back link: "< Back t" = 60,32,66,97,99,107,32,116
+    draw_label(x + 20, y + 140, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    # "o Home" = 111,32,72,111,109,101
+    draw_label(x + 84, y + 140, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+
+_DEAD_CODE_START_MARKER
     # Grid dots in icon view btn
     circle(x + w - 74, tb_y + 10, 3, 0x00FFFFFF, 220)
     circle(x + w - 68, tb_y + 10, 3, 0x00FFFFFF, 220)
@@ -2429,7 +2866,7 @@ fn draw_win2_normal(boff: u64, is_active: u64, theme: u64):
     val by = WIN2_Y - boff
     draw_glass_window(WIN2_X, by, WIN2_W, WIN2_H, is_active, theme)
     draw_files_content(WIN2_X, by, WIN2_W, WIN2_H, theme)
-    draw_window_title(WIN2_X, by, WIN2_W, pack8(70, 105, 110, 100, 101, 114, 0, 0), 6, theme)
+    draw_window_title(WIN2_X, by, WIN2_W, pack8(66, 114, 111, 119, 115, 101, 114, 0), 7, theme)
 
 # Draw close animation: scale down to center + fade
 fn draw_close_animated(wx: u64, wy: u64, ww: u64, wh: u64, theme: u64):
@@ -2649,6 +3086,14 @@ fn spl_start():
     # Initialize PS/2 mouse
     mouse_init()
 
+    # Initialize browser to about:home
+    browser_navigate(0)
+    # Set default URL text to "about:home"
+    # a=97,b=98,o=111,u=117,t=116,:=58,h=104,o=111,m=109,e=101
+    g_browser_url_0 = pack8(97, 98, 111, 117, 116, 58, 104, 111)
+    g_browser_url_1 = pack8(109, 101, 0, 0, 0, 0, 0, 0)
+    g_browser_url_len = 10
+
     # Local scancode-to-action mapping (matches os.gui.shortcut convention)
 
     serial_println("[WM] Rendering glass desktop (dark theme)...")
@@ -2829,7 +3274,7 @@ fn spl_start():
                         if left_was == 0:
                             serial_println("[WM] Mouse click")
                             # Hit test windows back-to-front (win2, win1, win0)
-                            # Window 2 (Finder)
+                            # Window 2 (Browser)
                             if g_mouse_x >= WIN2_X:
                                 if g_mouse_x < WIN2_X + WIN2_W:
                                     if g_mouse_y >= WIN2_Y:

@@ -2945,6 +2945,94 @@ int64_t rt_aes_sbox(int64_t i) { return (i >= 0 && i < 256) ? (int64_t)_aes_sbox
 int64_t rt_aes_inv_sbox(int64_t i) { return (i >= 0 && i < 256) ? (int64_t)_aes_inv_sbox[i] : 0; }
 int64_t rt_aes_rcon(int64_t i) { return (i >= 0 && i < 10) ? (int64_t)_aes_rcon[i] : 0; }
 
+/* ===================================================================
+ * 8e. C-side SHA-512 — full implementation for baremetal
+ *
+ * Simple's array push/len are unreliable in baremetal. The entire
+ * SHA-512 computation is done in C. Simple calls rt_sha512_hash().
+ * =================================================================== */
+
+static inline uint64_t _sha512_rotr(uint64_t x, int n) { return (x >> n) | (x << (64 - n)); }
+static inline uint64_t _sha512_ch(uint64_t x, uint64_t y, uint64_t z) { return (x & y) ^ (~x & z); }
+static inline uint64_t _sha512_maj(uint64_t x, uint64_t y, uint64_t z) { return (x & y) ^ (x & z) ^ (y & z); }
+static inline uint64_t _sha512_S0(uint64_t x) { return _sha512_rotr(x,28) ^ _sha512_rotr(x,34) ^ _sha512_rotr(x,39); }
+static inline uint64_t _sha512_S1(uint64_t x) { return _sha512_rotr(x,14) ^ _sha512_rotr(x,18) ^ _sha512_rotr(x,41); }
+static inline uint64_t _sha512_s0(uint64_t x) { return _sha512_rotr(x,1) ^ _sha512_rotr(x,8) ^ (x >> 7); }
+static inline uint64_t _sha512_s1(uint64_t x) { return _sha512_rotr(x,19) ^ _sha512_rotr(x,61) ^ (x >> 6); }
+
+static void _sha512_process_block(const uint8_t *block, uint64_t *h)
+{
+    uint64_t w[80];
+    for (int t = 0; t < 16; t++) {
+        w[t] = 0;
+        for (int b = 0; b < 8; b++)
+            w[t] = (w[t] << 8) | block[t * 8 + b];
+    }
+    for (int t = 16; t < 80; t++)
+        w[t] = _sha512_s1(w[t-2]) + w[t-7] + _sha512_s0(w[t-15]) + w[t-16];
+
+    uint64_t a=h[0], b=h[1], c=h[2], d=h[3], e=h[4], f=h[5], g=h[6], hh=h[7];
+    for (int t = 0; t < 80; t++) {
+        uint64_t t1 = hh + _sha512_S1(e) + _sha512_ch(e,f,g) + _sha512_K[t] + w[t];
+        uint64_t t2 = _sha512_S0(a) + _sha512_maj(a,b,c);
+        hh=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
+}
+
+/* SHA-512 result buffer — stores 64-byte digest for Simple to read byte-by-byte */
+static uint8_t _sha512_result[64];
+
+/* rt_sha512_hash: compute SHA-512, store result in _sha512_result buffer.
+ * data_rv: RuntimeValue [u8] array.
+ * Returns 64 (digest length) on success, negative on error. */
+int64_t rt_sha512_hash(int64_t data_rv, int64_t unused)
+{
+    if (!IS_HEAP(data_rv)) return -1;
+    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(data_rv);
+    if (!hdr || hdr->type != HEAP_ARRAY) return -1;
+    RuntimeArray *arr = (RuntimeArray *)hdr;
+    uint32_t data_len = arr->len;
+
+    uint8_t *data = (uint8_t *)malloc(data_len + 256);
+    if (!data) return -1;
+    for (uint32_t i = 0; i < data_len; i++)
+        data[i] = (uint8_t)(DECODE_INT(arr->items[i]) & 0xFF);
+
+    /* SHA-512 padding */
+    uint64_t bit_len = (uint64_t)data_len * 8;
+    uint32_t padded_len = data_len + 1;
+    while ((padded_len % 128) != 112) padded_len++;
+    padded_len += 16;
+
+    uint8_t *padded = (uint8_t *)malloc(padded_len);
+    if (!padded) return -1;
+    for (uint32_t i = 0; i < padded_len; i++) padded[i] = 0;
+    for (uint32_t i = 0; i < data_len; i++) padded[i] = data[i];
+    padded[data_len] = 0x80;
+    for (int i = 0; i < 8; i++)
+        padded[padded_len - 8 + i] = (uint8_t)(bit_len >> (56 - i * 8));
+
+    uint64_t h[8];
+    for (int i = 0; i < 8; i++) h[i] = _sha512_H[i];
+    for (uint32_t off = 0; off < padded_len; off += 128)
+        _sha512_process_block(padded + off, h);
+
+    /* Store 64-byte digest in static buffer */
+    for (int i = 0; i < 8; i++)
+        for (int b = 0; b < 8; b++)
+            _sha512_result[i * 8 + b] = (uint8_t)(h[i] >> (56 - b * 8));
+
+    return 64;
+}
+
+/* rt_sha512_byte: read one byte from the last SHA-512 result */
+int64_t rt_sha512_byte(int64_t index)
+{
+    if (index < 0 || index >= 64) return 0;
+    return (int64_t)_sha512_result[index];
+}
+
 /* Also provide the unmangled name for direct extern fn calls */
 int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 uint64_t a2, uint64_t a3, uint64_t a4)
@@ -4650,9 +4738,9 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
     int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
-    if (cap <= 0) cap = 64; /* default capacity — generous for bare metal */
-    /* Ensure minimum capacity for OS use (PCI scan needs ~32, string ops need ~16) */
-    if (cap < 64) cap = 64;
+    if (cap <= 0) cap = 1024; /* default capacity — large for crypto (SHA-512 needs ~400) */
+    /* Ensure minimum capacity for OS use (crypto padding needs ~400, PCI ~32) */
+    if (cap < 1024) cap = 1024;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -4675,9 +4763,21 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
     if (a->len >= a->cap) {
-        /* At capacity — cannot grow (flexible array member can't be resized in-place).
-         * Silently drop. Initial capacity should be large enough for the use case. */
-        return ENCODE_PTR(a);
+        /* At capacity — grow by allocating a new, larger array and copying.
+         * Bump allocator: old memory is leaked (free is no-op), but this
+         * enables crypto code (SHA-512/256 needs ~400+ byte arrays). */
+        uint32_t new_cap = a->cap * 2;
+        if (new_cap < 128) new_cap = 128;
+        size_t alloc_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
+        RuntimeArray *new_a = (RuntimeArray *)malloc(alloc_size);
+        if (!new_a) return ENCODE_PTR(a); /* alloc failed, drop */
+        new_a->hdr.type = HEAP_ARRAY;
+        new_a->hdr.size = (uint32_t)alloc_size;
+        new_a->len = a->len;
+        new_a->cap = new_cap;
+        for (uint32_t i = 0; i < a->len; i++) new_a->items[i] = a->items[i];
+        for (uint32_t i = a->len; i < new_cap; i++) new_a->items[i] = NIL_VALUE;
+        a = new_a;
     }
     a->items[a->len] = val;
     a->len++;

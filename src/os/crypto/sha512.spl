@@ -199,11 +199,27 @@ fn sha512_process_block(block: [u8], offset: u64, h: [u64]) -> [u64]:
 # SHA-512 Hash
 # ============================================================================
 
-extern fn serial_println(msg: text)
+# C-side SHA-512 — full implementation for baremetal
+extern fn rt_sha512_hash(data: [u8], unused: i64) -> i64
+extern fn rt_sha512_byte(index: i64) -> i64
+
+fn sha512(data: [u8]) -> [u8]:
+    """Compute SHA-512 hash of data.
+
+    WORKAROUND: Uses C-side implementation because baremetal array push/len
+    are unreliable. C computes the hash and stores it in a static buffer.
+    We read it back byte-by-byte via rt_sha512_byte().
+    """
+    rt_sha512_hash(data, 0)
+    var digest: [u8] = []
+    var i: i64 = 0
+    while i < 64:
+        digest.push(rt_sha512_byte(i).to_u8())
+        i = i + 1
+    return digest
 
 fn _sha512_padded_len(data_len: u64) -> u64:
     """Calculate expected padded length for SHA-512 (must be multiple of 128)."""
-    # Need: data + 1 (0x80) + zeros + 16 (length) = multiple of 128
     val total_without_pad = data_len + 1 + 16
     val remainder = total_without_pad % 128
     if remainder == 0:
@@ -211,33 +227,19 @@ fn _sha512_padded_len(data_len: u64) -> u64:
     else:
         total_without_pad + (128 - remainder)
 
-fn sha512(data: [u8]) -> [u8]:
-    """Compute SHA-512 hash of data.
-
-    Args:
-        data: Input bytes.
-
-    Returns: 64-byte (512-bit) digest.
-    """
-    # Pad the message
+fn _sha512_pure_simple(data: [u8]) -> [u8]:
+    """Original Pure Simple SHA-512 — disabled in baremetal."""
     val padded = sha512_pad(data)
-
-    # Initialize hash state
     var h: [u64] = []
     var i: u64 = 0
     while i < 8:
         h.push(rt_sha512_H(i))
         i = i + 1
-
-    # Process each 128-byte block
-    # WORKAROUND: use computed length instead of padded.len() (unreliable in baremetal)
     val num_blocks = _sha512_padded_len(data.len().to_u64()) / 128
     var block_idx: u64 = 0
     while block_idx < num_blocks:
         h = sha512_process_block(padded, block_idx * 128, h)
         block_idx = block_idx + 1
-
-    # Convert hash state to big-endian bytes
     var digest: [u8] = []
     i = 0
     while i < 8:

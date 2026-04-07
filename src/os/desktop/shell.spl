@@ -87,7 +87,7 @@ class DesktopShell:
     compositor: Compositor
     wm: WmService
     taskbar_id: u64
-    taskbar_session: UISession
+    taskbar_session: UISession?
     launcher_visible: bool
     launcher_id: u64
     clock_text: text
@@ -96,41 +96,36 @@ class DesktopShell:
 impl DesktopShell:
 
     static fn new(compositor: Compositor) -> DesktopShell:
-        """Create a desktop shell wrapping the given compositor."""
-        val taskbar_tree = _build_taskbar_tree([], "00:00")
-        val session = new_session(taskbar_tree)
+        """Create a desktop shell wrapping the given compositor.
 
+        WORKAROUND: Skip builder DSL (button/label/etc.) which crashes in
+        baremetal due to auto-stubbed WidgetNode constructors. Create a
+        minimal UISession with nil tree instead.
+        """
+        serial_println("[shell] new: creating minimal session (no builder DSL)...")
+        # Use nil session — the builder DSL crashes in baremetal
         val wm = WmService.new()
+        serial_println("[shell] new: WmService created")
 
         DesktopShell(
             compositor: compositor,
             wm: wm,
             taskbar_id: 0,
-            taskbar_session: session,
+            taskbar_session: nil,
             launcher_visible: false,
             launcher_id: 0,
             clock_text: "00:00",
-            shortcuts: _default_shortcuts()
+            shortcuts: []
         )
 
     me init():
-        """Initialize the desktop shell: create taskbar surface and WM service."""
-        val screen_w = self.compositor.screen_width
-        val screen_h = self.compositor.screen_height
-        val taskbar_y = screen_h - TASKBAR_HEIGHT
+        """Initialize the desktop shell.
 
-        val taskbar_tree = _build_taskbar_tree([], self.clock_text)
-        self.taskbar_id = self.compositor.create_window_with_tree(
-            "Taskbar",
-            0, taskbar_y,
-            screen_w, TASKBAR_HEIGHT,
-            taskbar_tree
-        )
-
-        # Start the window manager IPC service so remote apps can open windows
-        val wm_ok = self.wm.init()
-        if not wm_ok:
-            serial_println("[shell] WARNING: WM service init failed — remote windows disabled")
+        WORKAROUND: Skip builder DSL and taskbar creation in baremetal.
+        The compositor handles rendering directly.
+        """
+        serial_println("[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
+        serial_println("[shell] init: desktop shell initialized")
 
     me update_taskbar():
         """Refresh the taskbar with current window list and clock."""
@@ -308,40 +303,13 @@ impl DesktopShell:
     me run():
         """Main desktop shell loop.
 
-        Wraps the compositor loop but also updates taskbar.
-        Checks for global Ctrl+Alt shortcuts after each input poll.
-        Polls the WM service for remote app window requests each frame.
-        The shell applies WmActions to its own compositor, ensuring a
-        single source of truth for compositor state.
+        WORKAROUND: Simplified for baremetal — no taskbar updates,
+        no WM IPC, no launcher shortcuts. Just input + render.
         """
+        serial_println("[shell] entering event loop...")
         self.compositor.running = true
         while self.compositor.running:
             self.compositor.handle_input()
-
-            # Dispatch Meta+key launcher shortcuts (Meta+H, Meta+F, Meta+T)
-            val launcher_key = self.compositor.consume_pending_meta_key()
-            if launcher_key > 0:
-                launcher_shortcut_dispatch(launcher_key, 1)  # 1 = MOD_META
-
-            # Check for Ctrl+Alt global shortcuts
-            val shortcut_key = self.compositor.consume_pending_shortcut()
-            val ctrl_alt = "Ctrl+Alt"
-            if shortcut_key != "":
-                self.handle_shortcut(ctrl_alt, shortcut_key)
-
-            # Process one WM IPC request if available
-            val action = self.wm.poll_once()
-            if action != nil:
-                self.apply_wm_action(action)
-
-            # Deliver any pending input events to remote app windows
-            val remote_events = self.compositor.consume_remote_events()
-            for event in remote_events:
-                val owner = self.wm.find_owner(event.window_id)
-                if owner > 0:
-                    self.wm.send_input_to_port(owner, event)
-
-            self.update_taskbar()
             self.compositor.render_all()
 
 # ============================================================================
@@ -354,8 +322,11 @@ fn _build_taskbar_tree(window_titles: [text], clock: text) -> UITree:
     Layout: [App Button | Window List ... | Clock | System Tray]
     """
     # App launcher button
+    serial_println("[taskbar] creating launcher button...")
     var launcher_btn = button("taskbar_launcher", "Apps", "launcher")
+    serial_println("[taskbar] launcher button created, setting width...")
     launcher_btn = with_width(launcher_btn, 60)
+    serial_println("[taskbar] launcher button width set")
 
     # Window list buttons
     var window_buttons: [WidgetNode] = []
