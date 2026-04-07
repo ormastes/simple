@@ -441,11 +441,11 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    /* Return ENCODE_INT — callers expect tagged integer */
-    if (!IS_HEAP(str)) return ENCODE_INT(0);
+    /* Return RAW (untagged) — Cranelift backend does not unbox len results */
+    if (!IS_HEAP(str)) return 0;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return ENCODE_INT(0);
-    return ENCODE_INT(s->len);
+    if (!s) return 0;
+    return (RuntimeValue)s->len;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
@@ -584,24 +584,24 @@ RuntimeValue rt_value_to_string(RuntimeValue val)
 
 RuntimeValue rt_len(RuntimeValue v)
 {
-    /* Return ENCODE_INT — callers expect tagged integer */
-    if (IS_INT(v)) return ENCODE_INT(0);
-    if (!IS_HEAP(v)) return ENCODE_INT(0);
+    /* Return RAW (untagged) — Cranelift backend does not unbox len results */
+    if (IS_INT(v)) return 0;
+    if (!IS_HEAP(v)) return 0;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
-    if (!h) return ENCODE_INT(0);
+    if (!h) return 0;
     if (h->type == HEAP_STRING) {
         RuntimeString *s = (RuntimeString *)h;
-        return ENCODE_INT(s->len);
+        return (RuntimeValue)s->len;
     }
     if (h->type == HEAP_ARRAY) {
         RuntimeArray *a = (RuntimeArray *)h;
-        return ENCODE_INT(a->len);
+        return (RuntimeValue)a->len;
     }
     if (h->type == HEAP_MAP) {
         RuntimeMap *m = (RuntimeMap *)h;
-        return ENCODE_INT(m->len);
+        return (RuntimeValue)m->len;
     }
-    return ENCODE_INT(0);
+    return 0;
 }
 
 RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
@@ -4372,7 +4372,7 @@ RuntimeValue rt_gui_render_desktop(RuntimeValue unused1, RuntimeValue unused2)
 RuntimeValue rt_dict_new(void) { return NIL_VALUE; }
 RuntimeValue rt_dict_get(RuntimeValue d, RuntimeValue k) { (void)d; (void)k; return NIL_VALUE; }
 RuntimeValue rt_dict_set(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
-RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return ENCODE_INT(0); }
+RuntimeValue rt_dict_len(RuntimeValue d) { (void)d; return 0; /* raw untagged */ }
 RuntimeValue rt_dict_keys(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_dict_values(RuntimeValue d) { (void)d; return NIL_VALUE; }
 RuntimeValue rt_dict_clear(RuntimeValue d) { (void)d; return NIL_VALUE; }
@@ -5902,13 +5902,16 @@ RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return val;
 }
 
-/* rt_array_len: return ENCODE_INT — callers expect tagged integer */
+/* rt_array_len: return RAW (untagged) integer.
+ * The Cranelift backend's call_len_method does NOT unbox the result,
+ * and the MIR for-loop lowering compares directly with raw index counters.
+ * So we must return raw len, not ENCODE_INT(len). */
 RuntimeValue rt_array_len(RuntimeValue arr)
 {
-    if (!IS_HEAP(arr)) return ENCODE_INT(0);
+    if (!IS_HEAP(arr)) return 0;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
-    return ENCODE_INT(a->len);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (RuntimeValue)a->len;
 }
 /* rt_array_slice(arr, start, end) — return sub-array */
 RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end)
