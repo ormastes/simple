@@ -1,0 +1,295 @@
+# Animation controller — bridges the AnimationEngine into the render pipeline.
+# Detects CSS property transitions between old and new computed styles,
+# manages ActiveTransition lifecycles, and produces StyleUpdate objects
+# each tick for the renderer to apply.
+
+use examples.browser.entity.dom.css_types.{CSSValue, CSSDeclaration}
+use examples.browser.feature.style.computed.{ComputedStyle, extract_px, get_property_from_style}
+use examples.browser.feature.style.animation.{AnimationEngine, StyleUpdate, Transition, TimingFunction, AnimationState, interpolate}
+use examples.browser.shared.logging.{Logger, LogLevel}
+
+# ---------------------------------------------------------------------------
+# ActiveTransition — a single in-flight property transition owned by the
+# controller.  Tracks elapsed time so the controller can drive the
+# AnimationEngine's interpolation without requiring wall-clock queries.
+# ---------------------------------------------------------------------------
+
+class ActiveTransition:
+    node_id: i64
+    property: text
+    from_value: CSSValue
+    to_value: CSSValue
+    duration_ms: f64
+    elapsed_ms: f64
+    timing: text
+
+    static fn create(node_id: i64, property: text, from_value: CSSValue, to_value: CSSValue, duration_ms: f64, timing: text) -> ActiveTransition:
+        ActiveTransition(
+            node_id: node_id,
+            property: property,
+            from_value: from_value,
+            to_value: to_value,
+            duration_ms: duration_ms,
+            elapsed_ms: 0.0,
+            timing: timing
+        )
+
+# ---------------------------------------------------------------------------
+# AnimationController — orchestrates transitions detected from style changes.
+# ---------------------------------------------------------------------------
+
+class AnimationController:
+    engine: AnimationEngine
+    logger: Logger
+    active_transitions: [ActiveTransition]
+
+    static fn new(engine: AnimationEngine, logger: Logger) -> AnimationController:
+        AnimationController(
+            engine: engine,
+            logger: logger,
+            active_transitions: [ActiveTransition]()
+        )
+
+    # -----------------------------------------------------------------------
+    # detect_transitions — compare old and new computed styles for a node.
+    # For each property listed in transition_props whose value changed,
+    # create an ActiveTransition (replacing any existing transition on the
+    # same node + property).
+    # -----------------------------------------------------------------------
+
+    me detect_transitions(node_id: i64, old_style: ComputedStyle, new_style: ComputedStyle, transition_props: [text], duration_ms: f64, timing: text):
+        for prop in transition_props:
+            if not is_transitionable(prop):
+                continue
+
+            val old_val = get_property_from_style(old_style, prop)
+            val new_val = get_property_from_style(new_style, prop)
+
+            if not css_values_equal(old_val, new_val):
+                # Remove any existing transition for this node + property
+                self.remove_transition(node_id, prop)
+
+                val trans = ActiveTransition.create(
+                    node_id, prop, old_val, new_val, duration_ms, timing
+                )
+                self.active_transitions.push(trans)
+                self.logger.debug("transition detected: node={node_id} property='{prop}' duration={duration_ms}ms timing={timing}")
+
+    # -----------------------------------------------------------------------
+    # tick — advance all active transitions by delta_ms and return the
+    # resulting style updates.
+    # -----------------------------------------------------------------------
+
+    me tick(delta_ms: f64) -> [StyleUpdate]:
+        var updates = [StyleUpdate]()
+        var finished_indices = [i64]()
+
+        var idx = 0
+        while idx < self.active_transitions.len():
+            var trans = self.active_transitions.get(idx)
+            trans.elapsed_ms = trans.elapsed_ms + delta_ms
+
+            if trans.elapsed_ms >= trans.duration_ms:
+                # Transition complete — snap to final value
+                updates.push(StyleUpdate.create(trans.node_id, trans.property, trans.to_value))
+                finished_indices.push(idx)
+            else:
+                # Compute progress and apply easing
+                val raw_progress = trans.elapsed_ms / trans.duration_ms
+                val eased = apply_timing(raw_progress, trans.timing)
+                val interp_value = interpolate(trans.from_value, trans.to_value, eased)
+                updates.push(StyleUpdate.create(trans.node_id, trans.property, interp_value))
+
+            self.active_transitions.set(idx, trans)
+            idx = idx + 1
+
+        # Remove finished transitions in reverse order to keep indices valid
+        var remove_idx = finished_indices.len() - 1
+        while remove_idx >= 0:
+            val fi = finished_indices.get(remove_idx)
+            self.active_transitions.remove(fi)
+            remove_idx = remove_idx - 1
+
+        if updates.len() > 0:
+            self.logger.trace("tick delta={delta_ms}ms produced {updates.len()} updates, {self.active_transitions.len()} active transitions remaining")
+
+        updates
+
+    # -----------------------------------------------------------------------
+    # has_active_transitions — true if any transitions are still running.
+    # -----------------------------------------------------------------------
+
+    fn has_active_transitions() -> bool:
+        self.active_transitions.len() > 0
+
+    # -----------------------------------------------------------------------
+    # cancel_transitions — remove all transitions for a given node.
+    # -----------------------------------------------------------------------
+
+    me cancel_transitions(node_id: i64):
+        var idx = self.active_transitions.len() - 1
+        while idx >= 0:
+            val trans = self.active_transitions.get(idx)
+            if trans.node_id == node_id:
+                self.active_transitions.remove(idx)
+            idx = idx - 1
+        self.logger.debug("cancelled all transitions for node {node_id}")
+
+    # -----------------------------------------------------------------------
+    # Internal: remove a specific transition by node + property.
+    # -----------------------------------------------------------------------
+
+    me remove_transition(node_id: i64, property: text):
+        var idx = self.active_transitions.len() - 1
+        while idx >= 0:
+            val trans = self.active_transitions.get(idx)
+            if trans.node_id == node_id and trans.property == property:
+                self.active_transitions.remove(idx)
+            idx = idx - 1
+
+# ---------------------------------------------------------------------------
+# is_transitionable — check whether a CSS property supports smooth transitions.
+# Per CSS Transitions spec, only properties with numeric, length, color,
+# or percentage computed values are transitionable.
+# ---------------------------------------------------------------------------
+
+fn is_transitionable(property: text) -> bool:
+    val transitionable = [
+        # Lengths / sizing
+        "width", "height", "min-width", "max-width", "min-height", "max-height",
+        "top", "right", "bottom", "left",
+        # Margins
+        "margin-top", "margin-right", "margin-bottom", "margin-left",
+        # Padding
+        "padding-top", "padding-right", "padding-bottom", "padding-left",
+        # Borders — widths
+        "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+        # Border radius
+        "border-top-left-radius", "border-top-right-radius",
+        "border-bottom-right-radius", "border-bottom-left-radius",
+        # Colors
+        "color", "background-color",
+        "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+        # Typography (numeric)
+        "font-size", "font-weight", "line-height",
+        "letter-spacing", "word-spacing", "text-indent",
+        # Visual
+        "opacity",
+        # Flexbox
+        "flex-grow", "flex-shrink", "flex-basis",
+        "row-gap", "column-gap",
+        # Z-index
+        "z-index"
+    ]
+    for p in transitionable:
+        if p == property:
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# apply_timing — convert a timing function name to an eased progress value.
+# Uses simple polynomial approximations for the standard CSS easing curves.
+# ---------------------------------------------------------------------------
+
+fn apply_timing(progress: f64, timing: text) -> f64:
+    if timing == "linear":
+        return progress
+
+    if timing == "ease":
+        # Approximation of cubic-bezier(0.25, 0.1, 0.25, 1.0)
+        return ease_cubic(progress, 0.25, 0.1, 0.25, 1.0)
+
+    if timing == "ease-in":
+        # cubic-bezier(0.42, 0, 1, 1)
+        return ease_cubic(progress, 0.42, 0.0, 1.0, 1.0)
+
+    if timing == "ease-out":
+        # cubic-bezier(0, 0, 0.58, 1)
+        return ease_cubic(progress, 0.0, 0.0, 0.58, 1.0)
+
+    if timing == "ease-in-out":
+        # cubic-bezier(0.42, 0, 0.58, 1)
+        return ease_cubic(progress, 0.42, 0.0, 0.58, 1.0)
+
+    # Default to linear for unknown timing functions
+    progress
+
+# Cubic bezier evaluation (Newton-Raphson) matching the AnimationEngine impl.
+fn ease_cubic(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
+    var t_param = t
+    var i = 0
+    while i < 8:
+        val x_at = bezier_eval(t_param, x1, x2) - t
+        val dx_at = bezier_deriv(t_param, x1, x2)
+        if dx_at > -0.00001 and dx_at < 0.00001:
+            i = 8
+        else:
+            t_param = t_param - x_at / dx_at
+        i = i + 1
+
+    if t_param < 0.0:
+        t_param = 0.0
+    if t_param > 1.0:
+        t_param = 1.0
+
+    bezier_eval(t_param, y1, y2)
+
+fn bezier_eval(t: f64, p1: f64, p2: f64) -> f64:
+    val mt = 1.0 - t
+    3.0 * mt * mt * t * p1 + 3.0 * mt * t * t * p2 + t * t * t
+
+fn bezier_deriv(t: f64, p1: f64, p2: f64) -> f64:
+    val mt = 1.0 - t
+    3.0 * mt * mt * p1 + 6.0 * mt * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
+
+# ---------------------------------------------------------------------------
+# css_values_equal — compare two CSSValues for equality.
+# Used to detect whether a property actually changed between old and new style.
+# ---------------------------------------------------------------------------
+
+fn css_values_equal(a: CSSValue, b: CSSValue) -> bool:
+    match a:
+        CSSValue.Keyword(av):
+            match b:
+                CSSValue.Keyword(bv): av == bv
+                _: false
+        CSSValue.Length(av, au):
+            match b:
+                CSSValue.Length(bv, bu):
+                    au == bu and float_eq(av, bv)
+                _: false
+        CSSValue.Percentage(av):
+            match b:
+                CSSValue.Percentage(bv): float_eq(av, bv)
+                _: false
+        CSSValue.Number(av):
+            match b:
+                CSSValue.Number(bv): float_eq(av, bv)
+                _: false
+        CSSValue.Color(ac):
+            match b:
+                CSSValue.Color(bc):
+                    ac.r == bc.r and ac.g == bc.g and ac.b == bc.b and ac.a == bc.a
+                _: false
+        CSSValue.Url(av):
+            match b:
+                CSSValue.Url(bv): av == bv
+                _: false
+        CSSValue.Inherit:
+            match b:
+                CSSValue.Inherit: true
+                _: false
+        CSSValue.Initial:
+            match b:
+                CSSValue.Initial: true
+                _: false
+        CSSValue.Unset:
+            match b:
+                CSSValue.Unset: true
+                _: false
+        _: false
+
+fn float_eq(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+    abs_diff < 0.0001

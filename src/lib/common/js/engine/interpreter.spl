@@ -10,6 +10,7 @@ use std.js.types.ast_types.Expression
 use std.js.types.ast_types.Statement
 use std.js.types.ast_types.SwitchCase
 use std.js.engine.runtime.{dispatch_native}
+use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 # ── Environment (scope chain) ───────────────────────────────────────────
 
@@ -251,6 +252,15 @@ fn abstract_equals(a: JsValue, b: JsValue) -> bool:
 # The interpreter checks for this after each statement execution.
 val RETURN_SIGNAL = "__js_return__"
 
+fn _is_array_method(name: text) -> bool:
+    (name == "map" or name == "filter" or name == "reduce" or
+    name == "forEach" or name == "find" or name == "findIndex" or
+    name == "some" or name == "every" or name == "sort" or
+    name == "push" or name == "pop" or name == "shift" or
+    name == "unshift" or name == "slice" or name == "splice" or
+    name == "indexOf" or name == "includes" or name == "join" or
+    name == "reverse" or name == "concat")
+
 # ── Interpreter ──────────────────────────────────────────────────────────
 
 class JsInterpreter:
@@ -346,12 +356,95 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
             Statement.ClassDecl(name, parent_name, constructor, methods):
                 return self.exec_class_decl(name, parent_name, constructor, methods, env)
+            Statement.LetDecl(name, init):
+                return self.exec_var_decl(name, init, env)
+            Statement.ConstDecl(name, init):
+                return self.exec_var_decl(name, init, env)
+            Statement.DestructVarDecl(pattern, init, kind):
+                return self.exec_destruct_decl(pattern, init, env)
+            Statement.DoWhile(cond, body):
+                return self.exec_do_while(cond, body, env)
+            Statement.LabeledStmt(label, body):
+                return self.exec_statement(body, env)
 
     # Variable declaration
     me exec_var_decl(name: text, init: Expression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
         self.env_stack.define_var(env, name, value)
         Ok(value)
+
+    # Destructuring declaration: const {a, b} = obj; const [x, y] = arr
+    me exec_destruct_decl(pattern: Expression, init: Expression, env: i64) -> BrowserResult<JsValue>:
+        val value = self.eval_expression(init, env)?
+        self._bind_pattern(pattern, value, env)
+        Ok(value)
+
+    me _bind_pattern(pattern: Expression, value: JsValue, env: i64):
+        match pattern:
+            Expression.ObjectPattern(props):
+                match value:
+                    JsValue.Object(id):
+                        var i = 0
+                        while i < props.len():
+                            val dp = props.get(i)
+                            val prop_val = self.object_store.get_property(id, dp.key)
+                            var bound_val = JsValue.Undefined
+                            if val Some(pv) = prop_val:
+                                bound_val = pv
+                            match dp.value:
+                                Expression.Identifier(name):
+                                    self.env_stack.define_var(env, name, bound_val)
+                                _: pass_dn
+                            i = i + 1
+                    _: pass_dn
+            Expression.ArrayPattern(elements):
+                match value:
+                    JsValue.Array(id):
+                        var i = 0
+                        while i < elements.len():
+                            val elem = elements.get(i)
+                            match elem:
+                                Expression.SpreadElement(arg):
+                                    match arg:
+                                        Expression.Identifier(name):
+                                            var rest = [JsValue]()
+                                            val arr_len = self.object_store.array_length(id)
+                                            var ri = i
+                                            while ri < arr_len:
+                                                rest.push(self.object_store.get_by_index(id, ri))
+                                                ri = ri + 1
+                                            val rest_id = self.object_store.create_array_from(rest)
+                                            self.env_stack.define_var(env, name, JsValue.Array(id: rest_id))
+                                        _: pass_dn
+                                Expression.Identifier(name):
+                                    val elem_val = self.object_store.get_by_index(id, i)
+                                    self.env_stack.define_var(env, name, elem_val)
+                                _: pass_dn
+                            i = i + 1
+                    _: pass_dn
+            _: pass_dn
+
+    # Do-while loop
+    me exec_do_while(cond: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+        var result = JsValue.Undefined
+        var cont = true
+        while cont:
+            val loop_env = self.env_stack.create_env(env)
+            var bi = 0
+            while bi < body.len():
+                result = self.exec_statement(body.get(bi), loop_env)?
+                if self.has_return or self.has_thrown:
+                    return Ok(result)
+                if self.has_break:
+                    self.has_break = false
+                    return Ok(result)
+                if self.has_continue:
+                    self.has_continue = false
+                    break
+                bi = bi + 1
+            val cond_val = self.eval_expression(cond, env)?
+            cont = is_truthy(cond_val)
+        Ok(result)
 
     # If / else
     me exec_if(cond: Expression, then_body: [Statement], else_body: [Statement], env: i64) -> BrowserResult<JsValue>:
@@ -723,6 +816,65 @@ class JsInterpreter:
                         return Ok(JsValue.Boolean(v: false))
                     _:
                         return Ok(JsValue.Boolean(v: false))
+            Expression.NewExpr(callee, args):
+                return self.eval_new(callee, args, env)
+            Expression.ComputedMember(object, property):
+                val obj_val = self.eval_expression(object, env)?
+                val key_val = self.eval_expression(property, env)?
+                val key_str = to_string(key_val)
+                match obj_val:
+                    JsValue.Object(id):
+                        val prop = self.object_store.get_property(id, key_str)
+                        if val Some(v) = prop:
+                            return Ok(v)
+                        return Ok(JsValue.Undefined)
+                    JsValue.Array(id):
+                        val prop = self.object_store.get_property(id, key_str)
+                        if val Some(v) = prop:
+                            return Ok(v)
+                        return Ok(JsValue.Undefined)
+                    _:
+                        return Ok(JsValue.Undefined)
+            Expression.ObjectPattern(props):
+                return Ok(JsValue.Undefined)
+            Expression.ArrayPattern(elements):
+                return Ok(JsValue.Undefined)
+
+    # new operator: new Foo(args)
+    me eval_new(callee: Expression, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+        val callee_val = self.eval_expression(callee, env)?
+        var arg_vals = [JsValue]()
+        var i = 0
+        while i < args.len():
+            arg_vals.push(self.eval_expression(args.get(i), env)?)
+            i = i + 1
+        match callee_val:
+            JsValue.Function(fn_id):
+                val obj_id = self.object_store.create_object()
+                val this_val = JsValue.Object(id: obj_id)
+                if fn_id >= 0 and fn_id < self.functions.len():
+                    val js_fn = self.functions.get(fn_id)
+                    val fn_env = self.env_stack.create_env(js_fn.closure_env)
+                    var pi = 0
+                    while pi < js_fn.params.len():
+                        var pv = JsValue.Undefined
+                        if pi < arg_vals.len():
+                            pv = arg_vals.get(pi)
+                        self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+                        pi = pi + 1
+                    self.env_stack.define_var(fn_env, "this", this_val)
+                    val saved = self.has_return
+                    self.has_return = false
+                    var bi = 0
+                    while bi < js_fn.body.len():
+                        self.exec_statement(js_fn.body.get(bi), fn_env)?
+                        if self.has_return:
+                            break
+                        bi = bi + 1
+                    self.has_return = saved
+                return Ok(this_val)
+            _:
+                return Ok(JsValue.Undefined)
 
     # Binary operators
     me eval_binary(op: text, left: Expression, right: Expression, env: i64) -> BrowserResult<JsValue>:
@@ -941,6 +1093,16 @@ class JsInterpreter:
 
     # Function call
     me eval_call(callee: Expression, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+        # Array method dispatch
+        match callee:
+            Expression.Member(obj_expr, method_name):
+                val obj_val = self.eval_expression(obj_expr, env)?
+                match obj_val:
+                    JsValue.Array(arr_id):
+                        if _is_array_method(method_name):
+                            return self._dispatch_array_method(arr_id, method_name, args, env)
+                    _: pass_dn
+            _: pass_dn
         val callee_val = self.eval_expression(callee, env)?
 
         # Evaluate arguments
@@ -1073,16 +1235,35 @@ class JsInterpreter:
                 self.logger.warn("Invalid assignment target")
                 return Ok(rhs)
 
-    # Array literal
+    # Array literal — supports spread: [1, ...arr, 2]
     me eval_array(elements: [Expression], env: i64) -> BrowserResult<JsValue>:
         val arr_id = self.object_store.create_object()
+        var idx = 0
         var i = 0
         val len = elements.len()
         while i < len:
-            val elem = self.eval_expression(elements.get(i), env)?
-            self.object_store.set_property(arr_id, "{i}", elem)
+            val elem_expr = elements.get(i)
+            match elem_expr:
+                Expression.SpreadElement(arg):
+                    val spread_val = self.eval_expression(arg, env)?
+                    match spread_val:
+                        JsValue.Array(src_id):
+                            val src_len = self.object_store.array_length(src_id)
+                            var si = 0
+                            while si < src_len:
+                                val sv = self.object_store.get_by_index(src_id, si)
+                                self.object_store.set_property(arr_id, "{idx}", sv)
+                                idx = idx + 1
+                                si = si + 1
+                        _:
+                            self.object_store.set_property(arr_id, "{idx}", spread_val)
+                            idx = idx + 1
+                _:
+                    val elem = self.eval_expression(elem_expr, env)?
+                    self.object_store.set_property(arr_id, "{idx}", elem)
+                    idx = idx + 1
             i = i + 1
-        self.object_store.set_property(arr_id, "length", JsValue.Number(v: len.to_f64()))
+        self.object_store.set_property(arr_id, "length", JsValue.Number(v: idx.to_f64()))
         Ok(JsValue.Array(id: arr_id))
 
     # Object literal
@@ -1133,3 +1314,399 @@ class JsInterpreter:
                         return Ok(JsValue.Boolean(v: true))
             _:
                 return Ok(JsValue.Boolean(v: true))
+
+    # ── Array method dispatch ────────────────────────────────────────────
+    me _dispatch_array_method(arr_id: i64, method: text, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+        val arr_len = self.object_store.array_length(arr_id)
+
+        # --- Higher-order methods that need a callback ---
+        if method == "map":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    val result_id = self.object_store.create_object()
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val mapped = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        self.object_store.set_property(result_id, "{i}", mapped)
+                        i = i + 1
+                    self.object_store.set_property(result_id, "length", JsValue.Number(v: arr_len.to_f64()))
+                    return Ok(JsValue.Array(id: result_id))
+                _:
+                    return Ok(JsValue.Undefined)
+
+        if method == "filter":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    val result_id = self.object_store.create_object()
+                    var i = 0
+                    var out_idx = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val keep = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        if is_truthy(keep):
+                            self.object_store.set_property(result_id, "{out_idx}", elem)
+                            out_idx = out_idx + 1
+                        i = i + 1
+                    self.object_store.set_property(result_id, "length", JsValue.Number(v: out_idx.to_f64()))
+                    return Ok(JsValue.Array(id: result_id))
+                _:
+                    return Ok(JsValue.Undefined)
+
+        if method == "forEach":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        i = i + 1
+                _: pass_dn
+            return Ok(JsValue.Undefined)
+
+        if method == "find":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        if is_truthy(result):
+                            return Ok(elem)
+                        i = i + 1
+                _: pass_dn
+            return Ok(JsValue.Undefined)
+
+        if method == "findIndex":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        if is_truthy(result):
+                            return Ok(JsValue.Number(v: i.to_f64()))
+                        i = i + 1
+                _: pass_dn
+            return Ok(JsValue.Number(v: -1.0))
+
+        if method == "some":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        if is_truthy(result):
+                            return Ok(JsValue.Boolean(v: true))
+                        i = i + 1
+                _: pass_dn
+            return Ok(JsValue.Boolean(v: false))
+
+        if method == "every":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val result = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        if not is_truthy(result):
+                            return Ok(JsValue.Boolean(v: false))
+                        i = i + 1
+                _: pass_dn
+            return Ok(JsValue.Boolean(v: true))
+
+        if method == "reduce":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    var acc = JsValue.Undefined
+                    var start = 0
+                    if args.len() > 1:
+                        acc = self.eval_expression(args.get(1), env)?
+                    else:
+                        if arr_len > 0:
+                            acc = self.object_store.get_by_index(arr_id, 0)
+                            start = 1
+                    var i = start
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        acc = self._invoke_function(fn_id, [acc, elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        i = i + 1
+                    return Ok(acc)
+                _:
+                    return Ok(JsValue.Undefined)
+
+        # --- Mutating / non-callback methods ---
+        if method == "push":
+            var i = 0
+            while i < args.len():
+                val arg_val = self.eval_expression(args.get(i), env)?
+                self.object_store.set_property(arr_id, "{arr_len + i}", arg_val)
+                i = i + 1
+            val new_len = arr_len + args.len()
+            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            return Ok(JsValue.Number(v: new_len.to_f64()))
+
+        if method == "pop":
+            if arr_len == 0:
+                return Ok(JsValue.Undefined)
+            val last = self.object_store.get_by_index(arr_id, arr_len - 1)
+            val new_len = arr_len - 1
+            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            return Ok(last)
+
+        if method == "indexOf":
+            val search_val = self.eval_expression(args.get(0), env)?
+            var i = 0
+            while i < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                if strict_equals(elem, search_val):
+                    return Ok(JsValue.Number(v: i.to_f64()))
+                i = i + 1
+            return Ok(JsValue.Number(v: -1.0))
+
+        if method == "includes":
+            val search_val = self.eval_expression(args.get(0), env)?
+            var i = 0
+            while i < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                if strict_equals(elem, search_val):
+                    return Ok(JsValue.Boolean(v: true))
+                i = i + 1
+            return Ok(JsValue.Boolean(v: false))
+
+        if method == "join":
+            var sep = ","
+            if args.len() > 0:
+                val sep_val = self.eval_expression(args.get(0), env)?
+                sep = to_string(sep_val)
+            var result = ""
+            var i = 0
+            while i < arr_len:
+                if i > 0:
+                    result = result + sep
+                val elem = self.object_store.get_by_index(arr_id, i)
+                result = result + to_string(elem)
+                i = i + 1
+            return Ok(JsValue.String(v: result))
+
+        if method == "reverse":
+            var i = 0
+            var j = arr_len - 1
+            while i < j:
+                val a = self.object_store.get_by_index(arr_id, i)
+                val b = self.object_store.get_by_index(arr_id, j)
+                self.object_store.set_property(arr_id, "{i}", b)
+                self.object_store.set_property(arr_id, "{j}", a)
+                i = i + 1
+                j = j - 1
+            return Ok(JsValue.Array(id: arr_id))
+
+        if method == "slice":
+            var start = 0
+            var end = arr_len
+            if args.len() > 0:
+                val s = self.eval_expression(args.get(0), env)?
+                start = to_number(s).to_i64()
+                if start < 0:
+                    start = arr_len + start
+                    if start < 0:
+                        start = 0
+            if args.len() > 1:
+                val e = self.eval_expression(args.get(1), env)?
+                end = to_number(e).to_i64()
+                if end < 0:
+                    end = arr_len + end
+                if end > arr_len:
+                    end = arr_len
+            val result_id = self.object_store.create_object()
+            var i = start
+            var out = 0
+            while i < end:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                self.object_store.set_property(result_id, "{out}", elem)
+                out = out + 1
+                i = i + 1
+            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            return Ok(JsValue.Array(id: result_id))
+
+        if method == "concat":
+            val result_id = self.object_store.create_object()
+            var out = 0
+            # Copy current array
+            var i = 0
+            while i < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                self.object_store.set_property(result_id, "{out}", elem)
+                out = out + 1
+                i = i + 1
+            # Append each argument (expand arrays)
+            var ai = 0
+            while ai < args.len():
+                val arg_val = self.eval_expression(args.get(ai), env)?
+                match arg_val:
+                    JsValue.Array(src_id):
+                        val src_len = self.object_store.array_length(src_id)
+                        var si = 0
+                        while si < src_len:
+                            val sv = self.object_store.get_by_index(src_id, si)
+                            self.object_store.set_property(result_id, "{out}", sv)
+                            out = out + 1
+                            si = si + 1
+                    _:
+                        self.object_store.set_property(result_id, "{out}", arg_val)
+                        out = out + 1
+                ai = ai + 1
+            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            return Ok(JsValue.Array(id: result_id))
+
+        if method == "sort":
+            if args.len() > 0:
+                val cb_val = self.eval_expression(args.get(0), env)?
+                match cb_val:
+                    JsValue.Function(fn_id):
+                        # Simple bubble sort with comparator
+                        var swapped = true
+                        while swapped:
+                            swapped = false
+                            var i = 0
+                            while i < arr_len - 1:
+                                val a = self.object_store.get_by_index(arr_id, i)
+                                val b = self.object_store.get_by_index(arr_id, i + 1)
+                                val cmp = self._invoke_function(fn_id, [a, b], env)?
+                                val cmp_num = to_number(cmp)
+                                if cmp_num > 0.0:
+                                    self.object_store.set_property(arr_id, "{i}", b)
+                                    self.object_store.set_property(arr_id, "{i + 1}", a)
+                                    swapped = true
+                                i = i + 1
+                    _: pass_dn
+            return Ok(JsValue.Array(id: arr_id))
+
+        # shift — remove first element
+        if method == "shift":
+            if arr_len == 0:
+                return Ok(JsValue.Undefined)
+            val first = self.object_store.get_by_index(arr_id, 0)
+            var i = 1
+            while i < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                self.object_store.set_property(arr_id, "{i - 1}", elem)
+                i = i + 1
+            val new_len = arr_len - 1
+            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            return Ok(first)
+
+        # unshift — prepend elements
+        if method == "unshift":
+            val count = args.len()
+            # Shift existing elements right
+            var i = arr_len - 1
+            while i >= 0:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                self.object_store.set_property(arr_id, "{i + count}", elem)
+                i = i - 1
+            # Insert new elements at front
+            var j = 0
+            while j < count:
+                val arg_val = self.eval_expression(args.get(j), env)?
+                self.object_store.set_property(arr_id, "{j}", arg_val)
+                j = j + 1
+            val new_len = arr_len + count
+            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            return Ok(JsValue.Number(v: new_len.to_f64()))
+
+        # splice — remove/insert elements
+        if method == "splice":
+            var start = 0
+            if args.len() > 0:
+                val s = self.eval_expression(args.get(0), env)?
+                start = to_number(s).to_i64()
+                if start < 0:
+                    start = arr_len + start
+                    if start < 0:
+                        start = 0
+            var delete_count = arr_len - start
+            if args.len() > 1:
+                val dc = self.eval_expression(args.get(1), env)?
+                delete_count = to_number(dc).to_i64()
+            # Collect removed elements
+            val removed_id = self.object_store.create_object()
+            var ri = 0
+            while ri < delete_count and (start + ri) < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, start + ri)
+                self.object_store.set_property(removed_id, "{ri}", elem)
+                ri = ri + 1
+            self.object_store.set_property(removed_id, "length", JsValue.Number(v: ri.to_f64()))
+            # Collect insert items (args from index 2 onward)
+            var inserts = [JsValue]()
+            var ii = 2
+            while ii < args.len():
+                val iv = self.eval_expression(args.get(ii), env)?
+                inserts.push(iv)
+                ii = ii + 1
+            # Shift tail elements
+            val tail_start = start + delete_count
+            val shift_amount = inserts.len() - delete_count
+            if shift_amount > 0:
+                var ti = arr_len - 1
+                while ti >= tail_start:
+                    val elem = self.object_store.get_by_index(arr_id, ti)
+                    self.object_store.set_property(arr_id, "{ti + shift_amount}", elem)
+                    ti = ti - 1
+            else:
+                if shift_amount < 0:
+                    var ti = tail_start
+                    while ti < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, ti)
+                        self.object_store.set_property(arr_id, "{ti + shift_amount}", elem)
+                        ti = ti + 1
+            # Insert new elements
+            var ki = 0
+            while ki < inserts.len():
+                self.object_store.set_property(arr_id, "{start + ki}", inserts.get(ki))
+                ki = ki + 1
+            val new_len = arr_len + shift_amount
+            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            return Ok(JsValue.Array(id: removed_id))
+
+        self.logger.warn("Unknown array method: {method}")
+        Ok(JsValue.Undefined)
+
+    # Invoke a JS function by id with the given argument values
+    me _invoke_function(fn_id: i64, arg_vals: [JsValue], env: i64) -> BrowserResult<JsValue>:
+        if fn_id < 0 or fn_id >= self.functions.len():
+            return Ok(JsValue.Undefined)
+        val js_fn = self.functions.get(fn_id)
+        val fn_env = self.env_stack.create_env(js_fn.closure_env)
+        var pi = 0
+        while pi < js_fn.params.len():
+            var pv = JsValue.Undefined
+            if pi < arg_vals.len():
+                pv = arg_vals.get(pi)
+            self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
+            pi = pi + 1
+        self.env_stack.define_var(fn_env, "this", JsValue.Undefined)
+        val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: JsValue.Undefined)
+        self.call_stack.push(frame)
+        val saved = self.has_return
+        self.has_return = false
+        var result = JsValue.Undefined
+        var bi = 0
+        while bi < js_fn.body.len():
+            result = self.exec_statement(js_fn.body.get(bi), fn_env)?
+            if self.has_return:
+                result = self.return_value
+                break
+            bi = bi + 1
+        self.call_stack.pop()
+        self.has_return = saved
+        Ok(result)

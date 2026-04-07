@@ -1,0 +1,215 @@
+# CSS Transform parser and resolver.
+# Parses the `transform` property value into a list of TransformFunctions,
+# then composes them into a single Matrix4 for use by the layout/paint pipeline.
+# Spec: https://www.w3.org/TR/css-transforms-1/#transform-functions
+#
+# Supported functions:
+#   translate(x,y), translateX(x), translateY(y),
+#   rotate(deg), scale(x,y), scaleX(x), scaleY(y),
+#   skew(x,y), skewX(x), skewY(y)
+
+use examples.browser.shared.matrix4.Matrix4
+use examples.browser.shared.logging.(Logger, LogLevel)
+
+# =========================================================================
+# TransformFunction — a single CSS transform function call
+# =========================================================================
+
+class TransformFunction:
+    name: text
+    args: [f64]
+
+    static fn create(name: text, args: [f64]) -> TransformFunction:
+        TransformFunction(name: name, args: args)
+
+# =========================================================================
+# Parsing
+# =========================================================================
+
+fn parse_transform(value: text) -> [TransformFunction]:
+    """Parse a CSS transform value string into a list of TransformFunctions.
+
+    Examples:
+        'rotate(45deg) translate(10px, 20px)'
+        'scale(2) skewX(15deg)'
+        'none' -> empty list
+    """
+    val trimmed = value.trim()
+    if trimmed == "none" or trimmed.len() == 0:
+        return [TransformFunction]()
+
+    var functions = [TransformFunction]()
+    var i = 0
+    val len = trimmed.len()
+
+    while i < len:
+        # Skip whitespace
+        while i < len and trimmed.slice(i, i + 1) == " ":
+            i = i + 1
+        if i >= len:
+            break
+
+        # Read function name (until '(')
+        val name_start = i
+        while i < len and trimmed.slice(i, i + 1) != "(":
+            i = i + 1
+
+        if i >= len:
+            break
+
+        val fn_name = trimmed.slice(name_start, i).trim()
+        i = i + 1  # skip '('
+
+        # Read arguments until matching ')'
+        val args_start = i
+        var depth = 1
+        while i < len and depth > 0:
+            val ch = trimmed.slice(i, i + 1)
+            if ch == "(":
+                depth = depth + 1
+            else if ch == ")":
+                depth = depth - 1
+            i = i + 1
+
+        val args_str = trimmed.slice(args_start, i - 1)
+        val args = _parse_args(args_str)
+        functions.push(TransformFunction.create(fn_name, args))
+
+    functions
+
+# =========================================================================
+# Matrix composition
+# =========================================================================
+
+fn transforms_to_matrix(fns: [TransformFunction]) -> Matrix4:
+    """Compose a list of transform functions into a single 4x4 matrix.
+    The functions are applied left-to-right (post-multiplication).
+    """
+    var result = Matrix4.identity()
+    for tf in fns:
+        val m = _function_to_matrix(tf)
+        result = result.multiply(m)
+    result
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _function_to_matrix(tf: TransformFunction) -> Matrix4:
+    """Convert a single TransformFunction to its Matrix4 representation."""
+    val name = tf.name
+    val args = tf.args
+
+    if name == "translate":
+        val tx = _arg_at(args, 0, 0.0)
+        val ty = _arg_at(args, 1, 0.0)
+        return Matrix4.translate(tx, ty, 0.0)
+
+    if name == "translateX":
+        val tx = _arg_at(args, 0, 0.0)
+        return Matrix4.translate(tx, 0.0, 0.0)
+
+    if name == "translateY":
+        val ty = _arg_at(args, 0, 0.0)
+        return Matrix4.translate(0.0, ty, 0.0)
+
+    if name == "rotate":
+        val deg = _arg_at(args, 0, 0.0)
+        return Matrix4.rotate_z(deg)
+
+    if name == "scale":
+        val sx = _arg_at(args, 0, 1.0)
+        # If only one arg, scale uniformly
+        val sy = if args.len() > 1: _arg_at(args, 1, 1.0) else: sx
+        return Matrix4.scale(sx, sy, 1.0)
+
+    if name == "scaleX":
+        val sx = _arg_at(args, 0, 1.0)
+        return Matrix4.scale(sx, 1.0, 1.0)
+
+    if name == "scaleY":
+        val sy = _arg_at(args, 0, 1.0)
+        return Matrix4.scale(1.0, sy, 1.0)
+
+    if name == "skew":
+        val ax = _arg_at(args, 0, 0.0)
+        val ay = _arg_at(args, 1, 0.0)
+        return Matrix4.skew(ax, ay)
+
+    if name == "skewX":
+        val ax = _arg_at(args, 0, 0.0)
+        return Matrix4.skew(ax, 0.0)
+
+    if name == "skewY":
+        val ay = _arg_at(args, 0, 0.0)
+        return Matrix4.skew(0.0, ay)
+
+    # Unknown function — identity (no-op)
+    Matrix4.identity()
+
+fn _parse_args(args_str: text) -> [f64]:
+    """Parse comma-separated numeric arguments, stripping CSS units (px, deg, %)."""
+    var result = [f64]()
+    val parts = _split_by_comma(args_str)
+    for part in parts:
+        val value = _parse_numeric(part.trim())
+        result.push(value)
+    result
+
+fn _parse_numeric(s: text) -> f64:
+    """Parse a CSS numeric value, stripping known units."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0.0
+
+    # Strip known unit suffixes
+    var num_str = trimmed
+    if trimmed.ends_with("px"):
+        num_str = trimmed.slice(0, trimmed.len() - 2)
+    else if trimmed.ends_with("deg"):
+        num_str = trimmed.slice(0, trimmed.len() - 3)
+    else if trimmed.ends_with("rad"):
+        # Convert radians to degrees for consistency
+        num_str = trimmed.slice(0, trimmed.len() - 3)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v * 180.0 / 3.141592653589793
+        return 0.0
+    else if trimmed.ends_with("turn"):
+        num_str = trimmed.slice(0, trimmed.len() - 4)
+        val parsed = num_str.trim().to_f64()
+        if val v = parsed:
+            return v * 360.0
+        return 0.0
+    else if trimmed.ends_with("%"):
+        num_str = trimmed.slice(0, trimmed.len() - 1)
+
+    val parsed = num_str.trim().to_f64()
+    if val v = parsed:
+        return v
+    0.0
+
+fn _split_by_comma(s: text) -> [text]:
+    """Split a string by commas, returning trimmed parts."""
+    var parts = [text]()
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == ",":
+            parts.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim().len() > 0:
+        parts.push(current.trim())
+    parts
+
+fn _arg_at(args: [f64], index: i64, default_val: f64) -> f64:
+    """Safely get an argument by index, returning default if out of bounds."""
+    if index >= 0 and index < args.len():
+        val v = args.get(index)
+        if val a = v:
+            return a
+    default_val

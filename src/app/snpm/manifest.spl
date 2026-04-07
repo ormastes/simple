@@ -1,0 +1,137 @@
+# snpm manifest — package.sdn parsing and writing
+# Extends the existing pkg manifest format with scripts, workspaces, engines.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text)
+extern fn rt_file_exists(path: text) -> bool
+
+class SnpmManifest:
+    name: text
+    version: text
+    description: text
+    main: text
+    license: text
+    author: text
+    dependencies: [Pair<text, text>]
+    dev_dependencies: [Pair<text, text>]
+    scripts: [Pair<text, text>]
+    workspaces: [text]
+    engines_simple: text
+    repository_url: text
+
+    static fn empty() -> SnpmManifest:
+        SnpmManifest(
+            name: "", version: "0.1.0", description: "", main: "src/main.spl",
+            license: "MIT", author: "", dependencies: [Pair<text, text>](),
+            dev_dependencies: [Pair<text, text>](), scripts: [Pair<text, text>](),
+            workspaces: [text](), engines_simple: "", repository_url: ""
+        )
+
+fn parse_manifest(path: text) -> Result<SnpmManifest, text>:
+    """Parse a package.sdn file into SnpmManifest."""
+    if not rt_file_exists(path):
+        return Err("File not found: {path}")
+    val content = rt_file_read_text(path)
+    if content == nil or content == "":
+        return Err("Empty manifest: {path}")
+    var manifest = SnpmManifest.empty()
+    var current_section = ""
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "" or line.starts_with("#"):
+            i = i + 1
+            continue
+        # Section headers
+        if not line.starts_with(" ") and not line.starts_with("\t"):
+            if line.ends_with(":"):
+                current_section = line.slice(0, line.len() - 1).trim()
+                i = i + 1
+                continue
+        # Key-value pairs (indented)
+        val stripped = line.trim()
+        if stripped.contains(":"):
+            val colon_idx = _find_colon(stripped)
+            if colon_idx > 0:
+                val key = stripped.slice(0, colon_idx).trim()
+                var value = stripped.slice(colon_idx + 1, stripped.len()).trim()
+                # Strip quotes
+                if value.starts_with("\"") and value.ends_with("\""):
+                    value = value.slice(1, value.len() - 1)
+                _set_manifest_field(manifest, current_section, key, value)
+        i = i + 1
+    Ok(manifest)
+
+fn _find_colon(s: text) -> i64:
+    var i = 0
+    for ch in s:
+        if ch == ":":
+            return i
+        i = i + 1
+    -1
+
+fn _set_manifest_field(manifest: SnpmManifest, section: text, key: text, value: text):
+    if section == "" or section == "package":
+        match key:
+            "name": manifest.name = value
+            "version": manifest.version = value
+            "description": manifest.description = value
+            "main": manifest.main = value
+            "license": manifest.license = value
+            "author": manifest.author = value
+            _: pass_dn
+    elif section == "dependencies":
+        manifest.dependencies.push(Pair(first: key, second: value))
+    elif section == "dev_dependencies":
+        manifest.dev_dependencies.push(Pair(first: key, second: value))
+    elif section == "scripts":
+        manifest.scripts.push(Pair(first: key, second: value))
+    elif section == "workspaces":
+        manifest.workspaces.push(value)
+    elif section == "engines":
+        if key == "simple":
+            manifest.engines_simple = value
+    elif section == "repository":
+        if key == "url":
+            manifest.repository_url = value
+
+fn write_manifest(manifest: SnpmManifest, path: text):
+    """Write manifest to package.sdn."""
+    var content = "package:\n"
+    content = content + "    name: \"{manifest.name}\"\n"
+    content = content + "    version: \"{manifest.version}\"\n"
+    if manifest.description != "":
+        content = content + "    description: \"{manifest.description}\"\n"
+    if manifest.main != "":
+        content = content + "    main: {manifest.main}\n"
+    if manifest.license != "":
+        content = content + "    license: {manifest.license}\n"
+    if manifest.author != "":
+        content = content + "    author: \"{manifest.author}\"\n"
+
+    if manifest.dependencies.len() > 0:
+        content = content + "\ndependencies:\n"
+        var i = 0
+        while i < manifest.dependencies.len():
+            val dep = manifest.dependencies[i]
+            content = content + "    {dep.first}: \"{dep.second}\"\n"
+            i = i + 1
+
+    if manifest.dev_dependencies.len() > 0:
+        content = content + "\ndev_dependencies:\n"
+        var i = 0
+        while i < manifest.dev_dependencies.len():
+            val dep = manifest.dev_dependencies[i]
+            content = content + "    {dep.first}: \"{dep.second}\"\n"
+            i = i + 1
+
+    if manifest.scripts.len() > 0:
+        content = content + "\nscripts:\n"
+        var i = 0
+        while i < manifest.scripts.len():
+            val script = manifest.scripts[i]
+            content = content + "    {script.first}: \"{script.second}\"\n"
+            i = i + 1
+
+    rt_file_write_text(path, content)

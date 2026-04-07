@@ -9,6 +9,8 @@ use examples.browser.entity.dom.paint_types.{Color, Gradient, GradientStop, Pain
 use examples.browser.entity.dom.css_types.{CSSValue, CSSDeclaration}
 use examples.browser.entity.dom.box_types.{LayoutBox, BoxModel, BoxKind}
 use examples.browser.feature.style.computed.{ComputedStyle, extract_px}
+use examples.browser.feature.style.transform.{parse_transform, transforms_to_matrix}
+use examples.browser.feature.paint.shadow.{parse_box_shadow, generate_all_shadow_commands}
 use examples.browser.shared.logging.{Logger, LogLevel}
 use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
 use std.common.engine.color.{EngineColor}
@@ -57,9 +59,19 @@ class DisplayListBuilder:
     me paint_box(box_node: LayoutBox, style: ComputedStyle):
         self.logger.trace("painting box node_id={box_node.node_id}")
 
-        val clip_needed = style.overflow_x == "hidden" or style.overflow_y == "hidden"
+        val clip_needed = (style.overflow_x == "hidden" or style.overflow_y == "hidden"
+            or style.overflow_x == "scroll" or style.overflow_y == "scroll"
+            or style.overflow_x == "auto" or style.overflow_y == "auto")
 
-        # 1. Push clip if overflow hidden
+        # 0. Push CSS transform if present
+        val has_transform = style.transform != "none" and style.transform != ""
+        if has_transform:
+            val fns = parse_transform(style.transform)
+            if fns.len() > 0:
+                val matrix = transforms_to_matrix(fns)
+                self.ops.push(PaintOp.PushTransform(matrix: matrix.data))
+
+        # 1. Push clip if overflow hidden/scroll/auto
         if clip_needed:
             val clip_op = PaintOp.PushClip(
                 x: box_node.x,
@@ -74,14 +86,14 @@ class DisplayListBuilder:
         if needs_opacity:
             self.ops.push(PaintOp.PushOpacity(alpha: style.opacity))
 
-        # 2. Paint background
+        # 2. Paint box-shadow (before background, per CSS spec)
+        self.paint_box_shadow_for(box_node, style)
+
+        # 3. Paint background
         self.paint_background_for(box_node, style)
 
-        # 3. Paint borders
+        # 4. Paint borders
         self.paint_borders_for(box_node, style)
-
-        # 4. Paint box-shadow (concentric rectangles with decreasing alpha for blur)
-        self.paint_box_shadow_for(box_node, style)
 
         # 5. Paint content (text)
         self.paint_text_for(box_node, style)
@@ -93,6 +105,10 @@ class DisplayListBuilder:
         # 6. Pop clip
         if clip_needed:
             self.ops.push(PaintOp.PopClip)
+
+        # Pop transform
+        if has_transform:
+            self.ops.push(PaintOp.PopTransform)
 
     # Paint the background-color for a box. Background-image is handled separately.
     me paint_background_for(box_node: LayoutBox, style: ComputedStyle):
@@ -112,19 +128,32 @@ class DisplayListBuilder:
     # Paint all four borders. Uses DrawBorder with width/color arrays [top, right, bottom, left].
     me paint_borders_for(box_node: LayoutBox, style: ComputedStyle):
         val bm = box_node.box_model
-        # Skip if no borders
         val has_borders = (bm.border_top > 0.0 or bm.border_right > 0.0
             or bm.border_bottom > 0.0 or bm.border_left > 0.0)
         if not has_borders:
             return
 
-        # Only paint if border style is not "none"
-        if style.border_top_style == "none":
+        # Check each side's style independently
+        val top_visible = style.border_top_style != "none" and bm.border_top > 0.0
+        val right_visible = style.border_right_style != "none" and bm.border_right > 0.0
+        val bottom_visible = style.border_bottom_style != "none" and bm.border_bottom > 0.0
+        val left_visible = style.border_left_style != "none" and bm.border_left > 0.0
+
+        if not top_visible and not right_visible and not bottom_visible and not left_visible:
             return
 
-        val border_color = css_color_to_color(style.border_top_color)
-        val widths = [bm.border_top, bm.border_right, bm.border_bottom, bm.border_left]
-        val colors = [border_color, border_color, border_color, border_color]
+        val top_color = css_color_to_color(style.border_top_color)
+        val right_color = css_color_to_color(style.border_right_color)
+        val bottom_color = css_color_to_color(style.border_bottom_color)
+        val left_color = css_color_to_color(style.border_left_color)
+
+        val widths = [
+            if top_visible: bm.border_top else: 0.0,
+            if right_visible: bm.border_right else: 0.0,
+            if bottom_visible: bm.border_bottom else: 0.0,
+            if left_visible: bm.border_left else: 0.0
+        ]
+        val colors = [top_color, right_color, bottom_color, left_color]
 
         val op = PaintOp.DrawBorder(
             x: box_node.x,
@@ -162,49 +191,25 @@ class DisplayListBuilder:
         self.ops.push(op)
         self.logger.trace("text at ({text_x}, {text_y}) size={font_size}")
 
-    # Paint box-shadow as concentric rectangles with decreasing opacity.
-    # Box-shadow parameters are derived from the box position and a fixed
-    # shadow configuration (offset_x=2, offset_y=2, blur=4, color=black@0.3).
-    # ComputedStyle does not yet carry box-shadow values, so we use sensible
-    # defaults that produce a visible drop shadow effect.
+    # Paint box-shadow using the shadow module.
+    # Parses the box-shadow CSS value and generates paint commands.
     me paint_box_shadow_for(box_node: LayoutBox, style: ComputedStyle):
-        # Default shadow parameters — in the future these come from the style
-        val offset_x = 2.0
-        val offset_y = 2.0
-        val blur_radius = 4
-        val spread_radius = 0.0
-        val shadow_color = from_rgb(0, 0, 0)
-        val base_alpha = 0.3
-
-        # Only paint if there is a blur or spread
-        if blur_radius <= 0:
+        if style.box_shadow == "none" or style.box_shadow == "":
             return
 
-        # Draw N concentric rectangles, outermost first (painter's order)
-        var i = blur_radius
-        while i > 0:
-            val fraction = i.to_f64() / blur_radius.to_f64()
-            val alpha_i64 = (base_alpha * (1.0 - fraction) * 255.0).to_i64()
-            val clamped_alpha = if alpha_i64 < 0: 0 else: if alpha_i64 > 255: 255 else: alpha_i64
-            val ring_color = Color(r: shadow_color.r, g: shadow_color.g, b: shadow_color.b, a: clamped_alpha)
+        val shadows = parse_box_shadow(style.box_shadow)
+        if shadows.len() == 0:
+            return
 
-            val expand = i.to_f64() + spread_radius
-            val shadow_x = box_node.x + offset_x - expand
-            val shadow_y = box_node.y + offset_y - expand
-            val shadow_w = box_node.width + expand * 2.0
-            val shadow_h = box_node.height + expand * 2.0
-
-            val op = PaintOp.FillRect(
-                x: shadow_x,
-                y: shadow_y,
-                w: shadow_w,
-                h: shadow_h,
-                color: ring_color
-            )
+        val shadow_ops = generate_all_shadow_commands(
+            shadows,
+            box_node.x, box_node.y,
+            box_node.width, box_node.height
+        )
+        for op in shadow_ops:
             self.ops.push(op)
-            i = i - 1
 
-        self.logger.trace("box-shadow at ({box_node.x}, {box_node.y}) blur={blur_radius}")
+        self.logger.trace("box-shadow at ({box_node.x}, {box_node.y}) {shadows.len()} shadows")
 
     # Find the ComputedStyle for a given node_id from the style list.
     fn find_style(node_id: i64, styles: [ComputedStyle]) -> ComputedStyle?:
@@ -362,6 +367,32 @@ class DisplayListGpuEmitter:
                 if self.scissor_stack.len() > 0:
                     self.scissor_stack.pop()
 
+            PaintOp.DrawGradient(x, y, w, h, gradient):
+                # Approximate gradient as a series of filled rects
+                val steps = 16
+                val step_w = w / steps.to_f64()
+                var step_i = 0
+                while step_i < steps:
+                    val t = step_i.to_f64() / steps.to_f64()
+                    # Linear interpolation between first and last stop
+                    val stops = gradient.stops
+                    var color = from_rgb(0, 0, 0)
+                    if stops.len() >= 2:
+                        val c1 = stops[0].color
+                        val c2 = stops[stops.len() - 1].color
+                        val r = c1.r + ((c2.r - c1.r).to_f64() * t).to_i64()
+                        val g = c1.g + ((c2.g - c1.g).to_f64() * t).to_i64()
+                        val b = c1.b + ((c2.b - c1.b).to_f64() * t).to_i64()
+                        color = from_rgb(r, g, b)
+                    else if stops.len() == 1:
+                        color = stops[0].color
+                    val ec = _to_engine_color(color, self.current_alpha)
+                    val rect = Rect2(x: x + step_i.to_f64() * step_w, y: y, width: step_w, height: h)
+                    val z = ZIndex(value: self.z_counter)
+                    self.buffer.push(RenderCommand.DrawRect(rect: rect, color: ec, z_order: z))
+                    step_i = step_i + 1
+                self.z_counter = self.z_counter + 1
+
             PaintOp.PushOpacity(alpha):
                 self.alpha_stack.push(self.current_alpha)
                 self.current_alpha = self.current_alpha * alpha
@@ -375,6 +406,21 @@ class DisplayListGpuEmitter:
                         self.current_alpha = 1.0
                 else:
                     self.current_alpha = 1.0
+
+            PaintOp.PushTransform(matrix):
+                # Transform support: store matrix for future use
+                # GPU backend would set a transform uniform here
+                pass_dn
+
+            PaintOp.PopTransform:
+                pass_dn
+
+            PaintOp.PushFilter(filter_type, amount):
+                # Filter support: would set up a render target for post-processing
+                pass_dn
+
+            PaintOp.PopFilter:
+                pass_dn
 
 # Convert a browser Color (0-255 integer RGBA) to an EngineColor (0.0-1.0 float RGBA).
 fn _to_engine_color(color: Color, alpha_mul: f64) -> EngineColor:

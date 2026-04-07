@@ -2,19 +2,135 @@
 # Implements matching for type, class, ID, attribute, and pseudo-class selectors,
 # plus combinators (descendant, child, adjacent sibling, general sibling).
 # Provides querySelector and querySelectorAll tree-search methods.
+# Supports functional pseudo-classes: :nth-child(), :nth-last-child(),
+# :nth-of-type(), :nth-last-of-type(), :not().
+# Supports interaction pseudo-classes: :hover, :focus, :active.
 #
 # Depends on:
 #   entity/dom/node_types.spl   — DomNode, NodeKind, Element
-#   entity/dom/css_types.spl    — Selector, SelectorPart
+#   entity/dom/css_types.spl    — Selector, SelectorPart, FunctionalPseudo
 #   shared/logging.spl          — Logger, LogLevel
+#   feature/dom/generated_content.spl — InteractionState
+
+# --- An+B formula for :nth-child and related selectors ---
+
+class AnBFormula:
+    a: i64
+    b: i64
+
+    static fn create(a: i64, b: i64) -> AnBFormula:
+        AnBFormula(a: a, b: b)
+
+    # Check if a 1-based position matches this An+B formula.
+    fn matches_position(pos: i64) -> bool:
+        if self.a == 0:
+            # 0n+B means only position B matches
+            return pos == self.b
+        # An+B: pos = a*n + b for some non-negative integer n
+        # => n = (pos - b) / a, and n must be >= 0 and integer
+        val diff = pos - self.b
+        # Check divisibility
+        if diff % self.a != 0:
+            return false
+        val n = diff / self.a
+        n >= 0
+
+# Parse An+B syntax from a text argument.
+# Handles: "odd", "even", "3", "2n+1", "-n+3", "n", "3n", "-2n-1", etc.
+fn parse_an_b(expr: text) -> AnBFormula:
+    val s = expr.trim().to_lower()
+
+    # Keyword shortcuts
+    if s == "odd":
+        return AnBFormula.create(2, 1)
+    if s == "even":
+        return AnBFormula.create(2, 0)
+
+    # Find position of 'n'
+    val n_pos = s.find("n")
+
+    if n_pos < 0:
+        # No 'n': plain integer B (e.g., "3")
+        val b = parse_int_safe(s)
+        return AnBFormula.create(0, b)
+
+    # Parse A (coefficient of n)
+    var a = 1
+    if n_pos == 0:
+        # "n..." means a=1
+        a = 1
+    else:
+        val a_part = s.substring(0, n_pos).trim()
+        if a_part == "-":
+            a = -1
+        else if a_part == "+" or a_part == "":
+            a = 1
+        else:
+            a = parse_int_safe(a_part)
+
+    # Parse B (offset after n)
+    var b = 0
+    if n_pos + 1 < s.len():
+        val rest = s.substring(n_pos + 1, s.len()).trim()
+        if rest.len() > 0:
+            # rest is like "+1", "-3", "+0"
+            b = parse_int_safe(rest)
+
+    AnBFormula.create(a, b)
+
+# Parse an integer from text, handling optional leading + sign.
+fn parse_int_safe(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    # Strip leading +
+    if trimmed.starts_with("+"):
+        val rest = trimmed.substring(1, trimmed.len())
+        return parse_int_safe(rest)
+    # Handle negative
+    if trimmed.starts_with("-"):
+        val rest = trimmed.substring(1, trimmed.len())
+        val abs_val = parse_int_safe(rest)
+        return 0 - abs_val
+    # Parse digits
+    var result = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            val digit = char_to_digit(ch)
+            result = result * 10 + digit
+        else:
+            # Non-digit encountered; stop
+            return result
+        i = i + 1
+    result
+
+# Convert a single digit character to its integer value.
+fn char_to_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    0
 
 # --- Selector matcher ---
 
 class SelectorMatcher:
     logger: Logger
+    interaction: InteractionState
 
     static fn new(logger: Logger) -> SelectorMatcher:
-        SelectorMatcher(logger: logger)
+        SelectorMatcher(logger: logger, interaction: InteractionState.none())
+
+    static fn with_interaction(logger: Logger, interaction: InteractionState) -> SelectorMatcher:
+        SelectorMatcher(logger: logger, interaction: interaction)
 
     # Does this selector match the given node?
     fn matches(selector: Selector, node_id: i64, doc_nodes: [DomNode], doc_elements: [Element]) -> bool:
@@ -72,6 +188,8 @@ class SelectorMatcher:
             SelectorPart.PseudoElement(_):
                 # Pseudo-elements are handled at style application, not matching
                 false
+            SelectorPart.FunctionalPseudo(name, arg_text):
+                self.matches_functional_pseudo(name, arg_text, node_id, doc_nodes, doc_elements)
             SelectorPart.Combinator(_):
                 # Combinators are handled separately
                 false
@@ -271,8 +389,169 @@ class SelectorMatcher:
                     last_match == node_id
                 nil: false
 
+        if name == "only-of-type":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val siblings = get_siblings(node_id, doc_nodes)
+                    var count = 0
+                    var j = 0
+                    while j < siblings.len():
+                        val sib_id = siblings.get(j)
+                        val sib_elem = get_element_for_node(sib_id, elements)
+                        match sib_elem:
+                            Some(se):
+                                if se.tag_name == e.tag_name:
+                                    count = count + 1
+                            nil: pass_dn
+                        j = j + 1
+                    count == 1
+                nil: false
+
+        # Interaction pseudo-classes: check against InteractionState
+        if name == "hover":
+            return self.interaction.is_hovered(node_id)
+
+        if name == "focus":
+            return self.interaction.is_focused(node_id)
+
+        if name == "active":
+            return self.interaction.is_active(node_id)
+
+        if name == "visited":
+            # :visited is intentionally restricted for privacy
+            return false
+
+        if name == "link":
+            # :link matches unvisited <a> with href
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    if e.tag_name == "a" or e.tag_name == "area":
+                        val href = get_attribute_value(e, "href")
+                        match href:
+                            Some(_): return true
+                            nil: return false
+                    return false
+                nil: return false
+
+        if name == "enabled":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val disabled = get_attribute_value(e, "disabled")
+                    match disabled:
+                        Some(_): return false
+                        nil: return true
+                nil: return false
+
+        if name == "disabled":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val disabled = get_attribute_value(e, "disabled")
+                    match disabled:
+                        Some(_): return true
+                        nil: return false
+                nil: return false
+
+        if name == "checked":
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val checked = get_attribute_value(e, "checked")
+                    match checked:
+                        Some(_): return true
+                        nil: return false
+                nil: return false
+
         # Unsupported pseudo-class
         self.logger.warn("matches_pseudo_class: unsupported pseudo-class :{name}")
+        false
+
+    # --- Functional pseudo-class matching ---
+
+    # Match functional pseudo-classes: :nth-child(), :nth-last-child(),
+    # :nth-of-type(), :nth-last-of-type(), :not()
+    fn matches_functional_pseudo(name: text, arg_text: text, node_id: i64, doc_nodes: [DomNode], elements: [Element]) -> bool:
+        if name == "nth-child":
+            val formula = parse_an_b(arg_text)
+            val siblings = get_element_siblings(node_id, doc_nodes, elements)
+            val pos = get_position_in_list(node_id, siblings)
+            if pos < 0:
+                return false
+            return formula.matches_position(pos + 1)  # 1-based
+
+        if name == "nth-last-child":
+            val formula = parse_an_b(arg_text)
+            val siblings = get_element_siblings(node_id, doc_nodes, elements)
+            val pos = get_position_in_list(node_id, siblings)
+            if pos < 0:
+                return false
+            val reverse_pos = siblings.len() - pos  # 1-based from end
+            return formula.matches_position(reverse_pos)
+
+        if name == "nth-of-type":
+            val formula = parse_an_b(arg_text)
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val typed_siblings = get_typed_siblings(node_id, e.tag_name, doc_nodes, elements)
+                    val pos = get_position_in_list(node_id, typed_siblings)
+                    if pos < 0:
+                        return false
+                    return formula.matches_position(pos + 1)
+                nil: return false
+
+        if name == "nth-last-of-type":
+            val formula = parse_an_b(arg_text)
+            val elem = get_element_for_node(node_id, elements)
+            match elem:
+                Some(e):
+                    val typed_siblings = get_typed_siblings(node_id, e.tag_name, doc_nodes, elements)
+                    val pos = get_position_in_list(node_id, typed_siblings)
+                    if pos < 0:
+                        return false
+                    val reverse_pos = typed_siblings.len() - pos
+                    return formula.matches_position(reverse_pos)
+                nil: return false
+
+        if name == "not":
+            # :not(simple-selector) — negate a single selector part
+            val negated_part = parse_simple_selector(arg_text)
+            match negated_part:
+                Some(part):
+                    # :not() matches if the inner selector does NOT match
+                    return !self.matches_part(part, node_id, doc_nodes, elements)
+                nil:
+                    self.logger.warn("matches_functional_pseudo: could not parse :not({arg_text})")
+                    return false
+
+        if name == "is" or name == "where":
+            # :is() / :where() — matches if any argument selector matches
+            val parts = parse_selector_list_simple(arg_text)
+            var i = 0
+            while i < parts.len():
+                if self.matches_part(parts.get(i), node_id, doc_nodes, elements):
+                    return true
+                i = i + 1
+            return false
+
+        if name == "has":
+            # :has(selector) — matches if the element has a descendant matching selector
+            val part = parse_simple_selector(arg_text)
+            match part:
+                Some(p):
+                    val descendants = walk_subtree(node_id, doc_nodes)
+                    var i = 0
+                    while i < descendants.len():
+                        if self.matches_part(p, descendants.get(i), doc_nodes, elements):
+                            return true
+                        i = i + 1
+                    return false
+                nil: return false
+
+        self.logger.warn("matches_functional_pseudo: unsupported :{name}({arg_text})")
         false
 
     # --- Combinator matching ---
@@ -484,6 +763,140 @@ fn get_attribute_value(elem: Element, name: text) -> text?:
         i = i + 1
     nil
 
+# --- Functional pseudo-class helpers ---
+
+# Get element siblings (only element nodes) from the parent's children.
+fn get_element_siblings(node_id: i64, doc_nodes: [DomNode], elements: [Element]) -> [i64]:
+    val all_siblings = get_siblings(node_id, doc_nodes)
+    var result = [i64]()
+    var i = 0
+    while i < all_siblings.len():
+        val sid = all_siblings.get(i)
+        val elem = get_element_for_node(sid, elements)
+        match elem:
+            Some(_): result.push(sid)
+            nil: pass_dn
+        i = i + 1
+    result
+
+# Get siblings of the same tag type (element nodes only).
+fn get_typed_siblings(node_id: i64, tag_name: text, doc_nodes: [DomNode], elements: [Element]) -> [i64]:
+    val all_siblings = get_siblings(node_id, doc_nodes)
+    var result = [i64]()
+    var i = 0
+    while i < all_siblings.len():
+        val sid = all_siblings.get(i)
+        val elem = get_element_for_node(sid, elements)
+        match elem:
+            Some(e):
+                if e.tag_name == tag_name:
+                    result.push(sid)
+            nil: pass_dn
+        i = i + 1
+    result
+
+# Get the 0-based position of a node ID in a list. Returns -1 if not found.
+fn get_position_in_list(node_id: i64, ids: [i64]) -> i64:
+    var i = 0
+    while i < ids.len():
+        if ids.get(i) == node_id:
+            return i
+        i = i + 1
+    -1
+
+# Parse a simple selector argument (tag name, .class, #id, [attr], :pseudo).
+# Used by :not() and :has() to parse their argument.
+fn parse_simple_selector(arg: text) -> SelectorPart?:
+    val s = arg.trim()
+    if s.len() == 0:
+        return nil
+
+    val first = s.substring(0, 1)
+
+    # .class
+    if first == ".":
+        val class_name = s.substring(1, s.len())
+        return SelectorPart.Class(name: class_name)
+
+    # #id
+    if first == "#":
+        val id_name = s.substring(1, s.len())
+        return SelectorPart.Id(name: id_name)
+
+    # :pseudo-class
+    if first == ":":
+        val pseudo_name = s.substring(1, s.len())
+        return SelectorPart.PseudoClass(name: pseudo_name)
+
+    # [attr] or [attr=value]
+    if first == "[" and s.ends_with("]"):
+        val inner = s.substring(1, s.len() - 1)
+        return parse_attribute_selector(inner)
+
+    # * universal
+    if s == "*":
+        return SelectorPart.Universal
+
+    # Tag name
+    SelectorPart.Type(name: s)
+
+# Parse an attribute selector inner text (without brackets).
+fn parse_attribute_selector(inner: text) -> SelectorPart:
+    # Check for operators: *=, ^=, $=, ~=, |=, =
+    var op_pos = -1
+    var op = ""
+    var i = 0
+    while i < inner.len():
+        val ch = inner.substring(i, i + 1)
+        if ch == "=" and op_pos < 0:
+            # Check for 2-char operator
+            if i > 0:
+                val prev = inner.substring(i - 1, i)
+                if prev == "~" or prev == "|" or prev == "^" or prev == "$" or prev == "*":
+                    op = inner.substring(i - 1, i + 1)
+                    op_pos = i - 1
+                else:
+                    op = "="
+                    op_pos = i
+            else:
+                op = "="
+                op_pos = i
+        i = i + 1
+
+    if op_pos < 0:
+        # No operator: existence check [attr]
+        return SelectorPart.Attribute(name: inner.trim(), op: "", value: "")
+
+    var attr_name = ""
+    if op.len() == 2:
+        attr_name = inner.substring(0, op_pos).trim()
+    else:
+        attr_name = inner.substring(0, op_pos).trim()
+
+    val value_start = op_pos + op.len()
+    var attr_value = inner.substring(value_start, inner.len()).trim()
+    # Strip quotes from value if present
+    if attr_value.len() >= 2:
+        val vf = attr_value.substring(0, 1)
+        val vl = attr_value.substring(attr_value.len() - 1, attr_value.len())
+        if (vf == "\"" and vl == "\"") or (vf == "'" and vl == "'"):
+            attr_value = attr_value.substring(1, attr_value.len() - 1)
+
+    SelectorPart.Attribute(name: attr_name, op: op, value: attr_value)
+
+# Parse a comma-separated list of simple selectors (for :is() / :where()).
+fn parse_selector_list_simple(args: text) -> [SelectorPart]:
+    var result = [SelectorPart]()
+    val parts = args.split(",")
+    var i = 0
+    while i < parts.len():
+        val part = parse_simple_selector(parts.get(i))
+        match part:
+            Some(p): result.push(p)
+            nil: pass_dn
+        i = i + 1
+    result
+
 # --- Specificity calculation ---
 
 # Calculate specificity for a selector (ids, classes, elements).
@@ -508,6 +921,12 @@ fn calculate_specificity(selector: Selector) -> Specificity:
                 elements = elements + 1
             SelectorPart.PseudoElement(_):
                 elements = elements + 1
+            SelectorPart.FunctionalPseudo(name, _):
+                # :not() has specificity of its argument, :where() has zero
+                if name == "where":
+                    pass_dn
+                else:
+                    classes = classes + 1
             SelectorPart.Universal:
                 pass_dn  # Universal selector has no specificity
             SelectorPart.Combinator(_):

@@ -1,0 +1,187 @@
+# Simple JS — JavaScript Runtime CLI
+# Run JavaScript files, evaluate expressions, or test conformance.
+#
+# Usage:
+#   simple js <file.js>              — Run a JavaScript file
+#   simple js -e "code"              — Evaluate JS expression
+#   simple js --conformance          — Run conformance test suite
+#   simple js --repl                 — Interactive JS REPL
+#   simple js --version              — Show JS engine version
+
+use std.js.types.js_types.{JsValue}
+use std.js.types.ast_types.{Statement, Expression}
+use std.js.engine.js_error.{Logger, LogLevel, script_error, BrowserResult}
+use std.js.engine.lexer.{JsLexer}
+use std.js.engine.parser.{JsParser}
+use std.js.engine.interpreter.{JsInterpreter}
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.module_loader.{JsModuleLoader}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+fn _start():
+    val args = _get_args()
+
+    if args.len() == 0:
+        _print_usage()
+        return
+
+    val first = args[0]
+
+    if first == "--version" or first == "-v":
+        print "Simple JS Engine v0.9.5"
+        print "ECMAScript 2015+ (partial)"
+        return
+
+    if first == "--help" or first == "-h":
+        _print_usage()
+        return
+
+    if first == "-e":
+        if args.len() < 2:
+            print "js: missing expression after -e"
+            return
+        val code = args[1]
+        val result = _eval_js(code)
+        print result
+        return
+
+    if first == "--conformance":
+        print "Running ECMAScript conformance tests..."
+        _run_conformance()
+        return
+
+    if first == "--repl":
+        _run_repl()
+        return
+
+    # Default: run file
+    if not rt_file_exists(first):
+        print "js: file not found: {first}"
+        return
+    val source = rt_file_read_text(first)
+    if source == nil or source == "":
+        print "js: empty file: {first}"
+        return
+    val result = _eval_js(source)
+    if result != "undefined" and result != "":
+        print result
+
+fn _eval_js(source: text) -> text:
+    """Parse and execute JavaScript source, return string result."""
+    val logger = Logger.new("js", LogLevel.Warn)
+    val lexer = JsLexer.new(source, logger)
+    val parser = JsParser.new(source, logger)
+    val program = parser.parse_program()
+    match program:
+        Ok(stmts):
+            val interpreter = JsInterpreter.new(logger)
+            val result = interpreter.execute(stmts)
+            match result:
+                Ok(value):
+                    return _js_value_to_display(value)
+                Err(error):
+                    return "Error: {error.message}"
+        Err(error):
+            return "SyntaxError: {error.message}"
+
+fn _js_value_to_display(value: JsValue) -> text:
+    match value:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(v):
+            if v: "true" else: "false"
+        JsValue.Number(v): "{v}"
+        JsValue.String(v): v
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+fn _run_conformance():
+    """Run basic conformance checks."""
+    var pass_count = 0
+    var fail_count = 0
+
+    # ES5 basics
+    pass_count = pass_count + _check("typeof undefined", "undefined")
+    pass_count = pass_count + _check("typeof null", "object")
+    pass_count = pass_count + _check("1 + 2", "3")
+    pass_count = pass_count + _check("'hello' + ' world'", "hello world")
+    pass_count = pass_count + _check("true ? 'a' : 'b'", "a")
+    pass_count = pass_count + _check("var x = 5; x", "5")
+    pass_count = pass_count + _check("var x = 10; x > 5", "true")
+    pass_count = pass_count + _check("!false", "true")
+    pass_count = pass_count + _check("null == undefined", "true")
+
+    # Control flow
+    pass_count = pass_count + _check("var i=0; while(i<3){i=i+1;} i", "3")
+    pass_count = pass_count + _check("var s=0; for(var i=0;i<5;i=i+1){s=s+i;} s", "10")
+
+    # Functions
+    pass_count = pass_count + _check("function f(x){return x*2;} f(5)", "10")
+    pass_count = pass_count + _check("function f(){var x=10; return function(){return x;}; } f()()", "10")
+
+    # Arrow functions
+    pass_count = pass_count + _check("var f = x => x + 1; f(5)", "6")
+
+    # Objects and arrays
+    pass_count = pass_count + _check("var o = {a:1,b:2}; o.a + o.b", "3")
+    pass_count = pass_count + _check("var a = [1,2,3]; a.length", "3")
+
+    # String methods
+    pass_count = pass_count + _check("'hello'.length", "5")
+
+    # Try/catch
+    pass_count = pass_count + _check("try{throw 'err';}catch(e){e}", "err")
+
+    # typeof
+    pass_count = pass_count + _check("typeof 42", "number")
+    pass_count = pass_count + _check("typeof 'hi'", "string")
+    pass_count = pass_count + _check("typeof true", "boolean")
+
+    val total = pass_count + fail_count
+    print ""
+    print "ECMAScript Conformance Report"
+    print "=============================="
+    print "Passed: {pass_count}/{total}"
+    if fail_count > 0:
+        print "Failed: {fail_count}/{total}"
+    print ""
+
+fn _check(code: text, expected: text) -> i32:
+    val result = _eval_js(code)
+    # Normalize float display (3.0 -> 3)
+    var actual = result
+    if actual.ends_with(".0"):
+        actual = actual.slice(0, actual.len() - 2)
+    if actual == expected:
+        print "  PASS: {code}"
+        return 1
+    else:
+        print "  FAIL: {code}"
+        print "    expected: {expected}"
+        print "    got:      {actual}"
+        return 0
+
+fn _run_repl():
+    print "Simple JS REPL (type 'exit' to quit)"
+    print "> "
+    # REPL requires interactive input — stub for now
+    print "REPL not yet available in non-interactive mode"
+
+fn _print_usage():
+    print "Usage: simple js [options] [file.js]"
+    print ""
+    print "Options:"
+    print "  <file.js>        Run a JavaScript file"
+    print "  -e <code>        Evaluate JavaScript expression"
+    print "  --conformance    Run ECMAScript conformance tests"
+    print "  --repl           Interactive JS REPL"
+    print "  --version        Show JS engine version"
+    print "  --help           Show this help"
+
+fn _get_args() -> [text]:
+    # Placeholder — args passed by CLI dispatch
+    [text]()

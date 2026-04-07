@@ -240,27 +240,35 @@ fn apply_position(box_node: LayoutBox, style: ComputedStyle, containing: LayoutC
 
     match position:
         "static":
-            # No positioning offset — normal flow
             box_node
 
         "relative":
-            # Offset from normal flow position
-            val top = resolve_offset(style.margin_top, containing.containing_block_height)
-            val left = resolve_offset(style.margin_left, containing.containing_block_width)
-            # For relative, use the computed top/left values
-            # In a full implementation these would come from style.top / style.left
-            apply_relative(box_node, 0.0, 0.0)
+            # Offset from normal flow position using actual style.top / style.left
+            val top = resolve_position_offset(style.top, containing.containing_block_height)
+            val left = resolve_position_offset(style.left_val, containing.containing_block_width)
+            val bot = resolve_position_offset(style.bottom, containing.containing_block_height)
+            val right_v = resolve_position_offset(style.right_val, containing.containing_block_width)
+            # CSS 2.1: if both top and bottom are set, top wins. Same for left/right.
+            var dy = 0.0
+            var dx = 0.0
+            if top >= 0.0:
+                dy = top
+            else if bot >= 0.0:
+                dy = 0.0 - bot
+            if left >= 0.0:
+                dx = left
+            else if right_v >= 0.0:
+                dx = 0.0 - right_v
+            apply_relative(box_node, dy, dx)
 
         "absolute":
-            # Position relative to nearest positioned ancestor (the containing block)
-            val top = resolve_position_offset(CSSValue.Length(v: 0.0, unit: "px"), containing.containing_block_height)
-            val right_v = resolve_position_offset(CSSValue.Keyword(v: "auto"), containing.containing_block_width)
-            val bottom = resolve_position_offset(CSSValue.Keyword(v: "auto"), containing.containing_block_height)
-            val left = resolve_position_offset(CSSValue.Length(v: 0.0, unit: "px"), containing.containing_block_width)
-            apply_absolute(box_node, top, right_v, bottom, left, containing)
+            val top = resolve_position_offset(style.top, containing.containing_block_height)
+            val right_v = resolve_position_offset(style.right_val, containing.containing_block_width)
+            val bot = resolve_position_offset(style.bottom, containing.containing_block_height)
+            val left = resolve_position_offset(style.left_val, containing.containing_block_width)
+            apply_absolute(box_node, top, right_v, bot, left, containing)
 
         "fixed":
-            # Position relative to the viewport
             val vp_ctx = LayoutContext.from_containing(
                 containing.viewport_width,
                 containing.viewport_height,
@@ -269,16 +277,19 @@ fn apply_position(box_node: LayoutBox, style: ComputedStyle, containing: LayoutC
                 containing.viewport_height,
                 containing.logger
             )
-            val top = resolve_position_offset(CSSValue.Length(v: 0.0, unit: "px"), containing.viewport_height)
-            val right_v = resolve_position_offset(CSSValue.Keyword(v: "auto"), containing.viewport_width)
-            val bottom = resolve_position_offset(CSSValue.Keyword(v: "auto"), containing.viewport_height)
-            val left = resolve_position_offset(CSSValue.Length(v: 0.0, unit: "px"), containing.viewport_width)
-            apply_absolute(box_node, top, right_v, bottom, left, vp_ctx)
+            val top = resolve_position_offset(style.top, containing.viewport_height)
+            val right_v = resolve_position_offset(style.right_val, containing.viewport_width)
+            val bot = resolve_position_offset(style.bottom, containing.viewport_height)
+            val left = resolve_position_offset(style.left_val, containing.viewport_width)
+            apply_absolute(box_node, top, right_v, bot, left, vp_ctx)
 
         "sticky":
-            # Sticky positioning: relative until scroll threshold, then fixed.
-            # For now, treat as relative (sticky requires scroll state).
-            apply_relative(box_node, 0.0, 0.0)
+            # Sticky: treat as relative for now (needs scroll state)
+            val top = resolve_position_offset(style.top, containing.containing_block_height)
+            val left = resolve_position_offset(style.left_val, containing.containing_block_width)
+            var dy = if top >= 0.0: top else: 0.0
+            var dx = if left >= 0.0: left else: 0.0
+            apply_relative(box_node, dy, dx)
 
         _:
             box_node

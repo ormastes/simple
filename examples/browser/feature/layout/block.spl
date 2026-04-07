@@ -6,6 +6,8 @@
 use examples.browser.entity.dom.box_types.(BoxKind, BoxModel, LayoutBox)
 use examples.browser.entity.dom.css_types.(CSSValue)
 use examples.browser.feature.style.computed.(ComputedStyle, extract_px)
+use examples.browser.feature.style.css_functions.{FunctionContext, resolve_css_function}
+use examples.browser.feature.layout.float_pos.(apply_position)
 use examples.browser.shared.logging.(Logger, LogLevel)
 
 # ---------------------------------------------------------------------------
@@ -177,8 +179,12 @@ class BlockFormatter:
         val raw_height = resolve_height(style, containing_h, total_content_height)
 
         # Step 7: Apply min-height, max-height constraints
-        val constrained_h = constrain_size(raw_height, style.min_width, style.max_width, containing_h)
+        val constrained_h = constrain_size(raw_height, style.min_height, style.max_height, containing_h)
         result.height = constrained_h
+
+        # Step 8: Apply CSS positioning (relative/absolute/fixed/sticky)
+        if style.position != "static":
+            result = apply_position(result, style, ctx)
 
         self.logger.debug("layout_block done node={box_node.node_id} x={result.x} y={result.y} w={result.width} h={result.height}")
         result
@@ -192,7 +198,6 @@ fn resolve_width(style: ComputedStyle, containing_width: f64) -> f64:
     match width_val:
         CSSValue.Keyword(v):
             if v == "auto":
-                # Auto width: fill containing block minus margins, borders, padding
                 val ml = resolve_margin(style.margin_left, containing_width)
                 val mr = resolve_margin(style.margin_right, containing_width)
                 val pl = resolve_padding(style.padding_left, containing_width)
@@ -209,6 +214,13 @@ fn resolve_width(style: ComputedStyle, containing_width: f64) -> f64:
             (v / 100.0) * containing_width
         CSSValue.Number(v):
             v
+        CSSValue.Function(name, args):
+            val ctx = FunctionContext(
+                container_size: containing_width,
+                parent_font_size: 16.0,
+                root_font_size: 16.0
+            )
+            resolve_css_function(name, args, ctx)
         _:
             containing_width
 
@@ -230,6 +242,13 @@ fn resolve_height(style: ComputedStyle, containing_height: f64, content_height: 
             (v / 100.0) * containing_height
         CSSValue.Number(v):
             v
+        CSSValue.Function(name, args):
+            val ctx = FunctionContext(
+                container_size: containing_height,
+                parent_font_size: 16.0,
+                root_font_size: 16.0
+            )
+            resolve_css_function(name, args, ctx)
         _:
             content_height
 

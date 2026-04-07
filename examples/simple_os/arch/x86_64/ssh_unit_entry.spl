@@ -50,6 +50,57 @@ fn _start():
     var _rok_ok: bool = _rok.is_ok()
     _t(_rok_ok, "B0: Ok(42).is_ok()")
 
+    # Diagnostic: do tuples work at all?
+    var test_tup = (42, 99)
+    var test_tup_0: i64 = test_tup.0
+    var test_tup_1: i64 = test_tup.1
+    serial_println("[DBG] tuple test: .0={test_tup_0} .1={test_tup_1}")
+    _t(test_tup_0 == 42, "B0a: tuple.0 == 42")
+    _t(test_tup_1 == 99, "B0b: tuple.1 == 99")
+
+    # Diagnostic: does Result<tuple> unwrap work?
+    var test_ok_tup: Result<(i64, i64), text> = Ok((10, 20))
+    if test_ok_tup.is_ok():
+        var test_unwrap = test_ok_tup.unwrap()
+        var test_u0: i64 = test_unwrap.0
+        var test_u1: i64 = test_unwrap.1
+        serial_println("[DBG] Result<tuple> unwrap: .0={test_u0} .1={test_u1}")
+        _t(test_u0 == 10, "B0c: Result<(10,20)>.unwrap().0 == 10")
+        _t(test_u1 == 20, "B0d: Result<(10,20)>.unwrap().1 == 20")
+    else:
+        serial_println("[DBG] Result<tuple> is_ok() returned false!")
+        _t(false, "B0c: Result<(10,20)>.unwrap().0 == 10")
+        _t(false, "B0d: Result<(10,20)>.unwrap().1 == 20")
+
+    # Diagnostic: struct-in-tuple (the exact pattern that B3 uses)
+    var diag_arr: [u8] = [0xAA, 0xBB]
+    var diag_pkt = SshPacket(payload: diag_arr, sequence: 7)
+    var diag_pl = diag_pkt.payload
+    var diag_pl_len: u64 = diag_pl.len()
+    serial_println("[DBG] direct SshPacket.payload.len()={diag_pl_len}")
+    _t(diag_pl_len == 2, "B0e: SshPacket.payload.len() == 2")
+    var diag_tup = (diag_pkt, 100)
+    var diag_tup_0 = diag_tup.0
+    serial_println("[DBG] tuple(SshPacket, 100).0 extracted")
+    var diag_tup_0_pl = diag_tup_0.payload
+    var diag_tup_0_pl_len: u64 = diag_tup_0_pl.len()
+    serial_println("[DBG] tuple.0.payload.len()={diag_tup_0_pl_len}")
+    _t(diag_tup_0_pl_len == 2, "B0f: tuple(SshPacket).0.payload.len() == 2")
+
+    # Diagnostic: struct-in-tuple-in-Result (exact B3 pattern)
+    var diag_ok: Result<(SshPacket, u64), text> = Ok((diag_pkt, 100))
+    if diag_ok.is_ok():
+        var diag_unwrap = diag_ok.unwrap()
+        var diag_unwrap_0 = diag_unwrap.0
+        serial_println("[DBG] Result<(SshPacket,u64)>.unwrap().0 extracted")
+        var diag_unwrap_0_pl = diag_unwrap_0.payload
+        var diag_unwrap_0_pl_len: u64 = diag_unwrap_0_pl.len()
+        serial_println("[DBG] Result.unwrap().0.payload.len()={diag_unwrap_0_pl_len}")
+        _t(diag_unwrap_0_pl_len == 2, "B0g: Result<(SshPkt,u64)>.unwrap().0.payload.len() == 2")
+    else:
+        serial_println("[DBG] diag_ok.is_ok() returned false!")
+        _t(false, "B0g: Result<(SshPkt,u64)>.unwrap().0.payload.len() == 2")
+
     var p5: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]
     var e5 = ssh_packet_build(p5, 0)
     serial_println("[DBG] e5.len()={e5.len()}")
@@ -78,11 +129,22 @@ fn _start():
 
     if d5.is_ok():
         var d5_pkt = d5.unwrap()
-        var d5_payload = d5_pkt.0.payload
+        # --- Diagnostic: break apart tuple.0.payload chain ---
+        serial_println("[DBG] d5_pkt unwrapped (tuple)")
+        var d5_ssh_pkt = d5_pkt.0           # Extract SshPacket from tuple position 0
+        serial_println("[DBG] d5_ssh_pkt = d5_pkt.0 (SshPacket struct)")
+        var d5_payload = d5_ssh_pkt.payload  # Access .payload field on the struct
+        serial_println("[DBG] d5_payload = d5_ssh_pkt.payload (array)")
         var d5_plen: u64 = d5_payload.len()
+        serial_println("[DBG] d5_payload.len()={d5_plen}")
         _t(d5_plen == 5, "B3: Decoded len == 5")
-        var d5_first: u8 = d5_payload[0]
-        _t(d5_first == 0x14, "B4: Decoded [0] == 0x14")
+        if d5_plen > 0:
+            var d5_first: u8 = d5_payload[0]
+            serial_println("[DBG] d5_payload[0]={d5_first}")
+            _t(d5_first == 0x14, "B4: Decoded [0] == 0x14")
+        else:
+            serial_println("[DBG] d5_payload is empty, skipping B4")
+            _t(false, "B4: Decoded [0] == 0x14")
     else:
         _t(false, "B3: Decoded len == 5")
         _t(false, "B4: Decoded [0] == 0x14")
@@ -95,10 +157,22 @@ fn _start():
     var s1: [u8] = [0xFF]
     var s1_enc = ssh_packet_build(s1, 2)
     var ds1 = ssh_packet_read(s1_enc, 0)
+    serial_println("[DBG] ds1.is_ok()={ds1.is_ok()}")
     if ds1.is_ok():
         var ds1_pkt = ds1.unwrap()
-        var ds1_byte: u8 = ds1_pkt.0.payload[0]
-        _t(ds1_byte == 0xFF, "B6: Single byte 0xFF")
+        serial_println("[DBG] ds1_pkt unwrapped (tuple)")
+        var ds1_ssh = ds1_pkt.0              # Extract SshPacket from tuple
+        serial_println("[DBG] ds1_ssh = ds1_pkt.0 (SshPacket)")
+        var ds1_pl = ds1_ssh.payload         # Access .payload field
+        var ds1_pl_len: u64 = ds1_pl.len()
+        serial_println("[DBG] ds1_pl.len()={ds1_pl_len}")
+        if ds1_pl_len > 0:
+            var ds1_byte: u8 = ds1_pl[0]
+            serial_println("[DBG] ds1_pl[0]={ds1_byte}")
+            _t(ds1_byte == 0xFF, "B6: Single byte 0xFF")
+        else:
+            serial_println("[DBG] ds1 payload empty")
+            _t(false, "B6: Single byte 0xFF")
     else:
         _t(false, "B6: Single byte 0xFF")
 

@@ -73,14 +73,63 @@ fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
     if style.display == "none":
         return BeLayoutBox.empty(node)
 
+    if style.visibility == "hidden":
+        # Layout normally but won't be painted
+        pass_dn
+
     if node.is_text_node():
         return layout_text(node, container)
 
+    var result: BeLayoutBox
     if style.display == "flex":
-        return layout_flex(node, container, style)
+        result = layout_flex(node, container, style)
+    else:
+        result = layout_block(node, container, style)
 
-    # Default: block layout
-    return layout_block(node, container, style)
+    # Apply CSS positioning offsets
+    if style.position == "relative":
+        val dx = resolve_offset(style.left, container.content_width)
+        val dy = resolve_offset(style.top, container.content_height)
+        result.x = result.x + dx
+        result.y = result.y + dy
+        result.content_x = result.content_x + dx
+        result.content_y = result.content_y + dy
+    else if style.position == "absolute":
+        # Position relative to container origin
+        if not style.left.is_auto():
+            val lx = style.left.resolve_px(container.content_width)
+            result.x = container.x + lx
+            result.content_x = result.x + style.border.width + style.padding.left
+        if not style.top.is_auto():
+            val ty = style.top.resolve_px(container.content_height)
+            result.y = container.y + ty
+            result.content_y = result.y + style.border.width + style.padding.top
+        if not style.right.is_auto() and style.left.is_auto():
+            val rx = style.right.resolve_px(container.content_width)
+            result.x = container.x + container.width - rx - result.width
+            result.content_x = result.x + style.border.width + style.padding.left
+        if not style.bottom.is_auto() and style.top.is_auto():
+            val by = style.bottom.resolve_px(container.content_height)
+            result.y = container.y + container.height - by - result.height
+            result.content_y = result.y + style.border.width + style.padding.top
+    else if style.position == "fixed":
+        # Position relative to viewport (container at 0,0)
+        if not style.left.is_auto():
+            val lx = style.left.resolve_px(container.content_width)
+            result.x = lx
+            result.content_x = result.x + style.border.width + style.padding.left
+        if not style.top.is_auto():
+            val ty = style.top.resolve_px(container.content_height)
+            result.y = ty
+            result.content_y = result.y + style.border.width + style.padding.top
+
+    return result
+
+fn resolve_offset(value: CssValue, reference: i32) -> i32:
+    """Resolve a CSS offset value (top/left/right/bottom) to pixels."""
+    if value.is_auto():
+        return 0
+    return value.resolve_px(reference)
 
 # =========================================================================
 # Block Layout

@@ -164,6 +164,15 @@ class Compositor:
     dock_bounce_active: bool
     dock_bounce_progress: i32
     dock_bounce_icon: i32   # dock icon index to bounce (-1 = none)
+    # Double-click state
+    last_click_x: i32
+    last_click_y: i32
+    last_click_frame: i32
+    frame_count: i32
+    # Desktop right-click context menu
+    context_menu_active: bool
+    context_menu_x: i32
+    context_menu_y: i32
 
 impl Compositor:
 
@@ -188,6 +197,7 @@ impl Compositor:
             x: sw / 2,
             y: sh / 2,
             visible: true,
+            shape: 0,
             hotspot_x: 1,
             hotspot_y: 1
         )
@@ -240,7 +250,14 @@ impl Compositor:
             resize_orig_h: 0,
             dock_bounce_active: false,
             dock_bounce_progress: 0,
-            dock_bounce_icon: -1
+            dock_bounce_icon: -1,
+            last_click_x: 0,
+            last_click_y: 0,
+            last_click_frame: 0,
+            frame_count: 0,
+            context_menu_active: false,
+            context_menu_x: 0,
+            context_menu_y: 0
         )
 
     # -- Window Management ---------------------------------------------------
@@ -848,7 +865,7 @@ impl Compositor:
             idx = idx + 1
 
         # 3. System bar (top) + Dock (bottom) — shared desktop chrome
-        draw_system_bar(self.backend, cfg, active_idx)
+        draw_system_bar(self.backend, cfg, active_idx, self.frame_count)
         val bounce_icon = if self.dock_bounce_active: self.dock_bounce_icon else: -1
         val bounce_prog = if self.dock_bounce_active: self.dock_bounce_progress else: 0
         draw_dock(self.backend, cfg, active_idx, self.cursor.x, self.cursor.y, bounce_icon, bounce_prog)
@@ -886,6 +903,27 @@ impl Compositor:
                 else:
                     self.backend.blend_rect(dot_x, dot_y, 8, 8, 0x00FFFFFF, 60)
                 wi = wi + 1
+
+        # Desktop right-click context menu
+        if self.context_menu_active:
+            val cm_w: i32 = 160
+            val cm_h: i32 = 80
+            val cm_x = self.context_menu_x
+            val cm_y = self.context_menu_y
+            # Glass background
+            self.backend.blur_region(cm_x, cm_y, cm_w, cm_h, 16)
+            self.backend.blend_rect(cm_x, cm_y, cm_w, cm_h, gc.surface_color, gc.surface_alpha)
+            # Border
+            self.backend.blend_rect(cm_x, cm_y, cm_w, 1, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(cm_x, cm_y + cm_h - 1, cm_w, 1, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(cm_x, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
+            self.backend.blend_rect(cm_x + cm_w - 1, cm_y, 1, cm_h, gc.border_color, gc.border_alpha)
+            # Menu items
+            self.backend.draw_text(cm_x + 12, cm_y + 8, "New Window", 0xFFE0E0F0, 0x00000000)
+            self.backend.blend_rect(cm_x + 4, cm_y + 28, cm_w - 8, 1, gc.border_color, gc.border_alpha)
+            self.backend.draw_text(cm_x + 12, cm_y + 34, "Theme", 0xFFE0E0F0, 0x00000000)
+            self.backend.blend_rect(cm_x + 4, cm_y + 54, cm_w - 8, 1, gc.border_color, gc.border_alpha)
+            self.backend.draw_text(cm_x + 12, cm_y + 60, "About", 0xFFA0A0B0, 0x00000000)
 
         # 5. Cursor + present
         draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
@@ -958,9 +996,21 @@ impl Compositor:
 
         val key = key_event.key
 
-        # Escape quits in glass theme mode (like QEMU WM)
+        # Escape: cancel drag/resize first, then quit glass theme
         match key:
             Key.Escape:
+                if self.dragging:
+                    self.dragging = false
+                    self.drag_window_id = 0
+                    return
+                if self.resizing:
+                    # Restore original geometry
+                    self.move_window(self.resize_window_id, self.resize_orig_x, self.resize_orig_y)
+                    self.resize_window(self.resize_window_id, self.resize_orig_w, self.resize_orig_h)
+                    self.resizing = false
+                    self.resize_window_id = 0
+                    self.resize_edge = 0
+                    return
                 if self.glass_theme_active:
                     self.stop()
                     return
@@ -1129,17 +1179,36 @@ impl Compositor:
 
     me _handle_mouse_event(event: MouseEvent):
         """Process a mouse event: update cursor, handle clicks, dragging."""
-        # Update cursor position
+        val mx = event.x.to_i32()
+        val my = event.y.to_i32()
+
+        # Update cursor shape based on position
+        var new_shape: i32 = 0  # default arrow
+        var shape_idx = self.surfaces.len() - 1
+        while shape_idx >= 0:
+            val ss = self.surfaces[shape_idx]
+            if ss.visible:
+                val edge = _detect_resize_edge(mx, my, ss.x, ss.y, ss.width, ss.height)
+                if edge > 0:
+                    new_shape = 2  # hand/pointer for resize
+                    shape_idx = -1  # break
+                else:
+                    # Check if over content area (for I-beam on text apps)
+                    val in_content = mx > ss.x + 10 and mx < ss.x + ss.width - 10 and my > ss.y + 44 and my < ss.y + ss.height - 10
+                    if in_content and (ss.title == "Terminal" or ss.title == "Editor"):
+                        new_shape = 1  # I-beam for text
+                        shape_idx = -1
+            shape_idx = shape_idx - 1
+
+        # Update cursor position and shape
         self.cursor = CursorState(
-            x: event.x.to_i32(),
-            y: event.y.to_i32(),
+            x: mx,
+            y: my,
             visible: self.cursor.visible,
+            shape: new_shape,
             hotspot_x: self.cursor.hotspot_x,
             hotspot_y: self.cursor.hotspot_y
         )
-
-        val mx = event.x.to_i32()
-        val my = event.y.to_i32()
 
         # Handle resize release
         if event.left_just_released:
@@ -1220,6 +1289,30 @@ impl Compositor:
 
         # Handle new left click — hit test windows back-to-front (topmost first)
         if event.left_just_pressed:
+            # Dismiss context menu on any left click
+            if self.context_menu_active:
+                self.context_menu_active = false
+                # If click was ON the menu, handle the menu item
+                val cm_x = self.context_menu_x
+                val cm_y = self.context_menu_y
+                val cm_w: i32 = 160
+                val cm_h: i32 = 80
+                if mx >= cm_x and mx < cm_x + cm_w and my >= cm_y and my < cm_y + cm_h:
+                    if my < cm_y + 28:
+                        # "New Window" clicked
+                        self.create_window("Terminal", cm_x, cm_y, 400, 280)
+                    else if my < cm_y + 54:
+                        # "Theme" clicked — toggle dark/light
+                        if not self.theme_transitioning:
+                            self.theme_transitioning = true
+                            self.theme_progress = 0
+                            val is_dark = self.glass_config.bg_top < 0x00808080
+                            if is_dark:
+                                self.theme_target_dark = false
+                            else:
+                                self.theme_target_dark = true
+                return  # consume click whether on menu or not
+
             # Check for edge resize on any visible window
             var ridx = self.surfaces.len() - 1
             while ridx >= 0:
@@ -1255,8 +1348,51 @@ impl Compositor:
                             self.destroy_window(sid)
                             return
 
-                        # Check title bar for drag
+                        # Check minimize button (yellow, second traffic light)
+                        val min_btn_x = s.x + 32
+                        val min_btn_y = s.y + 8
+                        if mx >= min_btn_x and mx < min_btn_x + 12 and my >= min_btn_y and my < min_btn_y + 12:
+                            if not self.minimize_active:
+                                self.minimize_active = true
+                                self.minimize_progress = 0
+                                self.minimize_win = idx
+                            return
+
+                        # Check maximize button (green, third traffic light)
+                        val max_btn_x = s.x + 52
+                        val max_btn_y = s.y + 8
+                        if mx >= max_btn_x and mx < max_btn_x + 12 and my >= max_btn_y and my < max_btn_y + 12:
+                            # Maximize: fill usable area
+                            val bar_h = SYSTEM_BAR_HEIGHT
+                            val dock_h_val: i32 = 68
+                            self.move_window(sid, 0, bar_h)
+                            self.resize_window(sid, self.screen_width, self.screen_height - bar_h - dock_h_val)
+                            return
+
+                        # Check title bar for drag (with double-click detection)
                         if is_in_title_bar(s.x, s.y, s.width, mx, my):
+                            # Double-click detection
+                            val frame_diff = self.frame_count - self.last_click_frame
+                            val dx_click = mx - self.last_click_x
+                            val dy_click = my - self.last_click_y
+                            val abs_dx = if dx_click < 0: 0 - dx_click else: dx_click
+                            val abs_dy = if dy_click < 0: 0 - dy_click else: dy_click
+                            self.last_click_frame = self.frame_count
+                            self.last_click_x = mx
+                            self.last_click_y = my
+                            if frame_diff < 15 and abs_dx < 10 and abs_dy < 10:
+                                # Toggle maximize
+                                val bar_h = SYSTEM_BAR_HEIGHT
+                                val dock_h_val: i32 = 68
+                                val usable = self.screen_height - bar_h - dock_h_val
+                                if s.width >= self.screen_width - 10 and s.height >= usable - 10:
+                                    self.move_window(sid, 60 + idx * 80, 80 + idx * 60)
+                                    self.resize_window(sid, 400, 280)
+                                else:
+                                    self.move_window(sid, 0, bar_h)
+                                    self.resize_window(sid, self.screen_width, usable)
+                                return
+                            # Single click: start drag
                             self.focus_window(sid)
                             self.dragging = true
                             self.drag_window_id = sid
@@ -1276,6 +1412,27 @@ impl Compositor:
                                 self._update_app_state(self.focused_idx, new_state)
                         return
                 idx = idx - 1
+
+            # No window hit — click on desktop background
+            if self.focused_idx >= 0:
+                self.focused_idx = -1
+
+        # Right-click context menu on empty desktop
+        if event.right_just_pressed:
+            self.context_menu_active = false
+            # Check if click is on empty desktop (no window hit)
+            var on_desktop = true
+            var ri = self.surfaces.len() - 1
+            while ri >= 0:
+                val rs = self.surfaces[ri]
+                if rs.visible and mx >= rs.x and mx < rs.x + rs.width and my >= rs.y and my < rs.y + rs.height:
+                    on_desktop = false
+                    ri = -1  # break
+                ri = ri - 1
+            if on_desktop:
+                self.context_menu_x = mx
+                self.context_menu_y = my
+                self.context_menu_active = true
 
     me cycle_focus():
         """Cycle focus to the next window (Alt+Tab behavior)."""
@@ -1345,6 +1502,7 @@ impl Compositor:
 
     me _tick_animations():
         """Update all active animations by one frame step."""
+        self.frame_count = self.frame_count + 1
         # Focus bounce animation (12 frames, 0-100 progress)
         if self.anim_active:
             self.anim_progress = self.anim_progress + 8

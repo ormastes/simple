@@ -1,0 +1,105 @@
+# snpm install — Install dependencies
+
+use app.snpm.config.{SnpmConfig}
+use app.snpm.manifest.{SnpmManifest, parse_manifest, write_manifest}
+use app.snpm.resolver.{resolve_dependencies, ResolvedPackage}
+use app.snpm.installer.{install_packages}
+use app.snpm.lockfile.{read_lockfile, write_lockfile, LockEntry}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir(path: text) -> bool
+
+fn cmd_install(config: SnpmConfig, args: [text]):
+    """Install packages or all dependencies from package.sdn."""
+    if args.len() > 0 and not args[0].starts_with("-"):
+        # Install specific package: snpm install <pkg>[@version]
+        _install_package(config, args[0])
+        return
+
+    # Install all from package.sdn
+    if not rt_file_exists(config.manifest_name):
+        print "snpm: no {config.manifest_name} found. Run 'snpm init' first."
+        return
+
+    val manifest_result = parse_manifest(config.manifest_name)
+    match manifest_result:
+        Err(msg):
+            print "snpm: {msg}"
+            return
+        Ok(manifest):
+            val dep_count = manifest.dependencies.len()
+            if dep_count == 0:
+                print "snpm: no dependencies to install"
+                return
+
+            print "snpm: installing {dep_count} dependencies..."
+            rt_mkdir(config.modules_dir)
+
+            # Resolve dependencies
+            val resolved = resolve_dependencies(manifest.dependencies, config)
+            if resolved.len() == 0:
+                print "snpm: all dependencies up to date"
+                return
+
+            # Install resolved packages
+            install_packages(resolved, config)
+
+            # Write lockfile
+            var lock_entries = [LockEntry]()
+            var i = 0
+            while i < resolved.len():
+                val pkg = resolved[i]
+                lock_entries.push(LockEntry(
+                    name: pkg.name, version: pkg.version,
+                    resolved: pkg.resolved_url, integrity: pkg.integrity
+                ))
+                i = i + 1
+            write_lockfile(lock_entries, config.lockfile_name)
+
+            print "snpm: installed {resolved.len()} packages"
+
+fn _install_package(config: SnpmConfig, spec: text):
+    """Install a single package and add to package.sdn."""
+    # Parse name@version
+    var name = spec
+    var version = "*"
+    val at_idx = _find_at(spec)
+    if at_idx > 0:
+        name = spec.slice(0, at_idx)
+        version = spec.slice(at_idx + 1, spec.len())
+
+    print "snpm: installing {name}@{version}..."
+    rt_mkdir(config.modules_dir)
+
+    # Add to manifest
+    if rt_file_exists(config.manifest_name):
+        val manifest_result = parse_manifest(config.manifest_name)
+        match manifest_result:
+            Ok(manifest):
+                # Check if already exists
+                var found = false
+                var i = 0
+                while i < manifest.dependencies.len():
+                    if manifest.dependencies[i].first == name:
+                        found = true
+                    i = i + 1
+                if not found:
+                    manifest.dependencies.push(Pair(first: name, second: "^{version}"))
+                    write_manifest(manifest, config.manifest_name)
+                    print "snpm: added {name} to dependencies"
+            Err(msg):
+                print "snpm: {msg}"
+    else:
+        print "snpm: no {config.manifest_name}, creating one..."
+        var manifest = SnpmManifest.empty()
+        manifest.dependencies.push(Pair(first: name, second: "^{version}"))
+        write_manifest(manifest, config.manifest_name)
+
+fn _find_at(s: text) -> i64:
+    # Find '@' that's not at position 0 (scoped packages start with @)
+    var i = 1
+    for ch in s:
+        if i > 0 and ch == "@":
+            return i
+        i = i + 1
+    -1

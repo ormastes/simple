@@ -1,0 +1,169 @@
+# Pixel Comparison Engine
+#
+# Compares two rendered pixel buffers for CSS ref test validation.
+# Supports exact matching, fuzzy matching (per-channel tolerance),
+# and generates diff statistics.
+#
+# Used by reftest_runner.spl to validate browser rendering output
+# against reference renderings.
+
+# =========================================================================
+# Comparison Result
+# =========================================================================
+
+class CompareResult:
+    passed: bool
+    total_pixels: i64
+    mismatched_pixels: i64
+    max_channel_delta: i64
+    mismatch_percentage: f64
+
+    static fn perfect(total: i64) -> CompareResult:
+        CompareResult(
+            passed: true,
+            total_pixels: total,
+            mismatched_pixels: 0,
+            max_channel_delta: 0,
+            mismatch_percentage: 0.0
+        )
+
+    fn summary() -> text:
+        if self.passed:
+            return "PASS ({self.total_pixels} pixels, 0 mismatches)"
+        return "FAIL ({self.mismatched_pixels}/{self.total_pixels} mismatched, {self.mismatch_percentage}%, max delta={self.max_channel_delta})"
+
+# =========================================================================
+# Exact Pixel Comparison
+# =========================================================================
+
+fn compare_exact(buffer_a: [u32], buffer_b: [u32], width: i32, height: i32) -> CompareResult:
+    """Compare two pixel buffers for exact equality.
+    Each element is a u32 ARGB pixel.
+    """
+    val total = width * height
+    if buffer_a.len() != buffer_b.len():
+        return CompareResult(
+            passed: false,
+            total_pixels: total.to_i64(),
+            mismatched_pixels: total.to_i64(),
+            max_channel_delta: 255,
+            mismatch_percentage: 100.0
+        )
+
+    var mismatched = 0
+    var max_delta = 0
+    var i = 0
+    while i < buffer_a.len():
+        if buffer_a[i] != buffer_b[i]:
+            mismatched = mismatched + 1
+            val delta = pixel_max_delta(buffer_a[i], buffer_b[i])
+            if delta > max_delta:
+                max_delta = delta
+        i = i + 1
+
+    val total_i64 = total.to_i64()
+    val pct = if total_i64 > 0: (mismatched.to_f64() / total_i64.to_f64()) * 100.0 else: 0.0
+
+    CompareResult(
+        passed: mismatched == 0,
+        total_pixels: total_i64,
+        mismatched_pixels: mismatched.to_i64(),
+        max_channel_delta: max_delta.to_i64(),
+        mismatch_percentage: pct
+    )
+
+# =========================================================================
+# Fuzzy Pixel Comparison (per-channel tolerance)
+# =========================================================================
+
+fn compare_fuzzy(buffer_a: [u32], buffer_b: [u32], width: i32, height: i32, tolerance: i32) -> CompareResult:
+    """Compare two pixel buffers allowing per-channel differences up to tolerance.
+    tolerance: maximum allowed difference per R/G/B/A channel (0-255).
+    """
+    val total = width * height
+    if buffer_a.len() != buffer_b.len():
+        return CompareResult(
+            passed: false,
+            total_pixels: total.to_i64(),
+            mismatched_pixels: total.to_i64(),
+            max_channel_delta: 255,
+            mismatch_percentage: 100.0
+        )
+
+    var mismatched = 0
+    var max_delta = 0
+    var i = 0
+    while i < buffer_a.len():
+        val delta = pixel_max_delta(buffer_a[i], buffer_b[i])
+        if delta > max_delta:
+            max_delta = delta
+        if delta > tolerance:
+            mismatched = mismatched + 1
+        i = i + 1
+
+    val total_i64 = total.to_i64()
+    val pct = if total_i64 > 0: (mismatched.to_f64() / total_i64.to_f64()) * 100.0 else: 0.0
+
+    CompareResult(
+        passed: mismatched == 0,
+        total_pixels: total_i64,
+        mismatched_pixels: mismatched.to_i64(),
+        max_channel_delta: max_delta.to_i64(),
+        mismatch_percentage: pct
+    )
+
+# =========================================================================
+# Diff Image Generation
+# =========================================================================
+
+fn generate_diff_buffer(buffer_a: [u32], buffer_b: [u32], width: i32, height: i32) -> [u32]:
+    """Generate a diff image highlighting mismatched pixels.
+    Matching pixels are rendered at 25% opacity; mismatched pixels are red.
+    """
+    var diff: [u32] = []
+    var i = 0
+    val len = if buffer_a.len() < buffer_b.len(): buffer_a.len() else: buffer_b.len()
+    while i < len:
+        if buffer_a[i] == buffer_b[i]:
+            # Match: dim the original pixel
+            val pixel = buffer_a[i]
+            val r = (pixel / 16777216) % 256
+            val g = (pixel / 65536) % 256
+            val b = (pixel / 256) % 256
+            val dimmed = ((r / 4) * 16777216) + ((g / 4) * 65536) + ((b / 4) * 256) + 255
+            diff = diff + [dimmed]
+        else:
+            # Mismatch: bright red
+            diff = diff + [0xFF0000FF]
+        i = i + 1
+    diff
+
+# =========================================================================
+# Pixel Utilities
+# =========================================================================
+
+fn pixel_max_delta(a: u32, b: u32) -> i32:
+    """Compute the maximum per-channel difference between two ARGB pixels."""
+    val ra = ((a / 16777216) % 256).to_i32()
+    val ga = ((a / 65536) % 256).to_i32()
+    val ba = ((a / 256) % 256).to_i32()
+    val aa = (a % 256).to_i32()
+
+    val rb = ((b / 16777216) % 256).to_i32()
+    val gb = ((b / 65536) % 256).to_i32()
+    val bb = ((b / 256) % 256).to_i32()
+    val ab = (b % 256).to_i32()
+
+    val dr = abs_i32(ra - rb)
+    val dg = abs_i32(ga - gb)
+    val db = abs_i32(ba - bb)
+    val da = abs_i32(aa - ab)
+
+    var max_d = dr
+    if dg > max_d: max_d = dg
+    if db > max_d: max_d = db
+    if da > max_d: max_d = da
+    max_d
+
+fn abs_i32(v: i32) -> i32:
+    if v < 0: 0 - v else: v
