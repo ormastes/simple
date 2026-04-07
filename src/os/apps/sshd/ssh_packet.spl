@@ -130,45 +130,47 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<(SshPacket, u64), text>:
     """Read one SSH packet from raw bytes. Returns (packet, bytes_consumed).
 
     Expects unencrypted data. For encrypted packets see ssh_cipher.spl.
+    NOTE: Uses var (mutable) locals and manual byte reads instead of
+    ssh_get_u32 to work around baremetal codegen bug where val locals
+    from function returns corrupt in arithmetic/comparisons.
     """
-    val avail = data.len() - offset
+    var avail: u64 = data.len() - offset
 
-    # Need at least 5 bytes (4 length + 1 padding_length)
     if avail < 5:
         return Err("ssh_packet_read: need at least 5 bytes")
 
-    # Read 4-byte packet_length (big-endian)
-    val packet_length = ssh_get_u32(data, offset).to_u64()
+    # Read packet_length manually from 4 big-endian bytes
+    var packet_length: u64 = 0
+    var b0: u64 = data[offset].to_u64()
+    var b1: u64 = data[offset + 1].to_u64()
+    var b2: u64 = data[offset + 2].to_u64()
+    var b3: u64 = data[offset + 3].to_u64()
+    packet_length = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
 
-    # Sanity check
     if packet_length < 2:
         return Err("ssh_packet_read: packet_length too small")
-    if packet_length > SSH_MAX_PACKET:
+    if packet_length > 35000:
         return Err("ssh_packet_read: packet_length exceeds max")
 
-    val total = 4 + packet_length  # 4 for the length field itself
+    var total: u64 = 4 + packet_length
     if avail < total:
         return Err("ssh_packet_read: incomplete packet")
 
-    # Read 1-byte padding_length
-    val padding_length = data[offset + 4].to_u64()
+    # Read padding_length byte
+    var padding_length: u64 = data[offset + 4].to_u64()
 
-    # payload_length = packet_length - padding_length - 1
     if padding_length + 1 > packet_length:
         return Err("ssh_packet_read: padding exceeds packet")
-    val payload_length = packet_length - padding_length - 1
+    var payload_length: u64 = packet_length - padding_length - 1
 
     # Extract payload
-    val payload_start = offset + 5
     var payload: [u8] = []
     var i: u64 = 0
     while i < payload_length:
-        payload.push(data[payload_start + i])
+        payload.push(data[offset + 5 + i])
         i = i + 1
 
-    # Skip padding (we don't need its contents)
-    val consumed = total
-    Ok((SshPacket(payload: payload, sequence: 0), consumed))
+    Ok((SshPacket(payload: payload, sequence: 0), total))
 
 # ============================================================================
 # Packet Build (plaintext)
