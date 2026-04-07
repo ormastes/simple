@@ -219,7 +219,7 @@ var g_editor_cursor_y: u64 = 3    # Cursor line (0-based)
 var g_editor_scroll_y: u64 = 0    # Scroll offset
 var g_editor_line_count: u64 = 8  # Total lines
 
-# File Explorer (Window 2) state
+# Legacy file explorer state (still used by handle_files_click)
 var g_files_selected: u64 = 0     # Selected item index (0-5)
 var g_files_view_mode: u64 = 0    # 0=icon, 1=list
 var g_files_sidebar_sel: u64 = 0  # Selected sidebar item (0-4)
@@ -1714,40 +1714,54 @@ fn handle_editor_click(local_x: u64, local_y: u64):
         else:
             g_editor_cursor_x = 29
 
-fn handle_files_click(local_x: u64, local_y: u64):
-    """Handle click in file explorer content area."""
-    # Browser content area click handler (legacy file explorer click zones)
-    if local_x < 110:
-        # Sidebar click -- map Y to sidebar item index
-        # Items at sb_y offsets: 22(Desktop), 41(Documents), 59(Downloads), 77(Apps), 118(SimpleHD)
-        if local_y >= 118 and local_y < 140:
-            g_files_sidebar_sel = 4
-            serial_println("[Files] Sidebar: SimpleHD")
-        else:
-            if local_y >= 77 and local_y < 97:
-                g_files_sidebar_sel = 3
-                serial_println("[Files] Sidebar: Apps")
-            else:
-                if local_y >= 59 and local_y < 77:
-                    g_files_sidebar_sel = 2
-                    serial_println("[Files] Sidebar: Downloads")
-                else:
-                    if local_y >= 41 and local_y < 59:
-                        g_files_sidebar_sel = 1
-                        serial_println("[Files] Sidebar: Documents")
-                    else:
-                        if local_y >= 22 and local_y < 41:
-                            g_files_sidebar_sel = 0
-                            serial_println("[Files] Sidebar: Desktop")
-    else:
-        # Icon grid click -- icon_w=56, gap_x=12, icon_h=60, gap_y=8
-        val grid_x = (local_x - 110) / 68  # 56 + 12 = 68px per column
-        val grid_y = local_y / 68           # 60 + 8 = 68px per row
-        if grid_x < 3:
-            val idx = grid_y * 3 + grid_x
-            if idx < 6:
-                g_files_selected = idx
-                serial_println("[Files] Item selected")
+fn handle_browser_click(local_x: u64, local_y: u64):
+    """Handle click in browser content area."""
+    # Toolbar area: y < 30 (toolbar height)
+    if local_y < 30:
+        # Back button: x 10-30
+        if local_x >= 10 and local_x < 30:
+            browser_go_back()
+            serial_println("[Browser] Back")
+            return
+        # Forward button: x 34-54
+        if local_x >= 34 and local_x < 54:
+            browser_go_forward()
+            serial_println("[Browser] Forward")
+            return
+        # Reload: x 58-78
+        if local_x >= 58 and local_x < 78:
+            serial_println("[Browser] Reload")
+            return
+        # URL bar: x >= 82
+        if local_x >= 82:
+            g_browser_input_active = 1
+            serial_println("[Browser] Address bar focused")
+            return
+        return
+    # Content area: y >= 32 (below toolbar)
+    # Unfocus address bar when clicking content
+    g_browser_input_active = 0
+    # Check for link clicks based on current page
+    val content_y = local_y - 32  # Offset below toolbar
+    if g_browser_page == 0:
+        # Home page links (at y offsets relative to content area)
+        # Link 1: "About SimpleOS" at ~y+128
+        if content_y >= 128 and content_y < 146:
+            browser_navigate(3)
+            serial_println("[Browser] -> about:about")
+        # Link 2: "System Info" at ~y+152
+        if content_y >= 152 and content_y < 170:
+            browser_navigate(2)
+            serial_println("[Browser] -> about:sysinfo")
+        # Link 3: "Help" at ~y+176
+        if content_y >= 176 and content_y < 194:
+            browser_navigate(1)
+            serial_println("[Browser] -> about:help")
+    if g_browser_page == 1 or g_browser_page == 2 or g_browser_page == 3:
+        # "< Back to Home" link (last item on each page)
+        if content_y >= 140 and content_y < 160:
+            browser_navigate(0)
+            serial_println("[Browser] -> about:home")
 
 # ===========================================================================
 # Application Window Content
@@ -2902,9 +2916,25 @@ fn spl_start():
                             handle_terminal_enter()
                             key_handled = 1
                             needs_redraw = 1
+                        if active_win == 2 and g_browser_input_active == 1:
+                            browser_navigate_url()
+                            g_browser_input_active = 0
+                            key_handled = 1
+                            needs_redraw = 1
                     if scancode == 0x0E:  # Backspace
                         if active_win == 0:
                             handle_terminal_backspace()
+                            key_handled = 1
+                            needs_redraw = 1
+                        if active_win == 2 and g_browser_input_active == 1:
+                            if g_browser_url_len > 0:
+                                g_browser_url_len = g_browser_url_len - 1
+                                browser_set_url_char(g_browser_url_len, 0)
+                            key_handled = 1
+                            needs_redraw = 1
+                    if scancode == 0x01:  # Escape
+                        if active_win == 2:
+                            g_browser_input_active = 0
                             key_handled = 1
                             needs_redraw = 1
                     # Letter/symbol keys forwarded to active app
@@ -2913,6 +2943,14 @@ fn spl_start():
                             val ch = scancode_to_ascii(scancode)
                             if ch != 0:
                                 handle_terminal_char(ch)
+                                key_handled = 1
+                                needs_redraw = 1
+                        if active_win == 2 and g_browser_input_active == 1:
+                            val ch = scancode_to_ascii(scancode)
+                            if ch != 0:
+                                if g_browser_url_len < 40:
+                                    browser_set_url_char(g_browser_url_len, ch)
+                                    g_browser_url_len = g_browser_url_len + 1
                                 key_handled = 1
                                 needs_redraw = 1
 
@@ -3075,7 +3113,7 @@ fn spl_start():
                                     if active_win == 1:
                                         handle_editor_click(local_x, local_y)
                                     if active_win == 2:
-                                        handle_files_click(local_x, local_y)
+                                        handle_browser_click(local_x, local_y)
                                     needs_redraw = 1
 
                     # Button released — stop dragging
