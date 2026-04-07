@@ -75,9 +75,9 @@ val TITLE_BAR_H: u64 = 44
 val DARK_BG_TOP: u64       = 0x00060508   # Slightly warm dark — naturalistic tone
 val DARK_BG_BOT: u64       = 0x00200840   # Brighter purple, more vibrant
 val DARK_SURFACE: u64      = 0x001E1E23   # Glass surface color
-val DARK_SURFACE_A: u64    = 55           # 22% opacity (more visible glass — background still shows through)
+val DARK_SURFACE_A: u64    = 35           # 14% opacity (very transparent glass)
 val DARK_ELEVATED: u64     = 0x002C2C32   # Elevated glass
-val DARK_ELEVATED_A: u64   = 130          # 51% opacity (glass-like translucent title bar)
+val DARK_ELEVATED_A: u64   = 50           # 20% opacity (very transparent title bar — blur shows through)
 val DARK_BORDER: u64       = 0x00FFFFFF   # Glass border (white)
 val DARK_BORDER_A: u64     = 100          # 39% opacity (thicker visual weight)
 val DARK_TEXT: u64         = 0x00F5F5F7   # Primary text
@@ -94,7 +94,7 @@ val LIGHT_BG_BOT: u64      = 0x00F5F0FF   # Warmer white-lavender
 val LIGHT_SURFACE: u64     = 0x00F8F0FF   # Glass surface (slight lavender tint)
 val LIGHT_SURFACE_A: u64   = 65           # 25% opacity (slightly more opaque for light — opposite of dark's transparency)
 val LIGHT_ELEVATED: u64    = 0x00FFF0F8   # Elevated glass (stronger pink tint for title bars)
-val LIGHT_ELEVATED_A: u64  = 155          # 61% opacity (stronger glass title bar — more visible in thumbnails)
+val LIGHT_ELEVATED_A: u64  = 110          # 43% opacity (glass title bar — lighter for correct gradient)
 val LIGHT_BORDER: u64      = 0x00000000   # Glass border (black)
 val LIGHT_BORDER_A: u64    = 90           # 35% opacity (more visible border)
 val LIGHT_TEXT: u64        = 0x00201820   # Primary text (slightly warm black)
@@ -158,19 +158,21 @@ val BANNER_H: u64 = 44
 val GRID_COL_SPACING: u64 = 72
 val GRID_ROW_SPACING: u64 = 50
 
-# Window positions (will be replaced by layout engine later)
-val WIN0_X: u64 = 60
-val WIN0_Y: u64 = 60
+# Window sizes (fixed)
 val WIN0_W: u64 = 420
 val WIN0_H: u64 = 300
-val WIN1_X: u64 = 300
-val WIN1_Y: u64 = 160
 val WIN1_W: u64 = 380
 val WIN1_H: u64 = 260
-val WIN2_X: u64 = 540
-val WIN2_Y: u64 = 300
 val WIN2_W: u64 = 340
 val WIN2_H: u64 = 220
+
+# Window positions (mutable — draggable)
+var WIN0_X: u64 = 60
+var WIN0_Y: u64 = 60
+var WIN1_X: u64 = 300
+var WIN1_Y: u64 = 160
+var WIN2_X: u64 = 540
+var WIN2_Y: u64 = 300
 
 # Animation globals (module-level state for focus transitions)
 var g_anim_progress: u64 = 100  # 0-100 (0=start, 100=done)
@@ -199,6 +201,11 @@ var g_mouse_y: u64 = 384
 var g_mouse_buttons: u64 = 0
 var g_mouse_prev_buttons: u64 = 0
 var g_mouse_initialized: u64 = 0
+
+# Drag state
+var g_dragging: u64 = 0         # 0=not dragging, 1/2/3=dragging window 0/1/2 (offset by 1)
+var g_drag_offset_x: u64 = 0    # offset from mouse to window left
+var g_drag_offset_y: u64 = 0    # offset from mouse to window top
 
 # Bounce easing: overshoot then settle (integer approximation)
 # Maps progress 0-100 to offset 0-N-0 with overshoot
@@ -2281,9 +2288,81 @@ fn spl_start():
                     # Left click detection
                     val left_pressed = g_mouse_buttons & 1
                     val left_was = g_mouse_prev_buttons & 1
+
+                    # Button just pressed — hit test for focus + start drag
                     if left_pressed == 1:
                         if left_was == 0:
                             serial_println("[WM] Mouse click")
+                            # Hit test windows back-to-front (win2, win1, win0)
+                            # Window 2 (Finder)
+                            if g_mouse_x >= WIN2_X:
+                                if g_mouse_x < WIN2_X + WIN2_W:
+                                    if g_mouse_y >= WIN2_Y:
+                                        if g_mouse_y < WIN2_Y + WIN2_H:
+                                            if active_win != 2:
+                                                active_win = 2
+                                                animating = 1
+                                                anim_start = anim_frame
+                                                g_anim_progress = 0
+                                            # Start drag if in title bar
+                                            if g_mouse_y < WIN2_Y + TITLE_BAR_H:
+                                                g_dragging = 3
+                                                g_drag_offset_x = g_mouse_x - WIN2_X
+                                                g_drag_offset_y = g_mouse_y - WIN2_Y
+                            # Window 1 (Editor)
+                            if g_dragging == 0:
+                                if g_mouse_x >= WIN1_X:
+                                    if g_mouse_x < WIN1_X + WIN1_W:
+                                        if g_mouse_y >= WIN1_Y:
+                                            if g_mouse_y < WIN1_Y + WIN1_H:
+                                                if active_win != 1:
+                                                    active_win = 1
+                                                    animating = 1
+                                                    anim_start = anim_frame
+                                                    g_anim_progress = 0
+                                                if g_mouse_y < WIN1_Y + TITLE_BAR_H:
+                                                    g_dragging = 2
+                                                    g_drag_offset_x = g_mouse_x - WIN1_X
+                                                    g_drag_offset_y = g_mouse_y - WIN1_Y
+                            # Window 0 (Terminal)
+                            if g_dragging == 0:
+                                if g_mouse_x >= WIN0_X:
+                                    if g_mouse_x < WIN0_X + WIN0_W:
+                                        if g_mouse_y >= WIN0_Y:
+                                            if g_mouse_y < WIN0_Y + WIN0_H:
+                                                if active_win != 0:
+                                                    active_win = 0
+                                                    animating = 1
+                                                    anim_start = anim_frame
+                                                    g_anim_progress = 0
+                                                if g_mouse_y < WIN0_Y + TITLE_BAR_H:
+                                                    g_dragging = 1
+                                                    g_drag_offset_x = g_mouse_x - WIN0_X
+                                                    g_drag_offset_y = g_mouse_y - WIN0_Y
+
+                    # Dragging — update window position
+                    if g_dragging != 0:
+                        if left_pressed == 1:
+                            if g_dragging == 1:
+                                if g_mouse_x >= g_drag_offset_x:
+                                    WIN0_X = g_mouse_x - g_drag_offset_x
+                                if g_mouse_y >= g_drag_offset_y:
+                                    WIN0_Y = g_mouse_y - g_drag_offset_y
+                            if g_dragging == 2:
+                                if g_mouse_x >= g_drag_offset_x:
+                                    WIN1_X = g_mouse_x - g_drag_offset_x
+                                if g_mouse_y >= g_drag_offset_y:
+                                    WIN1_Y = g_mouse_y - g_drag_offset_y
+                            if g_dragging == 3:
+                                if g_mouse_x >= g_drag_offset_x:
+                                    WIN2_X = g_mouse_x - g_drag_offset_x
+                                if g_mouse_y >= g_drag_offset_y:
+                                    WIN2_Y = g_mouse_y - g_drag_offset_y
+
+                    # Button released — stop dragging
+                    if left_pressed == 0:
+                        if g_dragging != 0:
+                            g_dragging = 0
 
                     needs_redraw = 1
 

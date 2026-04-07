@@ -220,20 +220,20 @@ static inline uint32_t alpha_blend(uint32_t dst, uint32_t src, uint8_t alpha)
     return 0xFF000000u | (rr << 16) | (rg << 8) | rb;
 }
 
-/* Linear interpolation between two colors */
+/* Linear interpolation between two colors (signed to fix gradient banding) */
 static inline uint32_t lerp_color(uint32_t c1, uint32_t c2, uint32_t t, uint32_t max)
 {
     if (max == 0) return c1;
     uint32_t r1 = (c1 >> 16) & 0xFF, g1 = (c1 >> 8) & 0xFF, b1 = c1 & 0xFF;
     uint32_t r2 = (c2 >> 16) & 0xFF, g2 = (c2 >> 8) & 0xFF, b2 = c2 & 0xFF;
-    uint32_t r = r1 + ((r2 - r1) * t + max / 2) / max;
-    uint32_t g = g1 + ((g2 - g1) * t + max / 2) / max;
-    uint32_t b = b1 + ((b2 - b1) * t + max / 2) / max;
-    /* Clamp (handles underflow from unsigned subtraction) */
-    if (r > 255) r = (r2 > r1) ? 255 : 0;
-    if (g > 255) g = (g2 > g1) ? 255 : 0;
-    if (b > 255) b = (b2 > b1) ? 255 : 0;
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
+    /* Signed math prevents unsigned underflow when c2 channel < c1 channel */
+    int32_t r = (int32_t)r1 + ((int32_t)r2 - (int32_t)r1) * (int32_t)t / (int32_t)max;
+    int32_t g = (int32_t)g1 + ((int32_t)g2 - (int32_t)g1) * (int32_t)t / (int32_t)max;
+    int32_t b = (int32_t)b1 + ((int32_t)b2 - (int32_t)b1) * (int32_t)t / (int32_t)max;
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
 /* ===================================================================
@@ -661,7 +661,7 @@ RuntimeValue rt_gui_rounded_rect(RuntimeValue xy, RuntimeValue wh,
             x_end = w - (radius - dx);
         } else if (row >= h - radius) {
             /* Bottom corners */
-            uint32_t dy = row - (h - radius - 1);
+            uint32_t dy = row - (h - radius);
             uint32_t dx = 0;
             while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) dx++;
             x_start = radius - dx;
@@ -1324,18 +1324,18 @@ RuntimeValue rt_gui_rounded_rect_aa(RuntimeValue xy, RuntimeValue wh,
                 in_corner = 1;
             } else if (col >= w - radius && row < radius) {
                 /* Top-right corner */
-                cx = col - (w - radius - 1);
+                cx = col - (w - radius);
                 cy = radius - row;
                 in_corner = 1;
             } else if (col < radius && row >= h - radius) {
                 /* Bottom-left corner */
                 cx = radius - col;
-                cy = row - (h - radius - 1);
+                cy = row - (h - radius);
                 in_corner = 1;
             } else if (col >= w - radius && row >= h - radius) {
                 /* Bottom-right corner */
-                cx = col - (w - radius - 1);
-                cy = row - (h - radius - 1);
+                cx = col - (w - radius);
+                cy = row - (h - radius);
                 in_corner = 1;
             }
 
@@ -1533,7 +1533,7 @@ RuntimeValue rt_gui_gradient_rect(RuntimeValue xy, RuntimeValue wh,
             x_start = radius - dx;
             x_end = w - (radius - dx);
         } else if (row >= h - radius) {
-            uint32_t dy = row - (h - radius - 1);
+            uint32_t dy = row - (h - radius);
             uint32_t dx = 0;
             while ((dx + 1) * (dx + 1) + dy * dy <= radius * radius) dx++;
             x_start = radius - dx;
