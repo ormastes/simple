@@ -1,0 +1,175 @@
+"""
+# RV64 PLIC — Platform-Level Interrupt Controller
+
+Implements the RISC-V PLIC specification for external interrupt routing.
+Supports up to 1024 interrupt sources and multiple hart contexts.
+
+QEMU virt PLIC layout:
+  0x000000 - 0x000FFF : Source priorities (4 bytes each, source 0 reserved)
+  0x001000 - 0x001FFF : Pending bits (1 bit per source)
+  0x002000 - 0x1FFFFF : Enable bits per context (1 bit per source per context)
+  0x200000 - 0x3FFFFF : Per-context registers (priority threshold + claim/complete)
+"""
+
+val PLIC_MAX_SOURCES: i64 = 64    # Practical limit for emulation
+val PLIC_MAX_CONTEXTS: i64 = 16   # 2 per hart (M-mode, S-mode)
+
+val PLIC_PRIORITY_BASE: i64 = 0x000000
+val PLIC_PENDING_BASE: i64 = 0x001000
+val PLIC_ENABLE_BASE: i64 = 0x002000
+val PLIC_CONTEXT_BASE: i64 = 0x200000
+val PLIC_CONTEXT_STRIDE: i64 = 0x1000
+
+class Rv64Plic:
+    priorities: [i64]      # Priority per source
+    pending: [bool]        # Pending bit per source
+    claimed: [bool]        # Claimed bit per source
+    enable: [i64]          # Enable bits: [context * max_sources_words + word_idx]
+    threshold: [i64]       # Priority threshold per context
+    num_sources: i64
+    num_contexts: i64
+
+    static fn create(num_sources: i64, num_contexts: i64) -> Rv64Plic:
+        var prio: [i64] = []
+        var pend: [bool] = []
+        var claim: [bool] = []
+        var i = 0
+        while i < num_sources:
+            prio = prio + [0]
+            pend = pend + [false]
+            claim = claim + [false]
+            i = i + 1
+
+        # Enable bits: words of 64 bits each
+        val words_per_ctx = (num_sources + 63) / 64
+        var en: [i64] = []
+        i = 0
+        while i < num_contexts * words_per_ctx:
+            en = en + [0]
+            i = i + 1
+
+        var thresh: [i64] = []
+        i = 0
+        while i < num_contexts:
+            thresh = thresh + [0]
+            i = i + 1
+
+        Rv64Plic(
+            priorities: prio, pending: pend, claimed: claim,
+            enable: en, threshold: thresh,
+            num_sources: num_sources, num_contexts: num_contexts
+        )
+
+    fn _words_per_ctx() -> i64:
+        (self.num_sources + 63) / 64
+
+    fn _is_enabled(context: i64, source: i64) -> bool:
+        """Check if a source is enabled for a context."""
+        val wpc = self._words_per_ctx()
+        val word_idx = source / 64
+        val bit_idx = source - (word_idx * 64)
+        val idx = context * wpc + word_idx
+        (self.enable[idx] and (1 << bit_idx)) != 0
+
+    me set_pending(source: i64):
+        """Set interrupt source as pending."""
+        if source > 0 and source < self.num_sources:
+            self.pending[source] = true
+
+    me clear_pending(source: i64):
+        """Clear pending bit for a source."""
+        if source > 0 and source < self.num_sources:
+            self.pending[source] = false
+
+    fn claim(context: i64) -> i64:
+        """Claim the highest-priority pending interrupt for a context.
+        Returns source ID, or 0 if no interrupt."""
+        var best_source: i64 = 0
+        var best_prio: i64 = 0
+        val thresh = self.threshold[context]
+
+        var src = 1
+        while src < self.num_sources:
+            if self.pending[src] and (self.claimed[src] == false):
+                if self._is_enabled(context, src):
+                    val prio = self.priorities[src]
+                    if prio > thresh and prio > best_prio:
+                        best_source = src
+                        best_prio = prio
+            src = src + 1
+
+        best_source
+
+    me do_claim(context: i64) -> i64:
+        """Claim and mark as claimed."""
+        val src = self.claim(context)
+        if src != 0:
+            self.claimed[src] = true
+            self.pending[src] = false
+        src
+
+    me complete(context: i64, source: i64):
+        """Complete (acknowledge) an interrupt."""
+        if source > 0 and source < self.num_sources:
+            self.claimed[source] = false
+
+    fn has_pending(context: i64) -> bool:
+        """Check if any interrupt is pending above threshold for context."""
+        self.claim(context) != 0
+
+    fn read(offset: i64) -> i64:
+        """Read PLIC register by offset."""
+        if offset >= PLIC_PRIORITY_BASE and offset < PLIC_PENDING_BASE:
+            val source = (offset - PLIC_PRIORITY_BASE) / 4
+            if source < self.num_sources: self.priorities[source] else: 0
+
+        elif offset >= PLIC_PENDING_BASE and offset < PLIC_ENABLE_BASE:
+            # Read pending bits as 32-bit word
+            val word_off = (offset - PLIC_PENDING_BASE) / 4
+            val base_src = word_off * 32
+            var result: i64 = 0
+            var b = 0
+            while b < 32:
+                val src = base_src + b
+                if src < self.num_sources and self.pending[src]:
+                    result = result or (1 << b)
+                b = b + 1
+            result
+
+        elif offset >= PLIC_CONTEXT_BASE:
+            val ctx_off = offset - PLIC_CONTEXT_BASE
+            val context = ctx_off / PLIC_CONTEXT_STRIDE
+            val reg_off = ctx_off - (context * PLIC_CONTEXT_STRIDE)
+            if context < self.num_contexts:
+                if reg_off == 0: self.threshold[context]
+                elif reg_off == 4: self.claim(context)
+                else: 0
+            else: 0
+
+        else: 0
+
+    me write_reg(offset: i64, value: i64):
+        """Write PLIC register by offset."""
+        if offset >= PLIC_PRIORITY_BASE and offset < PLIC_PENDING_BASE:
+            val source = (offset - PLIC_PRIORITY_BASE) / 4
+            if source < self.num_sources:
+                self.priorities[source] = value and 0x7  # 3-bit priority
+
+        elif offset >= PLIC_ENABLE_BASE and offset < PLIC_CONTEXT_BASE:
+            val en_off = offset - PLIC_ENABLE_BASE
+            val context = en_off / 0x80  # 128 bytes per context
+            val word_off = (en_off - context * 0x80) / 8
+            val wpc = self._words_per_ctx()
+            val idx = context * wpc + word_off
+            if idx < self.num_contexts * wpc:
+                self.enable[idx] = value
+
+        elif offset >= PLIC_CONTEXT_BASE:
+            val ctx_off = offset - PLIC_CONTEXT_BASE
+            val context = ctx_off / PLIC_CONTEXT_STRIDE
+            val reg_off = ctx_off - (context * PLIC_CONTEXT_STRIDE)
+            if context < self.num_contexts:
+                if reg_off == 0:
+                    self.threshold[context] = value and 0x7
+                elif reg_off == 4:
+                    self.complete(context, value)

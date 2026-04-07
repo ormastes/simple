@@ -1,0 +1,350 @@
+# ITF CLI — Wiki commands (Confluence backend)
+#
+# Subcommands: list, view, edit, create, delete, search
+# gh-compatible flags: --json, --jq, --format, --web
+
+use app.itf.config.{ItfConfig, load_config}
+use app.itf.auth.{check_confluence_auth}
+use app.itf.adapter_confluence.{confluence_list_pages, confluence_get_page, confluence_create_page, confluence_update_page, confluence_delete_page, confluence_search_pages, PageListItem, PageContent, PageRef}
+use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json, should_use_color, open_in_browser}
+use std.common.report.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
+
+
+fn handle_wiki(args: [text]) -> i64:
+    """Dispatch wiki subcommands."""
+    if args.len() == 0:
+        _print_wiki_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "list" | "ls":
+            _wiki_list(action_args)
+        "view":
+            _wiki_view(action_args)
+        "edit":
+            _wiki_edit(action_args)
+        "create":
+            _wiki_create(action_args)
+        "delete" | "rm":
+            _wiki_delete(action_args)
+        "search":
+            _wiki_search(action_args)
+        "-h" | "--help" | "help":
+            _print_wiki_help()
+            0
+        _:
+            print_error("unknown wiki command: {action}")
+            _print_wiki_help()
+            1
+
+
+fn _require_confluence_auth() -> (bool, ItfConfig):
+    """Load config and verify Confluence auth. Returns (ok, config)."""
+    val config = load_config()
+    if not check_confluence_auth(config):
+        print_error("Confluence not configured. Run: itf auth login --confluence")
+        return (false, config)
+    (true, config)
+
+
+fn _wiki_list(args: [text]) -> i64:
+    """List wiki pages. Usage: itf wiki list [--space KEY] [--limit N] [--json fields]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val space = _extract_flag(args, "--space", config.confluence_default_space)
+    val limit_str = _extract_flag(args, "--limit", "25")
+    var limit = 25
+    if limit_str != "25":
+        # Simple integer parse
+        var n = 0
+        for ch in limit_str:
+            if ch >= "0" and ch <= "9":
+                n = n * 10 + (ch.to_i64() - "0".to_i64())
+        if n > 0:
+            limit = n
+
+    val (success, items, raw_json) = confluence_list_pages(config, space, limit)
+    if not success:
+        print_error("failed to list pages: {raw_json}")
+        return 1
+
+    # --web flag: open in browser
+    if _has_flag(args, "--web"):
+        return open_in_browser("{config.confluence_url}/spaces/{space}/pages")
+
+    # --json flag: output raw or filtered JSON
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    # Default: text table output
+    if items.len() == 0:
+        print "No pages found."
+        return 0
+
+    print_table_header(["ID", "TITLE", "STATUS", "MODIFIED"])
+    for item in items:
+        print_table_row([item.id, _truncate(item.title, 35), item.status, _truncate(item.last_modified, 20)])
+
+    0
+
+
+fn _wiki_view(args: [text]) -> i64:
+    """View a wiki page. Usage: itf wiki view <page-id> [--format markdown|storage] [--json fields]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page ID required. Usage: itf wiki view <page-id>")
+        return 1
+
+    val page_id = positionals[0]
+    val format = _extract_flag(args, "--format", "storage")
+
+    val (success, content, raw_json) = confluence_get_page(config, page_id)
+    if not success:
+        print_error("failed to get page {page_id}: {raw_json}")
+        return 1
+
+    # --web flag
+    if _has_flag(args, "--web") and content.ref.url != "":
+        return open_in_browser(content.ref.url)
+
+    # --json flag
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    # Text output
+    val use_color = should_use_color()
+    if use_color:
+        print "{ansi_bold()}{content.ref.title}{ansi_reset()}"
+        print "{ansi_dim()}Page ID: {content.ref.id} | Version: {content.ref.version} | Status: {content.ref.status}{ansi_reset()}"
+    else:
+        print content.ref.title
+        print "Page ID: {content.ref.id} | Version: {content.ref.version} | Status: {content.ref.status}"
+    print ""
+
+    if format == "markdown":
+        use app.itf.convert_storage.{storage_to_markdown}
+        print storage_to_markdown(content.body_storage)
+    else:
+        print content.body_storage
+
+    0
+
+
+fn _wiki_edit(args: [text]) -> i64:
+    """Edit a wiki page. Usage: itf wiki edit <page-id> [--mode markdown|storage] [--message MSG]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page ID required. Usage: itf wiki edit <page-id>")
+        return 1
+
+    val page_id = positionals[0]
+    val message = _extract_flag(args, "--message", "")
+
+    # Fetch current page
+    val (success, content, _raw) = confluence_get_page(config, page_id)
+    if not success:
+        print_error("failed to get page {page_id}: {_raw}")
+        return 1
+
+    val version = content.ref.version
+    val title = content.ref.title
+
+    # Write to temp file
+    use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_read_text}
+    use std.nogc_sync_mut.io.process_ops.{process_run}
+
+    val tmp_path = "/tmp/itf_edit_{page_id}.html"
+    file_write_text(tmp_path, content.body_storage)
+
+    # Open editor
+    val editor = _resolve_editor(config)
+    val (_, _, editor_code) = process_run(editor, [tmp_path])
+    if editor_code != 0:
+        print_error("editor exited with code {editor_code}")
+        return 2
+
+    # Read edited content
+    val edited = file_read_text(tmp_path)
+    if edited == nil:
+        print_error("could not read edited file")
+        return 1
+
+    # Check if changed
+    if edited == content.body_storage:
+        print "No changes made."
+        return 0
+
+    # Upload
+    val commit_msg = if message != "": message else: "Edited via itf CLI"
+    val (update_ok, updated_ref, update_raw) = confluence_update_page(config, page_id, title, edited, version, commit_msg)
+    if not update_ok:
+        print_error("failed to update page: {update_raw}")
+        return 1
+
+    print_success("Page updated: {updated_ref.title} (version {updated_ref.version})")
+    if updated_ref.url != "":
+        print updated_ref.url
+    0
+
+
+fn _wiki_create(args: [text]) -> i64:
+    """Create a wiki page. Usage: itf wiki create --space KEY --title T [--parent ID] [--from-file PATH]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val space = _extract_flag(args, "--space", config.confluence_default_space)
+    val title = _extract_flag(args, "--title", "")
+    val parent = _extract_flag(args, "--parent", "")
+    val from_file = _extract_flag(args, "--from-file", "")
+
+    if title == "":
+        print_error("--title required. Usage: itf wiki create --space KEY --title T")
+        return 1
+    if space == "":
+        print_error("--space required (or set confluence.default_space in config)")
+        return 1
+
+    # Read body from file or empty
+    var body = "<p></p>"
+    if from_file != "":
+        use std.nogc_sync_mut.file_system.file_ops.{file_read_text}
+        val content = file_read_text(from_file)
+        if content == nil:
+            print_error("could not read file: {from_file}")
+            return 1
+        body = content
+
+    val (success, ref, raw_json) = confluence_create_page(config, space, title, body, parent)
+    if not success:
+        print_error("failed to create page: {raw_json}")
+        return 1
+
+    # --json flag
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    print_success("Page created: {ref.title} (id: {ref.id})")
+    if ref.url != "":
+        print ref.url
+    0
+
+
+fn _wiki_delete(args: [text]) -> i64:
+    """Delete a wiki page. Usage: itf wiki delete <page-id> [--yes]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("page ID required. Usage: itf wiki delete <page-id>")
+        return 1
+
+    val page_id = positionals[0]
+
+    if not _has_flag(args, "--yes"):
+        print "Are you sure you want to delete page {page_id}? Use --yes to confirm."
+        return 2
+
+    val (success, err_msg) = confluence_delete_page(config, page_id)
+    if not success:
+        print_error("failed to delete page {page_id}: {err_msg}")
+        return 1
+
+    print_success("Page {page_id} deleted.")
+    0
+
+
+fn _wiki_search(args: [text]) -> i64:
+    """Search wiki pages. Usage: itf wiki search <query> [--space KEY] [--limit N] [--json fields]"""
+    val (ok, config) = _require_confluence_auth()
+    if not ok:
+        return 4
+
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("search query required. Usage: itf wiki search <query>")
+        return 1
+
+    val query = positionals[0]
+    val space = _extract_flag(args, "--space", config.confluence_default_space)
+    val limit_str = _extract_flag(args, "--limit", "25")
+    var limit = 25
+    if limit_str != "25":
+        var n = 0
+        for ch in limit_str:
+            if ch >= "0" and ch <= "9":
+                n = n * 10 + (ch.to_i64() - "0".to_i64())
+        if n > 0:
+            limit = n
+
+    val (success, items, raw_json) = confluence_search_pages(config, query, space, limit)
+    if not success:
+        print_error("search failed: {raw_json}")
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    if items.len() == 0:
+        print "No pages found matching \"{query}\"."
+        return 0
+
+    print_table_header(["ID", "TITLE", "SPACE", "STATUS"])
+    for item in items:
+        print_table_row([item.id, _truncate(item.title, 35), item.space_id, item.status])
+
+    0
+
+
+fn _resolve_editor(config: ItfConfig) -> text:
+    """Resolve editor from config/env."""
+    use std.nogc_sync_mut.env.{env_get}
+    use app.itf.config.{resolve_editor}
+    resolve_editor(config)
+
+
+fn _truncate(s: text, max_len: i64) -> text:
+    """Truncate text with ellipsis if too long."""
+    if s.len() <= max_len:
+        return s
+    s[0:max_len - 3] + "..."
+
+
+fn _print_wiki_help():
+    """Print wiki subcommand help."""
+    print "Usage: itf wiki <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  list, ls     List pages in a space"
+    print "  view         View a page"
+    print "  edit         Edit a page in \$EDITOR"
+    print "  create       Create a new page"
+    print "  delete, rm   Delete a page"
+    print "  search       Search pages by title"
+    print ""
+    print "Common flags:"
+    print "  --space KEY  Confluence space (or set default in config)"
+    print "  --json       Output as JSON"
+    print "  --jq EXPR    Filter JSON output (e.g. .[].title)"
+    print "  --web        Open in browser"
+    print "  --limit N    Max results (default: 25)"

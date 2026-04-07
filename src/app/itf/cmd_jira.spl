@@ -1,0 +1,165 @@
+# ITF CLI — Jira commands (acli backend)
+#
+# Subcommands: view, search, create
+# Delegates to acli via adapter_jira
+
+use app.itf.config.{ItfConfig, load_config}
+use app.itf.auth.{check_jira_auth}
+use app.itf.adapter_jira.{jira_view_issue, jira_search, jira_create_issue, JiraIssue}
+use app.itf.flags.{_extract_flag, _has_flag, _positional_args}
+use app.itf.output.{print_error, print_success, print_info, print_table_header, print_table_row, format_json_output, wants_json, should_use_color}
+use std.common.report.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
+
+
+fn handle_jira(args: [text]) -> i64:
+    """Dispatch jira subcommands."""
+    if args.len() == 0:
+        _print_jira_help()
+        return 0
+
+    val action = args[0]
+    val action_args = if args.len() > 1: args[1:] else: []
+
+    match action:
+        "view":
+            _jira_view(action_args)
+        "search":
+            _jira_search(action_args)
+        "create":
+            _jira_create(action_args)
+        "-h" | "--help" | "help":
+            _print_jira_help()
+            0
+        _:
+            print_error("unknown jira command: {action}")
+            _print_jira_help()
+            1
+
+
+fn _jira_view(args: [text]) -> i64:
+    """View a Jira issue. Usage: itf jira view <KEY> [--json]"""
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("issue key required. Usage: itf jira view <KEY>")
+        return 1
+
+    val key = positionals[0]
+    val (success, issue, raw_json) = jira_view_issue(config, key)
+    if not success:
+        print_error(raw_json)
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    # Text display
+    val use_color = should_use_color()
+    if use_color:
+        print "{ansi_bold()}{issue.key}: {issue.summary}{ansi_reset()}"
+        print "{ansi_dim()}Status: {issue.status} | Type: {issue.issue_type} | Priority: {issue.priority}{ansi_reset()}"
+    else:
+        print "{issue.key}: {issue.summary}"
+        print "Status: {issue.status} | Type: {issue.issue_type} | Priority: {issue.priority}"
+
+    if issue.assignee != "":
+        print "Assignee: {issue.assignee}"
+    if issue.description != "":
+        print ""
+        print issue.description
+
+    0
+
+
+fn _jira_search(args: [text]) -> i64:
+    """Search Jira issues. Usage: itf jira search <JQL> [--fields F] [--limit N] [--json]"""
+    val config = load_config()
+    val positionals = _positional_args(args)
+    if positionals.len() == 0:
+        print_error("JQL query required. Usage: itf jira search <JQL>")
+        return 1
+
+    val jql = positionals[0]
+    val fields = _extract_flag(args, "--fields", "")
+    val limit_str = _extract_flag(args, "--limit", "25")
+    var limit = 25
+    if limit_str != "25":
+        var n = 0
+        for ch in limit_str:
+            if ch >= "0" and ch <= "9":
+                n = n * 10 + (ch.to_i64() - "0".to_i64())
+        if n > 0:
+            limit = n
+
+    val (success, issues, raw_json) = jira_search(config, jql, fields, limit)
+    if not success:
+        print_error(raw_json)
+        return 1
+
+    if wants_json(args):
+        print format_json_output(raw_json, args)
+        return 0
+
+    if issues.len() == 0:
+        print "No issues found."
+        return 0
+
+    print_table_header(["KEY", "STATUS", "ASSIGNEE", "SUMMARY"])
+    for issue in issues:
+        print_table_row([issue.key, _truncate(issue.status, 15), _truncate(issue.assignee, 15), _truncate(issue.summary, 40)])
+
+    0
+
+
+fn _jira_create(args: [text]) -> i64:
+    """Create a Jira issue. Usage: itf jira create --project P --summary S [--type T] [--description D]"""
+    val config = load_config()
+    val project = _extract_flag(args, "--project", "")
+    val summary = _extract_flag(args, "--summary", "")
+    val issue_type = _extract_flag(args, "--type", "")
+    val description = _extract_flag(args, "--description", "")
+
+    if project == "":
+        print_error("--project required. Usage: itf jira create --project P --summary S")
+        return 1
+    if summary == "":
+        print_error("--summary required.")
+        return 1
+
+    val (success, key, raw) = jira_create_issue(config, project, summary, issue_type, description)
+    if not success:
+        print_error("failed to create issue: {raw}")
+        return 1
+
+    if wants_json(args):
+        print raw
+        return 0
+
+    print_success("Issue created: {key}")
+    0
+
+
+fn _truncate(s: text, max_len: i64) -> text:
+    """Truncate text with ellipsis."""
+    if s.len() <= max_len:
+        return s
+    s[0:max_len - 3] + "..."
+
+
+fn _print_jira_help():
+    """Print jira subcommand help."""
+    print "Usage: itf jira <command> [flags]"
+    print ""
+    print "Commands:"
+    print "  view     View a Jira issue"
+    print "  search   Search issues with JQL"
+    print "  create   Create a new issue"
+    print ""
+    print "Common flags:"
+    print "  --json          Output as JSON"
+    print "  --jq EXPR       Filter JSON output"
+    print "  --fields F      Select output fields"
+    print "  --limit N       Max results (default: 25)"
+    print "  --project P     Jira project key"
+    print "  --type T        Issue type (Task, Bug, Story, etc.)"

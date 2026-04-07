@@ -1,0 +1,338 @@
+"""
+# RV64C Compressed Instruction Decompression
+
+Decompresses 16-bit RV64C instructions into 32-bit equivalents.
+Handles all three quadrants (Q0, Q1, Q2) including RV64-specific:
+C.LD, C.SD, C.ADDIW, C.LDSP, C.SDSP.
+"""
+
+# Re-export shared compressed helpers
+use hardware.riscv_common.core.riscv_compressed.{is_compressed, rvc_reg}
+
+use hardware.riscv_common.pkg.riscv_isa_pkg.*
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _bits(instr: i64, hi: i64, lo: i64) -> i64:
+    """Extract bits [hi:lo] from instr."""
+    (instr >> lo) and ((1 << (hi - lo + 1)) - 1)
+
+fn _bit(instr: i64, pos: i64) -> i64:
+    """Extract single bit."""
+    (instr >> pos) and 1
+
+fn _encode_r(opcode: i64, rd: i64, f3: i64, rs1: i64, rs2: i64, f7: i64) -> i64:
+    opcode or (rd << 7) or (f3 << 12) or (rs1 << 15) or (rs2 << 20) or (f7 << 25)
+
+fn _encode_i(opcode: i64, rd: i64, f3: i64, rs1: i64, imm: i64) -> i64:
+    opcode or (rd << 7) or (f3 << 12) or (rs1 << 15) or ((imm and 0xFFF) << 20)
+
+fn _encode_s(opcode: i64, f3: i64, rs1: i64, rs2: i64, imm: i64) -> i64:
+    val lo5 = imm and 0x1F
+    val hi7 = (imm >> 5) and 0x7F
+    opcode or (lo5 << 7) or (f3 << 12) or (rs1 << 15) or (rs2 << 20) or (hi7 << 25)
+
+fn _encode_u(opcode: i64, rd: i64, imm20: i64) -> i64:
+    opcode or (rd << 7) or ((imm20 and 0xFFFFF) << 12)
+
+# Illegal instruction sentinel
+val ILLEGAL_INSTR: i64 = 0x00000000
+
+# ---------------------------------------------------------------------------
+# Quadrant 0 (bits [1:0] = 00)
+# ---------------------------------------------------------------------------
+
+fn _decompress_q0(instr: i64) -> i64:
+    val funct3 = _bits(instr, 15, 13)
+
+    if funct3 == 0:
+        # C.ADDI4SPN -> addi rd', x2, nzuimm
+        val rd_c = rvc_reg(_bits(instr, 4, 2))
+        val imm = (_bit(instr, 5) << 3) or (_bit(instr, 6) << 2) or (_bits(instr, 10, 7) << 6) or (_bits(instr, 12, 11) << 4)
+        if imm == 0: ILLEGAL_INSTR
+        else: _encode_i(OP_OP_IMM, rd_c, 0, 2, imm)
+
+    elif funct3 == 1:
+        # C.FLD -> fld rd', offset(rs1')  (RV64)
+        val rd_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bits(instr, 6, 5) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_i(OP_LOAD_FP, rd_c, F3_LD, rs1_c, imm)
+
+    elif funct3 == 2:
+        # C.LW -> lw rd', offset(rs1')
+        val rd_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bit(instr, 5) << 6) or (_bits(instr, 12, 10) << 3) or (_bit(instr, 6) << 2)
+        _encode_i(OP_LOAD, rd_c, F3_LW, rs1_c, imm)
+
+    elif funct3 == 3:
+        # C.LD -> ld rd', offset(rs1')  (RV64-specific)
+        val rd_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bits(instr, 6, 5) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_i(OP_LOAD, rd_c, F3_LD, rs1_c, imm)
+
+    elif funct3 == 5:
+        # C.FSD -> fsd rs2', offset(rs1')
+        val rs2_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bits(instr, 6, 5) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_s(OP_STORE_FP, F3_SD, rs1_c, rs2_c, imm)
+
+    elif funct3 == 6:
+        # C.SW -> sw rs2', offset(rs1')
+        val rs2_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bit(instr, 5) << 6) or (_bits(instr, 12, 10) << 3) or (_bit(instr, 6) << 2)
+        _encode_s(OP_STORE, F3_SW, rs1_c, rs2_c, imm)
+
+    elif funct3 == 7:
+        # C.SD -> sd rs2', offset(rs1')  (RV64-specific)
+        val rs2_c = rvc_reg(_bits(instr, 4, 2))
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val imm = (_bits(instr, 6, 5) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_s(OP_STORE, F3_SD, rs1_c, rs2_c, imm)
+
+    else:
+        ILLEGAL_INSTR
+
+# ---------------------------------------------------------------------------
+# Quadrant 1 (bits [1:0] = 01)
+# ---------------------------------------------------------------------------
+
+fn _decompress_q1(instr: i64) -> i64:
+    val funct3 = _bits(instr, 15, 13)
+
+    if funct3 == 0:
+        # C.NOP / C.ADDI -> addi rd, rd, nzimm
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+        val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFFFFC0 else: imm
+        _encode_i(OP_OP_IMM, rd, 0, rd, simm)
+
+    elif funct3 == 1:
+        # C.ADDIW -> addiw rd, rd, imm  (RV64-specific)
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+        val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFFFFC0 else: imm
+        if rd == 0: ILLEGAL_INSTR
+        else: _encode_i(OP_OP_IMM_32, rd, 0, rd, simm)
+
+    elif funct3 == 2:
+        # C.LI -> addi rd, x0, imm
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+        val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFFFFC0 else: imm
+        _encode_i(OP_OP_IMM, rd, 0, 0, simm)
+
+    elif funct3 == 3:
+        val rd = _bits(instr, 11, 7)
+        if rd == 2:
+            # C.ADDI16SP -> addi x2, x2, nzimm
+            val imm = (_bit(instr, 12) << 9) or (_bit(instr, 4) << 4) or (_bit(instr, 3) << 5) or (_bit(instr, 5) << 6) or (_bit(instr, 2) << 7) or (_bit(instr, 6) << 8)
+            val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFFFC00 else: imm
+            if simm == 0: ILLEGAL_INSTR
+            else: _encode_i(OP_OP_IMM, 2, 0, 2, simm)
+        else:
+            # C.LUI -> lui rd, nzimm
+            val imm = (_bit(instr, 12) << 17) or (_bits(instr, 6, 2) << 12)
+            val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFC0000 else: imm
+            if simm == 0: ILLEGAL_INSTR
+            else: _encode_u(OP_LUI, rd, (simm >> 12) and 0xFFFFF)
+
+    elif funct3 == 4:
+        val funct2 = _bits(instr, 11, 10)
+        val rd_c = rvc_reg(_bits(instr, 9, 7))
+
+        if funct2 == 0:
+            # C.SRLI -> srli rd', rd', shamt
+            val shamt = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+            _encode_i(OP_OP_IMM, rd_c, F3_SRL_SRA, rd_c, shamt)
+        elif funct2 == 1:
+            # C.SRAI -> srai rd', rd', shamt
+            val shamt = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+            _encode_i(OP_OP_IMM, rd_c, F3_SRL_SRA, rd_c, shamt or 0x400)
+        elif funct2 == 2:
+            # C.ANDI -> andi rd', rd', imm
+            val imm = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+            val simm = if (_bit(instr, 12) != 0): imm or 0xFFFFFFFFFFFFFFC0 else: imm
+            _encode_i(OP_OP_IMM, rd_c, F3_AND, rd_c, simm)
+        else:
+            # funct2 == 3: arithmetic ops
+            val rs2_c = rvc_reg(_bits(instr, 4, 2))
+            val funct1 = _bit(instr, 12)
+            val funct2b = _bits(instr, 6, 5)
+
+            if funct1 == 0:
+                if funct2b == 0:
+                    # C.SUB -> sub rd', rd', rs2'
+                    _encode_r(OP_OP, rd_c, 0, rd_c, rs2_c, F7_SUB_SRA)
+                elif funct2b == 1:
+                    # C.XOR -> xor rd', rd', rs2'
+                    _encode_r(OP_OP, rd_c, F3_XOR, rd_c, rs2_c, 0)
+                elif funct2b == 2:
+                    # C.OR -> or rd', rd', rs2'
+                    _encode_r(OP_OP, rd_c, F3_OR, rd_c, rs2_c, 0)
+                else:
+                    # C.AND -> and rd', rd', rs2'
+                    _encode_r(OP_OP, rd_c, F3_AND, rd_c, rs2_c, 0)
+            else:
+                if funct2b == 0:
+                    # C.SUBW -> subw rd', rd', rs2'  (RV64)
+                    _encode_r(OP_OP_32, rd_c, 0, rd_c, rs2_c, F7_SUB_SRA)
+                elif funct2b == 1:
+                    # C.ADDW -> addw rd', rd', rs2'  (RV64)
+                    _encode_r(OP_OP_32, rd_c, 0, rd_c, rs2_c, 0)
+                else:
+                    ILLEGAL_INSTR
+
+    elif funct3 == 5:
+        # C.J -> jal x0, offset
+        val b11 = _bit(instr, 12)
+        val b4 = _bit(instr, 11)
+        val b9_8 = _bits(instr, 10, 9)
+        val b10 = _bit(instr, 8)
+        val b6 = _bit(instr, 7)
+        val b7 = _bit(instr, 6)
+        val b3_1 = _bits(instr, 5, 3)
+        val b5 = _bit(instr, 2)
+        val imm = (b11 << 11) or (b10 << 10) or (b9_8 << 8) or (b7 << 7) or (b6 << 6) or (b5 << 5) or (b4 << 4) or (b3_1 << 1)
+        val simm = if (b11 != 0): imm or 0xFFFFFFFFFFFFF000 else: imm
+        # Encode as JAL x0, offset (J-type encoding)
+        val b20 = (simm >> 20) and 1
+        val b10_1 = (simm >> 1) and 0x3FF
+        val jb11 = (simm >> 11) and 1
+        val b19_12 = (simm >> 12) and 0xFF
+        val jimm = (b20 << 19) or (b10_1 << 9) or (jb11 << 8) or b19_12
+        OP_JAL or (0 << 7) or (jimm << 12)
+
+    elif funct3 == 6:
+        # C.BEQZ -> beq rs1', x0, offset
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val b8 = _bit(instr, 12)
+        val b4_3 = _bits(instr, 11, 10)
+        val b7_6 = _bits(instr, 6, 5)
+        val b2_1 = _bits(instr, 4, 3)
+        val b5 = _bit(instr, 2)
+        val imm = (b8 << 8) or (b7_6 << 6) or (b5 << 5) or (b4_3 << 3) or (b2_1 << 1)
+        val simm = if (b8 != 0): imm or 0xFFFFFFFFFFFFFE00 else: imm
+        # B-type encoding
+        val blo = ((simm >> 11) and 1) or (((simm >> 1) and 0xF) << 1)
+        val bhi = (((simm >> 5) and 0x3F)) or (((simm >> 12) and 1) << 6)
+        OP_BRANCH or (blo << 7) or (F3_BEQ << 12) or (rs1_c << 15) or (0 << 20) or (bhi << 25)
+
+    else:
+        # C.BNEZ -> bne rs1', x0, offset
+        val rs1_c = rvc_reg(_bits(instr, 9, 7))
+        val b8 = _bit(instr, 12)
+        val b4_3 = _bits(instr, 11, 10)
+        val b7_6 = _bits(instr, 6, 5)
+        val b2_1 = _bits(instr, 4, 3)
+        val b5 = _bit(instr, 2)
+        val imm = (b8 << 8) or (b7_6 << 6) or (b5 << 5) or (b4_3 << 3) or (b2_1 << 1)
+        val simm = if (b8 != 0): imm or 0xFFFFFFFFFFFFFE00 else: imm
+        val blo = ((simm >> 11) and 1) or (((simm >> 1) and 0xF) << 1)
+        val bhi = (((simm >> 5) and 0x3F)) or (((simm >> 12) and 1) << 6)
+        OP_BRANCH or (blo << 7) or (F3_BNE << 12) or (rs1_c << 15) or (0 << 20) or (bhi << 25)
+
+# ---------------------------------------------------------------------------
+# Quadrant 2 (bits [1:0] = 10)
+# ---------------------------------------------------------------------------
+
+fn _decompress_q2(instr: i64) -> i64:
+    val funct3 = _bits(instr, 15, 13)
+
+    if funct3 == 0:
+        # C.SLLI -> slli rd, rd, shamt
+        val rd = _bits(instr, 11, 7)
+        val shamt = (_bit(instr, 12) << 5) or _bits(instr, 6, 2)
+        if rd == 0: ILLEGAL_INSTR
+        else: _encode_i(OP_OP_IMM, rd, F3_SLL, rd, shamt)
+
+    elif funct3 == 1:
+        # C.FLDSP -> fld rd, offset(x2)
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bits(instr, 4, 2) << 6) or (_bit(instr, 12) << 5) or (_bits(instr, 6, 5) << 3)
+        _encode_i(OP_LOAD_FP, rd, F3_LD, 2, imm)
+
+    elif funct3 == 2:
+        # C.LWSP -> lw rd, offset(x2)
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bits(instr, 3, 2) << 6) or (_bit(instr, 12) << 5) or (_bits(instr, 6, 4) << 2)
+        if rd == 0: ILLEGAL_INSTR
+        else: _encode_i(OP_LOAD, rd, F3_LW, 2, imm)
+
+    elif funct3 == 3:
+        # C.LDSP -> ld rd, offset(x2)  (RV64-specific)
+        val rd = _bits(instr, 11, 7)
+        val imm = (_bits(instr, 4, 2) << 6) or (_bit(instr, 12) << 5) or (_bits(instr, 6, 5) << 3)
+        if rd == 0: ILLEGAL_INSTR
+        else: _encode_i(OP_LOAD, rd, F3_LD, 2, imm)
+
+    elif funct3 == 4:
+        val rs2 = _bits(instr, 6, 2)
+        val rd = _bits(instr, 11, 7)
+        val bit12 = _bit(instr, 12)
+
+        if bit12 == 0:
+            if rs2 == 0:
+                # C.JR -> jalr x0, 0(rs1)
+                if rd == 0: ILLEGAL_INSTR
+                else: _encode_i(OP_JALR, 0, 0, rd, 0)
+            else:
+                # C.MV -> add rd, x0, rs2
+                _encode_r(OP_OP, rd, 0, 0, rs2, 0)
+        else:
+            if rs2 == 0:
+                if rd == 0:
+                    # C.EBREAK -> ebreak
+                    _encode_i(OP_SYSTEM, 0, 0, 0, 1)
+                else:
+                    # C.JALR -> jalr x1, 0(rs1)
+                    _encode_i(OP_JALR, 1, 0, rd, 0)
+            else:
+                # C.ADD -> add rd, rd, rs2
+                _encode_r(OP_OP, rd, 0, rd, rs2, 0)
+
+    elif funct3 == 5:
+        # C.FSDSP -> fsd rs2, offset(x2)
+        val rs2 = _bits(instr, 6, 2)
+        val imm = (_bits(instr, 9, 7) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_s(OP_STORE_FP, F3_SD, 2, rs2, imm)
+
+    elif funct3 == 6:
+        # C.SWSP -> sw rs2, offset(x2)
+        val rs2 = _bits(instr, 6, 2)
+        val imm = (_bits(instr, 8, 7) << 6) or (_bits(instr, 12, 9) << 2)
+        _encode_s(OP_STORE, F3_SW, 2, rs2, imm)
+
+    elif funct3 == 7:
+        # C.SDSP -> sd rs2, offset(x2)  (RV64-specific)
+        val rs2 = _bits(instr, 6, 2)
+        val imm = (_bits(instr, 9, 7) << 6) or (_bits(instr, 12, 10) << 3)
+        _encode_s(OP_STORE, F3_SD, 2, rs2, imm)
+
+    else:
+        ILLEGAL_INSTR
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn decompress_rvc(instr: i64) -> i64:
+    """Decompress a 16-bit RVC instruction into its 32-bit equivalent.
+    Returns ILLEGAL_INSTR (0) if the instruction cannot be decompressed."""
+    val quadrant = instr and 0x3
+
+    if quadrant == 0:
+        _decompress_q0(instr)
+    elif quadrant == 1:
+        _decompress_q1(instr)
+    elif quadrant == 2:
+        _decompress_q2(instr)
+    else:
+        # quadrant 3 = not compressed (32-bit), should not be called
+        ILLEGAL_INSTR

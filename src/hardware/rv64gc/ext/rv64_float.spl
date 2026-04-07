@@ -1,0 +1,264 @@
+"""
+# RV64F Single-Precision Floating-Point Extension
+
+All functions operate on i64 bit patterns representing IEEE 754 single-precision
+values (lower 32 bits). Results are NaN-boxed where appropriate.
+"""
+
+use hardware.rv64gc.pkg.rv64_fp_types_pkg.*
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _sp_sign(x: i64) -> i64:
+    (x >> 31) and 1
+
+fn _sp_exp(x: i64) -> i64:
+    (x >> 23) and 0xFF
+
+fn _sp_frac(x: i64) -> i64:
+    x and SP_FRAC_MASK
+
+fn _sp_is_nan(x: i64) -> bool:
+    val bits = x and 0xFFFFFFFF
+    (_sp_exp(bits) == 0xFF) and (_sp_frac(bits) != 0)
+
+fn _sp_is_snan(x: i64) -> bool:
+    _sp_is_nan(x) and ((_sp_frac(x) and 0x00400000) == 0)
+
+fn _sp_is_inf(x: i64) -> bool:
+    val bits = x and 0xFFFFFFFF
+    (_sp_exp(bits) == 0xFF) and (_sp_frac(bits) == 0)
+
+fn _sp_is_zero(x: i64) -> bool:
+    (x and 0x7FFFFFFF) == 0
+
+fn _fp_result(value: i64, flags: i64) -> FpResult:
+    FpResult(value: value and 0xFFFFFFFF, flags: flags)
+
+fn _check_nan_inputs_s(a: i64, b: i64) -> i64:
+    """Returns NV flag if either input is signaling NaN, 0 otherwise."""
+    if _sp_is_snan(a) or _sp_is_snan(b): FP_FLAG_NV
+    else: 0
+
+# ---------------------------------------------------------------------------
+# Arithmetic operations
+# ---------------------------------------------------------------------------
+
+fn fp_add_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision addition."""
+    pass_todo("IEEE 754 bit-level addition implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_sub_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision subtraction."""
+    pass_todo("IEEE 754 bit-level subtraction implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_mul_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision multiplication."""
+    pass_todo("IEEE 754 bit-level multiplication implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_div_s(a: i64, b: i64, rm: RoundMode) -> FpResult:
+    """Single-precision division."""
+    pass_todo("IEEE 754 bit-level division implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_sqrt_s(a: i64, rm: RoundMode) -> FpResult:
+    """Single-precision square root."""
+    pass_todo("IEEE 754 bit-level square root implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+# ---------------------------------------------------------------------------
+# Fused multiply-add
+# ---------------------------------------------------------------------------
+
+fn fp_fmadd_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-add: a*b + c."""
+    pass_todo("IEEE 754 fused multiply-add implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_fmsub_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused multiply-subtract: a*b - c."""
+    pass_todo("IEEE 754 fused multiply-subtract implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_fnmadd_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused negate-multiply-add: -(a*b) + c."""
+    pass_todo("IEEE 754 fused negate-multiply-add implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+fn fp_fnmsub_s(a: i64, b: i64, c: i64, rm: RoundMode) -> FpResult:
+    """Fused negate-multiply-subtract: -(a*b) - c."""
+    pass_todo("IEEE 754 fused negate-multiply-subtract implementation")
+    _fp_result(SP_QNAN, FP_FLAG_NV)
+
+# ---------------------------------------------------------------------------
+# Comparison operations
+# ---------------------------------------------------------------------------
+
+fn fp_eq_s(a: i64, b: i64) -> i64:
+    """FEQ.S: returns 1 if a == b, 0 otherwise. NaN -> 0, signals on sNaN."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    elif _sp_is_zero(a) and _sp_is_zero(b): 1  # +0 == -0
+    elif (a and 0xFFFFFFFF) == (b and 0xFFFFFFFF): 1
+    else: 0
+
+fn fp_lt_s(a: i64, b: i64) -> i64:
+    """FLT.S: returns 1 if a < b, 0 otherwise. NaN -> 0."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    else:
+        val sa = _sp_sign(a)
+        val sb = _sp_sign(b)
+        if sa != sb:
+            if _sp_is_zero(a) and _sp_is_zero(b): 0
+            else: sa  # Negative < positive
+        elif sa == 0:
+            if (a and 0x7FFFFFFF) < (b and 0x7FFFFFFF): 1 else: 0
+        else:
+            if (a and 0x7FFFFFFF) > (b and 0x7FFFFFFF): 1 else: 0
+
+fn fp_le_s(a: i64, b: i64) -> i64:
+    """FLE.S: returns 1 if a <= b, 0 otherwise."""
+    if _sp_is_nan(a) or _sp_is_nan(b): 0
+    elif fp_eq_s(a, b) == 1: 1
+    else: fp_lt_s(a, b)
+
+# ---------------------------------------------------------------------------
+# Min / Max
+# ---------------------------------------------------------------------------
+
+fn fp_min_s(a: i64, b: i64) -> i64:
+    """FMIN.S: returns the minimum of a and b."""
+    if _sp_is_nan(a) and _sp_is_nan(b): SP_QNAN
+    elif _sp_is_nan(a): b and 0xFFFFFFFF
+    elif _sp_is_nan(b): a and 0xFFFFFFFF
+    elif _sp_is_zero(a) and _sp_is_zero(b):
+        # -0.0 < +0.0
+        if _sp_sign(a) == 1: a and 0xFFFFFFFF else: b and 0xFFFFFFFF
+    elif fp_lt_s(a, b) == 1: a and 0xFFFFFFFF
+    else: b and 0xFFFFFFFF
+
+fn fp_max_s(a: i64, b: i64) -> i64:
+    """FMAX.S: returns the maximum of a and b."""
+    if _sp_is_nan(a) and _sp_is_nan(b): SP_QNAN
+    elif _sp_is_nan(a): b and 0xFFFFFFFF
+    elif _sp_is_nan(b): a and 0xFFFFFFFF
+    elif _sp_is_zero(a) and _sp_is_zero(b):
+        if _sp_sign(a) == 0: a and 0xFFFFFFFF else: b and 0xFFFFFFFF
+    elif fp_lt_s(b, a) == 1: a and 0xFFFFFFFF
+    else: b and 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Sign injection
+# ---------------------------------------------------------------------------
+
+fn fp_sgnj_s(a: i64, b: i64) -> i64:
+    """FSGNJ.S: result = |a| with sign of b."""
+    val mag = a and 0x7FFFFFFF
+    val sign = b and SP_SIGN_MASK
+    (mag or sign) and 0xFFFFFFFF
+
+fn fp_sgnjn_s(a: i64, b: i64) -> i64:
+    """FSGNJN.S: result = |a| with negated sign of b."""
+    val mag = a and 0x7FFFFFFF
+    val sign = (b xor SP_SIGN_MASK) and SP_SIGN_MASK
+    (mag or sign) and 0xFFFFFFFF
+
+fn fp_sgnjx_s(a: i64, b: i64) -> i64:
+    """FSGNJX.S: result = a with sign = sign(a) XOR sign(b)."""
+    val sign = (a xor b) and SP_SIGN_MASK
+    val mag = a and 0x7FFFFFFF
+    (mag or sign) and 0xFFFFFFFF
+
+# ---------------------------------------------------------------------------
+# Classify
+# ---------------------------------------------------------------------------
+
+fn fp_class_s(a: i64) -> i64:
+    """FCLASS.S: returns 10-bit classification mask."""
+    val bits = a and 0xFFFFFFFF
+    val sign = _sp_sign(bits)
+    val exp = _sp_exp(bits)
+    val frac = _sp_frac(bits)
+
+    if exp == 0xFF:
+        if frac == 0:
+            if sign == 1: 1       # bit 0: -inf
+            else: 0x80            # bit 7: +inf
+        elif (frac and 0x00400000) != 0:
+            0x200                 # bit 9: quiet NaN
+        else:
+            0x100                 # bit 8: signaling NaN
+    elif exp == 0:
+        if frac == 0:
+            if sign == 1: 0x8    # bit 3: -0
+            else: 0x10           # bit 4: +0
+        else:
+            if sign == 1: 0x4    # bit 2: -subnormal
+            else: 0x20           # bit 5: +subnormal
+    else:
+        if sign == 1: 0x2        # bit 1: -normal
+        else: 0x40               # bit 6: +normal
+
+# ---------------------------------------------------------------------------
+# Conversions
+# ---------------------------------------------------------------------------
+
+fn fcvt_w_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to signed 32-bit integer."""
+    pass_todo("IEEE 754 float-to-int32 conversion")
+    _fp_result(0, 0)
+
+fn fcvt_wu_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to unsigned 32-bit integer."""
+    pass_todo("IEEE 754 float-to-uint32 conversion")
+    _fp_result(0, 0)
+
+fn fcvt_s_w(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 32-bit integer to single-precision float."""
+    pass_todo("IEEE 754 int32-to-float conversion")
+    _fp_result(0, 0)
+
+fn fcvt_s_wu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 32-bit integer to single-precision float."""
+    pass_todo("IEEE 754 uint32-to-float conversion")
+    _fp_result(0, 0)
+
+fn fcvt_l_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to signed 64-bit integer (RV64)."""
+    pass_todo("IEEE 754 float-to-int64 conversion")
+    _fp_result(0, 0)
+
+fn fcvt_lu_s(a: i64, rm: RoundMode) -> FpResult:
+    """Convert single-precision float to unsigned 64-bit integer (RV64)."""
+    pass_todo("IEEE 754 float-to-uint64 conversion")
+    _fp_result(0, 0)
+
+fn fcvt_s_l(a: i64, rm: RoundMode) -> FpResult:
+    """Convert signed 64-bit integer to single-precision float (RV64)."""
+    pass_todo("IEEE 754 int64-to-float conversion")
+    _fp_result(0, 0)
+
+fn fcvt_s_lu(a: i64, rm: RoundMode) -> FpResult:
+    """Convert unsigned 64-bit integer to single-precision float (RV64)."""
+    pass_todo("IEEE 754 uint64-to-float conversion")
+    _fp_result(0, 0)
+
+# ---------------------------------------------------------------------------
+# Move (bit-level reinterpret)
+# ---------------------------------------------------------------------------
+
+fn fmv_x_w(a: i64) -> i64:
+    """FMV.X.W: move float bits to integer register (sign-extended)."""
+    val bits = a and 0xFFFFFFFF
+    if (bits and 0x80000000) != 0:
+        bits or 0xFFFFFFFF00000000
+    else:
+        bits
+
+fn fmv_w_x(a: i64) -> i64:
+    """FMV.W.X: move integer bits to float register (NaN-boxed)."""
+    a and 0xFFFFFFFF
