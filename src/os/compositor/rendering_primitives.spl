@@ -29,8 +29,9 @@ fn rounded_rect_aa(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
                    color: u32, radius: i32, alpha: u8):
     """Draw a filled rounded rectangle with anti-aliased edges.
 
-    Uses isqrt-based corner masking with 1px edge softening.
-    Pattern established by render_extras.spl:gradient_rect.
+    Uses superellipse (x⁴+y⁴≤r⁴) for radii ≤ 200, matching the QEMU C
+    backend's rt_gui_rounded_rect_aa. Falls back to circular (x²+y²≤r²)
+    for larger radii where i32 would overflow.
     """
     if w <= 0 or h <= 0:
         return
@@ -39,6 +40,13 @@ fn rounded_rect_aa(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
         backend.blend_rect(x, y, w, h, color, alpha)
         return
 
+    # Delegate to superellipse for radii that fit i32 (r⁴ ≤ 2.1B → r ≤ 215)
+    # Use 200 as safe limit. Covers all practical cases: dock r=14, windows r=22, splash r=28.
+    if r <= 200:
+        superellipse_rect(backend, x, y, w, h, color, r, alpha)
+        return
+
+    # Circular fallback for large radii (r > 200)
     var row: i32 = 0
     while row < h:
         var inset: i32 = 0
@@ -109,21 +117,23 @@ fn gradient_h(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
               color1: u32, color2: u32):
     """Draw a horizontal gradient from color1 (left) to color2 (right).
 
-    Uses 8-segment approximation with alpha blending to avoid .to_i32()/.to_u32()
-    interpreter limitations. Paints color1 then overlays color2 with increasing alpha.
+    Uses 32-segment approximation with alpha blending. Produces smooth
+    gradients matching C per-pixel quality for typical dock/title bar widths.
     """
     if w <= 0 or h <= 0:
         return
 
-    val segs: i32 = 8
-    val seg_w = if w / segs > 0: w / segs else: 1
+    val segs: i32 = if w < 32: w else: 32
+    val seg_w = w / segs
+    if seg_w <= 0:
+        backend.fill_rect(x, y, w, h, color1)
+        return
     val max_seg = segs - 1
     var s: i32 = 0
     while s < segs:
         val sx = x + seg_w * s
         val sw = if s == max_seg: w - seg_w * s else: seg_w
         if sw > 0:
-            # Paint base color1, then overlay color2 with increasing opacity
             val t: u8 = if max_seg > 0: 255 * s / max_seg else: 0
             backend.fill_rect(sx, y, sw, h, color1)
             if t > 0:
@@ -227,11 +237,11 @@ fn superellipse_rect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
                      color: u32, radius: i32, alpha: u8):
     """Draw a filled superellipse (squircle) rounded rect.
     Uses x⁴+y⁴≤r⁴ for smoother continuous-curvature corners (macOS/iPadOS style).
-    Radius limited to 20 for i32 overflow safety.
+    Radius limited to 200 for i32 overflow safety (200⁴ = 1.6B, fits signed i32).
     """
     if w <= 0 or h <= 0:
         return
-    val r = if radius > 20: 20 else: if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
+    val r = if radius > 200: 200 else: if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
     if r <= 0:
         backend.blend_rect(x, y, w, h, color, alpha)
         return

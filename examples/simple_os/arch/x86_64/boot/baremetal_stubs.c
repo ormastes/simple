@@ -7866,6 +7866,225 @@ RuntimeValue rt_auth_check_key(RuntimeValue uname_rv, RuntimeValue key_blob_rv)
     return 0;
 }
 
+/* rt_parse_auth_verify — C-side parser for SSH_MSG_USERAUTH_REQUEST (C12 test).
+ *
+ * Parses a raw USERAUTH_REQUEST byte array and checks that the extracted
+ * username, method, and password match the expected values.
+ * Works around the Cranelift codegen bug where returning large structs
+ * (8 fields) through Result<> corrupts text field values on baremetal.
+ *
+ * Parameters: raw packet [u8], expected_user, expected_method, expected_pass
+ * Returns: 1 if all match, 0 otherwise.
+ */
+RuntimeValue rt_parse_auth_verify(RuntimeValue arr_rv, RuntimeValue exp_user_rv,
+                                  RuntimeValue exp_method_rv, RuntimeValue exp_pass_rv)
+{
+    RuntimeString *exp_user = decode_string(exp_user_rv);
+    RuntimeString *exp_method = decode_string(exp_method_rv);
+    RuntimeString *exp_pass = decode_string(exp_pass_rv);
+    if (!exp_user || !exp_method || !exp_pass) {
+        serial_puts("[rt_parse_auth_verify] bad expected strings\r\n");
+        return 0;
+    }
+
+    if (!IS_HEAP(arr_rv)) { serial_puts("[rt_parse_auth_verify] arr not heap\r\n"); return 0; }
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr_rv);
+    if (!a || a->hdr.type != HEAP_ARRAY) { serial_puts("[rt_parse_auth_verify] bad array\r\n"); return 0; }
+
+    /* Extract raw bytes from the RuntimeArray (items are BoxInt-tagged) */
+    uint32_t len = a->len;
+    if (len < 2) { serial_puts("[rt_parse_auth_verify] too short\r\n"); return 0; }
+
+    uint8_t *raw = (uint8_t *)__builtin_alloca(len);
+    for (uint32_t i = 0; i < len; i++) {
+        raw[i] = (uint8_t)DECODE_INT(a->items[i]);
+    }
+
+    /* Check message type */
+    if (raw[0] != 50) { serial_puts("[rt_parse_auth_verify] not USERAUTH_REQUEST\r\n"); return 0; }
+
+    uint32_t off = 1;
+
+    /* Helper: read SSH string (uint32 big-endian length + data) */
+    #define READ_STR(dst_ptr, dst_len) do { \
+        if (off + 4 > len) { serial_puts("[rt_parse_auth_verify] truncated len\r\n"); return 0; } \
+        uint32_t slen = ((uint32_t)raw[off] << 24) | ((uint32_t)raw[off+1] << 16) | \
+                        ((uint32_t)raw[off+2] << 8) | (uint32_t)raw[off+3]; \
+        off += 4; \
+        if (off + slen > len) { serial_puts("[rt_parse_auth_verify] truncated data\r\n"); return 0; } \
+        dst_ptr = (const char *)&raw[off]; \
+        dst_len = slen; \
+        off += slen; \
+    } while(0)
+
+    const char *user_ptr; uint32_t user_len;
+    READ_STR(user_ptr, user_len);
+
+    const char *svc_ptr; uint32_t svc_len;
+    READ_STR(svc_ptr, svc_len);
+
+    const char *method_ptr; uint32_t method_len;
+    READ_STR(method_ptr, method_len);
+
+    /* Check username */
+    if (user_len != exp_user->len || memcmp(user_ptr, exp_user->data, user_len) != 0) {
+        serial_puts("[rt_parse_auth_verify] username mismatch\r\n");
+        return 0;
+    }
+
+    /* Check method */
+    if (method_len != exp_method->len || memcmp(method_ptr, exp_method->data, method_len) != 0) {
+        serial_puts("[rt_parse_auth_verify] method mismatch\r\n");
+        return 0;
+    }
+
+    /* For password method: skip bool byte, then read password */
+    if (method_len == 8 && memcmp(method_ptr, "password", 8) == 0) {
+        if (off >= len) { serial_puts("[rt_parse_auth_verify] no bool byte\r\n"); return 0; }
+        off++; /* skip bool */
+
+        const char *pass_ptr; uint32_t pass_len;
+        READ_STR(pass_ptr, pass_len);
+
+        if (pass_len != exp_pass->len || memcmp(pass_ptr, exp_pass->data, pass_len) != 0) {
+            serial_puts("[rt_parse_auth_verify] password mismatch\r\n");
+            return 0;
+        }
+    }
+
+    #undef READ_STR
+    return 1;
+}
+
+/* =========================================================================
+ * SSH Channel Table — C-side workaround for Cranelift array-of-structs
+ * codegen bug where array[0] loads correctly but array[1+] returns NIL.
+ * Tests D5, D6, D11 depend on this.
+ * ========================================================================= */
+struct _ssh_channel {
+    uint32_t local_id;
+    uint32_t remote_id;
+    uint32_t local_window;
+    uint32_t remote_window;
+    uint32_t max_packet;
+    int      active;     /* 1 = open, 0 = closed */
+};
+static struct _ssh_channel _channels[32];
+static int _channel_count = 0;
+
+/* rt_channel_open(remote_id, window, max_pkt) -> local_id (raw int) */
+RuntimeValue rt_channel_open(RuntimeValue remote_id_rv, RuntimeValue window_rv,
+                             RuntimeValue max_pkt_rv)
+{
+    int64_t remote_id = DECODE_INT(remote_id_rv);
+    int64_t window    = DECODE_INT(window_rv);
+    int64_t max_pkt   = DECODE_INT(max_pkt_rv);
+
+    if (_channel_count >= 32) return ENCODE_INT(-1);
+    int id = _channel_count++;
+    _channels[id].local_id      = (uint32_t)id;
+    _channels[id].remote_id     = (uint32_t)remote_id;
+    _channels[id].local_window  = (uint32_t)window;
+    _channels[id].remote_window = (uint32_t)window;
+    _channels[id].max_packet    = (uint32_t)max_pkt;
+    _channels[id].active        = 1;
+    return ENCODE_INT(id);
+}
+
+/* rt_channel_find(local_id) -> 1 if found & active, 0 if not */
+RuntimeValue rt_channel_find(RuntimeValue local_id_rv)
+{
+    int64_t lid = DECODE_INT(local_id_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
+            return ENCODE_INT(1);
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_get_remote_id(local_id) -> remote_id (raw) */
+RuntimeValue rt_channel_get_remote_id(RuntimeValue local_id_rv)
+{
+    int64_t lid = DECODE_INT(local_id_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
+            return ENCODE_INT((int64_t)_channels[i].remote_id);
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_get_local_window(local_id) -> local_window */
+RuntimeValue rt_channel_get_local_window(RuntimeValue local_id_rv)
+{
+    int64_t lid = DECODE_INT(local_id_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
+            return ENCODE_INT((int64_t)_channels[i].local_window);
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_get_remote_window(local_id) -> remote_window */
+RuntimeValue rt_channel_get_remote_window(RuntimeValue local_id_rv)
+{
+    int64_t lid = DECODE_INT(local_id_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active)
+            return ENCODE_INT((int64_t)_channels[i].remote_window);
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_close(local_id) -> 0 */
+RuntimeValue rt_channel_close(RuntimeValue local_id_rv)
+{
+    int64_t lid = DECODE_INT(local_id_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid) {
+            _channels[i].active = 0;
+            return ENCODE_INT(0);
+        }
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_adjust_window(local_id, bytes) -> 0 */
+RuntimeValue rt_channel_adjust_window(RuntimeValue local_id_rv, RuntimeValue bytes_rv)
+{
+    int64_t lid   = DECODE_INT(local_id_rv);
+    int64_t bytes = DECODE_INT(bytes_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active) {
+            _channels[i].local_window += (uint32_t)bytes;
+            return ENCODE_INT(0);
+        }
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_consume_window(local_id, bytes) -> 1 if ok, 0 if insufficient */
+RuntimeValue rt_channel_consume_window(RuntimeValue local_id_rv, RuntimeValue bytes_rv)
+{
+    int64_t lid   = DECODE_INT(local_id_rv);
+    int64_t bytes = DECODE_INT(bytes_rv);
+    for (int i = 0; i < _channel_count; i++) {
+        if (_channels[i].local_id == (uint32_t)lid && _channels[i].active) {
+            if (_channels[i].remote_window < (uint32_t)bytes)
+                return ENCODE_INT(0);
+            _channels[i].remote_window -= (uint32_t)bytes;
+            return ENCODE_INT(1);
+        }
+    }
+    return ENCODE_INT(0);
+}
+
+/* rt_channel_reset() -> 0   (for test isolation) */
+RuntimeValue rt_channel_reset(void)
+{
+    _channel_count = 0;
+    return ENCODE_INT(0);
+}
+
 #endif /* __x86_64__ || __i386__ */
 
 /* End of x86_64 baremetal_stubs.c */

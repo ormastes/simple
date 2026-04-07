@@ -106,21 +106,30 @@ impl CompositorBackend for BrowserCompositorBackend:
                 while col < w:
                     val px = x + col
                     if px >= 0 and px < self.w:
-                        val idx = py * self.w + px
-                        val dst = self.pixel_buffer[idx]
+                        val pixel_idx = py * self.w + px
+                        if alpha == 255:
+                            # Opaque: write directly
+                            self.pixel_buffer[pixel_idx] = color | 0xFF000000
+                            col = col + 1
+                            continue
+                        if alpha == 0:
+                            col = col + 1
+                            continue
+                        val dst = self.pixel_buffer[pixel_idx]
                         val dr: i32 = ((dst >> 16) & 0xFF).to_i32()
                         val dg: i32 = ((dst >> 8) & 0xFF).to_i32()
                         val db: i32 = (dst & 0xFF).to_i32()
-                        val r = (sr * sa + dr * inv_a) / 255
-                        val g = (sg * sa + dg * inv_a) / 255
-                        val b = (sb * sa + db * inv_a) / 255
-                        self.pixel_buffer[idx] = 0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+                        val r = (sr * sa + dr * inv_a + 128) / 256
+                        val g = (sg * sa + dg * inv_a + 128) / 256
+                        val b = (sb * sa + db * inv_a + 128) / 256
+                        self.pixel_buffer[pixel_idx] = 0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
                     col = col + 1
             row = row + 1
 
     me blur_region(x: i32, y: i32, w: i32, h: i32, radius: u32):
-        """3-pass box blur approximation of Gaussian blur."""
-        val rad: i32 = radius.to_i32()
+        """5-pass box blur approximation of Gaussian blur (HVHVH)."""
+        val clamped_radius = if radius > 30: 30 else: radius
+        val rad: i32 = clamped_radius.to_i32()
         if rad <= 0: return
         # Clamp region
         val x0 = if x < 0: 0 else: x
@@ -131,74 +140,75 @@ impl CompositorBackend for BrowserCompositorBackend:
         val rh = y1 - y0
         if rw <= 0 or rh <= 0: return
 
+        # 5-pass HVHVH blur to match C backend
         var pass: i32 = 0
-        while pass < 3:
-            # Horizontal pass — use a temporary row buffer
-            var row: i32 = 0
-            while row < rh:
-                # Build averaged row
-                var temp_row: [u32] = []
+        while pass < 5:
+            if pass % 2 == 0:
+                # Horizontal pass — use a temporary row buffer
+                var row: i32 = 0
+                while row < rh:
+                    var temp_row: [u32] = []
+                    var col: i32 = 0
+                    while col < rw:
+                        var r_sum: i32 = 0
+                        var g_sum: i32 = 0
+                        var b_sum: i32 = 0
+                        var count: i32 = 0
+                        val c_min = if col - rad < 0: 0 else: col - rad
+                        val c_max = if col + rad + 1 > rw: rw else: col + rad + 1
+                        var kc = c_min
+                        while kc < c_max:
+                            val px = self.pixel_buffer[(y0 + row) * self.w + (x0 + kc)]
+                            r_sum = r_sum + ((px >> 16) & 0xFF).to_i32()
+                            g_sum = g_sum + ((px >> 8) & 0xFF).to_i32()
+                            b_sum = b_sum + (px & 0xFF).to_i32()
+                            count = count + 1
+                            kc = kc + 1
+                        if count == 0: count = 1
+                        val r = (r_sum / count).to_u32()
+                        val g = (g_sum / count).to_u32()
+                        val b = (b_sum / count).to_u32()
+                        temp_row = temp_row + [0xFF000000 | (r << 16) | (g << 8) | b]
+                        col = col + 1
+                    # Write back
+                    col = 0
+                    while col < rw:
+                        self.pixel_buffer[(y0 + row) * self.w + (x0 + col)] = temp_row[col]
+                        col = col + 1
+                    row = row + 1
+            else:
+                # Vertical pass — use a temporary column buffer
                 var col: i32 = 0
                 while col < rw:
-                    var r_sum: i32 = 0
-                    var g_sum: i32 = 0
-                    var b_sum: i32 = 0
-                    var count: i32 = 0
-                    val c_min = if col - rad < 0: 0 else: col - rad
-                    val c_max = if col + rad + 1 > rw: rw else: col + rad + 1
-                    var kc = c_min
-                    while kc < c_max:
-                        val px = self.pixel_buffer[(y0 + row) * self.w + (x0 + kc)]
-                        r_sum = r_sum + ((px >> 16) & 0xFF).to_i32()
-                        g_sum = g_sum + ((px >> 8) & 0xFF).to_i32()
-                        b_sum = b_sum + (px & 0xFF).to_i32()
-                        count = count + 1
-                        kc = kc + 1
-                    if count == 0: count = 1
-                    val r = (r_sum / count).to_u32()
-                    val g = (g_sum / count).to_u32()
-                    val b = (b_sum / count).to_u32()
-                    temp_row = temp_row + [0xFF000000 | (r << 16) | (g << 8) | b]
+                    var temp_col: [u32] = []
+                    var row: i32 = 0
+                    while row < rh:
+                        var r_sum: i32 = 0
+                        var g_sum: i32 = 0
+                        var b_sum: i32 = 0
+                        var count: i32 = 0
+                        val r_min = if row - rad < 0: 0 else: row - rad
+                        val r_max = if row + rad + 1 > rh: rh else: row + rad + 1
+                        var kr = r_min
+                        while kr < r_max:
+                            val px = self.pixel_buffer[(y0 + kr) * self.w + (x0 + col)]
+                            r_sum = r_sum + ((px >> 16) & 0xFF).to_i32()
+                            g_sum = g_sum + ((px >> 8) & 0xFF).to_i32()
+                            b_sum = b_sum + (px & 0xFF).to_i32()
+                            count = count + 1
+                            kr = kr + 1
+                        if count == 0: count = 1
+                        val r = (r_sum / count).to_u32()
+                        val g = (g_sum / count).to_u32()
+                        val b = (b_sum / count).to_u32()
+                        temp_col = temp_col + [0xFF000000 | (r << 16) | (g << 8) | b]
+                        row = row + 1
+                    # Write back
+                    row = 0
+                    while row < rh:
+                        self.pixel_buffer[(y0 + row) * self.w + (x0 + col)] = temp_col[row]
+                        row = row + 1
                     col = col + 1
-                # Write back
-                col = 0
-                while col < rw:
-                    self.pixel_buffer[(y0 + row) * self.w + (x0 + col)] = temp_row[col]
-                    col = col + 1
-                row = row + 1
-
-            # Vertical pass — use a temporary column buffer
-            col = 0
-            while col < rw:
-                var temp_col: [u32] = []
-                row = 0
-                while row < rh:
-                    var r_sum: i32 = 0
-                    var g_sum: i32 = 0
-                    var b_sum: i32 = 0
-                    var count: i32 = 0
-                    val r_min = if row - rad < 0: 0 else: row - rad
-                    val r_max = if row + rad + 1 > rh: rh else: row + rad + 1
-                    var kr = r_min
-                    while kr < r_max:
-                        val px = self.pixel_buffer[(y0 + kr) * self.w + (x0 + col)]
-                        r_sum = r_sum + ((px >> 16) & 0xFF).to_i32()
-                        g_sum = g_sum + ((px >> 8) & 0xFF).to_i32()
-                        b_sum = b_sum + (px & 0xFF).to_i32()
-                        count = count + 1
-                        kr = kr + 1
-                    if count == 0: count = 1
-                    val r = (r_sum / count).to_u32()
-                    val g = (g_sum / count).to_u32()
-                    val b = (b_sum / count).to_u32()
-                    temp_col = temp_col + [0xFF000000 | (r << 16) | (g << 8) | b]
-                    row = row + 1
-                # Write back
-                row = 0
-                while row < rh:
-                    self.pixel_buffer[(y0 + row) * self.w + (x0 + col)] = temp_col[row]
-                    row = row + 1
-                col = col + 1
             pass = pass + 1
 
     me gradient_v(x: i32, y: i32, w: i32, h: i32, color1: u32, color2: u32):

@@ -183,15 +183,26 @@ fn draw_inactive_dim(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
 # ============================================================================
 
 fn draw_noise_blend(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, alpha: u8):
-    """Apply a subtle noise/grain texture over a region.
-    Improved pattern-based noise with ~30% coverage (closer to QEMU).
+    """Apply frosted glass noise texture matching QEMU C rt_gui_noise_blend.
+    Uses C-compatible pseudo-random hash for ~37.5% pixel coverage with
+    white/black dither. Steps by 2 for interpreter performance.
     """
     var row: i32 = 0
     while row < h:
         var col: i32 = 0
         while col < w:
-            if (row + col) % 3 == 0 or (row * 7 + col * 13) % 11 < 4:
-                backend.blend_rect(x + col, y + row, 1, 1, 0x00FFFFFF, alpha)
+            val px = x + col
+            val py = y + row
+            # C-compatible hash: truncated constants to stay in i32 range
+            val h1 = px * 2654435
+            val h2 = py * 2246822
+            val hash = (h1 ^ h2) & 0x7FFFFFFF
+            # ~37.5% coverage: (hash & 7) < 3
+            if (hash & 7) < 3:
+                # Noise value: 0 or 1 (darken or lighten)
+                val noise_val = (hash >> 8) & 1
+                val noise_color: u32 = if noise_val == 1: 0x00FFFFFF else: 0x00000000
+                backend.blend_rect(px, py, 1, 1, noise_color, alpha)
             col = col + 2
         row = row + 2
 

@@ -76,10 +76,14 @@ fn ssh_put_text(buf: [u8], s: text):
     ssh_put_string(buf, bytes)
 
 fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
-    """Read SSH string at offset. Returns SshStringResult(data, next_offset)."""
+    """Read SSH string at offset. Returns SshStringResult(data, next_offset).
+    NOTE: Uses intermediate var for ssh_get_u32 result to avoid baremetal
+    Cranelift codegen bug with chained .to_u64() on function returns.
+    """
     if offset + 4 > data.len():
         return Err("ssh_get_string: truncated length")
-    var str_len: u64 = ssh_get_u32(data, offset).to_u64()
+    var str_len_u32: u32 = ssh_get_u32(data, offset)
+    var str_len: u64 = str_len_u32.to_u64()
     var start: u64 = offset + 4
     if start + str_len > data.len():
         return Err("ssh_get_string: truncated data")
@@ -94,12 +98,17 @@ extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_string_to_byte_array(s: text) -> [u8]
 
 fn ssh_get_text(data: [u8], offset: u64) -> Result<SshTextResult, text>:
-    """Read SSH string as text at offset. Returns SshTextResult(value, next_offset)."""
+    """Read SSH string as text at offset. Returns SshTextResult(value, next_offset).
+    NOTE: Extracts next_offset into var BEFORE extern call to avoid
+    baremetal Cranelift register-clobber after rt_string_from_byte_array.
+    """
     var r = ssh_get_string(data, offset)
     if r.is_ok():
         var sr = r.unwrap()
-        var txt: text = rt_string_from_byte_array(sr.data)
-        Ok(SshTextResult(value: txt, next_offset: sr.next_offset))
+        var sr_data: [u8] = sr.data
+        var sr_next: u64 = sr.next_offset
+        var txt: text = rt_string_from_byte_array(sr_data)
+        Ok(SshTextResult(value: txt, next_offset: sr_next))
     else:
         Err("ssh_get_text: string decode failed")
 
@@ -151,22 +160,25 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
     """Read one SSH packet from raw bytes. Returns (packet, bytes_consumed).
 
     Expects unencrypted data. For encrypted packets see ssh_cipher.spl.
-    NOTE: Uses var (mutable) locals and manual byte reads instead of
-    ssh_get_u32 to work around baremetal codegen bug where val locals
-    from function returns corrupt in arithmetic/comparisons.
+    NOTE: Uses var (mutable) locals and ssh_get_u32 (bit-shift based) to
+    work around baremetal codegen bugs: (1) val locals from function returns
+    corrupt in arithmetic, (2) multiplication of byte values fails for
+    larger payloads. The ssh_get_u32 approach is proven correct by B7 test.
     """
     var avail: u64 = data.len() - offset
 
     if avail < 5:
         return Err("ssh_packet_read: need at least 5 bytes")
 
-    # Read packet_length manually from 4 big-endian bytes
+    # Read packet_length via ssh_get_u32 (bit-shift based, proven by B7 test).
+    # Previous manual multiplication approach broke for larger payloads due to
+    # baremetal codegen bug with intermediate multiplication results.
+    var pkt_len_u32: u32 = ssh_get_u32(data, offset)
     var packet_length: u64 = 0
-    var b0: u64 = data[offset].to_u64()
-    var b1: u64 = data[offset + 1].to_u64()
-    var b2: u64 = data[offset + 2].to_u64()
-    var b3: u64 = data[offset + 3].to_u64()
-    packet_length = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+    # Avoid .to_u64() on function return (val-from-return corruption).
+    # Instead, store u32 in var first, then widen.
+    var pkt_tmp: u32 = pkt_len_u32
+    packet_length = pkt_tmp.to_u64()
 
     if packet_length < 2:
         return Err("ssh_packet_read: packet_length too small")
