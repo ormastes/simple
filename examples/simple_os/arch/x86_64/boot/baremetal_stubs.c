@@ -2840,6 +2840,7 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
 }
 
 /* Direct PCI cache access — bypasses syscall for pcimgr */
+/* Direct PCI cache access — returns raw (untagged) integers */
 int64_t rt_pci_device_count(void)
 {
     if (_pci_cache_count < 0) _pci_scan();
