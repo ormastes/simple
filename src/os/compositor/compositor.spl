@@ -25,7 +25,7 @@ use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
 use os.compositor.desktop_chrome.{draw_system_bar, draw_dock, SYSTEM_BAR_HEIGHT, DOCK_HEIGHT}
 use os.compositor.window_effects.{draw_glass_window_enhanced}
 use os.compositor.render_extras.{draw_wallpaper_enhanced}
-use os.compositor.app_content.{render_app_content}
+use os.compositor.app_content.{render_app_content, render_app_content_stateful, AppState, app_state_new, handle_app_input, handle_app_click}
 use os.compositor.easing.{bounce_offset, ease_out_cubic, ease_in_cubic}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
@@ -89,6 +89,7 @@ class Compositor:
     backend: CompositorBackend
     input: InputBackend
     cursor: CursorState
+    app_states: [AppState]
     desktop_bg: u32
     next_id: u64
     screen_width: i32
@@ -147,6 +148,7 @@ impl Compositor:
             backend: b,
             input: i,
             cursor: initial_cursor,
+            app_states: [],
             desktop_bg: 0xFF003060,
             next_id: 1,
             screen_width: sw,
@@ -203,6 +205,7 @@ impl Compositor:
         )
 
         self.surfaces = self.surfaces.push(surface)
+        self.app_states = self.app_states.push(app_state_new())
         self.focused_idx = self.surfaces.len() - 1
         return id
 
@@ -229,6 +232,7 @@ impl Compositor:
         )
 
         self.surfaces = self.surfaces.push(surface)
+        self.app_states = self.app_states.push(app_state_new())
         self.focused_idx = self.surfaces.len() - 1
         return id
 
@@ -729,7 +733,10 @@ impl Compositor:
                     val cw = client_area_width(ww)
                     val ch_val = client_area_height(wh)
                     if cw > 0 and ch_val > 0:
-                        render_app_content(self.backend, surface.title, cx, cy, cw, ch_val)
+                        if idx < self.app_states.len():
+                            render_app_content_stateful(self.backend, surface.title, cx, cy, cw, ch_val, self.app_states[idx])
+                        else:
+                            render_app_content(self.backend, surface.title, cx, cy, cw, ch_val)
             idx = idx + 1
 
         # 3. System bar (top) + Dock (bottom) — shared desktop chrome
@@ -804,6 +811,20 @@ impl Compositor:
                     return
             _: pass_dn
 
+        # Enter/Backspace for terminal
+        if self.glass_theme_active and self.focused_idx >= 0 and self.focused_idx < self.app_states.len():
+            if self.surfaces[self.focused_idx].title == "Terminal":
+                match key:
+                    Key.Enter:
+                        val new_state = handle_app_input(self.app_states[self.focused_idx], "Terminal", 13)
+                        self._update_app_state(self.focused_idx, new_state)
+                        return
+                    Key.Backspace:
+                        val new_state = handle_app_input(self.app_states[self.focused_idx], "Terminal", 8)
+                        self._update_app_state(self.focused_idx, new_state)
+                        return
+                    _: pass_dn
+
         # Glass theme shortcuts (like QEMU WM)
         val ch_val = self.input.key_to_char(key)
         if ch_val != nil:
@@ -855,6 +876,39 @@ impl Compositor:
                             restored = restored.push(s)
                     self.surfaces = restored
                     return
+
+                # Forward unhandled printable keys to focused Terminal
+                if self.focused_idx >= 0 and self.focused_idx < self.app_states.len():
+                    val focused_title = self.surfaces[self.focused_idx].title
+                    if focused_title == "Terminal":
+                        val key_code: i32 = 0
+                        if ch_val == " ": key_code = 32
+                        else if ch_val == "a": key_code = 97
+                        else if ch_val == "b": key_code = 98
+                        else if ch_val == "c": key_code = 99
+                        else if ch_val == "d": key_code = 100
+                        else if ch_val == "e": key_code = 101
+                        else if ch_val == "f": key_code = 102
+                        else if ch_val == "g": key_code = 103
+                        else if ch_val == "h": key_code = 104
+                        else if ch_val == "i": key_code = 105
+                        else if ch_val == "j": key_code = 106
+                        else if ch_val == "k": key_code = 107
+                        else if ch_val == "l": key_code = 108
+                        else if ch_val == "n": key_code = 110
+                        else if ch_val == "o": key_code = 111
+                        else if ch_val == "p": key_code = 112
+                        else if ch_val == "q": key_code = 113
+                        else if ch_val == "s": key_code = 115
+                        else if ch_val == "u": key_code = 117
+                        else if ch_val == "v": key_code = 118
+                        else if ch_val == "x": key_code = 120
+                        else if ch_val == "y": key_code = 121
+                        else if ch_val == "z": key_code = 122
+                        if key_code > 0:
+                            val new_state = handle_app_input(self.app_states[self.focused_idx], focused_title, key_code)
+                            self._update_app_state(self.focused_idx, new_state)
+                            return
 
         # Compositor-level shortcuts (Alt held)
         if self.input.alt_held():
@@ -970,6 +1024,14 @@ impl Compositor:
 
                         # Click on window body — just focus
                         self.focus_window(sid)
+
+                        # Forward click to app content
+                        if self.focused_idx >= 0 and self.focused_idx < self.app_states.len():
+                            val local_x = mx - client_area_x(s.x)
+                            val local_y = my - client_area_y(s.y)
+                            if local_x >= 0 and local_y >= 0:
+                                val new_state = handle_app_click(self.app_states[self.focused_idx], s.title, local_x, local_y)
+                                self._update_app_state(self.focused_idx, new_state)
                         return
                 idx = idx - 1
 
@@ -1097,6 +1159,18 @@ impl Compositor:
     me stop():
         """Signal the compositor loop to exit."""
         self.running = false
+
+    me _update_app_state(idx: i32, new_state: AppState):
+        """Update app state at index, rebuilding the array."""
+        var new_states: [AppState] = []
+        var i: i32 = 0
+        while i < self.app_states.len():
+            if i == idx:
+                new_states = new_states.push(new_state)
+            else:
+                new_states = new_states.push(self.app_states[i])
+            i = i + 1
+        self.app_states = new_states
 
 # ============================================================================
 # Internal: Render a Single Window (via CompositorBackend)
