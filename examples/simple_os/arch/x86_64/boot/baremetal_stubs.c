@@ -100,6 +100,19 @@ static void serial_putchar(char c)
     outb(0x3F8, (uint8_t)c);
 }
 
+static int serial_data_ready(void)
+{
+    /* Bit 0 of LSR (0x3F8 + 5) = Data Ready */
+    return inb(0x3F8 + 5) & 0x01;
+}
+
+static char serial_getchar(void)
+{
+    /* Wait until data is available */
+    while (!serial_data_ready()) {}
+    return (char)inb(0x3F8);
+}
+
 static void serial_puts(const char *s)
 {
     while (*s) {
@@ -1486,6 +1499,48 @@ RuntimeValue spl_fat32_read_file(RuntimeValue name_rv, RuntimeValue buf_rv, Runt
     uint32_t *bytes_read = (uint32_t *)(uintptr_t)DECODE_INT(bytes_read_rv);
     int result = fat32_read_file(name, buf, max_size, bytes_read);
     return ENCODE_INT(result);
+}
+
+/* Simple wrappers that return values directly (no output-parameter encoding issues) */
+
+RuntimeValue rt_fat32_read_file_text(RuntimeValue name_rv)
+{
+    const char *name = "";
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) name = s->data;
+    }
+    static uint8_t _read_buf[8192];
+    uint32_t bytes_read = 0;
+    int result = fat32_read_file(name, _read_buf, sizeof(_read_buf) - 1, &bytes_read);
+    if (result != 0 || bytes_read == 0) return rt_string_from_cstr("");
+    _read_buf[bytes_read] = '\0';
+    return rt_string_from_cstr((const char *)_read_buf);
+}
+
+RuntimeValue rt_fat32_file_size(RuntimeValue name_rv)
+{
+    const char *name = "";
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) name = s->data;
+    }
+    uint32_t cluster = 0, size = 0;
+    int result = fat32_find_file(name, &cluster, &size);
+    if (result != 0) return ENCODE_INT(-1);
+    return ENCODE_INT((int64_t)size);
+}
+
+RuntimeValue rt_fat32_file_exists(RuntimeValue name_rv)
+{
+    const char *name = "";
+    if (IS_HEAP(name_rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(name_rv);
+        if (s) name = s->data;
+    }
+    uint32_t cluster = 0, size = 0;
+    int result = fat32_find_file(name, &cluster, &size);
+    return result == 0 ? TRUE_VALUE : FALSE_VALUE;
 }
 
 static struct {
@@ -3033,6 +3088,951 @@ int64_t rt_sha512_byte(int64_t index)
     return (int64_t)_sha512_result[index];
 }
 
+/* ===================================================================
+ * 8f. Ed25519 — digital signatures (RFC 8032)
+ *
+ * Minimal but correct implementation based on ref10 / SUPERCOP design.
+ * Uses the SHA-512 primitives from section 8e above.
+ * All arithmetic is mod p = 2^255 - 19.
+ * =================================================================== */
+
+/* ---------- SHA-512 helpers (reuse 8e internals) ---------- */
+
+static void _ed25519_sha512(const uint8_t *msg, uint32_t msg_len, uint8_t out[64])
+{
+    uint64_t bit_len = (uint64_t)msg_len * 8;
+    uint32_t padded_len = msg_len + 1;
+    while ((padded_len % 128) != 112) padded_len++;
+    padded_len += 16;
+
+    uint8_t *padded = (uint8_t *)malloc(padded_len);
+    if (!padded) return;
+    for (uint32_t i = 0; i < padded_len; i++) padded[i] = 0;
+    for (uint32_t i = 0; i < msg_len; i++) padded[i] = msg[i];
+    padded[msg_len] = 0x80;
+    for (int i = 0; i < 8; i++)
+        padded[padded_len - 8 + i] = (uint8_t)(bit_len >> (56 - i * 8));
+
+    uint64_t h[8];
+    for (int i = 0; i < 8; i++) h[i] = _sha512_H[i];
+    for (uint32_t off = 0; off < padded_len; off += 128)
+        _sha512_process_block(padded + off, h);
+    free(padded);
+
+    for (int i = 0; i < 8; i++)
+        for (int b = 0; b < 8; b++)
+            out[i * 8 + b] = (uint8_t)(h[i] >> (56 - b * 8));
+}
+
+/* ---------- fe25519: field element mod p = 2^255-19 ----------
+ * Radix 2^51, 5 limbs: f = f[0] + f[1]*2^51 + ... + f[4]*2^204
+ */
+
+typedef struct { int64_t v[5]; } fe25519;
+
+#define FE_MASK51 ((int64_t)((1ULL << 51) - 1))
+
+static void fe_0(fe25519 *f) { f->v[0]=f->v[1]=f->v[2]=f->v[3]=f->v[4]=0; }
+static void fe_1(fe25519 *f) { f->v[0]=1; f->v[1]=f->v[2]=f->v[3]=f->v[4]=0; }
+static void fe_copy(fe25519 *d, const fe25519 *s) { for(int i=0;i<5;i++) d->v[i]=s->v[i]; }
+
+static void fe_add(fe25519 *h, const fe25519 *f, const fe25519 *g)
+{
+    for (int i = 0; i < 5; i++) h->v[i] = f->v[i] + g->v[i];
+}
+
+static void fe_sub(fe25519 *h, const fe25519 *f, const fe25519 *g)
+{
+    /* Add 2*p split into limbs to keep result positive.
+     * 2p limbs: (2^52 - 38, 2^52 - 2, 2^52 - 2, 2^52 - 2, 2^52 - 2) */
+    h->v[0] = f->v[0] + ((1LL<<52) - 38) - g->v[0];
+    h->v[1] = f->v[1] + ((1LL<<52) - 2)  - g->v[1];
+    h->v[2] = f->v[2] + ((1LL<<52) - 2)  - g->v[2];
+    h->v[3] = f->v[3] + ((1LL<<52) - 2)  - g->v[3];
+    h->v[4] = f->v[4] + ((1LL<<52) - 2)  - g->v[4];
+}
+
+static void fe_neg(fe25519 *h, const fe25519 *f)
+{
+    fe25519 z; fe_0(&z);
+    fe_sub(h, &z, f);
+}
+
+static void fe_carry(fe25519 *h)
+{
+    int64_t c;
+    for (int i = 0; i < 4; i++) {
+        c = h->v[i] >> 51;
+        h->v[i] &= FE_MASK51;
+        h->v[i+1] += c;
+    }
+    c = h->v[4] >> 51;
+    h->v[4] &= FE_MASK51;
+    h->v[0] += c * 19;
+    c = h->v[0] >> 51;
+    h->v[0] &= FE_MASK51;
+    h->v[1] += c;
+}
+
+/* fe_mul using __int128 (always available on x86_64) */
+static void fe_mul(fe25519 *h, const fe25519 *f, const fe25519 *g)
+{
+#ifdef __SIZEOF_INT128__
+    __int128 t[5];
+    int64_t f0=f->v[0], f1=f->v[1], f2=f->v[2], f3=f->v[3], f4=f->v[4];
+    int64_t g0=g->v[0], g1=g->v[1], g2=g->v[2], g3=g->v[3], g4=g->v[4];
+    int64_t g1_19=19*g1, g2_19=19*g2, g3_19=19*g3, g4_19=19*g4;
+
+    t[0] = (__int128)f0*g0 + (__int128)f1*g4_19 + (__int128)f2*g3_19 + (__int128)f3*g2_19 + (__int128)f4*g1_19;
+    t[1] = (__int128)f0*g1 + (__int128)f1*g0    + (__int128)f2*g4_19 + (__int128)f3*g3_19 + (__int128)f4*g2_19;
+    t[2] = (__int128)f0*g2 + (__int128)f1*g1    + (__int128)f2*g0    + (__int128)f3*g4_19 + (__int128)f4*g3_19;
+    t[3] = (__int128)f0*g3 + (__int128)f1*g2    + (__int128)f2*g1    + (__int128)f3*g0    + (__int128)f4*g4_19;
+    t[4] = (__int128)f0*g4 + (__int128)f1*g3    + (__int128)f2*g2    + (__int128)f3*g1    + (__int128)f4*g0;
+
+    int64_t c;
+    t[1] += (int64_t)(t[0] >> 51); h->v[0] = (int64_t)t[0] & FE_MASK51;
+    t[2] += (int64_t)(t[1] >> 51); h->v[1] = (int64_t)t[1] & FE_MASK51;
+    t[3] += (int64_t)(t[2] >> 51); h->v[2] = (int64_t)t[2] & FE_MASK51;
+    t[4] += (int64_t)(t[3] >> 51); h->v[3] = (int64_t)t[3] & FE_MASK51;
+    c     = (int64_t)(t[4] >> 51); h->v[4] = (int64_t)t[4] & FE_MASK51;
+    h->v[0] += c * 19;
+    c = h->v[0] >> 51; h->v[0] &= FE_MASK51; h->v[1] += c;
+#else
+    /* Fallback: naive approach for non-x86_64.
+     * Split each limb into two 26-bit halves to avoid overflow. */
+    fe25519 tmp; fe_0(&tmp);
+    for (int i = 0; i < 5; i++) {
+        int64_t fi = f->v[i];
+        for (int j = 0; j < 5; j++) {
+            int k = i + j;
+            int64_t gj = g->v[j];
+            if (k >= 5) {
+                tmp.v[k - 5] += fi * gj * 19;
+            } else {
+                tmp.v[k] += fi * gj;
+            }
+        }
+    }
+    fe_carry(&tmp); fe_carry(&tmp);
+    *h = tmp;
+#endif
+}
+
+static void fe_sq(fe25519 *h, const fe25519 *f) { fe_mul(h, f, f); }
+
+static uint64_t _fe_load8(const uint8_t *p)
+{
+    uint64_t r = 0;
+    for (int i = 7; i >= 0; i--) r = (r << 8) | p[i];
+    return r;
+}
+
+static void fe_frombytes(fe25519 *h, const uint8_t s[32])
+{
+    uint64_t lo   = _fe_load8(s);
+    uint64_t mid1 = _fe_load8(s + 8);
+    uint64_t mid2 = _fe_load8(s + 16);
+    uint64_t hi   = _fe_load8(s + 24);
+
+    h->v[0] = (int64_t)(lo & (uint64_t)FE_MASK51);
+    h->v[1] = (int64_t)(((lo >> 51) | (mid1 << 13)) & (uint64_t)FE_MASK51);
+    h->v[2] = (int64_t)(((mid1 >> 38) | (mid2 << 26)) & (uint64_t)FE_MASK51);
+    h->v[3] = (int64_t)(((mid2 >> 25) | (hi << 39)) & (uint64_t)FE_MASK51);
+    h->v[4] = (int64_t)((hi >> 12) & 0x7FFFFFFFFF);  /* 39 bits max (255-4*51=51, but top bit is sign) */
+}
+
+static void fe_tobytes(uint8_t s[32], const fe25519 *f)
+{
+    fe25519 t;
+    fe_copy(&t, f);
+    fe_carry(&t);
+    fe_carry(&t);
+
+    /* Conditional subtraction of p */
+    int64_t q = (t.v[0] + 19) >> 51;
+    for (int i = 1; i < 5; i++) q = (t.v[i] + q) >> 51;
+    t.v[0] += 19 * q;
+    int64_t c;
+    for (int i = 0; i < 4; i++) {
+        c = t.v[i] >> 51;
+        t.v[i] &= FE_MASK51;
+        t.v[i+1] += c;
+    }
+    t.v[4] &= FE_MASK51;
+
+    uint64_t u0 = (uint64_t)t.v[0], u1 = (uint64_t)t.v[1], u2 = (uint64_t)t.v[2];
+    uint64_t u3 = (uint64_t)t.v[3], u4 = (uint64_t)t.v[4];
+    uint64_t w0 = u0 | (u1 << 51);
+    uint64_t w1 = (u1 >> 13) | (u2 << 38);
+    uint64_t w2 = (u2 >> 26) | (u3 << 25);
+    uint64_t w3 = (u3 >> 39) | (u4 << 12);
+    for (int i = 0; i < 8; i++) s[i]    = (uint8_t)(w0 >> (i*8));
+    for (int i = 0; i < 8; i++) s[8+i]  = (uint8_t)(w1 >> (i*8));
+    for (int i = 0; i < 8; i++) s[16+i] = (uint8_t)(w2 >> (i*8));
+    for (int i = 0; i < 8; i++) s[24+i] = (uint8_t)(w3 >> (i*8));
+}
+
+static int fe_isnonzero(const fe25519 *f)
+{
+    uint8_t s[32]; fe_tobytes(s, f);
+    uint8_t r = 0; for (int i = 0; i < 32; i++) r |= s[i];
+    return r != 0;
+}
+
+static int fe_isneg(const fe25519 *f)
+{
+    uint8_t s[32]; fe_tobytes(s, f);
+    return s[0] & 1;
+}
+
+/* fe_invert: z^(p-2), p-2 = 2^255-21. Standard addition chain from ref10. */
+static void fe_invert(fe25519 *out, const fe25519 *z)
+{
+    fe25519 t0, t1, t2, t3; int i;
+    fe_sq(&t0, z);                                         /* t0 = z^2          */
+    fe_sq(&t1, &t0);                                       /* t1 = z^4          */
+    fe_sq(&t1, &t1);                                       /* t1 = z^8          */
+    fe_mul(&t1, z, &t1);                                   /* t1 = z^9          */
+    fe_mul(&t0, &t0, &t1);                                 /* t0 = z^11         */
+    fe_sq(&t2, &t0);                                       /* t2 = z^22         */
+    fe_mul(&t1, &t1, &t2);                                 /* t1 = z^(2^5-1)    */
+    fe_sq(&t2, &t1);
+    for (i=0;i<4;i++) fe_sq(&t2, &t2);                    /* t2 = z^(2^10-2^5) */
+    fe_mul(&t1, &t2, &t1);                                 /* t1 = z^(2^10-1)   */
+    fe_sq(&t2, &t1);
+    for (i=0;i<9;i++) fe_sq(&t2, &t2);                    /* t2 = z^(2^20-2^10)*/
+    fe_mul(&t2, &t2, &t1);                                 /* t2 = z^(2^20-1)   */
+    fe_sq(&t3, &t2);
+    for (i=0;i<19;i++) fe_sq(&t3, &t3);                   /* t3 = z^(2^40-2^20)*/
+    fe_mul(&t2, &t3, &t2);                                 /* t2 = z^(2^40-1)   */
+    fe_sq(&t2, &t2);
+    for (i=0;i<9;i++) fe_sq(&t2, &t2);                    /* t2 = z^(2^50-2^10)*/
+    fe_mul(&t1, &t2, &t1);                                 /* t1 = z^(2^50-1)   */
+    fe_sq(&t2, &t1);
+    for (i=0;i<49;i++) fe_sq(&t2, &t2);                   /* t2 = z^(2^100-2^50)*/
+    fe_mul(&t2, &t2, &t1);                                 /* t2 = z^(2^100-1)  */
+    fe_sq(&t3, &t2);
+    for (i=0;i<99;i++) fe_sq(&t3, &t3);                   /* t3 = z^(2^200-2^100)*/
+    fe_mul(&t2, &t3, &t2);                                 /* t2 = z^(2^200-1)  */
+    fe_sq(&t2, &t2);
+    for (i=0;i<49;i++) fe_sq(&t2, &t2);                   /* t2 = z^(2^250-2^50)*/
+    fe_mul(&t1, &t2, &t1);                                 /* t1 = z^(2^250-1)  */
+    fe_sq(&t1, &t1);                                       /* z^(2^251-2)       */
+    fe_sq(&t1, &t1);                                       /* z^(2^252-4)       */
+    fe_sq(&t1, &t1);                                       /* z^(2^253-8)       */
+    fe_sq(&t1, &t1);                                       /* z^(2^254-16)      */
+    fe_sq(&t1, &t1);                                       /* z^(2^255-32)      */
+    fe_mul(out, &t1, &t0);                                 /* z^(2^255-21) = z^(p-2) */
+}
+
+/* fe_pow2523: z^((p-5)/8) = z^(2^252-3). Used for square root recovery. */
+static void fe_pow2523(fe25519 *out, const fe25519 *z)
+{
+    fe25519 t0, t1, t2; int i;
+    fe_sq(&t0, z);                                         /* z^2 */
+    fe_sq(&t1, &t0); fe_sq(&t1, &t1);                     /* z^8 */
+    fe_mul(&t1, z, &t1);                                   /* z^9 */
+    fe_mul(&t0, &t0, &t1);                                 /* z^11 */
+    fe_sq(&t0, &t0);                                       /* z^22 */
+    fe_mul(&t0, &t1, &t0);                                 /* z^(2^5-1) */
+    fe_sq(&t1, &t0);
+    for (i=0;i<4;i++) fe_sq(&t1, &t1);
+    fe_mul(&t0, &t1, &t0);                                 /* z^(2^10-1) */
+    fe_sq(&t1, &t0);
+    for (i=0;i<9;i++) fe_sq(&t1, &t1);
+    fe_mul(&t1, &t1, &t0);                                 /* z^(2^20-1) */
+    fe_sq(&t2, &t1);
+    for (i=0;i<19;i++) fe_sq(&t2, &t2);
+    fe_mul(&t1, &t2, &t1);                                 /* z^(2^40-1) */
+    fe_sq(&t1, &t1);
+    for (i=0;i<9;i++) fe_sq(&t1, &t1);
+    fe_mul(&t0, &t1, &t0);                                 /* z^(2^50-1) */
+    fe_sq(&t1, &t0);
+    for (i=0;i<49;i++) fe_sq(&t1, &t1);
+    fe_mul(&t1, &t1, &t0);                                 /* z^(2^100-1) */
+    fe_sq(&t2, &t1);
+    for (i=0;i<99;i++) fe_sq(&t2, &t2);
+    fe_mul(&t1, &t2, &t1);                                 /* z^(2^200-1) */
+    fe_sq(&t1, &t1);
+    for (i=0;i<49;i++) fe_sq(&t1, &t1);
+    fe_mul(&t0, &t1, &t0);                                 /* z^(2^250-1) */
+    fe_sq(&t0, &t0); fe_sq(&t0, &t0);                     /* z^(2^252-4) */
+    fe_mul(out, &t0, z);                                   /* z^(2^252-3) */
+}
+
+/* ---------- ge25519: group element on Ed25519 ----------
+ * Curve: -x^2 + y^2 = 1 + d*x^2*y^2
+ * Extended coords (X:Y:Z:T) where x=X/Z, y=Y/Z, T=XY/Z
+ */
+
+typedef struct { fe25519 X, Y, Z, T; } ge_p3;
+typedef struct { fe25519 X, Y, Z; } ge_p2;
+typedef struct { fe25519 X, Y, Z, T; } ge_p1p1;
+typedef struct { fe25519 YplusX, YminusX, Z, T2d; } ge_cached;
+
+/* Curve constant d and 2d, loaded from canonical bytes */
+static int _ed25519_consts_inited = 0;
+static fe25519 _ed_d, _ed_2d, _ed_sqrtm1;
+
+static void _ed25519_init_consts(void)
+{
+    if (_ed25519_consts_inited) return;
+    static const uint8_t d_bytes[32] = {
+        0xa3,0x78,0x59,0x13,0xca,0x4d,0xeb,0x75,
+        0xab,0xd1,0x68,0x4e,0x7f,0x6e,0xb2,0x27,
+        0x09,0x8c,0x0d,0x22,0x18,0x6d,0x2a,0x21,
+        0xf5,0xfe,0xd4,0xaa,0x09,0x57,0xa1,0x52
+    };
+    static const uint8_t d2_bytes[32] = {
+        0x45,0xf1,0xb2,0x26,0x94,0x9b,0xd6,0xeb,
+        0x56,0xa3,0xd1,0x9c,0xfe,0xdc,0x64,0x4f,
+        0x12,0x18,0x1b,0x44,0x30,0xda,0x54,0x42,
+        0xea,0xfd,0xa9,0x54,0x13,0xae,0x42,0x25
+    };
+    static const uint8_t sqrtm1_bytes[32] = {
+        0xb0,0xa0,0x0e,0x4a,0x27,0x1b,0xee,0xc4,
+        0x78,0xe4,0x2f,0xad,0x06,0x18,0x43,0x2f,
+        0xa7,0xd7,0xfb,0x3d,0x99,0x00,0x4d,0x2b,
+        0x0b,0xdf,0xc1,0x4f,0x80,0x24,0x83,0x2b
+    };
+    fe_frombytes(&_ed_d, d_bytes);
+    fe_frombytes(&_ed_2d, d2_bytes);
+    fe_frombytes(&_ed_sqrtm1, sqrtm1_bytes);
+    _ed25519_consts_inited = 1;
+}
+
+/* ge_p3_0: identity (0,1,1,0) */
+static void ge_p3_0(ge_p3 *h)
+{
+    fe_0(&h->X); fe_1(&h->Y); fe_1(&h->Z); fe_0(&h->T);
+}
+
+/* Conversion routines */
+static void ge_p3_to_p2(ge_p2 *r, const ge_p3 *p)
+{
+    fe_copy(&r->X, &p->X); fe_copy(&r->Y, &p->Y); fe_copy(&r->Z, &p->Z);
+}
+
+static void ge_p1p1_to_p3(ge_p3 *r, const ge_p1p1 *p)
+{
+    fe_mul(&r->X, &p->X, &p->T);
+    fe_mul(&r->Y, &p->Y, &p->Z);
+    fe_mul(&r->Z, &p->Z, &p->T);
+    fe_mul(&r->T, &p->X, &p->Y);
+}
+
+static void ge_p1p1_to_p2(ge_p2 *r, const ge_p1p1 *p)
+{
+    fe_mul(&r->X, &p->X, &p->T);
+    fe_mul(&r->Y, &p->Y, &p->Z);
+    fe_mul(&r->Z, &p->Z, &p->T);
+}
+
+static void ge_p3_to_cached(ge_cached *r, const ge_p3 *p)
+{
+    fe_add(&r->YplusX, &p->Y, &p->X);
+    fe_sub(&r->YminusX, &p->Y, &p->X);
+    fe_copy(&r->Z, &p->Z);
+    fe_mul(&r->T2d, &p->T, &_ed_2d);
+}
+
+/* Doubling: p2 -> p1p1 (ref10 ge_p2_dbl) */
+static void ge_p2_dbl(ge_p1p1 *r, const ge_p2 *p)
+{
+    fe25519 t0;
+    fe_sq(&r->X, &p->X);
+    fe_sq(&r->Z, &p->Y);
+    fe_sq(&r->T, &p->Z);
+    fe_add(&r->T, &r->T, &r->T);
+    fe_add(&t0, &p->X, &p->Y);
+    fe_sq(&t0, &t0);
+    fe_add(&r->Y, &r->Z, &r->X);
+    fe_sub(&r->Z, &r->Z, &r->X);
+    fe_sub(&r->X, &t0, &r->Y);
+    fe_sub(&r->T, &r->T, &r->Z);
+}
+
+/* Doubling: p3 -> p1p1 */
+static void ge_p3_dbl(ge_p1p1 *r, const ge_p3 *p)
+{
+    ge_p2 q; ge_p3_to_p2(&q, p); ge_p2_dbl(r, &q);
+}
+
+/* Addition: p3 + cached -> p1p1 (ref10 ge_add) */
+static void ge_add_cached(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q)
+{
+    fe25519 t0;
+    fe_add(&r->X, &p->Y, &p->X);
+    fe_sub(&r->Y, &p->Y, &p->X);
+    fe_mul(&r->Z, &r->X, &q->YplusX);
+    fe_mul(&r->Y, &r->Y, &q->YminusX);
+    fe_mul(&r->T, &q->T2d, &p->T);
+    fe_mul(&t0, &p->Z, &q->Z);
+    fe_add(&t0, &t0, &t0);
+    fe_sub(&r->X, &r->Z, &r->Y);
+    fe_add(&r->Y, &r->Z, &r->Y);
+    fe_add(&r->Z, &t0, &r->T);
+    fe_sub(&r->T, &t0, &r->T);
+}
+
+/* Subtraction: p3 - cached -> p1p1 (ref10 ge_sub) */
+static void ge_sub_cached(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q)
+{
+    fe25519 t0;
+    fe_add(&r->X, &p->Y, &p->X);
+    fe_sub(&r->Y, &p->Y, &p->X);
+    fe_mul(&r->Z, &r->X, &q->YminusX);
+    fe_mul(&r->Y, &r->Y, &q->YplusX);
+    fe_mul(&r->T, &q->T2d, &p->T);
+    fe_mul(&t0, &p->Z, &q->Z);
+    fe_add(&t0, &t0, &t0);
+    fe_sub(&r->X, &r->Z, &r->Y);
+    fe_add(&r->Y, &r->Z, &r->Y);
+    fe_sub(&r->Z, &t0, &r->T);
+    fe_add(&r->T, &t0, &r->T);
+}
+
+/* Point encoding: compress p3 to 32 bytes */
+static void ge_tobytes(uint8_t s[32], const ge_p3 *h)
+{
+    fe25519 recip, x, y;
+    fe_invert(&recip, &h->Z);
+    fe_mul(&x, &h->X, &recip);
+    fe_mul(&y, &h->Y, &recip);
+    fe_tobytes(s, &y);
+    s[31] ^= (uint8_t)(fe_isneg(&x) << 7);
+}
+
+/* Point decoding: decompress 32 bytes to p3 (returns -P as in ref10).
+ * Returns 0 on success, -1 on invalid point. */
+static int ge_frombytes_negate_vartime(ge_p3 *h, const uint8_t s[32])
+{
+    _ed25519_init_consts();
+    fe25519 u, v, v3, vxx, check;
+
+    int x_sign = (s[31] >> 7) & 1;
+    uint8_t s2[32];
+    for (int i = 0; i < 32; i++) s2[i] = s[i];
+    s2[31] &= 0x7F;
+
+    fe_frombytes(&h->Y, s2);
+    fe_1(&h->Z);
+
+    /* u = y^2 - 1, v = d*y^2 + 1 */
+    fe_sq(&u, &h->Y);
+    fe_mul(&v, &u, &_ed_d);
+    fe_sub(&u, &u, &h->Z);
+    fe_add(&v, &v, &h->Z);
+
+    /* x = u * v^3 * (u * v^7)^((p-5)/8) */
+    fe_sq(&v3, &v);
+    fe_mul(&v3, &v3, &v);       /* v^3 */
+    fe_sq(&h->X, &v3);
+    fe_mul(&h->X, &h->X, &v);   /* v^7 */
+    fe_mul(&h->X, &h->X, &u);   /* u*v^7 */
+    fe_pow2523(&h->X, &h->X);   /* (u*v^7)^((p-5)/8) */
+    fe_mul(&h->X, &h->X, &v3);  /* * v^3 */
+    fe_mul(&h->X, &h->X, &u);   /* * u */
+
+    /* Verify: v * x^2 == u */
+    fe_sq(&vxx, &h->X);
+    fe_mul(&vxx, &vxx, &v);
+    fe_sub(&check, &vxx, &u);
+    if (fe_isnonzero(&check)) {
+        fe_add(&check, &vxx, &u);
+        if (fe_isnonzero(&check)) return -1;
+        fe_mul(&h->X, &h->X, &_ed_sqrtm1);
+    }
+
+    /* Adjust sign: frombytes_negate returns -P, so we want the x
+     * that, when negated, gives the correct sign for -P.
+     * If fe_isneg(x) == x_sign, negate x (so -P has opposite sign). */
+    if (fe_isneg(&h->X) == x_sign) {
+        fe_neg(&h->X, &h->X);
+    }
+
+    fe_mul(&h->T, &h->X, &h->Y);
+    return 0;
+}
+
+/* Scalar mult: [s]B (base point), double-and-add */
+static void ge_scalarmult_base(ge_p3 *result, const uint8_t s[32])
+{
+    _ed25519_init_consts();
+
+    /* Decode base point from canonical encoding */
+    static const uint8_t base_enc[32] = {
+        0x58,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+        0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+        0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,
+        0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66
+    };
+    ge_p3 B;
+    ge_frombytes_negate_vartime(&B, base_enc);
+    /* frombytes returns -B; negate X,T to get +B */
+    fe_neg(&B.X, &B.X);
+    fe_neg(&B.T, &B.T);
+
+    ge_p3_0(result);
+    int started = 0;
+
+    for (int i = 255; i >= 0; i--) {
+        if (started) {
+            ge_p1p1 t; ge_p3_dbl(&t, result); ge_p1p1_to_p3(result, &t);
+        }
+        if ((s[i/8] >> (i%8)) & 1) {
+            if (!started) {
+                *result = B; started = 1;
+            } else {
+                ge_p1p1 t; ge_cached Bc;
+                ge_p3_to_cached(&Bc, &B);
+                ge_add_cached(&t, result, &Bc);
+                ge_p1p1_to_p3(result, &t);
+            }
+        }
+    }
+    if (!started) ge_p3_0(result);
+}
+
+/* Generic scalar mult: [s]P */
+static void ge_scalarmult(ge_p3 *result, const uint8_t s[32], const ge_p3 *P)
+{
+    ge_p3_0(result);
+    int started = 0;
+
+    for (int i = 255; i >= 0; i--) {
+        if (started) {
+            ge_p1p1 t; ge_p3_dbl(&t, result); ge_p1p1_to_p3(result, &t);
+        }
+        if ((s[i/8] >> (i%8)) & 1) {
+            if (!started) {
+                *result = *P; started = 1;
+            } else {
+                ge_p1p1 t; ge_cached Pc;
+                ge_p3_to_cached(&Pc, P);
+                ge_add_cached(&t, result, &Pc);
+                ge_p1p1_to_p3(result, &t);
+            }
+        }
+    }
+    if (!started) ge_p3_0(result);
+}
+
+/* ---------- Scalar arithmetic mod L ----------
+ * L = 2^252 + 27742317777372353535851937790883648493
+ * Using 21-bit limbs (12 limbs for 252 bits).
+ */
+
+static void _sc_load21(int64_t out[24], const uint8_t in[], int nbytes)
+{
+    /* Load nbytes as 21-bit limbs. For 32 bytes -> 12 limbs, 64 bytes -> 24 limbs */
+    int nlimbs = (nbytes == 64) ? 24 : 12;
+    for (int i = 0; i < nlimbs; i++) out[i] = 0;
+
+    out[ 0] = (int64_t)( in[0]        | ((int64_t)in[1]  << 8) | ((int64_t)in[2]  << 16)) & 0x1FFFFF;
+    out[ 1] = (int64_t)((in[2]  >> 5) | ((int64_t)in[3]  << 3) | ((int64_t)in[4]  << 11) | ((int64_t)in[5]  << 19)) & 0x1FFFFF;
+    out[ 2] = (int64_t)((in[5]  >> 2) | ((int64_t)in[6]  << 6) | ((int64_t)in[7]  << 14)) & 0x1FFFFF;
+    out[ 3] = (int64_t)((in[7]  >> 7) | ((int64_t)in[8]  << 1) | ((int64_t)in[9]  << 9) | ((int64_t)in[10] << 17)) & 0x1FFFFF;
+    out[ 4] = (int64_t)((in[10] >> 4) | ((int64_t)in[11] << 4) | ((int64_t)in[12] << 12) | ((int64_t)in[13] << 20)) & 0x1FFFFF;
+    out[ 5] = (int64_t)((in[13] >> 1) | ((int64_t)in[14] << 7) | ((int64_t)in[15] << 15)) & 0x1FFFFF;
+    out[ 6] = (int64_t)((in[15] >> 6) | ((int64_t)in[16] << 2) | ((int64_t)in[17] << 10) | ((int64_t)in[18] << 18)) & 0x1FFFFF;
+    out[ 7] = (int64_t)((in[18] >> 3) | ((int64_t)in[19] << 5) | ((int64_t)in[20] << 13)) & 0x1FFFFF;
+
+    if (nbytes < 22) return;
+    out[ 8] = (int64_t)( in[21]       | ((int64_t)in[22] << 8) | ((int64_t)in[23] << 16)) & 0x1FFFFF;
+    out[ 9] = (int64_t)((in[23] >> 5) | ((int64_t)in[24] << 3) | ((int64_t)in[25] << 11) | ((int64_t)in[26] << 19)) & 0x1FFFFF;
+    out[10] = (int64_t)((in[26] >> 2) | ((int64_t)in[27] << 6) | ((int64_t)in[28] << 14)) & 0x1FFFFF;
+    out[11] = (int64_t)((in[28] >> 7) | ((int64_t)in[29] << 1) | ((int64_t)in[30] << 9) | ((int64_t)in[31] << 17)) & 0x1FFFFF;
+
+    if (nbytes < 34) return;
+    out[12] = (int64_t)((in[31] >> 4) | ((int64_t)in[32] << 4) | ((int64_t)in[33] << 12) | ((int64_t)in[34] << 20)) & 0x1FFFFF;
+    out[13] = (int64_t)((in[34] >> 1) | ((int64_t)in[35] << 7) | ((int64_t)in[36] << 15)) & 0x1FFFFF;
+    out[14] = (int64_t)((in[36] >> 6) | ((int64_t)in[37] << 2) | ((int64_t)in[38] << 10) | ((int64_t)in[39] << 18)) & 0x1FFFFF;
+    out[15] = (int64_t)((in[39] >> 3) | ((int64_t)in[40] << 5) | ((int64_t)in[41] << 13)) & 0x1FFFFF;
+    out[16] = (int64_t)( in[42]       | ((int64_t)in[43] << 8) | ((int64_t)in[44] << 16)) & 0x1FFFFF;
+    out[17] = (int64_t)((in[44] >> 5) | ((int64_t)in[45] << 3) | ((int64_t)in[46] << 11) | ((int64_t)in[47] << 19)) & 0x1FFFFF;
+    out[18] = (int64_t)((in[47] >> 2) | ((int64_t)in[48] << 6) | ((int64_t)in[49] << 14)) & 0x1FFFFF;
+    out[19] = (int64_t)((in[49] >> 7) | ((int64_t)in[50] << 1) | ((int64_t)in[51] << 9) | ((int64_t)in[52] << 17)) & 0x1FFFFF;
+    out[20] = (int64_t)((in[52] >> 4) | ((int64_t)in[53] << 4) | ((int64_t)in[54] << 12) | ((int64_t)in[55] << 20)) & 0x1FFFFF;
+    out[21] = (int64_t)((in[55] >> 1) | ((int64_t)in[56] << 7) | ((int64_t)in[57] << 15)) & 0x1FFFFF;
+    out[22] = (int64_t)((in[57] >> 6) | ((int64_t)in[58] << 2) | ((int64_t)in[59] << 10) | ((int64_t)in[60] << 18)) & 0x1FFFFF;
+    out[23] = (int64_t)((in[60] >> 3) | ((int64_t)in[61] << 5) | ((int64_t)in[62] << 13));
+}
+
+static void _sc_pack(uint8_t out[32], const int64_t s[12])
+{
+    out[ 0] = (uint8_t)(s[0]  >>  0);
+    out[ 1] = (uint8_t)(s[0]  >>  8);
+    out[ 2] = (uint8_t)((s[0] >> 16) | (s[1] << 5));
+    out[ 3] = (uint8_t)(s[1]  >>  3);
+    out[ 4] = (uint8_t)(s[1]  >> 11);
+    out[ 5] = (uint8_t)((s[1] >> 19) | (s[2] << 2));
+    out[ 6] = (uint8_t)(s[2]  >>  6);
+    out[ 7] = (uint8_t)((s[2] >> 14) | (s[3] << 7));
+    out[ 8] = (uint8_t)(s[3]  >>  1);
+    out[ 9] = (uint8_t)(s[3]  >>  9);
+    out[10] = (uint8_t)((s[3] >> 17) | (s[4] << 4));
+    out[11] = (uint8_t)(s[4]  >>  4);
+    out[12] = (uint8_t)(s[4]  >> 12);
+    out[13] = (uint8_t)((s[4] >> 20) | (s[5] << 1));
+    out[14] = (uint8_t)(s[5]  >>  7);
+    out[15] = (uint8_t)((s[5] >> 15) | (s[6] << 6));
+    out[16] = (uint8_t)(s[6]  >>  2);
+    out[17] = (uint8_t)(s[6]  >> 10);
+    out[18] = (uint8_t)((s[6] >> 18) | (s[7] << 3));
+    out[19] = (uint8_t)(s[7]  >>  5);
+    out[20] = (uint8_t)(s[7]  >> 13);
+    out[21] = (uint8_t)(s[8]  >>  0);
+    out[22] = (uint8_t)(s[8]  >>  8);
+    out[23] = (uint8_t)((s[8] >> 16) | (s[9] << 5));
+    out[24] = (uint8_t)(s[9]  >>  3);
+    out[25] = (uint8_t)(s[9]  >> 11);
+    out[26] = (uint8_t)((s[9] >> 19) | (s[10] << 2));
+    out[27] = (uint8_t)(s[10] >>  6);
+    out[28] = (uint8_t)((s[10] >> 14) | (s[11] << 7));
+    out[29] = (uint8_t)(s[11] >>  1);
+    out[30] = (uint8_t)(s[11] >>  9);
+    out[31] = (uint8_t)(s[11] >> 17);
+}
+
+/* Reduce mod L using the relation:
+ * L = 2^252 + c, where c is small. At limb position 12 we have 2^252.
+ * So s[i] for i >= 12: subtract s[i] * L_low from s[i-12..i-7],
+ * and s[i]*1 from s[i] (which becomes 0). */
+static void _sc_reduce_limbs(int64_t s[24])
+{
+    int64_t carry;
+    for (int i = 23; i >= 12; i--) {
+        int64_t si = s[i]; s[i] = 0;
+        s[i-12] += si * 666643;
+        s[i-11] += si * 470296;
+        s[i-10] += si * 654183;
+        s[i-9]  -= si * 997805;
+        s[i-8]  += si * 136657;
+        s[i-7]  -= si * 683564;
+    }
+    /* Carry-propagate to [0..11] */
+    for (int i = 0; i < 11; i++) {
+        carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        s[i+1] += carry;
+    }
+    /* Conditional final subtraction of L */
+    {
+        int64_t t[12]; int64_t c;
+        for (int i = 0; i < 12; i++) t[i] = s[i];
+        t[0] -= 666643; t[1] -= 470296; t[2] -= 654183;
+        t[3] += 997805; t[4] -= 136657; t[5] += 683564;
+        for (int i = 0; i < 11; i++) {
+            c = t[i] >> 21; t[i] -= c << 21; t[i+1] += c;
+        }
+        /* If result is non-negative, use it */
+        if (t[11] >= 0) {
+            int ok = 1;
+            for (int i = 0; i < 12; i++) if (t[i] < 0) { ok = 0; break; }
+            if (ok) for (int i = 0; i < 12; i++) s[i] = t[i];
+        }
+    }
+}
+
+static void sc_reduce(uint8_t out[32], const uint8_t in[64])
+{
+    int64_t s[24];
+    _sc_load21(s, in, 64);
+    /* Initial carry-propagate */
+    for (int i = 0; i < 23; i++) {
+        int64_t carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        s[i+1] += carry;
+    }
+    _sc_reduce_limbs(s);
+    _sc_pack(out, s);
+}
+
+/* sc_muladd: out = (a * b + c) mod L */
+static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32], const uint8_t c[32])
+{
+    int64_t al[24], bl[24], cl[24];
+    _sc_load21(al, a, 32);
+    _sc_load21(bl, b, 32);
+    _sc_load21(cl, c, 32);
+
+    /* Schoolbook multiply a*b, result in s[0..23], then add c */
+    int64_t s[24];
+    for (int i = 0; i < 24; i++) s[i] = 0;
+
+    s[ 0] = cl[0] + al[0]*bl[0];
+    s[ 1] = cl[1] + al[0]*bl[1] + al[1]*bl[0];
+    s[ 2] = cl[2] + al[0]*bl[2] + al[1]*bl[1] + al[2]*bl[0];
+    s[ 3] = cl[3] + al[0]*bl[3] + al[1]*bl[2] + al[2]*bl[1] + al[3]*bl[0];
+    s[ 4] = cl[4] + al[0]*bl[4] + al[1]*bl[3] + al[2]*bl[2] + al[3]*bl[1] + al[4]*bl[0];
+    s[ 5] = cl[5] + al[0]*bl[5] + al[1]*bl[4] + al[2]*bl[3] + al[3]*bl[2] + al[4]*bl[1] + al[5]*bl[0];
+    s[ 6] = cl[6] + al[0]*bl[6] + al[1]*bl[5] + al[2]*bl[4] + al[3]*bl[3] + al[4]*bl[2] + al[5]*bl[1] + al[6]*bl[0];
+    s[ 7] = cl[7] + al[0]*bl[7] + al[1]*bl[6] + al[2]*bl[5] + al[3]*bl[4] + al[4]*bl[3] + al[5]*bl[2] + al[6]*bl[1] + al[7]*bl[0];
+    s[ 8] = cl[8] + al[0]*bl[8] + al[1]*bl[7] + al[2]*bl[6] + al[3]*bl[5] + al[4]*bl[4] + al[5]*bl[3] + al[6]*bl[2] + al[7]*bl[1] + al[8]*bl[0];
+    s[ 9] = cl[9] + al[0]*bl[9] + al[1]*bl[8] + al[2]*bl[7] + al[3]*bl[6] + al[4]*bl[5] + al[5]*bl[4] + al[6]*bl[3] + al[7]*bl[2] + al[8]*bl[1] + al[9]*bl[0];
+    s[10] = cl[10]+ al[0]*bl[10]+ al[1]*bl[9] + al[2]*bl[8] + al[3]*bl[7] + al[4]*bl[6] + al[5]*bl[5] + al[6]*bl[4] + al[7]*bl[3] + al[8]*bl[2] + al[9]*bl[1] + al[10]*bl[0];
+    s[11] = cl[11]+ al[0]*bl[11]+ al[1]*bl[10]+ al[2]*bl[9] + al[3]*bl[8] + al[4]*bl[7] + al[5]*bl[6] + al[6]*bl[5] + al[7]*bl[4] + al[8]*bl[3] + al[9]*bl[2] + al[10]*bl[1] + al[11]*bl[0];
+    s[12] =         al[1]*bl[11]+ al[2]*bl[10]+ al[3]*bl[9] + al[4]*bl[8] + al[5]*bl[7] + al[6]*bl[6] + al[7]*bl[5] + al[8]*bl[4] + al[9]*bl[3] + al[10]*bl[2] + al[11]*bl[1];
+    s[13] =         al[2]*bl[11]+ al[3]*bl[10]+ al[4]*bl[9] + al[5]*bl[8] + al[6]*bl[7] + al[7]*bl[6] + al[8]*bl[5] + al[9]*bl[4] + al[10]*bl[3] + al[11]*bl[2];
+    s[14] =         al[3]*bl[11]+ al[4]*bl[10]+ al[5]*bl[9] + al[6]*bl[8] + al[7]*bl[7] + al[8]*bl[6] + al[9]*bl[5] + al[10]*bl[4] + al[11]*bl[3];
+    s[15] =         al[4]*bl[11]+ al[5]*bl[10]+ al[6]*bl[9] + al[7]*bl[8] + al[8]*bl[7] + al[9]*bl[6] + al[10]*bl[5] + al[11]*bl[4];
+    s[16] =         al[5]*bl[11]+ al[6]*bl[10]+ al[7]*bl[9] + al[8]*bl[8] + al[9]*bl[7] + al[10]*bl[6] + al[11]*bl[5];
+    s[17] =         al[6]*bl[11]+ al[7]*bl[10]+ al[8]*bl[9] + al[9]*bl[8] + al[10]*bl[7] + al[11]*bl[6];
+    s[18] =         al[7]*bl[11]+ al[8]*bl[10]+ al[9]*bl[9] + al[10]*bl[8] + al[11]*bl[7];
+    s[19] =         al[8]*bl[11]+ al[9]*bl[10]+ al[10]*bl[9] + al[11]*bl[8];
+    s[20] =         al[9]*bl[11]+ al[10]*bl[10]+ al[11]*bl[9];
+    s[21] =         al[10]*bl[11]+ al[11]*bl[10];
+    s[22] =         al[11]*bl[11];
+    s[23] = 0;
+
+    /* Carry-propagate */
+    for (int i = 0; i < 23; i++) {
+        int64_t carry = (s[i] + (1LL << 20)) >> 21;
+        s[i] -= carry << 21;
+        s[i+1] += carry;
+    }
+    _sc_reduce_limbs(s);
+    _sc_pack(out, s);
+}
+
+/* ---------- Ed25519 high-level API ---------- */
+
+static void _ed25519_create_keypair(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
+{
+    uint8_t h[64];
+    _ed25519_sha512(seed, 32, h);
+    h[0] &= 248;
+    h[31] &= 127;
+    h[31] |= 64;
+
+    ge_p3 A;
+    ge_scalarmult_base(&A, h);
+    ge_tobytes(pk, &A);
+
+    for (int i = 0; i < 32; i++) sk[i] = seed[i];
+    for (int i = 0; i < 32; i++) sk[32+i] = pk[i];
+}
+
+static void _ed25519_sign(const uint8_t *msg, uint32_t msg_len,
+                           const uint8_t sk[64], uint8_t sig[64])
+{
+    uint8_t h[64];
+    _ed25519_sha512(sk, 32, h);
+
+    uint8_t a_scalar[32];
+    for (int i = 0; i < 32; i++) a_scalar[i] = h[i];
+    a_scalar[0] &= 248;
+    a_scalar[31] &= 127;
+    a_scalar[31] |= 64;
+
+    /* r = H(h[32..63] || msg) mod L */
+    uint8_t nonce[64];
+    {
+        uint32_t total = 32 + msg_len;
+        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
+        if (!tmp) return;
+        for (int i = 0; i < 32; i++) tmp[i] = h[32+i];
+        for (uint32_t i = 0; i < msg_len; i++) tmp[32+i] = msg[i];
+        _ed25519_sha512(tmp, total, nonce);
+        free(tmp);
+    }
+    uint8_t r_scalar[32];
+    sc_reduce(r_scalar, nonce);
+
+    /* R = [r]B */
+    ge_p3 R;
+    ge_scalarmult_base(&R, r_scalar);
+    uint8_t R_bytes[32];
+    ge_tobytes(R_bytes, &R);
+
+    /* S = r + H(R || pk || msg) * a mod L */
+    uint8_t hram[64];
+    {
+        uint32_t total = 32 + 32 + msg_len;
+        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
+        if (!tmp) return;
+        for (int i = 0; i < 32; i++) tmp[i] = R_bytes[i];
+        for (int i = 0; i < 32; i++) tmp[32+i] = sk[32+i];
+        for (uint32_t i = 0; i < msg_len; i++) tmp[64+i] = msg[i];
+        _ed25519_sha512(tmp, total, hram);
+        free(tmp);
+    }
+    uint8_t hram_reduced[32];
+    sc_reduce(hram_reduced, hram);
+
+    uint8_t S[32];
+    sc_muladd(S, hram_reduced, a_scalar, r_scalar);
+
+    for (int i = 0; i < 32; i++) sig[i] = R_bytes[i];
+    for (int i = 0; i < 32; i++) sig[32+i] = S[i];
+}
+
+/* Verify: check [S]B == R + [H(R||pk||msg)]A.
+ * Since frombytes gives -A, we check [S]B + [h](-A) == R. */
+static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
+                            const uint8_t pk[32], const uint8_t sig[64])
+{
+    ge_p3 A;
+    if (ge_frombytes_negate_vartime(&A, pk) != 0) return -1;
+
+    if (sig[63] & 0xF0) return -1;
+
+    uint8_t h[64];
+    {
+        uint32_t total = 32 + 32 + msg_len;
+        uint8_t *tmp = (uint8_t *)malloc(total ? total : 1);
+        if (!tmp) return -1;
+        for (int i = 0; i < 32; i++) tmp[i] = sig[i];
+        for (int i = 0; i < 32; i++) tmp[32+i] = pk[i];
+        for (uint32_t i = 0; i < msg_len; i++) tmp[64+i] = msg[i];
+        _ed25519_sha512(tmp, total, h);
+        free(tmp);
+    }
+    uint8_t h_scalar[32];
+    sc_reduce(h_scalar, h);
+
+    /* [S]B + [h](-A) should equal R */
+    ge_p3 sB;
+    ge_scalarmult_base(&sB, sig + 32);
+
+    ge_p3 hA;
+    ge_scalarmult(&hA, h_scalar, &A);
+
+    ge_p1p1 sum11;
+    ge_cached hA_c;
+    ge_p3_to_cached(&hA_c, &hA);
+    ge_add_cached(&sum11, &sB, &hA_c);
+    ge_p3 check;
+    ge_p1p1_to_p3(&check, &sum11);
+
+    uint8_t check_bytes[32];
+    ge_tobytes(check_bytes, &check);
+
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) diff |= check_bytes[i] ^ sig[i];
+    return diff == 0 ? 0 : -1;
+}
+
+/* ---------- RuntimeValue API wrappers ---------- */
+
+static uint8_t *_ed_rv_to_bytes(int64_t rv, uint32_t *out_len)
+{
+    if (!IS_HEAP(rv)) return (void*)0;
+    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(rv);
+    if (!hdr || hdr->type != HEAP_ARRAY) return (void*)0;
+    RuntimeArray *arr = (RuntimeArray *)hdr;
+    uint32_t len = arr->len;
+    uint8_t *buf = (uint8_t *)malloc(len);
+    if (!buf) return (void*)0;
+    for (uint32_t i = 0; i < len; i++)
+        buf[i] = (uint8_t)(DECODE_INT(arr->items[i]) & 0xFF);
+    *out_len = len;
+    return buf;
+}
+
+static int _ed_bytes_to_rv(const uint8_t *src, uint32_t src_len, int64_t rv)
+{
+    if (!IS_HEAP(rv)) return -1;
+    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(rv);
+    if (!hdr || hdr->type != HEAP_ARRAY) return -1;
+    RuntimeArray *arr = (RuntimeArray *)hdr;
+    if (arr->len < src_len) return -1;
+    for (uint32_t i = 0; i < src_len; i++)
+        arr->items[i] = ENCODE_INT(src[i]);
+    return 0;
+}
+
+int64_t rt_ed25519_keypair(int64_t seed_rv, int64_t pk_rv)
+{
+    uint32_t seed_len = 0;
+    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
+    if (!seed || seed_len != 32) { if (seed) free(seed); return -1; }
+    uint8_t pk[32], sk[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    free(seed);
+    if (_ed_bytes_to_rv(pk, 32, pk_rv) != 0) return -1;
+    return 0;
+}
+
+int64_t rt_ed25519_sign(int64_t msg_rv, int64_t sk_rv, int64_t sig_rv)
+{
+    uint32_t msg_len = 0, sk_len = 0;
+    uint8_t *msg = _ed_rv_to_bytes(msg_rv, &msg_len);
+    uint8_t *sk = _ed_rv_to_bytes(sk_rv, &sk_len);
+    if (!sk || sk_len != 64) { if (msg) free(msg); if (sk) free(sk); return -1; }
+    uint8_t sig[64];
+    _ed25519_sign(msg ? msg : (const uint8_t*)"", msg_len, sk, sig);
+    if (msg) free(msg); free(sk);
+    if (_ed_bytes_to_rv(sig, 64, sig_rv) != 0) return -1;
+    return 0;
+}
+
+int64_t rt_ed25519_verify(int64_t msg_rv, int64_t pk_rv, int64_t sig_rv)
+{
+    uint32_t msg_len = 0, pk_len = 0, sig_len = 0;
+    uint8_t *msg = _ed_rv_to_bytes(msg_rv, &msg_len);
+    uint8_t *pk = _ed_rv_to_bytes(pk_rv, &pk_len);
+    uint8_t *sig = _ed_rv_to_bytes(sig_rv, &sig_len);
+    if (!pk || pk_len != 32 || !sig || sig_len != 64) {
+        if (msg) free(msg); if (pk) free(pk); if (sig) free(sig);
+        return -1;
+    }
+    int result = _ed25519_verify(msg ? msg : (const uint8_t*)"", msg_len, pk, sig);
+    if (msg) free(msg); free(pk); free(sig);
+    return (int64_t)result;
+}
+
+/* rt_ed25519_self_test: RFC 8032 Test Vector 1.  Returns 0 on pass, -1 on fail. */
+int64_t rt_ed25519_self_test(void)
+{
+    _ed25519_init_consts();
+
+    static const uint8_t seed[32] = {
+        0x9d,0x61,0xb1,0x9d,0xef,0xfd,0x5a,0x60,
+        0xba,0x84,0x4a,0xf4,0x92,0xec,0x2c,0xc4,
+        0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
+        0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
+    };
+    static const uint8_t expected_pk[32] = {
+        0xd7,0x5a,0x98,0x01,0x82,0xb1,0x0a,0xb7,
+        0xd5,0x4b,0xfe,0xd3,0xc9,0x64,0x07,0x3a,
+        0x0e,0xe1,0x72,0xf3,0xda,0xa3,0xf4,0xa1,
+        0x84,0x46,0xb0,0xb8,0xd1,0x83,0xf8,0xe3
+    };
+    static const uint8_t expected_sig[64] = {
+        0xe5,0x56,0x43,0x00,0xc3,0x60,0xac,0x72,
+        0x90,0x86,0xe2,0xcc,0x80,0x6e,0x82,0x8a,
+        0x84,0x87,0x7f,0x1e,0xb8,0xe5,0xd9,0x74,
+        0xd8,0x73,0xe0,0x65,0x22,0x49,0x01,0x55,
+        0x5f,0xb8,0x82,0x15,0x90,0xa3,0x3b,0xac,
+        0xc6,0x1e,0x39,0x70,0x1c,0xf9,0xb4,0x6b,
+        0xd2,0x5b,0xf5,0xf0,0x59,0x5b,0xbe,0x24,
+        0x65,0x51,0x41,0x43,0x8e,0x7a,0x10,0x0b
+    };
+
+    /* 1. Generate keypair */
+    uint8_t pk[32], sk[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    for (int i = 0; i < 32; i++)
+        if (pk[i] != expected_pk[i]) return -1;
+
+    /* 2. Sign empty message */
+    uint8_t sig[64];
+    _ed25519_sign((const uint8_t *)"", 0, sk, sig);
+    for (int i = 0; i < 64; i++)
+        if (sig[i] != expected_sig[i]) return -1;
+
+    /* 3. Verify valid signature */
+    if (_ed25519_verify((const uint8_t *)"", 0, pk, sig) != 0) return -1;
+
+    /* 4. Verify tampered message fails */
+    uint8_t bad_msg[1] = {0x42};
+    if (_ed25519_verify(bad_msg, 1, pk, sig) == 0) return -1;
+
+    return 0; /* All tests passed */
+}
+
 /* Also provide the unmangled name for direct extern fn calls */
 int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 uint64_t a2, uint64_t a3, uint64_t a4)
@@ -3398,6 +4398,55 @@ RuntimeValue serial_println(RuntimeValue val) {
     rt_print(val);
     serial_puts("\r\n");
     return NIL_VALUE;
+}
+
+/* ===================================================================
+ * Serial Input — COM1 RX polling + line editing
+ * =================================================================== */
+
+/* Read a line from serial (blocks until newline or buffer full).
+ * Returns length of line (excluding null terminator). Echoes characters. */
+static int serial_readline(char *buf, int max_len)
+{
+    int pos = 0;
+    while (pos < max_len - 1) {
+        char c = serial_getchar();
+        if (c == '\r' || c == '\n') {
+            serial_putchar('\r');
+            serial_putchar('\n');
+            break;
+        } else if (c == 0x7f || c == '\b') {
+            /* Backspace */
+            if (pos > 0) {
+                pos--;
+                serial_puts("\b \b");
+            }
+        } else if (c >= 0x20) {
+            buf[pos++] = c;
+            serial_putchar(c);
+        }
+    }
+    buf[pos] = '\0';
+    return pos;
+}
+
+/* Simple language wrappers for serial input */
+RuntimeValue rt_serial_getchar(void)
+{
+    char c = serial_getchar();
+    return ENCODE_INT((int64_t)c);
+}
+
+RuntimeValue rt_serial_readline(void)
+{
+    char buf[256];
+    serial_readline(buf, 256);
+    return rt_string_from_cstr(buf);
+}
+
+RuntimeValue rt_serial_data_ready(void)
+{
+    return serial_data_ready() ? TRUE_VALUE : FALSE_VALUE;
 }
 
 static void serial_puthex(uint32_t v) {

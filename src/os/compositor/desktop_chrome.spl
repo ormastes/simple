@@ -1,0 +1,361 @@
+# Desktop Chrome — Shared system bar + dock rendering
+#
+# Pure Simple implementation using CompositorBackend trait.
+# Shared between hosted (winit) and baremetal (QEMU) window managers.
+# Ported from QEMU ARM64 wm_entry.spl glass system bar + dock.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_port.{GlassPortConfig}
+
+# ============================================================================
+# Chrome Configuration
+# ============================================================================
+
+val SYSTEM_BAR_HEIGHT: i32 = 28
+val DOCK_HEIGHT: i32 = 58
+val DOCK_ICON_SIZE: i32 = 32
+val DOCK_PILL_SIZE: i32 = 48
+val DOCK_ICON_GAP: i32 = 8
+val DOCK_ICON_PAD: i32 = 8
+val DOCK_CORNER_RADIUS: i32 = 16
+val DOCK_MARGIN_BOTTOM: i32 = 6
+
+# Icon colors
+val ICON_TERM: u32 = 0x003498DB
+val ICON_FILES: u32 = 0x0027AE60
+val ICON_CALC: u32 = 0x00E74C3C
+val ICON_CLOCK: u32 = 0x00F39C12
+val ICON_SETTINGS: u32 = 0x009B59B6
+val ICON_BROWSER: u32 = 0x00E67E22
+val ICON_EDITOR: u32 = 0x001ABC9C
+
+# ============================================================================
+# System Bar (top 28px)
+# ============================================================================
+
+fn draw_system_bar(backend: CompositorBackend, config: GlassPortConfig, active_win: i32):
+    """Draw the macOS-style system bar at the top of the screen.
+
+    Includes: logo, active app name, menu items (File, Edit, View, Go, Window),
+    search icon, control center, Wi-Fi, battery, volume, clock.
+    All rendered via CompositorBackend for cross-platform use.
+    """
+    val sw = backend.width()
+    val h = SYSTEM_BAR_HEIGHT
+
+    # Glass blur + tint
+    backend.blur_region(0, 0, sw, h, 24)
+    backend.blur_region(0, 0, sw, h, 10)
+    backend.blend_rect(0, 0, sw, h, config.accent_color, 5)
+    backend.blend_rect(0, 0, sw, h, 0x004080FF, 12)
+
+    # Gradient overlay: elevated → surface
+    backend.gradient_v(0, 0, sw, h, 0x002C2C32, 0x001E1E23)
+    backend.blend_rect(0, 0, sw, h / 2, 0x00FFFFFF, 8)
+    backend.blend_rect(0, h / 2, sw, h / 2, 0x00000000, 8)
+    backend.blend_rect(0, 1, sw, 1, 0x00FFFFFF, 35)
+    backend.blend_rect(0, 0, sw, 1, 0x00FFFFFF, 30)
+
+    # Bottom separator
+    backend.blend_rect(0, h - 1, sw, 1, config.border_color, 38)
+    backend.blend_rect(0, h - 2, sw, 1, config.accent_color, 15)
+
+    # Edge accents
+    backend.blend_rect(4, 4, 2, h - 8, config.accent_color, 30)
+    backend.blend_rect(sw - 6, 4, 2, h - 8, config.accent2_color, 30)
+
+    # SimpleOS logo pill (rounded via blend)
+    backend.blend_rect(10, 4, 28, 20, config.accent_color, 200)
+    backend.blend_rect(12, 5, 24, 9, 0x00FFFFFF, 40)
+    backend.fill_rect(32, 6, 3, 3, 0x00FFFFFF)
+
+    # Active app name
+    val app_name = if active_win == 0: "Terminal"
+                   else if active_win == 1: "Editor"
+                   else: "Finder"
+    backend.draw_text(46, 6, app_name, 0xFFE0E0F0, 0x00000000)
+
+    # Green running dot
+    _draw_filled_circle(backend, 46 + 68, 10, 4, 0xFF30D158)
+
+    # Menu items (simple text)
+    val menu_x: i32 = 128
+    backend.blend_rect(menu_x - 2, 5, 38, 18, 0x00FFFFFF, 25)
+    backend.blend_rect(menu_x - 2, 5, 38, 18, config.accent_color, 8)
+    backend.draw_text(menu_x, 6, "File", 0xFFE0E0F0, 0x00000000)
+    backend.blend_rect(menu_x, 19, 34, 1, config.accent_color, 120)
+    backend.draw_text(menu_x + 46, 6, "Edit", 0xFFC8C8D0, 0x00000000)
+    backend.draw_text(menu_x + 90, 6, "View", 0xFFC8C8D0, 0x00000000)
+    backend.draw_text(menu_x + 134, 6, "Go", 0xFFC8C8D0, 0x00000000)
+    backend.draw_text(menu_x + 162, 6, "Window", 0xFFC8C8D0, 0x00000000)
+
+    # Right-side indicators
+    val rx = sw - 200
+
+    # Search icon (circle + line)
+    _draw_ring(backend, rx, 5, 12, 2, 0xFFE0E0F0, 150)
+    backend.blend_rect(rx + 10, 15, 4, 2, 0x00E0E0F0, 150)
+
+    # Wi-Fi icon (nested rings)
+    _draw_ring(backend, rx + 30, 4, 16, 2, 0xFFE0E0F0, 140)
+    _draw_ring(backend, rx + 33, 7, 10, 2, 0xFFE0E0F0, 160)
+    _draw_filled_circle(backend, rx + 37, 13, 4, 0xFFE0E0F0)
+
+    # Battery
+    val bx = rx + 56
+    backend.blend_rect(bx, 8, 24, 12, 0x00E0E0F0, 160)
+    backend.blend_rect(bx + 1, 9, 22, 10, 0x00000000, 200)
+    backend.blend_rect(bx + 2, 10, 16, 8, 0x0030D158, 200)
+    backend.blend_rect(bx + 24, 11, 3, 6, 0x00E0E0F0, 100)
+    backend.draw_text(bx + 30, 6, "85%", 0xFFA0A0B0, 0x00000000)
+
+    # Clock (with accent background)
+    val clx = sw - 84
+    backend.blend_rect(clx, 4, 72, 20, 0x002C2C32, 100)
+    backend.blend_rect(clx - 2, 3, 76, 22, config.accent_color, 8)
+    backend.draw_text(clx + 4, 6, "12:00 PM", 0xFFE0E0F0, 0x00000000)
+
+    # Notification dot
+    _draw_filled_circle(backend, clx + 66, 2, 5, 0xFFFF3B30)
+
+# ============================================================================
+# Dock (bottom)
+# ============================================================================
+
+fn draw_dock(backend: CompositorBackend, config: GlassPortConfig, active_win: i32):
+    """Draw the macOS-style dock at the bottom of the screen.
+
+    Includes: 7 app icons + separator + 2 utility icons + running indicators.
+    Uses pill-shaped icon containers with gradient reflections.
+    """
+    val sw = backend.width()
+    val sh = backend.height()
+
+    val num_icons: i32 = 9
+    val pill = DOCK_PILL_SIZE
+    val gap = DOCK_ICON_GAP
+    val sep_w: i32 = 2
+    val sep_gap: i32 = 10
+    val pad: i32 = 16
+
+    val dock_w = 7 * (pill + gap) + sep_w + sep_gap * 2 + 2 * (pill + gap) - gap + pad * 2
+    val dock_h: i32 = 52
+    val dock_x = (sw - dock_w) / 2
+    val dock_y = sh - dock_h - DOCK_MARGIN_BOTTOM
+
+    # Glass background
+    backend.blur_region(dock_x, dock_y, dock_w, dock_h, 24)
+    backend.blur_region(dock_x, dock_y, dock_w, dock_h, 12)
+    backend.blend_rect(dock_x, dock_y, dock_w, dock_h, config.accent_color, 6)
+    backend.blend_rect(dock_x, dock_y, dock_w, dock_h, 0x00FFFFFF, 12)
+    backend.blend_rect(dock_x, dock_y, dock_w, dock_h, 0x004080FF, 12)
+
+    # Rounded surface fill (approximated with insets)
+    backend.blend_rect(dock_x + 4, dock_y + 4, dock_w - 8, dock_h - 8, config.surface_color, config.surface_alpha)
+    backend.blend_rect(dock_x + 2, dock_y + 6, dock_w - 4, dock_h - 12, config.surface_color, config.surface_alpha)
+    backend.blend_rect(dock_x + 6, dock_y + 2, dock_w - 12, dock_h - 4, config.surface_color, config.surface_alpha)
+
+    # Top/bottom highlights
+    backend.blend_rect(dock_x + 8, dock_y + 1, dock_w - 16, 1, 0x00FFFFFF, 35)
+    backend.blend_rect(dock_x + 2, dock_y + 2, dock_w - 4, 1, 0x00FFFFFF, 15)
+
+    # Border
+    backend.blend_rect(dock_x, dock_y, dock_w, 1, config.border_color, config.border_alpha)
+    backend.blend_rect(dock_x, dock_y + dock_h - 1, dock_w, 1, config.border_color, config.border_alpha)
+    backend.blend_rect(dock_x, dock_y, 1, dock_h, config.border_color, config.border_alpha)
+    backend.blend_rect(dock_x + dock_w - 1, dock_y, 1, dock_h, config.border_color, config.border_alpha)
+
+    # Dynamic Island notch
+    val notch_w: i32 = 80
+    val notch_h: i32 = 6
+    val notch_x = dock_x + (dock_w - notch_w) / 2
+    val notch_y = dock_y - notch_h + 2
+    backend.blend_rect(notch_x + 4, notch_y + 2, notch_w - 8, notch_h, config.surface_color, config.surface_alpha + 30)
+    backend.blend_rect(notch_x + 2, notch_y + 4, notch_w - 4, notch_h - 4, config.surface_color, config.surface_alpha + 30)
+    _draw_filled_circle(backend, notch_x + notch_w / 2 - 14, notch_y + 5, 3, 0xFF0A84FF)
+    _draw_filled_circle(backend, notch_x + notch_w / 2 - 2, notch_y + 5, 3, 0xFF30D158)
+    _draw_filled_circle(backend, notch_x + notch_w / 2 + 10, notch_y + 5, 3, 0xFFBB86FC)
+
+    # Draw icons
+    val icon_y = dock_y + 4
+    var ix: i32 = dock_x + pad
+
+    # 1. Terminal
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_TERM, config)
+    _draw_icon_terminal(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 2. Files
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_FILES, config)
+    _draw_icon_files(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 3. Calculator
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_CALC, config)
+    _draw_icon_calc(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 4. Clock
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_CLOCK, config)
+    _draw_icon_clock(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 5. Settings
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_SETTINGS, config)
+    _draw_icon_settings(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 6. Browser
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_BROWSER, config)
+    _draw_icon_browser(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 7. Editor
+    _draw_dock_icon(backend, ix, icon_y, pill, ICON_EDITOR, config)
+    _draw_icon_editor(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+
+    # Separator
+    val sep_x = ix + pill + sep_gap
+    backend.blend_rect(sep_x, dock_y + 8, sep_w, dock_h - 16, config.border_color, config.border_alpha)
+    ix = sep_x + sep_w + sep_gap
+
+    # 8. Finder
+    _draw_dock_icon(backend, ix, icon_y, pill, 0x004A90D9, config)
+    _draw_icon_finder(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+    ix = ix + pill + gap
+
+    # 9. Trash
+    _draw_dock_icon(backend, ix, icon_y, pill, 0x00808080, config)
+    _draw_icon_trash(backend, ix + DOCK_ICON_PAD, icon_y + DOCK_ICON_PAD, DOCK_ICON_SIZE)
+
+    # Running indicators (dots)
+    val dot_y = dock_y + dock_h - 6
+    val first_dot = dock_x + pad + pill / 2 - 2
+
+    # Terminal, Files, Clock, Editor have running indicators
+    _draw_running_dot(backend, first_dot, dot_y, config.accent_color)
+    _draw_running_dot(backend, first_dot + (pill + gap), dot_y, config.accent_color)
+    _draw_running_dot(backend, first_dot + 3 * (pill + gap), dot_y, config.accent_color)
+    _draw_running_dot(backend, first_dot + 6 * (pill + gap), dot_y, config.accent_color)
+
+    # Active window highlight dot (white)
+    val active_dot_x = first_dot + active_win * (pill + gap)
+    _draw_filled_circle(backend, active_dot_x, dot_y, 3, 0xFFFFFFFF)
+
+    # Reflection below dock
+    backend.blend_rect(dock_x + 10, dock_y + dock_h + 2, dock_w - 20, 1, config.surface_color, 20)
+    backend.blend_rect(dock_x + 16, dock_y + dock_h + 3, dock_w - 32, 1, config.surface_color, 12)
+
+# ============================================================================
+# Dock Icon Helpers
+# ============================================================================
+
+fn _draw_dock_icon(backend: CompositorBackend, x: i32, y: i32, size: i32, color: u32, config: GlassPortConfig):
+    """Draw a pill-shaped dock icon container."""
+    backend.blend_rect(x + 4, y + 4, size - 8, size - 8, config.surface_color, 60)
+    backend.blend_rect(x + 2, y + 6, size - 4, size - 12, config.surface_color, 60)
+    backend.blend_rect(x + 6, y + 2, size - 12, size - 4, config.surface_color, 60)
+    backend.blend_rect(x, y, size, size, color, 255)
+    backend.blend_rect(x, y, size, size / 3, 0x00FFFFFF, 25)
+
+fn _draw_icon_terminal(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw terminal icon content."""
+    backend.blend_rect(x + 2, y + 2, s - 4, s - 4, 0x001A1A2E, 200)
+    backend.blend_rect(x + 6, y + s / 2, 8, 2, 0x0044FF44, 255)
+    backend.fill_rect(x + 14, y + s / 2 - 2, 2, 6, 0xFF44FF44)
+
+fn _draw_icon_files(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw files/folder icon content."""
+    backend.blend_rect(x + 2, y + 6, s - 4, s - 8, 0x001E8449, 220)
+    backend.fill_rect(x + 6, y + 12, s - 12, 2, 0xFFFFFFFF)
+    backend.fill_rect(x + 6, y + 16, s - 16, 2, 0xFFFFFFFF)
+
+fn _draw_icon_calc(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw calculator icon content."""
+    backend.blend_rect(x + 2, y + 2, s - 4, 8, 0x00FFFFFF, 120)
+    val bsz: i32 = 7
+    backend.blend_rect(x + 3, y + 13, bsz, bsz, 0x00FFFFFF, 200)
+    backend.blend_rect(x + 11, y + 13, bsz, bsz, 0x00FFFFFF, 200)
+    backend.blend_rect(x + 19, y + 13, bsz, bsz, 0x00FFFFFF, 200)
+
+fn _draw_icon_clock(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw clock icon content."""
+    _draw_ring(backend, x + 2, y + 2, s - 4, 2, 0xFFFFFFFF, 180)
+    backend.blend_rect(x + s / 2, y + s / 2, 2, 0 - s / 4, 0x00FFFFFF, 200)
+    backend.blend_rect(x + s / 2, y + s / 2, s / 4, 2, 0x00FFFFFF, 200)
+
+fn _draw_icon_settings(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw settings gear icon content."""
+    _draw_ring(backend, x + 4, y + 4, s - 8, 3, 0xFFFFFFFF, 160)
+    _draw_filled_circle(backend, x + s / 2 - 3, y + s / 2 - 3, 4, 0xFFFFFFFF)
+    backend.fill_rect(x + s / 2 - 1, y, 2, 4, 0xFFFFFFFF)
+    backend.fill_rect(x + s / 2 - 1, y + s - 4, 2, 4, 0xFFFFFFFF)
+    backend.fill_rect(x, y + s / 2 - 1, 4, 2, 0xFFFFFFFF)
+    backend.fill_rect(x + s - 4, y + s / 2 - 1, 4, 2, 0xFFFFFFFF)
+
+fn _draw_icon_browser(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw browser globe icon content."""
+    _draw_ring(backend, x + 2, y + 2, s - 4, 2, 0xFFFFFFFF, 180)
+    backend.blend_rect(x + s / 3, y + 2, 1, s - 4, 0x00FFFFFF, 120)
+    backend.blend_rect(x + s * 2 / 3, y + 2, 1, s - 4, 0x00FFFFFF, 120)
+
+fn _draw_icon_editor(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw editor icon content."""
+    backend.blend_rect(x + 4, y + 2, s - 8, s - 4, 0x00FFFFFF, 140)
+    backend.fill_rect(x + 8, y + 7, s - 16, 2, 0xFF148F77)
+    backend.fill_rect(x + 8, y + 12, s - 18, 2, 0xFF148F77)
+    backend.fill_rect(x + 8, y + 17, s - 14, 2, 0xFF148F77)
+
+fn _draw_icon_finder(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw Finder icon (face with eyes)."""
+    backend.blend_rect(x + s / 2, y, s / 2, s, 0x00357ABD, 120)
+    _draw_filled_circle(backend, x + 6, y + 8, 3, 0xFFFFFFFF)
+    _draw_filled_circle(backend, x + 18, y + 8, 3, 0xFFFFFFFF)
+    _draw_filled_circle(backend, x + 7, y + 8, 2, 0xFF000000)
+    _draw_filled_circle(backend, x + 19, y + 8, 2, 0xFF000000)
+    backend.blend_rect(x + 6, y + 18, 18, 6, 0x00FFFFFF, 200)
+
+fn _draw_icon_trash(backend: CompositorBackend, x: i32, y: i32, s: i32):
+    """Draw trash can icon."""
+    backend.blend_rect(x + 4, y + 2, s - 8, 4, 0x00C0C0C0, 255)
+    backend.blend_rect(x + 6, y + 8, s - 12, s - 12, 0x00A0A0A0, 220)
+    backend.blend_rect(x + 10, y + 11, 2, s - 18, 0x00808080, 180)
+    backend.blend_rect(x + 14, y + 11, 2, s - 18, 0x00808080, 180)
+    backend.blend_rect(x + 18, y + 11, 2, s - 18, 0x00808080, 180)
+
+fn _draw_running_dot(backend: CompositorBackend, x: i32, y: i32, color: u32):
+    """Draw a running app indicator dot with glow."""
+    _draw_filled_circle(backend, x - 1, y - 1, 4, color)
+    _draw_filled_circle(backend, x, y, 3, color)
+
+# ============================================================================
+# Geometry Primitives (shared)
+# ============================================================================
+
+fn _draw_filled_circle(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32):
+    """Draw a filled circle at center (cx+r, cy+r) with radius r."""
+    var dy: i32 = 0
+    while dy < r * 2:
+        val dist_y = dy - r
+        val abs_dy = if dist_y < 0: 0 - dist_y else: dist_y
+        val hw = r - abs_dy
+        if hw > 0:
+            backend.fill_rect(cx + r - hw, cy + dy, hw * 2, 1, color)
+        dy = dy + 1
+
+fn _draw_ring(backend: CompositorBackend, x: i32, y: i32, size: i32, thickness: i32, color: u32, alpha: u8):
+    """Draw a circle outline (ring)."""
+    val r = size / 2
+    var dy: i32 = 0
+    while dy < size:
+        val dist_y = dy - r
+        val abs_dy = if dist_y < 0: 0 - dist_y else: dist_y
+        val hw_outer = r - abs_dy
+        val inner_r = r - thickness
+        val hw_inner = if abs_dy < inner_r: inner_r - abs_dy else: 0
+        if hw_outer > 0:
+            val left_w = hw_outer - hw_inner
+            if left_w > 0:
+                backend.blend_rect(x + r - hw_outer, y + dy, left_w, 1, color, alpha)
+                backend.blend_rect(x + r + hw_inner, y + dy, left_w, 1, color, alpha)
+        dy = dy + 1

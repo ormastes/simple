@@ -16,11 +16,16 @@ use common.ui.builder.{column, text_widget}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard, KeyEvent, Key}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseEvent}
-use os.compositor.decorations.{draw_window_frame, draw_glass_window_frame, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
+use os.compositor.decorations.{draw_window_frame, draw_glass_window_frame, draw_glass_window_frame_enhanced, TITLE_BAR_HEIGHT, BORDER_WIDTH, client_area_x, client_area_y, client_area_width, client_area_height, is_in_title_bar, is_in_close_button}
 use os.compositor.glass_effects.{GlassConfig, glass_begin_frame, glass_present, glass_gradient_v, draw_glass_rect}
+# glass_effects_pure.GlassConfig not imported — we use GlassPortConfig for pure Simple path
 use os.compositor.glass_port.{GlassPort, GlassPortConfig, glass_port_name, register_pure_glass, gp_begin_frame, gp_present, gp_gradient_v, gp_draw_rect, gp_draw_text, gp_fill}
 use os.compositor.cursor.{CursorState, default_cursor_state, draw_cursor}
 use os.compositor.fb_backend.{_render_tree, resolve_theme, CHAR_W, CHAR_H}
+use os.compositor.desktop_chrome.{draw_system_bar, draw_dock, SYSTEM_BAR_HEIGHT, DOCK_HEIGHT}
+use os.compositor.window_effects.{draw_glass_window_enhanced}
+use os.compositor.render_extras.{draw_wallpaper_enhanced}
+use os.compositor.app_content.{render_app_content}
 use common.window_protocol.window_protocol.{WmInputEvent, wm_input_event, WM_EVENT_KEY_PRESS, WM_EVENT_MOUSE_CLICK, WM_EVENT_MOUSE_MOVE, WM_EVENT_MOUSE_RELEASE}
 use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend}
 use os.compositor.input_backend.{InputBackend, Ps2InputBackend}
@@ -591,48 +596,72 @@ impl Compositor:
             self.backend.present()
 
     me _render_glass_pure():
-        """Glass rendering via pure Simple (DI glass port).
+        """Glass rendering via pure Simple — full desktop chrome.
 
-        Uses gp_* functions from glass_port module which dispatch
-        to CompositorBackend trait methods.
+        Uses shared modules for cross-platform rendering:
+        - render_extras: enhanced wallpaper with stars/vignette/tech grid
+        - window_effects: multi-layer shadows, frosted glass, focus ring, noise
+        - desktop_chrome: system bar (top) + dock (bottom)
+        - app_content: shared Terminal/Editor/FileManager/Calculator content
+        All via CompositorBackend trait — works on hosted + baremetal.
         """
         val gc = self.glass_config
+        # Convert u64 GlassConfig to u32/u8/i32 GlassPortConfig for pure Simple path
+        val sc: u32 = gc.surface_color
+        val sa: u8 = gc.surface_alpha
+        val br: u32 = gc.blur_radius
+        val bc: u32 = gc.border_color
+        val ba: u8 = gc.border_alpha
+        val so: i32 = gc.shadow_offset
+        val sb: u32 = gc.shadow_blur
+        val sha: u8 = gc.shadow_alpha
+        val ac: u32 = gc.accent_color
+        val ac2: u32 = gc.accent2_color
+        val bgt: u32 = gc.bg_top
+        val bgb: u32 = gc.bg_bottom
         val cfg = GlassPortConfig(
-            surface_color: gc.surface_color,
-            surface_alpha: gc.surface_alpha,
-            blur_radius: gc.blur_radius,
-            border_color: gc.border_color,
-            border_alpha: gc.border_alpha,
-            shadow_offset: gc.shadow_offset,
-            shadow_blur: gc.shadow_blur,
-            shadow_alpha: gc.shadow_alpha,
-            accent_color: gc.accent_color,
-            accent2_color: gc.accent2_color,
-            bg_top: gc.bg_top,
-            bg_bottom: gc.bg_bottom
+            surface_color: sc, surface_alpha: sa,
+            blur_radius: br, border_color: bc, border_alpha: ba,
+            shadow_offset: so, shadow_blur: sb, shadow_alpha: sha,
+            accent_color: ac, accent2_color: ac2,
+            bg_top: bgt, bg_bottom: bgb
         )
 
-        gp_begin_frame(self.screen_width, self.screen_height)
-        gp_gradient_v(0, 0, self.screen_width, self.screen_height, cfg.bg_top, cfg.bg_bottom)
+        # 1. Enhanced wallpaper with stars, vignette, tech grid
+        self.backend.clear(0xFF000000)
+        val is_dark = gc.bg_top < 0x00808080
+        draw_wallpaper_enhanced(self.backend, is_dark, gc.accent_color, gc.accent2_color)
 
+        # 2. Windows (back-to-front Z-order)
+        val active_idx = self.focused_idx
         var idx: i32 = 0
         for surface in self.surfaces:
             if surface.visible:
                 val is_focused = idx == self.focused_idx
-                gp_draw_rect(surface.x, surface.y, surface.width, surface.height, cfg)
-                val title_fg: u32 = if is_focused: 0xFFFFFFFF else: 0xFFB0B0B0
-                gp_draw_text(surface.x + 8, surface.y + 4, surface.title, title_fg)
+                # Enhanced glass window frame (shared window_effects)
+                draw_glass_window_enhanced(self.backend, surface.x, surface.y,
+                    surface.width, surface.height, surface.title, is_focused, cfg, 28)
+
+                # App content (shared app_content)
                 val cx = client_area_x(surface.x)
                 val cy = client_area_y(surface.y)
                 val cw = client_area_width(surface.width)
                 val ch = client_area_height(surface.height)
                 if cw > 0 and ch > 0:
-                    gp_fill(cx, cy, cw, ch, 0xFF202030, 180)
-                    _render_glass_content(self.backend, surface.title, cx, cy, cw, ch)
+                    render_app_content(self.backend, surface.title, cx, cy, cw, ch)
             idx = idx + 1
 
+        # 3. System bar (top) + Dock (bottom) — shared desktop chrome
+        draw_system_bar(self.backend, cfg, active_idx)
+        draw_dock(self.backend, cfg, active_idx)
+
+        # 4. Global accent tint + bottom edge line
+        self.backend.blend_rect(0, self.screen_height - 2, self.screen_width, 2, 0x00000000, 20)
+        self.backend.blend_rect(0, 0, self.screen_width, self.screen_height, gc.accent_color, 2)
+
+        # 5. Cursor + present
         draw_cursor(self.backend, self.screen_width, self.screen_height, self.cursor)
-        gp_present()
+        self.backend.present()
 
     me set_glass_theme(active: bool):
         """Enable or disable glassmorphism rendering."""
@@ -685,6 +714,25 @@ impl Compositor:
                 pass_dn
 
         val key = key_event.key
+
+        # Escape quits in glass theme mode (like QEMU WM)
+        match key:
+            Key.Escape:
+                if self.glass_theme_active:
+                    self.stop()
+                    return
+            _: pass_dn
+
+        # T key toggles dark/light glass theme (like QEMU WM)
+        val ch_val = self.input.key_to_char(key)
+        if ch_val != nil:
+            if ch_val == "t" or ch_val == "T":
+                if self.glass_theme_active:
+                    if self.glass_config.bg_top < 0x00808080:
+                        self.glass_config = GlassConfig.light()
+                    else:
+                        self.glass_config = GlassConfig.dark()
+                    return
 
         # Compositor-level shortcuts (Alt held)
         if self.input.alt_held():
@@ -883,62 +931,6 @@ impl Compositor:
 # ============================================================================
 # Internal: Render a Single Window (via CompositorBackend)
 # ============================================================================
-
-fn _render_glass_content(backend: CompositorBackend, title: text, cx: i32, cy: i32, cw: i32, ch: i32):
-    """Draw app content inside a glass window based on title."""
-    val fg: u32 = 0xFFE0E0F0
-    val dim: u32 = 0xFF808890
-    val accent: u32 = 0xFF44FF44
-    val blue: u32 = 0xFF5588CC
-
-    if title == "Terminal":
-        backend.draw_text(cx + 8, cy + 8, "$ ls -la", accent, 0x00000000)
-        backend.draw_text(cx + 8, cy + 26, "total 42", fg, 0x00000000)
-        backend.draw_text(cx + 8, cy + 44, "drwxr-xr-x  Documents/", fg, 0x00000000)
-        backend.draw_text(cx + 8, cy + 62, "drwxr-xr-x  Downloads/", fg, 0x00000000)
-        backend.draw_text(cx + 8, cy + 80, "-rw-r--r--  readme.md", dim, 0x00000000)
-        backend.draw_text(cx + 8, cy + 98, "-rw-r--r--  hello.spl", dim, 0x00000000)
-        backend.draw_text(cx + 8, cy + 116, "$ _", accent, 0x00000000)
-    else if title == "File Manager":
-        # Sidebar
-        backend.fill_rect(cx, cy, 100, ch, 0x30FFFFFF)
-        backend.draw_text(cx + 4, cy + 4, "/ root", fg, 0x00000000)
-        backend.draw_text(cx + 4, cy + 22, "  home", fg, 0x00000000)
-        backend.draw_text(cx + 4, cy + 40, "    Docs", blue, 0x00000000)
-        backend.draw_text(cx + 4, cy + 58, "    DL", dim, 0x00000000)
-        backend.draw_text(cx + 4, cy + 76, "  usr", dim, 0x00000000)
-        backend.draw_text(cx + 4, cy + 94, "  etc", dim, 0x00000000)
-        # File list
-        backend.draw_text(cx + 108, cy + 4, "Name          Type  Size", dim, 0x00000000)
-        backend.fill_rect(cx + 108, cy + 20, cw - 116, 1, 0x40FFFFFF)
-        backend.draw_text(cx + 108, cy + 26, "[D] Documents  Dir  4 KB", fg, 0x00000000)
-        backend.draw_text(cx + 108, cy + 44, "[D] Downloads  Dir  4 KB", fg, 0x00000000)
-        backend.draw_text(cx + 108, cy + 62, "[D] Pictures   Dir  4 KB", fg, 0x00000000)
-        backend.draw_text(cx + 108, cy + 80, "    readme.md  File 2 KB", dim, 0x00000000)
-        backend.draw_text(cx + 108, cy + 98, "    hello.spl  File 512B", dim, 0x00000000)
-        # Status bar
-        backend.fill_rect(cx, cy + ch - 18, cw, 18, 0x20FFFFFF)
-        backend.draw_text(cx + 4, cy + ch - 16, "5 items  /home", dim, 0x00000000)
-    else if title == "Calculator":
-        # Display
-        backend.fill_rect(cx + 8, cy + 8, cw - 16, 32, 0x20FFFFFF)
-        backend.draw_text(cx + cw - 24, cy + 16, "0", fg, 0x00000000)
-        # Button grid
-        val bw: i32 = (cw - 40) / 4
-        val bh: i32 = 28
-        val labels = ["7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "0", ".", "=", "+"]
-        var bi: i32 = 0
-        while bi < 16:
-            val bx = cx + 8 + (bi % 4) * (bw + 4)
-            val by = cy + 52 + (bi / 4) * (bh + 4)
-            backend.blend_rect(bx, by, bw, bh, 0x00FFFFFF, 40)
-            backend.draw_text(bx + bw / 2 - 4, by + 6, labels[bi], fg, 0x00000000)
-            bi = bi + 1
-        # Clear buttons
-        backend.blend_rect(cx + 8, cy + 52 + 4 * (bh + 4), bw, bh, 0x00FF6666, 60)
-        backend.draw_text(cx + 8 + bw / 2 - 4, cy + 52 + 4 * (bh + 4) + 6, "C", fg, 0x00000000)
-    else:
-        backend.draw_text(cx + 8, cy + 8, title, fg, 0x00000000)
 
 fn _render_window(backend: CompositorBackend, surface: WindowSurface, focused: bool):
     """Render a single window: decorations + client area content.
