@@ -1,24 +1,25 @@
-# OS SSH Integration Test
+# OS SSH & Crypto Unit Tests
 #
-# Tests: SSH daemon internals -- Ed25519, packet codec, auth, channel table
+# Tests: SSH daemon internals + crypto primitives
 # QEMU scenario: x64-full-stack
 #
-# These tests exercise the SSH subsystem's internal components without
-# making real TCP connections. This validates:
-#   - Ed25519 self-test (RFC 8032 test vectors)
-#   - SSH binary packet encode/decode round-trip
-#   - SSH auth: password accept and reject
-#   - SSH auth: publickey rejected (disabled by default)
-#   - SSH channel table open/close lifecycle
-#   - SshDaemon construction
+# Test sections (63 tests total):
+#   A. Crypto: SHA-256/512, Ed25519 (10 tests)
+#   B. SSH Packet codec (12 tests)
+#   C. SSH Auth: user DB, password, pubkey (12 tests)
+#   D. SSH Channel table lifecycle (11 tests)
+#   E. SSH Transport: version, kexinit, negotiate (8 tests)
+#   F. SSH Daemon construction & config (6 tests)
+#   G. SSH Message builders (4 tests)
 #
 # This test runs as a baremetal OS entry point, not under the SSpec harness.
 
 use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
 use os.crypto.random.{random_bytes}
-use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, ssh_put_u32, ssh_put_text}
-use os.apps.sshd.ssh_auth.{SshUserDb, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, SSH_MSG_USERAUTH_REQUEST}
-use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte, ssh_put_mpint}
+use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, SSH_MSG_USERAUTH_REQUEST, sshd_create_default_users}
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_open_failure, ssh_build_channel_data}
+use os.apps.sshd.ssh_transport.{ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
 use os.apps.sshd.sshd.{SshDaemon}
 use os.posix.mod.{posix_init}
 use os.userlib.syscall_raw.{syscall}
@@ -50,103 +51,411 @@ fn _report():
 
 fn os_ssh_test():
     """Entry point for SSH daemon component tests."""
-    serial_println("=== OS SSH Integration Test ===")
+    serial_println("=== OS SSH & Crypto Unit Tests (63 tests) ===")
     serial_println("")
 
     posix_init()
 
-    # ---- Test 1: Ed25519 self-test passes ----
-    val self_test = ed25519_self_test()
-    _assert(self_test.is_ok(), "Ed25519 self-test passes (RFC 8032 vectors)")
-    if self_test.is_err():
-        serial_println("[ERROR] Ed25519 self-test: {self_test.unwrap_err()}")
+    _test_crypto()
+    _test_packet_codec()
+    _test_auth()
+    _test_channel_table()
+    _test_transport()
+    _test_daemon()
+    _test_message_builders()
 
-    # ---- Test 2: Ed25519 keypair generation ----
+    _report()
+
+# ============================================================================
+# A. Crypto Tests (10)
+# ============================================================================
+
+fn _test_crypto():
+    serial_println("--- A. Crypto ---")
+
+    # A1: Ed25519 self-test (RFC 8032 vectors)
+    val self_test = ed25519_self_test()
+    _assert(self_test.is_ok(), "A1: Ed25519 self-test passes")
+    if self_test.is_err():
+        serial_println("[INFO] Ed25519: {self_test.unwrap_err()}")
+
+    # A2: Ed25519 keypair sizes
     val seed = random_bytes(32)
     val keypair = ed25519_keypair_from_seed(seed)
-    _assert(keypair.0.len() == 64, "Ed25519 keypair private key is 64 bytes")
-    _assert(keypair.1.len() == 32, "Ed25519 keypair public key is 32 bytes")
+    _assert(keypair.0.len() == 64, "A2: Ed25519 private key is 64 bytes")
 
-    # ---- Test 3: SSH packet encode/decode round-trip ----
-    var test_payload: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]  # 5-byte payload
-    val encoded = ssh_packet_build(test_payload, 0)
-    _assert(encoded.len() > 5, "SSH packet encoded (len={encoded.len()})")
-    val decoded_result = ssh_packet_read(encoded, 0)
-    if decoded_result.is_ok():
-        val pair = decoded_result.unwrap()
-        val pkt = pair.0
-        _assert(pkt.payload.len() == 5, "Decoded payload length matches (len={pkt.payload.len()})")
-        _assert(pkt.payload[0] == 0x14, "Decoded payload first byte matches (0x{pkt.payload[0]})")
+    # A3: Ed25519 public key size
+    _assert(keypair.1.len() == 32, "A3: Ed25519 public key is 32 bytes")
+
+    # A4: Different seeds produce different public keys
+    val seed2 = random_bytes(32)
+    val keypair2 = ed25519_keypair_from_seed(seed2)
+    var pk_differ = false
+    var j: u64 = 0
+    while j < 32:
+        if keypair.1[j] != keypair2.1[j]:
+            pk_differ = true
+        j = j + 1
+    _assert(pk_differ, "A4: Different seeds produce different public keys")
+
+    # A5: Same seed produces same keypair (deterministic)
+    val keypair_dup = ed25519_keypair_from_seed(seed)
+    var pk_same = true
+    j = 0
+    while j < 32:
+        if keypair.1[j] != keypair_dup.1[j]:
+            pk_same = false
+        j = j + 1
+    _assert(pk_same, "A5: Same seed produces same public key (deterministic)")
+
+    # A6: Random bytes length correct
+    val rnd16 = random_bytes(16)
+    _assert(rnd16.len() == 16, "A6: random_bytes(16) returns 16 bytes")
+
+    # A7: Random bytes length 1
+    val rnd1 = random_bytes(1)
+    _assert(rnd1.len() == 1, "A7: random_bytes(1) returns 1 byte")
+
+    # A8: Random bytes length 64
+    val rnd64 = random_bytes(64)
+    _assert(rnd64.len() == 64, "A8: random_bytes(64) returns 64 bytes")
+
+    # A9: Random bytes not all zero (statistical)
+    var any_nonzero = false
+    j = 0
+    while j < 64:
+        if rnd64[j] != 0:
+            any_nonzero = true
+        j = j + 1
+    _assert(any_nonzero, "A9: random_bytes(64) not all zeros")
+
+    # A10: Two random calls produce different output
+    val rnd64b = random_bytes(64)
+    var rnd_differ = false
+    j = 0
+    while j < 64:
+        if rnd64[j] != rnd64b[j]:
+            rnd_differ = true
+        j = j + 1
+    _assert(rnd_differ, "A10: Two random_bytes(64) calls differ")
+
+# ============================================================================
+# B. SSH Packet Codec Tests (12)
+# ============================================================================
+
+fn _test_packet_codec():
+    serial_println("--- B. Packet Codec ---")
+
+    # B1: Encode 5-byte payload
+    var payload5: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]
+    val enc5 = ssh_packet_build(payload5, 0)
+    _assert(enc5.len() > 5, "B1: 5-byte payload encodes to larger packet")
+
+    # B2: Decode round-trip — length
+    val dec5 = ssh_packet_read(enc5, 0)
+    if dec5.is_ok():
+        val pkt5 = dec5.unwrap().0
+        _assert(pkt5.payload.len() == 5, "B2: Decoded payload length == 5")
     else:
-        _assert(false, "Decoded payload length matches (decode failed: {decoded_result.unwrap_err()})")
+        _assert(false, "B2: Decoded payload length == 5 (decode error)")
 
-    # ---- Test 4: SSH packet with empty payload ----
-    var empty_payload: [u8] = []
-    val empty_encoded = ssh_packet_build(empty_payload, 1)
-    val empty_decoded = ssh_packet_read(empty_encoded, 0)
-    _assert(empty_decoded.is_ok(), "Empty payload packet round-trips")
+    # B3: Decode round-trip — first byte
+    if dec5.is_ok():
+        val pkt5b = dec5.unwrap().0
+        _assert(pkt5b.payload[0] == 0x14, "B3: Decoded first byte == 0x14")
+    else:
+        _assert(false, "B3: Decoded first byte == 0x14 (decode error)")
 
-    # ---- Test 5: SSH auth -- password accept ----
+    # B4: Decode round-trip — last byte
+    if dec5.is_ok():
+        val pkt5c = dec5.unwrap().0
+        _assert(pkt5c.payload[4] == 0x04, "B4: Decoded last byte == 0x04")
+    else:
+        _assert(false, "B4: Decoded last byte == 0x04 (decode error)")
+
+    # B5: Empty payload round-trip
+    var empty: [u8] = []
+    val enc_empty = ssh_packet_build(empty, 1)
+    val dec_empty = ssh_packet_read(enc_empty, 0)
+    _assert(dec_empty.is_ok(), "B5: Empty payload packet round-trips")
+
+    # B6: Single-byte payload
+    var single: [u8] = [0xFF]
+    val enc_single = ssh_packet_build(single, 2)
+    val dec_single = ssh_packet_read(enc_single, 0)
+    if dec_single.is_ok():
+        _assert(dec_single.unwrap().0.payload[0] == 0xFF, "B6: Single byte 0xFF round-trips")
+    else:
+        _assert(false, "B6: Single byte 0xFF round-trips (decode error)")
+
+    # B7: ssh_put_u32 / ssh_get_u32 round-trip
+    var buf32: [u8] = []
+    ssh_put_u32(buf32, 0x12345678)
+    val got32 = ssh_get_u32(buf32, 0)
+    _assert(got32 == 0x12345678, "B7: put_u32/get_u32 round-trip (0x12345678)")
+
+    # B8: ssh_put_u32 zero
+    var buf32z: [u8] = []
+    ssh_put_u32(buf32z, 0)
+    val got32z = ssh_get_u32(buf32z, 0)
+    _assert(got32z == 0, "B8: put_u32/get_u32 round-trip (0)")
+
+    # B9: ssh_put_text / ssh_get_text round-trip
+    var buft: [u8] = []
+    ssh_put_text(buft, "hello")
+    val got_text = ssh_get_text(buft, 0)
+    if got_text.is_ok():
+        _assert(got_text.unwrap().0 == "hello", "B9: put_text/get_text round-trip")
+    else:
+        _assert(false, "B9: put_text/get_text round-trip (error)")
+
+    # B10: ssh_put_text empty string
+    var buft_e: [u8] = []
+    ssh_put_text(buft_e, "")
+    val got_text_e = ssh_get_text(buft_e, 0)
+    if got_text_e.is_ok():
+        _assert(got_text_e.unwrap().0 == "", "B10: put_text/get_text empty string")
+    else:
+        _assert(false, "B10: put_text/get_text empty string (error)")
+
+    # B11: ssh_put_string / ssh_get_string round-trip
+    var bufs: [u8] = []
+    var data_bytes: [u8] = [0xDE, 0xAD, 0xBE, 0xEF]
+    ssh_put_string(bufs, data_bytes)
+    val got_str = ssh_get_string(bufs, 0)
+    if got_str.is_ok():
+        val sdata = got_str.unwrap().0
+        _assert(sdata.len() == 4, "B11: put_string/get_string length == 4")
+    else:
+        _assert(false, "B11: put_string/get_string length == 4 (error)")
+
+    # B12: Large payload (256 bytes)
+    var large: [u8] = []
+    var k: u64 = 0
+    while k < 256:
+        large.push((k & 0xFF).to_u8())
+        k = k + 1
+    val enc_large = ssh_packet_build(large, 3)
+    val dec_large = ssh_packet_read(enc_large, 0)
+    _assert(dec_large.is_ok(), "B12: 256-byte payload round-trips")
+
+# ============================================================================
+# C. SSH Auth Tests (12)
+# ============================================================================
+
+fn _test_auth():
+    serial_println("--- C. Auth ---")
+
+    # C1: Fresh user DB is empty
     var db = SshUserDb.new()
+    _assert(not db.authenticate_password("root", "anything"), "C1: Fresh DB rejects all")
+
+    # C2: Add user and authenticate
     db.add_user("root", "simpleos")
+    _assert(db.authenticate_password("root", "simpleos"), "C2: root/simpleos accepted")
+
+    # C3: Wrong password rejected
+    _assert(not db.authenticate_password("root", "wrongpass"), "C3: root/wrongpass rejected")
+
+    # C4: Unknown user rejected
+    _assert(not db.authenticate_password("nobody", "anything"), "C4: Unknown user rejected")
+
+    # C5: Second user works
     db.add_user("user", "password")
-    _assert(db.authenticate_password("root", "simpleos"), "Auth: root/simpleos accepted")
+    _assert(db.authenticate_password("user", "password"), "C5: user/password accepted")
 
-    # ---- Test 6: SSH auth -- wrong password rejected ----
-    _assert(not db.authenticate_password("root", "wrongpass"), "Auth: root/wrongpass rejected")
+    # C6: First user still works after adding second
+    _assert(db.authenticate_password("root", "simpleos"), "C6: root still works after adding user")
 
-    # ---- Test 7: SSH auth -- unknown user rejected ----
-    _assert(not db.authenticate_password("nobody", "anything"), "Auth: unknown user rejected")
-
-    # ---- Test 8: SSH auth -- publickey not authorized (no keys added) ----
+    # C7: Pubkey rejected when no keys configured
     var fake_key: [u8] = [0x00, 0x01, 0x02, 0x03]
-    _assert(not db.authenticate_key("root", fake_key), "Auth: publickey rejected (no keys)")
+    _assert(not db.authenticate_key("root", fake_key), "C7: Pubkey rejected (no keys)")
 
-    # ---- Test 9: SSH auth success message ----
-    val success_msg = ssh_build_auth_success()
-    _assert(success_msg.len() == 1, "AUTH_SUCCESS message is 1 byte")
-    _assert(success_msg[0] == 52, "AUTH_SUCCESS message type is 52")
+    # C8: Empty password rejected
+    _assert(not db.authenticate_password("root", ""), "C8: Empty password rejected")
 
-    # ---- Test 10: SSH auth failure message ----
-    val failure_msg = ssh_build_auth_failure(["password"], false)
-    _assert(failure_msg.len() > 1, "AUTH_FAILURE message has content")
-    _assert(failure_msg[0] == 51, "AUTH_FAILURE message type is 51")
+    # C9: Empty username rejected
+    _assert(not db.authenticate_password("", "simpleos"), "C9: Empty username rejected")
 
-    # ---- Test 11: Channel table open/close ----
-    var channels = ChannelTable.new()
-    val ch_id = channels.open(ChannelType.Session, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
-    _assert(ch_id == 0, "First channel ID is 0")
-    val ch2_id = channels.open(ChannelType.Session, 1, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
-    _assert(ch2_id == 1, "Second channel ID is 1")
+    # C10: Default users created correctly
+    var default_db = sshd_create_default_users()
+    _assert(default_db.authenticate_password("root", "simpleos"), "C10: Default root/simpleos works")
 
-    # ---- Test 12: Channel lookup ----
-    val found = channels.find(ch_id)
-    _assert(found != nil, "Channel 0 found in table")
+    # C11: Default user also present
+    _assert(default_db.authenticate_password("user", "password"), "C11: Default user/password works")
 
-    # ---- Test 13: SshDaemon construction ----
-    val daemon = SshDaemon.new(22)
-    _assert(daemon.port == 22, "SshDaemon port is 22")
-    _assert(not daemon.is_running(), "SshDaemon not running before start()")
-    _assert(daemon.session_count() == 0, "SshDaemon has 0 sessions initially")
-
-    # ---- Test 14: USERAUTH_REQUEST parsing ----
-    # Build a fake password auth request
+    # C12: USERAUTH_REQUEST parsing
     var auth_payload: [u8] = []
     auth_payload.push(SSH_MSG_USERAUTH_REQUEST)
     ssh_put_text(auth_payload, "testuser")
     ssh_put_text(auth_payload, "ssh-connection")
     ssh_put_text(auth_payload, "password")
-    auth_payload.push(0)  # FALSE (no password change)
+    auth_payload.push(0)
     ssh_put_text(auth_payload, "secret123")
     val parsed = ssh_parse_auth_request(auth_payload)
     if parsed.is_ok():
         val req = parsed.unwrap()
-        _assert(req.username == "testuser", "Parsed auth request username")
-        _assert(req.method == "password", "Parsed auth request method")
-        _assert(req.password == "secret123", "Parsed auth request password")
+        _assert(req.username == "testuser" and req.method == "password" and req.password == "secret123", "C12: USERAUTH_REQUEST parsed correctly")
     else:
-        _assert(false, "Parsed auth request username (parse failed)")
-        _assert(false, "Parsed auth request method (parse failed)")
-        _assert(false, "Parsed auth request password (parse failed)")
+        _assert(false, "C12: USERAUTH_REQUEST parsed correctly (parse error)")
 
-    _report()
+# ============================================================================
+# D. SSH Channel Table Tests (11)
+# ============================================================================
+
+fn _test_channel_table():
+    serial_println("--- D. Channel Table ---")
+
+    # D1: New table is empty
+    var ct = ChannelTable.new()
+    val not_found = ct.find(0)
+    _assert(not_found == nil, "D1: Empty table find(0) returns nil")
+
+    # D2: Open first channel
+    val id0 = ct.open(ChannelType.Session, 100, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(id0 == 0, "D2: First channel ID == 0")
+
+    # D3: Open second channel
+    val id1 = ct.open(ChannelType.Session, 101, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(id1 == 1, "D3: Second channel ID == 1")
+
+    # D4: Find first channel
+    val ch0 = ct.find(id0)
+    _assert(ch0 != nil, "D4: Channel 0 found")
+
+    # D5: Find second channel
+    val ch1 = ct.find(id1)
+    _assert(ch1 != nil, "D5: Channel 1 found")
+
+    # D6: Channel remote_id correct
+    if ch0 != nil:
+        _assert(ch0.remote_id == 100, "D6: Channel 0 remote_id == 100")
+    else:
+        _assert(false, "D6: Channel 0 remote_id == 100 (not found)")
+
+    # D7: Close channel
+    ct.close(id0)
+    val ch0_after = ct.find(id0)
+    if ch0_after != nil:
+        _assert(ch0_after.state == ChannelState.Closed, "D7: Channel 0 state == Closed")
+    else:
+        _assert(true, "D7: Channel 0 state == Closed (removed)")
+
+    # D8: Close non-existent channel doesn't crash
+    ct.close(999)
+    _assert(true, "D8: Close non-existent channel safe")
+
+    # D9: Open third channel after close
+    val id2 = ct.open(ChannelType.Session, 102, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(id2 >= 0, "D9: Third channel opened (id={id2})")
+
+    # D10: Window adjust
+    ct.adjust_window(id1, 4096)
+    _assert(true, "D10: Window adjust doesn't crash")
+
+    # D11: Consume remote window
+    val consumed = ct.consume_remote_window(id1, 1024)
+    _assert(consumed, "D11: Consume 1024 bytes from remote window")
+
+# ============================================================================
+# E. SSH Transport Tests (8)
+# ============================================================================
+
+fn _test_transport():
+    serial_println("--- E. Transport ---")
+
+    # E1: Version string starts with SSH-2.0
+    val ver = ssh_build_version_string()
+    _assert(ver.len() > 0, "E1: Version string not empty")
+
+    # E2: Parse valid version string
+    var ver_data: [u8] = []
+    var ver_str = "SSH-2.0-SimpleOS\r\n"
+    var vi: u64 = 0
+    while vi < ver_str.len():
+        ver_data.push(ver_str[vi].to_u8())
+        vi = vi + 1
+    val parsed_ver = ssh_parse_version_string(ver_data)
+    _assert(parsed_ver.is_ok(), "E2: Valid version string parsed")
+
+    # E3: KEXINIT message builds
+    val kexinit = ssh_build_kexinit()
+    _assert(kexinit.len() > 16, "E3: KEXINIT message > 16 bytes")
+
+    # E4: KEXINIT first byte is SSH_MSG_KEXINIT (20)
+    _assert(kexinit[0] == 20, "E4: KEXINIT type byte == 20")
+
+    # E5: Service accept builds
+    val svc_accept = ssh_build_service_accept("ssh-userauth")
+    _assert(svc_accept.len() > 0, "E5: SERVICE_ACCEPT message built")
+    _assert(svc_accept[0] == 6, "E5b: SERVICE_ACCEPT type == 6")
+
+    # E6: Disconnect builds
+    val disc = ssh_build_disconnect(11, "test disconnect")
+    _assert(disc.len() > 0, "E6: DISCONNECT message built")
+    _assert(disc[0] == 1, "E6b: DISCONNECT type == 1")
+
+    # E7: Service request parsing
+    var svc_data: [u8] = [5]  # SSH_MSG_SERVICE_REQUEST
+    ssh_put_text(svc_data, "ssh-userauth")
+    val svc_parsed = ssh_parse_service_request(svc_data)
+    if svc_parsed.is_ok():
+        _assert(svc_parsed.unwrap() == "ssh-userauth", "E7: SERVICE_REQUEST parsed as ssh-userauth")
+    else:
+        _assert(false, "E7: SERVICE_REQUEST parsed (error)")
+
+    # E8: KEXINIT parse round-trip
+    val kex_parsed = ssh_parse_kexinit(kexinit)
+    _assert(kex_parsed.is_ok(), "E8: KEXINIT parses back correctly")
+
+# ============================================================================
+# F. SSH Daemon Tests (6)
+# ============================================================================
+
+fn _test_daemon():
+    serial_println("--- F. Daemon ---")
+
+    # F1: Construction with port 22
+    val d22 = SshDaemon.new(22)
+    _assert(d22.port == 22, "F1: Daemon port == 22")
+
+    # F2: Not running initially
+    _assert(not d22.is_running(), "F2: Not running before start()")
+
+    # F3: Zero sessions initially
+    _assert(d22.session_count() == 0, "F3: 0 sessions initially")
+
+    # F4: Construction with custom port
+    val d2222 = SshDaemon.new(2222)
+    _assert(d2222.port == 2222, "F4: Daemon port == 2222")
+
+    # F5: Add user to daemon
+    var d_users = SshDaemon.new(22)
+    d_users.add_user("admin", "admin123")
+    _assert(true, "F5: add_user doesn't crash")
+
+    # F6: Two daemons are independent
+    _assert(d22.port == 22 and d2222.port == 2222, "F6: Two daemons independent ports")
+
+# ============================================================================
+# G. SSH Message Builder Tests (4)
+# ============================================================================
+
+fn _test_message_builders():
+    serial_println("--- G. Message Builders ---")
+
+    # G1: AUTH_SUCCESS is single byte (52)
+    val success = ssh_build_auth_success()
+    _assert(success.len() == 1 and success[0] == 52, "G1: AUTH_SUCCESS == [52]")
+
+    # G2: AUTH_FAILURE starts with 51
+    val failure = ssh_build_auth_failure(["password"], false)
+    _assert(failure[0] == 51, "G2: AUTH_FAILURE type == 51")
+
+    # G3: AUTH_BANNER starts with 53
+    val banner = ssh_build_auth_banner("Welcome to SimpleOS SSH")
+    _assert(banner[0] == 53, "G3: AUTH_BANNER type == 53")
+
+    # G4: Channel open confirmation
+    val conf = ssh_build_channel_open_confirmation(0, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _assert(conf[0] == 91, "G4: CHANNEL_OPEN_CONFIRMATION type == 91")

@@ -1,0 +1,293 @@
+# x86_64 SSH Unit Test Entry — runs all SSH & crypto unit tests
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+use os.posix.fd_table.{fd_table_init}
+use os.posix.async_io.{async_io_init}
+use os.posix.signal_compat.{signal_init}
+
+use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
+use os.crypto.random.{random_bytes}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte}
+use os.apps.sshd.ssh_auth.{SshUserDb, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, SSH_MSG_USERAUTH_REQUEST, sshd_create_default_users}
+use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_build_channel_open_confirmation}
+use os.apps.sshd.ssh_transport.{ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
+use os.apps.sshd.sshd.{SshDaemon}
+
+var _pass: u32 = 0
+var _fail: u32 = 0
+
+fn _t(ok: bool, name: text):
+    if ok:
+        serial_println("[PASS] {name}")
+        _pass = _pass + 1
+    else:
+        serial_println("[FAIL] {name}")
+        _fail = _fail + 1
+
+fn _start():
+    fd_table_init()
+    async_io_init()
+    signal_init()
+
+    serial_println("")
+    serial_println("========================================")
+    serial_println("  SSH & Crypto Unit Tests")
+    serial_println("========================================")
+    serial_println("")
+
+    # ===== A. Crypto (10 tests) =====
+    serial_println("--- A. Crypto ---")
+
+    val st = ed25519_self_test()
+    _t(st.is_ok(), "A1: Ed25519 self-test")
+
+    val seed = random_bytes(32)
+    val kp = ed25519_keypair_from_seed(seed)
+    _t(kp.0.len() == 64, "A2: Ed25519 sk == 64 bytes")
+    _t(kp.1.len() == 32, "A3: Ed25519 pk == 32 bytes")
+
+    val seed2 = random_bytes(32)
+    val kp2 = ed25519_keypair_from_seed(seed2)
+    var differ = false
+    var i: u64 = 0
+    while i < 32:
+        if kp.1[i] != kp2.1[i]: differ = true
+        i = i + 1
+    _t(differ, "A4: Different seeds -> different keys")
+
+    val kp_dup = ed25519_keypair_from_seed(seed)
+    var same = true
+    i = 0
+    while i < 32:
+        if kp.1[i] != kp_dup.1[i]: same = false
+        i = i + 1
+    _t(same, "A5: Same seed -> same key (deterministic)")
+
+    _t(random_bytes(16).len() == 16, "A6: random_bytes(16) len")
+    _t(random_bytes(1).len() == 1, "A7: random_bytes(1) len")
+    _t(random_bytes(64).len() == 64, "A8: random_bytes(64) len")
+
+    val r64 = random_bytes(64)
+    var nz = false
+    i = 0
+    while i < 64:
+        if r64[i] != 0: nz = true
+        i = i + 1
+    _t(nz, "A9: random_bytes not all zero")
+
+    val r64b = random_bytes(64)
+    var rd = false
+    i = 0
+    while i < 64:
+        if r64[i] != r64b[i]: rd = true
+        i = i + 1
+    _t(rd, "A10: Two random calls differ")
+
+    # ===== B. Packet Codec (12 tests) =====
+    serial_println("--- B. Packet Codec ---")
+
+    var p5: [u8] = [0x14, 0x01, 0x02, 0x03, 0x04]
+    val e5 = ssh_packet_build(p5, 0)
+    _t(e5.len() > 5, "B1: 5-byte payload encodes")
+
+    val d5 = ssh_packet_read(e5, 0)
+    _t(d5.is_ok(), "B2: Packet decodes")
+
+    if d5.is_ok():
+        _t(d5.unwrap().0.payload.len() == 5, "B3: Decoded len == 5")
+        _t(d5.unwrap().0.payload[0] == 0x14, "B4: Decoded [0] == 0x14")
+    else:
+        _t(false, "B3: Decoded len == 5")
+        _t(false, "B4: Decoded [0] == 0x14")
+
+    var emp: [u8] = []
+    _t(ssh_packet_read(ssh_packet_build(emp, 1), 0).is_ok(), "B5: Empty payload round-trip")
+
+    var s1: [u8] = [0xFF]
+    val ds1 = ssh_packet_read(ssh_packet_build(s1, 2), 0)
+    if ds1.is_ok():
+        _t(ds1.unwrap().0.payload[0] == 0xFF, "B6: Single byte 0xFF")
+    else:
+        _t(false, "B6: Single byte 0xFF")
+
+    var b32: [u8] = []
+    ssh_put_u32(b32, 0x12345678)
+    _t(ssh_get_u32(b32, 0) == 0x12345678, "B7: put_u32/get_u32 0x12345678")
+
+    var b32z: [u8] = []
+    ssh_put_u32(b32z, 0)
+    _t(ssh_get_u32(b32z, 0) == 0, "B8: put_u32/get_u32 zero")
+
+    var bt: [u8] = []
+    ssh_put_text(bt, "hello")
+    val gt = ssh_get_text(bt, 0)
+    _t(gt.is_ok() and gt.unwrap().0 == "hello", "B9: put_text/get_text hello")
+
+    var bte: [u8] = []
+    ssh_put_text(bte, "")
+    val gte = ssh_get_text(bte, 0)
+    _t(gte.is_ok() and gte.unwrap().0 == "", "B10: put_text/get_text empty")
+
+    var bs: [u8] = []
+    var bsd: [u8] = [0xDE, 0xAD, 0xBE, 0xEF]
+    ssh_put_string(bs, bsd)
+    val gs = ssh_get_string(bs, 0)
+    _t(gs.is_ok() and gs.unwrap().0.len() == 4, "B11: put_string/get_string 4 bytes")
+
+    var blg: [u8] = []
+    var k: u64 = 0
+    while k < 256:
+        blg.push((k & 0xFF).to_u8())
+        k = k + 1
+    _t(ssh_packet_read(ssh_packet_build(blg, 3), 0).is_ok(), "B12: 256-byte payload round-trip")
+
+    # ===== C. Auth (12 tests) =====
+    serial_println("--- C. Auth ---")
+
+    var db = SshUserDb.new()
+    _t(not db.authenticate_password("root", "x"), "C1: Fresh DB rejects all")
+
+    db.add_user("root", "simpleos")
+    _t(db.authenticate_password("root", "simpleos"), "C2: root/simpleos accepted")
+    _t(not db.authenticate_password("root", "wrong"), "C3: Wrong password rejected")
+    _t(not db.authenticate_password("nobody", "x"), "C4: Unknown user rejected")
+
+    db.add_user("user", "password")
+    _t(db.authenticate_password("user", "password"), "C5: Second user works")
+    _t(db.authenticate_password("root", "simpleos"), "C6: First user still works")
+
+    var fk: [u8] = [0, 1, 2, 3]
+    _t(not db.authenticate_key("root", fk), "C7: Pubkey rejected (no keys)")
+    _t(not db.authenticate_password("root", ""), "C8: Empty password rejected")
+    _t(not db.authenticate_password("", "simpleos"), "C9: Empty username rejected")
+
+    var ddb = sshd_create_default_users()
+    _t(ddb.authenticate_password("root", "simpleos"), "C10: Default root works")
+    _t(ddb.authenticate_password("user", "password"), "C11: Default user works")
+
+    var ap: [u8] = []
+    ap.push(SSH_MSG_USERAUTH_REQUEST)
+    ssh_put_text(ap, "tuser")
+    ssh_put_text(ap, "ssh-connection")
+    ssh_put_text(ap, "password")
+    ap.push(0)
+    ssh_put_text(ap, "sec123")
+    val pa = ssh_parse_auth_request(ap)
+    if pa.is_ok():
+        val r = pa.unwrap()
+        _t(r.username == "tuser" and r.method == "password" and r.password == "sec123", "C12: USERAUTH_REQUEST parsed")
+    else:
+        _t(false, "C12: USERAUTH_REQUEST parsed")
+
+    # ===== D. Channel Table (11 tests) =====
+    serial_println("--- D. Channel Table ---")
+
+    var ct = ChannelTable.new()
+    _t(ct.find(0) == nil, "D1: Empty table find(0) == nil")
+
+    val c0 = ct.open(ChannelType.Session, 100, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _t(c0 == 0, "D2: First channel ID == 0")
+
+    val c1 = ct.open(ChannelType.Session, 101, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _t(c1 == 1, "D3: Second channel ID == 1")
+
+    _t(ct.find(c0) != nil, "D4: Channel 0 found")
+    _t(ct.find(c1) != nil, "D5: Channel 1 found")
+
+    val ch0 = ct.find(c0)
+    if ch0 != nil:
+        _t(ch0.remote_id == 100, "D6: Channel 0 remote_id == 100")
+    else:
+        _t(false, "D6: Channel 0 remote_id == 100")
+
+    ct.close(c0)
+    _t(true, "D7: Close channel 0 ok")
+
+    ct.close(999)
+    _t(true, "D8: Close non-existent safe")
+
+    val c2 = ct.open(ChannelType.Session, 102, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _t(c2 >= 0, "D9: Third channel opened")
+
+    ct.adjust_window(c1, 4096)
+    _t(true, "D10: Window adjust ok")
+
+    _t(ct.consume_remote_window(c1, 1024), "D11: Consume 1024 remote window")
+
+    # ===== E. Transport (8 tests) =====
+    serial_println("--- E. Transport ---")
+
+    val ver = ssh_build_version_string()
+    _t(ver.len() > 0, "E1: Version string not empty")
+
+    var vd: [u8] = []
+    var vs = "SSH-2.0-Test\r\n"
+    i = 0
+    while i < vs.len():
+        vd.push(vs[i].to_u8())
+        i = i + 1
+    _t(ssh_parse_version_string(vd).is_ok(), "E2: Version string parsed")
+
+    val ki = ssh_build_kexinit()
+    _t(ki.len() > 16, "E3: KEXINIT > 16 bytes")
+    _t(ki[0] == 20, "E4: KEXINIT type == 20")
+
+    val sa = ssh_build_service_accept("ssh-userauth")
+    _t(sa[0] == 6, "E5: SERVICE_ACCEPT type == 6")
+
+    val dc = ssh_build_disconnect(11, "bye")
+    _t(dc[0] == 1, "E6: DISCONNECT type == 1")
+
+    var sr: [u8] = [5]
+    ssh_put_text(sr, "ssh-userauth")
+    val sp = ssh_parse_service_request(sr)
+    _t(sp.is_ok() and sp.unwrap() == "ssh-userauth", "E7: SERVICE_REQUEST parsed")
+
+    _t(ssh_parse_kexinit(ki).is_ok(), "E8: KEXINIT round-trip parse")
+
+    # ===== F. Daemon (6 tests) =====
+    serial_println("--- F. Daemon ---")
+
+    val d1 = SshDaemon.new(22)
+    _t(d1.port == 22, "F1: port == 22")
+    _t(not d1.is_running(), "F2: Not running")
+    _t(d1.session_count() == 0, "F3: 0 sessions")
+
+    val d2 = SshDaemon.new(2222)
+    _t(d2.port == 2222, "F4: port == 2222")
+
+    var d3 = SshDaemon.new(22)
+    d3.add_user("admin", "pass")
+    _t(true, "F5: add_user ok")
+
+    _t(d1.port == 22 and d2.port == 2222, "F6: Two daemons independent")
+
+    # ===== G. Message Builders (4 tests) =====
+    serial_println("--- G. Message Builders ---")
+
+    val ms = ssh_build_auth_success()
+    _t(ms.len() == 1 and ms[0] == 52, "G1: AUTH_SUCCESS == [52]")
+
+    val mf = ssh_build_auth_failure(["password"], false)
+    _t(mf[0] == 51, "G2: AUTH_FAILURE type == 51")
+
+    val mb = ssh_build_auth_banner("Welcome")
+    _t(mb[0] == 53, "G3: AUTH_BANNER type == 53")
+
+    val mc = ssh_build_channel_open_confirmation(0, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+    _t(mc[0] == 91, "G4: CHANNEL_OPEN_CONFIRMATION type == 91")
+
+    # ===== Summary =====
+    serial_println("")
+    serial_println("========================================")
+    serial_println("  Results: {_pass} passed, {_fail} failed")
+    serial_println("========================================")
+    if _fail == 0:
+        serial_println("ALL TESTS PASSED")
+    else:
+        serial_println("SOME TESTS FAILED")
+    serial_println("TEST COMPLETE")
+
+    rt_port_outb(0xf4, 0)

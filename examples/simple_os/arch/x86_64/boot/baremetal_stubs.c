@@ -3737,8 +3737,11 @@ static void _sc_reduce_limbs(int64_t s[24])
     {
         int64_t t[12]; int64_t c;
         for (int i = 0; i < 12; i++) t[i] = s[i];
-        t[0] -= 666643; t[1] -= 470296; t[2] -= 654183;
-        t[3] += 997805; t[4] -= 136657; t[5] += 683901;
+        /* Subtract L_low = c from t. c in signed 21-bit limbs = -(-c) =
+         * -[666643, 470296, 654183, -997805, 136657, -683901].
+         * So subtracting c means: t[j] += (-c)_j */
+        t[0] += 666643; t[1] += 470296; t[2] += 654183;
+        t[3] -= 997805; t[4] += 136657; t[5] -= 683901;
         for (int i = 0; i < 11; i++) {
             c = t[i] >> 21; t[i] -= c << 21; t[i+1] += c;
         }
@@ -5819,9 +5822,8 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 RuntimeValue rt_array_new(RuntimeValue cap_val)
 {
     int64_t cap = (int64_t)cap_val;  /* RAW — not DECODE_INT */
-    if (cap <= 0) cap = 1024; /* default capacity — large for crypto (SHA-512 needs ~400) */
-    /* Ensure minimum capacity for OS use (crypto padding needs ~400, PCI ~32) */
-    if (cap < 1024) cap = 1024;
+    if (cap <= 0) cap = 64; /* default capacity */
+    if (cap < 64) cap = 64;
     if (cap > 0x100000) cap = 0x100000; /* safety limit */
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
