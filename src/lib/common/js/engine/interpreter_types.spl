@@ -1,0 +1,252 @@
+# JavaScript interpreter support types and helpers.
+# Extracted from interpreter.spl: scope chain, call frames, type coercion, equality.
+
+use std.js.types.js_types.JsValue
+
+# ── Environment (scope chain) ───────────────────────────────────────────
+
+class Environment:
+    variables: [Pair<text, JsValue>]
+    parent_id: i64
+    id: i64
+
+    static fn create(id: i64, parent_id: i64) -> Environment:
+        Environment(variables: [], parent_id: parent_id, id: id)
+
+class EnvironmentStack:
+    envs: [Environment]
+    next_id: i64
+
+    static fn new() -> EnvironmentStack:
+        EnvironmentStack(envs: [], next_id: 0)
+
+    me create_env(parent_id: i64) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val env = Environment.create(id, parent_id)
+        self.envs.push(env)
+        id
+
+    fn _find_env(env_id: i64) -> Option<Environment>:
+        var i = 0
+        val len = self.envs.len()
+        while i < len:
+            val env = self.envs.get(i)
+            if env.id == env_id:
+                return Some(env)
+            i = i + 1
+        nil
+
+    # Get a variable by searching up the scope chain
+    fn get_var(env_id: i64, name: text) -> Option<JsValue>:
+        var current_id = env_id
+        while current_id >= 0:
+            val env_opt = self._find_env(current_id)
+            if val Some(env) = env_opt:
+                var j = 0
+                val vlen = env.variables.len()
+                while j < vlen:
+                    val pair = env.variables.get(j)
+                    if pair.first == name:
+                        return Some(pair.second)
+                    j = j + 1
+                current_id = env.parent_id
+            else:
+                break
+        nil
+
+    # Set an existing variable (searches up scope chain)
+    me set_var(env_id: i64, name: text, value: JsValue):
+        var current_id = env_id
+        while current_id >= 0:
+            var i = 0
+            val len = self.envs.len()
+            while i < len:
+                if self.envs.get(i).id == current_id:
+                    var j = 0
+                    val vlen = self.envs.get(i).variables.len()
+                    while j < vlen:
+                        val pair = self.envs.get(i).variables.get(j)
+                        if pair.first == name:
+                            self.envs.get(i).variables.set(j, Pair(first: name, second: value))
+                            return
+                        j = j + 1
+                    current_id = self.envs.get(i).parent_id
+                    break
+                i = i + 1
+            if i >= len:
+                break
+        # Variable not found — define in the given env
+        self.define_var(env_id, name, value)
+
+    # Define a new variable in the given environment
+    me define_var(env_id: i64, name: text, value: JsValue):
+        var i = 0
+        val len = self.envs.len()
+        while i < len:
+            if self.envs.get(i).id == env_id:
+                # Check if already exists in this scope
+                var j = 0
+                val vlen = self.envs.get(i).variables.len()
+                while j < vlen:
+                    val pair = self.envs.get(i).variables.get(j)
+                    if pair.first == name:
+                        self.envs.get(i).variables.set(j, Pair(first: name, second: value))
+                        return
+                    j = j + 1
+                self.envs.get(i).variables.push(Pair(first: name, second: value))
+                return
+            i = i + 1
+
+# ── Call frame ───────────────────────────────────────────────────────────
+
+class CallFrame:
+    function_name: text
+    env_id: i64
+    line: i64
+    this_value: JsValue
+
+# ── Stored function ──────────────────────────────────────────────────────
+
+class JsFunction:
+    name: text
+    params: [text]
+    body: [Statement]
+    closure_env: i64
+
+use std.js.types.ast_types.Statement
+
+# ── Type coercion helpers ────────────────────────────────────────────────
+
+fn to_number(value: JsValue) -> f64:
+    match value:
+        JsValue.Number(v): v
+        JsValue.Boolean(v):
+            if v: 1.0
+            else: 0.0
+        JsValue.Null: 0.0
+        JsValue.Undefined: 0.0 / 0.0  # NaN
+        JsValue.String(v):
+            if v == "":
+                return 0.0
+            val parsed = v.parse_float()
+            if val Some(n) = parsed:
+                return n
+            0.0 / 0.0  # NaN
+        _: 0.0 / 0.0  # NaN
+
+fn to_string(value: JsValue) -> text:
+    match value:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(v):
+            if v: "true"
+            else: "false"
+        JsValue.Number(v): "{v}"
+        JsValue.String(v): v
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "function"
+        JsValue.Symbol(id): "Symbol()"
+
+fn to_boolean(value: JsValue) -> bool:
+    match value:
+        JsValue.Undefined: false
+        JsValue.Null: false
+        JsValue.Boolean(v): v
+        JsValue.Number(v):
+            if v == 0.0: false
+            else: true
+        JsValue.String(v):
+            v.len() > 0
+        _: true
+
+fn is_truthy(value: JsValue) -> bool:
+    to_boolean(value)
+
+fn typeof_value(value: JsValue) -> text:
+    match value:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "object"  # JS spec quirk
+        JsValue.Boolean(v): "boolean"
+        JsValue.Number(v): "number"
+        JsValue.String(v): "string"
+        JsValue.Object(id): "object"
+        JsValue.Array(id): "object"
+        JsValue.Function(id): "function"
+        JsValue.Symbol(id): "symbol"
+
+fn strict_equals(a: JsValue, b: JsValue) -> bool:
+    match a:
+        JsValue.Undefined:
+            match b:
+                JsValue.Undefined: true
+                _: false
+        JsValue.Null:
+            match b:
+                JsValue.Null: true
+                _: false
+        JsValue.Boolean(va):
+            match b:
+                JsValue.Boolean(vb): va == vb
+                _: false
+        JsValue.Number(va):
+            match b:
+                JsValue.Number(vb): va == vb
+                _: false
+        JsValue.String(va):
+            match b:
+                JsValue.String(vb): va == vb
+                _: false
+        JsValue.Object(ia):
+            match b:
+                JsValue.Object(ib): ia == ib
+                _: false
+        JsValue.Array(ia):
+            match b:
+                JsValue.Array(ib): ia == ib
+                _: false
+        JsValue.Function(ia):
+            match b:
+                JsValue.Function(ib): ia == ib
+                _: false
+        _: false
+
+fn abstract_equals(a: JsValue, b: JsValue) -> bool:
+    # Same type — use strict
+    val ta = typeof_value(a)
+    val tb = typeof_value(b)
+    if ta == tb:
+        return strict_equals(a, b)
+
+    # null == undefined
+    match a:
+        JsValue.Null:
+            match b:
+                JsValue.Undefined: return true
+                _: pass_dn
+        JsValue.Undefined:
+            match b:
+                JsValue.Null: return true
+                _: pass_dn
+        _: pass_dn
+
+    # Number comparisons with coercion
+    val na = to_number(a)
+    val nb = to_number(b)
+    na == nb
+
+# ── Signal values for control flow ───────────────────────────────────────
+
+# We use a special string convention to signal return from functions.
+# The interpreter checks for this after each statement execution.
+val RETURN_SIGNAL = "__js_return__"
+
+fn _is_array_method(name: text) -> bool:
+    (name == "map" or name == "filter" or name == "reduce" or
+    name == "forEach" or name == "find" or name == "findIndex" or
+    name == "some" or name == "every" or name == "sort" or
+    name == "push" or name == "pop" or name == "shift" or
+    name == "unshift" or name == "slice" or name == "splice" or
+    name == "indexOf" or name == "includes" or name == "join" or
+    name == "reverse" or name == "concat")
