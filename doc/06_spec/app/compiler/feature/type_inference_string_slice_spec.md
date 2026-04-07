@@ -1,54 +1,46 @@
-# type_inference_string_slice_spec
+# Type Inference String Slice Specification
 
-**Category:** Compiler | **Status:** Failing
+## At a Glance
 
-_Source: `test/feature/compiler/type_inference_string_slice_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/type_inference_string_slice_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Bug Description
-
-When using string slicing like `text[n:]` or `text[n:m]`, the type
-inference system sometimes incorrectly infers the result as an enum type
-instead of text, leading to method resolution failures.
-
-## Impact
-
-- Blocks build system compilation
-- Affects any code using string slicing followed by string methods
-- Critical blocker for DAP integration
-
-## Root Cause
-
-Type inference for slice operations doesn't properly preserve the base
-type through the slicing operation.
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 8 |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Type Inference for String Slicing
+Documentation was generated from executable SSpec scenarios.
 
-### Basic string slicing
+## Evidence
 
-- ✅ infers sliced string as text
-- ✅ allows method calls on sliced strings
-- ✅ infers mid-range slice as text
-### String slicing in conditionals
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ infers correctly in if branches
-- ✅ infers correctly with variable assignment
-### String slicing with enum variables nearby
+### Artifacts
 
-- ✅ doesn't confuse string slice with enum
-- ✅ handles multiple string operations after slice
-### Type annotation workaround
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/type_inference_string_slice/result.json` |
 
-- ✅ works with explicit type annotation
+## Scenarios
 
+- infers sliced string as text
+- allows method calls on sliced strings
+- infers mid-range slice as text
+- infers correctly in if branches
+- infers correctly with variable assignment
+- doesn't confuse string slice with enum
+- handles multiple string operations after slice
+- works with explicit type annotation

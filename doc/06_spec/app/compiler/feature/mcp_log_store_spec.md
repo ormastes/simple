@@ -1,59 +1,39 @@
-# MCP Log Store
+# Mcp Log Store Specification
 
-**Feature ID:** #MCP-003 | **Category:** Application | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/app/mcp_log_store_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/mcp_log_store_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests the JSON serialization and tree rendering of AOP debug log entries for the MCP log store.
-Validates single entry and multi-entry JSON serialization, hierarchical tree building from nested
-function calls, text-based tree rendering with collapsed (>>) and expanded (v>) markers and
-indentation, and status serialization including enabled state, filter pattern, entry count,
-and current depth.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val json = log_entry_to_json(entry)
-expect(json).to_contain("\"function_name\":\"start\"")
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-val text_tree = format_log_tree_text(entries, expanded)
-expect(text_tree).to_contain(">> app.mcp.main::start_server")
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/mcp_log_store/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 10 |
-
-## Test Structure
-
-### MCP Log Store
-
-#### log_entry_to_json
-
-- ✅ serializes a single entry to JSON
-#### log_entries_to_json
-
-- ✅ serializes empty array
-- ✅ serializes multiple entries
-#### log_tree_to_json
-
-- ✅ builds hierarchical tree from nested calls
-- ✅ returns empty array for no entries
-#### format_log_tree_text
-
-- ✅ renders collapsed tree with >> markers
-- ✅ renders expanded tree with v> markers
-- ✅ renders nested indentation
-#### log_status_to_json
-
-- ✅ serializes status correctly
-- ✅ serializes disabled status
-
+- skipped

@@ -1,72 +1,51 @@
 # Config Loader Specification
 
-**Feature ID:** TBD | **Category:** Configuration / File Loading | **Status:** Implemented
+## At a Glance
 
-_Source: `test/feature/app/config_loader_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/config_loader_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 13 |
+| Active scenarios | 13 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-The config loader provides a Simple-native configuration format using `.spl`
-syntax with variable assignments. It supports hierarchical config loading
-with directory-based precedence.
+Documentation was generated from executable SSpec scenarios.
 
-## Config File Format
+## Evidence
 
-```simple
-# Numbers
-port = 8080
-timeout = 30.5
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-# Booleans
-logging = true
-debug = false
+### Artifacts
 
-# Strings
-name = "MyApp"
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/config_loader/result.json` |
 
-# Identifiers (constants)
-mode = PRODUCTION
+## Scenarios
 
-# Arrays
-ports = [8080, 8081, 8082]
-
-# Nested values (dotted keys)
-train.epochs = 100
-train.lr = 0.001
-```
-
-## Hierarchy & Precedence
-
-Config files are searched from the current directory up to the project root.
-Configs closer to the current directory override those higher in the hierarchy.
-
-```
-/project/__init__.spl          (lowest precedence)
-/project/subdir/__init__.spl   (highest precedence)
-```
-
----
-
-## Test Summary
-
-| Metric | Count |
-|--------|-------|
-| Tests | 19 |
-
-## Test Structure
-
-### Config File Parsing
-
-- ✅ parses basic integers
-- ✅ parses floats
-- ✅ parses booleans
-- ✅ parses strings
-- ✅ parses identifiers as constants
-- ✅ parses arrays
-- ✅ parses nested values with dotted keys
-- ✅ skips comments
-- ✅ skips empty lines
-- ✅ handles multiline config
-
+- stores basic integers
+- stores floats
+- stores booleans
+- stores strings
+- stores identifiers as string constants
+- stores arrays
+- stores nested values
+- skips comments are pure-text concern
+- handles multiline config
+- gets simple values
+- gets nested values
+- handles missing keys with default
+- merges configs with overlay precedence

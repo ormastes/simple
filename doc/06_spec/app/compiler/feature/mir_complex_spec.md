@@ -1,28 +1,39 @@
-# MIR Complex Specification
+# Mir Complex Specification
 
-**Feature ID:** #TBD | **Category:** Compiler | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/compiler/mir_complex_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/mir_complex_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests arithmetic, control flow (if/else), and multiple function calls
-through the ISel → RegAlloc → Encode → ELF pipeline using manually
-constructed MIR.
+Documentation was generated from executable SSpec scenarios.
 
----
+## Evidence
 
-## Test Summary
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 1 |
+### Artifacts
 
-## Test Structure
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/mir_complex/result.json` |
 
-### MIR Complex
+## Scenarios
 
-- ✅ compiles arithmetic and if/else MIR and outputs '42'
-
+- compiles arithmetic and if/else MIR and outputs '42'

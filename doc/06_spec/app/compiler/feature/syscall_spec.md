@@ -1,87 +1,56 @@
-# Bare-Metal Syscall and Peripheral Tests
+# Syscall Specification
 
-**Feature ID:** #BAREMETAL-011 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/syscall_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/syscall_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 18 |
+| Active scenarios | 18 |
+| Slow scenarios | 18 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests bare-metal syscall wrappers including semihosting operations (debug console output,
-file I/O, timing), UART configuration and byte transmission, timer initialization and delay
-functions, and memory-mapped I/O register access with bit manipulation. All tests operate
-on hardware register addresses and verify peripheral interaction patterns.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-semi_write_string("Test message\n")
-uart_init(0x40011000, 115200)
-uart_write_byte(0x40011000, 65)
-timer_delay_ms(0x40000000, 10)
-mem_write_u32(0x40020000, 0x12345678)
-mem_set_bit(0x40020000, 5)
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/syscall/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 20 |
+## Scenarios
 
-## Test Structure
-
-### Semihosting
-
-#### basic operations
-
-- ✅ writes string to debug console
-- ✅ exits with status code
-#### file I/O
-
-- ✅ opens file for reading
-- ✅ writes to file
-#### timing
-
-- ✅ reads clock in centiseconds
-### UART
-
-#### initialization
-
-- ✅ configures UART with baud rate
-#### byte transmission
-
-- ✅ writes single byte
-- ✅ writes string
-#### status checking
-
-- ✅ checks if UART ready to write
-- ✅ checks if data available to read
-### Timer
-
-#### initialization
-
-- ✅ configures timer frequency
-#### counter access
-
-- ✅ reads current counter value
-#### delays
-
-- ✅ delays for milliseconds
-- ✅ delays for microseconds
-### Memory-Mapped I/O
-
-#### register access
-
-- ✅ reads and writes 32-bit registers
-- ✅ reads and writes 8-bit registers
-#### bit manipulation
-
-- ✅ sets specific bit
-- ✅ clears specific bit
-- ✅ tests specific bit
-- ✅ modifies bits with mask
-
+- [slow] writes string to debug console
+- [slow] reads clock in centiseconds
+- [slow] opens file for reading
+- [slow] writes to file
+- [slow] reads time since epoch
+- [slow] configures UART with baud rate
+- [slow] checks if UART ready to write
+- [slow] checks if data available to read
+- [slow] configures timer frequency
+- [slow] reads current counter value
+- [slow] delays for milliseconds
+- [slow] delays for microseconds
+- [slow] reads and writes 32-bit registers
+- [slow] reads and writes 8-bit registers
+- [slow] sets specific bit
+- [slow] clears specific bit
+- [slow] tests specific bit
+- [slow] modifies bits with mask

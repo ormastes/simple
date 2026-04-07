@@ -1,21 +1,25 @@
-# code_quality_tools_spec
+# Code Quality Tools Specification
 
-**Category:** Application | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/app/code_quality_tools_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/code_quality_tools_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Overview
 
-Code Quality Tools Tests
-Feature: Code quality tools and linting
-Category: Development Tools
-Status: Planned
+Documentation was generated from executable SSpec scenarios.
 
-Tests for code quality tooling, linting, and analysis features.
+## Evidence
 
----
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-## Test Structure
+### Artifacts
 
-### Code Quality Tools
-
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/code_quality_tools/result.json` |

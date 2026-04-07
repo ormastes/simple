@@ -1,42 +1,44 @@
-# ARM64 (AArch64) Bare-Metal Boot Tests
+# Arm64 Boot Specification
 
-**Feature ID:** #BAREMETAL-003 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/arm64_boot_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/arm64_boot_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 6 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests ARM64 (AArch64) bare-metal boot functionality including exception vector table
-generation, exception level (EL0-EL3) setup and transitions, VBAR alignment validation,
-and 16-byte stack pointer alignment. Verifies the ARM64 boot infrastructure handles
-EL transitions correctly and maintains AArch64 calling convention requirements.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val vt = create_vector_table()
-expect(vt.sync_current_sp0.handler > 0).to_equal(true)
-expect(check_vbar_alignment(0x40000000)).to_equal(true)
-expect(check_el_transition(EL3, EL1)).to_equal(true)
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/arm64_boot/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 4 |
+## Scenarios
 
-## Test Structure
-
-### ARM64 Boot Code
-
-- ✅ generates valid exception vector table
-- ✅ checks vector table alignment
-- ✅ sets up exception levels correctly
-- ✅ maintains stack pointer alignment
-### ARM64 QEMU Boot
-
+- [slow] generates valid exception vector table
+- [slow] checks vector table alignment
+- [slow] sets up exception levels correctly
+- [slow] maintains stack pointer alignment
+- [slow] boots on virt machine
+- [slow] handles exceptions correctly

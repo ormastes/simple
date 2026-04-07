@@ -1,51 +1,49 @@
-# Registry Install Specification
+# Install Specification
 
-**Feature ID:** #953-955 | **Category:** Tooling | **Difficulty:** 3/5 | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/app/install_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/install_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Overview
-Tests for installing packages from the GHCR-based registry.
-
-## Key Concepts
-- Index lookup and version resolution
-- OCI artifact pull
-- Checksum verification
-- Local package extraction
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 11 |
+|--------|------:|
+| Total scenarios | 11 |
+| Active scenarios | 11 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Install from Registry
+Documentation was generated from executable SSpec scenarios.
 
-#### when package exists
+## Evidence
 
-- ✅ resolves latest non-yanked version
-- ✅ pulls artifact from GHCR
-- ✅ verifies checksum after download
-- ✅ extracts to packages directory
-#### when package not found
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ shows error message
-#### when version is yanked
+### Artifacts
 
-- ✅ shows warning for yanked version
-- ✅ selects next available version
-#### when using --save flag
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/install/result.json` |
 
-- ✅ adds package to simple.sdn dependencies
-### Version Resolution
+## Scenarios
 
-- ✅ selects latest version when no constraint
-- ✅ respects caret constraint
-- ✅ respects exact version constraint
-
+- resolves latest non-yanked version
+- pulls artifact from GHCR
+- verifies checksum after download
+- extracts to packages directory
+- shows error message
+- shows warning for yanked version
+- selects next available version
+- adds package to simple.sdn dependencies
+- selects latest version when no constraint
+- respects caret constraint
+- respects exact version constraint

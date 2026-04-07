@@ -1,31 +1,58 @@
-# MCP Library Integration Tests
+# Integration Specification
 
-**Feature ID:** #MCP-LIB-004 | **Category:** Standard Library | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/lib/mcp/integration_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/dap/integration_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 20 |
+| Active scenarios | 20 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-End-to-end integration tests for the MCP library verifying complete request-response
-cycles. Tests building MCP initialize responses, tools/list responses with pre-computed
-schemas, JSON-RPC method extraction, error response creation, session lifecycle management,
-tool handler registration and lookup, and full request-response simulation including
-argument extraction and tool result building.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val request = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"""
-val method = extract_json_string_v2(request, "method")
-expect(method).to_equal("initialize")
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-init_core_schemas()
-val tools = get_all_tool_schemas()
-expect(tools).to_contain("read_code")
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/dap/integration/result.json` |
 
+## Scenarios
 
+- executes a simple debugging session
+- steps through sequential code
+- steps over function call
+- steps into function call
+- steps out of function
+- tracks recursive factorial calls
+- handles deep recursion
+- debugs across multiple files
+- hits breakpoint then steps
+- sets breakpoint while stepping
+- handles breakpoint at non-existent line
+- recovers from pause without continue
+- handles missing stack frames
+- handles rapid mode switching
+- handles many breakpoints
+- handles frequent location updates
+- handles large stack depths
+- debugs a simple program
+- debugs loop with breakpoint
+- debugs conditional branches

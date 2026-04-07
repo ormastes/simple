@@ -1,28 +1,40 @@
-# Native Compile ELF Specification
+# Native Compile Elf Specification
 
-**Feature ID:** #TBD | **Category:** Compiler | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/compiler/native_compile_elf_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/native_compile_elf_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests generating a native binary from hand-crafted x86_64 instructions
-through the ELF writer pipeline: instructions → ELF → link → run.
+Documentation was generated from executable SSpec scenarios.
 
----
+## Evidence
 
-## Test Summary
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 2 |
+### Artifacts
 
-## Test Structure
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/native_compile_elf/result.json` |
 
-### Native Compile ELF
+## Scenarios
 
-- ✅ generates a valid ELF binary from x86_64 machine code
-- ✅ produces a linkable and runnable binary with exit 0
-
+- generates a valid ELF binary from x86_64 machine code
+- produces a linkable and runnable binary with exit 0

@@ -1,28 +1,40 @@
 # Pipeline Native Specification
 
-**Feature ID:** #TBD | **Category:** Compiler | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/compiler/pipeline_native_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/pipeline_native_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests the full Pure Simple compilation pipeline:
-Source → Parse → HIR → MIR → ISel → RegAlloc → Encode → ELF → Link → Run
+Documentation was generated from executable SSpec scenarios.
 
----
+## Evidence
 
-## Test Summary
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 2 |
+### Artifacts
 
-## Test Structure
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/pipeline_native/result.json` |
 
-### Pipeline Native
+## Scenarios
 
-- ✅ compiles fn main() -> exit 0
-- ✅ produces non-empty ELF bytes
-
+- compiles fn main() -> exit 0
+- produces non-empty ELF bytes

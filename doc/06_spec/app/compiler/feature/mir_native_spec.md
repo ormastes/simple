@@ -1,29 +1,41 @@
-# MIR Native Specification
+# Mir Native Specification
 
-**Feature ID:** #TBD | **Category:** Compiler | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/compiler/mir_native_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/mir_native_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests the MIR → Native Backend pipeline by constructing a MirModule manually
-and running it through ISel → RegAlloc → Encode → ELF → Link → Run.
+Documentation was generated from executable SSpec scenarios.
 
----
+## Evidence
 
-## Test Summary
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 3 |
+### Artifacts
 
-## Test Structure
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/mir_native/result.json` |
 
-### MIR Native
+## Scenarios
 
-- ✅ runs ISel on manually constructed MIR module
-- ✅ produces non-empty ELF from MIR module
-- ✅ runs hello MIR binary and produces correct output
-
+- runs ISel on manually constructed MIR module
+- produces non-empty ELF from MIR module
+- runs hello MIR binary and produces correct output

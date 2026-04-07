@@ -1,54 +1,44 @@
-# Native File and Directory Operations Tests
+# Native Ops Specification
 
-**Feature ID:** #IO-001 | **Category:** I/O | **Status:** Active
+## At a Glance
 
-_Sources:_
-- `test/integration/io/native_ops_file_read_write_spec.spl`
-- `test/integration/io/native_ops_file_copy_spec.spl`
-- `test/integration/io/native_ops_file_size_spec.spl`
-- `test/integration/io/native_ops_dir_create_spec.spl`
-- `test/integration/io/native_ops_dir_recursive_spec.spl`
-- `test/integration/io/native_ops_dir_create_all_spec.spl`
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/io/native_ops_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests native file and directory operations using SFFI without shell fallbacks. Validates
-file creation, reading, copying, size retrieval, and deletion via file_ops, as well as
-directory creation (including recursive/nested), directory detection, and removal via dir_ops.
-All operations use /tmp paths and clean up after themselves.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-file_write(test_file, content)
-val read_content = file_read(test_file)
-expect(read_content).to_equal(content)
-file_delete(test_file)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-dir_create(test_dir, true)  # recursive
-check(is_dir(test_dir))
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/io/native_ops/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 6 |
-
-## Test Structure
-
-### Native File Operations
-
-- ✅ creates and reads files
-- ✅ copies files
-- ✅ gets file size
-
-### Native Directory Operations
-
-- ✅ creates directories
-- ✅ creates nested directories recursively
-- ✅ creates directory tree with dir_create_all
+- creates and reads files
+- copies files
+- gets file size
+- creates directories
+- creates nested directories recursively
+- creates directory tree with dir_create_all

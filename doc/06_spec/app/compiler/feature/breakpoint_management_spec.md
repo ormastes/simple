@@ -1,71 +1,55 @@
-# breakpoint_management_spec
+# Breakpoint Management Specification
 
-**Category:** System/DAP | **Status:** Passing
+## At a Glance
 
-_Source: `test/feature/dap/breakpoint_management_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/dap/breakpoint_management_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Features Tested
-
-- Setting breakpoints via FFI
-- Removing breakpoints
-- Checking breakpoint existence
-- Breakpoint hit detection
-- Multiple breakpoints in same file
-- Breakpoints across multiple files
-
-## Implementation
-
-Uses the FFI debug functions from src/lib/ffi/debug.spl:
-- debug_add_breakpoint(file, line, id)
-- debug_remove_breakpoint(file, line)
-- debug_has_breakpoint(file, line)
-- debug_should_break()
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 17 |
+|--------|------:|
+| Total scenarios | 17 |
+| Active scenarios | 17 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Breakpoint Management
-_Tests for adding, removing, and checking breakpoints._
+Documentation was generated from executable SSpec scenarios.
 
-### Adding breakpoints
-_Test breakpoint creation._
+## Evidence
 
-- ✅ adds a single breakpoint
-- ✅ adds multiple breakpoints in same file
-- ✅ adds breakpoints in different files
-- ✅ allows duplicate breakpoints with different IDs
-### Removing breakpoints
-_Test breakpoint removal._
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ removes a breakpoint
-- ✅ removes specific breakpoint from multiple
-- ✅ handles removing non-existent breakpoint
-### Checking breakpoint existence
-_Test breakpoint queries._
+### Artifacts
 
-- ✅ returns false for non-existent breakpoint
-- ✅ checks breakpoint in correct file only
-- ✅ checks breakpoint at correct line only
-### Breakpoint hit detection
-_Test whether execution should break at current location._
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/dap/breakpoint_management/result.json` |
 
-- ✅ should break when at breakpoint location
-- ✅ should not break when not at breakpoint
-- ✅ should not break when debug inactive
-### Edge cases
-_Test edge cases and boundary conditions._
+## Scenarios
 
-- ✅ handles line number 0
-- ✅ handles large line numbers
-- ✅ handles empty file path
-- ✅ handles special characters in file path
-
+- adds a single breakpoint
+- adds multiple breakpoints in same file
+- adds breakpoints in different files
+- allows duplicate breakpoints with different IDs
+- removes a breakpoint
+- removes specific breakpoint from multiple
+- handles removing non-existent breakpoint
+- returns false for non-existent breakpoint
+- checks breakpoint in correct file only
+- checks breakpoint at correct line only
+- should break when at breakpoint location
+- should not break when not at breakpoint
+- should not break when debug inactive
+- handles line number 0
+- handles large line numbers
+- handles empty file path
+- handles special characters in file path

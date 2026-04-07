@@ -1,118 +1,88 @@
-# Bare-Metal Startup Code Tests
+# Startup Specification
 
-**Feature ID:** #BAREMETAL-010 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/startup_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/startup_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 50 |
+| Active scenarios | 50 |
+| Slow scenarios | 50 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests startup code (crt0.s equivalent) for ARM Cortex-M, x86_64, and RISC-V architectures.
-Verifies vector table generation, BSS zeroing, .data section copying from flash to RAM,
-stack setup, multiboot2 header validation, long mode transition on x86_64, hart initialization
-on RISC-V, trap handling register save/restore, and cross-platform __spl_start_bare symbol provision.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-# ARM: Vector table has initial SP at entry 0 and Thumb-bit reset handler at entry 1
-# x86_64: Multiboot2 magic = 0xE85250D6, checks CPUID for long mode
-# RISC-V: Disables interrupts, sets up trap vector, parks secondary harts in WFI
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/startup/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 50 |
+## Scenarios
 
-## Test Structure
-
-### ARM Cortex-M Startup
-
-#### vector table
-
-- ✅ has correct initial SP at entry 0
-- ✅ has reset handler at entry 1 with Thumb bit
-- ✅ includes all 16 core exception vectors
-- ✅ is aligned to 256 bytes minimum
-#### reset handler
-
-- ✅ copies .data section from flash to RAM
-- ✅ zeros .bss section
-- ✅ sets up stack pointer correctly
-- ✅ enables FPU on Cortex-M4F
-- ✅ calls __spl_start_bare
-- ✅ loops forever if main returns
-#### exception handlers
-
-- ✅ has default handler for all unimplemented interrupts
-- ✅ has hard fault handler that saves fault info
-### x86_64 Startup
-
-#### multiboot2 header
-
-- ✅ has correct magic number
-- ✅ has correct architecture field
-- ✅ has correct checksum
-- ✅ includes framebuffer tag
-#### long mode check
-
-- ✅ detects CPUID support
-- ✅ detects long mode support
-- ✅ fails gracefully if no long mode
-#### page tables
-
-- ✅ creates valid PML4 entry
-- ✅ creates valid PDPT entry
-- ✅ creates valid PD with huge pages
-- ✅ identity-maps first 2MB
-#### mode transition
-
-- ✅ enables PAE in CR4
-- ✅ sets LME bit in EFER
-- ✅ enables paging in CR0
-- ✅ loads 64-bit GDT
-- ✅ jumps to 64-bit code
-#### 64-bit initialization
-
-- ✅ zeros BSS section
-- ✅ sets up 64-bit stack
-- ✅ calls __spl_start_bare
-### RISC-V Startup
-
-#### hart initialization
-
-- ✅ disables interrupts on entry
-- ✅ sets up trap vector
-- ✅ parks secondary harts in WFI
-#### primary hart setup
-
-- ✅ saves device tree blob address
-- ✅ sets up stack pointer
-- ✅ configures mstatus for machine mode
-#### memory initialization
-
-- ✅ zeros BSS section
-- ✅ copies .data section from flash to RAM
-#### trap handling
-
-- ✅ saves all caller-saved registers
-- ✅ reads trap cause from mcause
-- ✅ reads exception PC from mepc
-- ✅ calls trap_handler with correct arguments
-- ✅ restores registers and returns with mret
-#### secondary harts
-
-- ✅ sets up per-hart stack
-- ✅ enters WFI loop
-### Cross-Platform Startup
-
-- ✅ provides __spl_start_bare symbol
-- ✅ calls main with argc=0, argv=NULL
-- ✅ handles main return gracefully
-- ✅ aligns stack to platform requirements
-
+- [slow] has correct initial SP at entry 0
+- [slow] has reset handler at entry 1 with Thumb bit
+- [slow] includes all 16 core exception vectors
+- [slow] is aligned to 256 bytes minimum
+- [slow] copies .data section from flash to RAM
+- [slow] zeros .bss section
+- [slow] sets up stack pointer correctly
+- [slow] enables FPU on Cortex-M4F
+- [slow] calls __spl_start_bare
+- [slow] loops forever if main returns
+- [slow] has default handler for all unimplemented interrupts
+- [slow] has hard fault handler that saves fault info
+- [slow] has correct magic number
+- [slow] has correct architecture field
+- [slow] has correct checksum
+- [slow] includes framebuffer tag
+- [slow] detects CPUID support
+- [slow] detects long mode support
+- [slow] fails gracefully if no long mode
+- [slow] creates valid PML4 entry
+- [slow] creates valid PDPT entry
+- [slow] creates valid PD with huge pages
+- [slow] identity-maps first 2MB
+- [slow] enables PAE in CR4
+- [slow] sets LME bit in EFER
+- [slow] enables paging in CR0
+- [slow] loads 64-bit GDT
+- [slow] jumps to 64-bit code
+- [slow] zeros BSS section
+- [slow] sets up 64-bit stack
+- [slow] calls __spl_start_bare
+- [slow] disables interrupts on entry
+- [slow] sets up trap vector
+- [slow] parks secondary harts in WFI
+- [slow] saves device tree blob address
+- [slow] sets up stack pointer
+- [slow] configures mstatus for machine mode
+- [slow] zeros BSS section
+- [slow] copies .data section from flash to RAM
+- [slow] saves all caller-saved registers
+- [slow] reads trap cause from mcause
+- [slow] reads exception PC from mepc
+- [slow] calls trap_handler with correct arguments
+- [slow] restores registers and returns with mret
+- [slow] sets up per-hart stack
+- [slow] enters WFI loop
+- [slow] provides __spl_start_bare symbol
+- [slow] calls main with argc=0, argv=NULL
+- [slow] handles main return gracefully
+- [slow] aligns stack to platform requirements

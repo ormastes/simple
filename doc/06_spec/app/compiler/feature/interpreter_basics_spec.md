@@ -1,35 +1,43 @@
-# interpreter_basics_spec
+# Interpreter Basics Specification
 
-**Category:** Runtime | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/interpreter/interpreter_basics_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/interpreter/interpreter_basics_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-System test for fundamental interpreter functionality.
-
-Tests the interpreter's ability to evaluate basic expressions, perform
-arithmetic, handle comparisons, evaluate boolean logic, and process strings.
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 5 |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Simple Interpreter
+Documentation was generated from executable SSpec scenarios.
 
-#### when evaluating expressions
+## Evidence
 
-- ✅ handles arithmetic operations
-- ✅ handles comparison operations
-- ✅ handles boolean operations
-#### when working with strings
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ supports string concatenation
-- ✅ supports string interpolation
+### Artifacts
 
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/interpreter/interpreter_basics/result.json` |
+
+## Scenarios
+
+- handles arithmetic operations
+- handles comparison operations
+- handles boolean operations
+- supports string concatenation
+- supports string interpolation

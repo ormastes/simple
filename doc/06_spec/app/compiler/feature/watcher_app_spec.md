@@ -1,37 +1,43 @@
-# watcher_app_spec
+# Watcher App Specification
 
-**Category:** Tooling | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/watcher/watcher_app_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/watcher/watcher_app_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-System test for file watcher application integration.
-
-Tests the file watcher's integration with the application lifecycle,
-including monitoring source files, triggering rebuilds, and error handling.
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 5 |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### File Watcher
+Documentation was generated from executable SSpec scenarios.
 
-#### when monitoring source files
+## Evidence
 
-- ✅ detects basic changes
-- ✅ handles multiple file operations
-#### when rebuilding on changes
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ recalculates simple math
-- ✅ maintains state correctly
-#### when handling errors
+### Artifacts
 
-- ✅ recovers from errors gracefully
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/watcher/watcher_app/result.json` |
 
+## Scenarios
+
+- detects basic changes
+- handles multiple file operations
+- recalculates simple math
+- maintains state correctly
+- recovers from errors gracefully

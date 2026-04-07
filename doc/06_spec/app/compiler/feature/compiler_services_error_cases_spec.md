@@ -1,93 +1,68 @@
-# CompilerServices Error Cases
+# Compiler Services Error Cases Specification
 
-**Feature ID:** #BACKEND-002 | **Category:** Compiler | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/app/compiler_services_error_cases_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/compiler_services_error_cases_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 30 |
+| Active scenarios | 30 |
+| Slow scenarios | 30 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests failure paths and edge cases for noop port behavior in CompilerServices. Validates that
-noop ports handle degenerate inputs gracefully, including empty strings, empty lists, and
-nonexistent paths. Verifies idempotency of repeated calls, that the noop logger does not crash
-on empty messages, that the noop module loader returns sensible defaults, and that the noop
-desugarer passes input through unchanged. Also confirms independent factory instances.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val svc = create_default_services()
-val f = svc.lexer.tokenize_fn
-val result = f("")
-expect(result.len()).to_equal(0)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-val rf = svc.module_loader.resolve_fn
-val result = rf("/src/main.spl", "std.string")
-expect(result).to_equal("std.string")
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/compiler_services_error_cases/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 33 |
-
-## Test Structure
-
-### CompilerServices Error Cases: noop lexer degenerate inputs
-
-- ✅ tokenize empty string returns empty list
-- ✅ tokenize whitespace-only input returns empty list
-- ✅ tokenize any input always returns empty list for noop
-- ✅ calling tokenize twice is idempotent
-### CompilerServices Error Cases: noop parser degenerate inputs
-
-- ✅ parse empty token list with empty source returns no errors
-- ✅ parse non-empty token list with empty source returns no errors
-- ✅ parse empty token list with non-empty source returns no errors
-- ✅ calling parse twice returns empty errors both times
-### CompilerServices Error Cases: noop desugarer edge cases
-
-- ✅ desugar empty string returns empty string
-- ✅ desugar whitespace-only returns whitespace unchanged
-- ✅ desugar returns input text unchanged for noop
-- ✅ calling desugar twice returns same result
-### CompilerServices Error Cases: noop type checker degenerate inputs
-
-- ✅ check empty module name returns no errors
-- ✅ check nonexistent module name returns no errors for noop
-- ✅ calling check multiple times returns empty each time
-### CompilerServices Error Cases: noop HIR lowerer degenerate inputs
-
-- ✅ lower empty module name returns no errors
-- ✅ lower nonexistent module returns no errors for noop
-### CompilerServices Error Cases: noop MIR lowerer degenerate inputs
-
-- ✅ lower empty module name returns no errors
-- ✅ lower any module returns no errors for noop
-### CompilerServices Error Cases: noop logger degenerate inputs
-
-- ✅ info_fn does not crash on empty message
-- ✅ debug_fn does not crash on empty message
-- ✅ warn_fn does not crash on empty message
-- ✅ error_fn does not crash on empty message
-- ✅ calling all log levels in sequence does not crash
-### CompilerServices Error Cases: noop module loader degenerate inputs
-
-- ✅ load_fn returns empty string for nonexistent path
-- ✅ load_fn returns empty string for empty path
-- ✅ resolve_fn returns import name unchanged for noop
-- ✅ resolve_fn returns empty string for empty import name
-- ✅ resolve_fn with both empty args returns empty string
-### CompilerServices Error Cases: noop backend degenerate inputs
-
-- ✅ supports_jit_fn always returns false for noop
-- ✅ target_triple_fn always returns noop for noop backend
-### CompilerServices Error Cases: independent factory instances
-
-- ✅ two factory calls produce independent services
-- ✅ noop services from different factory calls return same results
-
+- [slow] tokenize empty string returns empty list
+- [slow] tokenize whitespace-only input returns empty list
+- [slow] tokenize any input always returns empty list for noop
+- [slow] calling tokenize twice is idempotent
+- [slow] parse empty token list with empty source returns no errors
+- [slow] parse non-empty token list with empty source returns no errors
+- [slow] parse empty token list with non-empty source returns no errors
+- [slow] calling parse twice returns empty errors both times
+- [slow] desugar empty string returns empty string
+- [slow] desugar whitespace-only returns whitespace unchanged
+- [slow] desugar returns input text unchanged for noop
+- [slow] calling desugar twice returns same result
+- [slow] check empty module name returns no errors
+- [slow] check nonexistent module name returns no errors for noop
+- [slow] calling check multiple times returns empty each time
+- [slow] lower empty module name returns no errors
+- [slow] lower nonexistent module returns no errors for noop
+- [slow] lower empty module name returns no errors
+- [slow] lower any module returns no errors for noop
+- [slow] logger has name field
+- [slow] logger has level field set to 0
+- [slow] load_fn returns empty string for nonexistent path
+- [slow] load_fn returns empty string for empty path
+- [slow] resolve_fn returns import name unchanged for noop
+- [slow] resolve_fn returns empty string for empty import name
+- [slow] resolve_fn with both empty args returns empty string
+- [slow] supports_jit_fn always returns false for noop
+- [slow] target_triple_fn always returns noop for noop backend
+- [slow] two factory calls produce independent services
+- [slow] noop services from different factory calls return same results

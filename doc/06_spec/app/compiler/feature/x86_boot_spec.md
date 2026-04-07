@@ -1,51 +1,49 @@
-# x86 Bare-Metal Boot Tests
+# X86 Boot Specification
 
-**Feature ID:** #BAREMETAL-013 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/x86_boot_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/x86_boot_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 11 |
+| Active scenarios | 11 |
+| Slow scenarios | 11 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests x86 bare-metal boot functionality including multiboot header generation with correct
-magic number (0x1BADB002), flags, and checksum validation. Verifies boot code allocates a
-64KB stack with 16-byte alignment and sets up the stack pointer correctly. Also includes
-skipped tests for linker script placement and QEMU boot verification.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val header = multiboot_header()
-expect(header.magic).to_equal(0x1BADB002)
-expect(validate_multiboot(header)).to_equal(true)
-expect(STACK_SIZE).to_equal(65536)
-val sp = get_stack_pointer()
-expect(sp % 16).to_equal(0)
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/x86_boot/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 7 |
+## Scenarios
 
-## Test Structure
-
-### x86 Multiboot Header
-
-- ✅ has correct magic number
-- ✅ has valid checksum
-- ✅ has correct flags
-- ✅ validates successfully
-### x86 Boot Code
-
-- ✅ allocates 64KB stack
-- ✅ maintains 16-byte stack alignment
-- ✅ sets up stack pointer correctly
-### x86 Linker Script
-
-### x86 QEMU Boot
-
+- [slow] has correct magic number
+- [slow] has valid checksum
+- [slow] has correct flags
+- [slow] validates successfully
+- [slow] allocates 64KB stack
+- [slow] maintains 16-byte stack alignment
+- [slow] sets up stack pointer correctly
+- [slow] places multiboot header at correct address
+- [slow] sets correct entry point
+- [slow] boots successfully in QEMU
+- [slow] handles interrupts correctly

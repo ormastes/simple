@@ -1,53 +1,48 @@
-# Registry Publish Specification
+# Publish Specification
 
-**Feature ID:** #950-952 | **Category:** Tooling | **Difficulty:** 3/5 | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/app/publish_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/publish_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Overview
-Tests for the `simple publish` command that builds .spk tarballs
-and pushes them to GHCR.
-
-## Key Concepts
-- Package manifest validation
-- .spk tarball creation
-- Checksum computation
-- GHCR push via oras
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 10 |
+|--------|------:|
+| Total scenarios | 10 |
+| Active scenarios | 10 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Publish Command
+Documentation was generated from executable SSpec scenarios.
 
-#### when manifest is valid
+## Evidence
 
-- ✅ parses package name from manifest
-- ✅ parses package version from manifest
-#### when manifest is missing
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ returns error when no simple.sdn exists
-#### when using --dry-run
+### Artifacts
 
-- ✅ does not push to GHCR in dry-run mode
-### SPK Tarball
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/publish/result.json` |
 
-#### when building tarball
+## Scenarios
 
-- ✅ excludes .jj directory
-- ✅ excludes target directory
-- ✅ excludes .env files
-- ✅ includes simple.sdn manifest
-- ✅ includes src directory
-### Checksum
-
-- ✅ computes sha256 checksum with prefix
-
+- parses package name from manifest
+- parses package version from manifest
+- returns error when no simple.sdn exists
+- does not push to GHCR in dry-run mode
+- excludes .jj directory
+- excludes target directory
+- excludes .env files
+- includes simple.sdn manifest
+- includes src directory
+- computes sha256 checksum with prefix

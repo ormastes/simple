@@ -1,37 +1,39 @@
-# Minimal Helper Import Test
+# Minimal Specification
 
-**Feature ID:** #STDLIB-002 | **Category:** Standard Library | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/lib/minimal_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/lib/minimal_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Minimal test verifying that helper functions can be imported from test utility modules.
-Tests that the test_file_exists helper from the minimal_helper module can be called
-successfully within a describe/it block structure, validating basic cross-module import
-resolution in the test framework.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-use test.lib.minimal_helper.{test_file_exists}
-val result = test_file_exists("/tmp/test")
-check(true)
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/lib/minimal/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 1 |
+## Scenarios
 
-## Test Structure
-
-### Test helper import
-
-- ✅ calls helper
-
+- calls helper

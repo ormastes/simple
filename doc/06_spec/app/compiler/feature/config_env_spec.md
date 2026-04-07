@@ -1,40 +1,42 @@
-# config_env_spec
+# Config Env Specification
 
-**Category:** System Integration | **Status:** Implemented
+## At a Glance
 
-_Source: `test/feature/app/config_env_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/config_env_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-Configuration and Environment Access Specification
-
-
-Tests for accessing environment variables, configuration files in SDN format,
-and system configuration. Verifies proper integration with the OS environment
-and configuration file parsing.
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 4 |
+|--------|------:|
+| Total scenarios | 4 |
+| Active scenarios | 4 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Configuration and Environment Access
+Documentation was generated from executable SSpec scenarios.
 
-#### Environment variables
+## Evidence
 
-- ✅ reads environment variables
-#### SDN configuration files
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ parses SDN configuration format
-#### Missing configuration
+### Artifacts
 
-- ✅ handles missing environment variables gracefully
-#### Configuration defaults
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/config_env/result.json` |
 
-- ✅ provides default values for missing settings
+## Scenarios
 
+- reads environment variables
+- parses SDN configuration format
+- handles missing environment variables gracefully
+- provides default values for missing settings

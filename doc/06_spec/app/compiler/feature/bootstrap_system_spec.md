@@ -1,78 +1,60 @@
-# Bootstrap System Multi-Platform Tests
+# Bootstrap System Specification
 
-**Feature ID:** #BOOTSTRAP-003 | **Category:** Runtime | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/compiler/bootstrap_system_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/bootstrap_system_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 22 |
+| Active scenarios | 22 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests the multi-platform bootstrap system functionality using the SSpec framework. Validates
-platform detection and normalization of architecture/OS names, bootstrap binary capabilities
-including script execution, standard library loading, string interpolation, functions, and
-classes. Also covers wrapper script behavior, file system operations, platform module information
-(separators, extensions), build system integration, error handling, and startup performance.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val has_platform = is_windows() or is_unix() or is_linux() or is_macos()
-check(has_platform)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-val dir = dir_sep()
-val path = path_sep()
-check(dir.len() > 0)
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/bootstrap_system/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 22 |
-
-## Test Structure
-
-### Bootstrap System
-
-### Platform Detection
-
-- ✅ detects current platform
-- ✅ normalizes architecture names
-- ✅ normalizes OS names
-### Bootstrap Binary
-
-- ✅ executes Simple scripts
-- ✅ loads standard library
-- ✅ handles string interpolation
-- ✅ supports functions
-- ✅ supports classes
-### Wrapper Script
-
-- ✅ finds bootstrap binary
-- ✅ passes arguments correctly
-- ✅ handles errors gracefully
-### File System
-
-- ✅ can read files
-- ✅ can write files
-### Platform Module
-
-- ✅ provides platform information
-- ✅ provides path separators
-- ✅ provides executable and library extensions
-### Build System Integration
-
-- ✅ can load build modules
-- ✅ supports CLI commands
-### Error Handling
-
-- ✅ handles invalid syntax gracefully
-- ✅ provides clear error messages
-### Performance
-
-- ✅ starts up quickly
-- ✅ executes efficiently
-
+- detects current platform
+- normalizes architecture names
+- normalizes OS names
+- executes Simple scripts
+- loads standard library
+- handles string interpolation
+- supports functions
+- supports classes
+- finds bootstrap binary
+- passes arguments correctly
+- handles errors gracefully
+- can read files
+- can write files
+- provides platform information
+- provides path separators
+- provides executable and library extensions
+- can load build modules
+- supports CLI commands
+- handles invalid syntax gracefully
+- provides clear error messages
+- starts up quickly
+- executes efficiently

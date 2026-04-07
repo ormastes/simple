@@ -1,44 +1,43 @@
-# RISC-V 64-bit Bare-Metal Boot Tests
+# Riscv64 Boot Specification
 
-**Feature ID:** #BAREMETAL-009 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/riscv64_boot_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/riscv64_boot_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 5 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests RISC-V 64-bit bare-metal boot functionality including machine mode startup,
-trap vector setup with direct and vectored modes, machine status register initialization,
-interrupt enable configuration (timer, external, software), and 16-byte stack alignment.
-Validates that the RISC-V 64 boot infrastructure correctly initializes mtvec, mstatus, and mie CSRs.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val mstatus = MSTATUS_MPP_MACHINE
-expect(check_machine_mode(mstatus)).to_equal(true)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-val mtvec = 0x80000100
-val (base, mode) = parse_mtvec(mtvec)
-expect(mode).to_equal(MTVEC_MODE_DIRECT)
-expect(validate_trap_vector(mtvec)).to_equal(true)
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/riscv64_boot/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 3 |
-
-## Test Structure
-
-### RISC-V 64 Boot Code
-
-- ✅ starts in machine mode
-- ✅ sets up trap vector
-- ✅ configures machine registers
-### RISC-V 64 QEMU Boot
-
+- [slow] starts in machine mode
+- [slow] sets up trap vector
+- [slow] configures machine registers
+- [slow] boots on virt machine
+- [slow] handles traps correctly

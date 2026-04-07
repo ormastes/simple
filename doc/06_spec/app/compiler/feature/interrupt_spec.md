@@ -1,104 +1,67 @@
-# Bare-Metal Interrupt Handler Tests
+# Interrupt Specification
 
-**Feature ID:** #BAREMETAL-008 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/interrupt_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/interrupt_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 29 |
+| Active scenarios | 29 |
+| Slow scenarios | 29 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests interrupt controllers and exception handling across ARM NVIC, RISC-V PLIC, and
-x86_64 APIC platforms. Validates interrupt enable/disable, priority configuration, pending
-interrupt management, claim/complete protocol, global interrupt control, critical sections,
-and interrupt handler registration and dispatch.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-nvic_enable_irq(15)
-nvic_set_priority(10, 128)
-val priority = nvic_get_priority(10)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-with_interrupts_disabled(fn():
-    executed = true
-)
-expect(executed).to_equal(true)
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/interrupt/result.json` |
 
-## Test Summary
+## Scenarios
 
-| Metric | Count |
-|--------|-------|
-| Tests | 29 |
-
-## Test Structure
-
-### ARM NVIC
-
-#### interrupt enable/disable
-
-- ✅ enables external interrupt
-- ✅ disables external interrupt
-- ✅ handles out-of-range IRQ gracefully
-#### priority configuration
-
-- ✅ sets interrupt priority
-- ✅ reads interrupt priority
-#### pending interrupts
-
-- ✅ sets interrupt pending
-- ✅ clears pending interrupt
-- ✅ checks if interrupt is active
-#### system control
-
-- ✅ sets vector table offset
-- ✅ triggers system reset
-### RISC-V PLIC
-
-#### interrupt enable/disable
-
-- ✅ enables external interrupt
-- ✅ disables external interrupt
-- ✅ rejects IRQ 0 (reserved)
-#### priority configuration
-
-- ✅ sets interrupt priority
-- ✅ sets priority threshold
-#### claim/complete protocol
-
-- ✅ claims pending interrupt
-- ✅ completes interrupt
-### x86_64 APIC
-
-#### initialization
-
-- ✅ enables Local APIC
-- ✅ reads APIC ID
-#### end of interrupt
-
-- ✅ signals EOI
-### Generic Interrupt Control
-
-#### global interrupt enable/disable
-
-- ✅ disables interrupts globally
-- ✅ enables interrupts globally
-- ✅ checks interrupt status
-#### critical sections
-
-- ✅ executes function with interrupts disabled
-- ✅ restores interrupt state after function
-### Interrupt Handler Registration
-
-#### registration
-
-- ✅ registers interrupt handler
-- ✅ unregisters interrupt handler
-#### dispatch
-
-- ✅ calls registered handler
-- ✅ calls default handler if no handler registered
-
+- [slow] enables external interrupt
+- [slow] disables external interrupt
+- [slow] handles out-of-range IRQ gracefully
+- [slow] sets interrupt priority
+- [slow] reads interrupt priority
+- [slow] sets interrupt pending
+- [slow] clears pending interrupt
+- [slow] checks if interrupt is active
+- [slow] sets vector table offset
+- [slow] validates vector table address range
+- [slow] enables external interrupt
+- [slow] disables external interrupt
+- [slow] rejects IRQ 0 (reserved)
+- [slow] sets interrupt priority
+- [slow] sets priority threshold
+- [slow] claims pending interrupt
+- [slow] completes interrupt
+- [slow] enables Local APIC
+- [slow] reads APIC ID
+- [slow] signals EOI
+- [slow] disables interrupts globally
+- [slow] enables interrupts globally
+- [slow] checks interrupt status
+- [slow] executes function with interrupts disabled
+- [slow] restores interrupt state after function
+- [slow] registers interrupt handler
+- [slow] unregisters interrupt handler
+- [slow] dispatches to default handler for unregistered vector
+- [slow] dispatches registered vector without crash

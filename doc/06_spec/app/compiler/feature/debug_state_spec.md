@@ -1,100 +1,68 @@
-# debug_state_spec
+# Debug State Specification
 
-**Category:** System/DAP | **Status:** Passing
+## At a Glance
 
-_Source: `test/feature/dap/debug_state_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/dap/debug_state_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Features Tested
-
-- Debug mode activation/deactivation
-- Pause and continue operations
-- Current location tracking
-- State persistence
-- Zero overhead when inactive
-
-## Implementation
-
-Uses FFI functions:
-- debug_is_active() / debug_set_active()
-- debug_pause() / debug_continue() / debug_is_paused()
-- debug_set_current_location() / debug_current_file() / debug_current_line()
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 30 |
+|--------|------:|
+| Total scenarios | 30 |
+| Active scenarios | 30 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Debug Activation
-_Tests for enabling/disabling debug mode._
+Documentation was generated from executable SSpec scenarios.
 
-- ✅ starts inactive by default
-- ✅ activates debug mode
-- ✅ deactivates debug mode
-- ✅ toggles debug mode
-### Pause and Continue
-_Tests for pausing and resuming execution._
+## Evidence
 
-### Pause operations
-_Test pausing execution._
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ starts not paused
-- ✅ pauses execution
-- ✅ can pause multiple times
-### Continue operations
-_Test resuming execution._
+### Artifacts
 
-- ✅ continues from paused state
-- ✅ can continue when not paused
-### Pause/continue cycle
-_Test repeated pause/continue operations._
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/dap/debug_state/result.json` |
 
-- ✅ handles multiple pause/continue cycles
-### Location Tracking
-_Tests for tracking current execution location._
+## Scenarios
 
-### Setting location
-_Test updating current location._
-
-- ✅ sets current file and line
-- ✅ updates location multiple times
-- ✅ tracks location through different files
-### Getting location
-_Test retrieving current location._
-
-- ✅ returns current file
-- ✅ returns current line
-- ✅ tracks line changes in same file
-### Edge cases
-_Test boundary conditions for location tracking._
-
-- ✅ handles line 0
-- ✅ handles large line numbers
-- ✅ handles empty file path
-- ✅ handles paths with special characters
-- ✅ handles absolute paths
-- ✅ handles relative paths
-### State Persistence
-_Tests that debug state persists correctly._
-
-- ✅ maintains state across operations
-- ✅ preserves location when toggling debug
-### Performance and Overhead
-_Tests for minimal overhead when debug is off._
-
-- ✅ has no overhead when inactive
-- ✅ handles high frequency location updates
-### Integration Scenarios
-_Tests combining multiple debug features._
-
-- ✅ tracks location while stepping
-- ✅ maintains breakpoints while paused
-- ✅ tracks location with active breakpoints
-- ✅ handles full debug session lifecycle
-
+- starts inactive by default
+- activates debug mode
+- deactivates debug mode
+- toggles debug mode
+- starts not paused
+- pauses execution
+- can pause multiple times
+- continues from paused state
+- can continue when not paused
+- handles multiple pause/continue cycles
+- sets current file and line
+- updates location multiple times
+- tracks location through different files
+- returns current file
+- returns current line
+- tracks line changes in same file
+- handles line 0
+- handles large line numbers
+- handles empty file path
+- handles paths with special characters
+- handles absolute paths
+- handles relative paths
+- maintains state across operations
+- preserves location when toggling debug
+- has no overhead when inactive
+- handles high frequency location updates
+- tracks location while stepping
+- maintains breakpoints while paused
+- tracks location with active breakpoints
+- handles full debug session lifecycle

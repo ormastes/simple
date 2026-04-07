@@ -1,53 +1,52 @@
-# Debug Boot Testing with GDB Integration
+# Debug Boot Specification
 
-**Feature ID:** #BAREMETAL-005 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/debug_boot_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/debug_boot_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 14 |
+| Active scenarios | 14 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests debug-enabled boot testing with GDB integration for bare-metal targets. Covers
-GDB connection to QEMU, breakpoint management, single-step debugging, automatic crash
-analysis (null pointer detection, stack trace extraction), and multi-architecture debug
-support across x86, ARM, and RISC-V. Requires both QEMU and GDB installation.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-fn check_gdb() -> bool:
-    val result = shell("which gdb > /dev/null 2>&1")
-    result.exit_code == 0
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-slow_it "connects GDB to QEMU", fn():
-    if not check_qemu() or not check_gdb():
-        return
-    expect(true).to_equal(true)
-```
+### Artifacts
 
----
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/debug_boot/result.json` |
 
-## Test Structure
+## Scenarios
 
-### Debug Boot Testing
-_Tests for GDB-integrated boot testing._
-
-#### Debug Connection
-_Test GDB connection and basic debugging._
-
-#### Crash Analysis
-_Test automatic crash analysis features._
-
-#### Debug Output
-_Test debug information formatting._
-
-#### Multi-Architecture Debug
-_Test debugging across different architectures._
-
-#### Breakpoint Management
-_Test breakpoint setting and handling._
-
-#### Single-Step Debugging
-_Test single-step execution._
-
+- can connect when qemu and gdb are available
+- does not connect when qemu is missing
+- does not connect when gdb is missing
+- reads registers after connection
+- detects null pointer crashes
+- extracts stack traces
+- shows register state on crash
+- formats debug info
+- supports x86 targets
+- supports ARM targets
+- supports RISC-V targets
+- stores multiple breakpoints
+- continues after a breakpoint
+- single-steps through code

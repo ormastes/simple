@@ -1,36 +1,39 @@
-# Bug Database Import Debug Test
+# Import Debug Specification
 
-**Feature ID:** #STDLIB-001 | **Category:** Standard Library | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/lib/import_debug_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/lib/import_debug_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Minimal test verifying that the BugDatabase module can be imported and instantiated using
-describe/it blocks. Tests that create_bug_database can be called without a direct import
-of the function (relying on wildcard import resolution) and that the resulting database
-contains the expected "bugs" table.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-var db = create_bug_database("/tmp/describe_test.sdn")
-check(db.db.tables.contains_key("bugs"))
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/lib/import_debug/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 1 |
+## Scenarios
 
-## Test Structure
-
-### Test create_bug_database
-
-- ✅ calls create_bug_database without importing it
-
+- calls create_bug_database without importing it

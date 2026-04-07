@@ -1,89 +1,65 @@
-# MCP Database Resource Specification
+# Database Resource Specification
 
-**Feature ID:** #MCP-DB-001 | **Category:** MCP / Database Integration | **Difficulty:** 3/5 | **Status:** Implemented
+## At a Glance
 
-_Source: `test/feature/app/database_resource_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/database_resource_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 27 |
+| Active scenarios | 27 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests for MCP database resources that provide JSON API access to:
-- Bug Database (`bugdb://`)
-- Feature Database (`featuredb://`)
-- Test Database (`testdb://`)
+Documentation was generated from executable SSpec scenarios.
 
-All resources use the shared `lib.database` atomic operations.
+## Evidence
 
----
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-## Test Summary
+### Artifacts
 
-| Metric | Count |
-|--------|-------|
-| Tests | 27 |
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/database_resource/result.json` |
 
-## Test Structure
+## Scenarios
 
-### Bug Database MCP Resource
-_Tests for bugdb:// MCP resource._
-
-#### read operations
-
-- ✅ returns empty list for new database
-- ✅ returns stats for empty database
-- ✅ returns error for non-existent bug
-#### write operations
-
-- ✅ adds bug via JSON
-- ✅ retrieves added bug
-- ✅ updates bug status
-- ✅ fails to add bug without id
-#### query operations
-
-- ✅ gets open bugs only
-- ✅ gets critical bugs only
-- ✅ calculates correct stats
-### Feature Database MCP Resource
-_Tests for featuredb:// MCP resource._
-
-#### read operations
-
-- ✅ returns empty list for new database
-- ✅ returns stats for empty database
-#### write operations
-
-- ✅ adds feature via JSON
-- ✅ retrieves added feature
-- ✅ updates feature status
-#### query operations
-
-- ✅ gets features by category
-- ✅ gets features by status
-### Test Database MCP Resource
-_Tests for testdb:// MCP resource._
-
-#### read operations
-
-- ✅ returns empty list for new database
-- ✅ returns stats for empty database
-#### test run lifecycle
-
-- ✅ starts a test run
-- ✅ ends a test run
-- ✅ records test result
-#### analysis operations
-
-- ✅ returns empty flaky tests for new database
-- ✅ returns empty slow tests for new database
-### Database MCP Integration
-_Cross-database integration tests._
-
-#### atomic operations
-
-- ✅ database operations are atomic
-#### JSON format
-
-- ✅ escapes special characters in JSON
-- ✅ handles empty strings
-
+- returns empty list for new database
+- returns stats for empty database
+- returns error for non-existent bug
+- adds bug via JSON
+- retrieves added bug
+- updates bug status
+- fails to add bug without id
+- gets open bugs only
+- gets critical bugs only
+- calculates correct stats
+- returns empty list for new database
+- returns stats for empty database
+- adds feature via JSON
+- retrieves added feature
+- updates feature status
+- gets features by category
+- gets features by status
+- returns empty list for new database
+- returns stats for empty database
+- starts a test run
+- ends a test run
+- records test result
+- returns empty flaky tests for new database
+- returns empty slow tests for new database
+- database operations are atomic
+- escapes special characters in JSON
+- handles empty strings

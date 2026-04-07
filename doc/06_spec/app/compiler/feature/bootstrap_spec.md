@@ -1,30 +1,25 @@
-# Direct Bootstrap System Tests
+# Bootstrap Specification
 
-**Feature ID:** #BOOTSTRAP-002 | **Category:** Runtime | **Status:** Active
+## At a Glance
 
-_Source: `test/feature/compiler/bootstrap_spec.spl`_
-
----
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/bootstrap_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
 ## Overview
 
-Tests core language features required for bootstrap without depending on the SSpec framework.
-Validates basic execution, arithmetic, string interpolation, function definition and invocation,
-for-loop iteration, array creation and traversal, class instantiation with methods, pattern
-matching, optional types, and dictionary access. Each test prints a pass/fail indicator directly
-to stdout.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-fn double(x: i64) -> i64:
-    x * 2
-val result = double(21)
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-val dict = {"one": 1, "two": 2, "three": 3}
-val value = dict["two"]
-```
+### Artifacts
 
----
-
-
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/bootstrap/result.json` |

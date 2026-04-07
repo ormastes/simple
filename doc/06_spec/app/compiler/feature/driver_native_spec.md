@@ -1,27 +1,39 @@
 # Driver Native Specification
 
-**Feature ID:** #TBD | **Category:** Compiler | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/compiler/driver_native_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/compiler/driver_native_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests compiling a simple program through the full compiler driver pipeline
-using the native backend (Parse → HIR → MIR → ISel → RegAlloc → Encode → ELF).
+Documentation was generated from executable SSpec scenarios.
 
----
+## Evidence
 
-## Test Summary
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 1 |
+### Artifacts
 
-## Test Structure
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/compiler/driver_native/result.json` |
 
-### Driver Native
+## Scenarios
 
-- ✅ compiles a simple function via driver and exits 0
-
+- compiles a simple function via driver and exits 0

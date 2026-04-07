@@ -1,43 +1,44 @@
-# x86_64 Bare-Metal Boot Tests
+# X86 64 Boot Specification
 
-**Feature ID:** #BAREMETAL-012 | **Category:** Baremetal | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/baremetal/x86_64_boot_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/baremetal/x86_64_boot_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 6 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
 ## Overview
 
-Tests x86_64 bare-metal boot functionality including 64-bit multiboot2 header generation
-and validation, long mode setup through PAE (CR4), LME (EFER), and paging (CR0) control
-register configuration, and 16-byte stack alignment verification. Validates that the x86_64
-boot infrastructure correctly transitions from protected mode to long mode.
+Documentation was generated from executable SSpec scenarios.
 
-## Syntax
+## Evidence
 
-```simple
-val header = multiboot2_header()
-expect(header.magic).to_equal(0xE85250D6)
-expect(validate_multiboot2(header)).to_equal(true)
-expect(is_pae_enabled(CR4_PAE)).to_equal(true)
-expect(is_long_mode_enabled(EFER_LME)).to_equal(true)
-```
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
----
+### Artifacts
 
-## Test Summary
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/baremetal/x86_64_boot/result.json` |
 
-| Metric | Count |
-|--------|-------|
-| Tests | 4 |
+## Scenarios
 
-## Test Structure
-
-### x86_64 Boot Code
-
-- ✅ generates valid 64-bit multiboot header
-- ✅ validates multiboot2 header successfully
-- ✅ sets up long mode correctly
-- ✅ maintains 16-byte stack alignment
-### x86_64 QEMU Boot
-
+- [slow] generates valid 64-bit multiboot header
+- [slow] validates multiboot2 header successfully
+- [slow] sets up long mode correctly
+- [slow] maintains 16-byte stack alignment
+- [slow] boots successfully in QEMU
+- [slow] handles 64-bit interrupts

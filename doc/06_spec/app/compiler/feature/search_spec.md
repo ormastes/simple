@@ -1,40 +1,43 @@
-# Registry Search Specification
+# Search Specification
 
-**Feature ID:** #959-960 | **Category:** Tooling | **Difficulty:** 2/5 | **Status:** In Progress
+## At a Glance
 
-_Source: `test/feature/app/search_spec.spl`_
+| Field | Value |
+|-------|-------|
+| Source | `test/feature/app/search_spec.spl` |
+| Updated | 2026-04-07 |
+| Generator | `simple sspec-docgen` (Rust) |
 
----
-
-## Overview
-Tests for the `simple search` command that queries the package listing.
-
-## Key Concepts
-- Package listing parsing
-- Name and description matching
-- Result limiting
-
----
-
-## Test Summary
+## Scenario Summary
 
 | Metric | Count |
-|--------|-------|
-| Tests | 5 |
+|--------|------:|
+| Total scenarios | 5 |
+| Active scenarios | 5 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-## Test Structure
+## Overview
 
-### Search Command
+Documentation was generated from executable SSpec scenarios.
 
-#### when packages match
+## Evidence
 
-- ✅ finds packages by name
-- ✅ finds packages by description
-- ✅ is case insensitive
-#### when no packages match
+| Category | Count |
+|----------|------:|
+| Artifacts | 1 |
 
-- ✅ returns empty list
-#### when limit is applied
+### Artifacts
 
-- ✅ respects result limit
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `target/test-artifacts/feature/app/search/result.json` |
 
+## Scenarios
+
+- finds packages by name
+- finds packages by description
+- is case insensitive
+- returns empty list
+- respects result limit
