@@ -1,0 +1,79 @@
+# x86_64 Desktop Entry — VGA + Keyboard + Mouse → Compositor
+#
+# Initializes all hardware drivers and links them to the compositor:
+#   1. BGA framebuffer (1024x768x32bpp) → CompositorBackend
+#   2. PS/2 keyboard (port 0x60/0x64) → InputBackend
+#   3. PS/2 mouse (port 0x60/0x64, aux device) → InputBackend
+#   4. Compositor runs the event loop (input → render → present)
+#
+# Also boots storage + network services for file access.
+#
+# Usage:
+#   qemu-system-x86_64 -machine q35 -m 2G -vga std \
+#     -drive file=build/os/fat32.img,if=none,id=nvm,format=raw \
+#     -device nvme,serial=deadbeef,drive=nvm \
+#     -kernel build/os/simpleos_desktop_32.elf
+
+extern fn serial_println(msg: text)
+
+# Drivers
+use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, Color}
+use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
+use os.drivers.input.ps2_mouse.{Ps2Mouse}
+
+# Compositor
+use os.compositor.compositor.{Compositor}
+
+# Services (for file access in terminal windows)
+use os.services.pcimgr.pcimgr.{pcimgr_init}
+use os.services.vfs.vfs_init.{vfs_boot_init}
+
+fn _start():
+    serial_println("")
+    serial_println("=== SimpleOS Desktop ===")
+    serial_println("")
+
+    # Step 1: Initialize PCI + storage
+    serial_println("[desktop] Initializing PCI...")
+    pcimgr_init()
+    val storage_ok = vfs_boot_init()
+    if storage_ok:
+        serial_println("[desktop] Storage: OK")
+
+    # Step 2: Initialize BGA framebuffer (1024x768x32bpp)
+    serial_println("[desktop] Initializing BGA framebuffer...")
+    val fb_info = bga_init_framebuffer(1024, 768, 32)
+    var fb = FramebufferDriver.from_boot_info(fb_info)
+    serial_println("[desktop] Framebuffer: 1024x768x32 @ 0x{fb_info.addr.addr}")
+
+    # Step 3: Initialize PS/2 keyboard
+    serial_println("[desktop] Initializing PS/2 keyboard...")
+    var keyboard = Ps2Keyboard.new()
+    keyboard.init()
+    serial_println("[desktop] Keyboard: OK")
+
+    # Step 4: Initialize PS/2 mouse
+    serial_println("[desktop] Initializing PS/2 mouse...")
+    var mouse = Ps2Mouse.create(1024, 768)
+    mouse.init()
+    serial_println("[desktop] Mouse: OK")
+
+    # Step 5: Create compositor with all drivers linked
+    serial_println("[desktop] Creating compositor...")
+    var compositor = Compositor.new(fb, keyboard, mouse)
+    serial_println("[desktop] Compositor created")
+
+    # Step 6: Create demo windows (use add_surface to bypass UITree/widget stubs)
+    serial_println("[desktop] Creating windows...")
+    compositor.add_surface("Terminal", 50, 50, 500, 350)
+    compositor.add_surface("File Browser", 300, 150, 450, 300)
+    compositor.add_surface("Editor", 150, 200, 400, 280)
+    serial_println("[desktop] 3 windows created")
+
+    # Step 7: Run the compositor loop (never returns)
+    serial_println("[desktop] Starting compositor event loop...")
+    serial_println("[desktop]   Keyboard: Alt+Tab=switch, Alt+F4=close, T=theme")
+    serial_println("[desktop]   Mouse: click=focus, drag title=move, X=close")
+    serial_println("")
+    compositor.run_loop()

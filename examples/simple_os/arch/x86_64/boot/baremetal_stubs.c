@@ -6469,11 +6469,11 @@ RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    /* NO tagging here — values arrive in whatever format the compiler sends.
-     * For array literals, the compiler BoxInt's values before push.
-     * For .push(expr), the compiler's wrap_value is a no-op, so values are raw.
-     * The MIR's UnboxInt after IndexGet handles the tagged case.
-     * We keep values as-is for consistency. */
+    /* Values now arrive TAGGED from the compiler:
+     * - Array literals: MIR BoxInt before rt_array_set
+     * - .push(expr): MIR BoxInt inserted in lowering_expr.rs for integer args
+     * - C-side callers: explicitly ENCODE_INT or pass heap pointers
+     * IndexGet + MIR UnboxInt reads them back correctly. */
     if (a->len >= a->cap) {
         /* At capacity — grow by allocating a new, larger array and copying.
          * Bump allocator: old memory is leaked (free is no-op), but this

@@ -4,7 +4,7 @@
 # via the CompositorBackend trait. Works on all backends.
 
 use os.compositor.display_backend.{CompositorBackend}
-use os.compositor.rendering_primitives.{draw_line}
+use os.compositor.rendering_primitives.{draw_line, filled_circle}
 
 # ============================================================================
 # Gradient Rectangle with Rounded Corners
@@ -126,6 +126,9 @@ fn draw_wallpaper_enhanced(backend: CompositorBackend, dark: bool, accent: u32, 
             backend.blend_rect(gx, 100, 1, sh - 200, 0x00FFFFFF, 2)
             gx = gx + 80
 
+    # Procedural wallpaper effects (stars, nebula, galaxy, moon, etc.)
+    draw_wallpaper_procedural(backend, dark, accent, accent2)
+
     # Stars (dark theme only)
     if dark:
         # Shooting star 1
@@ -156,6 +159,248 @@ fn draw_wallpaper_enhanced(backend: CompositorBackend, dark: bool, accent: u32, 
     backend.blend_rect(0, 0, sw, sh, accent, 2)
     # Bottom gradient fade
     backend.blend_rect(0, sh - 2, sw, 2, 0x00000000, 20)
+
+# ============================================================================
+# Procedural Wallpaper Effects
+# ============================================================================
+
+fn draw_wallpaper_procedural(backend: CompositorBackend, dark: bool, accent: u32, accent2: u32):
+    """Draw procedural wallpaper effects: stars, nebula, galaxy, moon, constellations, aurora.
+
+    Called from draw_wallpaper_enhanced after base gradient/grid, before shooting stars.
+    Shared between hosted (Mac/winit) and QEMU (ARM64/x86_64) window managers.
+    """
+    val sw = backend.width()
+    val sh = backend.height()
+
+    # ------------------------------------------------------------------
+    # K12: 600 pseudo-random stars (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        var i: i32 = 0
+        while i < 600:
+            val hash = (i * 2654435761) & 0x7FFFFFFF
+            val sx = hash % sw
+            val sy = (hash / sw) % sh
+            # Color variety: white 70%, cool blue 20%, warm amber 10%
+            val color_sel = hash % 100
+            var star_color: u32 = 0x00FFFFFF
+            if color_sel >= 90:
+                star_color = 0x00FFE8D0   # warm amber (10%)
+            else if color_sel >= 70:
+                star_color = 0x00C0D0FF   # cool blue (20%)
+            # Alpha: 80-200 range based on hash
+            val star_alpha: u8 = 80 + (hash % 121)
+            # Size: every 5th star is 3x3, rest 2x2
+            val star_size: i32 = if i % 5 == 0: 3 else: 2
+            backend.blend_rect(sx, sy, star_size, star_size, star_color, star_alpha)
+            i = i + 1
+
+    # ------------------------------------------------------------------
+    # K13: 12 super-bright stars (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        _draw_bright_star(backend, sw / 8, sh / 6)
+        _draw_bright_star(backend, sw * 3 / 8, sh / 8)
+        _draw_bright_star(backend, sw * 5 / 8, sh / 5)
+        _draw_bright_star(backend, sw * 7 / 8, sh / 7)
+        _draw_bright_star(backend, sw / 5, sh * 2 / 5)
+        _draw_bright_star(backend, sw * 2 / 5, sh * 3 / 8)
+        _draw_bright_star(backend, sw * 3 / 5, sh / 3)
+        _draw_bright_star(backend, sw * 4 / 5, sh * 2 / 7)
+        _draw_bright_star(backend, sw / 4, sh * 3 / 5)
+        _draw_bright_star(backend, sw / 2, sh * 4 / 7)
+        _draw_bright_star(backend, sw * 3 / 4, sh * 3 / 7)
+        _draw_bright_star(backend, sw * 7 / 10, sh * 5 / 8)
+
+    # ------------------------------------------------------------------
+    # K14: 11 nebula radial blobs (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        _draw_nebula_blob(backend, sw / 3, sh / 3, 165, 0x000A84FF, 44)
+        _draw_nebula_blob(backend, sw * 2 / 3, sh * 2 / 3, 150, 0x00BB86FC, 37)
+        _draw_nebula_blob(backend, sw / 2, sh * 3 / 4, 135, 0x0000D4AA, 27)
+        _draw_nebula_blob(backend, sw * 3 / 4, sh / 4, 120, 0x00FF6B9D, 30)
+        _draw_nebula_blob(backend, sw / 4, sh * 2 / 3, 105, 0x00FFD700, 24)
+        _draw_nebula_blob(backend, sw / 2, sh / 4, 90, 0x004ECDC4, 20)
+        _draw_nebula_blob(backend, sw * 3 / 4, sh / 2, 112, 0x00E040FB, 25)
+        _draw_nebula_blob(backend, sw / 4, sh / 2, 97, 0x00FF7043, 22)
+        _draw_nebula_blob(backend, sw / 2, sh / 2, 82, accent, 18)
+        _draw_nebula_blob(backend, sw / 3, sh * 3 / 4, 75, accent2, 15)
+        _draw_nebula_blob(backend, sw * 2 / 3, sh / 4, 68, 0x00FFFFFF, 12)
+
+    # ------------------------------------------------------------------
+    # K15: Galaxy spiral (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        val gcx = sw / 2
+        val gcy = sh * 2 / 5
+        # Core glow
+        filled_circle(backend, gcx, gcy, 40, 0x00FFFFFF, 30)
+        # Sin lookup table (scaled by 43): 0..15 for 0..337.5 degrees in 22.5-degree steps
+        # sin_table[i] = round(43 * sin(i * 22.5 degrees))
+        # [0, 17, 31, 40, 43, 40, 31, 17, 0, -17, -31, -40, -43, -40, -31, -17]
+        # Spiral: 2 arms, 8 segments each
+        # Arm 0 offset = 0 degrees, Arm 1 offset = 180 degrees (= 8 steps in table)
+        var arm: i32 = 0
+        while arm < 2:
+            val arm_offset = arm * 8   # 0 or 8 steps (0 or 180 degrees)
+            var seg: i32 = 0
+            while seg < 8:
+                val r = 60 + seg * 25
+                # angle in table steps: each step = 22.5 degrees
+                # We want arm_offset + seg*40 degrees = arm_offset + seg*40/22.5 steps
+                # 40/22.5 ~ 1.78, approximate as seg*2 (= 45 degrees per segment)
+                val angle_step = (arm_offset + seg * 2) % 16
+                val cos_val = _sin_lookup((angle_step + 4) % 16)  # cos = sin(x + 90) = sin(x + 4 steps)
+                val sin_val = _sin_lookup(angle_step)
+                val px = gcx + r * cos_val / 43
+                val py = gcy + r * sin_val / 43
+                val sr = 8 - seg
+                val sa: u8 = if 20 - seg * 2 > 0: 20 - seg * 2 else: 2
+                if sr > 0:
+                    filled_circle(backend, px, py, sr, 0x00FFFFFF, sa)
+                seg = seg + 1
+            arm = arm + 1
+
+    # ------------------------------------------------------------------
+    # K16: Crescent moon (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        val mx = sw * 4 / 5
+        val my = sh / 5
+        # Halo glow
+        filled_circle(backend, mx, my, 50, 0x00FFFFFF, 18)
+        # Moon body
+        filled_circle(backend, mx, my, 30, 0x00FFFFFF, 85)
+        # Shadow crescent (offset to darken one side)
+        filled_circle(backend, mx - 12, my - 8, 28, 0x00060508, 200)
+
+    # ------------------------------------------------------------------
+    # K17: 7 constellation points (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        _draw_constellation_point(backend, 200, 180)
+        _draw_constellation_point(backend, 280, 220)
+        _draw_constellation_point(backend, 350, 190)
+        _draw_constellation_point(backend, 420, 250)
+        _draw_constellation_point(backend, 500, 210)
+        _draw_constellation_point(backend, 560, 270)
+        _draw_constellation_point(backend, 620, 230)
+
+    # ------------------------------------------------------------------
+    # K18: Aurora horizon glow (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        val aurora_y = sh * 2 / 3
+        var ay: i32 = 0
+        while ay < 60:
+            val aurora_alpha: u8 = 40 - ay * 40 / 60
+            if aurora_alpha > 0:
+                backend.blend_rect(0, aurora_y + ay, sw, 1, 0x00200840, aurora_alpha)
+            ay = ay + 1
+
+    # ------------------------------------------------------------------
+    # K19: Pastel clouds (light theme only)
+    # ------------------------------------------------------------------
+    if not dark:
+        filled_circle(backend, sw / 4, sh / 3, 80, 0x00FFB5C5, 12)
+        filled_circle(backend, sw * 3 / 4, sh / 2, 70, 0x0099CCFF, 10)
+        filled_circle(backend, sw / 2, sh * 2 / 3, 75, 0x00E8C5FF, 8)
+
+    # ------------------------------------------------------------------
+    # K20, K21: Sun glow + lens flare (light theme only)
+    # ------------------------------------------------------------------
+    if not dark:
+        val sun_x = sw / 2
+        val sun_y: i32 = 80
+        # Outer glow
+        filled_circle(backend, sun_x, sun_y, 100, 0x00FFFFFF, 15)
+        # Sun core
+        filled_circle(backend, sun_x, sun_y, 40, 0x00FFFFFF, 25)
+        # Sun center
+        filled_circle(backend, sun_x, sun_y, 20, 0x00FFFDE0, 40)
+        # Lens flare horizontal band
+        backend.blend_rect(sun_x - 75, 78, 150, 4, 0x00FFFFFF, 6)
+
+    # ------------------------------------------------------------------
+    # K22: Atmospheric haze (dark theme only)
+    # ------------------------------------------------------------------
+    if dark:
+        backend.blend_rect(0, sh * 2 / 3, sw, 40, 0x000A84FF, 15)
+
+    # ------------------------------------------------------------------
+    # K24: 1% noise overlay (both themes)
+    # ------------------------------------------------------------------
+    var ny: i32 = 0
+    while ny < sh:
+        var nx: i32 = 0
+        while nx < sw:
+            if (ny * 7 + nx * 13) % 100 < 1:
+                backend.blend_rect(nx, ny, 1, 1, 0x00FFFFFF, 4)
+            nx = nx + 10
+        ny = ny + 10
+
+fn _sin_lookup(idx: i32) -> i32:
+    """Integer sine lookup table. 16 entries for 0..360 degrees in 22.5-degree steps.
+
+    Values scaled by 43 (~100%). Returns sin(idx * 22.5 degrees) * 43.
+    """
+    val i = idx % 16
+    if i == 0: return 0
+    if i == 1: return 17
+    if i == 2: return 31
+    if i == 3: return 40
+    if i == 4: return 43
+    if i == 5: return 40
+    if i == 6: return 31
+    if i == 7: return 17
+    if i == 8: return 0
+    if i == 9: return -17
+    if i == 10: return -31
+    if i == 11: return -40
+    if i == 12: return -43
+    if i == 13: return -40
+    if i == 14: return -31
+    if i == 15: return -17
+    0
+
+fn _draw_bright_star(backend: CompositorBackend, x: i32, y: i32):
+    """Draw a super-bright star with core, cross arms, and diagonal softening."""
+    # Core: 4x4px, alpha 250
+    backend.blend_rect(x - 2, y - 2, 4, 4, 0x00FFFFFF, 250)
+    # Cross arms: horizontal +-1px
+    backend.blend_rect(x - 3, y - 1, 1, 2, 0x00FFFFFF, 200)
+    backend.blend_rect(x + 2, y - 1, 1, 2, 0x00FFFFFF, 200)
+    # Cross arms: vertical +-1px
+    backend.blend_rect(x - 1, y - 3, 2, 1, 0x00FFFFFF, 200)
+    backend.blend_rect(x - 1, y + 2, 2, 1, 0x00FFFFFF, 200)
+    # Diagonal softening: 4 corner pixels
+    backend.blend_rect(x - 3, y - 3, 1, 1, 0x00FFFFFF, 100)
+    backend.blend_rect(x + 2, y - 3, 1, 1, 0x00FFFFFF, 100)
+    backend.blend_rect(x - 3, y + 2, 1, 1, 0x00FFFFFF, 100)
+    backend.blend_rect(x + 2, y + 2, 1, 1, 0x00FFFFFF, 100)
+
+fn _draw_nebula_blob(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32, max_alpha: u8):
+    """Draw a nebula blob as 3 concentric filled circles with decreasing alpha."""
+    # Outer ring: full radius, alpha / 3
+    val a1: u8 = max_alpha / 3
+    filled_circle(backend, cx, cy, r, color, a1)
+    # Middle ring: 2/3 radius, alpha * 2/3
+    val a2: u8 = max_alpha * 2 / 3
+    filled_circle(backend, cx, cy, r * 2 / 3, color, a2)
+    # Inner ring: 1/3 radius, full alpha
+    filled_circle(backend, cx, cy, r / 3, color, max_alpha)
+
+fn _draw_constellation_point(backend: CompositorBackend, x: i32, y: i32):
+    """Draw a constellation point with 2x2 core and 4 adjacent glow pixels."""
+    # Core: 2x2 at alpha 220
+    backend.blend_rect(x, y, 2, 2, 0x00FFFFFF, 220)
+    # 4 adjacent pixels at alpha 120
+    backend.blend_rect(x - 1, y, 1, 2, 0x00FFFFFF, 120)
+    backend.blend_rect(x + 2, y, 1, 2, 0x00FFFFFF, 120)
+    backend.blend_rect(x, y - 1, 2, 1, 0x00FFFFFF, 120)
+    backend.blend_rect(x, y + 2, 2, 1, 0x00FFFFFF, 120)
 
 fn _draw_star_line(backend: CompositorBackend, x1: i32, y1: i32, x2: i32, y2: i32, alpha: u8):
     """Draw a shooting star trail with head glow and fade tail."""

@@ -66,14 +66,14 @@ fn call_runtime_3<M: Module>(
 
 /// Pass value through for array/dict operations.
 /// Values that are already RuntimeValue (strings, arrays, objects) should be passed directly.
-/// Only raw integers need boxing via MirInst::BoxInt, which is done at MIR level.
+/// For .push() on integer-typed arrays, MIR lowering now inserts BoxInt before the
+/// MethodCallStatic (see lowering_expr.rs), so integer args arrive already tagged.
+/// This function remains a no-op pass-through.
 fn wrap_value<M: Module>(
     _ctx: &mut InstrContext<'_, M>,
     _builder: &mut FunctionBuilder,
     val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    // Just pass the value through - values are already in RuntimeValue format
-    // or will be boxed at MIR level via BoxInt if needed.
     val
 }
 

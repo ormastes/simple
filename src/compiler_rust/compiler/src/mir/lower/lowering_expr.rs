@@ -1286,6 +1286,38 @@ impl<'a> MirLowerer<'a> {
                     arg_regs.push(self.lower_expr(arg)?);
                 }
 
+                // Box integer arguments for array .push() — matches IndexGet unbox at line 1236.
+                // Without this, wrap_value (no-op) passes raw integers to rt_array_push,
+                // but IndexGet + MIR UnboxInt expects tagged (val << 3) values.
+                if method == "push" && !args.is_empty() {
+                    let push_arg_ty = args[0].ty;
+                    let needs_push_boxing = matches!(
+                        push_arg_ty,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                            | TypeId::BOOL
+                    );
+                    if needs_push_boxing {
+                        let raw_arg = arg_regs[0];
+                        let boxed_arg = self.with_func(|func, current_block| {
+                            let boxed = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BoxInt {
+                                dest: boxed,
+                                value: raw_arg,
+                            });
+                            boxed
+                        })?;
+                        arg_regs[0] = boxed_arg;
+                    }
+                }
+
                 // Try to qualify method name with receiver type (e.g., "TreeSitter.expect")
                 let func_name = if let Some(registry) = self.type_registry {
                     if let Some(type_name) = registry.get_type_name(receiver.ty) {
