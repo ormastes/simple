@@ -1,16 +1,14 @@
 # hosted_wm.spl — SimpleOS Hosted Window Manager (1024x768, 3 windows)
 #
 # A full desktop window manager running natively on macOS via winit/softbuffer.
-# Ports the multi-window composition from wm_entry.spl (baremetal) to hosted mode.
-#
-# Uses Rust-side pixel buffer for fast rendering (no interpreter overhead per pixel).
+# Uses the compositor module for rendering — same code path as baremetal.
 #
 # Features:
 #   - 1024x768 native window
-#   - System bar (top) + Taskbar with dock icons (bottom)
 #   - 3 app windows: Terminal, Hello World, File Manager
 #   - Z-order management (focused window drawn on top)
-#   - Keyboard: Tab=cycle, 1/2/3=focus window, S=screenshot, Escape/Q=quit
+#   - Window decorations (title bar, close/min/max buttons, borders)
+#   - Keyboard: Alt+Tab=cycle, 1/2/3=focus, S=screenshot, Escape=quit
 #
 # Run with:
 #   SIMPLE_GUI=1 bin/simple examples/simple_os/hosted/hosted_wm.spl
@@ -21,203 +19,34 @@
 
 extern fn rt_winit_event_loop_new() -> i64
 extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
-extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
-extern fn rt_winit_event_get_type(ev: i64) -> i64
-extern fn rt_winit_event_keyboard_input(ev: i64) -> (i64, i64, bool)
-extern fn rt_winit_event_free(ev: i64)
-extern fn rt_winit_window_free(win: i64)
-extern fn rt_winit_event_loop_free(el: i64)
-extern fn rt_thread_sleep(ms: i64)
-
-# Buffer-based rendering (Rust-side pixel buffer — fast)
 extern fn rt_winit_buffer_create(w: i64, h: i64, fill_color: i64) -> i64
-extern fn rt_winit_buffer_fill_rect(buf: i64, x: i64, y: i64, w: i64, h: i64, color: i64) -> bool
-extern fn rt_winit_buffer_present(win: i64, buf: i64) -> bool
 extern fn rt_winit_buffer_save_bmp(buf: i64, path: text) -> bool
 extern fn rt_winit_buffer_free(buf: i64) -> bool
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+
+use os.compositor.hosted_backend.{HostedCompositorBackend}
+use os.compositor.hosted_input_backend.{HostedInputBackend}
+use os.compositor.compositor.{Compositor}
 
 # ============================================================================
-# Constants
+# Configuration
 # ============================================================================
 
 val SCREEN_W: i64 = 1024
 val SCREEN_H: i64 = 768
-
-val EVT_CLOSE: i64 = 3
-val EVT_KEYBOARD: i64 = 10
-
-val KEY_TAB: i64 = 9
-val KEY_ESCAPE: i64 = 27
-val KEY_1: i64 = 49
-val KEY_2: i64 = 50
-val KEY_3: i64 = 51
-val KEY_S: i64 = 83
-val KEY_Q: i64 = 81
+val BG_COLOR: i64 = 0xFF1A1B26   # Dark navy (ARGB)
 
 # ============================================================================
-# Color Palette (Dark theme)
-# ============================================================================
-
-fn c(r: i64, g: i64, b: i64) -> i64:
-    (255 << 24) | (r << 16) | (g << 8) | b
-
-val BG: i64              = c(26, 27, 38)
-val BAR_BG: i64          = c(30, 30, 46)
-val WIN_ACTIVE: i64      = c(0, 122, 204)
-val WIN_INACTIVE: i64    = c(80, 80, 112)
-val WIN_BODY: i64        = c(255, 255, 255)
-val WIN_BORDER: i64      = c(64, 64, 96)
-val BTN_CLOSE: i64       = c(231, 76, 60)
-val BTN_MIN: i64         = c(243, 156, 18)
-val BTN_MAX: i64         = c(46, 204, 113)
-val STATUS: i64          = c(224, 224, 224)
-val ACCENT: i64          = c(187, 134, 252)
-val CLOCK_BG: i64        = c(44, 44, 62)
-val LIGHT: i64           = c(204, 204, 204)
-val DOCK_TERM: i64       = c(52, 152, 219)
-val DOCK_FILES: i64      = c(39, 174, 96)
-val DOCK_CALC: i64       = c(231, 76, 60)
-val DOCK_CLOCK: i64      = c(243, 156, 18)
-val DOCK_SETTINGS: i64   = c(155, 89, 182)
-
-# ============================================================================
-# Drawing helpers (delegate to Rust buffer)
-# ============================================================================
-
-var g_buf: i64 = 0
-
-fn fill(x: i64, y: i64, w: i64, h: i64, color: i64):
-    rt_winit_buffer_fill_rect(g_buf, x, y, w, h, color)
-
-# ============================================================================
-# Desktop Components
-# ============================================================================
-
-fn draw_system_bar():
-    fill(0, 0, SCREEN_W, 24, BAR_BG)
-    fill(6, 4, 60, 16, ACCENT)
-    fill(SCREEN_W - 80, 4, 74, 16, CLOCK_BG)
-
-fn draw_taskbar():
-    val bar_y = SCREEN_H - 40
-    fill(0, bar_y, SCREEN_W, 40, BAR_BG)
-
-    val sz: i64 = 28
-    val y = bar_y + 6
-    val gap: i64 = 8
-    var x: i64 = 12
-
-    fill(x, y, sz, sz, DOCK_TERM)
-    x = x + sz + gap
-    fill(x, y, sz, sz, DOCK_FILES)
-    x = x + sz + gap
-    fill(x, y, sz, sz, DOCK_CALC)
-    x = x + sz + gap
-    fill(x, y, sz, sz, DOCK_CLOCK)
-    x = x + sz + gap
-    fill(x, y, sz, sz, DOCK_SETTINGS)
-
-    # Running indicators
-    fill(24, bar_y + 36, 4, 3, LIGHT)
-    fill(24 + sz + gap, bar_y + 36, 4, 3, LIGHT)
-
-# ============================================================================
-# Window Drawing
-# ============================================================================
-
-fn draw_window(x: i64, y: i64, w: i64, h: i64, active: bool):
-    val th: i64 = 28
-    val bs: i64 = 14
-
-    fill(x - 1, y - 1, w + 2, h + 2, WIN_BORDER)
-    if active:
-        fill(x, y, w, th, WIN_ACTIVE)
-    else:
-        fill(x, y, w, th, WIN_INACTIVE)
-    fill(x + w - 22, y + 7, bs, bs, BTN_CLOSE)
-    fill(x + w - 40, y + 7, bs, bs, BTN_MAX)
-    fill(x + w - 58, y + 7, bs, bs, BTN_MIN)
-    fill(x, y + th, w, h - th, WIN_BODY)
-
-fn draw_hello(x: i64, y: i64, active: bool):
-    val w: i64 = 360
-    val h: i64 = 240
-    draw_window(x, y, w, h, active)
-    val cy = y + 28
-    val p: i64 = 16
-    fill(x + p, cy + p, w - p * 2, 40, c(240, 244, 255))
-    fill(x + p, cy + p, 4, 40, ACCENT)
-    val by = cy + p + 56
-    fill(x + p, by, 80, 32, c(255, 107, 107))
-    fill(x + p + 90, by, 80, 32, c(81, 207, 102))
-    fill(x + p + 180, by, 80, 32, c(91, 155, 213))
-    fill(x, y + h - 24, w, 24, STATUS)
-
-fn draw_terminal(x: i64, y: i64, active: bool):
-    val w: i64 = 400
-    val h: i64 = 280
-    draw_window(x, y, w, h, active)
-    val by = y + 28
-    fill(x, by, w, h - 28, c(26, 27, 38))
-    fill(x + 12, by + 12, 8, 16, c(68, 255, 68))
-    fill(x + 24, by + 12, 120, 2, c(68, 255, 68))
-    fill(x + 12, by + 32, 200, 2, c(170, 170, 170))
-    fill(x + 12, by + 48, 160, 2, c(170, 170, 170))
-    fill(x + 12, by + 64, 240, 2, c(85, 136, 204))
-    fill(x + 12, by + 80, 100, 2, c(170, 170, 170))
-    fill(x + 12, by + 96, 180, 2, c(68, 255, 68))
-
-fn draw_files(x: i64, y: i64, active: bool):
-    val w: i64 = 320
-    val h: i64 = 200
-    draw_window(x, y, w, h, active)
-    val by = y + 28
-    fill(x, by, 80, h - 28, c(240, 240, 240))
-    fill(x + 8, by + 8, 64, 16, c(224, 224, 224))
-    fill(x + 8, by + 28, 64, 16, c(224, 224, 224))
-    fill(x + 8, by + 48, 64, 16, c(208, 232, 255))
-    var row: i64 = 0
-    while row < 3:
-        var col_: i64 = 0
-        while col_ < 3:
-            val fx = x + 92 + col_ * 72
-            val fy = by + 8 + row * 52
-            fill(fx, fy, 48, 36, c(232, 232, 232))
-            fill(fx, fy, 48, 4, c(91, 155, 213))
-            col_ = col_ + 1
-        row = row + 1
-
-# ============================================================================
-# Desktop Composition (Z-order)
-# ============================================================================
-
-fn redraw_desktop(active: i64):
-    fill(0, 24, SCREEN_W, SCREEN_H - 64, BG)
-    draw_system_bar()
-    draw_taskbar()
-
-    if active == 0:
-        draw_files(520, 320, false)
-        draw_hello(320, 140, false)
-        draw_terminal(60, 80, true)
-    else if active == 1:
-        draw_files(520, 320, false)
-        draw_terminal(60, 80, false)
-        draw_hello(320, 140, true)
-    else:
-        draw_terminal(60, 80, false)
-        draw_hello(320, 140, false)
-        draw_files(520, 320, true)
-
-# ============================================================================
-# Main
+# Entry Point
 # ============================================================================
 
 fn main() -> i64:
     print "SimpleOS Window Manager — Hosted ({SCREEN_W}x{SCREEN_H})"
-    print "Controls: Tab=cycle, 1/2/3=focus, S=screenshot, Escape/Q=quit"
+    print "Controls: Alt+Tab=cycle, 1/2/3=focus, S=screenshot, Escape=quit"
     print ""
 
+    # --- Step 1: Create winit event loop and window ---
     val el = rt_winit_event_loop_new()
     val win = rt_winit_window_new(el, SCREEN_W, SCREEN_H, "SimpleOS Window Manager")
     if win == 0:
@@ -225,86 +54,46 @@ fn main() -> i64:
         return 1
     print "Window created: {SCREEN_W}x{SCREEN_H}"
 
-    # Create Rust-side pixel buffer
-    g_buf = rt_winit_buffer_create(SCREEN_W, SCREEN_H, BG)
-    print "Pixel buffer ready"
+    # --- Step 2: Create native pixel buffer ---
+    val buf = rt_winit_buffer_create(SCREEN_W, SCREEN_H, BG_COLOR)
+    if buf == 0:
+        print "ERROR: Buffer creation failed"
+        return 1
 
-    # Initial render
-    var active_win: i64 = 1
-    print "Rendering desktop..."
-    redraw_desktop(active_win)
-    rt_winit_buffer_present(win, g_buf)
-    print "First frame presented"
+    # --- Step 3: Create backends ---
+    val w32: i32 = 1024
+    val h32: i32 = 768
+    val bg_u32: u32 = 0xFF1A1B26
+    var backend = HostedCompositorBackend.create(win, w32, h32, bg_u32)
+    var input = HostedInputBackend.create(el)
 
-    # Save initial screenshot
-    val saved = rt_winit_buffer_save_bmp(g_buf, "/tmp/simpleos_wm.bmp")
+    # --- Step 4: Create compositor ---
+    var compositor = Compositor.with_backends(backend, input, w32, h32)
+
+    # --- Step 5: Launch 3 demo windows ---
+    print "Creating windows..."
+    compositor.create_window("Terminal", 60, 80, 400, 280)
+    compositor.create_window("Hello World", 320, 140, 360, 240)
+    compositor.create_window("File Manager", 520, 320, 320, 200)
+
+    # --- Step 6: Save initial screenshot ---
+    compositor.render_all()
+    val saved = rt_winit_buffer_save_bmp(buf, "/tmp/simpleos_wm.bmp")
     if saved:
-        print "Screenshot saved: /tmp/simpleos_wm.bmp"
+        print "Initial screenshot: /tmp/simpleos_wm.bmp"
 
-    # Event loop
-    var running = true
-    var frame: i64 = 0
-    var screenshot_count: i64 = 1
-
-    print "Entering event loop..."
-
-    while running:
-        var ev = rt_winit_event_loop_poll_events(el, 100)
-        while ev != 0:
-            val etype = rt_winit_event_get_type(ev)
-
-            if etype == EVT_CLOSE:
-                print "Window close requested"
-                running = false
-
-            else if etype == EVT_KEYBOARD:
-                val (scancode, keycode, pressed) = rt_winit_event_keyboard_input(ev)
-                if pressed:
-                    if keycode == KEY_TAB:
-                        active_win = (active_win + 1) % 3
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        val names = ["Terminal", "Hello World", "File Manager"]
-                        print "Focus: {names[active_win]}"
-
-                    else if keycode == KEY_1:
-                        active_win = 0
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: Terminal"
-
-                    else if keycode == KEY_2:
-                        active_win = 1
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: Hello World"
-
-                    else if keycode == KEY_3:
-                        active_win = 2
-                        redraw_desktop(active_win)
-                        rt_winit_buffer_present(win, g_buf)
-                        print "Focus: File Manager"
-
-                    else if keycode == KEY_S:
-                        screenshot_count = screenshot_count + 1
-                        val path = "/tmp/simpleos_wm_{screenshot_count}.bmp"
-                        val ok = rt_winit_buffer_save_bmp(g_buf, path)
-                        if ok:
-                            print "Screenshot saved: {path}"
-
-                    else if keycode == KEY_ESCAPE or keycode == KEY_Q:
-                        print "Quit requested"
-                        running = false
-
-            rt_winit_event_free(ev)
-            ev = rt_winit_event_loop_poll_events(el, 100)
-
-        frame = frame + 1
-        rt_thread_sleep(33)
-
+    # --- Step 7: Enter compositor event loop ---
+    print "Desktop ready!"
+    print "  Alt+Tab     = cycle windows"
+    print "  Alt+F4      = close focused window"
+    print "  Escape      = quit"
     print ""
-    print "Desktop closed after {frame} frames"
-    rt_winit_buffer_free(g_buf)
+
+    compositor.run_loop()
+
+    # --- Cleanup ---
+    print "Desktop closed"
+    rt_winit_buffer_free(buf)
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
     return 0

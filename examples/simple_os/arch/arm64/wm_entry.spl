@@ -244,6 +244,30 @@ fn uart_read_char() -> u64:
     """Read a character from PL011 UART data register."""
     rt_mmio_read_u32(PL011_BASE + PL011_DR) & 0xFF
 
+# Action codes returned by uart_char_to_action:
+#   0 = None, 1 = CycleFocus, 2 = ToggleTheme, 3 = Quit,
+#   4 = Minimize, 5 = Close, 6 = Restore,
+#   10 = FocusWindow(0), 11 = FocusWindow(1), 12 = FocusWindow(2)
+# Mirrors os.gui.shortcut.uart_char_to_action but uses numeric codes
+# so this standalone baremetal file needs no `use` imports.
+fn uart_char_to_action(ch: u64) -> u64:
+    """Map UART ASCII char to action code."""
+    if ch == 9: return 1      # Tab  -> CycleFocus
+    if ch == 49: return 10    # '1'  -> FocusWindow(0)
+    if ch == 50: return 11    # '2'  -> FocusWindow(1)
+    if ch == 51: return 12    # '3'  -> FocusWindow(2)
+    if ch == 116: return 2    # 't'  -> ToggleTheme
+    if ch == 84: return 2     # 'T'  -> ToggleTheme
+    if ch == 113: return 3    # 'q'  -> Quit
+    if ch == 81: return 3     # 'Q'  -> Quit
+    if ch == 109: return 4    # 'm'  -> Minimize
+    if ch == 77: return 4     # 'M'  -> Minimize
+    if ch == 119: return 5    # 'w'  -> Close
+    if ch == 87: return 5     # 'W'  -> Close
+    if ch == 114: return 6    # 'r'  -> Restore
+    if ch == 82: return 6     # 'R'  -> Restore
+    return 0                  # None
+
 # ===========================================================================
 # ARM64 Framebuffer Setup via ramfb
 #
@@ -1699,9 +1723,10 @@ fn spl_start():
         # Poll PL011 UART for keyboard input
         if uart_data_ready() == 1:
             val ch = uart_read_char()
+            val action = uart_char_to_action(ch)
 
-            # Tab (0x09) = cycle windows
-            if ch == 0x09:
+            # CycleFocus (action 1)
+            if action == 1:
                 active_win = (active_win + 1) % 3
                 animating = 1
                 anim_start = anim_frame
@@ -1709,8 +1734,8 @@ fn spl_start():
                 needs_redraw = 1
                 serial_println("[WM] Focus cycled")
 
-            # '1' = focus Terminal
-            if ch == 0x31:
+            # FocusWindow(0) (action 10)
+            if action == 10:
                 active_win = 0
                 animating = 1
                 anim_start = anim_frame
@@ -1718,8 +1743,8 @@ fn spl_start():
                 needs_redraw = 1
                 serial_println("[WM] Focus: Terminal")
 
-            # '2' = focus Editor
-            if ch == 0x32:
+            # FocusWindow(1) (action 11)
+            if action == 11:
                 active_win = 1
                 animating = 1
                 anim_start = anim_frame
@@ -1727,8 +1752,8 @@ fn spl_start():
                 needs_redraw = 1
                 serial_println("[WM] Focus: Editor")
 
-            # '3' = focus Finder
-            if ch == 0x33:
+            # FocusWindow(2) (action 12)
+            if action == 12:
                 active_win = 2
                 animating = 1
                 anim_start = anim_frame
@@ -1736,8 +1761,8 @@ fn spl_start():
                 needs_redraw = 1
                 serial_println("[WM] Focus: Finder")
 
-            # 't' or 'T' = toggle theme
-            if ch == 0x74 or ch == 0x54:
+            # ToggleTheme (action 2)
+            if action == 2:
                 theme = (theme + 1) % 2
                 animating = 1
                 anim_start = anim_frame
@@ -1748,13 +1773,13 @@ fn spl_start():
                 else:
                     serial_println("[WM] Theme: White Glass")
 
-            # 'q' or 'Q' = quit
-            if ch == 0x71 or ch == 0x51:
+            # Quit (action 3)
+            if action == 3:
                 running = 0
                 serial_println("[WM] Quit requested")
 
-            # 'm' or 'M' = minimize active window
-            if ch == 0x6D or ch == 0x4D:
+            # Minimize (action 4)
+            if action == 4:
                 val already_minimized = (g_minimize_states >> active_win) & 1
                 if g_minimize_active == 0 and already_minimized == 0:
                     g_minimize_active = 1
@@ -1763,8 +1788,8 @@ fn spl_start():
                     needs_redraw = 1
                     serial_println("[WM] Minimizing window")
 
-            # 'w' or 'W' = close window
-            if ch == 0x77 or ch == 0x57:
+            # Close (action 5)
+            if action == 5:
                 if g_close_active == 0:
                     g_close_active = 1
                     g_close_progress = 0
@@ -1772,8 +1797,8 @@ fn spl_start():
                     needs_redraw = 1
                     serial_println("[WM] Closing window")
 
-            # 'r' or 'R' = restore all
-            if ch == 0x72 or ch == 0x52:
+            # Restore (action 6)
+            if action == 6:
                 if g_minimize_states != 0:
                     g_minimize_states = 0
                     needs_redraw = 1

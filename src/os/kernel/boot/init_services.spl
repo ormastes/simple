@@ -9,7 +9,7 @@
 
 use os.services.vfs.vfs_init.{vfs_boot_init, vfs_service_start, vfs_is_ready}
 use os.services.netstack.netstack_init.{net_boot_init, net_service_start, net_is_ready}
-use os.services.pcimgr.pcimgr.{pcimgr_dump_devices}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_dump_devices}
 use os.drivers.framebuffer.bga_init.{bga_init_framebuffer}
 
 extern fn serial_println(msg: text)
@@ -38,6 +38,9 @@ fn init_all_services():
     serial_println("[init] Starting SimpleOS services...")
     serial_println("========================================")
 
+    # Step 0: PCI device enumeration (populates pcimgr device table)
+    pcimgr_init()
+
     # Step 1: Storage stack (PCI -> NVMe -> FAT32 -> VFS)
     svc_storage_ok = vfs_boot_init()
     if svc_storage_ok:
@@ -55,8 +58,12 @@ fn init_all_services():
     else:
         serial_println("[init] Network stack: UNAVAILABLE (no VirtIO-net device)")
 
-    # TODO(P3/os): Display init skipped — BGA uses x86 I/O ports, hangs on non-x86 via --no-mangle. Add @cfg(x86_64) guard or runtime platform check.
-    serial_println("[init] Display: skipped")
+    # Step 4: Display init (BGA framebuffer, x86_64 only)
+    svc_display_ok = _init_display_service()
+    if svc_display_ok:
+        serial_println("[init] Display: framebuffer initialized")
+    else:
+        serial_println("[init] Display: UNAVAILABLE")
 
     # Step 5: Start VFS service loop if storage is available
     # NOTE: In a full system this would be spawn_task(vfs_service_start)

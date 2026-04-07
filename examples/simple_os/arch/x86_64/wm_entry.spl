@@ -11,15 +11,27 @@
 # 8. Focus ring effect on active window
 # 9. PS/2 keyboard input for window management
 
+# === Input handling (local — no external imports to avoid ABI conflicts) ===
+
 # === Extern FFI declarations ===
 extern fn serial_println(msg: text)
-extern fn rt_port_outw(port: u64, value: u64)
-extern fn rt_port_inw(port: u64) -> u64
-extern fn rt_port_outl(port: u64, value: u64)
-extern fn rt_port_inl(port: u64) -> u64
-extern fn rt_port_outb(port: u64, value: u64)
-extern fn rt_port_inb(port: u64) -> u64
 extern fn rt_gui_set_fb(addr: u64, width: u64)
+
+# Port I/O — direct extern (u64 params match RuntimeValue ABI)
+extern fn rt_port_inb(port: u64) -> u64
+extern fn rt_port_outb(port: u64, value: u64)
+extern fn rt_port_outw(port: u64, value: u64)
+extern fn rt_port_inl(port: u64) -> u64
+extern fn rt_port_outl(port: u64, value: u64)
+
+# Aliases for readability
+fn io_inb(port: u64) -> u64: rt_port_inb(port)
+fn io_outb(port: u64, value: u64): rt_port_outb(port, value)
+fn io_inw(port: u64) -> u64: rt_port_inb(port)
+fn io_outw(port: u64, value: u64): rt_port_outw(port, value)
+fn io_inl(port: u64) -> u64: rt_port_inl(port)
+fn io_outl(port: u64, value: u64): rt_port_outl(port, value)
+
 extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64)
 
 # Glass rendering primitives (from glass_render.c)
@@ -274,18 +286,18 @@ val ICON_EDITOR: u64   = 0x001ABC9C
 # === Hardware init ===
 
 fn bga_wr(idx: u64, val_: u64):
-    rt_port_outw(0x01CE, idx)
-    rt_port_outw(0x01CF, val_)
+    io_outw(0x01CE, idx)
+    io_outw(0x01CF, val_)
 
 fn pci_rd(dev: u64, off: u64) -> u64:
     val a: u64 = 0x80000000 | (dev << 11) | (off & 0xFC)
-    rt_port_outl(0x0CF8, a)
-    rt_port_inl(0x0CFC)
+    io_outl(0x0CF8, a)
+    io_inl(0x0CFC)
 
 fn pci_wr(dev: u64, off: u64, val_: u64):
     val a: u64 = 0x80000000 | (dev << 11) | (off & 0xFC)
-    rt_port_outl(0x0CF8, a)
-    rt_port_outl(0x0CFC, val_)
+    io_outl(0x0CF8, a)
+    io_outl(0x0CFC, val_)
 
 fn find_vga_fb() -> u64:
     var d: u64 = 0
@@ -308,40 +320,40 @@ fn find_vga_fb() -> u64:
 fn mouse_wait_write():
     var i: u64 = 0
     while i < 100000:
-        if (rt_port_inb(0x64) & 2) == 0:
+        if (io_inb(0x64) & 2) == 0:
             return
         i = i + 1
 
 fn mouse_wait_read():
     var i: u64 = 0
     while i < 100000:
-        if (rt_port_inb(0x64) & 1) != 0:
+        if (io_inb(0x64) & 1) != 0:
             return
         i = i + 1
 
 fn mouse_cmd(cmd: u64):
     mouse_wait_write()
-    rt_port_outb(0x64, 0xD4)  # Send to mouse
+    io_outb(0x64, 0xD4)  # Send to mouse
     mouse_wait_write()
-    rt_port_outb(0x60, cmd)
+    io_outb(0x60, cmd)
     mouse_wait_read()
-    rt_port_inb(0x60)  # Read ACK
+    io_inb(0x60)  # Read ACK
 
 fn mouse_init():
     """Initialize PS/2 mouse with basic 3-byte packet mode."""
     # Enable auxiliary device
     mouse_wait_write()
-    rt_port_outb(0x64, 0xA8)
+    io_outb(0x64, 0xA8)
 
     # Enable interrupts — get controller config byte
     mouse_wait_write()
-    rt_port_outb(0x64, 0x20)  # Get compaq status
+    io_outb(0x64, 0x20)  # Get compaq status
     mouse_wait_read()
-    val status = rt_port_inb(0x60)
+    val status = io_inb(0x60)
     mouse_wait_write()
-    rt_port_outb(0x64, 0x60)  # Set compaq status
+    io_outb(0x64, 0x60)  # Set compaq status
     mouse_wait_write()
-    rt_port_outb(0x60, (status | 2) & 0xDF)  # Enable IRQ12, disable clock disable
+    io_outb(0x60, (status | 2) & 0xDF)  # Enable IRQ12, disable clock disable
 
     # Set defaults
     mouse_cmd(0xF6)
@@ -2149,6 +2161,19 @@ fn spl_start():
     # Initialize PS/2 mouse
     mouse_init()
 
+    # Initialize shortcut handler (shared module)
+    # Shortcut action codes (matching os.gui.input_event.WmAction layout)
+    val ACT_NONE: u64 = 0
+    val ACT_CYCLE: u64 = 1
+    val ACT_FOCUS0: u64 = 10
+    val ACT_FOCUS1: u64 = 11
+    val ACT_FOCUS2: u64 = 12
+    val ACT_THEME: u64 = 2
+    val ACT_QUIT: u64 = 3
+    val ACT_MINIMIZE: u64 = 4
+    val ACT_CLOSE: u64 = 5
+    val ACT_RESTORE: u64 = 6
+
     serial_println("[WM] Rendering glass desktop (dark theme)...")
     draw_desktop(active_win, theme)
 
@@ -2158,46 +2183,52 @@ fn spl_start():
     # 4. Continuous render loop with animation
     var running: u64 = 1
     while running == 1:
-        # Poll keyboard
-        val status = rt_port_inb(0x64)
-        if (status & 1) != 0:
-            val scancode = rt_port_inb(0x60)
-            if (scancode & 0x80) == 0:
+        # Poll keyboard (scancode → action code)
+        val kb_status = io_inb(0x64)
+        if (kb_status & 1) != 0:
+            val raw = io_inb(0x60)
+            if (raw & 0x80) == 0:
+                # Press event — map scancode to action
+                var action: u64 = ACT_NONE
+                if raw == 0x0F: action = ACT_CYCLE    # Tab
+                if raw == 0x02: action = ACT_FOCUS0   # 1
+                if raw == 0x03: action = ACT_FOCUS1   # 2
+                if raw == 0x04: action = ACT_FOCUS2   # 3
+                if raw == 0x14: action = ACT_THEME    # T
+                if raw == 0x10: action = ACT_QUIT     # Q
+                if raw == 0x32: action = ACT_MINIMIZE # M
+                if raw == 0x11: action = ACT_CLOSE    # W
+                if raw == 0x13: action = ACT_RESTORE  # R
 
-                # Tab = cycle windows (with animation)
-                if scancode == 0x0F:
+                if action == ACT_CYCLE:
                     active_win = (active_win + 1) % 3
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus cycled")
-
-                # 1/2/3 = direct focus
-                if scancode == 0x02:
+                if action == ACT_FOCUS0:
                     active_win = 0
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus: Terminal")
-                if scancode == 0x03:
+                if action == ACT_FOCUS1:
                     active_win = 1
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus: Editor")
-                if scancode == 0x04:
+                if action == ACT_FOCUS2:
                     active_win = 2
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus: Finder")
-
-                # T = toggle theme (with animation)
-                if scancode == 0x14:
+                if action == ACT_THEME:
                     theme = (theme + 1) % 2
                     animating = 1
                     anim_start = anim_frame
@@ -2207,14 +2238,10 @@ fn spl_start():
                         serial_println("[WM] Theme: Dark Glass")
                     else:
                         serial_println("[WM] Theme: White Glass")
-
-                # Q = quit
-                if scancode == 0x10:
+                if action == ACT_QUIT:
                     running = 0
                     serial_println("[WM] Quit requested")
-
-                # M = minimize active window (with animation)
-                if scancode == 0x32:
+                if action == ACT_MINIMIZE:
                     val already_minimized = (g_minimize_states >> active_win) & 1
                     if g_minimize_active == 0 and already_minimized == 0:
                         g_minimize_active = 1
@@ -2222,18 +2249,14 @@ fn spl_start():
                         g_minimize_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Minimizing window")
-
-                # W = close window (with animation)
-                if scancode == 0x11:
+                if action == ACT_CLOSE:
                     if g_close_active == 0:
                         g_close_active = 1
                         g_close_progress = 0
                         g_close_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Closing window")
-
-                # R = restore all minimized windows
-                if scancode == 0x13:
+                if action == ACT_RESTORE:
                     if g_minimize_states != 0:
                         g_minimize_states = 0
                         needs_redraw = 1
@@ -2241,15 +2264,15 @@ fn spl_start():
 
         # Poll mouse (PS/2 auxiliary device)
         if g_mouse_initialized == 1:
-            val m_status = rt_port_inb(0x64)
+            val m_status = io_inb(0x64)
             if (m_status & 0x21) == 0x21:  # Bit 0=data ready, bit 5=mouse data
-                val byte1 = rt_port_inb(0x60)
+                val byte1 = io_inb(0x60)
                 # Wait for byte 2
                 mouse_wait_read()
-                val byte2 = rt_port_inb(0x60)
+                val byte2 = io_inb(0x60)
                 # Wait for byte 3
                 mouse_wait_read()
-                val byte3 = rt_port_inb(0x60)
+                val byte3 = io_inb(0x60)
 
                 # Parse mouse packet — bit 3 of byte1 always set in valid packets
                 if (byte1 & 0x08) != 0:
