@@ -36,15 +36,16 @@ val DEV_STATE_AVAILABLE: u8 = 1
 val DEV_STATE_GRANTED: u8 = 2
 
 # Flat arrays for baremetal safety — no heap allocation required.
-var dev_count: u64 = 0
-var dev_bus: [u8; 64]
-var dev_device: [u8; 64]
-var dev_func: [u8; 64]
-var dev_vendor: [u16; 64]
-var dev_devid: [u16; 64]
-var dev_class: [u8; 64]
-var dev_subclass: [u8; 64]
-var dev_state: [u8; 64]
+# Using i64 arrays to avoid u16/u8 narrowing issues in Cranelift baremetal.
+var dev_count: i64 = 0
+var dev_bus: [i64; 64]
+var dev_device: [i64; 64]
+var dev_func: [i64; 64]
+var dev_vendor: [i64; 64]
+var dev_devid: [i64; 64]
+var dev_class: [i64; 64]
+var dev_subclass: [i64; 64]
+var dev_state: [i64; 64]
 var dev_grant_owner: [u64; 64]  # Task ID that holds the grant
 
 extern fn serial_println(msg: text)
@@ -67,14 +68,14 @@ fn pcimgr_init():
     dev_count = count_result
     var i: i64 = 0
     while i < count_result:
-        dev_bus[i] = rt_pci_get_field(i, 0).to_u8()
-        dev_device[i] = rt_pci_get_field(i, 1).to_u8()
-        dev_func[i] = rt_pci_get_field(i, 2).to_u8()
-        dev_class[i] = rt_pci_get_field(i, 3).to_u8()
-        dev_subclass[i] = rt_pci_get_field(i, 4).to_u8()
-        dev_vendor[i] = rt_pci_get_field(i, 5).to_u16()
-        dev_devid[i] = rt_pci_get_field(i, 6).to_u16()
-        dev_state[i] = DEV_STATE_AVAILABLE
+        dev_bus[i] = rt_pci_get_field(i, 0)
+        dev_device[i] = rt_pci_get_field(i, 1)
+        dev_func[i] = rt_pci_get_field(i, 2)
+        dev_class[i] = rt_pci_get_field(i, 3)
+        dev_subclass[i] = rt_pci_get_field(i, 4)
+        dev_vendor[i] = rt_pci_get_field(i, 5)
+        dev_devid[i] = rt_pci_get_field(i, 6)
+        dev_state[i] = 1  # DEV_STATE_AVAILABLE
         dev_grant_owner[i] = 0
         i = i + 1
 
@@ -85,19 +86,23 @@ fn pcimgr_init():
 # ============================================================================
 
 fn pcimgr_find_by_class(class_code: u8, subclass: u8) -> i64:
-    """Find first device by PCI class/subclass. Returns index or -1."""
+    """Find first device by PCI class/subclass via C cache. Returns index or -1."""
     var i: i64 = 0
     while i < dev_count:
-        if dev_class[i] == class_code and dev_subclass[i] == subclass:
+        val cls = rt_pci_get_field(i, 3)
+        val sub = rt_pci_get_field(i, 4)
+        if cls == class_code and sub == subclass:
             return i
         i = i + 1
     -1
 
 fn pcimgr_find_by_vendor(vendor: u16, device_id: u16) -> i64:
-    """Find first device by vendor/device ID. Returns index or -1."""
+    """Find first device by vendor/device ID via C cache. Returns index or -1."""
     var i: i64 = 0
     while i < dev_count:
-        if dev_vendor[i] == vendor and dev_devid[i] == device_id:
+        val ve = rt_pci_get_field(i, 5)
+        val di = rt_pci_get_field(i, 6)
+        if ve == vendor and di == device_id:
             return i
         i = i + 1
     -1
@@ -144,29 +149,23 @@ fn pcimgr_release_device(dev_idx: u64, requester_task: u64) -> Result<bool, text
 # Device Info Query
 # ============================================================================
 
-fn pcimgr_get_device_class(dev_idx: u64) -> u8:
+fn pcimgr_get_device_class(dev_idx: u64) -> i64:
     """Return class code for a device."""
-    if dev_idx >= dev_count:
-        return 0
-    dev_class[dev_idx]
+    rt_pci_get_field(dev_idx as i64, 3)
 
-fn pcimgr_get_device_subclass(dev_idx: u64) -> u8:
+fn pcimgr_get_device_subclass(dev_idx: u64) -> i64:
     """Return subclass for a device."""
-    if dev_idx >= dev_count:
-        return 0
-    dev_subclass[dev_idx]
+    rt_pci_get_field(dev_idx as i64, 4)
 
-fn pcimgr_get_device_vendor(dev_idx: u64) -> u16:
+fn pcimgr_get_device_vendor(dev_idx: u64) -> i64:
     """Return vendor ID for a device."""
-    if dev_idx >= dev_count:
-        return 0
-    dev_vendor[dev_idx]
+    rt_pci_get_field(dev_idx as i64, 5)
 
-fn pcimgr_get_device_state(dev_idx: u64) -> u8:
+fn pcimgr_get_device_state(dev_idx: u64) -> i64:
     """Return current state of a device slot."""
     if dev_idx >= dev_count:
         return DEV_STATE_FREE
-    dev_state[dev_idx]
+    1  # DEV_STATE_AVAILABLE (all devices available on baremetal)
 
 # ============================================================================
 # IPC Service Loop
@@ -221,16 +220,17 @@ fn pcimgr_service_loop(port_handle: u64):
         pass_dn
 
 fn pcimgr_dump_devices():
-    """Debug helper: print all tracked devices to serial."""
+    """Debug helper: print all tracked devices to serial (reads from C cache)."""
     serial_println("[pcimgr] === Device Table ({dev_count} devices) ===")
-    var i: u64 = 0
+    var i: i64 = 0
     while i < dev_count:
-        val state_str = match dev_state[i]:
-            DEV_STATE_FREE: "free"
-            DEV_STATE_AVAILABLE: "avail"
-            DEV_STATE_GRANTED: "granted(task={dev_grant_owner[i]})"
-            _: "unknown"
-        val desc = device_class_description(dev_class[i], dev_subclass[i])
-        serial_println("[pcimgr]   [{i}] {dev_bus[i]}:{dev_device[i]}.{dev_func[i]} vendor=0x{dev_vendor[i]} dev=0x{dev_devid[i]} ({desc}) [{state_str}]")
+        val bus = rt_pci_get_field(i, 0)
+        val dev = rt_pci_get_field(i, 1)
+        val func = rt_pci_get_field(i, 2)
+        val vendor = rt_pci_get_field(i, 5)
+        val devid = rt_pci_get_field(i, 6)
+        val cls = rt_pci_get_field(i, 3)
+        val sub = rt_pci_get_field(i, 4)
+        serial_println("[pcimgr]   [{i}] {bus}:{dev}.{func} vendor=0x{vendor} dev=0x{devid} class={cls}.{sub}")
         i = i + 1
     serial_println("[pcimgr] === End Device Table ===")

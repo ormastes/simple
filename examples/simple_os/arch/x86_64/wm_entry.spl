@@ -190,6 +190,40 @@ var WIN1_Y: u64 = 160
 var WIN2_X: u64 = 540
 var WIN2_Y: u64 = 300
 
+# === App State ===
+# Terminal (Window 0) state
+var g_term_cursor_y: u64 = 0      # Current line in terminal (0-based)
+var g_term_input_len: u64 = 0     # Characters in current input line
+var g_term_line_count: u64 = 4    # Number of output lines displayed
+var g_term_cmd_history: u64 = 0   # Number of commands executed
+var g_term_input_active: u64 = 0  # 1 when terminal has keyboard focus
+
+# Terminal input buffer — packed u64 (8 chars each), max 40 chars = 5 words
+var g_term_input_0: u64 = 0
+var g_term_input_1: u64 = 0
+var g_term_input_2: u64 = 0
+var g_term_input_3: u64 = 0
+var g_term_input_4: u64 = 0
+
+# Terminal output state — which command output to show
+# 0=none, 1=help, 2=uname, 3=ls, 4=whoami, 5=echo, 6=date, 7=unknown cmd
+var g_term_out_type: u64 = 0
+var g_term_out_count: u64 = 0     # Lines of output to display
+
+# Scroll offset for terminal output history
+var g_term_scroll_y: u64 = 0
+
+# Editor (Window 1) state
+var g_editor_cursor_x: u64 = 0    # Cursor column
+var g_editor_cursor_y: u64 = 3    # Cursor line (0-based)
+var g_editor_scroll_y: u64 = 0    # Scroll offset
+var g_editor_line_count: u64 = 8  # Total lines
+
+# File Explorer (Window 2) state
+var g_files_selected: u64 = 0     # Selected item index (0-5)
+var g_files_view_mode: u64 = 0    # 0=icon, 1=list
+var g_files_sidebar_sel: u64 = 0  # Selected sidebar item (0-4)
+
 # Animation globals (module-level state for focus transitions)
 var g_anim_progress: u64 = 100  # 0-100 (0=start, 100=done)
 
@@ -1440,6 +1474,195 @@ fn draw_glass_dock(theme: u64, active: u64):
     blend(dock_x + 24, refl_y + 2, dock_w - 48, 1, surface(theme), 6)
 
 # ===========================================================================
+# Scancode to ASCII Conversion
+# ===========================================================================
+
+fn scancode_to_ascii(scancode: u64) -> u64:
+    """Convert PS/2 scancode to ASCII character. Returns 0 for non-printable."""
+    # Letters (lowercase only for now)
+    if scancode == 0x1E: return 97   # a
+    if scancode == 0x30: return 98   # b
+    if scancode == 0x2E: return 99   # c
+    if scancode == 0x20: return 100  # d
+    if scancode == 0x12: return 101  # e
+    if scancode == 0x21: return 102  # f
+    if scancode == 0x22: return 103  # g
+    if scancode == 0x23: return 104  # h
+    if scancode == 0x17: return 105  # i
+    if scancode == 0x24: return 106  # j
+    if scancode == 0x25: return 107  # k
+    if scancode == 0x26: return 108  # l
+    if scancode == 0x32: return 109  # m
+    if scancode == 0x31: return 110  # n
+    if scancode == 0x18: return 111  # o
+    if scancode == 0x19: return 112  # p
+    if scancode == 0x10: return 113  # q
+    if scancode == 0x13: return 114  # r
+    if scancode == 0x1F: return 115  # s
+    if scancode == 0x14: return 116  # t
+    if scancode == 0x16: return 117  # u
+    if scancode == 0x2F: return 118  # v
+    if scancode == 0x11: return 119  # w
+    if scancode == 0x2D: return 120  # x
+    if scancode == 0x15: return 121  # y
+    if scancode == 0x2C: return 122  # z
+    if scancode == 0x39: return 32   # space
+    if scancode == 0x33: return 46   # .
+    if scancode == 0x34: return 47   # /
+    if scancode == 0x28: return 45   # -
+    return 0
+
+# ===========================================================================
+# App Click and Input Handlers
+# ===========================================================================
+
+fn handle_terminal_click(local_x: u64, local_y: u64):
+    """Handle click in terminal content area."""
+    serial_println("[Terminal] Click at local coords")
+
+fn term_get_input_char(pos: u64) -> u64:
+    """Get character at position from packed input buffer."""
+    val word = pos / 8
+    val byte_idx = pos % 8
+    val shift = (7 - byte_idx) * 8
+    var packed: u64 = 0
+    if word == 0: packed = g_term_input_0
+    if word == 1: packed = g_term_input_1
+    if word == 2: packed = g_term_input_2
+    if word == 3: packed = g_term_input_3
+    if word == 4: packed = g_term_input_4
+    (packed >> shift) & 0xFF
+
+fn term_set_input_char(pos: u64, ch: u64):
+    """Set character at position in packed input buffer."""
+    val word = pos / 8
+    val byte_idx = pos % 8
+    val shift = (7 - byte_idx) * 8
+    val mask = 0xFF << shift
+    val clear_mask = 0xFFFFFFFFFFFFFFFF - mask
+    val bits = (ch & 0xFF) << shift
+    if word == 0: g_term_input_0 = (g_term_input_0 & clear_mask) | bits
+    if word == 1: g_term_input_1 = (g_term_input_1 & clear_mask) | bits
+    if word == 2: g_term_input_2 = (g_term_input_2 & clear_mask) | bits
+    if word == 3: g_term_input_3 = (g_term_input_3 & clear_mask) | bits
+    if word == 4: g_term_input_4 = (g_term_input_4 & clear_mask) | bits
+
+fn term_clear_input():
+    """Clear the terminal input buffer."""
+    g_term_input_0 = 0
+    g_term_input_1 = 0
+    g_term_input_2 = 0
+    g_term_input_3 = 0
+    g_term_input_4 = 0
+    g_term_input_len = 0
+
+fn term_match_cmd(expected_0: u64, expected_len: u64) -> u64:
+    """Check if input matches a command (single word, up to 8 chars)."""
+    if g_term_input_len != expected_len: return 0
+    if g_term_input_0 != expected_0: return 0
+    return 1
+
+fn handle_terminal_enter():
+    """Execute the current terminal input as a command."""
+    serial_println("[Terminal] Enter pressed")
+
+    if g_term_input_len == 0:
+        return
+
+    # Match against built-in commands by comparing packed input
+    val cmd_help = pack8(104, 101, 108, 112, 0, 0, 0, 0)
+    val cmd_clear = pack8(99, 108, 101, 97, 114, 0, 0, 0)
+    val cmd_uname = pack8(117, 110, 97, 109, 101, 0, 0, 0)
+    val cmd_ls = pack8(108, 115, 0, 0, 0, 0, 0, 0)
+    val cmd_whoami = pack8(119, 104, 111, 97, 109, 105, 0, 0)
+    val cmd_date = pack8(100, 97, 116, 101, 0, 0, 0, 0)
+    val cmd_uptime = pack8(117, 112, 116, 105, 109, 101, 0, 0)
+
+    var matched: u64 = 0
+
+    if term_match_cmd(cmd_help, 4) == 1:
+        g_term_out_type = 1
+        g_term_out_count = 8
+        matched = 1
+
+    if term_match_cmd(cmd_clear, 5) == 1:
+        g_term_out_type = 0
+        g_term_out_count = 0
+        g_term_cmd_history = 0
+        matched = 1
+
+    if term_match_cmd(cmd_uname, 5) == 1:
+        g_term_out_type = 2
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_ls, 2) == 1:
+        g_term_out_type = 3
+        g_term_out_count = 5
+        matched = 1
+
+    if term_match_cmd(cmd_whoami, 6) == 1:
+        g_term_out_type = 4
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_date, 4) == 1:
+        g_term_out_type = 5
+        g_term_out_count = 1
+        matched = 1
+
+    if term_match_cmd(cmd_uptime, 6) == 1:
+        g_term_out_type = 6
+        g_term_out_count = 1
+        matched = 1
+
+    if matched == 0:
+        g_term_out_type = 7
+        g_term_out_count = 1
+
+    # Advance history and reset input
+    g_term_cmd_history = g_term_cmd_history + 1
+    term_clear_input()
+
+fn handle_terminal_backspace():
+    """Handle Backspace in terminal."""
+    if g_term_input_len > 0:
+        g_term_input_len = g_term_input_len - 1
+        term_set_input_char(g_term_input_len, 0)
+
+fn handle_terminal_char(ch: u64):
+    """Handle character input in terminal."""
+    if g_term_input_len < 40:
+        term_set_input_char(g_term_input_len, ch)
+        g_term_input_len = g_term_input_len + 1
+
+fn handle_editor_click(local_x: u64, local_y: u64):
+    """Handle click in editor content area."""
+    # Move cursor to clicked position
+    val char_x = local_x / 8   # 8px per character
+    val char_y = local_y / 16  # 16px per line
+    g_editor_cursor_x = char_x
+    g_editor_cursor_y = char_y
+
+fn handle_files_click(local_x: u64, local_y: u64):
+    """Handle click in file explorer content area."""
+    # Check if click is in sidebar (left 70px) or icon grid
+    if local_x < 70:
+        # Sidebar click -- select item based on Y position
+        val item = local_y / 20
+        if item < 5:
+            g_files_sidebar_sel = item
+            serial_println("[Files] Sidebar item selected")
+    else:
+        # Icon grid click -- determine which icon
+        val grid_x = (local_x - 70) / 56  # ~56px per icon column
+        val grid_y = local_y / 60          # ~60px per icon row
+        val idx = grid_y * 3 + grid_x
+        if idx < 6:
+            g_files_selected = idx
+            serial_println("[Files] Item selected")
+
+# ===========================================================================
 # Application Window Content
 # ===========================================================================
 
@@ -1531,11 +1754,17 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Line 7: "    n * n"
     draw_label(code_x + 32, ed_y + 100, 0x00CCCCCC, 200, pack8(110, 32, 42, 32, 110, 0, 0, 0), 5)
 
-    # Cursor on line 3
-    blend(code_x + 88, ed_y + 36, 2, 14, accent(theme), 255)
+    # Current line highlight (dynamic, follows g_editor_cursor_y)
+    val line_hl_y = ed_y + 4 + g_editor_cursor_y * line_h
+    blend(ed_x + gutter_w + 1, line_hl_y - 2, ed_w - gutter_w - 2, line_h, 0x00FFFFFF, 10)
 
-    # Current line highlight
-    blend(ed_x + gutter_w + 1, ed_y + 34, ed_w - gutter_w - 2, line_h, 0x00FFFFFF, 8)
+    # Cursor (dynamic, follows g_editor_cursor_x / g_editor_cursor_y)
+    val cursor_px_x = gutter_w + 8 + g_editor_cursor_x * 8
+    val cursor_px_y = ed_y + 4 + g_editor_cursor_y * line_h
+    # Semi-transparent block so underlying text remains visible
+    blend(ed_x + cursor_px_x, cursor_px_y, 8, line_h, accent(theme), 120)
+    # Thin insertion-style cursor line
+    blend(ed_x + cursor_px_x, cursor_px_y, 2, line_h, 0x00FFFFFF, 200)
 
     # Progress bar
     val prog_y = ed_y + ed_h - 24
@@ -1550,8 +1779,16 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # --- Status bar at bottom ---
     val st_y = y + h - status_h - 2
     blend(x + 1, st_y, w - 2, status_h, accent(theme), 200)
-    # "Ln 3, Col 12"
-    draw_label(x + 8, st_y + 3, 0x00FFFFFF, 200, pack8(76, 110, 32, 51, 44, 32, 67, 111), 8)
+    # Dynamic "Ln N" using cursor position (1-based line number)
+    val disp_ln = g_editor_cursor_y + 1
+    # "Ln " prefix
+    draw_label(x + 8, st_y + 3, 0x00FFFFFF, 200, pack8(76, 110, 32, 0, 0, 0, 0, 0), 3)
+    # Line number digit (0-9)
+    draw_label(x + 32, st_y + 3, 0x00FFFFFF, 200, pack8(48 + disp_ln, 0, 0, 0, 0, 0, 0, 0), 1)
+    # ", C" separator
+    draw_label(x + 40, st_y + 3, 0x00FFFFFF, 200, pack8(44, 32, 67, 0, 0, 0, 0, 0), 3)
+    # Column number digit (0-based displayed as-is for simplicity)
+    draw_label(x + 64, st_y + 3, 0x00FFFFFF, 200, pack8(48 + g_editor_cursor_x, 0, 0, 0, 0, 0, 0, 0), 1)
     # "Simple" on right
     draw_label_shadow(x + w - 56, st_y + 3, 0x00FFFFFF, 200, pack8(83, 105, 109, 112, 108, 101, 0, 0), 6, 60)
 
@@ -1620,7 +1857,19 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Sidebar section: "Favorites" header
     draw_label(x + 12, sb_y + 6, text_sec(theme), 100, pack8(70, 97, 118, 111, 114, 105, 116, 101), 8)
 
-    # --- Sidebar: Desktop (selected) with monitor icon ---
+    # --- Sidebar selection highlights (dynamic, based on g_files_sidebar_sel) ---
+    if g_files_sidebar_sel == 0:
+        blend(x + 6, sb_y + 22, sidebar_w - 10, 20, accent(theme), 30)
+    if g_files_sidebar_sel == 1:
+        blend(x + 6, sb_y + 41, sidebar_w - 10, 20, accent(theme), 30)
+    if g_files_sidebar_sel == 2:
+        blend(x + 6, sb_y + 59, sidebar_w - 10, 20, accent(theme), 30)
+    if g_files_sidebar_sel == 3:
+        blend(x + 6, sb_y + 77, sidebar_w - 10, 20, accent(theme), 30)
+    if g_files_sidebar_sel == 4:
+        blend(x + 6, sb_y + 118, sidebar_w - 10, 20, accent(theme), 30)
+
+    # --- Sidebar: Desktop with monitor icon ---
     rrect_aa(x + 6, sb_y + 22, sidebar_w - 10, 18, accent(theme), 6, 80)
     draw_label(x + 28, sb_y + 23, text_c(theme), 220, pack8(68, 101, 115, 107, 116, 111, 112, 0), 7)
     # Monitor shape: screen body
@@ -1676,6 +1925,14 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     val icon_h: u64 = 60
     val gap_x: u64 = 12
     val gap_y: u64 = 8
+
+    # --- Grid item selection highlight (dynamic, based on g_files_selected) ---
+    # Items 0-2 are Row 1 (folders), items 3-5 are Row 2 (files)
+    val sel_col = g_files_selected % 3
+    val sel_row = g_files_selected / 3
+    val sel_ix = cx + sel_col * (icon_w + gap_x)
+    val sel_iy = grid_y + sel_row * (icon_h + gap_y)
+    rrect_aa(sel_ix - 2, sel_iy - 2, icon_w + 4, icon_h + 4, accent(theme), 4, 40)
 
     # ================================================================
     # Row 1: 3D Folder Icons (blue, green, purple)
@@ -1860,14 +2117,27 @@ fn draw_files_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Label: "README" = 82,69,65,68,77,69,0,0
     draw_label_shadow(d2x + 6, d2y + 42, text_c(theme), 200, pack8(82, 69, 65, 68, 77, 69, 0, 0), 6, 45)
 
-    # --- Path bar at bottom ---
+    # --- Path bar at bottom (shows selected item name) ---
     val pb_y = y + h - 22
     blend(x + 1, pb_y, w - 2, 20, surface(theme), 50)
     blend(x + 1, pb_y, w - 2, 1, border_c(theme), border_a(theme))
-    # Path: "SimpleHD > Desktop"
-    draw_label(x + 10, pb_y + 3, text_sec(theme), 120, pack8(83, 105, 109, 112, 108, 101, 72, 68), 8)
-    draw_label(x + 78, pb_y + 3, text_sec(theme), 80, pack8(32, 62, 32, 0, 0, 0, 0, 0), 3)
-    draw_label(x + 102, pb_y + 3, text_c(theme), 160, pack8(68, 101, 115, 107, 116, 111, 112, 0), 7)
+    # Path prefix: "Desktop > "
+    draw_label(x + 10, pb_y + 3, text_sec(theme), 120, pack8(68, 101, 115, 107, 116, 111, 112, 0), 7)
+    draw_label(x + 66, pb_y + 3, text_sec(theme), 80, pack8(32, 62, 32, 0, 0, 0, 0, 0), 3)
+    # Selected item name (dynamic, based on g_files_selected)
+    # 0=Project, 1=Photos, 2=Music, 3=main.spl, 4=cover.pn, 5=README
+    if g_files_selected == 0:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(80, 114, 111, 106, 101, 99, 116, 0), 7)
+    if g_files_selected == 1:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(80, 104, 111, 116, 111, 115, 0, 0), 6)
+    if g_files_selected == 2:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(77, 117, 115, 105, 99, 0, 0, 0), 5)
+    if g_files_selected == 3:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(109, 97, 105, 110, 46, 115, 112, 108), 8)
+    if g_files_selected == 4:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(99, 111, 118, 101, 114, 46, 112, 110), 8)
+    if g_files_selected == 5:
+        draw_label(x + 90, pb_y + 3, text_c(theme), 180, pack8(82, 69, 65, 68, 77, 69, 0, 0), 6)
 
 # ===========================================================================
 # Window Title Drawing
@@ -2176,40 +2446,62 @@ fn spl_start():
     # 4. Continuous render loop with animation
     var running: u64 = 1
     while running == 1:
+        # Update terminal input active state based on focused window
+        if active_win == 0:
+            g_term_input_active = 1
+        else:
+            g_term_input_active = 0
+
         # Poll keyboard — only if data is from keyboard (bit 5 clear), not mouse
         val kb_status = io_inb(0x64)
         if (kb_status & 0x21) == 0x01:  # Bit 0=data ready, bit 5=NOT mouse
             val scancode = io_inb(0x60)
             if (scancode & 0x80) == 0:
-                # Tab = cycle focus
-                if scancode == 0x0F:
+                # Determine which WM shortcut (if any) this scancode maps to
+                # Tab and number keys always work; letter shortcuts only when
+                # the terminal is NOT in input mode (active_win != 0)
+                var wm_shortcut: u64 = 0
+                if scancode == 0x0F: wm_shortcut = 1  # Tab always works
+                if scancode == 0x02: wm_shortcut = 2  # 1 always works
+                if scancode == 0x03: wm_shortcut = 3  # 2 always works
+                if scancode == 0x04: wm_shortcut = 4  # 3 always works
+                # T/Q/M/W/R only work as shortcuts when NOT typing in terminal
+                if g_term_input_active == 0:
+                    if scancode == 0x14: wm_shortcut = 5  # T = theme
+                    if scancode == 0x10: wm_shortcut = 6  # Q = quit
+                    if scancode == 0x32: wm_shortcut = 7  # M = minimize
+                    if scancode == 0x11: wm_shortcut = 8  # W = close
+                    if scancode == 0x13: wm_shortcut = 9  # R = restore
+
+                # Process WM shortcuts
+                if wm_shortcut == 1:
+                    # Tab = cycle focus
                     active_win = (active_win + 1) % 3
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
                     serial_println("[WM] Focus cycled")
-                # 1/2/3 = direct focus
-                if scancode == 0x02:
+                if wm_shortcut == 2:
                     active_win = 0
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                if scancode == 0x03:
+                if wm_shortcut == 3:
                     active_win = 1
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                if scancode == 0x04:
+                if wm_shortcut == 4:
                     active_win = 2
                     animating = 1
                     anim_start = anim_frame
                     g_anim_progress = 0
                     needs_redraw = 1
-                # T = toggle theme
-                if scancode == 0x14:
+                if wm_shortcut == 5:
+                    # T = toggle theme
                     theme = (theme + 1) % 2
                     animating = 1
                     anim_start = anim_frame
@@ -2219,12 +2511,12 @@ fn spl_start():
                         serial_println("[WM] Theme: Dark Glass")
                     else:
                         serial_println("[WM] Theme: White Glass")
-                # Q = quit
-                if scancode == 0x10:
+                if wm_shortcut == 6:
+                    # Q = quit
                     running = 0
                     serial_println("[WM] Quit requested")
-                # M = minimize
-                if scancode == 0x32:
+                if wm_shortcut == 7:
+                    # M = minimize
                     val already_minimized = (g_minimize_states >> active_win) & 1
                     if g_minimize_active == 0 and already_minimized == 0:
                         g_minimize_active = 1
@@ -2232,16 +2524,17 @@ fn spl_start():
                         g_minimize_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Minimizing window")
-                # W = close
-                if scancode == 0x11:
+                if wm_shortcut == 8:
+                    # W = close
                     if g_close_active == 0:
                         g_close_active = 1
                         g_close_progress = 0
                         g_close_win = active_win
                         needs_redraw = 1
                         serial_println("[WM] Closing window")
-                # R = restore
-                if scancode == 0x13:
+                if wm_shortcut == 9:
+                    # R = restore
+                    if scancode == 0x13:
                     if g_minimize_states != 0:
                         g_minimize_states = 0
                         needs_redraw = 1
@@ -2366,6 +2659,49 @@ fn spl_start():
                                     WIN2_X = g_mouse_x - g_drag_offset_x
                                 if g_mouse_y >= g_drag_offset_y:
                                     WIN2_Y = g_mouse_y - g_drag_offset_y
+
+                    # Propagate click to active window's content area
+                    if g_dragging == 0:
+                        if left_pressed == 1:
+                            if left_was == 0:
+                                # Compute local coordinates within the active window
+                                var local_x: u64 = 0
+                                var local_y: u64 = 0
+                                var in_content: u64 = 0
+
+                                if active_win == 0:
+                                    if g_mouse_x >= WIN0_X:
+                                        if g_mouse_x < WIN0_X + WIN0_W:
+                                            if g_mouse_y >= WIN0_Y + TITLE_BAR_H:
+                                                if g_mouse_y < WIN0_Y + WIN0_H:
+                                                    local_x = g_mouse_x - WIN0_X
+                                                    local_y = g_mouse_y - (WIN0_Y + TITLE_BAR_H)
+                                                    in_content = 1
+                                if active_win == 1:
+                                    if g_mouse_x >= WIN1_X:
+                                        if g_mouse_x < WIN1_X + WIN1_W:
+                                            if g_mouse_y >= WIN1_Y + TITLE_BAR_H:
+                                                if g_mouse_y < WIN1_Y + WIN1_H:
+                                                    local_x = g_mouse_x - WIN1_X
+                                                    local_y = g_mouse_y - (WIN1_Y + TITLE_BAR_H)
+                                                    in_content = 1
+                                if active_win == 2:
+                                    if g_mouse_x >= WIN2_X:
+                                        if g_mouse_x < WIN2_X + WIN2_W:
+                                            if g_mouse_y >= WIN2_Y + TITLE_BAR_H:
+                                                if g_mouse_y < WIN2_Y + WIN2_H:
+                                                    local_x = g_mouse_x - WIN2_X
+                                                    local_y = g_mouse_y - (WIN2_Y + TITLE_BAR_H)
+                                                    in_content = 1
+
+                                if in_content == 1:
+                                    if active_win == 0:
+                                        handle_terminal_click(local_x, local_y)
+                                    if active_win == 1:
+                                        handle_editor_click(local_x, local_y)
+                                    if active_win == 2:
+                                        handle_files_click(local_x, local_y)
+                                    needs_redraw = 1
 
                     # Button released — stop dragging
                     if left_pressed == 0:
