@@ -1,0 +1,101 @@
+# Boot Splash — Shared boot splash screen
+#
+# Renders a glassmorphism boot splash with logo, version, and progress bar.
+# Shared between hosted (winit) and QEMU window managers.
+# Ported from QEMU ARM64/x86_64 wm_entry.spl boot splash sections.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_port.{GlassPortConfig}
+use os.compositor.rendering_primitives.{rounded_rect_aa, gradient_h}
+use os.compositor.render_extras.{draw_wallpaper_enhanced}
+
+# ============================================================================
+# Boot Splash Screen
+# ============================================================================
+
+fn draw_boot_splash(backend: CompositorBackend, config: GlassPortConfig, platform_tag: text):
+    """Draw a glassmorphism boot splash screen.
+
+    Shows: wallpaper background, centered glass pill, "SimpleOS" heading,
+    version string, progress bar, "Starting..." text, and platform tag.
+
+    Shared between all platforms — uses CompositorBackend trait.
+    """
+    val sw = backend.width()
+    val sh = backend.height()
+
+    # 1. Wallpaper background
+    val is_dark = config.bg_top < 0x00808080
+    draw_wallpaper_enhanced(backend, is_dark, config.accent_color, config.accent2_color)
+
+    # 2. Centered glass pill container
+    val pill_w: i32 = 320
+    val pill_h: i32 = 160
+    val pill_x = (sw - pill_w) / 2
+    val pill_y = (sh - pill_h) / 2 - 20
+
+    # Blur background behind pill
+    backend.blur_region(pill_x, pill_y, pill_w, pill_h, 16)
+    backend.blur_region(pill_x, pill_y, pill_w, pill_h, 8)
+
+    # Glass surface
+    rounded_rect_aa(backend, pill_x, pill_y, pill_w, pill_h,
+                    config.surface_color, 16, config.surface_alpha)
+
+    # Border
+    backend.blend_rect(pill_x, pill_y, pill_w, 1, config.border_color, config.border_alpha)
+    backend.blend_rect(pill_x, pill_y + pill_h - 1, pill_w, 1, config.border_color, config.border_alpha)
+    backend.blend_rect(pill_x, pill_y, 1, pill_h, config.border_color, config.border_alpha)
+    backend.blend_rect(pill_x + pill_w - 1, pill_y, 1, pill_h, config.border_color, config.border_alpha)
+
+    # Highlight lines
+    backend.blend_rect(pill_x + 4, pill_y + 1, pill_w - 8, 1, 0x00FFFFFF, 35)
+    backend.blend_rect(pill_x + 8, pill_y + 2, pill_w - 16, 1, 0x00FFFFFF, 15)
+
+    # 3. "SimpleOS" heading (regular size centered, with accent underline)
+    val title_w: i32 = 64
+    val title_x: i32 = pill_x + (pill_w - title_w) / 2
+    val title_y = pill_y + 28
+    # Shadow
+    backend.draw_text(title_x + 1, title_y + 1, "SimpleOS", 0x40000000, 0x00000000)
+    # Foreground
+    backend.draw_text(title_x, title_y, "SimpleOS", 0xFFFFFFFF, 0x00000000)
+    # Accent underline
+    backend.blend_rect(title_x, title_y + 18, title_w, 2, config.accent_color, 200)
+
+    # 4. Version string
+    val ver_w: i32 = 32
+    val ver_x: i32 = pill_x + (pill_w - ver_w) / 2
+    val ver_y = title_y + 28
+    backend.draw_text(ver_x, ver_y, "v1.0", 0xFFA0A0B0, 0x00000000)
+
+    # 5. Progress bar
+    val bar_w: i32 = pill_w - 60
+    val bar_h: i32 = 8
+    val bar_x = pill_x + 30
+    val bar_y = ver_y + 28
+
+    # Bar background
+    rounded_rect_aa(backend, bar_x, bar_y, bar_w, bar_h, 0x00FFFFFF, 4, 30)
+
+    # Bar fill (2/3 progress)
+    val fill_w = bar_w * 2 / 3
+    gradient_h(backend, bar_x + 2, bar_y + 2, fill_w, bar_h - 4,
+               config.accent_color | 0xFF000000, config.accent2_color | 0xFF000000)
+
+    # 6. "Starting..." text
+    val start_w: i32 = 88
+    val start_x: i32 = pill_x + (pill_w - start_w) / 2
+    val start_y = bar_y + 18
+    backend.draw_text(start_x, start_y, "Starting...", 0xFF808890, 0x00000000)
+
+    # 7. Platform tag (centered)
+    val tag_x: i32 = pill_x + 80
+    val tag_y = pill_y + pill_h - 22
+    backend.draw_text(tag_x, tag_y, platform_tag, 0xFF606070, 0x00000000)
+
+    # 8. Bottom accent line
+    backend.blend_rect(pill_x + 20, pill_y + pill_h - 4, pill_w - 40, 1, config.accent_color, 60)
+
+    # Present the splash frame
+    backend.present()

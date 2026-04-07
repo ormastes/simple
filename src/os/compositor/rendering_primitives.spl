@@ -1,0 +1,174 @@
+# Rendering Primitives — Pure Simple implementations via CompositorBackend
+#
+# Anti-aliased rounded rectangles, line drawing, horizontal gradients,
+# and filled circles. Shared between hosted and QEMU window managers.
+# All rendering through CompositorBackend trait — works on all backends.
+
+use os.compositor.display_backend.{CompositorBackend}
+
+# ============================================================================
+# Integer Square Root (for corner calculations)
+# ============================================================================
+
+fn _isqrt(n: i32) -> i32:
+    """Integer square root via Newton's method."""
+    if n <= 0: return 0
+    if n == 1: return 1
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
+
+# ============================================================================
+# Anti-Aliased Rounded Rectangle
+# ============================================================================
+
+fn rounded_rect_aa(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
+                   color: u32, radius: i32, alpha: u8):
+    """Draw a filled rounded rectangle with anti-aliased edges.
+
+    Uses isqrt-based corner masking with 1px edge softening.
+    Pattern established by render_extras.spl:gradient_rect.
+    """
+    if w <= 0 or h <= 0:
+        return
+    val r = if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
+    if r <= 0:
+        backend.blend_rect(x, y, w, h, color, alpha)
+        return
+
+    var row: i32 = 0
+    while row < h:
+        var inset: i32 = 0
+        var edge_alpha: u8 = alpha
+
+        if row < r:
+            # Top corners
+            val dy = r - row
+            val full_hw = _isqrt(r * r - dy * dy)
+            inset = r - full_hw
+            # Edge softening: reduce alpha on the outermost pixel
+            if inset > 0:
+                val edge_dy = r - (row + 1)
+                val edge_hw = if edge_dy >= 0: _isqrt(r * r - edge_dy * edge_dy) else: r
+                if edge_hw != full_hw:
+                    # Fractional pixel — soften the edge
+                    edge_alpha = alpha / 2
+        else if row >= h - r:
+            # Bottom corners
+            val dy = row - (h - r - 1)
+            val full_hw = _isqrt(r * r - dy * dy)
+            inset = r - full_hw
+            if inset > 0:
+                edge_alpha = alpha / 2
+
+        val rx = x + inset
+        val rw = w - inset * 2
+        if rw > 0:
+            # Draw main row
+            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
+            # Soften edges (1px on each side at reduced alpha)
+            if inset > 0 and edge_alpha < alpha:
+                backend.blend_rect(rx - 1, y + row, 1, 1, color, edge_alpha)
+                backend.blend_rect(rx + rw, y + row, 1, 1, color, edge_alpha)
+        row = row + 1
+
+# ============================================================================
+# Bresenham Line Drawing
+# ============================================================================
+
+fn draw_line(backend: CompositorBackend, x1: i32, y1: i32, x2: i32, y2: i32,
+             color: u32, thickness: i32, alpha: u8):
+    """Draw a line from (x1,y1) to (x2,y2) with given thickness and alpha.
+
+    Uses Bresenham-like stepping. For thick lines, draws a filled rect at each step.
+    """
+    var dx = x2 - x1
+    var dy = y2 - y1
+    val abs_dx = if dx < 0: 0 - dx else: dx
+    val abs_dy = if dy < 0: 0 - dy else: dy
+    val steps = if abs_dx > abs_dy: abs_dx else: abs_dy
+    if steps <= 0:
+        backend.blend_rect(x1, y1, thickness, thickness, color, alpha)
+        return
+
+    var i: i32 = 0
+    while i <= steps:
+        val px = x1 + dx * i / steps
+        val py = y1 + dy * i / steps
+        backend.blend_rect(px, py, thickness, thickness, color, alpha)
+        i = i + 1
+
+# ============================================================================
+# Horizontal Gradient
+# ============================================================================
+
+fn gradient_h(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
+              color1: u32, color2: u32):
+    """Draw a horizontal gradient from color1 (left) to color2 (right).
+
+    Renders column-by-column with linear interpolation between colors.
+    """
+    if w <= 0 or h <= 0:
+        return
+
+    val r1: i32 = ((color1 >> 16) & 0xFF).to_i32()
+    val g1: i32 = ((color1 >> 8) & 0xFF).to_i32()
+    val b1: i32 = (color1 & 0xFF).to_i32()
+    val r2: i32 = ((color2 >> 16) & 0xFF).to_i32()
+    val g2: i32 = ((color2 >> 8) & 0xFF).to_i32()
+    val b2: i32 = (color2 & 0xFF).to_i32()
+    val denom = if w > 1: w - 1 else: 1
+
+    var col: i32 = 0
+    while col < w:
+        val cr = (r1 + (r2 - r1) * col / denom).to_u32()
+        val cg = (g1 + (g2 - g1) * col / denom).to_u32()
+        val cb = (b1 + (b2 - b1) * col / denom).to_u32()
+        val color = 0xFF000000 | (cr << 16) | (cg << 8) | cb
+        backend.fill_rect(x + col, y, 1, h, color)
+        col = col + 1
+
+# ============================================================================
+# Filled Circle
+# ============================================================================
+
+fn filled_circle(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32, alpha: u8):
+    """Draw a filled circle centered at (cx, cy) with radius r.
+
+    Uses concentric horizontal lines for circle approximation.
+    Canonical implementation — replaces duplicates in desktop_chrome.spl.
+    """
+    var dy: i32 = 0 - r
+    while dy <= r:
+        val abs_dy = if dy < 0: 0 - dy else: dy
+        val hw = _isqrt(r * r - abs_dy * abs_dy)
+        if hw > 0:
+            backend.blend_rect(cx - hw, cy + dy, hw * 2, 1, color, alpha)
+        dy = dy + 1
+
+# ============================================================================
+# Circle Outline (Ring)
+# ============================================================================
+
+fn draw_ring(backend: CompositorBackend, cx: i32, cy: i32, r: i32,
+             thickness: i32, color: u32, alpha: u8):
+    """Draw a circle outline (ring) centered at (cx, cy).
+
+    Renders the difference between outer and inner circles.
+    """
+    val inner_r = r - thickness
+    var dy: i32 = 0 - r
+    while dy <= r:
+        val abs_dy = if dy < 0: 0 - dy else: dy
+        val hw_outer = _isqrt(r * r - abs_dy * abs_dy)
+        val hw_inner = if abs_dy < inner_r: _isqrt(inner_r * inner_r - abs_dy * abs_dy) else: 0
+        val left_w = hw_outer - hw_inner
+        if left_w > 0:
+            # Left arc
+            backend.blend_rect(cx - hw_outer, cy + dy, left_w, 1, color, alpha)
+            # Right arc
+            backend.blend_rect(cx + hw_inner, cy + dy, left_w, 1, color, alpha)
+        dy = dy + 1

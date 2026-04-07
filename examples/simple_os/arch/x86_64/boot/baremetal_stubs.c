@@ -3379,15 +3379,15 @@ static void _ed25519_init_consts(void)
     if (_ed25519_consts_inited) return;
     static const uint8_t d_bytes[32] = {
         0xa3,0x78,0x59,0x13,0xca,0x4d,0xeb,0x75,
-        0xab,0xd1,0x68,0x4e,0x7f,0x6e,0xb2,0x27,
-        0x09,0x8c,0x0d,0x22,0x18,0x6d,0x2a,0x21,
-        0xf5,0xfe,0xd4,0xaa,0x09,0x57,0xa1,0x52
+        0xab,0xd8,0x41,0x41,0x4d,0x0a,0x70,0x00,
+        0x98,0xe8,0x79,0x77,0x79,0x40,0xc7,0x8c,
+        0x73,0xfe,0x6f,0x2b,0xee,0x6c,0x03,0x52
     };
     static const uint8_t d2_bytes[32] = {
-        0x45,0xf1,0xb2,0x26,0x94,0x9b,0xd6,0xeb,
-        0x56,0xa3,0xd1,0x9c,0xfe,0xdc,0x64,0x4f,
-        0x12,0x18,0x1b,0x44,0x30,0xda,0x54,0x42,
-        0xea,0xfd,0xa9,0x54,0x13,0xae,0x42,0x25
+        0x59,0xf1,0xb2,0x26,0x94,0x9b,0xd6,0xeb,
+        0x56,0xb1,0x83,0x82,0x9a,0x14,0xe0,0x00,
+        0x30,0xd1,0xf3,0xee,0xf2,0x80,0x8e,0x19,
+        0xe7,0xfc,0xdf,0x56,0xdc,0xd9,0x06,0x24
     };
     static const uint8_t sqrtm1_bytes[32] = {
         0xb0,0xa0,0x0e,0x4a,0x27,0x1b,0xee,0xc4,
@@ -3415,10 +3415,16 @@ static void ge_p3_to_p2(ge_p2 *r, const ge_p3 *p)
 
 static void ge_p1p1_to_p3(ge_p3 *r, const ge_p1p1 *p)
 {
-    fe_mul(&r->X, &p->X, &p->T);
-    fe_mul(&r->Y, &p->Y, &p->Z);
-    fe_mul(&r->Z, &p->Z, &p->T);
-    fe_mul(&r->T, &p->X, &p->Y);
+    /* Use temporaries to avoid aliasing if r overlaps p */
+    fe25519 tX, tY, tZ, tT;
+    fe_mul(&tX, &p->X, &p->T);
+    fe_mul(&tY, &p->Y, &p->Z);
+    fe_mul(&tZ, &p->Z, &p->T);
+    fe_mul(&tT, &p->X, &p->Y);
+    fe_copy(&r->X, &tX);
+    fe_copy(&r->Y, &tY);
+    fe_copy(&r->Z, &tZ);
+    fe_copy(&r->T, &tT);
 }
 
 static void ge_p1p1_to_p2(ge_p2 *r, const ge_p1p1 *p)
@@ -4062,13 +4068,19 @@ int64_t rt_ed25519_self_test(void)
         serial_puts("[ed25519-c] 3B=");
         for(int k=0;k<4;k++) serial_puthex(enc3B[k]);
         serial_puts(" exp=d4b4f502\r\n");
-        /* Test: scalar mult [1]*B should give B */
-        uint8_t one[32] = {0}; one[0] = 1;
-        ge_p3 R1; ge_scalarmult_base(&R1, one);
-        uint8_t enc1B[32]; ge_tobytes(enc1B, &R1);
-        serial_puts("[ed25519-c] [1]*B=");
-        for(int k=0;k<4;k++) serial_puthex(enc1B[k]);
-        serial_puts(" exp=58666666\r\n");
+        /* Test: B+B via addition (not doubling) */
+        ge_p1p1 t_add; ge_cached Bc2; ge_p3 B_plus_B;
+        ge_p3_to_cached(&Bc2, &B);
+        ge_add_cached(&t_add, &B, &Bc2);
+        ge_p1p1_to_p3(&B_plus_B, &t_add);
+        uint8_t enc_BpB[32]; ge_tobytes(enc_BpB, &B_plus_B);
+        serial_puts("[ed25519-c] B+B(add)=");
+        for(int k=0;k<4;k++) serial_puthex(enc_BpB[k]);
+        serial_puts("\r\n");
+        /* Compare with 2B from dbl */
+        serial_puts("[ed25519-c] 2B(dbl) =");
+        for(int k=0;k<4;k++) serial_puthex(enc2B[k]);
+        serial_puts("\r\n");
     }
     uint8_t pk[32], sk[64];
     _ed25519_create_keypair(seed, pk, sk);
