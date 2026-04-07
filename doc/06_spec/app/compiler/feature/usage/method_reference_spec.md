@@ -1,9 +1,13 @@
-# Method Reference Specification
+# Method Reference Syntax
+
+Tests the `&:method` syntax which creates a lambda that calls the given method on its argument (inspired by Ruby's Symbol#to_proc). Covers basic method references with map and filter, chaining, storing references as values, usage with various types (strings, arrays), and combining method references with placeholder lambdas.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/method_reference_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,10 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests the `&:method` syntax which creates a lambda that calls the given method on its
+argument (inspired by Ruby's Symbol#to_proc). Covers basic method references with map
+and filter, chaining, storing references as values, usage with various types (strings,
+arrays), and combining method references with placeholder lambdas.
 
 ## Evidence
 

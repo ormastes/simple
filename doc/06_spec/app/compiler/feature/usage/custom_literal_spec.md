@@ -1,9 +1,13 @@
-# Custom Literal Specification
+# Custom Literal Syntax
+
+Tests the custom collection literal syntax, specifically the `s{...}` prefix for set literals. Verifies that set literals are distinguished from ordinary identifiers and blocks, handles nested set literals with correct depth tracking, and rejects malformed custom literal expressions.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/custom_literal_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,10 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests the custom collection literal syntax, specifically the `s{...}` prefix for set
+literals. Verifies that set literals are distinguished from ordinary identifiers and
+blocks, handles nested set literals with correct depth tracking, and rejects malformed
+custom literal expressions.
 
 ## Evidence
 

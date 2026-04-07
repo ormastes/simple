@@ -1,9 +1,13 @@
-# Bitfield Specification
+# Bitfield Feature Plan
+
+Tests the bitfield feature plan by verifying parser phase scope, validation phase scope, and coverage path tracking. Ensures the bitfield declaration syntax, storage widths, field widths, and reserved field support are properly scoped and linked to the canonical implementation plan.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/bitfield_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,10 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests the bitfield feature plan by verifying parser phase scope, validation phase scope,
+and coverage path tracking. Ensures the bitfield declaration syntax, storage widths,
+field widths, and reserved field support are properly scoped and linked to the
+canonical implementation plan.
 
 ## Evidence
 

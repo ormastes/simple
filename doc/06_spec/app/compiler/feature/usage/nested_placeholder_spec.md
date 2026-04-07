@@ -1,9 +1,13 @@
-# Nested Placeholder Specification
+# Nested Placeholder Scoping
+
+Tests that placeholder lambdas in nested call arguments maintain independent scoping at each nesting level. Verifies that inner and outer placeholders are independent, chained placeholders with nested any/all/filter work correctly, map with nested filter preserves scope, deeply nested chaining, string method placeholders, and edge cases like empty inner lists.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/nested_placeholder_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests that placeholder lambdas in nested call arguments maintain independent scoping at
+each nesting level. Verifies that inner and outer placeholders are independent, chained
+placeholders with nested any/all/filter work correctly, map with nested filter preserves
+scope, deeply nested chaining, string method placeholders, and edge cases like empty
+inner lists.
 
 ## Evidence
 

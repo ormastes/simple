@@ -1,9 +1,13 @@
-# Stackless Coroutines Specification
+# Stackless Coroutines
+
+Tests stackless coroutines which provide lightweight concurrency without allocating stack space for each coroutine. Covers generator functions (creation, lazy evaluation, state preservation), async/await semantics (stubbed due to parser limitations), yield operations (single/multiple/computed/conditional), coroutine scheduling with multiple generators, and the full coroutine lifecycle including creation, completion, and state transitions.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Runtime |
+| Status | In Progress |
 | Source | `test/feature/usage/stackless_coroutines_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,12 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests stackless coroutines which provide lightweight concurrency without allocating
+stack space for each coroutine. Covers generator functions (creation, lazy evaluation,
+state preservation), async/await semantics (stubbed due to parser limitations), yield
+operations (single/multiple/computed/conditional), coroutine scheduling with multiple
+generators, and the full coroutine lifecycle including creation, completion, and state
+transitions.
 
 ## Evidence
 

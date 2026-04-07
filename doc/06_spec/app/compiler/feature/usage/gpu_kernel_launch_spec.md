@@ -1,9 +1,13 @@
-# Gpu Kernel Launch Specification
+# GPU Kernel Launch
+
+Tests actual GPU kernel launch, device memory allocation, data transfer, and result verification. Covers CUDA device availability checks, runtime API completeness, memory allocation/free operations, and kernel execution pipeline validation. Uses stub functions in interpreter mode; actual GPU testing requires compiled binary with CUDA runtime linked and a compatible GPU.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | GPU & SIMD |
+| Status | In Progress |
 | Source | `test/feature/usage/gpu_kernel_launch_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests actual GPU kernel launch, device memory allocation, data transfer, and result
+verification. Covers CUDA device availability checks, runtime API completeness,
+memory allocation/free operations, and kernel execution pipeline validation. Uses stub
+functions in interpreter mode; actual GPU testing requires compiled binary with CUDA
+runtime linked and a compatible GPU.
 
 ## Evidence
 

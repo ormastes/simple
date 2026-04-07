@@ -1,9 +1,13 @@
-# Bitfield Runtime Compat Specification
+# Bitfield Runtime Compatibility
+
+Tests that real bitfield syntax is accepted and parsed correctly in the feature test path. Validates a basic bitfield declaration with a u8 backing type, including ready, mode, and reserved fields.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/bitfield_runtime_compat_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,9 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests that real bitfield syntax is accepted and parsed correctly in the feature test path.
+Validates a basic bitfield declaration with a u8 backing type, including ready, mode,
+and reserved fields.
 
 ## Evidence
 

@@ -1,9 +1,13 @@
-# Gpu Kernel Compilation Specification
+# GPU Kernel Compilation
+
+Tests that @gpu_kernel functions are properly lowered through HIR -> MIR and compiled to PTX with .entry directives. Validates GPU intrinsic name recognition (thread ID, synchronization, memory, atomic operations), PTX output structure (version, target, address size, directives), special register mappings, and the full compilation pipeline from Simple source to GPU-ready output. No GPU hardware required.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | GPU & SIMD |
+| Status | In Progress |
 | Source | `test/feature/usage/gpu_kernel_compilation_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests that @gpu_kernel functions are properly lowered through HIR -> MIR and compiled
+to PTX with .entry directives. Validates GPU intrinsic name recognition (thread ID,
+synchronization, memory, atomic operations), PTX output structure (version, target,
+address size, directives), special register mappings, and the full compilation pipeline
+from Simple source to GPU-ready output. No GPU hardware required.
 
 ## Evidence
 

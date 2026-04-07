@@ -1,14 +1,14 @@
 # Test Specification Index
 
-*Generated: 2026-04-07 00:37:31*
+*Generated: 2026-04-07 06:36:11*
 
 ## Quick Stats
 
-- **Total Features:** 243
-- **Complete Documentation:** 217 (89%)
-- **Stubs Remaining:** 26
-- **Total Lines:** 7073
-- **Warnings:** 402
+- **Total Features:** 238
+- **Complete Documentation:** 238 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 7365
+- **Warnings:** 421
 
 ---
 
@@ -36,11 +36,13 @@
 |---------|--------|------|------------|-------|---------|
 | [Generator State Machine Codegen Specification](generator_state_machine_codegen_spec.md) | In Progress | Needs detail | 4/5 | 8 | Generator state machine codegen provides optimized code generation for generator functions that implement explicit stat… |
 
-## Compiler (11 features)
+## Compiler (13 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
 | [Aop Debug Log Specification](aop_debug_log_spec.md) | Active | Thin | N/A | 16 | AOP Debug Logger |
+| [DI Error Cases](di_error_cases_spec.md) | In Progress | Thin | N/A | 22 | Tests the failure paths and edge cases of the DiContainer dependency injection system. Covers locked container behavior… |
+| [DI Extensions Feature](di_extensions_feature_spec.md) | In Progress | Thin | N/A | 31 | Tests the DI Extension Container (CompileContext.extensions) which provides a dynamic plugin/extension registration poi… |
 | [DI Lock Feature](di_lock_feature_spec.md) | Active | Thin | N/A | 29 | Tests the DiContainer lock/unlock mechanism across all phases: lock state transitions, locked behavior that rejects new… |
 | [DI System Test Lock - All Phases](di_lock_all_phases_spec.md) | Active | Thin | N/A | 31 | Comprehensive phase tests for the DI system test lock feature covering all five phases: lock state transitions (lock/un… |
 | [Generic Template Bytecode in SMF](generic_bytecode_spec.md) | In Progress | Thin | N/A | 1 | Tests storage of generic function templates in the SMF (Simple Module Format) bytecode format. |
@@ -69,6 +71,13 @@
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
 | [Curry Partial Specification](curry_partial_spec.md) | Active | Thin | N/A | 10 | Curry and Partial Application |
+
+## GPU & SIMD (2 features)
+
+| Feature | Status | Docs | Difficulty | Tests | Summary |
+|---------|--------|------|------------|-------|---------|
+| [GPU Kernel Compilation](gpu_kernel_compilation_spec.md) | In Progress | Thin | N/A | 23 | Tests that @gpu_kernel functions are properly lowered through HIR -> MIR and compiled to PTX with .entry directives. Va… |
+| [GPU Kernel Launch](gpu_kernel_launch_spec.md) | In Progress | Thin | N/A | 8 | Tests actual GPU kernel launch, device memory allocation, data transfer, and result verification. Covers CUDA device av… |
 
 ## Infrastructure (13 features)
 
@@ -162,6 +171,18 @@
 | [Type Inference Specification](type_inference_spec.md) | Implemented | Needs detail | 4/5 | 29 | Type inference automatically deduces types for variables, function parameters, and return values without explicit type… |
 | [Union Type Declarations and Discrimination](union_types_spec.md) | Planned | Thin | N/A | 1 | Union types allow a variable to hold a value of one of several specified types, written as `A \| B`. At runtime the lang… |
 | [Variables and Bindings Specification](variables_let_bindings_spec.md) | Implemented | Thin | N/A | 23 | Tests for variable declarations including val (immutable) and var (mutable) bindings, type inference, and scoping rules. |
+
+## Language Features (7 features)
+
+| Feature | Status | Docs | Difficulty | Tests | Summary |
+|---------|--------|------|------------|-------|---------|
+| [Bitfield Feature Plan](bitfield_spec.md) | In Progress | Thin | N/A | 4 | Tests the bitfield feature plan by verifying parser phase scope, validation phase scope, and coverage path tracking. En… |
+| [Bitfield Runtime Compatibility](bitfield_runtime_compat_spec.md) | In Progress | Thin | N/A | 1 | Tests that real bitfield syntax is accepted and parsed correctly in the feature test path. Validates a basic bitfield d… |
+| [Custom Literal Syntax](custom_literal_spec.md) | In Progress | Thin | N/A | 3 | Tests the custom collection literal syntax, specifically the `s{...}` prefix for set literals. Verifies that set litera… |
+| [Dual Argument Syntax](parser_dual_argument_syntax_spec.md) | In Progress | Thin | N/A | 32 | Tests support for both ':' and '=' as argument assignment syntax in all contexts. Covers function calls (colon, equals,… |
+| [Method Reference Syntax](method_reference_spec.md) | In Progress | Thin | N/A | 8 | Tests the `&:method` syntax which creates a lambda that calls the given method on its argument (inspired by Ruby's Symb… |
+| [Nested Placeholder Scoping](nested_placeholder_spec.md) | In Progress | Thin | N/A | 9 | Tests that placeholder lambdas in nested call arguments maintain independent scoping at each nesting level. Verifies th… |
+| [Numbered Placeholder Lambda Expressions](numbered_placeholder_spec.md) | In Progress | Thin | N/A | 13 | Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit parameter ordering in lambda shorthand.… |
 
 ## Language | CLI (11 features)
 
@@ -295,40 +316,14 @@
 |---------|--------|------|------------|-------|---------|
 | [Matrix Multiplication Operator (@)](matrix_multiplication_spec.md) | Implemented | Thin | N/A | 37 | The `@` operator performs matrix multiplication following NumPy semantics: |
 
-## Other (30 features)
+## Other (4 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
-| [Bitfield Runtime Compat Specification](bitfield_runtime_compat_spec.md) | ❌ Stub | Stub | N/A | 1 | Summary not provided in the doc blocks. |
-| [Bitfield Specification](bitfield_spec.md) | ❌ Stub | Stub | N/A | 4 | Summary not provided in the doc blocks. |
-| [Custom Literal Specification](custom_literal_spec.md) | ❌ Stub | Stub | N/A | 3 | Summary not provided in the doc blocks. |
-| [Di Error Cases Specification](di_error_cases_spec.md) | ❌ Stub | Stub | N/A | 22 | Summary not provided in the doc blocks. |
-| [Di Extensions Feature Specification](di_extensions_feature_spec.md) | ❌ Stub | Stub | N/A | 31 | Summary not provided in the doc blocks. |
-| [Gpu Kernel Compilation Specification](gpu_kernel_compilation_spec.md) | ❌ Stub | Stub | N/A | 23 | Summary not provided in the doc blocks. |
-| [Gpu Kernel Launch Specification](gpu_kernel_launch_spec.md) | ❌ Stub | Stub | N/A | 8 | Summary not provided in the doc blocks. |
-| [Hashset Basic Specification](hashset_basic_spec.md) | ❌ Stub | Stub | N/A | 7 | Summary not provided in the doc blocks. |
-| [Math Autograd Runtime Specification](math_autograd_runtime_spec.md) | ❌ Stub | Stub | N/A | 9 | Summary not provided in the doc blocks. |
-| [Method Reference Specification](method_reference_spec.md) | ❌ Stub | Stub | N/A | 8 | Summary not provided in the doc blocks. |
-| [Nested Placeholder Specification](nested_placeholder_spec.md) | ❌ Stub | Stub | N/A | 9 | Summary not provided in the doc blocks. |
-| [Numbered Placeholder Specification](numbered_placeholder_spec.md) | ❌ Stub | Stub | N/A | 13 | Summary not provided in the doc blocks. |
-| [Parser Control Flow Specification](parser_control_flow_spec.md) | ❌ Stub | Stub | N/A | 0 | Summary not provided in the doc blocks. |
-| [Parser Dual Argument Syntax Specification](parser_dual_argument_syntax_spec.md) | ❌ Stub | Stub | N/A | 32 | Summary not provided in the doc blocks. |
 | [Sandboxing & Isolation](sandboxing_spec.md) | Runtime Complete (#916-919), Environment Planned (#920-923) | Needs detail | N/A | 14 | Simple provides two complementary isolation models for secure code execution: |
 | [Simple Language Metaprogramming - Test Specification](metaprogramming.md) | Partial Implementation | Thin | N/A | 8 | This file contains executable test cases for metaprogramming features that are currently implemented in Simple's runtim… |
 | [Simple Language Syntax Specification - Test Specification](syntax_spec.md) | Stable | Thin | N/A | 15 | Comprehensive tests for Simple's syntax, including literals, string interpolation, operators, and indentation-based par… |
 | [Simple Language Type System - Test Specification](types_spec.md) | Stable (Basic Features) | Thin | N/A | 5 | Executable tests for Simple's type system basics: primitives, mutability, generics, and type inference. |
-| [Stackless Coroutines Specification](stackless_coroutines_spec.md) | ❌ Stub | Stub | N/A | 24 | Summary not provided in the doc blocks. |
-| [Temp Di5 Test Specification](_temp_di5_test_spec.md) | ❌ Stub | Stub | N/A | 22 | Summary not provided in the doc blocks. |
-| [Temp Diag Specification](_temp_diag_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag10 Specification](_temp_diag10_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag2 Specification](_temp_diag2_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag3 Specification](_temp_diag3_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag4 Specification](_temp_diag4_spec.md) | ❌ Stub | Stub | N/A | 1 | Summary not provided in the doc blocks. |
-| [Temp Diag5 Specification](_temp_diag5_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag6 Specification](_temp_diag6_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag7 Specification](_temp_diag7_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
-| [Temp Diag8 Specification](_temp_diag8_spec.md) | ❌ Stub | Stub | N/A | 1 | Summary not provided in the doc blocks. |
-| [Temp Diag9 Specification](_temp_diag9_spec.md) | ❌ Stub | Stub | N/A | 2 | Summary not provided in the doc blocks. |
 
 ## Parser / Operators (1 features)
 
@@ -336,7 +331,7 @@
 |---------|--------|------|------------|-------|---------|
 | [Null Coalescing and Try Operator Parser Specification](null_coalescing_try_operator_spec.md) | In Progress | Thin | 3/5 | 15 | Tests for the `??` (null coalescing) and `?` (try) operators in various contexts. These operators should work correctly… |
 
-## Runtime (16 features)
+## Runtime (18 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
@@ -350,8 +345,10 @@
 | [GPU Basic Operations](gpu_basic_spec.md) | In Progress | Thin | N/A | 18 | Tests GPU device detection and basic operations across all backends. Validates backend detection, preferred backend sel… |
 | [GPU Kernels Specification](gpu_kernels_spec.md) | Planned | Needs detail | 5/5 | 10 | GPU kernel support enables compute-intensive operations to run on GPU hardware through a high-level interface. This fea… |
 | [Garbage-Collected Memory Management as the Default Strategy](gc_managed_default_spec.md) | In Progress | Thin | N/A | 16 | In Simple, all heap-allocated objects default to garbage-collected (GC) memory management unless an explicit capability… |
+| [Math Blocks Autograd Runtime](math_autograd_runtime_spec.md) | In Progress | Thin | N/A | 9 | Compiled-mode proof tests for m{}, loss{}, and nograd{} runtime semantics. Verifies that MIR lowering emits real runtim… |
 | [Reference Counted Pointers Specification](shared_pointers_spec.md) | Implemented | Thin | N/A | 9 | Reference counted pointers provide safe sharing of data with automatic |
 | [Rust-to-Simple FFI Specification](rust_simple_ffi_spec.md) | Implemented | Thin | 4/5 | 32 | The Simple language provides a comprehensive Foreign Function Interface (FFI) system that enables bidirectional communi… |
+| [Stackless Coroutines](stackless_coroutines_spec.md) | In Progress | Thin | N/A | 24 | Tests stackless coroutines which provide lightweight concurrency without allocating stack space for each coroutine. Cov… |
 | [Tensor Bridge Batch Conversion](tensor_bridge_spec.md) | Active | Thin | N/A | 5 | Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor arrays. Validates flattening Vec3 lists… |
 | [Unique Pointers Specification](unique_pointers_spec.md) | Implemented | Thin | N/A | 5 | UniquePtr provides exclusive ownership semantics via cooperative move tracking. Since Simple copies on assignment, uniq… |
 | [Vulkan Compute Backend](vulkan_spec.md) | In Progress | Thin | N/A | 22 | Tests Vulkan compute backend functionality including initialization and shutdown, device selection and info retrieval,… |
@@ -398,6 +395,12 @@
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
 | [Networking Specification](networking_spec.md) | Implemented | Thin | N/A | 12 | Tests networking functionality including: |
+
+## Standard Library (1 features)
+
+| Feature | Status | Docs | Difficulty | Tests | Summary |
+|---------|--------|------|------------|-------|---------|
+| [HashSet Basic Operations](hashset_basic_spec.md) | In Progress | Thin | N/A | 7 | Tests HashSet basic operations using a self-contained implementation. Covers set creation and initialization, element i… |
 
 ## Stdlib (10 features)
 
@@ -479,12 +482,19 @@
 |---------|--------|------|------------|-------|---------|
 | [Btree Basic Specification](btree_basic_spec.md) | Active | Thin | N/A | 7 | BTreeMap Basic Operations System Test |
 
-## Tooling (2 features)
+## Tooling (9 features)
 
 | Feature | Status | Docs | Difficulty | Tests | Summary |
 |---------|--------|------|------------|-------|---------|
 | [Architecture Check Error Cases](arch_check_error_cases_spec.md) | Active | Thin | N/A | 43 | Tests failure paths and edge cases in the architecture validation system. Covers boundary conditions for string trimmin… |
+| [Bulk Validate Path Handling Specification](bulk_validate_spec.md) | Implemented | Needs detail | N/A | 80 | Tests for path normalization, dot-directory handling, file extension detection, and CMM file identification in the bulk… |
+| [CMM Expression Parser Specification](cmm_parser_expr_spec.md) | Implemented | Thin | N/A | 80 | Summary not provided in the doc blocks. |
+| [CMM Lexer Specification](cmm_lexer_spec.md) | Implemented | Thin | N/A | 95 | Tests for the CMM (PRACTICE Script) lexer. Validates tokenization of all CMM lexical elements: comments, labels, macros… |
+| [CMM Parser Specification](cmm_parser_spec.md) | Implemented | Thin | N/A | 82 | Summary not provided in the doc blocks. |
+| [CMM Parser V4 Fixes Specification](cmm_parse_v4_fixes_spec.md) | Implemented | Thin | N/A | 19 | Summary not provided in the doc blocks. |
+| [CMM v2025 Version Support](cmm_v2025_spec.md) | In Progress | Thin | N/A | 16 | Tests for CMM v2025 version support and command database updates. |
 | [Registry Index Specification](index_spec.md) | In Progress | Thin | 2/5 | 16 | Tests for the sparse package index: parsing SDN entries, computing index paths, and searching. |
+| [String Operation Efficiency Specification](string_efficiency_spec.md) | Implemented | Thin | N/A | 58 | Tests that string operations in the CMM LSP toolchain produce correct results after being rewritten from O(n²) characte… |
 
 ## Tools | Development (1 features)
 
@@ -536,5 +546,17 @@ These files are present in `doc/06_spec` but were not regenerated in this run.
 
 | File | Type |
 |------|------|
+| _temp_di5_test_spec.md | Legacy markdown |
+| _temp_diag10_spec.md | Legacy markdown |
+| _temp_diag2_spec.md | Legacy markdown |
+| _temp_diag3_spec.md | Legacy markdown |
+| _temp_diag4_spec.md | Legacy markdown |
+| _temp_diag5_spec.md | Legacy markdown |
+| _temp_diag6_spec.md | Legacy markdown |
+| _temp_diag7_spec.md | Legacy markdown |
+| _temp_diag8_spec.md | Legacy markdown |
+| _temp_diag9_spec.md | Legacy markdown |
+| _temp_diag_spec.md | Legacy markdown |
 | null_coalescing_try_operator.md | Legacy markdown |
+| parser_control_flow_spec.md | Legacy markdown |
 

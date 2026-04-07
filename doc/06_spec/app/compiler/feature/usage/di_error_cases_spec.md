@@ -1,9 +1,13 @@
-# Di Error Cases Specification
+# DI Error Cases
+
+Tests the failure paths and edge cases of the DiContainer dependency injection system. Covers locked container behavior (binding rejection), missing key fallback via resolve_or, edge cases like empty keys and key overwrites, resolve behavior through locks, and environment variable-based system test locking via SIMPLE_SYSTEM_TEST/SIMPLE_DI_TEST.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Compiler |
+| Status | In Progress |
 | Source | `test/feature/usage/di_error_cases_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,10 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests the failure paths and edge cases of the DiContainer dependency injection system.
+Covers locked container behavior (binding rejection), missing key fallback via resolve_or,
+edge cases like empty keys and key overwrites, resolve behavior through locks, and
+environment variable-based system test locking via SIMPLE_SYSTEM_TEST/SIMPLE_DI_TEST.
 
 ## Evidence
 

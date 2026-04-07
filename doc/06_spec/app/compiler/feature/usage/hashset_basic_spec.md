@@ -1,9 +1,13 @@
-# Hashset Basic Specification
+# HashSet Basic Operations
+
+Tests HashSet basic operations using a self-contained implementation. Covers set creation and initialization, element insertion with deduplication, membership testing via contains and remove, collection mutations like clear, and array conversion via to_vec.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Standard Library |
+| Status | In Progress |
 | Source | `test/feature/usage/hashset_basic_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,9 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests HashSet basic operations using a self-contained implementation. Covers set creation
+and initialization, element insertion with deduplication, membership testing via contains
+and remove, collection mutations like clear, and array conversion via to_vec.
 
 ## Evidence
 

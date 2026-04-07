@@ -1,9 +1,13 @@
-# Di Extensions Feature Specification
+# DI Extensions Feature
+
+Tests the DI Extension Container (CompileContext.extensions) which provides a dynamic plugin/extension registration point separate from typed core services. Covers basic plugin registration and retrieval, multiple independent plugins, separation from core services, integration with CompileContext, and plugin lifecycle management including lock/unlock behavior.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Compiler |
+| Status | In Progress |
 | Source | `test/feature/usage/di_extensions_feature_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests the DI Extension Container (CompileContext.extensions) which provides a dynamic
+plugin/extension registration point separate from typed core services. Covers basic
+plugin registration and retrieval, multiple independent plugins, separation from core
+services, integration with CompileContext, and plugin lifecycle management including
+lock/unlock behavior.
 
 ## Evidence
 

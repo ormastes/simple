@@ -1,9 +1,13 @@
-# Math Autograd Runtime Specification
+# Math Blocks Autograd Runtime
+
+Compiled-mode proof tests for m{}, loss{}, and nograd{} runtime semantics. Verifies that MIR lowering emits real runtime calls and the torch autograd backend produces correct gradient behavior, including scalar math evaluation, loss backward with automatic gradient computation, nograd gradient suppression, and loss/nograd interaction.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Runtime |
+| Status | In Progress |
 | Source | `test/feature/usage/math_autograd_runtime_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,10 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Compiled-mode proof tests for m{}, loss{}, and nograd{} runtime semantics. Verifies
+that MIR lowering emits real runtime calls and the torch autograd backend produces
+correct gradient behavior, including scalar math evaluation, loss backward with
+automatic gradient computation, nograd gradient suppression, and loss/nograd interaction.
 
 ## Evidence
 

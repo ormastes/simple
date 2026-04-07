@@ -1,9 +1,13 @@
-# Numbered Placeholder Specification
+# Numbered Placeholder Lambda Expressions
+
+Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit parameter ordering in lambda shorthand. Covers basic single-parameter usage with map and filter, method calls on numbered placeholders, compound arithmetic expressions, edge cases (empty collections, single elements), and chaining filter/map operations with numbered placeholders.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/numbered_placeholder_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit
+parameter ordering in lambda shorthand. Covers basic single-parameter usage with map
+and filter, method calls on numbered placeholders, compound arithmetic expressions,
+edge cases (empty collections, single elements), and chaining filter/map operations
+with numbered placeholders.
 
 ## Evidence
 

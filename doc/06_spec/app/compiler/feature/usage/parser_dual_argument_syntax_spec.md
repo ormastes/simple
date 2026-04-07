@@ -1,9 +1,13 @@
-# Parser Dual Argument Syntax Specification
+# Dual Argument Syntax
+
+Tests support for both ':' and '=' as argument assignment syntax in all contexts. Covers function calls (colon, equals, and mixed syntax), struct initialization with both syntaxes including shorthand, no-paren calls via a parser-safe model, edge cases like nested calls and multiline arguments, and consistency verification ensuring both syntaxes produce identical behavior.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
+| Category | Language Features |
+| Status | In Progress |
 | Source | `test/feature/usage/parser_dual_argument_syntax_spec.spl` |
 | Updated | 2026-04-07 |
 | Generator | `simple sspec-docgen` (Rust) |
@@ -20,7 +24,11 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Tests support for both ':' and '=' as argument assignment syntax in all contexts.
+Covers function calls (colon, equals, and mixed syntax), struct initialization with
+both syntaxes including shorthand, no-paren calls via a parser-safe model, edge cases
+like nested calls and multiline arguments, and consistency verification ensuring both
+syntaxes produce identical behavior.
 
 ## Evidence
 
