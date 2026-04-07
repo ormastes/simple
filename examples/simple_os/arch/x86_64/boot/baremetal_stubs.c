@@ -236,6 +236,9 @@ RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
 RuntimeValue rt_map_get(RuntimeValue map, RuntimeValue key);
 RuntimeValue rt_array_new(RuntimeValue cap_val);
 RuntimeValue rt_array_push(RuntimeValue arr, RuntimeValue val);
+RuntimeValue rt_tuple_new(RuntimeValue len_rv);
+RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index);
+RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value);
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 RuntimeValue rt_string_from_cstr(const char *cstr);
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
@@ -4747,6 +4750,26 @@ int64_t rt_ed25519_self_test(void)
 
     serial_puts("[ed25519-c] ALL PASSED\r\n");
     return 0;
+}
+
+/* C-side tuple test — bypasses Simple codegen to verify rt_tuple_* works */
+int64_t rt_test_tuple(void)
+{
+    RuntimeValue tup = rt_tuple_new(2);
+    if (IS_NIL(tup)) { serial_puts("[tuple-c] new returned NIL\r\n"); return -1; }
+    serial_puts("[tuple-c] new ok, IS_HEAP=");
+    serial_puthex(IS_HEAP(tup) ? 1 : 0);
+    serial_puts("\r\n");
+    rt_tuple_set(tup, 0, ENCODE_INT(42));
+    rt_tuple_set(tup, 1, ENCODE_INT(99));
+    RuntimeValue v0 = rt_tuple_get(tup, 0);
+    RuntimeValue v1 = rt_tuple_get(tup, 1);
+    serial_puts("[tuple-c] v0=");
+    serial_puthex((uint8_t)(DECODE_INT(v0) & 0xFF));
+    serial_puts(" v1=");
+    serial_puthex((uint8_t)(DECODE_INT(v1) & 0xFF));
+    serial_puts("\r\n");
+    return (DECODE_INT(v0) == 42 && DECODE_INT(v1) == 99) ? 0 : -1;
 }
 
 /* Also provide the unmangled name for direct extern fn calls */

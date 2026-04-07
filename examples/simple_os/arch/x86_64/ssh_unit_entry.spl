@@ -2,6 +2,7 @@
 
 extern fn serial_println(msg: text)
 extern fn rt_port_outb(port: u16, value: u8)
+extern fn rt_test_tuple() -> i64
 
 use os.posix.fd_table.{fd_table_init}
 use os.posix.async_io.{async_io_init}
@@ -9,7 +10,7 @@ use os.posix.signal_compat.{signal_init}
 
 use os.crypto.ed25519.{ed25519_self_test, ed25519_keypair_from_seed}
 use os.crypto.random.{random_bytes}
-use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte}
+use os.apps.sshd.ssh_packet.{ssh_packet_build, ssh_packet_read, SshPacket, SshPacketResult, SshStringResult, SshTextResult, ssh_put_u32, ssh_get_u32, ssh_put_text, ssh_get_text, ssh_put_string, ssh_get_string, ssh_put_bool, ssh_put_byte}
 use os.apps.sshd.ssh_auth.{SshUserDb, ssh_parse_auth_request, ssh_build_auth_success, ssh_build_auth_failure, ssh_build_auth_banner, SSH_MSG_USERAUTH_REQUEST, sshd_create_default_users}
 use os.apps.sshd.ssh_channel.{ChannelTable, ChannelType, ChannelState, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_build_channel_open_confirmation}
 use os.apps.sshd.ssh_transport.{ssh_build_version_string, ssh_parse_version_string, ssh_build_kexinit, ssh_parse_kexinit, ssh_build_service_accept, ssh_parse_service_request, ssh_build_disconnect}
@@ -49,6 +50,10 @@ fn _start():
     var _rok: Result<i64, text> = Ok(42)
     var _rok_ok: bool = _rok.is_ok()
     _t(_rok_ok, "B0: Ok(42).is_ok()")
+
+    # C-side tuple test (bypasses Simple codegen)
+    var tup_c_ok: i64 = rt_test_tuple()
+    _t(tup_c_ok == 0, "B0x: C-side tuple works")
 
     # Diagnostic: do tuples work at all?
     var test_tup = (42, 99)
@@ -128,22 +133,14 @@ fn _start():
     _t(d5.is_ok(), "B2: Packet decodes")
 
     if d5.is_ok():
-        var d5_pkt = d5.unwrap()
-        # --- Diagnostic: break apart tuple.0.payload chain ---
-        serial_println("[DBG] d5_pkt unwrapped (tuple)")
-        var d5_ssh_pkt = d5_pkt.0           # Extract SshPacket from tuple position 0
-        serial_println("[DBG] d5_ssh_pkt = d5_pkt.0 (SshPacket struct)")
-        var d5_payload = d5_ssh_pkt.payload  # Access .payload field on the struct
-        serial_println("[DBG] d5_payload = d5_ssh_pkt.payload (array)")
+        var d5_res = d5.unwrap()
+        var d5_payload = d5_res.packet.payload
         var d5_plen: u64 = d5_payload.len()
-        serial_println("[DBG] d5_payload.len()={d5_plen}")
         _t(d5_plen == 5, "B3: Decoded len == 5")
         if d5_plen > 0:
             var d5_first: u8 = d5_payload[0]
-            serial_println("[DBG] d5_payload[0]={d5_first}")
             _t(d5_first == 0x14, "B4: Decoded [0] == 0x14")
         else:
-            serial_println("[DBG] d5_payload is empty, skipping B4")
             _t(false, "B4: Decoded [0] == 0x14")
     else:
         _t(false, "B3: Decoded len == 5")
@@ -159,20 +156,9 @@ fn _start():
     var ds1 = ssh_packet_read(s1_enc, 0)
     serial_println("[DBG] ds1.is_ok()={ds1.is_ok()}")
     if ds1.is_ok():
-        var ds1_pkt = ds1.unwrap()
-        serial_println("[DBG] ds1_pkt unwrapped (tuple)")
-        var ds1_ssh = ds1_pkt.0              # Extract SshPacket from tuple
-        serial_println("[DBG] ds1_ssh = ds1_pkt.0 (SshPacket)")
-        var ds1_pl = ds1_ssh.payload         # Access .payload field
-        var ds1_pl_len: u64 = ds1_pl.len()
-        serial_println("[DBG] ds1_pl.len()={ds1_pl_len}")
-        if ds1_pl_len > 0:
-            var ds1_byte: u8 = ds1_pl[0]
-            serial_println("[DBG] ds1_pl[0]={ds1_byte}")
-            _t(ds1_byte == 0xFF, "B6: Single byte 0xFF")
-        else:
-            serial_println("[DBG] ds1 payload empty")
-            _t(false, "B6: Single byte 0xFF")
+        var ds1_res = ds1.unwrap()
+        var ds1_byte: u8 = ds1_res.packet.payload[0]
+        _t(ds1_byte == 0xFF, "B6: Single byte 0xFF")
     else:
         _t(false, "B6: Single byte 0xFF")
 
@@ -191,7 +177,7 @@ fn _start():
     var gt = ssh_get_text(bt, 0)
     if gt.is_ok():
         var gt_val = gt.unwrap()
-        var gt_text: text = gt_val.0
+        var gt_text: text = gt_val.value
         _t(gt_text == "hello", "B9: put_text/get_text hello")
     else:
         _t(false, "B9: put_text/get_text hello")
@@ -201,7 +187,7 @@ fn _start():
     var gte = ssh_get_text(bte, 0)
     if gte.is_ok():
         var gte_val = gte.unwrap()
-        var gte_text: text = gte_val.0
+        var gte_text: text = gte_val.value
         _t(gte_text == "", "B10: put_text/get_text empty")
     else:
         _t(false, "B10: put_text/get_text empty")
@@ -212,7 +198,7 @@ fn _start():
     var gs = ssh_get_string(bs, 0)
     if gs.is_ok():
         var gs_val = gs.unwrap()
-        var gs_bytes = gs_val.0
+        var gs_bytes = gs_val.data
         var gs_len: u64 = gs_bytes.len()
         _t(gs_len == 4, "B11: put_string/get_string 4 bytes")
     else:

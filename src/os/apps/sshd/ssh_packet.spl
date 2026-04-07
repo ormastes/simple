@@ -26,6 +26,21 @@ struct SshPacket:
     payload: [u8]
     sequence: u32
 
+struct SshPacketResult:
+    """Workaround: tuples are broken in baremetal Cranelift. Use struct instead."""
+    packet: SshPacket
+    consumed: u64
+
+struct SshStringResult:
+    """Workaround for tuple return from ssh_get_string."""
+    data: [u8]
+    next_offset: u64
+
+struct SshTextResult:
+    """Workaround for tuple return from ssh_get_text."""
+    value: text
+    next_offset: u64
+
 # ============================================================================
 # Big-Endian Encoding Helpers
 # ============================================================================
@@ -60,10 +75,8 @@ fn ssh_put_text(buf: [u8], s: text):
     var bytes = s.to_bytes()
     ssh_put_string(buf, bytes)
 
-fn ssh_get_string(data: [u8], offset: u64) -> Result<([u8], u64), text>:
-    """Read SSH string at offset. Returns (bytes, next_offset).
-    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
-    """
+fn ssh_get_string(data: [u8], offset: u64) -> Result<SshStringResult, text>:
+    """Read SSH string at offset. Returns SshStringResult(data, next_offset)."""
     if offset + 4 > data.len():
         return Err("ssh_get_string: truncated length")
     var str_len: u64 = ssh_get_u32(data, offset).to_u64()
@@ -75,19 +88,15 @@ fn ssh_get_string(data: [u8], offset: u64) -> Result<([u8], u64), text>:
     while i < str_len:
         result.push(data[start + i])
         i = i + 1
-    Ok((result, start + str_len))
+    Ok(SshStringResult(data: result, next_offset: start + str_len))
 
-fn ssh_get_text(data: [u8], offset: u64) -> Result<(text, u64), text>:
-    """Read SSH string as text at offset. Returns (text, next_offset).
-    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
-    """
+fn ssh_get_text(data: [u8], offset: u64) -> Result<SshTextResult, text>:
+    """Read SSH string as text at offset. Returns SshTextResult(value, next_offset)."""
     var r = ssh_get_string(data, offset)
     if r.is_ok():
-        var pair = r.unwrap()
-        var bytes = pair.0
-        var next_off: u64 = pair.1
-        var txt: text = text.from_bytes(bytes)
-        Ok((txt, next_off))
+        var sr = r.unwrap()
+        var txt: text = text.from_bytes(sr.data)
+        Ok(SshTextResult(value: txt, next_offset: sr.next_offset))
     else:
         Err("ssh_get_text: string decode failed")
 
@@ -135,7 +144,7 @@ fn ssh_put_byte(buf: [u8], val_: u8):
 # Packet Read (plaintext)
 # ============================================================================
 
-fn ssh_packet_read(data: [u8], offset: u64) -> Result<(SshPacket, u64), text>:
+fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
     """Read one SSH packet from raw bytes. Returns (packet, bytes_consumed).
 
     Expects unencrypted data. For encrypted packets see ssh_cipher.spl.
@@ -179,7 +188,7 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<(SshPacket, u64), text>:
         payload.push(data[offset + 5 + i])
         i = i + 1
 
-    Ok((SshPacket(payload: payload, sequence: 0), total))
+    Ok(SshPacketResult(packet: SshPacket(payload: payload, sequence: 0), consumed: total))
 
 # ============================================================================
 # Packet Build (plaintext)
