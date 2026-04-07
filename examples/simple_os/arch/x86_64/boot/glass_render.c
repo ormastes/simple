@@ -973,6 +973,26 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
+        /* Super-bright stars — 12 extra-brilliant points for dramatic effect */
+        for (uint32_t i = 0; i < 12; i++) {
+            uint32_t sx = ((i * 7919u + 104729u) ^ (i * 1299709u)) % sw;
+            uint32_t sy = ((i * 224737u) ^ (i * 350377u + 48611u)) % sh;
+            /* Color variety: white, warm, cool */
+            uint32_t star_color = 0x00FFFFFF;
+            if (i % 3 == 1) star_color = 0x00FFE8D0;      /* Warm */
+            else if (i % 3 == 2) star_color = 0x00C0D8FF;  /* Cool */
+            /* Core pixel at max brightness */
+            fb_write(sx, sy, alpha_blend(fb_read(sx, sy), star_color, 250));
+            /* 3x3 cross pattern for glow */
+            if (sx + 1 < sw) fb_write(sx + 1, sy, alpha_blend(fb_read(sx + 1, sy), star_color, 200));
+            if (sx > 0)      fb_write(sx - 1, sy, alpha_blend(fb_read(sx - 1, sy), star_color, 200));
+            if (sy + 1 < sh) fb_write(sx, sy + 1, alpha_blend(fb_read(sx, sy + 1), star_color, 180));
+            if (sy > 0)      fb_write(sx, sy > 0 ? sy - 1 : 0, alpha_blend(fb_read(sx, sy > 0 ? sy - 1 : 0), star_color, 180));
+            /* Diagonal pixels for softer glow */
+            if (sx + 1 < sw && sy + 1 < sh) fb_write(sx + 1, sy + 1, alpha_blend(fb_read(sx + 1, sy + 1), star_color, 100));
+            if (sx > 0 && sy > 0)           fb_write(sx - 1, sy - 1, alpha_blend(fb_read(sx - 1, sy - 1), star_color, 100));
+        }
+
         /* Subtle horizon glow — brighter band in lower third */
         for (uint32_t row = sh * 2 / 3; row < sh * 2 / 3 + sh / 8; row++) {
             for (uint32_t col = 0; col < sw; col++) {
@@ -986,30 +1006,30 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             }
         }
 
-        /* Nebula blobs — larger (1.5x radius) and brighter (1.3x alpha) */
-        draw_blob(sw * 3 / 4, sh / 4, 330, 0x000A84FF, 39, sw, sh);   /* Blue (top-right) */
-        draw_blob(sw / 5, sh * 2 / 3, 300, 0x00BB86FC, 33, sw, sh);   /* Purple (bottom-left) */
-        draw_blob(sw / 2, sh / 2, 270, 0x0000D4AA, 23, sw, sh);       /* Teal (center) */
-        draw_blob(sw * 4 / 5, sh * 3 / 4, 240, 0x00FF6B9D, 26, sw, sh); /* Pink (bottom-right) */
-        draw_blob(sw / 3, sh / 5, 210, 0x00FFD700, 20, sw, sh);       /* Gold (top-left) */
-        draw_blob(sw / 8, sh / 8, 180, 0x004ECDC4, 16, sw, sh);       /* Teal-mint (top-left) */
-        draw_blob(sw * 5 / 8, sh / 3, 225, 0x00E040FB, 21, sw, sh);   /* Neon purple (center-right) */
-        draw_blob(sw / 2, sh * 4 / 5, 195, 0x00FF7043, 18, sw, sh);   /* Coral (bottom-center) */
+        /* Nebula blobs — larger (1.5x radius) and brighter (boosted alpha) */
+        draw_blob(sw * 3 / 4, sh / 4, 330, 0x000A84FF, 44, sw, sh);   /* Blue (top-right) */
+        draw_blob(sw / 5, sh * 2 / 3, 300, 0x00BB86FC, 37, sw, sh);   /* Purple (bottom-left) */
+        draw_blob(sw / 2, sh / 2, 270, 0x0000D4AA, 27, sw, sh);       /* Teal (center) */
+        draw_blob(sw * 4 / 5, sh * 3 / 4, 240, 0x00FF6B9D, 30, sw, sh); /* Pink (bottom-right) */
+        draw_blob(sw / 3, sh / 5, 210, 0x00FFD700, 24, sw, sh);       /* Gold (top-left) */
+        draw_blob(sw / 8, sh / 8, 180, 0x004ECDC4, 20, sw, sh);       /* Teal-mint (top-left) */
+        draw_blob(sw * 5 / 8, sh / 3, 225, 0x00E040FB, 25, sw, sh);   /* Neon purple (center-right) */
+        draw_blob(sw / 2, sh * 4 / 5, 195, 0x00FF7043, 22, sw, sh);   /* Coral (bottom-center) */
 
-        /* Extra detail blobs for visual richness — larger (1.5x) and brighter (1.3x) */
-        draw_blob(sw / 6, sh * 3 / 5, 150, 0x00FFFFFF, 10, sw, sh);   /* White highlight */
-        draw_blob(sw * 7 / 8, sh / 6, 135, 0x0064B5F6, 13, sw, sh);  /* Light blue accent */
-        draw_blob(sw * 2 / 5, sh / 10, 120, 0x00CE93D8, 13, sw, sh);  /* Light purple */
+        /* Extra detail blobs for visual richness — larger (1.5x) and brighter (boosted) */
+        draw_blob(sw / 6, sh * 3 / 5, 150, 0x00FFFFFF, 14, sw, sh);   /* White highlight */
+        draw_blob(sw * 7 / 8, sh / 6, 135, 0x0064B5F6, 17, sw, sh);  /* Light blue accent */
+        draw_blob(sw * 2 / 5, sh / 10, 120, 0x00CE93D8, 17, sw, sh);  /* Light purple */
 
         /* Additional nebula blobs for photorealistic richness */
-        draw_blob(sw / 4, sh * 3 / 5, 100, 0x00FF4060, 8, sw, sh);   /* Red nebula */
-        draw_blob(sw * 2 / 3, sh / 3, 80, 0x0040A0FF, 10, sw, sh);   /* Cyan nebula */
-        draw_blob(sw / 2, sh * 4 / 5, 120, 0x00C060FF, 6, sw, sh);   /* Violet nebula near bottom */
+        draw_blob(sw / 4, sh * 3 / 5, 100, 0x00FF4060, 12, sw, sh);   /* Red nebula */
+        draw_blob(sw * 2 / 3, sh / 3, 80, 0x0040A0FF, 14, sw, sh);   /* Cyan nebula */
+        draw_blob(sw / 2, sh * 4 / 5, 120, 0x00C060FF, 10, sw, sh);   /* Violet nebula near bottom */
 
         /* Extra bright nebula cores for dramatic effect */
-        draw_blob(sw / 3, sh / 3, 200, 0x006020A0, 50, sw, sh);      /* Purple core */
-        draw_blob(sw * 2 / 3, sh * 2 / 3, 180, 0x002040C0, 45, sw, sh);  /* Blue core */
-        draw_blob(sw / 2, sh / 4, 150, 0x00A03060, 35, sw, sh);      /* Magenta accent */
+        draw_blob(sw / 3, sh / 3, 200, 0x006020A0, 55, sw, sh);      /* Purple core */
+        draw_blob(sw * 2 / 3, sh * 2 / 3, 180, 0x002040C0, 50, sw, sh);  /* Blue core */
+        draw_blob(sw / 2, sh / 4, 150, 0x00A03060, 40, sw, sh);      /* Magenta accent */
 
         /* Galaxy spiral — bright core + 2 spiral arms */
         {
@@ -1017,8 +1037,8 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
             uint32_t gcy = sh * 2 / 5;   /* upper area */
             /* Warm bright core */
             draw_blob(gcx, gcy, 60, 0x00FFFFFF, 20, sw, sh);
-            draw_blob(gcx, gcy, 35, 0x00FFE0B2, 35, sw, sh);
-            draw_blob(gcx, gcy, 18, 0x00FFFFFF, 50, sw, sh);
+            draw_blob(gcx, gcy, 35, 0x00FFE0B2, 45, sw, sh);
+            draw_blob(gcx, gcy, 18, 0x00FFFFFF, 65, sw, sh);
             /* Spiral arm 1 */
             for (int i = 0; i < 8; i++) {
                 int32_t ox = i * 22 - 20;
@@ -1043,8 +1063,8 @@ RuntimeValue rt_gui_draw_wallpaper(RuntimeValue wh, RuntimeValue style_rv,
         {
             uint32_t mx = sw * 7 / 8;
             uint32_t my = sh / 6;
-            draw_blob(mx, my, 50, 0x00FFFFFF, 12, sw, sh);  /* glow halo */
-            draw_blob(mx, my, 25, 0x00F0E8D0, 70, sw, sh);  /* moon body */
+            draw_blob(mx, my, 50, 0x00FFFFFF, 18, sw, sh);  /* glow halo */
+            draw_blob(mx, my, 25, 0x00F0E8D0, 85, sw, sh);  /* moon body */
             draw_blob(mx + 12, my > 4 ? my - 4 : 0, 22, 0x00060612, 85, sw, sh);  /* shadow crescent */
         }
 
