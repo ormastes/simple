@@ -2338,6 +2338,9 @@ static void _vnet_handle_icmp(const uint8_t *frame, uint16_t frame_len)
 /* -----------------------------------------------------------
  * _vnet_handle_frame — dispatch incoming Ethernet frame
  * ----------------------------------------------------------- */
+/* Forward declaration — defined after TCP stack */
+static void _vnet_handle_ipv4(const uint8_t *frame, uint16_t frame_len);
+
 static void _vnet_handle_frame(const uint8_t *frame, uint16_t frame_len)
 {
     if (frame_len < ETH_HLEN) return;
@@ -2350,7 +2353,7 @@ static void _vnet_handle_frame(const uint8_t *frame, uint16_t frame_len)
             _vnet_handle_arp(frame, frame_len);
             break;
         case ETH_P_IP:
-            _vnet_handle_icmp(frame, frame_len);
+            _vnet_handle_ipv4(frame, frame_len);
             break;
         default:
             /* Ignore unknown ethertype */
@@ -2708,6 +2711,624 @@ static void _virtio_net_get_stats(void)
 }
 
 /* ===================================================================
+ * 8d-tcp. Minimal TCP stack for baremetal SSH
+ *
+ * Implements: TCP 3-way handshake, data transfer, connection close.
+ * Socket table with IPC handlers (syscall 20/21) so the POSIX socket
+ * layer in socket_compat.spl works without a microkernel.
+ * =================================================================== */
+
+/* TCP header */
+struct tcp_hdr {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t seq_num;
+    uint32_t ack_num;
+    uint8_t  data_off;  /* upper 4 bits = offset in 32-bit words */
+    uint8_t  flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent;
+} __attribute__((packed));
+
+#define TCP_FIN  0x01
+#define TCP_SYN  0x02
+#define TCP_RST  0x04
+#define TCP_PSH  0x08
+#define TCP_ACK  0x10
+
+/* TCP connection states */
+enum tcp_state {
+    TCP_CLOSED = 0,
+    TCP_LISTEN,
+    TCP_SYN_RECEIVED,
+    TCP_ESTABLISHED,
+    TCP_FIN_WAIT_1,
+    TCP_FIN_WAIT_2,
+    TCP_CLOSE_WAIT,
+    TCP_LAST_ACK,
+    TCP_TIME_WAIT
+};
+
+/* Socket / TCP connection */
+#define MAX_SOCKETS 16
+#define TCP_RXBUF_SIZE 8192
+#define TCP_TXBUF_SIZE 8192
+#define TCP_ACCEPT_QUEUE 4
+
+struct tcp_socket {
+    int      in_use;
+    enum tcp_state state;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint8_t  remote_ip[4];
+    uint8_t  remote_mac[6];
+    uint32_t snd_nxt;       /* next send sequence number */
+    uint32_t snd_una;       /* unacknowledged */
+    uint32_t rcv_nxt;       /* next expected receive seq */
+    uint16_t rcv_wnd;       /* receive window */
+    /* Receive ring buffer */
+    uint8_t  rxbuf[TCP_RXBUF_SIZE];
+    uint32_t rx_head;
+    uint32_t rx_tail;
+    /* Accept queue (for listening sockets) */
+    int      accept_queue[TCP_ACCEPT_QUEUE];
+    int      aq_head;
+    int      aq_tail;
+    int      backlog;
+    /* IPC reply buffer */
+    int      has_reply;
+    int32_t  reply_status;
+    int32_t  reply_value;
+    uint8_t  reply_data[4096];
+    int      reply_data_len;
+};
+
+static struct tcp_socket _sockets[MAX_SOCKETS];
+static uint32_t _tcp_isn = 0x10000;  /* initial sequence number counter */
+
+/* TCP pseudo-header checksum */
+static uint16_t _tcp_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
+                               const void *tcp_data, uint16_t tcp_len)
+{
+    uint32_t sum = 0;
+    const uint8_t *p;
+    /* Pseudo-header: src_ip(4) + dst_ip(4) + zero(1) + proto(1=6) + tcp_len(2) */
+    sum += ((uint16_t)src_ip[0] << 8) | src_ip[1];
+    sum += ((uint16_t)src_ip[2] << 8) | src_ip[3];
+    sum += ((uint16_t)dst_ip[0] << 8) | dst_ip[1];
+    sum += ((uint16_t)dst_ip[2] << 8) | dst_ip[3];
+    sum += 6;  /* protocol = TCP */
+    sum += tcp_len;
+    /* TCP segment */
+    p = (const uint8_t *)tcp_data;
+    for (uint16_t i = 0; i + 1 < tcp_len; i += 2)
+        sum += ((uint16_t)p[i] << 8) | p[i+1];
+    if (tcp_len & 1)
+        sum += (uint16_t)p[tcp_len - 1] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return _net_htons((uint16_t)~sum);
+}
+
+/* Send a TCP segment */
+static void _tcp_send_segment(int sid, uint8_t flags, const void *data, uint16_t data_len)
+{
+    struct tcp_socket *s = &_sockets[sid];
+    uint8_t pkt[1500];
+    uint16_t tcp_len = 20 + data_len;  /* TCP header (no options) + data */
+    uint16_t ip_len = 20 + tcp_len;
+
+    /* Ethernet header */
+    struct eth_hdr *eth = (struct eth_hdr *)pkt;
+    __builtin_memcpy(eth->dst, s->remote_mac, 6);
+    __builtin_memcpy(eth->src, _vnet.mac, 6);
+    eth->ethertype = _net_htons(ETH_P_IP);
+
+    /* IPv4 header */
+    struct ipv4_hdr *ip = (struct ipv4_hdr *)(pkt + ETH_HLEN);
+    ip->ver_ihl = 0x45;
+    ip->tos = 0;
+    ip->total_len = _net_htons(ip_len);
+    ip->id = _net_htons((uint16_t)(_tcp_isn & 0xFFFF));
+    ip->frag_off = 0;
+    ip->ttl = 64;
+    ip->protocol = 6;  /* TCP */
+    ip->checksum = 0;
+    __builtin_memcpy(ip->src_ip, _vnet.our_ip, 4);
+    __builtin_memcpy(ip->dst_ip, s->remote_ip, 4);
+    ip->checksum = _inet_checksum(ip, 20);
+
+    /* TCP header */
+    struct tcp_hdr *tcp = (struct tcp_hdr *)(pkt + ETH_HLEN + 20);
+    tcp->src_port = _net_htons(s->local_port);
+    tcp->dst_port = _net_htons(s->remote_port);
+    tcp->seq_num = _net_htonl(s->snd_nxt);
+    tcp->ack_num = _net_htonl(s->rcv_nxt);
+    tcp->data_off = 0x50;  /* 5 * 4 = 20 bytes, no options */
+    tcp->flags = flags;
+    tcp->window = _net_htons(TCP_RXBUF_SIZE);
+    tcp->checksum = 0;
+    tcp->urgent = 0;
+
+    /* Copy data */
+    if (data && data_len > 0) {
+        __builtin_memcpy(pkt + ETH_HLEN + 20 + 20, data, data_len);
+    }
+
+    /* TCP checksum */
+    tcp->checksum = _tcp_checksum(_vnet.our_ip, s->remote_ip, tcp, tcp_len);
+
+    /* Send */
+    _vnet_send_frame(pkt, ETH_HLEN + ip_len);
+
+    /* Advance sequence number */
+    s->snd_nxt += data_len;
+    if (flags & (TCP_SYN | TCP_FIN)) s->snd_nxt += 1;
+}
+
+/* Handle incoming TCP segment */
+static void _tcp_handle_segment(const uint8_t *frame, uint16_t frame_len)
+{
+    if (frame_len < ETH_HLEN + 20 + 20) return;
+
+    const struct eth_hdr *eth = (const struct eth_hdr *)frame;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)(frame + ETH_HLEN);
+    uint16_t ip_hlen = (ip->ver_ihl & 0x0F) * 4;
+    const struct tcp_hdr *tcp = (const struct tcp_hdr *)(frame + ETH_HLEN + ip_hlen);
+    uint16_t tcp_hlen = (tcp->data_off >> 4) * 4;
+    uint16_t ip_total = _net_ntohs(ip->total_len);
+    uint16_t tcp_data_len = (ip_total > ip_hlen + tcp_hlen) ? ip_total - ip_hlen - tcp_hlen : 0;
+    const uint8_t *tcp_data = frame + ETH_HLEN + ip_hlen + tcp_hlen;
+
+    uint16_t dst_port = _net_ntohs(tcp->dst_port);
+    uint16_t src_port = _net_ntohs(tcp->src_port);
+    uint32_t seg_seq = _net_ntohl(tcp->seq_num);
+    uint32_t seg_ack = _net_ntohl(tcp->ack_num);
+    uint8_t  flags = tcp->flags;
+
+    /* Find matching socket */
+    int sid = -1;
+
+    /* First: look for established connection */
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (!_sockets[i].in_use) continue;
+        if (_sockets[i].state >= TCP_SYN_RECEIVED &&
+            _sockets[i].local_port == dst_port &&
+            _sockets[i].remote_port == src_port) {
+            sid = i;
+            break;
+        }
+    }
+
+    /* Second: look for listening socket (for SYN) */
+    int listen_sid = -1;
+    if (sid < 0 && (flags & TCP_SYN)) {
+        for (int i = 0; i < MAX_SOCKETS; i++) {
+            if (!_sockets[i].in_use) continue;
+            if (_sockets[i].state == TCP_LISTEN &&
+                _sockets[i].local_port == dst_port) {
+                listen_sid = i;
+                break;
+            }
+        }
+    }
+
+    if (sid < 0 && listen_sid < 0) {
+        /* No matching socket — send RST */
+        return;
+    }
+
+    /* Handle SYN on listening socket → create new connection */
+    if (listen_sid >= 0 && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
+        /* Find free socket for the new connection */
+        int new_sid = -1;
+        for (int i = 0; i < MAX_SOCKETS; i++) {
+            if (!_sockets[i].in_use) { new_sid = i; break; }
+        }
+        if (new_sid < 0) return;  /* No free sockets */
+
+        struct tcp_socket *ns = &_sockets[new_sid];
+        __builtin_memset(ns, 0, sizeof(*ns));
+        ns->in_use = 1;
+        ns->state = TCP_SYN_RECEIVED;
+        ns->local_port = dst_port;
+        ns->remote_port = src_port;
+        __builtin_memcpy(ns->remote_ip, ip->src_ip, 4);
+        __builtin_memcpy(ns->remote_mac, eth->src, 6);
+        ns->rcv_nxt = seg_seq + 1;
+        ns->snd_nxt = _tcp_isn++;
+        ns->snd_una = ns->snd_nxt;
+        ns->rcv_wnd = TCP_RXBUF_SIZE;
+
+        /* Send SYN+ACK */
+        _tcp_send_segment(new_sid, TCP_SYN | TCP_ACK, NULL, 0);
+
+        serial_puts("[tcp] SYN received on port ");
+        serial_put_dec(dst_port);
+        serial_puts(" from ");
+        _net_print_ip(ip->src_ip);
+        serial_puts(":");
+        serial_put_dec(src_port);
+        serial_puts("\r\n");
+        return;
+    }
+
+    if (sid < 0) return;
+    struct tcp_socket *s = &_sockets[sid];
+
+    switch (s->state) {
+    case TCP_SYN_RECEIVED:
+        if (flags & TCP_ACK) {
+            s->snd_una = seg_ack;
+            s->state = TCP_ESTABLISHED;
+            serial_puts("[tcp] Connection established on port ");
+            serial_put_dec(s->local_port);
+            serial_puts("\r\n");
+
+            /* Add to listening socket's accept queue */
+            for (int i = 0; i < MAX_SOCKETS; i++) {
+                if (_sockets[i].in_use && _sockets[i].state == TCP_LISTEN &&
+                    _sockets[i].local_port == s->local_port) {
+                    struct tcp_socket *ls = &_sockets[i];
+                    int next = (ls->aq_tail + 1) % TCP_ACCEPT_QUEUE;
+                    if (next != ls->aq_head) {
+                        ls->accept_queue[ls->aq_tail] = sid;
+                        ls->aq_tail = next;
+                    }
+                    break;
+                }
+            }
+        }
+        break;
+
+    case TCP_ESTABLISHED:
+        /* Handle incoming data */
+        if (tcp_data_len > 0) {
+            /* Store in receive buffer */
+            for (uint16_t i = 0; i < tcp_data_len; i++) {
+                uint32_t next = (s->rx_head + 1) % TCP_RXBUF_SIZE;
+                if (next == s->rx_tail) break;  /* Buffer full */
+                s->rxbuf[s->rx_head] = tcp_data[i];
+                s->rx_head = next;
+            }
+            s->rcv_nxt = seg_seq + tcp_data_len;
+            /* Send ACK */
+            _tcp_send_segment(sid, TCP_ACK, NULL, 0);
+        }
+        /* Handle ACK */
+        if (flags & TCP_ACK) {
+            s->snd_una = seg_ack;
+        }
+        /* Handle FIN */
+        if (flags & TCP_FIN) {
+            s->rcv_nxt = seg_seq + tcp_data_len + 1;
+            s->state = TCP_CLOSE_WAIT;
+            _tcp_send_segment(sid, TCP_ACK, NULL, 0);
+            serial_puts("[tcp] FIN received, connection closing\r\n");
+        }
+        break;
+
+    case TCP_FIN_WAIT_1:
+        if ((flags & TCP_ACK) && (flags & TCP_FIN)) {
+            s->rcv_nxt = seg_seq + 1;
+            s->state = TCP_TIME_WAIT;
+            _tcp_send_segment(sid, TCP_ACK, NULL, 0);
+        } else if (flags & TCP_ACK) {
+            s->state = TCP_FIN_WAIT_2;
+        }
+        break;
+
+    case TCP_FIN_WAIT_2:
+        if (flags & TCP_FIN) {
+            s->rcv_nxt = seg_seq + 1;
+            s->state = TCP_TIME_WAIT;
+            _tcp_send_segment(sid, TCP_ACK, NULL, 0);
+        }
+        break;
+
+    case TCP_LAST_ACK:
+        if (flags & TCP_ACK) {
+            s->state = TCP_CLOSED;
+            s->in_use = 0;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* Extend frame handler to dispatch TCP */
+static void _vnet_handle_ipv4(const uint8_t *frame, uint16_t frame_len)
+{
+    if (frame_len < ETH_HLEN + 20) return;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)(frame + ETH_HLEN);
+    if (ip->protocol == 1) {
+        _vnet_handle_icmp(frame, frame_len);
+    } else if (ip->protocol == 6) {
+        _tcp_handle_segment(frame, frame_len);
+    }
+}
+
+/* ===================================================================
+ * 8d-tcp-ipc. IPC handlers for syscalls 20/21
+ *
+ * socket_compat.spl sends IPC requests (syscall 20) with:
+ *   a0 = port (2 = netstack)
+ *   a1 = method (NET_SOCKET=1, NET_BIND=2, etc.)
+ *   a2 = flags (0)
+ *   a3 = payload buffer address
+ *   a4 = payload length
+ * and expects replies via syscall 21.
+ * =================================================================== */
+
+/* Pending IPC reply for socket operations */
+static struct {
+    int      valid;
+    int32_t  status;
+    int32_t  value;
+} _ipc_reply;
+
+/* Available bytes in socket receive buffer */
+static uint32_t _tcp_rx_available(int sid)
+{
+    struct tcp_socket *s = &_sockets[sid];
+    return (s->rx_head >= s->rx_tail)
+        ? s->rx_head - s->rx_tail
+        : TCP_RXBUF_SIZE - s->rx_tail + s->rx_head;
+}
+
+/* Read from socket receive buffer */
+static uint32_t _tcp_rx_read(int sid, uint8_t *buf, uint32_t max_len)
+{
+    struct tcp_socket *s = &_sockets[sid];
+    uint32_t copied = 0;
+    while (copied < max_len && s->rx_tail != s->rx_head) {
+        buf[copied++] = s->rxbuf[s->rx_tail];
+        s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
+    }
+    return copied;
+}
+
+static int32_t _read_i32(const uint8_t *buf, int offset)
+{
+    return (int32_t)(
+        ((uint32_t)buf[offset]) |
+        ((uint32_t)buf[offset+1] << 8) |
+        ((uint32_t)buf[offset+2] << 16) |
+        ((uint32_t)buf[offset+3] << 24)
+    );
+}
+
+static uint32_t _read_u32(const uint8_t *buf, int offset)
+{
+    return ((uint32_t)buf[offset]) |
+           ((uint32_t)buf[offset+1] << 8) |
+           ((uint32_t)buf[offset+2] << 16) |
+           ((uint32_t)buf[offset+3] << 24);
+}
+
+static uint16_t _read_u16(const uint8_t *buf, int offset)
+{
+    return (uint16_t)(buf[offset] | ((uint16_t)buf[offset+1] << 8));
+}
+
+static void _write_i32(uint8_t *buf, int offset, int32_t val)
+{
+    buf[offset]   = (uint8_t)(val & 0xFF);
+    buf[offset+1] = (uint8_t)((val >> 8) & 0xFF);
+    buf[offset+2] = (uint8_t)((val >> 16) & 0xFF);
+    buf[offset+3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+static int64_t _ipc_send_handler(uint64_t port, uint64_t method,
+                                   uint64_t flags, uint64_t buf_addr, uint64_t buf_len)
+{
+    (void)port; (void)flags;
+    const uint8_t *payload = (const uint8_t *)(uintptr_t)buf_addr;
+    uint32_t ipc_method = (buf_len >= 4) ? _read_u32(payload, 0) : (uint32_t)method;
+
+    _ipc_reply.valid = 1;
+    _ipc_reply.status = 0;
+    _ipc_reply.value = 0;
+
+    switch (ipc_method) {
+    case 1: { /* NET_SOCKET: payload = [method(4)] + [proto_byte(1)] */
+        int sid = -1;
+        for (int i = 0; i < MAX_SOCKETS; i++) {
+            if (!_sockets[i].in_use) { sid = i; break; }
+        }
+        if (sid < 0) {
+            _ipc_reply.status = -24; /* EMFILE */
+            break;
+        }
+        __builtin_memset(&_sockets[sid], 0, sizeof(_sockets[sid]));
+        _sockets[sid].in_use = 1;
+        _sockets[sid].state = TCP_CLOSED;
+        _sockets[sid].rcv_wnd = TCP_RXBUF_SIZE;
+        _ipc_reply.status = 0;
+        _ipc_reply.value = sid;
+        break;
+    }
+    case 2: { /* NET_BIND: payload = [method(4)] + [fd(4)] + [ip(4)] + [port(2)] */
+        int32_t fd = _read_i32(payload, 4);
+        uint16_t port_num = _read_u16(payload, 12);
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+            _ipc_reply.status = -9; /* EBADF */
+            break;
+        }
+        _sockets[fd].local_port = port_num;
+        _ipc_reply.status = 0;
+        serial_puts("[tcp] Socket ");
+        serial_put_dec(fd);
+        serial_puts(" bound to port ");
+        serial_put_dec(port_num);
+        serial_puts("\r\n");
+        break;
+    }
+    case 3: { /* NET_LISTEN: payload = [method(4)] + [fd(4)] + [backlog(4)] */
+        int32_t fd = _read_i32(payload, 4);
+        int32_t backlog = _read_i32(payload, 8);
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+            _ipc_reply.status = -9;
+            break;
+        }
+        _sockets[fd].state = TCP_LISTEN;
+        _sockets[fd].backlog = backlog;
+        _ipc_reply.status = 0;
+        serial_puts("[tcp] Socket ");
+        serial_put_dec(fd);
+        serial_puts(" listening on port ");
+        serial_put_dec(_sockets[fd].local_port);
+        serial_puts("\r\n");
+        break;
+    }
+    case 5: { /* NET_ACCEPT: payload = [method(4)] + [fd(4)] */
+        int32_t fd = _read_i32(payload, 4);
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use ||
+            _sockets[fd].state != TCP_LISTEN) {
+            _ipc_reply.status = -9;
+            break;
+        }
+        /* Poll for incoming connections */
+        struct tcp_socket *ls = &_sockets[fd];
+        int timeout = 0;
+        while (ls->aq_head == ls->aq_tail && timeout < 100000) {
+            _virtio_net_poll();
+            timeout++;
+            for (volatile int d = 0; d < 1000; d++) {}
+        }
+        if (ls->aq_head == ls->aq_tail) {
+            _ipc_reply.status = -11; /* EAGAIN — no connections */
+            break;
+        }
+        int accepted_sid = ls->accept_queue[ls->aq_head];
+        ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
+        _ipc_reply.status = 0;
+        _ipc_reply.value = accepted_sid;
+        serial_puts("[tcp] Accepted connection -> socket ");
+        serial_put_dec(accepted_sid);
+        serial_puts("\r\n");
+        break;
+    }
+    case 6: { /* NET_SEND: payload = [method(4)] + [fd(4)] + [data...] */
+        int32_t fd = _read_i32(payload, 4);
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use ||
+            _sockets[fd].state != TCP_ESTABLISHED) {
+            _ipc_reply.status = -9;
+            break;
+        }
+        uint32_t data_len = (buf_len > 8) ? (uint32_t)(buf_len - 8) : 0;
+        const uint8_t *data = payload + 8;
+        /* Send in chunks of 1400 bytes (MTU - headers) */
+        uint32_t sent = 0;
+        while (sent < data_len) {
+            uint16_t chunk = (data_len - sent > 1400) ? 1400 : (uint16_t)(data_len - sent);
+            _tcp_send_segment(fd, TCP_ACK | TCP_PSH, data + sent, chunk);
+            sent += chunk;
+        }
+        _ipc_reply.status = (int32_t)sent;
+        break;
+    }
+    case 7: { /* NET_RECV: payload = [method(4)] + [fd(4)] + [max_len(4)] */
+        int32_t fd = _read_i32(payload, 4);
+        uint32_t max_len = (buf_len >= 12) ? _read_u32(payload, 8) : 4096;
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+            _ipc_reply.status = -9;
+            break;
+        }
+        /* Poll until data available or timeout */
+        int timeout = 0;
+        while (_tcp_rx_available(fd) == 0 && _sockets[fd].state == TCP_ESTABLISHED && timeout < 50000) {
+            _virtio_net_poll();
+            timeout++;
+            for (volatile int d = 0; d < 1000; d++) {}
+        }
+        uint32_t avail = _tcp_rx_available(fd);
+        if (avail == 0) {
+            if (_sockets[fd].state != TCP_ESTABLISHED) {
+                _ipc_reply.status = 0; /* EOF */
+            } else {
+                _ipc_reply.status = -11; /* EAGAIN */
+            }
+            break;
+        }
+        uint32_t to_read = (avail < max_len) ? avail : max_len;
+        if (to_read > 4092) to_read = 4092; /* leave room for status in reply */
+        struct tcp_socket *rs = &_sockets[fd];
+        int read_count = (int)_tcp_rx_read(fd, rs->reply_data + 4, to_read);
+        rs->reply_data_len = read_count;
+        _write_i32(rs->reply_data, 0, (int32_t)read_count);
+        _ipc_reply.status = 0;
+        _ipc_reply.value = (int32_t)read_count;
+        /* Store reply data pointer for IPC_RECV */
+        rs->has_reply = 1;
+        break;
+    }
+    case 8: { /* NET_CLOSE: payload = [method(4)] + [fd(4)] */
+        int32_t fd = _read_i32(payload, 4);
+        if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+            _ipc_reply.status = -9;
+            break;
+        }
+        if (_sockets[fd].state == TCP_ESTABLISHED) {
+            _tcp_send_segment(fd, TCP_FIN | TCP_ACK, NULL, 0);
+            _sockets[fd].state = TCP_FIN_WAIT_1;
+            /* Brief poll for FIN-ACK */
+            for (int t = 0; t < 10000; t++) {
+                _virtio_net_poll();
+                if (_sockets[fd].state == TCP_TIME_WAIT || _sockets[fd].state == TCP_CLOSED)
+                    break;
+                for (volatile int d = 0; d < 100; d++) {}
+            }
+        }
+        _sockets[fd].in_use = 0;
+        _sockets[fd].state = TCP_CLOSED;
+        _ipc_reply.status = 0;
+        break;
+    }
+    default:
+        _ipc_reply.status = -38; /* ENOSYS */
+        break;
+    }
+    return 0;
+}
+
+static int64_t _ipc_recv_handler(uint64_t port, uint64_t buf_addr, uint64_t max_len)
+{
+    (void)port;
+    if (!_ipc_reply.valid) return -11; /* EAGAIN */
+
+    uint8_t *reply_buf = (uint8_t *)(uintptr_t)buf_addr;
+    _write_i32(reply_buf, 0, _ipc_reply.status);
+    _write_i32(reply_buf, 4, _ipc_reply.value);
+
+    _ipc_reply.valid = 0;
+
+    /* For NET_RECV with data, copy data into reply buffer */
+    /* The data was already stored in reply_data by IPC_SEND handler */
+    int total = 8;
+
+    /* Check if any socket has pending reply data */
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (_sockets[i].has_reply && _sockets[i].reply_data_len > 0) {
+            int copy_len = _sockets[i].reply_data_len + 4; /* status + data */
+            if ((uint64_t)(total + copy_len) <= max_len) {
+                /* Copy status + data into reply */
+                __builtin_memcpy(reply_buf, _sockets[i].reply_data, copy_len);
+                total = copy_len;
+            }
+            _sockets[i].has_reply = 0;
+            _sockets[i].reply_data_len = 0;
+            break;
+        }
+    }
+
+    return total;
+}
+
+/* ===================================================================
  * 8b. Bare-metal syscall stub
  *
  * On bare-metal, there is no kernel to syscall into. This stub handles
@@ -2721,7 +3342,6 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr);
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
 {
-    (void)a3; (void)a4;
     switch (id) {
         case 0:  /* Exit */
             outb(0xf4, (uint8_t)((a0 << 1) | 1)); /* isa-debug-exit */
@@ -2755,6 +3375,10 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
             return _fat32_read_file_syscall(a0, a1, a2);
         case 89: /* Fat32ListDir: list root directory entries to serial */
             return (int64_t)fat32_list_dir();
+        case 20: /* IPC_SEND: a0=port, a1=method, a2=flags, a3=buf, a4=len */
+            return _ipc_send_handler(a0, a1, a2, a3, a4);
+        case 21: /* IPC_RECV: a0=port, a1=reply_buf, a2=max_len */
+            return _ipc_recv_handler(a0, a1, a2);
         case 90: /* NetInit: initialize VirtIO-net, set IP 10.0.2.15 */
             return (int64_t)_virtio_net_init();
         case 91: /* NetPoll: process incoming frames (ARP/ICMP auto-reply) */
@@ -6733,7 +7357,7 @@ S1(rt_sha256)
 S1(rt_sha512)
 S1(rt_md5)
 S2(rt_hmac_sha256)
-S1(rt_random_bytes)
+/* rt_random_bytes: real implementation in section 8d-tcp */
 
 /* --- Object / Struct --- */
 S1(rt_object_new)
@@ -6994,6 +7618,53 @@ RuntimeValue rt_enable_interrupts(void) { return rt_enable_interrupts_real(); }
 RuntimeValue rt_disable_interrupts(void) { return rt_disable_interrupts_real(); }
 RuntimeValue rt_invlpg(RuntimeValue a) { return rt_invlpg_real(a); }
 RuntimeValue rt_rdtsc(void) { return rt_rdtsc_real(); }
+
+/* RDRAND — hardware random number generator (x86_64) */
+RuntimeValue rt_rdrand(void)
+{
+    uint64_t val;
+    uint8_t ok;
+    /* Try RDRAND up to 10 times (can fail transiently) */
+    for (int i = 0; i < 10; i++) {
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
+        if (ok) return ENCODE_INT((int64_t)val);
+    }
+    /* Fallback: use RDTSC as entropy source (less secure but functional) */
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ENCODE_INT((int64_t)(((uint64_t)hi << 32) | lo));
+}
+
+/* Generate random bytes as a [u8] array — C implementation for baremetal.
+ * The Simple random_bytes() uses ChaCha20 which relies on unreliable
+ * array operations in baremetal Cranelift. */
+RuntimeValue rt_random_bytes(RuntimeValue count_rv)
+{
+    int64_t count = DECODE_INT(count_rv);
+    if (count <= 0 || count > 256) count = 32;
+
+    RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
+    if (!arr) return NIL_VALUE;
+    arr->hdr.type = HEAP_ARRAY;
+    arr->hdr.size = (uint32_t)(sizeof(RuntimeArray) + count * sizeof(RuntimeValue));
+    arr->len = (uint32_t)count;
+    arr->cap = (uint32_t)count;
+
+    for (int64_t i = 0; i < count; i++) {
+        uint64_t val;
+        uint8_t ok = 0;
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
+        if (!ok) {
+            uint32_t lo, hi;
+            __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+            val = ((uint64_t)hi << 32) | lo;
+            val ^= (uint64_t)i * 0x9E3779B97F4A7C15ULL; /* mix */
+        }
+        arr->items[i] = ENCODE_INT((int64_t)(val & 0xFF));
+    }
+
+    return ENCODE_PTR(arr);
+}
 RuntimeValue rt_lgdt(RuntimeValue a) { return rt_lgdt_real(a); }
 RuntimeValue rt_lidt(RuntimeValue a) { return rt_lidt_real(a); }
 RuntimeValue rt_ltr(RuntimeValue a) { return rt_ltr_real(a); }

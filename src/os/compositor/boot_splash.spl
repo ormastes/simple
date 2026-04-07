@@ -47,14 +47,11 @@ fn draw_boot_splash(backend: CompositorBackend, config: GlassPortConfig, platfor
     backend.blur_region(pill_x, pill_y, pill_w, pill_h, 16)
     backend.blur_region(pill_x, pill_y, pill_w, pill_h, 8)
 
-    # Glass surface (rectangular, no rounding to avoid import)
-    backend.blend_rect(pill_x, pill_y, pill_w, pill_h, config.surface_color, config.surface_alpha)
+    # Glass surface with rounded corners (radius=28, matches QEMU)
+    _splash_rrect(backend, pill_x, pill_y, pill_w, pill_h, config.surface_color, 28, config.surface_alpha)
 
-    # Border
-    backend.blend_rect(pill_x, pill_y, pill_w, 1, config.border_color, config.border_alpha)
-    backend.blend_rect(pill_x, pill_y + pill_h - 1, pill_w, 1, config.border_color, config.border_alpha)
-    backend.blend_rect(pill_x, pill_y, 1, pill_h, config.border_color, config.border_alpha)
-    backend.blend_rect(pill_x + pill_w - 1, pill_y, 1, pill_h, config.border_color, config.border_alpha)
+    # Rounded border
+    _splash_rrect(backend, pill_x, pill_y, pill_w, pill_h, config.border_color, 28, config.border_alpha)
 
     # Highlight lines
     backend.blend_rect(pill_x + 4, pill_y + 1, pill_w - 8, 1, 0x00FFFFFF, 35)
@@ -64,8 +61,11 @@ fn draw_boot_splash(backend: CompositorBackend, config: GlassPortConfig, platfor
     val title_w: i32 = 64
     val title_x: i32 = pill_x + (pill_w - title_w) / 2
     val title_y = pill_y + 28
-    backend.draw_text(title_x + 1, title_y + 1, "SimpleOS", 0x40000000, 0x00000000)
+    # Shadow (offset +2, +2)
+    backend.draw_text(title_x + 2, title_y + 2, "SimpleOS", 0x20000000, 0x00000000)
+    # Bold effect (render at x and x+1)
     backend.draw_text(title_x, title_y, "SimpleOS", 0xFFFFFFFF, 0x00000000)
+    backend.draw_text(title_x + 1, title_y, "SimpleOS", 0xFFFFFFFF, 0x00000000)
     backend.blend_rect(title_x, title_y + 18, title_w, 2, config.accent_color, 200)
 
     # 4. Version string
@@ -82,11 +82,11 @@ fn draw_boot_splash(backend: CompositorBackend, config: GlassPortConfig, platfor
     # Bar background
     backend.blend_rect(bar_x, bar_y, bar_w, bar_h, 0x00FFFFFF, 30)
 
-    # Bar fill (2/3 progress) with accent color
+    # Bar fill with gradient effect (left half accent, right half accent2)
     val fill_w = bar_w * 2 / 3
-    backend.blend_rect(bar_x + 2, bar_y + 2, fill_w, bar_h - 4, config.accent_color, 200)
-    # Accent2 right half for gradient effect
-    backend.blend_rect(bar_x + 2 + fill_w / 2, bar_y + 2, fill_w / 2, bar_h - 4, config.accent2_color, 100)
+    val half_fill = fill_w / 2
+    backend.blend_rect(bar_x + 2, bar_y + 2, half_fill, bar_h - 4, config.accent_color, 200)
+    backend.blend_rect(bar_x + 2 + half_fill, bar_y + 2, fill_w - half_fill, bar_h - 4, config.accent2_color, 200)
 
     # 6. "Starting..." text
     val start_x: i32 = pill_x + (pill_w - 88) / 2
@@ -103,3 +103,35 @@ fn draw_boot_splash(backend: CompositorBackend, config: GlassPortConfig, platfor
 
     # Present the splash frame
     backend.present()
+
+fn _splash_rrect(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, color: u32, radius: i32, alpha: u8):
+    """Inline rounded rect for boot splash (avoids import issues)."""
+    val r = if radius > w / 2: w / 2 else: if radius > h / 2: h / 2 else: radius
+    if r <= 0:
+        backend.blend_rect(x, y, w, h, color, alpha)
+        return
+    var row: i32 = 0
+    while row < h:
+        var inset: i32 = 0
+        if row < r:
+            val dy = r - row
+            inset = r - _splash_isqrt(r * r - dy * dy)
+        else if row >= h - r:
+            val dy = row - (h - r - 1)
+            inset = r - _splash_isqrt(r * r - dy * dy)
+        val rx = x + inset
+        val rw = w - inset * 2
+        if rw > 0:
+            backend.blend_rect(rx, y + row, rw, 1, color, alpha)
+        row = row + 1
+
+fn _splash_isqrt(n: i32) -> i32:
+    """Integer square root for boot splash."""
+    if n <= 0: return 0
+    if n == 1: return 1
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
