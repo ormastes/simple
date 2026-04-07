@@ -193,6 +193,13 @@ var g_dock_bounce_active: u64 = 0    # 1 if dock bounce running
 var g_dock_bounce_progress: u64 = 0  # 0-100
 var g_dock_bounce_icon: u64 = 0      # which icon (0-6)
 
+# Mouse state
+var g_mouse_x: u64 = 512
+var g_mouse_y: u64 = 384
+var g_mouse_buttons: u64 = 0
+var g_mouse_prev_buttons: u64 = 0
+var g_mouse_initialized: u64 = 0
+
 # Bounce easing: overshoot then settle (integer approximation)
 # Maps progress 0-100 to offset 0-N-0 with overshoot
 fn bounce_offset(progress: u64) -> u64:
@@ -288,6 +295,100 @@ fn find_vga_fb() -> u64:
                     return addr
         d = d + 1
     0xFD000000
+
+# === PS/2 Mouse ===
+
+fn mouse_wait_write():
+    var i: u64 = 0
+    while i < 100000:
+        if (rt_port_inb(0x64) & 2) == 0:
+            return
+        i = i + 1
+
+fn mouse_wait_read():
+    var i: u64 = 0
+    while i < 100000:
+        if (rt_port_inb(0x64) & 1) != 0:
+            return
+        i = i + 1
+
+fn mouse_cmd(cmd: u64):
+    mouse_wait_write()
+    rt_port_outb(0x64, 0xD4)  # Send to mouse
+    mouse_wait_write()
+    rt_port_outb(0x60, cmd)
+    mouse_wait_read()
+    rt_port_inb(0x60)  # Read ACK
+
+fn mouse_init():
+    """Initialize PS/2 mouse with basic 3-byte packet mode."""
+    # Enable auxiliary device
+    mouse_wait_write()
+    rt_port_outb(0x64, 0xA8)
+
+    # Enable interrupts — get controller config byte
+    mouse_wait_write()
+    rt_port_outb(0x64, 0x20)  # Get compaq status
+    mouse_wait_read()
+    val status = rt_port_inb(0x60)
+    mouse_wait_write()
+    rt_port_outb(0x64, 0x60)  # Set compaq status
+    mouse_wait_write()
+    rt_port_outb(0x60, (status | 2) & 0xDF)  # Enable IRQ12, disable clock disable
+
+    # Set defaults
+    mouse_cmd(0xF6)
+
+    # Enable data reporting
+    mouse_cmd(0xF4)
+
+    g_mouse_initialized = 1
+    serial_println("[WM] PS/2 mouse initialized")
+
+fn draw_mouse_cursor(mx: u64, my: u64, theme: u64):
+    """Draw a simple arrow cursor at mouse position."""
+    # Cursor: 16-row triangle, each row has width = row/2 + 1
+    # Black outline on left edge, right edge, top, and bottom row
+    # White fill interior
+    # Drop shadow offset by 2px
+    # Shadow first (behind cursor)
+    blend(mx + 2, my + 2, 10, 16, 0x00000000, 30)
+
+    var row: u64 = 0
+    while row < 16:
+        var col: u64 = 0
+        val width = row / 2 + 1
+        while col < width:
+            val px = mx + col
+            val py = my + row
+            if px < SCREEN_W:
+                if py < SCREEN_H:
+                    if col == 0:
+                        # Left edge — black outline
+                        blend(px, py, 1, 1, 0x00000000, 220)
+                    else:
+                        if row < 3:
+                            # Top rows — white fill (too narrow for outline)
+                            blend(px, py, 1, 1, 0x00FFFFFF, 240)
+                        else:
+                            if col == width - 1:
+                                # Right edge — black outline
+                                blend(px, py, 1, 1, 0x00000000, 220)
+                            else:
+                                # Interior — white fill
+                                blend(px, py, 1, 1, 0x00FFFFFF, 240)
+            col = col + 1
+        # Bottom row — all black outline
+        if row == 15:
+            var c2: u64 = 0
+            while c2 < width:
+                val bx = mx + c2
+                val by = my + row
+                if bx < SCREEN_W:
+                    if by < SCREEN_H:
+                        blend(bx, by, 1, 1, 0x00000000, 220)
+                c2 = c2 + 1
+        row = row + 1
 
 # === Rendering helpers ===
 
@@ -1953,6 +2054,10 @@ fn draw_desktop(active: u64, theme: u64):
     # Global accent wash — ties all elements with consistent color signature
     blend(0, 0, SCREEN_W, SCREEN_H, accent(theme), 2)
 
+    # 6. Mouse cursor (drawn last — always on top)
+    if g_mouse_initialized == 1:
+        draw_mouse_cursor(g_mouse_x, g_mouse_y, theme)
+
     # Present — bulk-copy shadow buffer to MMIO framebuffer
     rt_gui_present(0, 0, 0, 0)
 
@@ -2033,6 +2138,9 @@ fn spl_start():
     var animating: u64 = 0        # 1 if currently animating
     var needs_redraw: u64 = 1     # Redraw on next frame
     var idle_count: u64 = 0       # Frames since last activity
+
+    # Initialize PS/2 mouse
+    mouse_init()
 
     serial_println("[WM] Rendering glass desktop (dark theme)...")
     draw_desktop(active_win, theme)
@@ -2123,6 +2231,61 @@ fn spl_start():
                         g_minimize_states = 0
                         needs_redraw = 1
                         serial_println("[WM] Restored all windows")
+
+        # Poll mouse (PS/2 auxiliary device)
+        if g_mouse_initialized == 1:
+            val m_status = rt_port_inb(0x64)
+            if (m_status & 0x21) == 0x21:  # Bit 0=data ready, bit 5=mouse data
+                val byte1 = rt_port_inb(0x60)
+                # Wait for byte 2
+                mouse_wait_read()
+                val byte2 = rt_port_inb(0x60)
+                # Wait for byte 3
+                mouse_wait_read()
+                val byte3 = rt_port_inb(0x60)
+
+                # Parse mouse packet — bit 3 of byte1 always set in valid packets
+                if (byte1 & 0x08) != 0:
+                    g_mouse_prev_buttons = g_mouse_buttons
+                    g_mouse_buttons = byte1 & 0x07  # Button bits
+
+                    # X delta
+                    var dx: u64 = byte2
+                    if (byte1 & 0x10) != 0:
+                        # Negative X: subtract from position
+                        val neg_dx = 256 - dx
+                        if g_mouse_x > neg_dx:
+                            g_mouse_x = g_mouse_x - neg_dx
+                        else:
+                            g_mouse_x = 0
+                    else:
+                        g_mouse_x = g_mouse_x + dx
+                        if g_mouse_x >= SCREEN_W:
+                            g_mouse_x = SCREEN_W - 1
+
+                    # Y delta (inverted for screen coordinates)
+                    var dy: u64 = byte3
+                    if (byte1 & 0x20) != 0:
+                        # Negative Y (inverted = move down on screen)
+                        val neg_dy = 256 - dy
+                        g_mouse_y = g_mouse_y + neg_dy
+                        if g_mouse_y >= SCREEN_H:
+                            g_mouse_y = SCREEN_H - 1
+                    else:
+                        # Positive Y (inverted = move up on screen)
+                        if g_mouse_y > dy:
+                            g_mouse_y = g_mouse_y - dy
+                        else:
+                            g_mouse_y = 0
+
+                    # Left click detection
+                    val left_pressed = g_mouse_buttons & 1
+                    val left_was = g_mouse_prev_buttons & 1
+                    if left_pressed == 1:
+                        if left_was == 0:
+                            serial_println("[WM] Mouse click")
+
+                    needs_redraw = 1
 
         # Update focus animation
         if animating == 1:
