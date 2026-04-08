@@ -40,15 +40,16 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         let normalized = name.strip_prefix('_').unwrap_or(name);
         use simple_runtime::value::{
-            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_condition_probe, rt_contains,
+            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_get_args, rt_cli_print_help,
+            rt_cli_print_version, rt_cli_version, rt_condition_probe, rt_contains,
             rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd,
             rt_env_exists, rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
             rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
             rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_method_not_found,
-            rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
+            rt_len, rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
             rt_term_enable_ansi, rt_term_get_size, rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run,
             rt_process_spawn, rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env,
-            rt_set_macro_trace, rt_value_eq, rt_value_compare,
+            rt_set_macro_trace, rt_unwrap_or_self, rt_value_compare, rt_value_eq, rt_value_to_string,
         };
         // File I/O operations
         use simple_runtime::value::{
@@ -178,6 +179,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             // Index/slice operations
             rt_index_get,
             rt_index_set,
+            rt_len,
             rt_slice,
             rt_contains,
             // String operations
@@ -290,6 +292,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             // Error handling
             rt_function_not_found,
             rt_method_not_found,
+            rt_unwrap_or_self,
             // I/O operations
             rt_print_str,
             rt_println_str,
@@ -297,6 +300,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_eprintln_str,
             rt_print_value,
             rt_println_value,
+            rt_value_to_string,
             rt_eprint_value,
             rt_eprintln_value,
             rt_capture_stdout_start,
@@ -320,6 +324,10 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_platform_name,
             rt_term_enable_ansi,
             rt_term_get_size,
+            rt_cli_get_args,
+            rt_cli_print_help,
+            rt_cli_print_version,
+            rt_cli_version,
             rt_decision_probe,
             rt_condition_probe,
             rt_path_probe,

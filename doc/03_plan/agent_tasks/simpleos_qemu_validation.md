@@ -48,6 +48,10 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - `TEST PASSED`
      - launcher registry count >= 3
      - successful shortcut dispatch
+   - Current blocker:
+     - direct harness image is not accepted by QEMU as a kernel image
+     - smallest bootable wrapper still dies with `heap exhausted` before `test_main()`
+     - current best hypothesis is pre-`test_main()` wrapper/runtime allocation burst against the fixed 64 MB bump heap
 
 2. Browser sample lane
    - Entry: `src/os/apps/browser_sample/browser_sample.spl`
@@ -58,6 +62,11 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Pass signals:
      - `Rendering complete - pipeline produced visible output`
      - `TEST PASSED`
+   - Current blocker:
+     - current `browser_sample.spl` path imports `Engine2D`, which unconditionally imports `backend_cuda`
+     - `backend_cuda.spl` parse failure prevents a runnable lane
+   - Revised approach:
+     - use the direct software browser pipeline from `browser_backend.spl` / `backend_factory.spl`
 
 3. WM mouse automation lane
    - Entry: `examples/simple_os/arch/x86_64/wm_entry.spl`
@@ -68,10 +77,13 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - inject pointer move
      - inject click-to-focus
      - inject drag on title bar
-     - inject close/minimize click if coordinates are known
+      - inject close/minimize click if coordinates are known
    - Pass signals:
-     - no crash during interaction window
-     - window movement/focus markers in serial or screenshot evidence
+      - no crash during interaction window
+      - window movement/focus markers in serial or screenshot evidence
+   - Current blocker:
+     - explicit QMP device routing is unavailable in this VM shape
+     - generic `input-send-event` is accepted by QEMU but does not yield guest-visible clicks
 
 4. Live `sshd` fault isolation lane
    - Entry: live SSH daemon path
@@ -83,6 +95,10 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Pass signals:
      - `[sshd] SSH daemon listening on port 22`
      - banner exchange proceeds beyond TCP connect
+   - Current blocker:
+     - live multiboot image carries unresolved early bindings
+     - fault occurs before first serial print
+     - disassembly now confirms early null indirect calls inside `spl_start`
 
 ### P1
 
@@ -93,6 +109,8 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Pass signals:
      - browser app launch marker
      - browser render marker or browser window creation marker
+   - Dependency:
+     - lower-level browser software-render lane must exist first
 
 6. Tools harness hardening
    - File: `examples/simple_os/arch/x86_64/tools_test_entry.spl`
@@ -151,8 +169,8 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
 
 ## Exit Criteria
 
-1. `desktop_e2e_test.spl` passes in QEMU.
-2. `browser_sample` passes in QEMU.
-3. WM lane survives automated mouse interaction without heap exhaustion.
-4. Live `sshd` reaches listening state and answers a host-side SSH handshake.
+1. A bootable wrapper for `desktop_e2e_test.spl` reaches `test_main()` and passes in QEMU.
+2. A browser software-render lane passes in QEMU without touching `Engine2D` / `backend_cuda`.
+3. WM lane either supports provable automated input, or the repo has a different routable GUI lane selected for automation.
+4. Live `sshd` image is rebuilt without unresolved early bindings, with non-null early `spl_start` calls, and reaches listening state.
 5. Tools lane reports meaningful pass/fail based on real tool exit codes.

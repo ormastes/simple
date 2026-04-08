@@ -261,6 +261,12 @@ Interpretation:
 
 - Live `SshDaemon` boot is currently broken.
 - Networking and hostfwd are not the blocker here; the guest faults before daemon readiness.
+- Follow-up artifact analysis tightened the failure:
+  - a fresh `--entry-closure` rebuild resolves `serial_println`, but still leaves:
+    - `U Users__ormastes__simple__examples__simple_os__arch__x86_64__ssh_live_entry__SshDaemon`
+  - the bootable live multiboot image shows early null indirect calls inside `spl_start`
+  - these null calls are the nearest static explanation for the observed `FAULT @ 0x0000000000000003`
+  - the working `ssh_system_test` image has the same early call structure, but all of those targets are concrete non-zero addresses
 
 ## Browser / Mouse / GUI Validation Status
 
@@ -271,17 +277,44 @@ Interpretation:
   - `src/os/desktop/app_manifest.spl`
 - The QEMU runs above did not prove browser launch or browser rendering inside the actual desktop session.
 - The serial-friendly browser sample exists in `src/os/apps/browser_sample/browser_sample.spl` and is a good next isolated lane.
+- Follow-up isolation showed the current `browser_sample.spl` path is blocked before runtime:
+  - `bin/simple run src/os/apps/browser_sample/browser_sample.spl`
+  - failure chain: `browser_sample -> engine2d_executor -> Engine2D -> backend_cuda`
+  - concrete parser blocker: `src/std/gc_async_mut/gpu/engine2d/backend_cuda.spl`
+  - separate host-run blocker: `unknown extern function: serial_println`
+- The architectural blocker is dependency selection, not `browser_sample.spl` syntax.
+- The shortest currently viable software-only browser path is not `BrowserRenderer`; it is the direct software pipeline already used by:
+  - `src/os/compositor/browser_backend.spl`
+  - `src/lib/common/ui/backend_factory.spl`
+  - flow: `UITree -> DOM -> layout -> paint -> RenderScene -> execute_scene_to_buffer`
 
 ### Mouse
 
 - PS/2 mouse init was reached in the WM lane.
 - No automated pointer event injection was used yet.
 - No end-to-end proof of click, drag, focus, or close behavior exists from this run.
+- Follow-up QMP/QOM analysis showed explicit device routing is not available in the current WM VM shape:
+  - `ps2-mouse` and `ps2-kbd` exist in the QOM tree
+  - but there is no usable QMP device identifier for `input-send-event`
+  - explicit device attempts (`video0`, `ps2mouse`, `ps2-kbd`, `i8042`, `VGA`) all returned `DeviceNotFound`
+- Generic `input-send-event` and HMP mouse commands were accepted by QEMU but still produced no guest-visible click markers.
+- Practical result: reliable automated mouse interaction is not currently proven feasible in this VM shape.
 
 ### Desktop app launch
 
 - `src/os/test/desktop_e2e_test.spl` exists and should be run as its own lane.
 - This validation session did not execute that entry.
+- Follow-up work narrowed the blocker:
+  - direct harness build can be produced, but QEMU rejects it as a kernel image:
+    - `Error loading uncompressed kernel without PVH ELF Note`
+  - the smallest bootable wrapper path reaches the x86_64 stub handoff and then dies with:
+    - `[PANIC] heap exhausted`
+  - so there is still no bootable lane that both wraps the real desktop E2E harness and reaches `test_main()`
+- The narrowest concrete cause proven so far is the fixed 64 MB bump heap in:
+  - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+- Changing guest RAM from 512 MB to 2 GB does not move the failure point.
+- Best current culprit chain:
+  - `_start() -> spl_start() -> generated wrapper / entry-closure setup -> early runtime string/array/map allocations`
 
 ## Current Conclusions
 
@@ -300,11 +333,16 @@ Interpretation:
 - Tools test harness over-reports success.
 - Browser rendering inside the desktop session is not proven.
 - Mouse interaction is initialized but not end-to-end verified.
+- The live `sshd` failure is now isolated to the entry-wrapper / artifact layer:
+  - the working system-test image has concrete early bindings
+  - the failing live image carries unresolved early imports
+  - disassembly shows the live path making early null indirect calls inside `spl_start`
+- The browser sample path is blocked by unconditional `Engine2D` / `backend_cuda` imports before backend fallback can help.
 
 ## Immediate Next Validation Targets
 
-1. Run `src/os/test/desktop_e2e_test.spl` under `x64-desktop-test`.
-2. Add a dedicated browser lane using `src/os/apps/browser_sample/browser_sample.spl`.
-3. Add QMP-driven mouse/keyboard injection for WM validation.
+1. Debug the x86_64 wrapper path for `desktop_e2e_test.spl`, starting from pre-`test_main()` allocation bursts inside the fixed bump heap.
+2. Build a browser QEMU lane around the direct software browser pipeline instead of `BrowserRenderer` / `Engine2D`.
+3. Either change the WM input backend / VM shape to something QMP-routable, or instrument the guest to prove whether generic injected events arrive at all.
 4. Tighten `tools_test_entry.spl` so `test_run()` respects return codes.
-5. Debug live `sshd` fault before treating SSH as production-ready.
+5. Fix the live SSH entry/artifact path so `ssh_live_entry__SshDaemon` is resolved and early `spl_start` calls are non-null.

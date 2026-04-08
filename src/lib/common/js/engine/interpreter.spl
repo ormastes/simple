@@ -19,6 +19,13 @@ use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, J
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
 
+# ── Helper ───────────────────────────────────────────────────────────────
+
+fn _ident_name(expr: Expression) -> text:
+    match expr:
+        Expression.Identifier(name): name
+        _: ""
+
 # ── Interpreter ──────────────────────────────────────────────────────────
 
 class JsInterpreter:
@@ -135,6 +142,74 @@ class JsInterpreter:
                 return self.class_proto_ids.get(i)
             i = i + 1
         -1
+
+    # Recursive JSON serialization (needs object_store access)
+    fn _json_stringify(value: JsValue) -> text:
+        match value:
+            JsValue.Undefined: return "undefined"
+            JsValue.Null: return "null"
+            JsValue.Boolean(v):
+                if v:
+                    return "true"
+                return "false"
+            JsValue.Number(v):
+                var s = "{v}"
+                val slen = s.len()
+                if slen >= 3:
+                    if s[slen - 2] == ".":
+                        if s[slen - 1] == "0":
+                            var result = ""
+                            var ci = 0
+                            while ci < slen - 2:
+                                result = result + s[ci]
+                                ci = ci + 1
+                            return result
+                return s
+            JsValue.String(v):
+                # Escape special characters
+                var escaped = ""
+                var ei = 0
+                val elen = v.len()
+                while ei < elen:
+                    val ch = v[ei]
+                    if ch == "\"":
+                        escaped = escaped + "\\\""
+                    if ch == "\\":
+                        escaped = escaped + "\\\\"
+                    if ch != "\"" and ch != "\\":
+                        escaped = escaped + ch
+                    ei = ei + 1
+                return "\"" + escaped + "\""
+            JsValue.Object(id):
+                val obj = self.object_store.get_object(id)
+                var result = "{"
+                var oi = 0
+                var first = true
+                val plen = obj.properties.len()
+                while oi < plen:
+                    val prop = obj.properties.get(oi)
+                    # Skip internal __proto__ property
+                    if prop.key != "__proto__":
+                        if not first:
+                            result = result + ","
+                        result = result + "\"" + prop.key + "\":" + self._json_stringify(prop.value)
+                        first = false
+                    oi = oi + 1
+                return result + "}"
+            JsValue.Array(id):
+                val arr_len = self.object_store.array_length(id)
+                var result = "["
+                var ai = 0
+                while ai < arr_len:
+                    if ai > 0:
+                        result = result + ","
+                    val elem = self.object_store.get_by_index(id, ai)
+                    result = result + self._json_stringify(elem)
+                    ai = ai + 1
+                return result + "]"
+            JsValue.Function(id): return "null"
+            JsValue.Symbol(id): return "null"
+        "undefined"
 
     # Execute a full program (list of statements)
     me execute(program: [Statement]) -> BrowserResult<JsValue>:
@@ -537,6 +612,16 @@ class JsInterpreter:
         # Create the prototype object
         val proto_id = self.object_store.create_object()
 
+        # Set up prototype chain for extends
+        if parent_name != "":
+            val parent_val = self.env_stack.get_var(env, parent_name)
+            if val Some(parent_fn) = parent_val:
+                val parent_fn_id = _get_fn_id(parent_fn)
+                if parent_fn_id >= 0:
+                    val parent_proto = self._find_class_proto(parent_fn_id)
+                    if parent_proto >= 0:
+                        self.object_store.set_property(proto_id, "__proto__", JsValue.Object(id: parent_proto))
+
         # Register methods on the prototype
         var mi = 0
         val mlen = methods.len()
@@ -675,6 +760,10 @@ class JsInterpreter:
             JsValue.Function(fn_id):
                 val obj_id = self.object_store.create_object()
                 val this_val = JsValue.Object(id: obj_id)
+                # Set __proto__ to the class prototype for method lookup
+                val proto_id = self._find_class_proto(fn_id)
+                if proto_id >= 0:
+                    self.object_store.set_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
                 if fn_id >= 0 and fn_id < self.functions.len():
                     val js_fn = self.functions.get(fn_id)
                     val fn_env = self.env_stack.create_env(js_fn.closure_env)
@@ -957,6 +1046,102 @@ class JsInterpreter:
             if is_string:
                 return self._dispatch_string_method(str_val, member_method, args, env)
 
+        # Object.keys / Object.values / Object.entries
+        if is_member and member_method == "keys":
+            val callee_obj_name = _ident_name(member_obj_expr)
+            if callee_obj_name == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.object_store.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            self.object_store.set_property(result_id, "{ki}", JsValue.String(v: prop.key))
+                            ki = ki + 1
+                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.object_store.create_object()))
+
+        if is_member and member_method == "values":
+            val callee_obj_name_v = _ident_name(member_obj_expr)
+            if callee_obj_name_v == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.object_store.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            self.object_store.set_property(result_id, "{ki}", prop.value)
+                            ki = ki + 1
+                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.object_store.create_object()))
+
+        if is_member and member_method == "entries":
+            val callee_obj_name_e = _ident_name(member_obj_expr)
+            if callee_obj_name_e == "Object":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val obj = self.object_store.get_object(arg_id)
+                        val result_id = self.object_store.create_object()
+                        var ki = 0
+                        while ki < obj.properties.len():
+                            val prop = obj.properties.get(ki)
+                            val entry_id = self.object_store.create_object()
+                            self.object_store.set_property(entry_id, "0", JsValue.String(v: prop.key))
+                            self.object_store.set_property(entry_id, "1", prop.value)
+                            self.object_store.set_property(entry_id, "length", JsValue.Number(v: 2.0))
+                            self.object_store.set_property(result_id, "{ki}", JsValue.Array(id: entry_id))
+                            ki = ki + 1
+                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        return Ok(JsValue.Array(id: result_id))
+                return Ok(JsValue.Array(id: self.object_store.create_object()))
+
+        # JSON.stringify
+        if is_member and member_method == "stringify":
+            val callee_obj_name_js = _ident_name(member_obj_expr)
+            if callee_obj_name_js == "JSON":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val json_str = self._json_stringify(arg)
+                    return Ok(JsValue.String(v: json_str))
+                return Ok(JsValue.String(v: "undefined"))
+
+        # Array.isArray / Array.from
+        if is_member and member_method == "isArray":
+            val callee_obj_name_a = _ident_name(member_obj_expr)
+            if callee_obj_name_a == "Array":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    return Ok(array_isArray(arg))
+                return Ok(JsValue.Boolean(v: false))
+
+        if is_member and member_method == "from":
+            val callee_obj_name_f = _ident_name(member_obj_expr)
+            if callee_obj_name_f == "Array":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val arg_id = _get_obj_id(arg)
+                    if arg_id >= 0:
+                        val arr_len = self.object_store.array_length(arg_id)
+                        val new_id = self.object_store.create_object()
+                        var ai = 0
+                        while ai < arr_len:
+                            val elem = self.object_store.get_by_index(arg_id, ai)
+                            self.object_store.set_property(new_id, "{ai}", elem)
+                            ai = ai + 1
+                        self.object_store.set_property(new_id, "length", JsValue.Number(v: arr_len.to_f64()))
+                        return Ok(JsValue.Array(id: new_id))
+                return Ok(JsValue.Array(id: self.object_store.create_object()))
+
         val callee_val = self.eval_expression(callee, env)?
 
         # Evaluate arguments
@@ -1042,15 +1227,15 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
 
     # Member access: obj.prop
-    # Look up property on object, with prototype chain fallback
+    # Look up property on object, with recursive prototype chain fallback
     fn _proto_lookup(obj_id: i64, property: text) -> JsValue:
         val prop = self.object_store.get_property(obj_id, property)
         if strict_equals(prop, JsValue.Undefined):
-            # Check __proto__ chain
+            # Check __proto__ chain recursively
             val proto = self.object_store.get_property(obj_id, "__proto__")
             val proto_id = _get_obj_id(proto)
             if proto_id >= 0:
-                return self.object_store.get_property(proto_id, property)
+                return self._proto_lookup(proto_id, property)
         prop
 
     me eval_member(object: Expression, property: text, env: i64) -> BrowserResult<JsValue>:

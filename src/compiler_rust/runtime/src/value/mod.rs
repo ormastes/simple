@@ -105,7 +105,7 @@ pub use channels::RuntimeChannel;
 // Re-export collection FFI functions
 pub use collections::{
     rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
-    rt_cstring_to_text, rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_ends_with,
+    rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_concat, rt_string_data, rt_string_ends_with,
     rt_string_eq, rt_string_len, rt_string_new, rt_string_starts_with, rt_tuple_get, rt_tuple_len, rt_tuple_new,
     rt_tuple_set,
 };
@@ -182,6 +182,7 @@ pub use objects::{
     rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_check_discriminant,
     rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_option_map, rt_object_class_id, rt_object_field_count,
     rt_object_field_get, rt_object_field_set, rt_object_new,
+    rt_unwrap_or_self,
 };
 
 // Re-export unique pointer FFI functions
@@ -310,6 +311,9 @@ pub use ffi::{
 
 // Re-export runtime configuration FFI functions
 pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
+
+// Re-export CLI FFI functions
+pub use cli_ffi::{rt_cli_get_args, rt_cli_print_help, rt_cli_print_version, rt_cli_version};
 
 // Re-export file I/O FFI functions
 pub use ffi::{
