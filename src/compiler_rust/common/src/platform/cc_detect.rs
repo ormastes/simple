@@ -7,11 +7,22 @@ use crate::target::{Target, TargetOS};
 
 /// Find a C compiler for the host platform.
 ///
-/// Respects the `CC` environment variable. On Windows, prefers `clang-cl`.
+/// Respects the `CC` environment variable. When `SIMPLE_LINKER_FLAVOR=msvc`,
+/// prefers MSVC-compatible compilers (`clang-cl`). On Windows, prefers `clang-cl`.
 /// On Unix, prefers `clang` over `gcc`.
 pub fn find_c_compiler() -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
+    }
+
+    // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible compilers
+    // to ensure the linker driver invokes lld-link (not MinGW ld).
+    if is_msvc_linker_flavor() {
+        for cc in &["clang-cl", "clang", "cl.exe"] {
+            if command_exists(cc) && is_msvc_target(cc) {
+                return cc.to_string();
+            }
+        }
     }
 
     if cfg!(target_os = "windows") {
@@ -30,12 +41,22 @@ pub fn find_c_compiler() -> String {
 
 /// Detect the C compiler for a specific target platform.
 ///
+/// When `SIMPLE_LINKER_FLAVOR=msvc`, prefers `clang-cl` to ensure
+/// MSVC-compatible object files and linker invocation.
 /// On Windows targets, prefers MinGW `gcc` when running on Windows,
 /// otherwise defaults to `cl.exe` (MSVC).
 /// On Unix targets, defaults to `cc`.
 pub fn detect_c_compiler_for_target(target: &Target) -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
+    }
+    // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible compilers
+    if is_msvc_linker_flavor() {
+        for cc in &["clang-cl", "clang", "cl.exe"] {
+            if command_exists(cc) && is_msvc_target(cc) {
+                return cc.to_string();
+            }
+        }
     }
     match target.os {
         TargetOS::Windows => {
@@ -53,11 +74,22 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
 
 /// Find a C++ compiler.
 ///
+/// When `SIMPLE_LINKER_FLAVOR=msvc`, prefers `clang-cl` (handles C++ linking).
 /// On Windows, tries clang++ then g++.
 /// On Unix, tries clang++ then g++.
 pub fn find_cxx_compiler() -> String {
     if let Ok(cxx) = std::env::var("CXX") {
         return cxx;
+    }
+    // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible C++ compilers.
+    // Try clang-cl first, then clang++ (may target MSVC), then plain clang
+    // (handles .cpp files and targets MSVC on Windows standalone installs).
+    if is_msvc_linker_flavor() {
+        for cxx in &["clang-cl", "clang++", "clang"] {
+            if command_exists(cxx) && is_msvc_target(cxx) {
+                return cxx.to_string();
+            }
+        }
     }
     for cxx in &["clang++", "g++"] {
         if command_exists(cxx) {
@@ -152,6 +184,15 @@ pub fn is_msvc_target(cc: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if the `SIMPLE_LINKER_FLAVOR` env var is set to "msvc".
+///
+/// When true, compiler detection should prefer MSVC-compatible tools
+/// (`clang-cl`, `lld-link`) over MinGW tools (`gcc`, `g++`, `ld`).
+pub fn is_msvc_linker_flavor() -> bool {
+    std::env::var("SIMPLE_LINKER_FLAVOR")
+        .map_or(false, |v| v.eq_ignore_ascii_case("msvc"))
 }
 
 /// Check if a command exists and works by running `--version`.

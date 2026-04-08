@@ -142,16 +142,20 @@ if [[ "$toolchain" == "msvc" ]]; then
   if [[ -z "${CC:-}" ]]; then
     for cc_candidate in clang-cl clang; do
       if command -v "$cc_candidate" &>/dev/null && "$cc_candidate" --version &>/dev/null 2>&1; then
-        export CC="$cc_candidate"
+        # Resolve to absolute path so the Rust seed (which uses Windows PATH
+        # resolution, not MSYS2 PATH) finds the same binary.
+        export CC="$(command -v "$cc_candidate")"
         break
       fi
     done
   fi
   if [[ -z "${CXX:-}" ]]; then
-    for cxx_candidate in clang++ g++; do
+    # For MSVC mode, also try plain clang (handles C++ .cpp files and targets MSVC).
+    # clang-cl may be broken on MSYS2 (missing libLLVM-19.dll).
+    for cxx_candidate in clang++ clang; do
       # Must actually run (MSYS2 clang++ may fail with missing libLLVM.dll)
       if "$cxx_candidate" --version &>/dev/null 2>&1; then
-        export CXX="$cxx_candidate"
+        export CXX="$(command -v "$cxx_candidate")"
         break
       fi
     done

@@ -1179,36 +1179,72 @@ int main(int argc, char** argv) {
         init_names.sort();
         init_names.dedup();
 
+        let cxx = find_cxx_compiler();
+        let is_clang_cl = cxx.contains("clang-cl");
+
         // Generate C source — NOT constructor, called from main() AFTER runtime init
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
-        code.push_str("extern \"C\" {\n");
-        for name in &init_names {
-            code.push_str(&format!("    void __attribute__((weak)) {}(void);\n", name));
+        if is_clang_cl {
+            // MSVC/clang-cl: use /ALTERNATENAME for weak-like behavior
+            code.push_str("extern \"C\" {\n");
+            for name in &init_names {
+                code.push_str(&format!("    void {}(void);\n", name));
+            }
+            code.push_str("}\n");
+            for name in &init_names {
+                let stub = format!("_{}_stub", name);
+                code.push_str(&format!(
+                    "#pragma comment(linker, \"/ALTERNATENAME:{}={}\")\n\
+                     extern \"C\" void {}(void) {{}}\n",
+                    name, stub, stub
+                ));
+            }
+            code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
+            for name in &init_names {
+                code.push_str(&format!("    {}();\n", name));
+            }
+            code.push_str("}\n");
+        } else {
+            // GCC/MinGW: use __attribute__((weak))
+            code.push_str("extern \"C\" {\n");
+            for name in &init_names {
+                code.push_str(&format!("    void __attribute__((weak)) {}(void);\n", name));
+            }
+            code.push_str("}\n");
+            code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
+            for name in &init_names {
+                code.push_str(&format!("    if ({}) {}();\n", name, name));
+            }
+            code.push_str("}\n");
         }
-        code.push_str("}\n");
-        code.push_str("extern \"C\" void __simple_call_module_inits(void) {\n");
-        for name in &init_names {
-            code.push_str(&format!("    if ({}) {}();\n", name, name));
-        }
-        code.push_str("}\n");
 
         let init_cpp = temp_dir.join("_init_all.cpp");
         std::fs::write(&init_cpp, &code).map_err(|e| format!("write init_all: {e}"))?;
 
         let init_o = temp_dir.join("_init_all.o");
-        let cxx = find_cxx_compiler();
-        let status = std::process::Command::new(&cxx)
-            .arg("-c")
-            .arg("-O2")
-            .arg("-ffunction-sections")
-            .arg("-fdata-sections")
-            .arg(&init_cpp)
-            .arg("-o")
-            .arg(&init_o)
-            .status()
-            .map_err(|e| format!("compile init_all: {e}"))?;
+        let status = if is_clang_cl {
+            std::process::Command::new(&cxx)
+                .arg("/c")
+                .arg("/O2")
+                .arg("/Gy")
+                .arg(format!("/Fo{}", init_o.display()))
+                .arg(&init_cpp)
+                .status()
+                .map_err(|e| format!("compile init_all: {e}"))?
+        } else {
+            std::process::Command::new(&cxx)
+                .arg("-c")
+                .arg("-O2")
+                .arg("-ffunction-sections")
+                .arg("-fdata-sections")
+                .arg(&init_cpp)
+                .arg("-o")
+                .arg(&init_o)
+                .status()
+                .map_err(|e| format!("compile init_all: {e}"))?
+        };
         if !status.success() {
-            return Err("compile init_all.cpp failed".into());
+            return Err(format!("compile init_all.cpp failed ({})", cxx));
         }
         Ok(Some(init_o))
     }
@@ -1446,7 +1482,21 @@ int main(int argc, char** argv) {
                 {
                     cmd.arg("-Wl,-force_load").arg(runtime_lib);
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(target_os = "windows")]
+                {
+                    if is_clang_cl {
+                        // clang-cl: pass lib directly; /WHOLEARCHIVE added via /link later
+                        cmd.arg(runtime_lib);
+                    } else if is_msvc {
+                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
+                    } else {
+                        // MinGW/GNU linker
+                        cmd.arg("-Wl,--whole-archive");
+                        cmd.arg(runtime_lib);
+                        cmd.arg("-Wl,--no-whole-archive");
+                    }
+                }
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 {
                     cmd.arg("-Wl,--whole-archive");
                     cmd.arg(runtime_lib);
@@ -1517,7 +1567,10 @@ int main(int argc, char** argv) {
             // /link passes remaining args to MSVC linker
             cmd.arg("/link").arg("/WHOLEARCHIVE").arg("/FORCE:MULTIPLE,UNRESOLVED");
         } else if is_msvc {
-            cmd.arg("-Wl,/FORCE:UNRESOLVED");
+            // Use -Xlinker (not -Wl,) to avoid comma-splitting of the flag value.
+            // -Wl,/FORCE:MULTIPLE,UNRESOLVED would split into /FORCE:MULTIPLE and
+            // UNRESOLVED (interpreted as a file) by clang's -Wl, handler.
+            cmd.arg("-Xlinker").arg("/FORCE:MULTIPLE,UNRESOLVED");
         }
 
         if self.config.strip {

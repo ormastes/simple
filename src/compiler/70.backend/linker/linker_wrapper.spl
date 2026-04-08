@@ -494,11 +494,15 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         Err("cc linking failed: {err_msg}")
 
 fn _is_mingw_env() -> bool:
-    """Check if running under MinGW/MSYS2."""
+    """Check if running under MinGW/MSYS2.
+    SIMPLE_LINKER_FLAVOR=msvc overrides MSYSTEM detection so that
+    MSVC toolchain is used even inside MSYS2/Git Bash."""
+    val linker_flavor = env_get("SIMPLE_LINKER_FLAVOR")
+    if linker_flavor == "msvc":
+        return false
     val msystem = env_get("MSYSTEM")
     if msystem != "" and msystem != nil:
         return true
-    val linker_flavor = env_get("SIMPLE_LINKER_FLAVOR")
     linker_flavor == "gnu"
 
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
@@ -551,6 +555,9 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
         extra.push("/OPT:REF,ICF")
+    # Allow multiply-defined symbols (runtime lib + compiled objects may overlap)
+    # and unresolved symbols (bootstrap stubs, lazy-loaded runtime functions).
+    extra.push("/FORCE:MULTIPLE,UNRESOLVED")
     msvc_config.extra_args = extra
 
     if config.verbose:

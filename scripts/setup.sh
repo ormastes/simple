@@ -217,13 +217,20 @@ fi
 # Atomic symlink creation: create a temp link then mv over the target.
 # This avoids a window where the link doesn't exist (rm + ln race).
 # Falls back to plain ln -sf on platforms where mv over symlinks fails.
+# On Windows/MSYS2, sets MSYS=winsymlinks:nativestrict to create real
+# NTFS symlinks instead of file copies (default MSYS2 behavior).
 create_link() {
   local target="$1" name="$2"
   local lpath="${bin_dir}/${name}"
   local tmp="${lpath}.setup_tmp.$$"
   cd "${bin_dir}"
-  ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${lpath}" 2>/dev/null \
-    || { rm -f "${tmp}" 2>/dev/null; rm -f "${lpath}"; ln -sf "${target}" "${name}"; }
+  # On MSYS2/Windows, default ln -s creates copies. Force native symlinks.
+  local _ln_env=""
+  case "${host_kernel}" in
+    MINGW*|MSYS*|CYGWIN*) _ln_env="MSYS=winsymlinks:nativestrict" ;;
+  esac
+  env ${_ln_env} ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${lpath}" 2>/dev/null \
+    || { rm -f "${tmp}" 2>/dev/null; rm -f "${lpath}"; env ${_ln_env} ln -sf "${target}" "${name}"; }
   # Validate: link should resolve to an executable
   if [ -L "${lpath}" ] && ! [ -e "${lpath}" ]; then
     echo "  [WARN] ${name} → ${target} (dangling — target does not exist yet)" >&2
@@ -236,8 +243,12 @@ create_release_link() {
   local target="$1" link_path="$2"
   local tmp="${link_path}.setup_tmp.$$"
   mkdir -p "$(dirname "${link_path}")"
-  ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${link_path}" 2>/dev/null \
-    || { rm -f "${tmp}" 2>/dev/null; rm -f "${link_path}"; ln -sf "${target}" "${link_path}"; }
+  local _ln_env=""
+  case "${host_kernel}" in
+    MINGW*|MSYS*|CYGWIN*) _ln_env="MSYS=winsymlinks:nativestrict" ;;
+  esac
+  env ${_ln_env} ln -sf "${target}" "${tmp}" 2>/dev/null && mv -f "${tmp}" "${link_path}" 2>/dev/null \
+    || { rm -f "${tmp}" 2>/dev/null; rm -f "${link_path}"; env ${_ln_env} ln -sf "${target}" "${link_path}"; }
   if [ -L "${link_path}" ] && ! [ -e "${link_path}" ]; then
     echo "  [WARN] ${link_path#${repo_root}/} → ${target} (dangling)" >&2
   else
@@ -731,7 +742,10 @@ for mcp_name in simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_m
     rm -f "${mcp_link}"
   fi
   cd "${bin_dir}"
-  ln -sf "release/${mcp_name}" "${mcp_name}"
+  case "${host_kernel}" in
+    MINGW*|MSYS*|CYGWIN*) MSYS=winsymlinks:nativestrict ln -sf "release/${mcp_name}" "${mcp_name}" ;;
+    *) ln -sf "release/${mcp_name}" "${mcp_name}" ;;
+  esac
 done
 echo "  Linked bin/*_mcp_server → release/*"
 
