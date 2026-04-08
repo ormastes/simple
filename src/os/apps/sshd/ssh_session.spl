@@ -121,7 +121,8 @@ impl SshSession:
             return
 
         val r = ssh_parse_version_string(client_data)
-        if val version = r.ok():
+        if r.is_ok():
+            val version = r.unwrap()
             self.client_version = version
             serial_println("[sshd-session] version exchange ok")
             self.state = SessionState.KexInit
@@ -229,7 +230,8 @@ impl SshSession:
         if algos.cipher_c2s != "aes256-gcm@openssh.com" or algos.cipher_s2c != "aes256-gcm@openssh.com":
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
             return
-        self.cipher.activate(keys)
+        self.cipher.activate(keys, self.recv_seq, self.send_seq)
+        serial_println("[sshd-session] cipher activated: c2s_seq={self.recv_seq} s2c_seq={self.send_seq}")
         serial_println("[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
@@ -248,7 +250,8 @@ impl SshSession:
 
         if payload[0] == SSH_MSG_SERVICE_REQUEST:
             val r = ssh_parse_service_request(payload)
-            if val service = r.ok():
+            if r.is_ok():
+                val service = r.unwrap()
                 if service == "ssh-userauth":
                     val accept = ssh_build_service_accept("ssh-userauth")
                     self.send_packet(accept)
@@ -563,7 +566,8 @@ impl SshSession:
         # Parse TERM
         var term_type: text = "xterm"
         val r_term = ssh_get_text(payload, pos)
-        if val term_pair = r_term.ok():
+        if r_term.is_ok():
+            val term_pair = r_term.unwrap()
             term_type = term_pair.value
             pos = term_pair.next_offset
 
@@ -580,7 +584,8 @@ impl SshSession:
 
         # Create PTY
         val r_pty = SshPty.create(term_type, cols, rows)
-        if val pty = r_pty.ok():
+        if r_pty.is_ok():
+            val pty = r_pty.unwrap()
             self.pty = pty
 
             # Mark channel as PTY-enabled
@@ -614,7 +619,8 @@ impl SshSession:
         # If no PTY was requested, create a default one
         if self.pty == nil:
             val r_pty = SshPty.create("vt100", 80, 24)
-            if val pty = r_pty.ok():
+            if r_pty.is_ok():
+                val pty = r_pty.unwrap()
                 self.pty = pty
 
         # Write a welcome message to the PTY
@@ -710,7 +716,8 @@ impl SshSession:
 
             # Decrypt
             val r = self.cipher.decrypt_packet(enc_packet)
-            if val payload = r.ok():
+            if r.is_ok():
+                val payload = r.unwrap()
                 self.recv_seq = (self.recv_seq + 1) & 0xFFFFFFFF
                 return payload
             else:
@@ -719,7 +726,8 @@ impl SshSession:
         else:
             # Plaintext mode
             val r = ssh_packet_read(self.recv_buf, 0)
-            if val pair = r.ok():
+            if r.is_ok():
+                val pair = r.unwrap()
                 val packet = pair.packet
                 val consumed = pair.consumed
 
@@ -742,7 +750,8 @@ impl SshSession:
                     i = i + 1
 
                 val r2 = ssh_packet_read(self.recv_buf, 0)
-                if val pair2 = r2.ok():
+                if r2.is_ok():
+                    val pair2 = r2.unwrap()
                     val packet2 = pair2.packet
                     val consumed2 = pair2.consumed
                     var remaining2: [u8] = []
@@ -769,7 +778,8 @@ impl SshSession:
     me raw_recv(max: u64) -> [u8]:
         """Receive raw bytes from the TCP socket."""
         val r = posix_recv_bytes(self.socket_fd, max, 0)
-        if val data = r.ok():
+        if r.is_ok():
+            val data = r.unwrap()
             data
         else:
             []

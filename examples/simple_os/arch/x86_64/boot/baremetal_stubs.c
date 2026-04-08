@@ -4388,7 +4388,7 @@ static void _sc_load21(int64_t out[24], const uint8_t in[], int nbytes)
     out[20] = (int64_t)((in[52] >> 4) | ((int64_t)in[53] << 4) | ((int64_t)in[54] << 12) | ((int64_t)in[55] << 20)) & 0x1FFFFF;
     out[21] = (int64_t)((in[55] >> 1) | ((int64_t)in[56] << 7) | ((int64_t)in[57] << 15)) & 0x1FFFFF;
     out[22] = (int64_t)((in[57] >> 6) | ((int64_t)in[58] << 2) | ((int64_t)in[59] << 10) | ((int64_t)in[60] << 18)) & 0x1FFFFF;
-    out[23] = (int64_t)((in[60] >> 3) | ((int64_t)in[61] << 5) | ((int64_t)in[62] << 13));
+    out[23] = (int64_t)((in[60] >> 3) | ((int64_t)in[61] << 5) | ((int64_t)in[62] << 13) | ((int64_t)in[63] << 21));
 }
 
 static void _sc_pack(uint8_t out[32], const int64_t s[12])
@@ -4425,6 +4425,110 @@ static void _sc_pack(uint8_t out[32], const int64_t s[12])
     out[29] = (uint8_t)(s[11] >>  1);
     out[30] = (uint8_t)(s[11] >>  9);
     out[31] = (uint8_t)(s[11] >> 17);
+}
+
+static const uint32_t _sc_l32[8] = {
+    0x5cf5d3edu, 0x5812631au, 0xa2f79cd6u, 0x14def9deu,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x10000000u
+};
+
+static void _sc_load_u32_8(uint32_t out[8], const uint8_t in[32])
+{
+    for (int i = 0; i < 8; i++) {
+        out[i] = ((uint32_t)in[i * 4]) |
+                 ((uint32_t)in[i * 4 + 1] << 8) |
+                 ((uint32_t)in[i * 4 + 2] << 16) |
+                 ((uint32_t)in[i * 4 + 3] << 24);
+    }
+}
+
+static void _sc_load_u32_16(uint32_t out[16], const uint8_t in[64])
+{
+    for (int i = 0; i < 16; i++) {
+        out[i] = ((uint32_t)in[i * 4]) |
+                 ((uint32_t)in[i * 4 + 1] << 8) |
+                 ((uint32_t)in[i * 4 + 2] << 16) |
+                 ((uint32_t)in[i * 4 + 3] << 24);
+    }
+}
+
+static void _sc_store_u32_8(uint8_t out[32], const uint32_t in[8])
+{
+    for (int i = 0; i < 8; i++) {
+        out[i * 4 + 0] = (uint8_t)(in[i] >> 0);
+        out[i * 4 + 1] = (uint8_t)(in[i] >> 8);
+        out[i * 4 + 2] = (uint8_t)(in[i] >> 16);
+        out[i * 4 + 3] = (uint8_t)(in[i] >> 24);
+    }
+}
+
+static int _sc_cmp_u32_8(const uint32_t a[8], const uint32_t b[8])
+{
+    for (int i = 7; i >= 0; i--) {
+        if (a[i] > b[i]) return 1;
+        if (a[i] < b[i]) return -1;
+    }
+    return 0;
+}
+
+static void _sc_sub_u32_8(uint32_t out[8], const uint32_t a[8], const uint32_t b[8])
+{
+    uint64_t borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t ai = (uint64_t)a[i];
+        uint64_t bi = (uint64_t)b[i] + borrow;
+        if (ai >= bi) {
+            out[i] = (uint32_t)(ai - bi);
+            borrow = 0;
+        } else {
+            out[i] = (uint32_t)((0x100000000ULL + ai) - bi);
+            borrow = 1;
+        }
+    }
+}
+
+static void _sc_add_u32_8(uint32_t out[8], const uint32_t a[8], const uint32_t b[8])
+{
+    uint64_t carry = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t sum = (uint64_t)a[i] + (uint64_t)b[i] + carry;
+        out[i] = (uint32_t)(sum & 0xFFFFFFFFu);
+        carry = sum >> 32;
+    }
+}
+
+static int _sc_bit_is_set_16(const uint32_t limbs[16], unsigned bit)
+{
+    return (int)((limbs[bit / 32] >> (bit % 32)) & 1u);
+}
+
+static void _sc_sub_shifted_L16(uint32_t limbs[16], unsigned shift)
+{
+    uint32_t shifted[16];
+    for (int i = 0; i < 16; i++) shifted[i] = 0;
+
+    unsigned word_shift = shift / 32;
+    unsigned bit_shift = shift % 32;
+    for (unsigned j = 0; j < 8; j++) {
+        unsigned idx = word_shift + j;
+        if (idx >= 16) break;
+        uint64_t piece = (uint64_t)_sc_l32[j] << bit_shift;
+        shifted[idx] |= (uint32_t)(piece & 0xFFFFFFFFu);
+        if (idx + 1 < 16) shifted[idx + 1] |= (uint32_t)(piece >> 32);
+    }
+
+    uint64_t borrow = 0;
+    for (int i = 0; i < 16; i++) {
+        uint64_t cur = (uint64_t)limbs[i];
+        uint64_t sub = (uint64_t)shifted[i] + borrow;
+        if (cur >= sub) {
+            limbs[i] = (uint32_t)(cur - sub);
+            borrow = 0;
+        } else {
+            limbs[i] = (uint32_t)((0x100000000ULL + cur) - sub);
+            borrow = 1;
+        }
+    }
 }
 
 /* Reduce mod L using the relation:
@@ -4506,63 +4610,63 @@ static void _sc_reduce_limbs(int64_t s[24])
 
 static void sc_reduce(uint8_t out[32], const uint8_t in[64])
 {
-    int64_t s[24];
-    _sc_load21(s, in, 64);
-    /* Initial carry-propagate */
-    for (int i = 0; i < 23; i++) {
-        int64_t carry = (s[i] + (1LL << 20)) >> 21;
-        s[i] -= carry << 21;
-        s[i+1] += carry;
+    uint32_t limbs[16];
+    _sc_load_u32_16(limbs, in);
+
+    for (int bit = 511; bit >= 252; bit--) {
+        if (_sc_bit_is_set_16(limbs, (unsigned)bit)) {
+            _sc_sub_shifted_L16(limbs, (unsigned)(bit - 252));
+        }
     }
-    _sc_reduce_limbs(s);
-    _sc_pack(out, s);
+
+    uint32_t low[8];
+    for (int i = 0; i < 8; i++) low[i] = limbs[i];
+    while (_sc_cmp_u32_8(low, _sc_l32) >= 0) {
+        _sc_sub_u32_8(low, low, _sc_l32);
+    }
+    _sc_store_u32_8(out, low);
 }
 
 /* sc_muladd: out = (a * b + c) mod L */
 static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32], const uint8_t c[32])
 {
-    int64_t al[24], bl[24], cl[24];
-    _sc_load21(al, a, 32);
-    _sc_load21(bl, b, 32);
-    _sc_load21(cl, c, 32);
+    uint32_t al[8], bl[8], cl[8];
+    _sc_load_u32_8(al, a);
+    _sc_load_u32_8(bl, b);
+    _sc_load_u32_8(cl, c);
 
-    /* Schoolbook multiply a*b, result in s[0..23], then add c */
-    int64_t s[24];
-    for (int i = 0; i < 24; i++) s[i] = 0;
-
-    s[ 0] = cl[0] + al[0]*bl[0];
-    s[ 1] = cl[1] + al[0]*bl[1] + al[1]*bl[0];
-    s[ 2] = cl[2] + al[0]*bl[2] + al[1]*bl[1] + al[2]*bl[0];
-    s[ 3] = cl[3] + al[0]*bl[3] + al[1]*bl[2] + al[2]*bl[1] + al[3]*bl[0];
-    s[ 4] = cl[4] + al[0]*bl[4] + al[1]*bl[3] + al[2]*bl[2] + al[3]*bl[1] + al[4]*bl[0];
-    s[ 5] = cl[5] + al[0]*bl[5] + al[1]*bl[4] + al[2]*bl[3] + al[3]*bl[2] + al[4]*bl[1] + al[5]*bl[0];
-    s[ 6] = cl[6] + al[0]*bl[6] + al[1]*bl[5] + al[2]*bl[4] + al[3]*bl[3] + al[4]*bl[2] + al[5]*bl[1] + al[6]*bl[0];
-    s[ 7] = cl[7] + al[0]*bl[7] + al[1]*bl[6] + al[2]*bl[5] + al[3]*bl[4] + al[4]*bl[3] + al[5]*bl[2] + al[6]*bl[1] + al[7]*bl[0];
-    s[ 8] = cl[8] + al[0]*bl[8] + al[1]*bl[7] + al[2]*bl[6] + al[3]*bl[5] + al[4]*bl[4] + al[5]*bl[3] + al[6]*bl[2] + al[7]*bl[1] + al[8]*bl[0];
-    s[ 9] = cl[9] + al[0]*bl[9] + al[1]*bl[8] + al[2]*bl[7] + al[3]*bl[6] + al[4]*bl[5] + al[5]*bl[4] + al[6]*bl[3] + al[7]*bl[2] + al[8]*bl[1] + al[9]*bl[0];
-    s[10] = cl[10]+ al[0]*bl[10]+ al[1]*bl[9] + al[2]*bl[8] + al[3]*bl[7] + al[4]*bl[6] + al[5]*bl[5] + al[6]*bl[4] + al[7]*bl[3] + al[8]*bl[2] + al[9]*bl[1] + al[10]*bl[0];
-    s[11] = cl[11]+ al[0]*bl[11]+ al[1]*bl[10]+ al[2]*bl[9] + al[3]*bl[8] + al[4]*bl[7] + al[5]*bl[6] + al[6]*bl[5] + al[7]*bl[4] + al[8]*bl[3] + al[9]*bl[2] + al[10]*bl[1] + al[11]*bl[0];
-    s[12] =         al[1]*bl[11]+ al[2]*bl[10]+ al[3]*bl[9] + al[4]*bl[8] + al[5]*bl[7] + al[6]*bl[6] + al[7]*bl[5] + al[8]*bl[4] + al[9]*bl[3] + al[10]*bl[2] + al[11]*bl[1];
-    s[13] =         al[2]*bl[11]+ al[3]*bl[10]+ al[4]*bl[9] + al[5]*bl[8] + al[6]*bl[7] + al[7]*bl[6] + al[8]*bl[5] + al[9]*bl[4] + al[10]*bl[3] + al[11]*bl[2];
-    s[14] =         al[3]*bl[11]+ al[4]*bl[10]+ al[5]*bl[9] + al[6]*bl[8] + al[7]*bl[7] + al[8]*bl[6] + al[9]*bl[5] + al[10]*bl[4] + al[11]*bl[3];
-    s[15] =         al[4]*bl[11]+ al[5]*bl[10]+ al[6]*bl[9] + al[7]*bl[8] + al[8]*bl[7] + al[9]*bl[6] + al[10]*bl[5] + al[11]*bl[4];
-    s[16] =         al[5]*bl[11]+ al[6]*bl[10]+ al[7]*bl[9] + al[8]*bl[8] + al[9]*bl[7] + al[10]*bl[6] + al[11]*bl[5];
-    s[17] =         al[6]*bl[11]+ al[7]*bl[10]+ al[8]*bl[9] + al[9]*bl[8] + al[10]*bl[7] + al[11]*bl[6];
-    s[18] =         al[7]*bl[11]+ al[8]*bl[10]+ al[9]*bl[9] + al[10]*bl[8] + al[11]*bl[7];
-    s[19] =         al[8]*bl[11]+ al[9]*bl[10]+ al[10]*bl[9] + al[11]*bl[8];
-    s[20] =         al[9]*bl[11]+ al[10]*bl[10]+ al[11]*bl[9];
-    s[21] =         al[10]*bl[11]+ al[11]*bl[10];
-    s[22] =         al[11]*bl[11];
-    s[23] = 0;
-
-    /* Carry-propagate */
-    for (int i = 0; i < 23; i++) {
-        int64_t carry = (s[i] + (1LL << 20)) >> 21;
-        s[i] -= carry << 21;
-        s[i+1] += carry;
+    unsigned __int128 accum[16];
+    for (int i = 0; i < 16; i++) accum[i] = 0;
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            accum[i + j] += (unsigned __int128)al[i] * (unsigned __int128)bl[j];
+        }
     }
-    _sc_reduce_limbs(s);
-    _sc_pack(out, s);
+
+    uint32_t prod32[16];
+    unsigned __int128 carry = 0;
+    for (int i = 0; i < 16; i++) {
+        unsigned __int128 sum = accum[i] + carry;
+        prod32[i] = (uint32_t)(sum & 0xFFFFFFFFu);
+        carry = sum >> 32;
+    }
+
+    uint8_t prod[64];
+    for (int i = 0; i < 16; i++) {
+        prod[i * 4 + 0] = (uint8_t)(prod32[i] >> 0);
+        prod[i * 4 + 1] = (uint8_t)(prod32[i] >> 8);
+        prod[i * 4 + 2] = (uint8_t)(prod32[i] >> 16);
+        prod[i * 4 + 3] = (uint8_t)(prod32[i] >> 24);
+    }
+
+    uint8_t reduced[32];
+    sc_reduce(reduced, prod);
+    _sc_load_u32_8(prod32, reduced);
+    _sc_add_u32_8(prod32, prod32, cl);
+    while (_sc_cmp_u32_8(prod32, _sc_l32) >= 0) {
+        _sc_sub_u32_8(prod32, prod32, _sc_l32);
+    }
+    _sc_store_u32_8(out, prod32);
 }
 
 /* ---------- Ed25519 high-level API ---------- */

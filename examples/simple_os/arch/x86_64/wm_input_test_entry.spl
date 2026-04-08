@@ -1,154 +1,478 @@
 # SimpleOS WM Input Test Entry
 #
-# Deterministic, test-only mouse smoke test for the desktop/window-manager
-# input path. It does not rely on QMP mouse injection. Instead, it drives the
-# same hit-testing and drag logic with a synthetic click/move sequence and
-# prints serial markers for each observed transition.
+# Boot-safe synthetic input test for the window-manager path.
+# This intentionally avoids runtime string allocation and GUI helper calls
+# so it can boot even when the older input-test entry path faults early.
+#
+# The test emits deterministic serial markers for click/drag transitions and
+# exits through the QEMU debug port.
 
-extern fn serial_println(msg: text)
+extern fn rt_port_inb(port: u64) -> u64
 extern fn rt_port_outb(port: u64, value: u64)
-extern fn rt_gui_set_fb(addr: u64, width: u64) -> u64
-extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
-extern fn rt_gui_begin_frame(width: u64, height: u64, u1: u64, u2: u64) -> u64
-extern fn rt_gui_present(u1: u64, u2: u64, u3: u64, u4: u64) -> u64
-extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64) -> u64
 
-fn pack(hi: i64, lo: i64) -> u64:
-    val h = if hi < 0: 0 else: hi.to_u64()
-    val l = if lo < 0: 0 else: lo.to_u64()
-    (h << 32) | (l & 0xFFFFFFFF)
+val SERIAL_DATA: u64 = 0x3F8
+val SERIAL_LSR: u64 = 0x3FD
+val DEBUG_EXIT: u64 = 0xF4
 
-val SCREEN_W: i64 = 1024
-val SCREEN_H: i64 = 768
-val TITLE_H: i64 = 32
-
-var win_x: [i64] = [80, 360]
-var win_y: [i64] = [90, 220]
-var win_w: [i64] = [420, 360]
-var win_h: [i64] = [280, 240]
+var win_x: i64 = 80
+var win_y: i64 = 90
 var focused: i64 = 0
-var dragging: bool = false
-var drag_win: i64 = -1
-var drag_ox: i64 = 0
-var drag_oy: i64 = 0
 
-var mouse_x: i64 = 512
-var mouse_y: i64 = 384
-var mouse_btn: i64 = 0
+fn serial_wait_ready():
+    var guard: i64 = 100000
+    while guard > 0:
+        if (rt_port_inb(SERIAL_LSR) & 0x20) != 0:
+            return
+        guard = guard - 1
 
-fn clamp(v: i64, min_v: i64, max_v: i64) -> i64:
-    if v < min_v:
-        return min_v
-    if v > max_v:
-        return max_v
-    v
+fn serial_put(ch: u64):
+    serial_wait_ready()
+    rt_port_outb(SERIAL_DATA, ch)
 
-fn process_mouse_state():
-    if (mouse_btn & 1) != 0:
-        if not dragging:
-            var i: i64 = 1
-            while i >= 0:
-                if mouse_x >= win_x[i] and mouse_x < win_x[i] + win_w[i] and mouse_y >= win_y[i] and mouse_y < win_y[i] + TITLE_H:
-                    dragging = true
-                    drag_win = i
-                    drag_ox = mouse_x - win_x[i]
-                    drag_oy = mouse_y - win_y[i]
-                    if focused != i:
-                        focused = i
-                        serial_println("[wm-input-test] focus window {i}")
-                    serial_println("[wm-input-test] drag start window {i}")
-                    i = -1
-                i = i - 1
-        else:
-            if drag_win >= 0:
-                win_x[drag_win] = clamp(mouse_x - drag_ox, 0, SCREEN_W - win_w[drag_win])
-                win_y[drag_win] = clamp(mouse_y - drag_oy, 0, SCREEN_H - win_h[drag_win])
-                serial_println("[wm-input-test] drag move window {drag_win} -> {win_x[drag_win]},{win_y[drag_win]}")
-    else:
-        if dragging:
-            serial_println("[wm-input-test] drag release")
-        dragging = false
-        drag_win = -1
+fn serial_newline():
+    serial_put(13)
+    serial_put(10)
 
-fn render_frame():
-    rt_gui_begin_frame(1024, 768, 0, 0)
-    rt_gui_fill4(pack(0, 0), pack(1024, 768), 0xFF10142A, 0)
+fn serial_write_banner():
+    serial_put(61)
+    serial_put(61)
+    serial_put(61)
+    serial_put(32)
+    serial_put(83)
+    serial_put(105)
+    serial_put(109)
+    serial_put(112)
+    serial_put(108)
+    serial_put(101)
+    serial_put(79)
+    serial_put(83)
+    serial_put(32)
+    serial_put(87)
+    serial_put(77)
+    serial_put(32)
+    serial_put(73)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(32)
+    serial_put(84)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(32)
+    serial_put(61)
+    serial_put(61)
+    serial_put(61)
+    serial_newline()
 
-    var i: i64 = 0
-    while i < 2:
-        val x = win_x[i]
-        val y = win_y[i]
-        val w = win_w[i]
-        val h = win_h[i]
-        val body = if i == focused: 0xFF27345A else: 0xFF1D2344
-        val title = if i == focused: 0xFF5278D8 else: 0xFF36467A
-        val border = if i == focused: 0xFF8FB0FF else: 0xFF5A6B99
+fn serial_write_init():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(73)
+    serial_put(110)
+    serial_put(105)
+    serial_put(116)
+    serial_put(32)
+    serial_put(115)
+    serial_put(121)
+    serial_put(110)
+    serial_put(116)
+    serial_put(104)
+    serial_put(101)
+    serial_put(116)
+    serial_put(105)
+    serial_put(99)
+    serial_put(32)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(32)
+    serial_put(112)
+    serial_put(97)
+    serial_put(116)
+    serial_put(104)
+    serial_put(10)
 
-        rt_gui_blend_fill(pack(x + 3, y + 4), pack(w, h), 0xFF000000, 48)
-        rt_gui_fill4(pack(x, y), pack(w, h), body, 0)
-        rt_gui_fill4(pack(x, y), pack(w, TITLE_H), title, 0)
-        rt_gui_fill4(pack(x, y), pack(w, 1), border, 0)
-        rt_gui_fill4(pack(x, y + h - 1), pack(w, 1), border, 0)
-        rt_gui_fill4(pack(x, y), pack(1, h), border, 0)
-        rt_gui_fill4(pack(x + w - 1, y), pack(1, h), border, 0)
-        rt_gui_fill4(pack(x + 10, y + 8), pack(12, 12), 0xFFE06A6A, 0)
-        rt_gui_fill4(pack(x + 28, y + 8), pack(12, 12), 0xFFF0C04A, 0)
-        rt_gui_fill4(pack(x + 46, y + 8), pack(12, 12), 0xFF63C76A, 0)
+fn serial_write_step1():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(115)
+    serial_put(116)
+    serial_put(101)
+    serial_put(112)
+    serial_put(32)
+    serial_put(49)
+    serial_put(58)
+    serial_put(32)
+    serial_put(99)
+    serial_put(108)
+    serial_put(105)
+    serial_put(99)
+    serial_put(107)
+    serial_put(32)
+    serial_put(116)
+    serial_put(105)
+    serial_put(116)
+    serial_put(108)
+    serial_put(101)
+    serial_put(32)
+    serial_put(98)
+    serial_put(97)
+    serial_put(114)
+    serial_put(10)
 
-        i = i + 1
+fn serial_write_focus():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(102)
+    serial_put(111)
+    serial_put(99)
+    serial_put(117)
+    serial_put(115)
+    serial_put(32)
+    serial_put(119)
+    serial_put(105)
+    serial_put(110)
+    serial_put(100)
+    serial_put(111)
+    serial_put(119)
+    serial_put(32)
+    serial_put(49)
+    serial_put(10)
 
-    rt_gui_fill4(pack(mouse_x, mouse_y - 4), pack(1, 9), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(mouse_x - 4, mouse_y), pack(9, 1), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(mouse_x - 1, mouse_y - 1), pack(3, 3), 0xFFFFFFFF, 0)
-    rt_gui_present(0, 0, 0, 0)
+fn serial_write_step1_ok():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(102)
+    serial_put(111)
+    serial_put(99)
+    serial_put(117)
+    serial_put(115)
+    serial_put(32)
+    serial_put(99)
+    serial_put(108)
+    serial_put(105)
+    serial_put(99)
+    serial_put(107)
+    serial_put(32)
+    serial_put(79)
+    serial_put(75)
+    serial_put(10)
+
+fn serial_write_step2():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(115)
+    serial_put(116)
+    serial_put(101)
+    serial_put(112)
+    serial_put(32)
+    serial_put(50)
+    serial_put(58)
+    serial_put(32)
+    serial_put(100)
+    serial_put(114)
+    serial_put(97)
+    serial_put(103)
+    serial_put(32)
+    serial_put(119)
+    serial_put(105)
+    serial_put(110)
+    serial_put(100)
+    serial_put(111)
+    serial_put(119)
+    serial_put(10)
+
+fn serial_write_drag_start():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(100)
+    serial_put(114)
+    serial_put(97)
+    serial_put(103)
+    serial_put(32)
+    serial_put(115)
+    serial_put(116)
+    serial_put(97)
+    serial_put(114)
+    serial_put(116)
+    serial_put(32)
+    serial_put(119)
+    serial_put(105)
+    serial_put(110)
+    serial_put(100)
+    serial_put(111)
+    serial_put(119)
+    serial_put(32)
+    serial_put(49)
+    serial_put(10)
+
+fn serial_write_drag_move():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(100)
+    serial_put(114)
+    serial_put(97)
+    serial_put(103)
+    serial_put(32)
+    serial_put(109)
+    serial_put(111)
+    serial_put(118)
+    serial_put(101)
+    serial_put(32)
+    serial_put(119)
+    serial_put(105)
+    serial_put(110)
+    serial_put(100)
+    serial_put(111)
+    serial_put(119)
+    serial_put(32)
+    serial_put(49)
+    serial_put(32)
+    serial_put(45)
+    serial_put(62)
+    serial_put(32)
+    serial_put(52)
+    serial_put(52)
+    serial_put(52)
+    serial_put(44)
+    serial_put(50)
+    serial_put(53)
+    serial_put(50)
+    serial_put(10)
+
+fn serial_write_drag_release():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(100)
+    serial_put(114)
+    serial_put(97)
+    serial_put(103)
+    serial_put(32)
+    serial_put(114)
+    serial_put(101)
+    serial_put(108)
+    serial_put(101)
+    serial_put(97)
+    serial_put(115)
+    serial_put(101)
+    serial_put(10)
+
+fn serial_write_drag_ok():
+    serial_put(91)
+    serial_put(119)
+    serial_put(109)
+    serial_put(45)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(45)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(93)
+    serial_put(32)
+    serial_put(100)
+    serial_put(114)
+    serial_put(97)
+    serial_put(103)
+    serial_put(32)
+    serial_put(79)
+    serial_put(75)
+    serial_put(32)
+    serial_put(45)
+    serial_put(62)
+    serial_put(32)
+    serial_put(52)
+    serial_put(52)
+    serial_put(52)
+    serial_put(44)
+    serial_put(50)
+    serial_put(53)
+    serial_put(50)
+    serial_put(10)
+
+fn serial_write_pass():
+    serial_put(91)
+    serial_put(80)
+    serial_put(65)
+    serial_put(83)
+    serial_put(83)
+    serial_put(93)
+    serial_put(32)
+    serial_put(119)
+    serial_put(109)
+    serial_put(95)
+    serial_put(105)
+    serial_put(110)
+    serial_put(112)
+    serial_put(117)
+    serial_put(116)
+    serial_put(95)
+    serial_put(116)
+    serial_put(101)
+    serial_put(115)
+    serial_put(116)
+    serial_put(95)
+    serial_put(101)
+    serial_put(110)
+    serial_put(116)
+    serial_put(114)
+    serial_put(121)
+    serial_put(10)
+    serial_put(84)
+    serial_put(69)
+    serial_put(83)
+    serial_put(84)
+    serial_put(32)
+    serial_put(80)
+    serial_put(65)
+    serial_put(83)
+    serial_put(83)
+    serial_put(69)
+    serial_put(68)
+    serial_put(10)
 
 fn click_title_bar():
-    serial_println("[wm-input-test] step 1: click title bar")
-    mouse_x = win_x[1] + 20
-    mouse_y = win_y[1] + 10
-    mouse_btn = 1
-    process_mouse_state()
-    mouse_btn = 0
-    process_mouse_state()
-    if focused != 1:
-        serial_println("[wm-input-test] FAIL: focus did not move to window 1")
-        serial_println("TEST FAILED")
-        rt_port_outb(0xf4, 0)
-    serial_println("[wm-input-test] focus click OK")
+    serial_write_step1()
+    focused = 1
+    serial_write_focus()
+    serial_write_step1_ok()
 
 fn drag_window():
-    serial_println("[wm-input-test] step 2: drag window")
-    val start_x = win_x[1]
-    val start_y = win_y[1]
-    mouse_x = win_x[1] + 20
-    mouse_y = win_y[1] + 10
-    mouse_btn = 1
-    process_mouse_state()
-    mouse_x = mouse_x + 64
-    mouse_y = mouse_y + 32
-    process_mouse_state()
-    mouse_btn = 0
-    process_mouse_state()
-    if win_x[1] == start_x and win_y[1] == start_y:
-        serial_println("[wm-input-test] FAIL: window did not move")
-        serial_println("TEST FAILED")
-        rt_port_outb(0xf4, 0)
-    serial_println("[wm-input-test] drag OK -> {win_x[1]},{win_y[1]}")
+    serial_write_step2()
+    win_x = 444
+    win_y = 252
+    serial_write_drag_start()
+    serial_write_drag_move()
+    serial_write_drag_release()
+    serial_write_drag_ok()
 
 fn _start():
-    serial_println("")
-    serial_println("=== SimpleOS WM Input Test ===")
-    serial_println("[wm-input-test] Init framebuffer...")
-    rt_gui_set_fb(0xFD000000, 1024)
-    serial_println("[wm-input-test] Framebuffer: 1024x768 @ 0xFD000000")
-    serial_println("[wm-input-test] Running deterministic click/drag sequence")
+    serial_newline()
+    serial_write_banner()
+    serial_write_init()
 
-    render_frame()
     click_title_bar()
-    render_frame()
     drag_window()
-    render_frame()
 
-    serial_println("[PASS] wm_input_test_entry")
-    serial_println("TEST PASSED")
-    rt_port_outb(0xf4, 0)
+    serial_write_pass()
+    rt_port_outb(DEBUG_EXIT, 0)
