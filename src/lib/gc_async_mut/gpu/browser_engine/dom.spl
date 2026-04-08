@@ -32,7 +32,7 @@ class BeDomNode:
             tag: tag,
             id: "",
             classes: [],
-            style: default_style(),
+            style: be_default_style(),
             children: [],
             text_content: "",
             attributes: []
@@ -44,7 +44,7 @@ class BeDomNode:
             tag: "#text",
             id: "",
             classes: [],
-            style: default_style(),
+            style: be_default_style(),
             children: [],
             text_content: content,
             attributes: []
@@ -146,7 +146,8 @@ class BeDomNode:
             "border-style" =>
                 s.border = BorderProps(width: s.border.width, color: s.border.color, style: value)
             "border-color" =>
-                s.border = BorderProps(width: s.border.width, color: parse_color_value(value), style: s.border.style)
+                val bc_val = if value.to_lower() == "currentcolor": s.color else: parse_color_value(value)
+                s.border = BorderProps(width: s.border.width, color: bc_val, style: s.border.style)
             "border-radius" =>
                 val cv = parse_css_value(value)
                 s.border_radius = cv.value_as_i32()
@@ -211,6 +212,74 @@ class BeDomNode:
                     s.background_color = parse_color_value(bg_trimmed)
             "line-height" =>
                 pass_dn  # parsed but not stored yet
+            "align-self" =>
+                s.align_self = value
+            "box-sizing" =>
+                s.box_sizing = value
+            "list-style" =>
+                pass_dn  # accept silently
+            "list-style-type" =>
+                pass_dn
+            "float" =>
+                pass_dn  # accept but not implemented in layout
+            "clear" =>
+                pass_dn
+            "text-indent" =>
+                pass_dn
+            "vertical-align" =>
+                pass_dn
+            "inline-size" =>
+                s.width = parse_css_value(value)
+            "block-size" =>
+                s.height = parse_css_value(value)
+            "margin-inline-start" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: s.margin.right, bottom: s.margin.bottom, left: cv.value_as_i32())
+            "margin-inline-end" =>
+                val cv = parse_css_value(value)
+                s.margin = BoxEdges(top: s.margin.top, right: cv.value_as_i32(), bottom: s.margin.bottom, left: s.margin.left)
+            "writing-mode" =>
+                pass_dn
+            "direction" =>
+                pass_dn
+            "outline" =>
+                pass_dn
+            "outline-color" =>
+                pass_dn
+            "outline-style" =>
+                pass_dn
+            "outline-width" =>
+                pass_dn
+            "border-spacing" =>
+                pass_dn
+            "box-shadow" =>
+                pass_dn
+            "text-shadow" =>
+                pass_dn
+            "cursor" =>
+                pass_dn
+            "word-spacing" =>
+                pass_dn
+            "transform" =>
+                pass_dn
+            "transition" =>
+                pass_dn
+            "animation" =>
+                pass_dn
+            "filter" =>
+                pass_dn
+            "content" =>
+                pass_dn
+            "background-clip" =>
+                pass_dn
+            "background-image" =>
+                pass_dn
+            "background-size" =>
+                pass_dn
+            "background-position" =>
+                pass_dn
+            "background-repeat" =>
+                pass_dn
             _ =>
                 pass_dn
         self.style = s
@@ -270,36 +339,71 @@ class BeDomFactory:
 fn parse_color_value(s: text) -> u32:
     """Parse a color string to a u32 RGBA value.
     Supports: '#RRGGBB', '#RRGGBBAA', '#RGB', 'rgb(r,g,b)',
-    'rgba(r,g,b,a)', named colors, and decimal numbers.
+    'rgba(r,g,b,a)', 'hsl(h,s%,l%)', 'hsla(h,s%,l%,a)',
+    modern space-separated syntax, named colors, currentColor,
+    and decimal numbers.
     """
-    if s.len() == 0:
+    val cleaned = strip_css_comments(s.trim())
+    if cleaned.len() == 0:
         return 0x000000FF
 
-    if s.starts_with("#"):
-        return parse_hex_color(s)
+    val lower = cleaned.to_lower()
 
-    # rgba(r,g,b,a) or rgb(r,g,b)
-    if s.starts_with("rgba(") and s.ends_with(")"):
-        return parse_rgba_func(s)
+    if lower == "currentcolor":
+        # Sentinel: caller should resolve. Return black as fallback.
+        return 0x000000FF
 
-    if s.starts_with("rgb(") and s.ends_with(")"):
-        return parse_rgb_func(s)
+    if cleaned.starts_with("#"):
+        return parse_hex_color(cleaned)
 
-    # CSS var() — not resolved by the software renderer; return transparent
-    # so unresolved custom properties don't produce opaque black artifacts.
-    if s.starts_with("var("):
+    # hsl/hsla before rgb so they're matched first
+    if lower.starts_with("hsla(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, true)
+    if lower.starts_with("hsl(") and cleaned.ends_with(")"):
+        return parse_hsl_func(cleaned, false)
+
+    # rgba/rgb — unified parser handles both
+    if lower.starts_with("rgba(") and cleaned.ends_with(")"):
+        return parse_rgb_unified(cleaned.slice(5, cleaned.len() - 1))
+    if lower.starts_with("rgb(") and cleaned.ends_with(")"):
+        return parse_rgb_unified(cleaned.slice(4, cleaned.len() - 1))
+
+    if cleaned.starts_with("var("):
         return 0x00000000
 
-    # Named colors (full CSS Level 4 table)
-    val named = named_color_to_u32(s)
+    val named = named_color_to_u32(cleaned)
     if val Some(c) = named:
         return c
 
-    # Try as decimal number
-    val num = s.parse_i64()
+    val num = cleaned.parse_i64()
     if num != nil:
         return num.to_u32()
     return 0x000000FF
+
+fn strip_css_comments(s: text) -> text:
+    """Remove CSS comments /* ... */ from a string."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        if i + 1 < s.len() and s.slice(i, i + 2) == "/*":
+            val end = dom_find_str(s, "*/", i + 2)
+            if end >= 0:
+                i = end + 2
+            else:
+                i = s.len()
+        else:
+            result = "{result}{s.slice(i, i + 1)}"
+            i = i + 1
+    result
+
+fn dom_find_str(s: text, needle: text, start: i32) -> i32:
+    val nlen = needle.len()
+    var i = start
+    while i + nlen <= s.len():
+        if s.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
 
 fn parse_hex_color(s: text) -> u32:
     """Parse a hex color string like '#RRGGBB', '#RRGGBBAA', or '#RGB' to u32 RGBA."""
@@ -325,35 +429,248 @@ fn parse_hex_color(s: text) -> u32:
         return (rr * 16777216) + (gg * 65536) + (bb * 256) + 255
     return 0x000000FF
 
-fn parse_rgba_func(s: text) -> u32:
-    """Parse 'rgba(r,g,b,a)' where a is 0.0-1.0 (float) to u32 RGBA."""
-    # Extract content between 'rgba(' and ')'
-    val inner = s.slice(5, s.len() - 1)
-    val parts = split_comma(inner)
-    if parts.len() < 4:
+fn parse_rgb_unified(inner_raw: text) -> u32:
+    """Parse rgb/rgba inner content. Supports:
+    - Comma-separated: '128, 0, 255' or '128, 0, 255, 0.5'
+    - Space-separated: '128 0 255' or '128 0 255 / 0.5'
+    - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
+    """
+    val inner = strip_css_comments(inner_raw).trim()
+    if inner.len() == 0:
         return 0x000000FF
-    val r = parse_int_clamped(parts[0].trim(), 0, 255)
-    val g = parse_int_clamped(parts[1].trim(), 0, 255)
-    val b = parse_int_clamped(parts[2].trim(), 0, 255)
-    val a_f = parse_float_value(parts[3].trim())
-    var a_byte = (a_f * 255.0).to_i32()
-    if a_byte < 0:
-        a_byte = 0
-    if a_byte > 255:
-        a_byte = 255
-    val a = a_byte.to_u32()
+
+    # Determine separator: comma or space
+    var has_comma = false
+    for ch in inner:
+        if ch == ",":
+            has_comma = true
+
+    var color_parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        val comma_parts = split_comma(inner)
+        color_parts = comma_parts
+    else:
+        # Space-separated, may have / for alpha
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos >= 0:
+            val before_slash = inner.slice(0, slash_pos).trim()
+            alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
+            color_parts = dom_split_ws(before_slash)
+        else:
+            color_parts = dom_split_ws(inner)
+
+    if color_parts.len() < 3:
+        return 0x000000FF
+
+    val r = parse_color_component(color_parts[0].trim())
+    val g = parse_color_component(color_parts[1].trim())
+    val b = parse_color_component(color_parts[2].trim())
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        a = parse_alpha_component(alpha_str)
+    elif color_parts.len() >= 4:
+        a = parse_alpha_component(color_parts[3].trim())
+
     return (r * 16777216) + (g * 65536) + (b * 256) + a
 
-fn parse_rgb_func(s: text) -> u32:
-    """Parse 'rgb(r,g,b)' to u32 RGBA with alpha=255."""
-    val inner = s.slice(4, s.len() - 1)
-    val parts = split_comma(inner)
+fn parse_color_component(s: text) -> u32:
+    """Parse a single color component (integer 0-255 or percentage 0%-100%)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct = pct_str.parse_f64()
+        if pct != nil:
+            var v = (pct * 255.0 / 100.0).to_i32()
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+        return 0
+    val f = trimmed.parse_f64()
+    if f != nil:
+        var v = f.to_i32()
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    0
+
+fn parse_alpha_component(s: text) -> u32:
+    """Parse an alpha component (float 0-1, percentage 0%-100%, or integer)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val pct_str = trimmed.slice(0, trimmed.len() - 1)
+        val pct = pct_str.parse_f64()
+        if pct != nil:
+            var v = (pct * 255.0 / 100.0).to_i32()
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+        return 255
+    val f = trimmed.parse_f64()
+    if f != nil:
+        if f <= 1.0 and f >= 0.0:
+            var v = (f * 255.0).to_i32()
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+        # Might be integer 0-255
+        var v = f.to_i32()
+        if v < 0:
+            v = 0
+        if v > 255:
+            v = 255
+        return v.to_u32()
+    255
+
+fn dom_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if current.len() > 0:
+                parts = parts + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    parts
+
+# =========================================================================
+# HSL/HSLA Color Parsing
+# =========================================================================
+
+fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
+    """Parse hsl() or hsla() color function.
+    Supports: hsl(120, 75%, 50%), hsla(120, 75%, 50%, 0.5),
+    hsl(120 75% 50%), hsl(120 75% 50% / 0.5)
+    """
+    val prefix_len = if is_hsla: 5 else: 4
+    val inner = strip_css_comments(s.slice(prefix_len, s.len() - 1)).trim()
+
+    var has_comma = false
+    for ch in inner:
+        if ch == ",":
+            has_comma = true
+
+    var parts: [text] = []
+    var alpha_str = ""
+
+    if has_comma:
+        parts = split_comma(inner)
+    else:
+        val slash_pos = dom_find_str(inner, "/", 0)
+        if slash_pos >= 0:
+            val before_slash = inner.slice(0, slash_pos).trim()
+            alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
+            parts = dom_split_ws(before_slash)
+        else:
+            parts = dom_split_ws(inner)
+
     if parts.len() < 3:
         return 0x000000FF
-    val r = parse_int_clamped(parts[0].trim(), 0, 255)
-    val g = parse_int_clamped(parts[1].trim(), 0, 255)
-    val b = parse_int_clamped(parts[2].trim(), 0, 255)
-    return (r * 16777216) + (g * 65536) + (b * 256) + 255
+
+    # Parse H (degrees), S (percentage), L (percentage)
+    val h_str = parts[0].trim()
+    val s_str = parts[1].trim()
+    val l_str = parts[2].trim()
+
+    var h_val = h_str.parse_f64()
+    if h_val == nil:
+        return 0x000000FF
+    var h = h_val.to_f32()
+    # Normalize hue to [0, 360)
+    while h < 0.0:
+        h = h + 360.0
+    while h >= 360.0:
+        h = h - 360.0
+
+    val s_pct = parse_pct_value(s_str)
+    val l_pct = parse_pct_value(l_str)
+
+    # Convert HSL to RGB
+    val sat = s_pct / 100.0
+    val lit = l_pct / 100.0
+
+    val c = (1.0 - f32_abs(2.0 * lit - 1.0)) * sat
+    val hp = h / 60.0
+    val x = c * (1.0 - f32_abs(f32_fmod(hp, 2.0) - 1.0))
+    val m = lit - c / 2.0
+
+    var r1 = 0.0
+    var g1 = 0.0
+    var b1 = 0.0
+
+    if hp < 1.0:
+        r1 = c
+        g1 = x
+    elif hp < 2.0:
+        r1 = x
+        g1 = c
+    elif hp < 3.0:
+        g1 = c
+        b1 = x
+    elif hp < 4.0:
+        g1 = x
+        b1 = c
+    elif hp < 5.0:
+        r1 = x
+        b1 = c
+    else:
+        r1 = c
+        b1 = x
+
+    var r = ((r1 + m) * 255.0 + 0.5).to_i32()
+    var g = ((g1 + m) * 255.0 + 0.5).to_i32()
+    var b = ((b1 + m) * 255.0 + 0.5).to_i32()
+    if r < 0: r = 0
+    if r > 255: r = 255
+    if g < 0: g = 0
+    if g > 255: g = 255
+    if b < 0: b = 0
+    if b > 255: b = 255
+
+    var a: u32 = 255
+    if alpha_str.len() > 0:
+        a = parse_alpha_component(alpha_str)
+    elif parts.len() >= 4:
+        a = parse_alpha_component(parts[3].trim())
+
+    return (r.to_u32() * 16777216) + (g.to_u32() * 65536) + (b.to_u32() * 256) + a
+
+fn parse_pct_value(s: text) -> f32:
+    """Parse a percentage value like '75%' to float (75.0)."""
+    val trimmed = s.trim()
+    if trimmed.ends_with("%"):
+        val num_str = trimmed.slice(0, trimmed.len() - 1)
+        val n = num_str.parse_f64()
+        if n != nil:
+            return n.to_f32()
+        return 0.0
+    val n = trimmed.parse_f64()
+    if n != nil:
+        return n.to_f32()
+    0.0
+
+fn f32_abs(v: f32) -> f32:
+    if v < 0.0: 0.0 - v else: v
+
+fn f32_fmod(a: f32, b: f32) -> f32:
+    """Float modulo."""
+    if b == 0.0:
+        return 0.0
+    val div = (a / b).to_i32().to_f32()
+    a - div * b
 
 fn split_comma(s: text) -> [text]:
     """Split a string by commas."""

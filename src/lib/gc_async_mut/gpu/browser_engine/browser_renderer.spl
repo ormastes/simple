@@ -8,7 +8,7 @@
 
 use common.ui.widget.{WidgetNode, UITree, UIState}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.css.{default_style, CssValue, BoxEdges}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
@@ -405,6 +405,15 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     while pos < len:
         val ch = html.slice(pos, pos + 1)
         if ch == "<":
+            # Check for HTML comment <!-- ... -->
+            if pos + 3 < len and html.slice(pos, pos + 4) == "<!--":
+                val comment_end = br_find_str(html, "-->", pos + 4)
+                if comment_end >= 0:
+                    pos = comment_end + 3
+                else:
+                    pos = len
+                continue
+
             val tag_end = browser_renderer_find_char(html, ">", pos)
             if tag_end < 0:
                 val remaining = html.slice(pos, len)
@@ -416,7 +425,22 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 break
 
             val tag_content = html.slice(pos + 1, tag_end)
+
+            # Skip <!DOCTYPE ...>
+            if tag_content.starts_with("!DOCTYPE") or tag_content.starts_with("!doctype"):
+                pos = tag_end + 1
+                continue
+
             if tag_content.starts_with("/"):
+                val close_tag = tag_content.slice(1, tag_content.len()).trim().to_lower()
+                # Skip closing structural tags
+                if close_tag == "html" or close_tag == "head" or close_tag == "body":
+                    pos = tag_end + 1
+                    continue
+                # Skip </style> (content already consumed)
+                if close_tag == "style":
+                    pos = tag_end + 1
+                    continue
                 if stack.len() > 1:
                     val completed = stack[stack.len() - 1]
                     var new_stack: [BeDomNode] = []
@@ -437,6 +461,23 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                     tag_content.trim()
 
                 var new_node = browser_renderer_parse_tag(clean_content)
+                val tag_lower = new_node.tag.to_lower()
+
+                # Skip structural tags — let content flow into root
+                if tag_lower == "html" or tag_lower == "head" or tag_lower == "body":
+                    pos = tag_end + 1
+                    continue
+
+                # <style> is a raw-text element — skip ahead to </style>
+                if tag_lower == "style":
+                    val style_close = br_find_str(html.to_lower(), "</style", tag_end + 1)
+                    if style_close >= 0:
+                        val style_tag_end = browser_renderer_find_char(html, ">", style_close)
+                        pos = if style_tag_end >= 0: style_tag_end + 1 else: style_close + 8
+                    else:
+                        pos = len
+                    continue
+
                 if is_self_closing or browser_renderer_is_void_element(new_node.tag):
                     if stack.len() > 0:
                         var parent = stack[stack.len() - 1]
@@ -474,7 +515,8 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     if stack.len() > 0:
         result = stack[0]
 
-    # Apply <style> block rules to the built DOM tree
+    # Apply UA default styles, then <style> block rules
+    br_apply_ua_defaults(result)
     process_style_blocks(result, raw_html)
 
     result
@@ -587,3 +629,86 @@ fn browser_renderer_is_void_element(tag: text) -> bool:
         "meta" => true
         "link" => true
         _ => false
+
+fn br_find_str(s: text, needle: text, start: i32) -> i32:
+    """Find substring in s starting at start. Returns -1 if not found."""
+    val nlen = needle.len()
+    var i = start
+    while i + nlen <= s.len():
+        if s.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn br_apply_ua_defaults(node: BeDomNode):
+    """Apply user-agent default styles to common HTML elements."""
+    if node.is_text_node():
+        return
+    val tag = node.tag
+    if tag == "body":
+        node.set_style("margin", "8px")
+    elif tag == "p":
+        node.set_style("display", "block")
+        node.set_style("margin-top", "16px")
+        node.set_style("margin-bottom", "16px")
+    elif tag == "h1":
+        node.set_style("display", "block")
+        node.set_style("font-size", "32px")
+        node.set_style("font-weight", "bold")
+        node.set_style("margin-top", "21px")
+        node.set_style("margin-bottom", "21px")
+    elif tag == "h2":
+        node.set_style("display", "block")
+        node.set_style("font-size", "24px")
+        node.set_style("font-weight", "bold")
+        node.set_style("margin-top", "19px")
+        node.set_style("margin-bottom", "19px")
+    elif tag == "h3":
+        node.set_style("display", "block")
+        node.set_style("font-size", "19px")
+        node.set_style("font-weight", "bold")
+    elif tag == "h4":
+        node.set_style("display", "block")
+        node.set_style("font-size", "16px")
+        node.set_style("font-weight", "bold")
+    elif tag == "h5":
+        node.set_style("display", "block")
+        node.set_style("font-size", "13px")
+        node.set_style("font-weight", "bold")
+    elif tag == "h6":
+        node.set_style("display", "block")
+        node.set_style("font-size", "11px")
+        node.set_style("font-weight", "bold")
+    elif tag == "ul" or tag == "ol":
+        node.set_style("display", "block")
+        node.set_style("padding-left", "40px")
+        node.set_style("margin-top", "16px")
+        node.set_style("margin-bottom", "16px")
+    elif tag == "li":
+        node.set_style("display", "block")
+    elif tag == "dl":
+        node.set_style("display", "block")
+        node.set_style("margin-top", "16px")
+        node.set_style("margin-bottom", "16px")
+    elif tag == "dt":
+        node.set_style("display", "block")
+    elif tag == "dd":
+        node.set_style("display", "block")
+        node.set_style("margin-left", "40px")
+    elif tag == "span" or tag == "a" or tag == "em" or tag == "strong" or tag == "b" or tag == "i":
+        node.set_style("display", "inline")
+    elif tag == "blockquote":
+        node.set_style("display", "block")
+        node.set_style("margin", "16px")
+        node.set_style("margin-left", "40px")
+    elif tag == "pre":
+        node.set_style("display", "block")
+    elif tag == "table":
+        node.set_style("display", "block")
+    elif tag == "form":
+        node.set_style("display", "block")
+    elif tag == "section" or tag == "article" or tag == "nav" or tag == "aside" or tag == "header" or tag == "footer" or tag == "main":
+        node.set_style("display", "block")
+
+    for child in node.children:
+        br_apply_ua_defaults(child)
