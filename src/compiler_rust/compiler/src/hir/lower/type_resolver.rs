@@ -299,13 +299,23 @@ impl Lowerer {
             if let Some((idx, ty, _)) = best {
                 return Ok((idx, ty));
             }
-            // No struct with this field was found in the type registry.
-            // Return an error so the caller can fall back to dynamic method dispatch
-            // instead of generating a FieldGet with byte_offset=0 which reads the wrong field.
-            // This is the root cause of the cross-module FieldGet bug: when imported types
-            // aren't resolved (lenient_types=true), the fallback to (0, ANY) produces
-            // FieldGet instructions that always read field 0 regardless of which field
-            // was actually requested.
+            // Search global struct definitions from other compilation units
+            if let Some(ref global_defs) = self.global_struct_defs {
+                let mut best_global: Option<(usize, usize)> = None;
+                for (_sname, fields) in global_defs.iter() {
+                    for (idx, (fname, _)) in fields.iter().enumerate() {
+                        if fname == field {
+                            let count = fields.len();
+                            if best_global.as_ref().is_none_or(|(_, c)| count > *c) {
+                                best_global = Some((idx, count));
+                            }
+                        }
+                    }
+                }
+                if let Some((idx, _)) = best_global {
+                    return Ok((idx, TypeId::ANY));
+                }
+            }
             return Err(LowerError::CannotInferFieldType {
                 struct_name: "ANY".to_string(),
                 field: field.to_string(),
@@ -379,11 +389,10 @@ impl Lowerer {
                 _ => {
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
-                    // the dependency wasn't loaded yet), search ALL known structs for
+                    // the dependency wasn't loaded yet), search known structs for
                     // a matching field name — same heuristic as the ANY case.
-                    // This is the fix for the cross-module FieldGet bug where all
-                    // field accesses incorrectly used byte_offset=0.
                     if self.lenient_types {
+                        // First: search local type registry
                         let mut best: Option<(usize, TypeId, usize)> = None;
                         for (_, hty) in self.module.types.iter() {
                             if let HirType::Struct { fields, .. } = hty {
@@ -399,6 +408,25 @@ impl Lowerer {
                         }
                         if let Some((idx, ty, _)) = best {
                             return Ok((idx, ty));
+                        }
+                        // Second: search global struct definitions from other modules.
+                        // These provide field names and order for types not in the
+                        // per-file registry (e.g., StyleProps in dom.spl).
+                        if let Some(ref global_defs) = self.global_struct_defs {
+                            let mut best_global: Option<(usize, usize)> = None;
+                            for (_sname, fields) in global_defs.iter() {
+                                for (idx, (fname, _)) in fields.iter().enumerate() {
+                                    if fname == field {
+                                        let count = fields.len();
+                                        if best_global.as_ref().is_none_or(|(_, c)| count > *c) {
+                                            best_global = Some((idx, count));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((idx, _)) = best_global {
+                                return Ok((idx, TypeId::ANY));
+                            }
                         }
                     }
                     Err(LowerError::CannotInferFieldType {

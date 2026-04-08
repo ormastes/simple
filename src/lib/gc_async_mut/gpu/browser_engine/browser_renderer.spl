@@ -430,6 +430,22 @@ pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) 
     val renderer = BrowserRenderer.create(width, height)
     renderer.render_html_to_pixels(html)
 
+fn br_stack_pop_and_add(stack: [BeDomNode]) -> [BeDomNode]:
+    """Pop last element from stack, add it as child to new top. Returns new stack."""
+    if stack.len() <= 1:
+        return stack
+    val completed = stack[stack.len() - 1]
+    var new_stack: [BeDomNode] = []
+    var si = 0
+    while si < stack.len() - 1:
+        rt_array_push(new_stack, stack[si])
+        si = si + 1
+    if new_stack.len() > 0:
+        var new_parent = new_stack[new_stack.len() - 1]
+        new_parent.add_child(completed)
+        new_stack[new_stack.len() - 1] = new_parent
+    new_stack
+
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var root = BeDomNode.element("div")
     root.id = "html-root"
@@ -445,6 +461,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
         val ch = html.slice(pos, pos + 1)
         if ch == "<":
             # Check for HTML comment <!-- ... -->
+            var is_comment = false
             if pos + 3 < len:
                 val comment_prefix = html.slice(pos, pos + 4)
                 if comment_prefix == "<!--":
@@ -453,7 +470,9 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                         pos = comment_end + 3
                     else:
                         pos = len
-                    continue
+                    is_comment = true
+            if is_comment:
+                continue
 
             val tag_end = browser_renderer_find_char(html, ">", pos)
             if tag_end >= 999999999:
@@ -473,135 +492,21 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 continue
 
             if tag_content.starts_with("/"):
-                # Break chained method call into intermediate vars
-                val close_raw = tag_content.slice(1, tag_content.len())
-                val close_trimmed = close_raw.trim()
-                val close_tag = close_trimmed.to_lower()
-                # Skip closing structural tags
-                if close_tag == "html" or close_tag == "head" or close_tag == "body":
-                    pos = tag_end + 1
-                    continue
-                # Skip </style> (content already consumed)
-                if close_tag == "style":
-                    pos = tag_end + 1
-                    continue
-                if stack.len() > 1:
-                    val completed = stack[stack.len() - 1]
-                    var new_stack: [BeDomNode] = []
-                    var si = 0
-                    while si < stack.len() - 1:
-                        rt_array_push(new_stack, stack[si])
-                        si = si + 1
-                    stack = new_stack
-                    if stack.len() > 0:
-                        var new_parent = stack[stack.len() - 1]
-                        new_parent.add_child(completed)
-                        stack[stack.len() - 1] = new_parent
-            else:
-                val is_self_closing = tag_content.ends_with("/")
-                var clean_content = tag_content.trim()
-                if is_self_closing:
-                    val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
-                    clean_content = trimmed_sc.trim()
-
-                var new_node = browser_renderer_parse_tag(clean_content)
-                # Use accessor to avoid cross-module FieldGet bug
-                val raw_tag = be_dom_get_tag(new_node)
-                val tag_lower = raw_tag.to_lower()
-
-                # Skip html/head and non-visual metadata tags
-                if tag_lower == "html" or tag_lower == "head" or tag_lower == "title" or tag_lower == "link" or tag_lower == "meta" or tag_lower == "script":
-                    # For title/script: skip to closing tag
-                    if tag_lower == "title" or tag_lower == "script":
-                        val close_needle = "</{tag_lower}"
-                        val html_lc = html.to_lower()
-                        val close_pos = br_find_str(html_lc, close_needle, tag_end + 1)
-                        if close_pos < 999999999:
-                            val close_end = browser_renderer_find_char(html, ">", close_pos)
-                            if close_end < 999999999:
-                                pos = close_end + 1
-                            else:
-                                pos = close_pos + 8
-                        else:
-                            pos = tag_end + 1
-                    else:
-                        pos = tag_end + 1
-                    continue
-
-                # For body: don't add to tree, but apply its inline styles to root
-                if tag_lower == "body":
-                    if stack.len() > 0:
-                        val root_node = stack[0]
-                        # Apply inline style from body tag directly
-                        val body_parts = browser_renderer_split_tag_parts(clean_content)
-                        var bi = 1
-                        while bi < body_parts.len():
-                            val bpart = body_parts[bi]
-                            val beq = browser_renderer_find_char(bpart, "=", 0)
-                            if beq > 0:
-                                val bkey = bpart.slice(0, beq)
-                                var bval = bpart.slice(beq + 1, bpart.len())
-                                if bval.starts_with("\"") and bval.ends_with("\""):
-                                    bval = bval.slice(1, bval.len() - 1)
-                                elif bval.starts_with("'") and bval.ends_with("'"):
-                                    bval = bval.slice(1, bval.len() - 1)
-                                if bkey == "style":
-                                    browser_renderer_apply_inline_style(root_node, bval)
-                            bi = bi + 1
-                        # Also set root's tag to "body" so CSS body selectors match
-                        root_node.tag = "body"
-                    pos = tag_end + 1
-                    continue
-
-                # <style> is a raw-text element — skip ahead to </style>
-                if tag_lower == "style":
-                    val html_lower = html.to_lower()
-                    val style_close = br_find_str(html_lower, "</style", tag_end + 1)
-                    if style_close < 999999999:
-                        val style_tag_end = browser_renderer_find_char(html, ">", style_close)
-                        if style_tag_end < 999999999:
-                            pos = style_tag_end + 1
-                        else:
-                            pos = style_close + 8
-                    else:
-                        pos = len
-                    continue
-
-                # Use accessor for void element check too
-                val node_tag_for_void = be_dom_get_tag(new_node)
-                if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
-                    if stack.len() > 0:
-                        var parent = stack[stack.len() - 1]
-                        parent.add_child(new_node)
-                        stack[stack.len() - 1] = parent
+                val close_result = br_handle_close_tag(tag_content, tag_end)
+                if close_result < 0:
+                    # Negative means "pop stack"; negate to get real pos
+                    pos = 0 - close_result
+                    if stack.len() > 1:
+                        stack = br_stack_pop_and_add(stack)
                 else:
-                    rt_array_push(stack, new_node)
-            pos = tag_end + 1
+                    pos = close_result
+            else:
+                pos = br_handle_open_tag(tag_content, html, tag_end, len, stack)
         else:
-            val text_end = browser_renderer_find_char(html, "<", pos)
-            val end_pos = if text_end >= 999999999: len else: text_end
-            val text_raw = html.slice(pos, end_pos)
-            val text_content = text_raw.trim()
-            if text_content.len() > 0:
-                val txt = BeDomNode.text(text_content)
-                if stack.len() > 0:
-                    var parent = stack[stack.len() - 1]
-                    parent.add_child(txt)
-                    stack[stack.len() - 1] = parent
-            pos = end_pos
+            pos = br_handle_text(html, pos, len, stack)
 
     while stack.len() > 1:
-        val completed = stack[stack.len() - 1]
-        var new_stack: [BeDomNode] = []
-        var si = 0
-        while si < stack.len() - 1:
-            rt_array_push(new_stack, stack[si])
-            si = si + 1
-        stack = new_stack
-        if stack.len() > 0:
-            var parent = stack[stack.len() - 1]
-            parent.add_child(completed)
-            stack[stack.len() - 1] = parent
+        stack = br_stack_pop_and_add(stack)
 
     var result = root
     if stack.len() > 0:
@@ -612,6 +517,114 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     process_style_blocks(result, raw_html)
 
     result
+
+fn br_handle_close_tag(tag_content: text, tag_end: i64) -> i64:
+    """Handle a closing tag. Returns positive pos if tag is skipped,
+    or negative pos (negate to get real pos) if a stack pop is needed."""
+    val close_raw = tag_content.slice(1, tag_content.len())
+    val close_trimmed = close_raw.trim()
+    val close_tag = close_trimmed.to_lower()
+    # Skip closing structural tags
+    if close_tag == "html" or close_tag == "head" or close_tag == "body":
+        return tag_end + 1
+    # Skip </style> (content already consumed)
+    if close_tag == "style":
+        return tag_end + 1
+    # Signal stack pop needed with negative value
+    return 0 - (tag_end + 1)
+
+fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> i64:
+    """Handle an opening tag. Returns new pos."""
+    val is_self_closing = tag_content.ends_with("/")
+    var clean_content = tag_content.trim()
+    if is_self_closing:
+        val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
+        clean_content = trimmed_sc.trim()
+
+    var new_node = browser_renderer_parse_tag(clean_content)
+    # Use accessor to avoid cross-module FieldGet bug
+    val raw_tag = be_dom_get_tag(new_node)
+    val tag_lower = raw_tag.to_lower()
+
+    # Skip html/head and non-visual metadata tags
+    if tag_lower == "html" or tag_lower == "head" or tag_lower == "title" or tag_lower == "link" or tag_lower == "meta" or tag_lower == "script":
+        # For title/script: skip to closing tag
+        if tag_lower == "title" or tag_lower == "script":
+            val close_needle = "</{tag_lower}"
+            val html_lc = html.to_lower()
+            val close_pos = br_find_str(html_lc, close_needle, tag_end + 1)
+            if close_pos < 999999999:
+                val close_end = browser_renderer_find_char(html, ">", close_pos)
+                if close_end < 999999999:
+                    return close_end + 1
+                else:
+                    return close_pos + 8
+            else:
+                return tag_end + 1
+        else:
+            return tag_end + 1
+
+    # For body: don't add to tree, but apply its inline styles to root
+    if tag_lower == "body":
+        if stack.len() > 0:
+            val root_node = stack[0]
+            # Apply inline style from body tag directly
+            val body_parts = browser_renderer_split_tag_parts(clean_content)
+            var bi = 1
+            while bi < body_parts.len():
+                val bpart = body_parts[bi]
+                val beq = browser_renderer_find_char(bpart, "=", 0)
+                if beq > 0:
+                    val bkey = bpart.slice(0, beq)
+                    var bval = bpart.slice(beq + 1, bpart.len())
+                    if bval.starts_with("\"") and bval.ends_with("\""):
+                        bval = bval.slice(1, bval.len() - 1)
+                    elif bval.starts_with("'") and bval.ends_with("'"):
+                        bval = bval.slice(1, bval.len() - 1)
+                    if bkey == "style":
+                        browser_renderer_apply_inline_style(root_node, bval)
+                bi = bi + 1
+            # Also set root's tag to "body" so CSS body selectors match
+            root_node.tag = "body"
+        return tag_end + 1
+
+    # <style> is a raw-text element — skip ahead to </style>
+    if tag_lower == "style":
+        val html_lower = html.to_lower()
+        val style_close = br_find_str(html_lower, "</style", tag_end + 1)
+        if style_close < 999999999:
+            val style_tag_end = browser_renderer_find_char(html, ">", style_close)
+            if style_tag_end < 999999999:
+                return style_tag_end + 1
+            else:
+                return style_close + 8
+        else:
+            return len
+
+    # Use accessor for void element check too
+    val node_tag_for_void = be_dom_get_tag(new_node)
+    if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
+        if stack.len() > 0:
+            var parent = stack[stack.len() - 1]
+            parent.add_child(new_node)
+            stack[stack.len() - 1] = parent
+    else:
+        rt_array_push(stack, new_node)
+    return tag_end + 1
+
+fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
+    """Handle text content between tags. Returns new pos."""
+    val text_end = browser_renderer_find_char(html, "<", pos)
+    val end_pos = if text_end >= 999999999: len else: text_end
+    val text_raw = html.slice(pos, end_pos)
+    val text_content = text_raw.trim()
+    if text_content.len() > 0:
+        val txt = BeDomNode.text(text_content)
+        if stack.len() > 0:
+            var parent = stack[stack.len() - 1]
+            parent.add_child(txt)
+            stack[stack.len() - 1] = parent
+    return end_pos
 
 fn browser_renderer_parse_tag(content: text) -> BeDomNode:
     val parts = browser_renderer_split_tag_parts(content)

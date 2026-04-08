@@ -60,6 +60,8 @@ pub struct Lowerer {
     pub(super) extern_fn_names: HashSet<String>,
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
+    /// Global struct definitions from all compilation units for cross-module field resolution.
+    pub(super) global_struct_defs: Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>>,
 }
 
 impl Lowerer {
@@ -92,6 +94,7 @@ impl Lowerer {
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            global_struct_defs: None,
         }
     }
 
@@ -123,6 +126,7 @@ impl Lowerer {
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            global_struct_defs: None,
         }
     }
 
@@ -177,6 +181,7 @@ impl Lowerer {
             lenient_types: false,
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            global_struct_defs: None,
         }
     }
 
@@ -200,6 +205,21 @@ impl Lowerer {
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub fn set_lenient_types(&mut self, lenient: bool) {
         self.lenient_types = lenient;
+    }
+
+    /// Pre-register global struct definitions from all compilation units.
+    /// This ensures consistent field offsets across all modules by making
+    /// every file's type registry aware of all struct layouts in the project.
+    /// Set global struct definitions for cross-module field resolution.
+    /// The type resolver uses these to look up field indices when the struct type
+    /// isn't in the per-file registry.
+    pub fn set_global_struct_defs(&mut self, defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>) {
+        self.global_struct_defs = Some(defs);
+    }
+
+    /// Get global struct definitions (if set).
+    pub fn global_struct_defs(&self) -> Option<&std::collections::HashMap<String, Vec<(String, String)>>> {
+        self.global_struct_defs.as_deref()
     }
 
     /// Take ownership of the memory warnings

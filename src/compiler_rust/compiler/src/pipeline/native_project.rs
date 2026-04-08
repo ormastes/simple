@@ -87,6 +87,9 @@ pub(crate) struct ModuleImports {
     pub all_mangled: std::sync::Arc<std::collections::HashMap<String, Vec<String>>>,
     /// Per-module re-export maps.
     pub re_exports: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    /// Global struct definitions: struct_name → [(field_name, field_type_name)].
+    /// Shared across all compilation units for consistent cross-module field offsets.
+    pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
 }
 
 /// Configuration for native project builds.
@@ -545,6 +548,7 @@ impl NativeProjectBuilder {
                 ambiguous_names: std::sync::Arc::new(result.ambiguous),
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
+                struct_defs: std::sync::Arc::new(result.struct_defs),
             }
         } else {
             ModuleImports {
@@ -552,6 +556,7 @@ impl NativeProjectBuilder {
                 ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+                struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
             }
         };
 
@@ -3635,6 +3640,10 @@ fn compile_file_to_object(
     let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
+    // Pass global struct definitions to the lowerer for cross-module field resolution.
+    // The type resolver uses these to look up field indices when the struct type
+    // isn't in the per-file registry (e.g., StyleProps in dom.spl where it's defined in css.spl).
+    lowerer.set_global_struct_defs(imports.struct_defs.clone());
     let hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
@@ -3933,6 +3942,9 @@ struct ImportMapResult {
     /// module_prefix → (func_name → actual_mangled_name) for re-exported functions.
     /// When a module imports a function via `use`, it becomes available at that module's path.
     re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// Global struct definitions: struct_name → field names (in order).
+    /// Shared across all compilation units so every file resolves the same field offsets.
+    struct_defs: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 /// Sanitize a mangled symbol name for the host platform.
@@ -3958,6 +3970,8 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
 
     // raw_name → list of mangled names (one per defining module)
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
+    // Global struct definitions: struct_name → [(field_name, field_type_name)]
+    let mut struct_defs: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
     // Deduplicate by canonical path so symlink aliases don't produce duplicate entries.
     // Use the raw (non-canonical) path for prefix computation to match compilation.
@@ -3985,6 +3999,14 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
+                        // Collect struct field definitions for global type sharing
+                        if !c.fields.is_empty() {
+                            let fields: Vec<(String, String)> = c.fields.iter().map(|f| {
+                                let ty_name = format!("{:?}", f.ty);
+                                (f.name.clone(), ty_name)
+                            }).collect();
+                            struct_defs.entry(c.name.clone()).or_insert(fields);
+                        }
                         // Also index class methods (needed for cross-module static calls like Logger.from_env)
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -4211,6 +4233,7 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
         ambiguous,
         all_mangled: raw_to_mangled,
         re_exports,
+        struct_defs,
     }
 }
 
