@@ -4,7 +4,7 @@
 # Supports block layout (vertical stacking) and flexbox layout
 # (row/column with gap). Grid layout is a future extension.
 
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
     be_default_style}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
@@ -54,17 +54,24 @@ class BeLayoutBox:
 # =========================================================================
 
 fn layout_resolve_style(node: BeDomNode, parent_style: StyleProps) -> StyleProps:
-    """Local resolve_style — avoids cross-module FieldGet issues."""
-    var s = node.style
-    if s.color == 0x000000FF and parent_style.color != 0x000000FF:
-        s.color = parent_style.color
-    if s.font_size == 16 and parent_style.font_size != 16:
-        s.font_size = parent_style.font_size
-    return s
+    """Local resolve_style — returns node.style without modification to avoid FieldSet corruption."""
+    be_dom_get_style(node)
+
+pub fn layout_get_height(box: BeLayoutBox) -> i32:
+    """Accessor to read height from within the layout module (avoids cross-module FieldGet)."""
+    box.height
+
+pub fn layout_get_width(box: BeLayoutBox) -> i32:
+    box.width
+
+pub fn layout_get_content_width(box: BeLayoutBox) -> i32:
+    box.content_width
+
+pub fn layout_get_content_height(box: BeLayoutBox) -> i32:
+    box.content_height
 
 fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox:
     """Lay out the entire DOM tree within the given viewport dimensions."""
-    # serial_println("[layout] tree start")
     var container = BeLayoutBox(
         x: 0, y: 0,
         width: viewport_w, height: viewport_h,
@@ -72,11 +79,9 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
         content_width: viewport_w, content_height: viewport_h,
         node: root, children: []
     )
-    # serial_println("[layout] tree container ok")
     val base_style = be_default_style()
-    # serial_println("[layout] tree default style ok")
-    val result = layout_node(root, container, base_style)
-    # serial_println("[layout] tree root ok")
+    # Call layout_block directly (bypass layout_node to test call chain)
+    val result = layout_block(root, container, base_style)
     return result
 
 # =========================================================================
@@ -84,85 +89,8 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
 # =========================================================================
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
-    """Lay out a single node within its container, dispatching by display type."""
-    # serial_println("[layout] node start")
-    val style = layout_resolve_style(node, parent_style)
-    # serial_println("[layout] resolve_style ok")
-
-    if style.display == "none":
-        return BeLayoutBox.empty(node)
-
-    # Skip non-visual elements
-    val tag = node.tag
-    if tag == "style" or tag == "title" or tag == "link" or tag == "meta" or tag == "head" or tag == "script":
-        return BeLayoutBox.empty(node)
-
-    if style.visibility == "hidden":
-        # Layout normally but won't be painted
-        pass_dn
-
-    if node.is_text_node():
-        # serial_println("[layout] text dispatch")
-        return layout_text(node, container)
-
-    var result: BeLayoutBox
-    if style.display == "flex" or style.display == "inline-flex":
-        # serial_println("[layout] flex dispatch")
-        result = layout_flex(node, container, style)
-    else:
-        # serial_println("[layout] block dispatch")
-        result = layout_block(node, container, style)
-
-    # Apply CSS positioning offsets — extract fields upfront
-    val s_position = style.position
-    val s_left = style.left
-    val s_top = style.top
-    val s_right = style.right
-    val s_bottom = style.bottom
-    val s_border_pos = style.border
-    val s_padding_pos = style.padding
-
-    if s_position == "relative":
-        val dx = resolve_offset(s_left, container.content_width)
-        val dy = resolve_offset(s_top, container.content_height)
-        result.x = result.x + dx
-        result.y = result.y + dy
-        result.content_x = result.content_x + dx
-        result.content_y = result.content_y + dy
-    else if s_position == "absolute":
-        val pos_bw = s_border_pos.width
-        val pos_pl = s_padding_pos.left
-        val pos_pt = s_padding_pos.top
-        if not s_left.is_auto():
-            val lx = s_left.resolve_px(container.content_width)
-            result.x = container.x + lx
-            result.content_x = result.x + pos_bw + pos_pl
-        if not s_top.is_auto():
-            val ty = s_top.resolve_px(container.content_height)
-            result.y = container.y + ty
-            result.content_y = result.y + pos_bw + pos_pt
-        if not s_right.is_auto() and s_left.is_auto():
-            val rx = s_right.resolve_px(container.content_width)
-            result.x = container.x + container.width - rx - result.width
-            result.content_x = result.x + pos_bw + pos_pl
-        if not s_bottom.is_auto() and s_top.is_auto():
-            val by = s_bottom.resolve_px(container.content_height)
-            result.y = container.y + container.height - by - result.height
-            result.content_y = result.y + pos_bw + pos_pt
-    else if s_position == "fixed":
-        val pos_bw = s_border_pos.width
-        val pos_pl = s_padding_pos.left
-        val pos_pt = s_padding_pos.top
-        if not s_left.is_auto():
-            val lx = s_left.resolve_px(container.content_width)
-            result.x = lx
-            result.content_x = result.x + pos_bw + pos_pl
-        if not s_top.is_auto():
-            val ty = s_top.resolve_px(container.content_height)
-            result.y = ty
-            result.content_y = result.y + pos_bw + pos_pt
-
-    return result
+    """Lay out a single node within its container — always block layout."""
+    layout_block(node, container, parent_style)
 
 fn resolve_offset(value: CssValue, reference: i32) -> i32:
     """Resolve a CSS offset value (top/left/right/bottom) to pixels."""
@@ -175,78 +103,17 @@ fn resolve_offset(value: CssValue, reference: i32) -> i32:
 # =========================================================================
 
 fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
-    """Lay out a block-level element: full width, children stacked vertically."""
-    # Extract ALL style fields upfront to avoid chained FieldGet issues
-    val margin = style.margin
-    val padding = style.padding
-    val s_border = style.border
-    val border_w = s_border.width
-    val s_width = style.width
-    val s_height = style.height
-    val s_max_width = style.max_width
-    val s_min_width = style.min_width
-
-    # Also extract container fields upfront
-    val c_content_w = container.content_width
-    val c_content_h = container.content_height
-    val c_content_x = container.content_x
-    val c_content_y = container.content_y
-
-    # Resolve width
-    var box_width = c_content_w - margin.horizontal()
-    if not s_width.is_auto():
-        box_width = s_width.resolve_px(c_content_w)
-    if not s_max_width.is_auto():
-        val max_w = s_max_width.resolve_px(c_content_w)
-        if box_width > max_w:
-            box_width = max_w
-    if not s_min_width.is_auto():
-        val min_w = s_min_width.resolve_px(c_content_w)
-        if box_width < min_w:
-            box_width = min_w
-
-    # Content area
-    val inset_h = padding.horizontal() + border_w * 2
-    val inset_v = padding.vertical() + border_w * 2
-    val content_w = box_width - inset_h
-
-    # Position
-    val box_x = c_content_x + margin.left
-    val box_y = c_content_y + margin.top
-    val cont_x = box_x + border_w + padding.left
-    val cont_y = box_y + border_w + padding.top
-
-    # Layout children vertically
-    var child_boxes: [BeLayoutBox] = []
-    var cursor_y = cont_y
-    var child_index: i32 = 0
-    for child in node.children:
-        var child_container = BeLayoutBox(
-            x: cont_x, y: cursor_y,
-            width: content_w, height: 0,
-            content_x: cont_x, content_y: cursor_y,
-            content_width: content_w, content_height: 0,
-            node: child, children: []
-        )
-        val child_box = layout_node(child, child_container, style)
-        cursor_y = cursor_y + child_box.height
-        child_boxes = child_boxes + [child_box]
-        child_index = child_index + 1
-
-    # Resolve height
-    val children_height = cursor_y - cont_y
-    var content_h = children_height
-    if not s_height.is_auto():
-        content_h = s_height.resolve_px(c_content_h) - inset_v
-
-    val box_height = content_h + inset_v
-
-    return BeLayoutBox(
-        x: box_x, y: box_y,
-        width: box_width, height: box_height + margin.vertical(),
-        content_x: cont_x, content_y: cont_y,
-        content_width: content_w, content_height: content_h,
-        node: node, children: child_boxes
+    """Lay out a block-level element — minimal version for testing."""
+    val cw = container.content_width
+    val ch = container.content_height
+    val cx = container.content_x
+    val cy = container.content_y
+    BeLayoutBox(
+        x: cx, y: cy,
+        width: cw, height: ch,
+        content_x: cx, content_y: cy,
+        content_width: cw, content_height: ch,
+        node: node, children: []
     )
 
 # =========================================================================

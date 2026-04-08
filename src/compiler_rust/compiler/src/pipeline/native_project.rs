@@ -4342,8 +4342,21 @@ fn extract_let_name(pattern: &simple_parser::Pattern) -> Option<String> {
 fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // Don't follow symlinked directories — src/compiler/ has symlinks
+        // (e.g., backend → 70.backend) that would compile 1000+ files twice,
+        // producing duplicate mangled names and broken function pointers.
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
             collect_spl_files_recursive(&path, out);
+        } else if ft.is_symlink() {
+            // Resolve symlink target: follow if it's a file, skip if directory
+            if path.is_file() && path.extension().is_some_and(|e| e == "spl") {
+                out.push(path);
+            }
+            // Skip symlinked directories entirely
         } else if path.extension().is_some_and(|e| e == "spl") {
             // Skip known problematic files for bootstrap
             if let Some(p) = path.to_str() {
@@ -4351,7 +4364,6 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                     continue;
                 }
             }
-            // Skip broken symlinks: is_file() returns false for broken symlinks
             if path.is_file() {
                 out.push(path);
             }
