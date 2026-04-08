@@ -25,8 +25,8 @@ if [ "$OS" = "Linux" ]; then
       fzf shellcheck silversearcher-ag universal-ctags \
       || true
 
-    # yq and eza may not be in default repos
-    sudo apt-get install -y yq eza 2>/dev/null || true
+    # yq, eza, delta may not be in default repos
+    sudo apt-get install -y yq eza git-delta 2>/dev/null || true
 
 elif [ "$OS" = "FreeBSD" ]; then
     echo "[1/5] pkg update"
@@ -34,17 +34,17 @@ elif [ "$OS" = "FreeBSD" ]; then
 
     echo "[2/5] install packages"
     sudo pkg install -y \
-      bash coreutils findutils ggrep gsed gawk tree less \
+      bash coreutils findutils gnugrep gsed gawk tree less \
       git patch diffutils ripgrep fd-find \
       jq bat \
-      curl wget unzip zip p7zip xz \
-      gmake cmake ninja llvm lld pkgconf python3 py39-pip \
-      htop lsof procps \
-      fzf hs-ShellCheck the_silver_searcher universal-ctags \
+      curl wget unzip zip \
+      gmake cmake ninja llvm pkgconf python3 \
+      htop lsof sudo \
+      fzf the_silver_searcher universal-ctags \
       || true
 
-    # FreeBSD-specific extras
-    sudo pkg install -y yq eza 2>/dev/null || true
+    # FreeBSD-specific extras (may not be in default repos)
+    sudo pkg install -y go-yq eza git-delta 2>/dev/null || true
 
 else
     echo "Unsupported OS: $OS"
@@ -132,7 +132,7 @@ echo "Done. OS=$OS"
 echo "Open a new shell or run: source \"$shell_rc\""
 echo ""
 echo "Installed tools:"
-echo "  rg, grep, fd, jq, bat, git, curl, cmake, ninja, clang, strace, lsof, fzf, shellcheck, ctags"
+echo "  rg, grep, fd, jq, bat, delta, git, curl, cmake, ninja, clang, strace, lsof, fzf, shellcheck, ctags"
 echo ""
 echo "Notes:"
 echo "  - grep was NOT replaced with rg"
