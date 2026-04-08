@@ -123,6 +123,8 @@ pub fn compile_function_body<M: Module>(
     let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
     // Dynamically-created variables for local indices not in the pre-allocated `variables` map
     let mut extra_variables: HashMap<usize, cranelift_frontend::Variable> = HashMap::new();
+    // Reverse map: VReg → local_index (populated by Load, used by push to store back)
+    let mut vreg_from_local: HashMap<VReg, usize> = HashMap::new();
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
@@ -433,6 +435,7 @@ pub fn compile_function_body<M: Module>(
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
                     extra_variables: &mut extra_variables,
+                    vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
                     blocks: &blocks,
@@ -457,6 +460,7 @@ pub fn compile_function_body<M: Module>(
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
                     extra_variables: &mut extra_variables,
+                    vreg_from_local: &mut vreg_from_local,
                     func,
                     entry_block,
                     blocks: &blocks,

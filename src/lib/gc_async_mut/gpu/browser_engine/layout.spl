@@ -4,12 +4,23 @@
 # Supports block layout (vertical stacking) and flexbox layout
 # (row/column with gap). Grid layout is a future extension.
 
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
+    be_dom_get_bg_color, be_dom_get_display, be_dom_get_visibility, be_dom_get_opacity,
+    be_dom_get_color, be_dom_get_font_size, be_dom_get_border_radius,
+    be_dom_get_border_width, be_dom_get_border_color, be_dom_get_border_style,
+    be_dom_get_padding_left, be_dom_get_padding_top, be_dom_get_padding_h, be_dom_get_padding_v,
+    be_dom_get_has_gradient, be_dom_get_gradient_c1, be_dom_get_gradient_c2,
+    be_dom_get_text}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
     be_default_style}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
 use common.text_layout.font_renderer.{FontRenderer}
+use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
+    scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
+    scene_gradient_rect, rgba_to_argb}
 # extern fn serial_println(msg: text)  # disabled for native builds
+
+extern fn rt_array_push(arr, val)
 
 # =========================================================================
 # Layout Box
@@ -80,8 +91,7 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
         node: root, children: []
     )
     val base_style = be_default_style()
-    # Call layout_block directly (bypass layout_node to test call chain)
-    val result = layout_block(root, container, base_style)
+    val result = layout_node(root, container, base_style)
     return result
 
 # =========================================================================
@@ -89,8 +99,16 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
 # =========================================================================
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
-    """Lay out a single node within its container — always block layout."""
-    layout_block(node, container, parent_style)
+    """Lay out a single node within its container — dispatches by display type."""
+    val s = be_dom_get_style(node)
+    val disp = s.display
+    if disp == "none":
+        return BeLayoutBox.empty(node)
+    if disp == "flex":
+        return layout_flex(node, container, s)
+    if node.tag == "#text":
+        return layout_text(node, container)
+    return layout_block(node, container, s)
 
 fn resolve_offset(value: CssValue, reference: i32) -> i32:
     """Resolve a CSS offset value (top/left/right/bottom) to pixels."""
@@ -103,17 +121,89 @@ fn resolve_offset(value: CssValue, reference: i32) -> i32:
 # =========================================================================
 
 fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
-    """Lay out a block-level element — minimal version for testing."""
+    """Lay out a block-level element with proper CSS box model and child recursion."""
+    val s = style
+    val s_width = s.width
+    val s_height = s.height
+    val s_margin = s.margin
+    val s_padding = s.padding
+    val s_border = s.border
+    val border_w = s_border.width
+
     val cw = container.content_width
     val ch = container.content_height
-    val cx = container.content_x
-    val cy = container.content_y
+
+    # Resolve width (block fills container by default minus margin)
+    var box_width = cw - s_margin.horizontal()
+    if not s_width.is_auto():
+        box_width = s_width.resolve_px(cw)
+
+    # Apply min/max width
+    val s_max_w = s.max_width
+    val s_min_w = s.min_width
+    if not s_max_w.is_auto():
+        val max_w = s_max_w.resolve_px(cw)
+        if box_width > max_w:
+            box_width = max_w
+    if not s_min_w.is_auto():
+        val min_w = s_min_w.resolve_px(cw)
+        if box_width < min_w:
+            box_width = min_w
+
+    # Content area insets
+    val inset_h = s_padding.horizontal() + border_w * 2
+    val inset_v = s_padding.vertical() + border_w * 2
+    val content_w = if box_width > inset_h: box_width - inset_h else: 0
+
+    # Position
+    val box_x = container.content_x + s_margin.left
+    val box_y = container.content_y + s_margin.top
+    val cont_x = box_x + border_w + s_padding.left
+    val cont_y = box_y + border_w + s_padding.top
+
+    # Lay out children vertically (block flow)
+    var child_boxes: [BeLayoutBox] = []
+    var cursor_y = cont_y
+    for child in node.children:
+        val child_disp = be_dom_get_display(child)
+        if child_disp != "none":
+            val child_container = BeLayoutBox(
+                x: cont_x, y: cursor_y,
+                width: content_w, height: 0,
+                content_x: cont_x, content_y: cursor_y,
+                content_width: content_w, content_height: 0,
+                node: child, children: []
+            )
+            val child_box = layout_node(child, child_container, s)
+            rt_array_push(child_boxes, child_box)
+            cursor_y = cursor_y + child_box.height
+
+    # Resolve height
+    var content_h = cursor_y - cont_y
+    if not s_height.is_auto():
+        val explicit_h = s_height.resolve_px(ch)
+        content_h = if explicit_h > inset_v: explicit_h - inset_v else: explicit_h
+
+    # Apply min/max height
+    val s_max_h = s.max_height
+    val s_min_h = s.min_height
+    if not s_max_h.is_auto():
+        val max_h = s_max_h.resolve_px(ch) - inset_v
+        if content_h > max_h:
+            content_h = max_h
+    if not s_min_h.is_auto():
+        val min_h = s_min_h.resolve_px(ch) - inset_v
+        if content_h < min_h:
+            content_h = min_h
+
+    val box_height = content_h + inset_v
+
     BeLayoutBox(
-        x: cx, y: cy,
-        width: cw, height: ch,
-        content_x: cx, content_y: cy,
-        content_width: cw, content_height: ch,
-        node: node, children: []
+        x: box_x, y: box_y,
+        width: box_width, height: box_height + s_margin.vertical(),
+        content_x: cont_x, content_y: cont_y,
+        content_width: content_w, content_height: content_h,
+        node: node, children: child_boxes
     )
 
 # =========================================================================
@@ -179,9 +269,9 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
     # Collect visible children and their flex properties
     var visible_children: [BeDomNode] = []
     for child in node.children:
-        val cs = child.style
+        val cs = be_dom_get_style(child)
         if cs.display != "none":
-            visible_children = visible_children + [child]
+            rt_array_push(visible_children, child)
 
     val visible_count = visible_children.len()
     val total_gaps = if visible_count > 1: gap * (visible_count - 1) else: 0
@@ -197,7 +287,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
     var total_base = 0
 
     for child in visible_children:
-        val cs = child.style
+        val cs = be_dom_get_style(child)
         var base = 0
         if not cs.flex_basis.is_auto():
             base = cs.flex_basis.resolve_px(if is_row: content_w else: 0)
@@ -206,9 +296,9 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         elif not is_row and not cs.height.is_auto():
             base = cs.height.resolve_px(0)
 
-        child_bases = child_bases + [base]
-        child_grows = child_grows + [cs.flex_grow]
-        child_shrinks = child_shrinks + [cs.flex_shrink]
+        rt_array_push(child_bases, base)
+        rt_array_push(child_grows, cs.flex_grow)
+        rt_array_push(child_shrinks, cs.flex_shrink)
         total_grow = total_grow + cs.flex_grow
         total_shrink = total_shrink + cs.flex_shrink
         total_base = total_base + base
@@ -232,12 +322,12 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
             # If no grow/shrink and base is 0, divide equally
             if sz == 0 and total_grow == 0.0 and total_base == 0:
                 sz = (main_avail - total_gaps) / visible_count
-            child_sizes = child_sizes + [sz]
+            rt_array_push(child_sizes, sz)
             idx = idx + 1
     else:
         var idx = 0
         while idx < visible_count:
-            child_sizes = child_sizes + [child_bases[idx]]
+            rt_array_push(child_sizes, child_bases[idx])
             idx = idx + 1
 
     # Phase 3: Layout each child with its allocated size
@@ -270,7 +360,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
             )
 
         val child_box = layout_node(child, child_container, style)
-        child_boxes = child_boxes + [child_box]
+        rt_array_push(child_boxes, child_box)
 
         if is_row:
             cursor_x = cursor_x + child_box.width + gap
@@ -336,7 +426,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
     if is_row:
         var bi = 0
         while bi < child_boxes.len():
-            val child_style = visible_children[bi].style
+            val child_style = be_dom_get_style(visible_children[bi])
             val ai = if child_style.align_self != "auto": child_style.align_self else: s_align
             val cb_h = child_boxes[bi].height
             if ai == "center":
@@ -356,7 +446,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         # Column: cross axis is horizontal
         var bi = 0
         while bi < child_boxes.len():
-            val child_style = visible_children[bi].style
+            val child_style = be_dom_get_style(visible_children[bi])
             val ai = if child_style.align_self != "auto": child_style.align_self else: s_align
             val cb_w = child_boxes[bi].width
             if ai == "center":
@@ -377,7 +467,8 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
                 val old_x = child_boxes[ri].x
                 val w = child_boxes[ri].width
                 child_boxes[ri].x = cont_x + content_w - (old_x - cont_x) - w
-                child_boxes[ri].content_x = child_boxes[ri].x + visible_children[ri].style.border.width + visible_children[ri].style.padding.left
+                val ri_style = be_dom_get_style(visible_children[ri])
+                child_boxes[ri].content_x = child_boxes[ri].x + ri_style.border.width + ri_style.padding.left
                 ri = ri + 1
         else:
             var ri = 0
@@ -385,7 +476,8 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
                 val old_y = child_boxes[ri].y
                 val h = child_boxes[ri].height
                 child_boxes[ri].y = cont_y + content_h - (old_y - cont_y) - h
-                child_boxes[ri].content_y = child_boxes[ri].y + visible_children[ri].style.border.width + visible_children[ri].style.padding.top
+                val ri_style_v = be_dom_get_style(visible_children[ri])
+                child_boxes[ri].content_y = child_boxes[ri].y + ri_style_v.border.width + ri_style_v.padding.top
                 ri = ri + 1
 
     val box_height = content_h + inset_v
@@ -435,7 +527,8 @@ fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
     """Lay out a text node using font renderer metrics.
     Uses vector/bitmap font with proportional width when available.
     """
-    val font_size = node.style.font_size
+    val ns = be_dom_get_style(node)
+    val font_size = ns.font_size
     val line_h = text_line_height(font_size)
 
     # Use font renderer for proportional width measurement
@@ -479,3 +572,94 @@ fn hit_test(layout: BeLayoutBox, x: i32, y: i32) -> text:
         return layout.node.id
 
     return ""
+
+# =========================================================================
+# Inline Paint → Scene Generation (avoids cross-module FieldGet bug)
+# =========================================================================
+
+pub fn layout_to_scene(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> RenderScene:
+    """Layout the DOM tree and generate scene commands — all in one module to
+    avoid the Cranelift cross-module FieldGet issue with struct/array fields."""
+    val layout = layout_tree(root, viewport_w, viewport_h)
+    var cmds: [SceneCommand] = []
+    cmds = _paint_box(layout, cmds)
+    render_scene(cmds, viewport_w, viewport_h)
+
+fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
+    """Generate scene commands for a layout box and children.
+    Uses accessor functions for all cross-module field access to avoid Cranelift bug."""
+    var cmds = commands
+    val node = box.node
+
+    # All style access via dom.spl accessors (avoid cross-module FieldGet on StyleProps)
+    val disp = be_dom_get_display(node)
+    if disp == "none":
+        return cmds
+    val vis = be_dom_get_visibility(node)
+    if vis == "hidden":
+        return cmds
+    val opacity = be_dom_get_opacity(node)
+    if opacity < 0.01:
+        return cmds
+
+    # Background color (via accessor)
+    val bg_color = be_dom_get_bg_color(node)
+    val border_radius = be_dom_get_border_radius(node)
+    val pad_left = be_dom_get_padding_left(node)
+    val pad_top = be_dom_get_padding_top(node)
+    val pad_h = be_dom_get_padding_h(node)
+    val pad_v = be_dom_get_padding_v(node)
+
+    if bg_color != 0x00000000:
+        val bg_argb = _apply_opacity(rgba_to_argb(bg_color), opacity)
+        if border_radius > 0:
+            rt_array_push(cmds, scene_rounded_rect(
+                box.content_x - pad_left, box.content_y - pad_top,
+                box.content_width + pad_h, box.content_height + pad_v,
+                bg_argb, border_radius))
+        else:
+            rt_array_push(cmds, scene_fill_rect(
+                box.content_x - pad_left, box.content_y - pad_top,
+                box.content_width + pad_h, box.content_height + pad_v,
+                bg_argb))
+
+    # Gradient
+    val has_grad = be_dom_get_has_gradient(node)
+    if has_grad:
+        val c1 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c1(node)), opacity)
+        val c2 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c2(node)), opacity)
+        rt_array_push(cmds, scene_gradient_rect(
+            box.content_x - pad_left, box.content_y - pad_top,
+            box.content_width + pad_h, box.content_height + pad_v, c1, c2))
+
+    # Border
+    val bw = be_dom_get_border_width(node)
+    val bs = be_dom_get_border_style(node)
+    if bw > 0 and bs != "none":
+        val bc = rgba_to_argb(be_dom_get_border_color(node))
+        rt_array_push(cmds, scene_stroke_rect(box.x, box.y, box.width, box.height, bc, bw))
+
+    # Text content
+    if node.is_text_node():
+        val txt = be_dom_get_text(node)
+        if txt.len() > 0:
+            val tc = rgba_to_argb(be_dom_get_color(node))
+            val fs = be_dom_get_font_size(node)
+            rt_array_push(cmds, scene_text(box.content_x, box.content_y, txt, tc, fs))
+
+    # Children (same-module access to BeLayoutBox.children)
+    for child in box.children:
+        cmds = _paint_box(child, cmds)
+
+    return cmds
+
+fn _apply_opacity(argb: u32, opacity: f32) -> u32:
+    if opacity >= 1.0:
+        return argb
+    if opacity <= 0.0:
+        return argb & 0x00FFFFFF
+    val a = (argb >> 24) & 0xFF
+    var new_a = (a.to_f32() * opacity).to_u32()
+    if new_a > 255:
+        new_a = 255
+    return (new_a << 24) | (argb & 0x00FFFFFF)

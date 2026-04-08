@@ -1314,18 +1314,8 @@ impl<'a> MirLowerer<'a> {
                 args,
                 dispatch,
             } => {
-                // For push: capture the receiver's local index so we can store
-                // the (possibly reallocated) array pointer back after the call.
-                // Without this, rt_array_push may return a new pointer but the
-                // local variable's stack slot still holds the stale old pointer.
-                let receiver_local_index = if method == "push" {
-                    match &receiver.kind {
-                        HirExprKind::Local(idx) => Some(*idx),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                // rt_array_push returns bool, not a new pointer — no store-back needed.
+                let _receiver_local_index: Option<usize> = None;
 
                 let receiver_reg = self.lower_expr(receiver)?;
                 let mut arg_regs = Vec::new();
@@ -1391,27 +1381,12 @@ impl<'a> MirLowerer<'a> {
                             dest
                         })?;
 
-                        // For push on a local variable: store the result back to
-                        // the receiver's stack slot.  rt_array_push may reallocate
-                        // the array, returning a new pointer.  Without this
-                        // store-back the local keeps the stale pre-reallocation
-                        // pointer, causing subsequent reads (e.g. arr.len()) to
-                        // see the old capacity instead of the true length.
-                        if let Some(local_idx) = receiver_local_index {
-                            self.with_func(|func, current_block| {
-                                let addr = func.new_vreg();
-                                let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::LocalAddr {
-                                    dest: addr,
-                                    local_index: local_idx,
-                                });
-                                block.instructions.push(MirInst::Store {
-                                    addr,
-                                    value: dest,
-                                    ty: receiver_ty,
-                                });
-                            })?;
-                        }
+                        // NOTE: Do NOT store the push result back to the receiver
+                        // variable. rt_array_push returns bool (success/failure),
+                        // NOT a new array pointer. Storing the bool back would
+                        // overwrite the array pointer with 1 (true), causing
+                        // crashes on subsequent array access.
+                        // The array is mutated in-place; the pointer stays valid.
 
                         Ok(dest)
                     },

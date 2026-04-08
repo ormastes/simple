@@ -58,6 +58,8 @@ pub fn compile_load<M: Module>(
         };
         let val = builder.use_var(var);
         ctx.vreg_values.insert(dest, val);
+        // Track which local this VReg was loaded from (used by push to store back)
+        ctx.vreg_from_local.insert(dest, local_index);
     } else if let Some(&val) = ctx.vreg_values.get(&addr) {
         ctx.vreg_values.insert(dest, val);
     }

@@ -103,6 +103,9 @@ pub struct InstrContext<'a, M: Module> {
     /// Dynamically-created variables for local indices not pre-allocated in `variables`.
     /// MIR lowering can create temp locals beyond the pre-allocated count.
     pub extra_variables: &'a mut HashMap<usize, cranelift_frontend::Variable>,
+    /// Reverse map: VReg → local_index, for VRegs produced by Load from a local.
+    /// Used by push codegen to store the new array pointer back to the local Variable.
+    pub vreg_from_local: &'a mut HashMap<VReg, usize>,
     pub func: &'a MirFunction,
     pub entry_block: cranelift_codegen::ir::Block,
     pub blocks: &'a HashMap<BlockId, cranelift_codegen::ir::Block>,

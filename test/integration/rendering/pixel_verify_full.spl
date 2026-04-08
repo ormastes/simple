@@ -1,0 +1,209 @@
+# Full Pipeline Pixel Verification
+#
+# Tests the complete HTML -> DOM -> Layout -> Paint -> Scene -> Pixels pipeline
+# plus direct scene executor tests for pixel-level color verification.
+#
+# Build: bin/simple native-build --source src/lib --source src/os --entry test/integration/rendering/pixel_verify_full.spl -o build/pixel_verify_full --entry-closure --runtime-bundle all
+# Run:   ./build/pixel_verify_full
+
+use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
+    scene_fill_rect, scene_stroke_rect, scene_rounded_rect,
+    scene_gradient_rect}
+use common.render_scene.executor.{execute_scene_to_buffer}
+use std.gc_async_mut.gpu.engine2d.color.{rgb, rgba, color_r, color_g, color_b, color_a}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+
+extern fn rt_array_push(arr, val)
+extern fn rt_array_new(cap: i32) -> [u32]
+
+var total_checks: i32 = 0
+var passed_checks: i32 = 0
+var failed_checks: i32 = 0
+
+fn check(name: text, condition: bool):
+    total_checks = total_checks + 1
+    if condition:
+        passed_checks = passed_checks + 1
+        print "  PASS: {name}"
+    else:
+        failed_checks = failed_checks + 1
+        print "  FAIL: {name}"
+
+fn make_buffer(w: i32, h: i32) -> [u32]:
+    """Create pixel buffer using scene executor to fill (avoids tagging issue with rt_array_push)."""
+    val count = w * h
+    var buf: [u32] = rt_array_new(count)
+    var i = 0
+    while i < count:
+        rt_array_push(buf, 0)
+        i = i + 1
+    # Use scene executor to fill with black
+    var cmds: [SceneCommand] = []
+    rt_array_push(cmds, scene_fill_rect(0, 0, w, h, 0xFF000000))
+    val scene = render_scene(cmds, w, h)
+    execute_scene_to_buffer(scene, buf, w, h)
+    buf
+
+fn main():
+    val W: i32 = 20
+    val H: i32 = 20
+
+    # ==================================================================
+    # Part A: Direct Scene Executor (bypasses HTML/CSS)
+    # ==================================================================
+    print "========== Part A: Scene Executor Pixel Tests =========="
+
+    # Test A1: Red fill
+    print "\n=== A1: Red Fill ==="
+    var buf1 = make_buffer(W, H)
+    var cmds1: [SceneCommand] = []
+    rt_array_push(cmds1, scene_fill_rect(0, 0, W, H, 0xFFFF0000))
+    val scene1 = render_scene(cmds1, W, H)
+    execute_scene_to_buffer(scene1, buf1, W, H)
+    val r1 = buf1[10 * W + 10]
+    print "  Center: R:{color_r(r1)} G:{color_g(r1)} B:{color_b(r1)} A:{color_a(r1)}"
+    check("A1: red fill R=255", color_r(r1) == 255)
+    check("A1: red fill G=0", color_g(r1) == 0)
+    check("A1: red fill B=0", color_b(r1) == 0)
+
+    # Test A2: Green fill
+    print "\n=== A2: Green Fill ==="
+    var buf2 = make_buffer(W, H)
+    var cmds2: [SceneCommand] = []
+    rt_array_push(cmds2, scene_fill_rect(0, 0, W, H, 0xFF00FF00))
+    val scene2 = render_scene(cmds2, W, H)
+    execute_scene_to_buffer(scene2, buf2, W, H)
+    val g2 = buf2[10 * W + 10]
+    print "  Center: R:{color_r(g2)} G:{color_g(g2)} B:{color_b(g2)}"
+    check("A2: green fill G=255", color_g(g2) == 255)
+    check("A2: green fill R=0", color_r(g2) == 0)
+
+    # Test A3: Pixel comparison (red vs green)
+    print "\n=== A3: Red vs Green Comparison ==="
+    var diff_rg: i32 = 0
+    var idx = 0
+    while idx < buf1.len() and idx < buf2.len():
+        if buf1[idx] != buf2[idx]:
+            diff_rg = diff_rg + 1
+        idx = idx + 1
+    print "  Different: {diff_rg}/{buf1.len()}"
+    check("A3: red != green", diff_rg == buf1.len())
+
+    # Test A4: Per-channel diff
+    print "\n=== A4: Per-Channel Diff (Red vs Green) ==="
+    var r_total: i32 = 0
+    var g_total: i32 = 0
+    var b_total: i32 = 0
+    var ci = 0
+    while ci < buf1.len() and ci < buf2.len():
+        var rd = color_r(buf1[ci]) - color_r(buf2[ci])
+        if rd < 0: rd = 0 - rd
+        var gd = color_g(buf1[ci]) - color_g(buf2[ci])
+        if gd < 0: gd = 0 - gd
+        var bd = color_b(buf1[ci]) - color_b(buf2[ci])
+        if bd < 0: bd = 0 - bd
+        r_total = r_total + rd
+        g_total = g_total + gd
+        b_total = b_total + bd
+        ci = ci + 1
+    print "  R diff total: {r_total}"
+    print "  G diff total: {g_total}"
+    print "  B diff total: {b_total}"
+    check("A4: R channel has diff", r_total > 0)
+    check("A4: G channel has diff", g_total > 0)
+    check("A4: B channel unchanged", b_total == 0)
+
+    # Test A5: Gradient
+    print "\n=== A5: Gradient ==="
+    var buf5 = make_buffer(W, H)
+    var cmds5: [SceneCommand] = []
+    rt_array_push(cmds5, scene_gradient_rect(0, 0, W, H, 0xFFFF0000, 0xFF0000FF))
+    val scene5 = render_scene(cmds5, W, H)
+    execute_scene_to_buffer(scene5, buf5, W, H)
+    val left = buf5[10 * W + 0]
+    val right = buf5[10 * W + 19]
+    print "  Left:  R:{color_r(left)} B:{color_b(left)}"
+    print "  Right: R:{color_r(right)} B:{color_b(right)}"
+    check("A5: gradient L->R red decreases", color_r(left) > color_r(right))
+    check("A5: gradient L->R blue increases", color_b(right) > color_b(left))
+
+    # Test A6: Rounded rect
+    print "\n=== A6: Rounded Rect ==="
+    var buf6 = make_buffer(W, H)
+    var cmds6: [SceneCommand] = []
+    rt_array_push(cmds6, scene_rounded_rect(2, 2, 16, 16, 0xFFFF00FF, 4))
+    val scene6 = render_scene(cmds6, W, H)
+    execute_scene_to_buffer(scene6, buf6, W, H)
+    val center6 = buf6[10 * W + 10]
+    val corner6 = buf6[0]
+    print "  Center: R:{color_r(center6)} G:{color_g(center6)} B:{color_b(center6)}"
+    print "  Corner: R:{color_r(corner6)} G:{color_g(corner6)} B:{color_b(corner6)}"
+    check("A6: center is magenta", color_r(center6) > 200 and color_b(center6) > 200)
+    check("A6: corner is black", color_r(corner6) == 0 and color_g(corner6) == 0 and color_b(corner6) == 0)
+
+    # Test A7: Deterministic
+    print "\n=== A7: Deterministic ==="
+    var buf7a = make_buffer(W, H)
+    var buf7b = make_buffer(W, H)
+    var cmds7: [SceneCommand] = []
+    rt_array_push(cmds7, scene_fill_rect(3, 3, 14, 14, 0xFFAA5533))
+    rt_array_push(cmds7, scene_rounded_rect(5, 5, 10, 10, 0xFF3355AA, 3))
+    val scene7 = render_scene(cmds7, W, H)
+    execute_scene_to_buffer(scene7, buf7a, W, H)
+    execute_scene_to_buffer(scene7, buf7b, W, H)
+    var match7: i32 = 0
+    var m7 = 0
+    while m7 < buf7a.len() and m7 < buf7b.len():
+        if buf7a[m7] == buf7b[m7]:
+            match7 = match7 + 1
+        m7 = m7 + 1
+    print "  Match: {match7}/{buf7a.len()}"
+    check("A7: deterministic", match7 == buf7a.len())
+
+    # ==================================================================
+    # Part B: HTML Pipeline Pixel Tests
+    # ==================================================================
+    print "\n========== Part B: HTML Pipeline Pixel Tests =========="
+
+    # Test B1: HTML renders pixels
+    print "\n=== B1: HTML Pixel Output ==="
+    val html1 = "<html><body></body></html>"
+    val px1 = render_html_to_pixel_array(html1, 50, 50)
+    check("B1: pixel count correct", px1.len() == 2500)
+
+    # Test B2: Deterministic HTML rendering
+    print "\n=== B2: HTML Deterministic ==="
+    val px2a = render_html_to_pixel_array(html1, 50, 50)
+    val px2b = render_html_to_pixel_array(html1, 50, 50)
+    var match_b2: i32 = 0
+    var b2i = 0
+    while b2i < px2a.len() and b2i < px2b.len():
+        if px2a[b2i] == px2b[b2i]:
+            match_b2 = match_b2 + 1
+        b2i = b2i + 1
+    print "  Match: {match_b2}/{px2a.len()}"
+    check("B2: HTML deterministic", match_b2 == px2a.len())
+
+    # Test B3: Different viewports produce different counts
+    print "\n=== B3: Different Viewport Sizes ==="
+    val px3a = render_html_to_pixel_array(html1, 30, 20)
+    val px3b = render_html_to_pixel_array(html1, 40, 30)
+    print "  30x20 pixels: {px3a.len()}"
+    print "  40x30 pixels: {px3b.len()}"
+    check("B3: 30x20 = 600", px3a.len() == 600)
+    check("B3: 40x30 = 1200", px3b.len() == 1200)
+
+    # ==================================================================
+    # Summary
+    # ==================================================================
+    print "\n========================================"
+    print "  Full Pipeline Pixel Verification"
+    print "========================================"
+    print "  Total checks: {total_checks}"
+    print "  Passed:       {passed_checks}"
+    print "  Failed:       {failed_checks}"
+    if failed_checks == 0:
+        print "  Result: ALL PASSED"
+    else:
+        print "  Result: {failed_checks} FAILURES"
+    print "========================================"

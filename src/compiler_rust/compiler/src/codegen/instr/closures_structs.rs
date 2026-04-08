@@ -196,27 +196,11 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
-        // For push: rt_array_push may return a new (grown) array pointer.
-        // We must update the receiver vreg so subsequent uses of the same
-        // variable see the new array.  Extract the plain method name first.
-        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
-        if method == "push" {
-            ctx.vreg_values.insert(receiver, result);
-            // Also update the Cranelift Variable if the receiver is backed by a local.
-            // Without this, subsequent Load from the Variable gets the stale pointer.
-            for (&vreg, &local_index) in ctx.local_addr_map.iter() {
-                if vreg == receiver || ctx.vreg_values.get(&vreg).copied() == Some(result) {
-                    if let Some(&var) = ctx.variables.get(&local_index) {
-                        builder.def_var(var, result);
-                        break;
-                    }
-                    if let Some(&var) = ctx.extra_variables.get(&local_index) {
-                        builder.def_var(var, result);
-                        break;
-                    }
-                }
-            }
-        }
+        // NOTE: Do NOT store the push result back to the receiver variable.
+        // rt_array_push returns bool (success/failure), NOT a new array pointer.
+        // The array is mutated in-place; the pointer stays valid.
+        // Storing the bool (1=true) back would corrupt the array variable,
+        // causing segfaults on subsequent array access.
         return Ok(());
     }
 
@@ -661,39 +645,15 @@ fn try_compile_builtin_method_call<M: Module>(
 
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
 
-    // Build call arguments: receiver first, then other args
+    // Build call arguments: receiver first, then other args.
+    // rt_array_push expects (array: RuntimeValue, value: RuntimeValue).
+    // Values are already tagged RuntimeValues at this point — the MIR-level
+    // BoxInt instruction handles integer tagging when needed. Do NOT
+    // defensively re-box here, as that would double-tag values from function
+    // calls, loads, and other sources that already return RuntimeValues.
     let mut call_args = vec![receiver_val];
-    for (i, arg) in args.iter().enumerate() {
-        let mut val = get_vreg_or_default(ctx, builder, arg);
-        // For rt_array_push, the value argument (index 0 in args, index 1 in call_args)
-        // must be a tagged RuntimeValue.  MIR lowering emits BoxInt for MethodCall,
-        // but some paths (MethodCallStatic fallback) may skip it.  We defensively box
-        // integer-width values here.  Heap pointers (tag 0x1) and already-boxed ints
-        // (tag 0x0 with high bits set) must NOT be double-boxed.
-        //
-        // Heuristic: if the Cranelift value was produced by an ishl with shift=3,
-        // it's already boxed.  Otherwise box it for push.
-        if runtime_func == "rt_array_push" && i == 0 {
-            // Check if this value is already the result of a BoxInt (ishl by 3).
-            // We do this by checking the instruction that produced the value.
-            let already_boxed = {
-                if let cranelift_codegen::ir::ValueDef::Result(inst, _) = builder.func.dfg.value_def(val) {
-                    matches!(builder.func.dfg.insts[inst], cranelift_codegen::ir::InstructionData::BinaryImm64 { .. })
-                        || matches!(builder.func.dfg.insts[inst],
-                            cranelift_codegen::ir::InstructionData::Binary { opcode: cranelift_codegen::ir::Opcode::Ishl, .. })
-                } else {
-                    false
-                }
-            };
-            if !already_boxed {
-                let val_type = builder.func.dfg.value_type(val);
-                if val_type == types::I32 || val_type == types::I8 || val_type == types::I16 {
-                    val = builder.ins().uextend(types::I64, val);
-                }
-                let three = builder.ins().iconst(types::I64, 3);
-                val = builder.ins().ishl(val, three);
-            }
-        }
+    for arg in args.iter() {
+        let val = get_vreg_or_default(ctx, builder, arg);
         call_args.push(val);
     }
 
@@ -709,16 +669,17 @@ fn try_compile_builtin_method_call<M: Module>(
     );
 
     if runtime_func == "rt_array_push" {
-        // rt_array_push returns the (possibly reallocated) array pointer.
+        // rt_array_push returns bool (success/failure), NOT a new array pointer.
+        // The array is mutated in-place. Return the bool result.
         if results.is_empty() {
             Ok(Some(receiver_val))
         } else {
-            let new_arr = results[0];
-            let result_type = builder.func.dfg.value_type(new_arr);
+            let push_result = results[0];
+            let result_type = builder.func.dfg.value_type(push_result);
             if result_type != types::I64 {
-                Ok(Some(super::helpers::safe_extend_to_i64(builder, new_arr)))
+                Ok(Some(super::helpers::safe_extend_to_i64(builder, push_result)))
             } else {
-                Ok(Some(new_arr))
+                Ok(Some(push_result))
             }
         }
     } else if in_place_mutating_no_push {

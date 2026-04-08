@@ -17,6 +17,8 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
 
+extern fn rt_array_push(arr, val)
+
 # =========================================================================
 # CSS Rule types
 # =========================================================================
@@ -39,17 +41,17 @@ fn extract_style_blocks(html: text) -> [text]:
     val lower = html.to_lower()
     while pos < lower.len():
         val style_open = sb_find(lower, "<style", pos)
-        if style_open < 0:
+        if style_open >= 999999999:
             break
         val gt = sb_find(html, ">", style_open)
-        if gt < 0:
+        if gt >= 999999999:
             break
         val content_start = gt + 1
         val style_close = sb_find(lower, "</style", content_start)
-        if style_close < 0:
+        if style_close >= 999999999:
             break
         val block = html.slice(content_start, style_close)
-        blocks = blocks + [block]
+        rt_array_push(blocks, block)
         pos = style_close + 8
     blocks
 
@@ -63,38 +65,31 @@ fn parse_css_rules(css_text: text) -> [CssRule]:
     val len = css_text.len()
 
     while pos < len:
-        # Skip whitespace and comments
         pos = sb_skip_ws_comments(css_text, pos)
         if pos >= len:
             break
-
-        # Find opening brace
         val brace_open = sb_find(css_text, "{", pos)
-        if brace_open < 0:
+        print "[pcr] pos={pos} brace={brace_open}"
+        if brace_open >= 999999999:
             break
-
         val selector_text = css_text.slice(pos, brace_open).trim()
         if selector_text.len() == 0:
             pos = brace_open + 1
             continue
-
-        # Find closing brace
         val brace_close = sb_find(css_text, "}", brace_open + 1)
-        if brace_close < 0:
+        if brace_close >= 999999999:
             break
-
         val decl_text = css_text.slice(brace_open + 1, brace_close).trim()
         val declarations = parse_declarations(decl_text)
-
-        # Handle comma-separated selectors
+        print "[pcr] sel='{selector_text}' decls={declarations.len()}"
         val selectors = sb_split_char(selector_text, ",")
         for sel in selectors:
             val trimmed = sel.trim()
             if trimmed.len() > 0:
-                rules = rules + [CssRule(selector: trimmed, declarations: declarations)]
-
+                rt_array_push(rules, CssRule(selector: trimmed, declarations: declarations))
         pos = brace_close + 1
 
+    print "[pcr] returning {rules.len()} rules"
     rules
 
 fn parse_declarations(text_val: text) -> [CssDecl]:
@@ -105,7 +100,7 @@ fn parse_declarations(text_val: text) -> [CssDecl]:
         if trimmed.len() == 0:
             continue
         val colon = sb_find(trimmed, ":", 0)
-        if colon <= 0:
+        if colon <= 0 or colon >= 999999999:
             continue
         val prop = trimmed.slice(0, colon).trim()
         val value = trimmed.slice(colon + 1, trimmed.len()).trim()
@@ -113,7 +108,7 @@ fn parse_declarations(text_val: text) -> [CssDecl]:
             # Expand shorthand properties
             val expanded = expand_shorthand(prop, value)
             for e in expanded:
-                decls = decls + [e]
+                rt_array_push(decls, e)
     decls
 
 # =========================================================================
@@ -153,11 +148,11 @@ fn expand_font(value: text) -> [CssDecl]:
     var decls: [CssDecl] = []
     for part in parts:
         if part.ends_with("px") or part.ends_with("em") or part.ends_with("rem") or part.ends_with("pt"):
-            decls = decls + [CssDecl(property: "font-size", value: part)]
+            rt_array_push(decls, CssDecl(property: "font-size", value: part))
         elif part.ends_with("%"):
-            decls = decls + [CssDecl(property: "font-size", value: part)]
+            rt_array_push(decls, CssDecl(property: "font-size", value: part))
         elif part == "bold" or part == "bolder":
-            decls = decls + [CssDecl(property: "font-weight", value: part)]
+            rt_array_push(decls, CssDecl(property: "font-weight", value: part))
         elif part == "italic":
             pass_dn
     if decls.len() == 0:
@@ -283,10 +278,10 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
 
     # Handle :nth-child pseudo
     val nth_pos = sb_find(sel, ":nth-child(", 0)
-    if nth_pos >= 0:
+    if nth_pos < 999999999:
         val base_sel = sel.slice(0, nth_pos)
         val paren_end = sb_find(sel, ")", nth_pos)
-        if paren_end > 0:
+        if paren_end > 0 and paren_end < 999999999:
             val n_str = sel.slice(nth_pos + 11, paren_end).trim()
             val target_n = n_str.parse_i32() ?? 0
             if nth != target_n:
@@ -307,13 +302,13 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
 
     # Compound: tag.class or tag#id
     val dot_pos = sb_find(sel, ".", 0)
-    if dot_pos > 0:
+    if dot_pos > 0 and dot_pos < 999999999:
         val tag = sel.slice(0, dot_pos)
         val cls = sel.slice(dot_pos + 1, sel.len())
         return node.tag == tag and node.has_class(cls)
 
     val hash_pos = sb_find(sel, "#", 0)
-    if hash_pos > 0:
+    if hash_pos > 0 and hash_pos < 999999999:
         val tag = sel.slice(0, hash_pos)
         val id = sel.slice(hash_pos + 1, sel.len())
         return node.tag == tag and node.id == id
@@ -358,7 +353,8 @@ pub fn process_style_blocks(root: BeDomNode, html: text):
     var all_rules: [CssRule] = []
     for block in blocks:
         val rules = parse_css_rules(block)
-        all_rules = all_rules + rules
+        for r in rules:
+            rt_array_push(all_rules, r)
     if all_rules.len() > 0:
         apply_css_rules_to_tree(root, all_rules)
 
@@ -373,19 +369,19 @@ fn sb_find(s: text, target: text, start: i32) -> i32:
         if s.slice(i, i + tlen) == target:
             return i
         i = i + 1
-    -1
+    999999999
 
 fn sb_split_char(s: text, delimiter: text) -> [text]:
     var parts: [text] = []
     var current = ""
     for ch in s:
         if ch == delimiter:
-            parts = parts + [current]
+            rt_array_push(parts, current)
             current = ""
         else:
             current = "{current}{ch}"
     if current.len() > 0:
-        parts = parts + [current]
+        rt_array_push(parts, current)
     parts
 
 fn sb_split_ws(s: text) -> [text]:
@@ -394,12 +390,12 @@ fn sb_split_ws(s: text) -> [text]:
     for ch in s:
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             if current.len() > 0:
-                parts = parts + [current]
+                rt_array_push(parts, current)
                 current = ""
         else:
             current = "{current}{ch}"
     if current.len() > 0:
-        parts = parts + [current]
+        rt_array_push(parts, current)
     parts
 
 fn sb_skip_ws_comments(s: text, start: i32) -> i32:
@@ -412,7 +408,7 @@ fn sb_skip_ws_comments(s: text, start: i32) -> i32:
         # CSS comment: /* ... */
         if pos + 1 < s.len() and s.slice(pos, pos + 2) == "/*":
             val end = sb_find(s, "*/", pos + 2)
-            if end >= 0:
+            if end < 999999999:
                 pos = end + 2
                 continue
             break

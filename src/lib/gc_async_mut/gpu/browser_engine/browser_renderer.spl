@@ -10,7 +10,8 @@ use common.ui.widget.{WidgetNode, UITree, UIState}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
-    layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height}
+    layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
+    layout_to_scene}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
 use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
@@ -408,11 +409,10 @@ fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: t
 
 pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     """Render HTML to a flat pixel array (ARGB u32). Returns just pixels, no struct wrapper.
-    Use this from native-built tests to avoid cross-module struct layout issues."""
+    Uses layout_to_scene() which does layout+paint in one module to avoid
+    cross-module FieldGet bug with struct/array fields."""
     val dom = browser_renderer_html_string_to_dom(html)
-    val layout = layout_tree(dom, width, height)
-    val commands = generate_paint_list(layout)
-    val scene = paint_commands_to_scene(commands, width, height)
+    val scene = layout_to_scene(dom, width, height)
     val pixel_count = width * height
     var pixels: [u32] = rt_array_new(pixel_count)
     var i = 0
@@ -444,14 +444,14 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
             # Check for HTML comment <!-- ... -->
             if pos + 3 < len and html.slice(pos, pos + 4) == "<!--":
                 val comment_end = br_find_str(html, "-->", pos + 4)
-                if comment_end >= 0:
+                if comment_end < 999999999:
                     pos = comment_end + 3
                 else:
                     pos = len
                 continue
 
             val tag_end = browser_renderer_find_char(html, ">", pos)
-            if tag_end < 0:
+            if tag_end >= 999999999:
                 val remaining = html.slice(pos, len)
                 val txt = BeDomNode.text(remaining)
                 if stack.len() > 0:
@@ -499,17 +499,46 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 var new_node = browser_renderer_parse_tag(clean_content)
                 val tag_lower = new_node.tag.to_lower()
 
-                # Skip structural tags — let content flow into root
-                if tag_lower == "html" or tag_lower == "head" or tag_lower == "body":
+                # Skip html/head — let content flow into root
+                if tag_lower == "html" or tag_lower == "head":
+                    pos = tag_end + 1
+                    continue
+
+                # For body: don't add to tree, but apply its inline styles to root
+                if tag_lower == "body":
+                    if stack.len() > 0:
+                        val root_node = stack[0]
+                        # Parse body's attributes and copy styles to root
+                        val body_parsed = new_node
+                        val body_style = body_parsed.style
+                        if body_style.background_color != 0x00000000:
+                            root_node.set_style("background-color", clean_content)
+                        # Apply inline style from body tag directly
+                        var bi = 1
+                        while bi < browser_renderer_split_tag_parts(clean_content).len():
+                            val bpart = browser_renderer_split_tag_parts(clean_content)[bi]
+                            val beq = browser_renderer_find_char(bpart, "=", 0)
+                            if beq > 0:
+                                val bkey = bpart.slice(0, beq)
+                                var bval = bpart.slice(beq + 1, bpart.len())
+                                if bval.starts_with("\"") and bval.ends_with("\""):
+                                    bval = bval.slice(1, bval.len() - 1)
+                                elif bval.starts_with("'") and bval.ends_with("'"):
+                                    bval = bval.slice(1, bval.len() - 1)
+                                if bkey == "style":
+                                    browser_renderer_apply_inline_style(root_node, bval)
+                            bi = bi + 1
+                        # Also set root's tag to "body" so CSS body selectors match
+                        root_node.tag = "body"
                     pos = tag_end + 1
                     continue
 
                 # <style> is a raw-text element — skip ahead to </style>
                 if tag_lower == "style":
                     val style_close = br_find_str(html.to_lower(), "</style", tag_end + 1)
-                    if style_close >= 0:
+                    if style_close < 999999999:
                         val style_tag_end = browser_renderer_find_char(html, ">", style_close)
-                        pos = if style_tag_end >= 0: style_tag_end + 1 else: style_close + 8
+                        pos = if style_tag_end < 999999999: style_tag_end + 1 else: style_close + 8
                     else:
                         pos = len
                     continue
@@ -524,7 +553,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
             pos = tag_end + 1
         else:
             val text_end = browser_renderer_find_char(html, "<", pos)
-            val end_pos = if text_end < 0: len else: text_end
+            val end_pos = if text_end >= 999999999: len else: text_end
             val text_content = html.slice(pos, end_pos).trim()
             if text_content.len() > 0:
                 val txt = BeDomNode.text(text_content)
@@ -654,7 +683,7 @@ fn browser_renderer_find_char(s: text, target: text, start: i32) -> i32:
         if s.slice(i, i + 1) == target:
             return i
         i = i + 1
-    -1
+    999999999
 
 fn browser_renderer_is_void_element(tag: text) -> bool:
     match tag:
@@ -667,14 +696,14 @@ fn browser_renderer_is_void_element(tag: text) -> bool:
         _ => false
 
 fn br_find_str(s: text, needle: text, start: i32) -> i32:
-    """Find substring in s starting at start. Returns -1 if not found."""
+    """Find substring in s starting at start. Returns 999999999 if not found."""
     val nlen = needle.len()
     var i = start
     while i + nlen <= s.len():
         if s.slice(i, i + nlen) == needle:
             return i
         i = i + 1
-    -1
+    999999999
 
 fn br_apply_ua_defaults(node: BeDomNode):
     """Apply user-agent default styles to common HTML elements."""

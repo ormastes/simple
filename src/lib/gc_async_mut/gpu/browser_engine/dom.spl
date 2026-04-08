@@ -6,6 +6,8 @@
 # and a tree structure using direct child references rather than ID-based
 # lookups.
 
+extern fn rt_array_push(arr, val)
+
 class BeDomNode:
     """A DOM node in the browser engine's simplified tree.
 
@@ -52,7 +54,7 @@ class BeDomNode:
 
     me add_child(child: BeDomNode):
         """Append a child node."""
-        self.children = self.children + [child]
+        rt_array_push(self.children, child)
 
     me set_style(prop: text, value: text):
         """Set a style property by name and string value."""
@@ -220,7 +222,7 @@ class BeDomNode:
             "line-height" =>
                 pass_dn  # parsed but not stored yet
             "align-self" =>
-                pass_dn  # would need align_self field in StyleProps
+                s.align_self = value
             "box-sizing" =>
                 pass_dn  # would need box_sizing field in StyleProps
             "list-style" =>
@@ -304,13 +306,16 @@ class BeDomNode:
         var i = 0
         while i + 1 < self.attributes.len():
             if self.attributes[i] == key:
-                new_attrs = new_attrs + [key, value]
+                rt_array_push(new_attrs, key)
+                rt_array_push(new_attrs, value)
                 found = true
             else:
-                new_attrs = new_attrs + [self.attributes[i], self.attributes[i + 1]]
+                rt_array_push(new_attrs, self.attributes[i])
+                rt_array_push(new_attrs, self.attributes[i + 1])
             i = i + 2
         if not found:
-            new_attrs = new_attrs + [key, value]
+            rt_array_push(new_attrs, key)
+            rt_array_push(new_attrs, value)
         self.attributes = new_attrs
 
     fn get_attr(key: text) -> text:
@@ -346,6 +351,57 @@ pub fn be_dom_get_bg_color(node: BeDomNode) -> u32:
 
 pub fn be_dom_get_display(node: BeDomNode) -> text:
     node.style.display
+
+pub fn be_dom_get_visibility(node: BeDomNode) -> text:
+    node.style.visibility
+
+pub fn be_dom_get_opacity(node: BeDomNode) -> f32:
+    node.style.opacity
+
+pub fn be_dom_get_color(node: BeDomNode) -> u32:
+    node.style.color
+
+pub fn be_dom_get_font_size(node: BeDomNode) -> i32:
+    node.style.font_size
+
+pub fn be_dom_get_border_radius(node: BeDomNode) -> i32:
+    node.style.border_radius
+
+pub fn be_dom_get_border_width(node: BeDomNode) -> i32:
+    node.style.border.width
+
+pub fn be_dom_get_border_color(node: BeDomNode) -> u32:
+    node.style.border.color
+
+pub fn be_dom_get_border_style(node: BeDomNode) -> text:
+    node.style.border.style
+
+pub fn be_dom_get_padding_left(node: BeDomNode) -> i32:
+    node.style.padding.left
+
+pub fn be_dom_get_padding_top(node: BeDomNode) -> i32:
+    node.style.padding.top
+
+pub fn be_dom_get_padding_h(node: BeDomNode) -> i32:
+    node.style.padding.horizontal()
+
+pub fn be_dom_get_padding_v(node: BeDomNode) -> i32:
+    node.style.padding.vertical()
+
+pub fn be_dom_get_has_gradient(node: BeDomNode) -> bool:
+    node.style.has_gradient
+
+pub fn be_dom_get_gradient_c1(node: BeDomNode) -> u32:
+    node.style.gradient_color1
+
+pub fn be_dom_get_gradient_c2(node: BeDomNode) -> u32:
+    node.style.gradient_color2
+
+pub fn be_dom_get_text(node: BeDomNode) -> text:
+    node.text_content
+
+pub fn be_dom_get_children(node: BeDomNode) -> [BeDomNode]:
+    node.children
 
 class BeDomFactory:
     static fn element(tag: text) -> BeDomNode:
@@ -409,7 +465,7 @@ fn strip_css_comments(s: text) -> text:
     while i < s.len():
         if i + 1 < s.len() and s.slice(i, i + 2) == "/*":
             val end = dom_find_str(s, "*/", i + 2)
-            if end >= 0:
+            if end < 999999999:
                 i = end + 2
             else:
                 i = s.len()
@@ -425,7 +481,7 @@ fn dom_find_str(s: text, needle: text, start: i32) -> i32:
         if s.slice(i, i + nlen) == needle:
             return i
         i = i + 1
-    -1
+    999999999
 
 fn parse_hex_color(s: text) -> u32:
     """Parse a hex color string like '#RRGGBB', '#RRGGBBAA', or '#RGB' to u32 RGBA."""
@@ -476,7 +532,7 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
     else:
         # Space-separated, may have / for alpha
         val slash_pos = dom_find_str(inner, "/", 0)
-        if slash_pos >= 0:
+        if slash_pos < 999999999:
             val before_slash = inner.slice(0, slash_pos).trim()
             alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
             color_parts = dom_split_ws(before_slash)
@@ -560,12 +616,12 @@ fn dom_split_ws(s: text) -> [text]:
     for ch in s:
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             if current.len() > 0:
-                parts = parts + [current]
+                rt_array_push(parts, current)
                 current = ""
         else:
             current = "{current}{ch}"
     if current.len() > 0:
-        parts = parts + [current]
+        rt_array_push(parts, current)
     parts
 
 # =========================================================================
@@ -592,7 +648,7 @@ fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
         parts = split_comma(inner)
     else:
         val slash_pos = dom_find_str(inner, "/", 0)
-        if slash_pos >= 0:
+        if slash_pos < 999999999:
             val before_slash = inner.slice(0, slash_pos).trim()
             alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
             parts = dom_split_ws(before_slash)
@@ -700,12 +756,12 @@ fn split_comma(s: text) -> [text]:
     var current = ""
     for ch in s:
         if ch == ",":
-            parts = parts + [current]
+            rt_array_push(parts, current)
             current = ""
         else:
             current = "{current}{ch}"
     if current.len() > 0:
-        parts = parts + [current]
+        rt_array_push(parts, current)
     return parts
 
 fn parse_int_clamped(s: text, min_val: u32, max_val: u32) -> u32:
@@ -932,12 +988,12 @@ fn sb_dom_split_ws(s: text) -> [text]:
     for ch in s:
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             if current.len() > 0:
-                parts = parts + [current]
+                rt_array_push(parts, current)
                 current = ""
         else:
             current = "{current}{ch}"
     if current.len() > 0:
-        parts = parts + [current]
+        rt_array_push(parts, current)
     parts
 
 # =========================================================================
@@ -964,12 +1020,12 @@ fn parse_linear_gradient(value: text) -> GradientParseResult:
 
     # Find opening paren
     val open = find_char_in(value, "(", 0)
-    if open < 0:
+    if open >= 999999999:
         return empty
 
     # Find matching closing paren (handle nested parens for rgba)
     var depth: i32 = 0
-    var close: i32 = -1
+    var close: i32 = 999999999
     var i: i32 = open
     while i < value.len():
         val ch = value.slice(i, i + 1)
@@ -982,7 +1038,7 @@ fn parse_linear_gradient(value: text) -> GradientParseResult:
                 break
         i = i + 1
 
-    if close < 0:
+    if close >= 999999999:
         return empty
 
     val inner = value.slice(open + 1, close).trim()
@@ -1033,14 +1089,14 @@ fn strip_stop_position(s: text) -> text:
     val trimmed = s.trim()
     # If it ends with % or px after a space, strip the position
     val last_space = find_last_space(trimmed)
-    if last_space > 0:
+    if last_space > 0 and last_space < 999999999:
         val after = trimmed.slice(last_space + 1, trimmed.len()).trim()
         if after.ends_with("%") or after.ends_with("px"):
             return trimmed.slice(0, last_space).trim()
     trimmed
 
 fn find_last_space(s: text) -> i32:
-    var last: i32 = -1
+    var last: i32 = 999999999
     var depth: i32 = 0
     var i: i32 = 0
     while i < s.len():
@@ -1065,13 +1121,13 @@ fn split_top_level_commas(s: text) -> [text]:
             depth = depth - 1
             current = "{current}{ch}"
         elif ch == "," and depth == 0:
-            parts = parts + [current.trim()]
+            rt_array_push(parts, current.trim())
             current = ""
         else:
             current = "{current}{ch}"
 
     if current.trim().len() > 0:
-        parts = parts + [current.trim()]
+        rt_array_push(parts, current.trim())
 
     parts
 
@@ -1082,7 +1138,7 @@ fn find_char_in(s: text, target: text, start: i32) -> i32:
         if s.slice(i, i + 1) == target:
             return i
         i = i + 1
-    return -1
+    return 999999999
 
 # =========================================================================
 # Box Shadow Parser
@@ -1100,7 +1156,7 @@ fn parse_box_shadows(value: text) -> [BoxShadow]:
     for shadow_str in shadow_strs:
         val shadow = parse_single_box_shadow(shadow_str.trim())
         if shadow.color != 0x00000000 or shadow.blur_radius > 0 or shadow.offset_x != 0 or shadow.offset_y != 0:
-            shadows = shadows + [shadow]
+            rt_array_push(shadows, shadow)
 
     shadows
 
@@ -1152,7 +1208,7 @@ fn parse_single_box_shadow(s: text) -> BoxShadow:
             val stripped = if tv.ends_with("px"): tv.slice(0, tv.len() - 2) else: tv
             val parsed = stripped.parse_f64()
             if parsed != nil:
-                nums = nums + [parsed.to_i32()]
+                rt_array_push(nums, parsed.to_i32())
                 num_count = num_count + 1
                 color_start = color_start + 1
                 continue
@@ -1203,13 +1259,13 @@ fn split_shadow_tokens(s: text) -> [text]:
             current = "{current}{ch}"
         elif (ch == " " or ch == "\t") and depth == 0:
             if current.trim().len() > 0:
-                tokens = tokens + [current.trim()]
+                rt_array_push(tokens, current.trim())
             current = ""
         else:
             current = "{current}{ch}"
 
     if current.trim().len() > 0:
-        tokens = tokens + [current.trim()]
+        rt_array_push(tokens, current.trim())
 
     tokens
 
@@ -1225,12 +1281,12 @@ fn parse_blur_value(value: text) -> i32:
     """
     val trimmed = value.trim()
     val blur_idx = find_substr(trimmed, "blur(")
-    if blur_idx < 0:
+    if blur_idx >= 999999999:
         return 0
 
     val start = blur_idx + 5  # length of "blur("
     val end = find_char_in(trimmed, ")", start)
-    if end < 0:
+    if end >= 999999999:
         return 0
 
     val inner = trimmed.slice(start, end).trim()
@@ -1245,13 +1301,13 @@ fn parse_blur_value(value: text) -> i32:
     0
 
 fn find_substr(haystack: text, needle: text) -> i32:
-    """Find the first occurrence of needle in haystack. Returns -1 if not found."""
+    """Find the first occurrence of needle in haystack. Returns 999999999 if not found."""
     val nlen = needle.len()
     if nlen == 0 or nlen > haystack.len():
-        return -1
+        return 999999999
     var i: i32 = 0
     while i + nlen <= haystack.len():
         if haystack.slice(i, i + nlen) == needle:
             return i
         i = i + 1
-    return -1
+    return 999999999
