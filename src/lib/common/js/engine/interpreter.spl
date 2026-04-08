@@ -133,6 +133,16 @@ class JsInterpreter:
         self._define_global_native("clearTimeout", -42)
         self._define_global_native("clearInterval", -43)
 
+        # Error constructors (empty body — new Error('msg') won't crash)
+        val error_fn_id = self.functions.len()
+        val error_fn = JsFunction(name: "Error", params: ["message"], body: [], closure_env: -1)
+        self.functions.push(error_fn)
+        self.env_stack.define_var(self.global_env, "Error", JsValue.Function(id: error_fn_id))
+        self.env_stack.define_var(self.global_env, "TypeError", JsValue.Function(id: error_fn_id))
+        self.env_stack.define_var(self.global_env, "RangeError", JsValue.Function(id: error_fn_id))
+        self.env_stack.define_var(self.global_env, "ReferenceError", JsValue.Function(id: error_fn_id))
+        self.env_stack.define_var(self.global_env, "SyntaxError", JsValue.Function(id: error_fn_id))
+
     # Find prototype id for a class constructor
     fn _find_class_proto(fn_id: i64) -> i64:
         var i = 0
@@ -1105,6 +1115,68 @@ class JsInterpreter:
                         return Ok(JsValue.Array(id: result_id))
                 return Ok(JsValue.Array(id: self.object_store.create_object()))
 
+        # Object.assign
+        if is_member and member_method == "assign":
+            val callee_obj_name_oa = _ident_name(member_obj_expr)
+            if callee_obj_name_oa == "Object":
+                if args.len() >= 1:
+                    val target = self.eval_expression(args.get(0), env)?
+                    val target_id = _get_obj_id(target)
+                    if target_id >= 0:
+                        var ai = 1
+                        while ai < args.len():
+                            val source = self.eval_expression(args.get(ai), env)?
+                            val source_id = _get_obj_id(source)
+                            if source_id >= 0:
+                                val src_obj = self.object_store.get_object(source_id)
+                                var pi = 0
+                                while pi < src_obj.properties.len():
+                                    val prop = src_obj.properties.get(pi)
+                                    self.object_store.set_property(target_id, prop.key, prop.value)
+                                    pi = pi + 1
+                            ai = ai + 1
+                        return Ok(target)
+                return Ok(JsValue.Undefined)
+
+        # Object.freeze (no-op stub — returns the same object)
+        if is_member and member_method == "freeze":
+            val callee_obj_name_of = _ident_name(member_obj_expr)
+            if callee_obj_name_of == "Object":
+                if args.len() > 0:
+                    return Ok(self.eval_expression(args.get(0), env)?)
+                return Ok(JsValue.Undefined)
+
+        # Number.isInteger / Number.isFinite / Number.isNaN / Number.parseInt / Number.parseFloat
+        if is_member and (member_method == "isInteger" or member_method == "isFinite" or member_method == "isNaN" or member_method == "parseInt" or member_method == "parseFloat"):
+            val callee_obj_name_n = _ident_name(member_obj_expr)
+            if callee_obj_name_n == "Number":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    val n = to_number(arg)
+                    if member_method == "isInteger":
+                        val int_val = f64_to_i64(n)
+                        return Ok(JsValue.Boolean(v: int_val.to_f64() == n))
+                    if member_method == "isFinite":
+                        val is_inf = n == 9999999999.0
+                        val is_neg_inf = n == -9999999999.0
+                        val is_nan_val = n == -9999999999.999
+                        return Ok(JsValue.Boolean(v: not is_inf and not is_neg_inf and not is_nan_val))
+                    if member_method == "isNaN":
+                        return Ok(JsValue.Boolean(v: n == -9999999999.999))
+                    if member_method == "parseInt":
+                        val s = js_to_string(arg)
+                        val parsed = s.parse_float()
+                        if val Some(pv) = parsed:
+                            return Ok(JsValue.Number(v: f64_to_i64(pv).to_f64()))
+                        return Ok(JsValue.Number(v: -9999999999.999))
+                    if member_method == "parseFloat":
+                        val s = js_to_string(arg)
+                        val parsed = s.parse_float()
+                        if val Some(pv) = parsed:
+                            return Ok(JsValue.Number(v: pv))
+                        return Ok(JsValue.Number(v: -9999999999.999))
+                return Ok(JsValue.Boolean(v: false))
+
         # JSON.stringify
         if is_member and member_method == "stringify":
             val callee_obj_name_js = _ident_name(member_obj_expr)
@@ -1254,6 +1326,11 @@ class JsInterpreter:
             if property == "length":
                 val str_val = js_to_string(obj_val)
                 return Ok(JsValue.Number(v: str_val.len().to_f64()))
+        # TypeError: Cannot read properties of undefined/null
+        if tv == "undefined" or strict_equals(obj_val, JsValue.Null):
+            self.thrown_value = JsValue.String(v: "TypeError: Cannot read properties of " + tv)
+            self.has_thrown = true
+            return Ok(JsValue.Undefined)
         Ok(JsValue.Undefined)
 
     # Assignment: target = value
@@ -1707,6 +1784,76 @@ class JsInterpreter:
             self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(JsValue.Array(id: removed_id))
 
+        if method == "at":
+            if args.len() > 0:
+                val idx_val = self.eval_expression(args.get(0), env)?
+                var idx = f64_to_i64(to_number(idx_val))
+                if idx < 0:
+                    idx = arr_len + idx
+                if idx >= 0 and idx < arr_len:
+                    return Ok(self.object_store.get_by_index(arr_id, idx))
+            return Ok(JsValue.Undefined)
+
+        if method == "flat":
+            val result_id = self.object_store.create_object()
+            var out = 0
+            var i = 0
+            while i < arr_len:
+                val elem = self.object_store.get_by_index(arr_id, i)
+                val elem_arr_id = _get_obj_id(elem)
+                var is_inner_array = false
+                match elem:
+                    JsValue.Array(id):
+                        is_inner_array = true
+                    _: pass_dn
+                if is_inner_array and elem_arr_id >= 0:
+                    val inner_len = self.object_store.array_length(elem_arr_id)
+                    var j = 0
+                    while j < inner_len:
+                        val inner_elem = self.object_store.get_by_index(elem_arr_id, j)
+                        self.object_store.set_property(result_id, "{out}", inner_elem)
+                        out = out + 1
+                        j = j + 1
+                else:
+                    self.object_store.set_property(result_id, "{out}", elem)
+                    out = out + 1
+                i = i + 1
+            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            return Ok(JsValue.Array(id: result_id))
+
+        if method == "flatMap":
+            val cb_val = self.eval_expression(args.get(0), env)?
+            match cb_val:
+                JsValue.Function(fn_id):
+                    val result_id = self.object_store.create_object()
+                    var out = 0
+                    var i = 0
+                    while i < arr_len:
+                        val elem = self.object_store.get_by_index(arr_id, i)
+                        val mapped = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
+                        val mapped_arr_id = _get_obj_id(mapped)
+                        var is_array = false
+                        match mapped:
+                            JsValue.Array(id):
+                                is_array = true
+                            _: pass_dn
+                        if is_array and mapped_arr_id >= 0:
+                            val inner_len = self.object_store.array_length(mapped_arr_id)
+                            var j = 0
+                            while j < inner_len:
+                                val inner = self.object_store.get_by_index(mapped_arr_id, j)
+                                self.object_store.set_property(result_id, "{out}", inner)
+                                out = out + 1
+                                j = j + 1
+                        else:
+                            self.object_store.set_property(result_id, "{out}", mapped)
+                            out = out + 1
+                        i = i + 1
+                    self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+                    return Ok(JsValue.Array(id: result_id))
+                _:
+                    return Ok(JsValue.Undefined)
+
         self.logger.warn("Unknown array method: {method}")
         Ok(JsValue.Undefined)
 
@@ -2031,6 +2178,38 @@ class JsInterpreter:
                     i = i + 1
             return Ok(JsValue.String(v: str_val))
 
+        if method == "replaceAll":
+            if args.len() >= 2:
+                val search_val = self.eval_expression(args.get(0), env)?
+                val replace_val = self.eval_expression(args.get(1), env)?
+                val search = js_to_string(search_val)
+                val replace_str = js_to_string(replace_val)
+                val slen = str_val.len()
+                val needle_len = search.len()
+                if needle_len == 0:
+                    return Ok(JsValue.String(v: str_val))
+                var result = ""
+                var i = 0
+                while i <= slen - needle_len:
+                    var matched = true
+                    var j = 0
+                    while j < needle_len:
+                        if str_val[i + j] != search[j]:
+                            matched = false
+                            j = needle_len
+                        j = j + 1
+                    if matched:
+                        result = result + replace_str
+                        i = i + needle_len
+                    else:
+                        result = result + str_val[i]
+                        i = i + 1
+                while i < slen:
+                    result = result + str_val[i]
+                    i = i + 1
+                return Ok(JsValue.String(v: result))
+            return Ok(JsValue.String(v: str_val))
+
         if method == "repeat":
             if args.len() > 0:
                 val count_val = self.eval_expression(args.get(0), env)?
@@ -2090,6 +2269,16 @@ class JsInterpreter:
                 result = result + js_to_string(arg_val)
                 i = i + 1
             return Ok(JsValue.String(v: result))
+
+        if method == "at":
+            if args.len() > 0:
+                val idx_val = self.eval_expression(args.get(0), env)?
+                var idx = f64_to_i64(to_number(idx_val))
+                if idx < 0:
+                    idx = str_val.len() + idx
+                if idx >= 0 and idx < str_val.len():
+                    return Ok(JsValue.String(v: str_val[idx]))
+            return Ok(JsValue.Undefined)
 
         self.logger.warn("Unknown string method: {method}")
         Ok(JsValue.Undefined)

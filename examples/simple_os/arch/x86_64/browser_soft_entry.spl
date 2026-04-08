@@ -1,0 +1,106 @@
+# x86_64 Browser Software Entry -- DOM/layout/paint/software raster smoke test
+#
+# Exercises the direct browser pipeline without BrowserRenderer, Engine2D,
+# or backend_cuda:
+#   BeDomNode -> layout_tree -> generate_paint_list ->
+#   paint_commands_to_scene -> execute_scene_to_buffer
+
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout.{layout_tree}
+use std.gc_async_mut.gpu.browser_engine.paint.{generate_paint_list,
+    paint_commands_to_scene}
+use common.render_scene.executor.{execute_scene_to_buffer}
+
+val VIEWPORT_W: i32 = 400
+val VIEWPORT_H: i32 = 300
+val BG_COLOR: u32 = 0xFFF5F5F5
+
+fn build_dom() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    root.set_style("width", "{VIEWPORT_W}")
+    root.set_style("height", "{VIEWPORT_H}")
+    root.set_style("padding", "16")
+    root.set_style("background-color", "#f5f5f5")
+    root.set_style("color", "#222222")
+
+    var header = BeDomNode.element("div")
+    header.set_style("background-color", "#0055cc")
+    header.set_style("color", "#ffffff")
+    header.set_style("padding", "12")
+    header.set_style("font-size", "24")
+    header.set_style("border-radius", "4")
+    header.add_child(BeDomNode.text("SimpleOS Browser Soft Entry"))
+    root.add_child(header)
+
+    var para = BeDomNode.element("p")
+    para.set_style("padding", "10")
+    para.set_style("color", "#333333")
+    para.set_style("font-size", "14")
+    para.add_child(BeDomNode.text("This smoke test exercises the direct browser pipeline in software. It proves that DOM construction, CSS layout, paint command generation, scene conversion, and software rasterization can produce visible pixels without BrowserRenderer or Engine2D."))
+    root.add_child(para)
+
+    var box_wrap = BeDomNode.element("div")
+    box_wrap.set_style("padding", "8")
+
+    var green_box = BeDomNode.element("div")
+    green_box.set_style("width", "200")
+    green_box.set_style("height", "50")
+    green_box.set_style("background-color", "#22aa44")
+    green_box.set_style("border-radius", "4")
+    box_wrap.add_child(green_box)
+    root.add_child(box_wrap)
+
+    return root
+
+fn init_buffer(width: i32, height: i32, bg: u32) -> [u32]:
+    var buffer: [u32] = []
+    var i: i32 = 0
+    val total = width * height
+    while i < total:
+        buffer = buffer + [bg]
+        i = i + 1
+    return buffer
+
+fn count_non_background_pixels(buffer: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var i: i32 = 0
+    while i < buffer.len():
+        if buffer[i] != bg:
+            count = count + 1
+        i = i + 1
+    return count
+
+fn _start():
+    serial_println("")
+    serial_println("[browser-soft] start")
+
+    val dom = build_dom()
+    serial_println("[browser-soft] DOM built")
+
+    val layout = layout_tree(dom, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] layout ok")
+
+    val commands = generate_paint_list(layout)
+    serial_println("[browser-soft] paint list ok")
+
+    val scene = paint_commands_to_scene(commands, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] scene ok")
+
+    var buffer = init_buffer(VIEWPORT_W, VIEWPORT_H, BG_COLOR)
+    execute_scene_to_buffer(scene, buffer, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] buffer rasterized")
+
+    val visible = count_non_background_pixels(buffer, BG_COLOR)
+    serial_println("[browser-soft] visible pixels: {visible}")
+
+    if visible > 0:
+        serial_println("[PASS] browser_soft_entry")
+        serial_println("TEST PASSED")
+    else:
+        serial_println("[FAIL] browser_soft_entry: no visible output")
+        serial_println("TEST FAILED")
+
+    rt_port_outb(0xf4, 0)

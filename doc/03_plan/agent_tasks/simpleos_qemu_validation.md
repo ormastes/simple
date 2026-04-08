@@ -52,9 +52,11 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - direct harness image is not accepted by QEMU as a kernel image
      - smallest bootable wrapper still dies with `heap exhausted` before `test_main()`
      - current best hypothesis is pre-`test_main()` wrapper/runtime allocation burst against the fixed 64 MB bump heap
+     - `--entry-closure` compilation is now the strongest wrapper-level suspect
+     - strongest current suspects are wrapper-generated `serial_println` formatting and early runtime object materialization, not `launcher_init()` itself
 
 2. Browser sample lane
-   - Entry: `src/os/apps/browser_sample/browser_sample.spl`
+   - Entry: new baremetal software-render lane, likely `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
    - QEMU shape: headless x86_64 serial lane
    - Purpose:
      - prove DOM -> layout -> paint -> scene -> pixels
@@ -67,6 +69,7 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - `backend_cuda.spl` parse failure prevents a runnable lane
    - Revised approach:
      - use the direct software browser pipeline from `browser_backend.spl` / `backend_factory.spl`
+     - avoid `BrowserRenderer.create(...)` and all `Engine2D` imports entirely
 
 3. WM mouse automation lane
    - Entry: `examples/simple_os/arch/x86_64/wm_entry.spl`
@@ -82,8 +85,13 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
       - no crash during interaction window
       - window movement/focus markers in serial or screenshot evidence
    - Current blocker:
+     - guest WM code is PS/2-only
+     - QEMU GUI launch does not provision an explicit tablet/pointer device
      - explicit QMP device routing is unavailable in this VM shape
      - generic `input-send-event` is accepted by QEMU but does not yield guest-visible clicks
+   - Next experiment:
+     - add `-device usb-tablet` as the first diagnostic
+     - if clicks still do not arrive, shift focus to guest-side input support instead of more QMP routing work
 
 4. Live `sshd` fault isolation lane
    - Entry: live SSH daemon path
@@ -98,7 +106,10 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Current blocker:
      - live multiboot image carries unresolved early bindings
      - fault occurs before first serial print
+     - earliest unresolved edge is `serial_println`
+     - `ssh_live_entry__SshDaemon` is also unresolved, but later
      - disassembly now confirms early null indirect calls inside `spl_start`
+     - strongest current mapping is that the first two null indirect calls correspond to the opening `serial_println(...)` calls in `ssh_live_entry.spl`
 
 ### P1
 

@@ -262,10 +262,16 @@ Interpretation:
 - Live `SshDaemon` boot is currently broken.
 - Networking and hostfwd are not the blocker here; the guest faults before daemon readiness.
 - Follow-up artifact analysis tightened the failure:
-  - a fresh `--entry-closure` rebuild resolves `serial_println`, but still leaves:
+  - the bootable live multiboot image carries both unresolved early bindings:
+    - `U serial_println`
     - `U Users__ormastes__simple__examples__simple_os__arch__x86_64__ssh_live_entry__SshDaemon`
+  - source order in `examples/simple_os/arch/x86_64/ssh_live_entry.spl` calls `serial_println(...)` before `SshDaemon.new(22)`
   - the bootable live multiboot image shows early null indirect calls inside `spl_start`
+  - strongest current mapping:
+    - first null indirect call most likely maps to the first `serial_println("")`
+    - second null indirect call most likely maps to the second `serial_println("=== SimpleOS SSH Live Boot ===")`
   - these null calls are the nearest static explanation for the observed `FAULT @ 0x0000000000000003`
+  - strongest current reading: unresolved `serial_println` is the first fault edge, while unresolved `SshDaemon` is a later edge the image never reaches
   - the working `ssh_system_test` image has the same early call structure, but all of those targets are concrete non-zero addresses
 
 ## Browser / Mouse / GUI Validation Status
@@ -287,6 +293,15 @@ Interpretation:
   - `src/os/compositor/browser_backend.spl`
   - `src/lib/common/ui/backend_factory.spl`
   - flow: `UITree -> DOM -> layout -> paint -> RenderScene -> execute_scene_to_buffer`
+- The most practical next lane is a new baremetal entry such as:
+  - `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
+- Minimal structure for that lane:
+  - build a fixed `BeDomNode` tree
+  - run `layout_tree`
+  - run `generate_paint_list`
+  - run `paint_commands_to_scene`
+  - run `execute_scene_to_buffer`
+  - count non-background pixels and print strict serial pass/fail markers
 
 ### Mouse
 
@@ -297,8 +312,19 @@ Interpretation:
   - `ps2-mouse` and `ps2-kbd` exist in the QOM tree
   - but there is no usable QMP device identifier for `input-send-event`
   - explicit device attempts (`video0`, `ps2mouse`, `ps2-kbd`, `i8042`, `VGA`) all returned `DeviceNotFound`
+- The guest side is PS/2-only:
+  - `examples/simple_os/arch/x86_64/wm_entry.spl` initializes the PS/2 controller directly
+  - WM input consumption reads only 3-byte PS/2 auxiliary packets
+- The QEMU launch side is also PS/2-only in practice:
+  - `scripts/os_gui.shs` uses `-display cocoa` and `-vga std`
+  - `src/os/qemu_runner.spl` uses the same GUI shape
+  - neither path provisions `usb-tablet`, `virtio-tablet-pci`, or another explicit pointer device
 - Generic `input-send-event` and HMP mouse commands were accepted by QEMU but still produced no guest-visible click markers.
 - Practical result: reliable automated mouse interaction is not currently proven feasible in this VM shape.
+- The narrowest host-side experiment is adding an explicit tablet device, but that is only diagnostic unless the guest also gains a matching input path.
+- Best first diagnostic:
+  - add `-device usb-tablet` to the WM launch and expose QMP
+  - if that still yields no guest-visible pointer activity, stop spending time on QMP routing and move to guest-side input work
 
 ### Desktop app launch
 
@@ -315,6 +341,13 @@ Interpretation:
 - Changing guest RAM from 512 MB to 2 GB does not move the failure point.
 - Best current culprit chain:
   - `_start() -> spl_start() -> generated wrapper / entry-closure setup -> early runtime string/array/map allocations`
+- `scripts/run_os_tests.shs` compiles tests with `--entry-closure`, which is now the strongest wrapper-level suspect for this early allocation burst.
+- Refined reading:
+  - `launcher_init()` itself is mostly static-state mutation
+  - the stronger current suspects are wrapper-generated `serial_println` formatting and entry-closure runtime object materialization before the launcher path begins
+- Static evidence in the bootable wrapper:
+  - long literal-byte string construction sequences appear in `build/os/desktop_e2e_boot.elf` before the first meaningful launcher work
+  - the image is stripped, so symbol-level mapping is limited without instrumentation
 
 ## Current Conclusions
 
@@ -338,6 +371,10 @@ Interpretation:
   - the failing live image carries unresolved early imports
   - disassembly shows the live path making early null indirect calls inside `spl_start`
 - The browser sample path is blocked by unconditional `Engine2D` / `backend_cuda` imports before backend fallback can help.
+- The next browser lane is concrete enough to implement:
+  - new entry `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
+  - imports only `BeDomNode`, `layout_tree`, `generate_paint_list`, `paint_commands_to_scene`, and `execute_scene_to_buffer`
+  - validates success by counting non-background pixels in a software-rendered buffer
 
 ## Immediate Next Validation Targets
 
@@ -345,4 +382,4 @@ Interpretation:
 2. Build a browser QEMU lane around the direct software browser pipeline instead of `BrowserRenderer` / `Engine2D`.
 3. Either change the WM input backend / VM shape to something QMP-routable, or instrument the guest to prove whether generic injected events arrive at all.
 4. Tighten `tools_test_entry.spl` so `test_run()` respects return codes.
-5. Fix the live SSH entry/artifact path so `ssh_live_entry__SshDaemon` is resolved and early `spl_start` calls are non-null.
+5. Fix the live SSH entry/artifact path so both `serial_println` and `ssh_live_entry__SshDaemon` are resolved and early `spl_start` calls are non-null.

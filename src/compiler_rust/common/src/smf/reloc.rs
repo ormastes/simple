@@ -57,7 +57,7 @@ pub fn apply_relocations(
             "Processing relocation"
         );
 
-        let sym_addr = if sym.binding == SymbolBinding::Local {
+        let sym_addr = if sym.binding == SymbolBinding::Local || sym.value != 0 {
             base_address.wrapping_add(sym.value as usize)
         } else {
             match imports(sym_name) {
@@ -157,4 +157,51 @@ pub fn apply_relocations(
 
     debug!(applied = relocs.len(), "Relocations applied successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    use crate::smf::symbol::{hash_name, SmfSymbol, SymbolTable, SymbolType};
+
+    #[test]
+    fn applies_defined_global_symbol_without_import_lookup() {
+        let name = b"___max_i32\0".to_vec();
+        let symbol = SmfSymbol {
+            name_offset: 0,
+            name_hash: hash_name("___max_i32"),
+            sym_type: SymbolType::Function,
+            binding: SymbolBinding::Global,
+            visibility: 0,
+            flags: 0,
+            value: 0x40,
+            size: 0,
+            type_id: 0,
+            version: 0,
+            template_param_count: 0,
+            reserved: [0; 3],
+            template_offset: 0,
+        };
+        let symbols = SymbolTable::new(vec![symbol], name);
+        let relocs = [SmfRelocation {
+            offset: 0,
+            symbol_index: 0,
+            reloc_type: RelocationType::Abs64,
+            addend: 0,
+        }];
+        let mut code = [0u8; 8];
+        let base_address = 0x1000usize;
+        let import_lookups = Cell::new(0);
+
+        apply_relocations(&mut code, &relocs, &symbols, base_address, &|_| {
+            import_lookups.set(import_lookups.get() + 1);
+            None
+        })
+        .expect("defined globals should relocate from the module body");
+
+        assert_eq!(import_lookups.get(), 0);
+        assert_eq!(u64::from_le_bytes(code), (base_address + 0x40) as u64);
+    }
 }
