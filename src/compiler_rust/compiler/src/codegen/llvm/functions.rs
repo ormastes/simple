@@ -1468,6 +1468,47 @@ impl LlvmBackend {
                 };
 
                 if let Some(rt_name) = runtime_func {
+                    // rt_slice requires exactly 4 args: (collection, start, end, step).
+                    // Handle it specially to pad missing optional args with defaults
+                    // (matching Cranelift behavior in try_compile_builtin_method_call).
+                    if rt_name == "rt_slice" {
+                        let coll = self.get_vreg(receiver, vreg_map)?;
+                        let coll_i64 = self.coerce_value_to_type(coll, Some(i64_type.into()), builder)?;
+                        let start_val = if !args.is_empty() {
+                            let v = self.get_vreg(&args[0], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(0, false).into()
+                        };
+                        let end_val = if args.len() > 1 {
+                            let v = self.get_vreg(&args[1], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(i64::MAX as u64, false).into()
+                        };
+                        let step_val = if args.len() > 2 {
+                            let v = self.get_vreg(&args[2], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(1, false).into()
+                        };
+                        let slice_fn_type = i64_type.fn_type(
+                            &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                            false,
+                        );
+                        let slice_fn = module
+                            .get_function("rt_slice")
+                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                        let call_site = builder
+                            .build_call(slice_fn, &[coll_i64.into(), start_val.into(), end_val.into(), step_val.into()], "rtslice")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice call", &e))?;
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            }
+                        }
+                        return Ok(());
+                    }
                     // Call the runtime function with receiver + args
                     let mut all_args_vregs = vec![*receiver];
                     all_args_vregs.extend_from_slice(args);
@@ -1659,6 +1700,43 @@ impl LlvmBackend {
                 };
 
                 if let Some(rt_fn_name) = rt_name {
+                    // rt_slice: handle specially to pad missing optional args
+                    if rt_fn_name == "rt_slice" {
+                        let start_val = if !args.is_empty() {
+                            let v = self.get_vreg(&args[0], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(0, false).into()
+                        };
+                        let end_val = if args.len() > 1 {
+                            let v = self.get_vreg(&args[1], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(i64::MAX as u64, false).into()
+                        };
+                        let step_val = if args.len() > 2 {
+                            let v = self.get_vreg(&args[2], vreg_map)?;
+                            self.coerce_value_to_type(v, Some(i64_type.into()), builder)?
+                        } else {
+                            i64_type.const_int(1, false).into()
+                        };
+                        let slice_fn_type = i64_type.fn_type(
+                            &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                            false,
+                        );
+                        let slice_fn = module
+                            .get_function("rt_slice")
+                            .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
+                        let call_site = builder
+                            .build_call(slice_fn, &[receiver_i64.into(), start_val.into(), end_val.into(), step_val.into()], "bslice")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice builtin call", &e))?;
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            }
+                        }
+                        return Ok(());
+                    }
                     // Build arg list: receiver + method args
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![receiver_i64.into()];
                     for arg in args.iter() {

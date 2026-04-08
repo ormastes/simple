@@ -303,8 +303,8 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
     if node.id == state.focused_id:
         rt_array_push(dom.classes, "focused")
         var s = dom.style
-        s.border_width = BoxEdges.all(2)
-        s.border_color = BoxEdges.all(0x58A6FFFF)
+        s.border_width = BoxEdges.uniform(2)
+        s.border_color = BoxEdges.uniform(0x58A6FFFF)
         dom.style = s
 
     for child in node.children():
@@ -414,11 +414,8 @@ pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     """Render HTML to a flat pixel array (ARGB u32). Returns just pixels, no struct wrapper.
     Uses layout_to_scene() which does layout+paint in one module to avoid
     cross-module FieldGet bug with struct/array fields."""
-    print "[RHPA] enter len={html.len()}"
     val dom = browser_renderer_html_string_to_dom(html)
-    print "[RHPA] dom done"
     val scene = layout_to_scene(dom, width, height)
-    print "[RHPA] scene done"
     val pixel_count = width * height
     var pixels: [u32] = rt_array_new(pixel_count)
     var i = 0
@@ -434,11 +431,8 @@ pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) 
     renderer.render_html_to_pixels(html)
 
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
-    print "[DOM] enter"
     var root = BeDomNode.element("div")
-    print "[DOM] root created"
     root.id = "html-root"
-    print "[DOM] id set"
 
     # Store raw HTML for later <style> block processing
     val raw_html = html
@@ -446,20 +440,13 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var stack: [BeDomNode] = [root]
     var pos = 0
     val len = html.len()
-    print "[DOM] loop start len={len}"
 
     while pos < len:
-        print "[DOM] pos={pos}"
         val ch = html.slice(pos, pos + 1)
-        print "[DOM] ch='{ch}'"
         if ch == "<":
-            print "[DOM] tag start at pos={pos}"
             # Check for HTML comment <!-- ... -->
-            val check_comment = pos + 3 < len
-            print "[DOM] comment check={check_comment}"
-            if check_comment:
+            if pos + 3 < len:
                 val comment_prefix = html.slice(pos, pos + 4)
-                print "[DOM] comment_prefix='{comment_prefix}'"
                 if comment_prefix == "<!--":
                     val comment_end = br_find_str(html, "-->", pos + 4)
                     if comment_end < 999999999:
@@ -468,9 +455,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                         pos = len
                     continue
 
-            print "[DOM] finding >"
             val tag_end = browser_renderer_find_char(html, ">", pos)
-            print "[DOM] tag_end={tag_end}"
             if tag_end >= 999999999:
                 val remaining = html.slice(pos, len)
                 val txt = BeDomNode.text(remaining)
@@ -481,22 +466,17 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 break
 
             val tag_content = html.slice(pos + 1, tag_end)
-            print "[DOM] tag_content='{tag_content}'"
 
             # Skip <!DOCTYPE ...>
             if tag_content.starts_with("!DOCTYPE") or tag_content.starts_with("!doctype"):
                 pos = tag_end + 1
                 continue
 
-            print "[DOM] checking starts_with /"
-            val is_close = tag_content.starts_with("/")
-            print "[DOM] is_close={is_close}"
-            if is_close:
+            if tag_content.starts_with("/"):
                 # Break chained method call into intermediate vars
                 val close_raw = tag_content.slice(1, tag_content.len())
                 val close_trimmed = close_raw.trim()
                 val close_tag = close_trimmed.to_lower()
-                print "[DOM] close_tag='{close_tag}'"
                 # Skip closing structural tags
                 if close_tag == "html" or close_tag == "head" or close_tag == "body":
                     pos = tag_end + 1
@@ -518,23 +498,16 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                         new_parent.add_child(completed)
                         stack[stack.len() - 1] = new_parent
             else:
-                print "[DOM] open tag"
                 val is_self_closing = tag_content.ends_with("/")
-                print "[DOM] self_closing={is_self_closing}"
                 var clean_content = tag_content.trim()
-                print "[DOM] clean='{clean_content}'"
                 if is_self_closing:
                     val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
                     clean_content = trimmed_sc.trim()
 
-                print "[DOM] calling parse_tag"
                 var new_node = browser_renderer_parse_tag(clean_content)
-                print "[DOM] parse_tag done"
                 # Use accessor to avoid cross-module FieldGet bug
                 val raw_tag = be_dom_get_tag(new_node)
-                print "[DOM] raw_tag='{raw_tag}'"
                 val tag_lower = raw_tag.to_lower()
-                print "[DOM] tag_lower='{tag_lower}'"
 
                 # Skip html/head — let content flow into root
                 if tag_lower == "html" or tag_lower == "head":
@@ -572,7 +545,10 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                     val style_close = br_find_str(html_lower, "</style", tag_end + 1)
                     if style_close < 999999999:
                         val style_tag_end = browser_renderer_find_char(html, ">", style_close)
-                        pos = if style_tag_end < 999999999: style_tag_end + 1 else: style_close + 8
+                        if style_tag_end < 999999999:
+                            pos = style_tag_end + 1
+                        else:
+                            pos = style_close + 8
                     else:
                         pos = len
                     continue
@@ -702,8 +678,10 @@ fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
     for decl in declarations:
         val colon_pos = browser_renderer_find_char(decl, ":", 0)
         if colon_pos > 0:
-            val prop = decl.slice(0, colon_pos).trim()
-            val value = decl.slice(colon_pos + 1, decl.len()).trim()
+            val prop_raw = decl.slice(0, colon_pos)
+            val prop = prop_raw.trim()
+            val value_raw = decl.slice(colon_pos + 1, decl.len())
+            val value = value_raw.trim()
             node.set_style(prop, value)
 
 fn browser_renderer_split_semicolons(s: text) -> [text]:
@@ -723,10 +701,12 @@ fn browser_renderer_split_semicolons(s: text) -> [text]:
         rt_array_push(parts, current.trim())
     parts
 
-fn browser_renderer_find_char(s: text, target: text, start: i32) -> i32:
+fn browser_renderer_find_char(s: text, target: text, start: i64) -> i64:
     var i = start
-    while i < s.len():
-        if s.slice(i, i + 1) == target:
+    val slen = s.len()
+    while i < slen:
+        val c = s.slice(i, i + 1)
+        if c == target:
             return i
         i = i + 1
     999999999
@@ -741,11 +721,12 @@ fn browser_renderer_is_void_element(tag: text) -> bool:
         "link" => true
         _ => false
 
-fn br_find_str(s: text, needle: text, start: i32) -> i32:
+fn br_find_str(s: text, needle: text, start: i64) -> i64:
     """Find substring in s starting at start. Returns 999999999 if not found."""
     val nlen = needle.len()
     var i = start
-    while i + nlen <= s.len():
+    val slen = s.len()
+    while i + nlen <= slen:
         if s.slice(i, i + nlen) == needle:
             return i
         i = i + 1

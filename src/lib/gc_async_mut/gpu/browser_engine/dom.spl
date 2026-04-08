@@ -469,9 +469,13 @@ fn parse_color_value(s: text) -> u32:
 
     # rgba/rgb — unified parser handles both
     if lower.starts_with("rgba(") and cleaned.ends_with(")"):
-        return parse_rgb_unified(cleaned.slice(5, cleaned.len() - 1))
+        val rgba_inner = cleaned.slice(5, cleaned.len() - 1)
+        print "[RGB] rgba inner='{rgba_inner}'"
+        return parse_rgb_unified(rgba_inner)
     if lower.starts_with("rgb(") and cleaned.ends_with(")"):
-        return parse_rgb_unified(cleaned.slice(4, cleaned.len() - 1))
+        val rgb_inner = cleaned.slice(4, cleaned.len() - 1)
+        print "[RGB] rgb inner='{rgb_inner}'"
+        return parse_rgb_unified(rgb_inner)
 
     if cleaned.starts_with("var("):
         return 0x00000000
@@ -501,10 +505,11 @@ fn strip_css_comments(s: text) -> text:
             i = i + 1
     result
 
-fn dom_find_str(s: text, needle: text, start: i32) -> i32:
+fn dom_find_str(s: text, needle: text, start: i64) -> i64:
     val nlen = needle.len()
     var i = start
-    while i + nlen <= s.len():
+    val slen = s.len()
+    while i + nlen <= slen:
         if s.slice(i, i + nlen) == needle:
             return i
         i = i + 1
@@ -540,48 +545,72 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
     - Space-separated: '128 0 255' or '128 0 255 / 0.5'
     - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
     """
-    val inner = strip_css_comments(inner_raw).trim()
+    print "[RGBu] enter raw='{inner_raw}'"
+    val inner_stripped = strip_css_comments(inner_raw)
+    print "[RGBu] stripped='{inner_stripped}'"
+    val inner = inner_stripped.trim()
+    print "[RGBu] inner='{inner}' len={inner.len()}"
     if inner.len() == 0:
         return 0x000000FF
 
     # Determine separator: comma or space
     var has_comma = false
     var idx_1 = 0
-    while idx_1 < inner.len():
+    val inner_len = inner.len()
+    print "[RGBu] scanning for comma, inner_len={inner_len}"
+    while idx_1 < inner_len:
         val ch = inner.slice(idx_1, idx_1 + 1)
         if ch == ",":
             has_comma = true
         idx_1 = idx_1 + 1
+    print "[RGBu] has_comma={has_comma}"
 
     var color_parts: [text] = []
     var alpha_str = ""
 
     if has_comma:
+        print "[RGBu] calling split_comma"
         val comma_parts = split_comma(inner)
+        print "[RGBu] split_comma done, parts={comma_parts.len()}"
         color_parts = comma_parts
     else:
         # Space-separated, may have / for alpha
         val slash_pos = dom_find_str(inner, "/", 0)
         if slash_pos < 999999999:
-            val before_slash = inner.slice(0, slash_pos).trim()
-            alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
+            val before_slash_raw = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw.trim()
+            val alpha_raw = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw.trim()
             color_parts = dom_split_ws(before_slash)
         else:
             color_parts = dom_split_ws(inner)
 
+    print "[RGBu] color_parts len={color_parts.len()}"
     if color_parts.len() < 3:
         return 0x000000FF
 
-    val r = parse_color_component(color_parts[0].trim())
-    val g = parse_color_component(color_parts[1].trim())
-    val b = parse_color_component(color_parts[2].trim())
+    val r_str = color_parts[0].trim()
+    print "[RGBu] r_str='{r_str}'"
+    val r = parse_color_component(r_str)
+    print "[RGBu] r={r}"
+    val g_str = color_parts[1].trim()
+    print "[RGBu] g_str='{g_str}'"
+    val g = parse_color_component(g_str)
+    print "[RGBu] g={g}"
+    val b_str = color_parts[2].trim()
+    print "[RGBu] b_str='{b_str}'"
+    val b = parse_color_component(b_str)
+    print "[RGBu] b={b}"
 
     var a: u32 = 255
     if alpha_str.len() > 0:
-        a = parse_alpha_component(alpha_str)
+        val a_trimmed = alpha_str.trim()
+        a = parse_alpha_component(a_trimmed)
     elif color_parts.len() >= 4:
-        a = parse_alpha_component(color_parts[3].trim())
+        val a4_str = color_parts[3].trim()
+        a = parse_alpha_component(a4_str)
 
+    print "[RGBu] r={r} g={g} b={b} a={a}"
     return (r * 16777216) + (g * 65536) + (b * 256) + a
 
 fn parse_color_component(s: text) -> u32:
@@ -599,8 +628,8 @@ fn parse_color_component(s: text) -> u32:
             return v.to_u32()
         return 0
     val f = trimmed.parse_f64()
-    if f != nil:
-        var v = f.to_i32()
+    if val Some(fval) = f:
+        var v = fval.to_i32()
         if v < 0:
             v = 0
         if v > 255:
@@ -667,7 +696,8 @@ fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
     hsl(120 75% 50%), hsl(120 75% 50% / 0.5)
     """
     val prefix_len = if is_hsla: 5 else: 4
-    val inner = strip_css_comments(s.slice(prefix_len, s.len() - 1)).trim()
+    val inner_raw_hsl = strip_css_comments(s.slice(prefix_len, s.len() - 1))
+    val inner = inner_raw_hsl.trim()
 
     var has_comma = false
     var idx_3 = 0
@@ -685,8 +715,10 @@ fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
     else:
         val slash_pos = dom_find_str(inner, "/", 0)
         if slash_pos < 999999999:
-            val before_slash = inner.slice(0, slash_pos).trim()
-            alpha_str = inner.slice(slash_pos + 1, inner.len()).trim()
+            val before_slash_raw_hsl = inner.slice(0, slash_pos)
+            val before_slash = before_slash_raw_hsl.trim()
+            val alpha_raw_hsl = inner.slice(slash_pos + 1, inner.len())
+            alpha_str = alpha_raw_hsl.trim()
             parts = dom_split_ws(before_slash)
         else:
             parts = dom_split_ws(inner)
@@ -1083,7 +1115,8 @@ fn parse_linear_gradient(value: text) -> GradientParseResult:
     if close >= 999999999:
         return empty
 
-    val inner = value.slice(open + 1, close).trim()
+    val inner_raw_grad = value.slice(open + 1, close)
+    val inner = inner_raw_grad.trim()
 
     # Split by top-level commas (not inside parens)
     val parts = split_top_level_commas(inner)
@@ -1096,7 +1129,8 @@ fn parse_linear_gradient(value: text) -> GradientParseResult:
 
     val first = parts[0].trim()
     if first.ends_with("deg"):
-        val deg_str = first.slice(0, first.len() - 3).trim()
+        val deg_str_raw = first.slice(0, first.len() - 3)
+        val deg_str = deg_str_raw.trim()
         val parsed = deg_str.parse_f64()
         if parsed != nil:
             angle = parsed.to_i32()
@@ -1132,9 +1166,11 @@ fn strip_stop_position(s: text) -> text:
     # If it ends with % or px after a space, strip the position
     val last_space = find_last_space(trimmed)
     if last_space > 0 and last_space < 999999999:
-        val after = trimmed.slice(last_space + 1, trimmed.len()).trim()
+        val after_raw = trimmed.slice(last_space + 1, trimmed.len())
+        val after = after_raw.trim()
         if after.ends_with("%") or after.ends_with("px"):
-            return trimmed.slice(0, last_space).trim()
+            val before_stop = trimmed.slice(0, last_space)
+            return before_stop.trim()
     trimmed
 
 fn find_last_space(s: text) -> i32:
@@ -1176,10 +1212,11 @@ fn split_top_level_commas(s: text) -> [text]:
 
     parts
 
-fn find_char_in(s: text, target: text, start: i32) -> i32:
+fn find_char_in(s: text, target: text, start: i64) -> i64:
     """Find the first occurrence of target character in s starting at position start."""
     var i = start
-    while i < s.len():
+    val slen = s.len()
+    while i < slen:
         if s.slice(i, i + 1) == target:
             return i
         i = i + 1
@@ -1224,10 +1261,12 @@ fn parse_single_box_shadow(s: text) -> BoxShadow:
     # Check for 'inset' keyword
     if work.starts_with("inset ") or work.starts_with("inset\t"):
         inset = true
-        work = work.slice(6, work.len()).trim()
+        val work_after_inset = work.slice(6, work.len())
+        work = work_after_inset.trim()
     elif work.ends_with(" inset"):
         inset = true
-        work = work.slice(0, work.len() - 6).trim()
+        val work_before_inset = work.slice(0, work.len() - 6)
+        work = work_before_inset.trim()
 
     # Split into tokens respecting parens
     val tokens = split_shadow_tokens(work)
@@ -1337,7 +1376,8 @@ fn parse_blur_value(value: text) -> i32:
     if end >= 999999999:
         return 0
 
-    val inner = trimmed.slice(start, end).trim()
+    val inner_raw_blur = trimmed.slice(start, end)
+    val inner = inner_raw_blur.trim()
     val num_str = if inner.ends_with("px"):
         inner.slice(0, inner.len() - 2)
     else:
