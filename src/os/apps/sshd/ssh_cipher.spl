@@ -7,8 +7,8 @@
 #
 # GCM nonce construction:
 #   RFC 5647 uses a 12-byte IV split into a 4-byte fixed field and an
-#   8-byte invocation counter field. The invocation counter increments
-#   once per packet.
+#   8-byte invocation counter field. The invocation counter is XORed with
+#   the SSH sequence number for each packet.
 #
 # ChaCha20-Poly1305 for SSH:
 #   Uses two separate ChaCha20 instances: one for packet length (K2)
@@ -145,7 +145,7 @@ impl SshCipher:
         var aad: [u8] = []
         ssh_put_u32(aad, packet_length.to_u32())
 
-        # Compute GCM nonce: iv_s2c XOR seq_s2c
+        # Compute GCM nonce: fixed IV prefix || (counter XOR seq)
         val nonce = _make_nonce(self.iv_s2c, self.seq_s2c)
 
         # Encrypt body
@@ -213,7 +213,7 @@ impl SshCipher:
             tag.push(data[4 + ct_len + i])
             i = i + 1
 
-        # Compute GCM nonce
+        # Compute GCM nonce: fixed IV prefix || (counter XOR seq)
         val nonce = _make_nonce(self.iv_c2s, self.seq_c2s)
 
         # Decrypt
@@ -271,7 +271,7 @@ fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
             nonce.push(0)
         i = i + 1
 
-    # Read the 8-byte invocation counter and advance it by the packet
+    # Read the 8-byte invocation counter and XOR it with the packet
     # sequence number. The resulting nonce remains 12 bytes total.
     var counter: u64 = 0
     while i < 12:
@@ -279,7 +279,7 @@ fn _make_nonce(base_iv: [u8], seq: u32) -> [u8]:
         counter = (counter << 8) | b.to_u64()
         i = i + 1
 
-    counter = counter + seq.to_u64()
+    counter = counter ^ seq.to_u64()
 
     nonce.push(((counter >> 56) & 0xFF).to_u8())
     nonce.push(((counter >> 48) & 0xFF).to_u8())

@@ -1,276 +1,109 @@
-# x86_64 Browser Software Entry -- boot-safe software-render browser smoke test
+# x86_64 Browser Software Entry -- DOM/layout/paint/software raster smoke test
 #
-# This lane intentionally avoids the browser-engine object graph and renders a
-# browser-like page directly with rt_gui_* so the baremetal QEMU path stays
-# boot-safe. The goal is to validate framebuffer init, drawing, and pixel
-# readback from the last known working desktop/WM shape.
+# Exercises the direct browser pipeline without BrowserRenderer, Engine2D,
+# or backend_cuda:
+#   BeDomNode -> layout_tree -> generate_paint_list ->
+#   paint_commands_to_scene -> execute_scene_to_buffer
 
-extern fn rt_port_outb(port: u64, value: u64)
-extern fn rt_port_inb(port: u64) -> u64
+extern fn serial_println(msg: text)
+extern fn rt_port_outb(port: u16, value: u8)
 
-extern fn rt_gui_set_fb(addr: u64, width: u64) -> u64
-extern fn rt_gui_begin_frame(width: u64, height: u64, u1: u64, u2: u64) -> u64
-extern fn rt_gui_present(u1: u64, u2: u64, u3: u64, u4: u64) -> u64
-extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
-extern fn rt_gui_blend_fill(xy: u64, wh: u64, color: u64, alpha: u64) -> u64
-extern fn rt_gui_read_pixel(x_y: u64, u1: u64, u2: u64, u3: u64) -> u64
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout.{layout_tree}
+use std.gc_async_mut.gpu.browser_engine.paint.{generate_paint_list,
+    paint_commands_to_scene}
+use common.render_scene.executor.{execute_scene_to_buffer}
 
-fn pack(hi: i64, lo: i64) -> u64:
-    val h = if hi < 0: 0 else: hi.to_u64()
-    val l = if lo < 0: 0 else: lo.to_u64()
-    (h << 32) | (l & 0xFFFFFFFF)
+val VIEWPORT_W: i32 = 400
+val VIEWPORT_H: i32 = 300
+val BG_COLOR: u32 = 0xFFF5F5F5
 
-val SCREEN_W: i64 = 1024
-val SCREEN_H: i64 = 768
-val BG_COLOR: u64 = 0xFF111827
-val CARD_COLOR: u64 = 0xFFE8ECF3
-val TITLE_COLOR: u64 = 0xFF1D4ED8
-val ACCENT_COLOR: u64 = 0xFF10B981
-val TEXT_DARK: u64 = 0xFF1F2937
-val CHROME_COLOR: u64 = 0xFFF3F4F6
-val URL_COLOR: u64 = 0xFFFFFFFF
+fn build_dom() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    root.set_style("width", "{VIEWPORT_W}")
+    root.set_style("height", "{VIEWPORT_H}")
+    root.set_style("padding", "16")
+    root.set_style("background-color", "#f5f5f5")
 
-fn read_px(x: i64, y: i64) -> u64:
-    rt_gui_read_pixel(pack(x, y), 0, 0, 0)
+    var header = BeDomNode.element("div")
+    header.set_style("background-color", "#0055cc")
+    header.set_style("padding", "12")
+    header.set_style("border-radius", "4")
+    root.add_child(header)
 
-fn is_visible(c: u64) -> bool:
-    val r = ((c >> 16) & 0xFF).to_i64()
-    val g = ((c >> 8) & 0xFF).to_i64()
-    val b = (c & 0xFF).to_i64()
-    r > 40 or g > 40 or b > 40
+    var hero = BeDomNode.element("div")
+    hero.set_style("margin", "8")
+    hero.set_style("padding", "8")
+    hero.set_style("background-color", "#e8ecf3")
+    root.add_child(hero)
 
-fn sputc(c: u64):
-    while (rt_port_inb(0x3FD) & 0x20) == 0:
-        pass_dn
-    rt_port_outb(0x3F8, c)
+    var cards = BeDomNode.element("div")
+    cards.set_style("padding", "8")
 
-fn newline():
-    sputc(13)
-    sputc(10)
+    var green_box = BeDomNode.element("div")
+    green_box.set_style("width", "200")
+    green_box.set_style("height", "50")
+    green_box.set_style("background-color", "#22aa44")
+    green_box.set_style("border-radius", "4")
+    cards.add_child(green_box)
 
-fn draw_page():
-    rt_gui_begin_frame(1024, 768, 0, 0)
+    var blue_box = BeDomNode.element("div")
+    blue_box.set_style("width", "160")
+    blue_box.set_style("height", "36")
+    blue_box.set_style("margin-top", "8")
+    blue_box.set_style("background-color", "#1d4ed8")
+    cards.add_child(blue_box)
 
-    # Base background and browser chrome.
-    rt_gui_fill4(pack(0, 0), pack(SCREEN_W, SCREEN_H), BG_COLOR, 0)
-    rt_gui_blend_fill(pack(32, 24), pack(960, 708), 0xFF000000, 38)
-    rt_gui_fill4(pack(24, 20), pack(976, 716), CHROME_COLOR, 0)
+    root.add_child(cards)
 
-    # Top chrome.
-    rt_gui_fill4(pack(24, 20), pack(976, 56), 0xFFE5E7EB, 0)
-    rt_gui_fill4(pack(52, 34), pack(42, 28), TITLE_COLOR, 0)
-    rt_gui_fill4(pack(106, 34), pack(84, 28), 0xFFF59E0B, 0)
-    rt_gui_fill4(pack(202, 34), pack(84, 28), ACCENT_COLOR, 0)
-    rt_gui_fill4(pack(304, 34), pack(660, 28), URL_COLOR, 0)
+    return root
 
-    # Browser UI details.
-    rt_gui_fill4(pack(318, 42), pack(28, 12), 0xFFCBD5E1, 0)
-    rt_gui_fill4(pack(358, 42), pack(220, 12), 0xFF94A3B8, 0)
-    rt_gui_fill4(pack(592, 42), pack(180, 12), 0xFFCBD5E1, 0)
-    rt_gui_fill4(pack(786, 42), pack(140, 12), 0xFF94A3B8, 0)
+fn init_buffer(width: i32, height: i32, bg: u32) -> [u32]:
+    var buffer: [u32] = []
+    var i: i32 = 0
+    val total = width * height
+    while i < total:
+        buffer = buffer + [bg]
+        i = i + 1
+    return buffer
 
-    # Content area.
-    rt_gui_fill4(pack(52, 92), pack(920, 136), CARD_COLOR, 0)
-    rt_gui_fill4(pack(52, 248), pack(610, 384), CARD_COLOR, 0)
-    rt_gui_fill4(pack(686, 248), pack(286, 384), CARD_COLOR, 0)
-
-    # Header blocks.
-    rt_gui_fill4(pack(76, 116), pack(240, 24), TITLE_COLOR, 0)
-    rt_gui_fill4(pack(76, 152), pack(380, 14), 0xFF9CA3AF, 0)
-    rt_gui_fill4(pack(76, 176), pack(328, 14), 0xFFCBD5E1, 0)
-    rt_gui_fill4(pack(76, 200), pack(180, 14), ACCENT_COLOR, 0)
-
-    # Three article cards.
-    rt_gui_fill4(pack(76, 284), pack(164, 132), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(256, 284), pack(164, 132), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(436, 284), pack(164, 132), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(92, 300), pack(132, 42), 0xFFD1D5DB, 0)
-    rt_gui_fill4(pack(272, 300), pack(132, 42), 0xFFD1D5DB, 0)
-    rt_gui_fill4(pack(452, 300), pack(132, 42), 0xFFD1D5DB, 0)
-    rt_gui_fill4(pack(92, 354), pack(102, 10), 0xFF9CA3AF, 0)
-    rt_gui_fill4(pack(272, 354), pack(102, 10), 0xFF9CA3AF, 0)
-    rt_gui_fill4(pack(452, 354), pack(102, 10), 0xFF9CA3AF, 0)
-
-    # Sidebar layout.
-    rt_gui_fill4(pack(710, 284), pack(228, 24), ACCENT_COLOR, 0)
-    rt_gui_fill4(pack(710, 324), pack(208, 20), 0xFFCBD5E1, 0)
-    rt_gui_fill4(pack(710, 356), pack(188, 20), 0xFFD1D5DB, 0)
-    rt_gui_fill4(pack(710, 388), pack(220, 20), 0xFFC7D2FE, 0)
-    rt_gui_fill4(pack(710, 428), pack(176, 96), 0xFFFFFFFF, 0)
-    rt_gui_fill4(pack(728, 446), pack(140, 20), 0xFF94A3B8, 0)
-    rt_gui_fill4(pack(728, 478), pack(102, 12), 0xFFD1D5DB, 0)
-
-    # Footer and status strip.
-    rt_gui_fill4(pack(52, 652), pack(920, 44), 0xFFE5E7EB, 0)
-    rt_gui_fill4(pack(76, 664), pack(168, 14), 0xFF64748B, 0)
-    rt_gui_fill4(pack(260, 664), pack(108, 14), 0xFF64748B, 0)
-    rt_gui_fill4(pack(388, 664), pack(208, 14), TITLE_COLOR, 0)
-    rt_gui_fill4(pack(820, 664), pack(116, 14), ACCENT_COLOR, 0)
-
-    rt_gui_present(0, 0, 0, 0)
-
-fn count_visible_samples() -> i64:
-    var visible: i64 = 0
-    if is_visible(read_px(64, 40)): visible = visible + 1
-    if is_visible(read_px(340, 44)): visible = visible + 1
-    if is_visible(read_px(84, 120)): visible = visible + 1
-    if is_visible(read_px(92, 314)): visible = visible + 1
-    if is_visible(read_px(726, 300)): visible = visible + 1
-    if is_visible(read_px(836, 448)): visible = visible + 1
-    if is_visible(read_px(884, 664)): visible = visible + 1
-    visible
+fn count_non_background_pixels(buffer: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var i: i32 = 0
+    while i < buffer.len():
+        if buffer[i] != bg:
+            count = count + 1
+        i = i + 1
+    return count
 
 fn _start():
-    sputc(91)
-    sputc(98)
-    sputc(114)
-    sputc(111)
-    sputc(119)
-    sputc(115)
-    sputc(101)
-    sputc(114)
-    sputc(45)
-    sputc(115)
-    sputc(111)
-    sputc(102)
-    sputc(116)
-    sputc(93)
-    sputc(32)
-    sputc(115)
-    sputc(116)
-    sputc(97)
-    sputc(114)
-    sputc(116)
-    newline()
+    serial_println("")
+    serial_println("[browser-soft] start")
 
-    sputc(91)
-    sputc(98)
-    sputc(114)
-    sputc(111)
-    sputc(119)
-    sputc(115)
-    sputc(101)
-    sputc(114)
-    sputc(45)
-    sputc(115)
-    sputc(111)
-    sputc(102)
-    sputc(116)
-    sputc(93)
-    sputc(32)
-    sputc(102)
-    sputc(98)
-    sputc(32)
-    sputc(105)
-    sputc(110)
-    sputc(105)
-    sputc(116)
-    newline()
-    rt_gui_set_fb(0xFD000000, 1024)
+    val dom = build_dom()
+    serial_println("[browser-soft] DOM built")
 
-    sputc(91)
-    sputc(98)
-    sputc(114)
-    sputc(111)
-    sputc(119)
-    sputc(115)
-    sputc(101)
-    sputc(114)
-    sputc(45)
-    sputc(115)
-    sputc(111)
-    sputc(102)
-    sputc(116)
-    sputc(93)
-    sputc(32)
-    sputc(114)
-    sputc(101)
-    sputc(110)
-    sputc(100)
-    sputc(101)
-    sputc(114)
-    newline()
-    draw_page()
+    val layout = layout_tree(dom, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] layout ok")
 
-    val visible = count_visible_samples()
+    val commands = generate_paint_list(layout)
+    serial_println("[browser-soft] paint list ok")
 
-    if visible >= 5:
-        sputc(91)
-        sputc(80)
-        sputc(65)
-        sputc(83)
-        sputc(83)
-        sputc(93)
-        sputc(32)
-        sputc(98)
-        sputc(114)
-        sputc(111)
-        sputc(119)
-        sputc(115)
-        sputc(101)
-        sputc(114)
-        sputc(95)
-        sputc(115)
-        sputc(111)
-        sputc(102)
-        sputc(116)
-        sputc(95)
-        sputc(101)
-        sputc(110)
-        sputc(116)
-        sputc(114)
-        sputc(121)
-        newline()
-        sputc(84)
-        sputc(69)
-        sputc(83)
-        sputc(84)
-        sputc(32)
-        sputc(80)
-        sputc(65)
-        sputc(83)
-        sputc(83)
-        sputc(69)
-        sputc(68)
-        newline()
+    val scene = paint_commands_to_scene(commands, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] scene ok")
+
+    var buffer = init_buffer(VIEWPORT_W, VIEWPORT_H, BG_COLOR)
+    execute_scene_to_buffer(scene, buffer, VIEWPORT_W, VIEWPORT_H)
+    serial_println("[browser-soft] buffer rasterized")
+
+    val visible = count_non_background_pixels(buffer, BG_COLOR)
+    serial_println("[browser-soft] visible pixels: {visible}")
+
+    if visible > 0:
+        serial_println("[PASS] browser_soft_entry")
+        serial_println("TEST PASSED")
     else:
-        sputc(91)
-        sputc(70)
-        sputc(65)
-        sputc(73)
-        sputc(76)
-        sputc(93)
-        sputc(32)
-        sputc(98)
-        sputc(114)
-        sputc(111)
-        sputc(119)
-        sputc(115)
-        sputc(101)
-        sputc(114)
-        sputc(95)
-        sputc(115)
-        sputc(111)
-        sputc(102)
-        sputc(116)
-        sputc(95)
-        sputc(101)
-        sputc(110)
-        sputc(116)
-        sputc(114)
-        sputc(121)
-        newline()
-        sputc(84)
-        sputc(69)
-        sputc(83)
-        sputc(84)
-        sputc(32)
-        sputc(70)
-        sputc(65)
-        sputc(73)
-        sputc(76)
-        sputc(69)
-        sputc(68)
-        newline()
+        serial_println("[FAIL] browser_soft_entry: no visible output")
+        serial_println("TEST FAILED")
 
     rt_port_outb(0xf4, 0)
