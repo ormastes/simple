@@ -60,8 +60,8 @@ Version checks are centralized in `llvm_version.spl`.
 
 | Build Type | Authoritative Backend | Rationale |
 |------------|----------------------|-----------|
-| Hosted native (release) | `llvm-lib` | In-process, best optimization |
-| Hosted native (debug) | `cranelift` | Fastest compile time |
+| Compiler (`build`, `native-build`) | `llvm-lib` | In-process, best optimization |
+| Interpreter / Loader | `cranelift` | Fast JIT for running code |
 | Cross-target Linux | `llvm` or `llvm-lib` | Needs target triple support |
 | Bare-metal | `llvm` or `llvm-lib` | Needs `-none` triple |
 | WASM | `llvm` | Needs `wasm-ld` for linking |

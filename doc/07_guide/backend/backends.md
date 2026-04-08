@@ -23,15 +23,15 @@ Simple supports multiple compiler backends. Each backend translates MIR (Mid-lev
 
 ### Cranelift
 
-Default backend for development. Fast compile times, good runtime performance.
+Backend for the interpreter and loader. Fast JIT compilation for running and loading code.
 
 ```bash
-bin/simple build                         # Uses Cranelift by default
-bin/simple build --backend=cranelift     # Explicit
+bin/simple build --backend=cranelift     # Explicit Cranelift
 ```
 
 **Strengths:** Fast compilation (sub-second for small projects), good debugging support, cross-platform.
 **Limitations:** Fewer optimizations than LLVM, no GPU code generation.
+**Usage:** Interpreter and loader paths use Cranelift by default.
 
 ### C++20
 
@@ -89,8 +89,8 @@ The compiler picks the best backend based on context:
 
 | Context | Selected Backend | Reason |
 |---------|-----------------|--------|
-| `build` (debug) | Cranelift | Fast compilation |
-| `build --release` | LLVM (if available), else Cranelift | Best optimization |
+| Interpreter / Loader | Cranelift | Fast JIT for running code |
+| Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | `build --target=wasm` | LLVM or Cranelift | WASM support |
 | `build --target=fpga` | VHDL | Hardware target |
 | No backends installed | C++20 | Always available |

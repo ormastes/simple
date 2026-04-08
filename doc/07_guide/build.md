@@ -110,15 +110,15 @@ bin/simple watch --debounce=1000    # Custom debounce (ms)
 
 ## Backend Selection
 
-The compiler supports multiple code generation backends. Selection is automatic based on build mode and available tools.
+The compiler supports multiple code generation backends:
 
-| Build Mode | Default Backend | Rationale |
-|------------|----------------|-----------|
-| Debug (`build`) | Cranelift | Fast compile times (~2.5x faster than LLVM) |
-| Release (`build --release`) | LLVM-lib | Best runtime performance (4-5x faster code) |
+| Mode | Default Backend | Rationale |
+|------|----------------|-----------|
+| Interpreter / Loader | Cranelift | Fast JIT compilation for running and loading code |
+| Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | Explicit (`--backend=X`) | User choice | No auto-selection |
 
-**Fallback chain for release builds:** `llvm-lib` (if `libLLVM` available) -> `llvm` (if `llc` available) -> `cranelift`.
+**Fallback chain for compiler builds:** `llvm-lib` (if `libLLVM` available) -> `llvm` (if `llc` available) -> `cranelift`.
 
 ### Platform Notes
 

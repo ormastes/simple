@@ -112,7 +112,9 @@ pub struct NativeBuildConfig {
     pub clean: bool,
     /// Disable name mangling for cross-module resolution (default: false = mangling enabled).
     pub no_mangle: bool,
-    /// Codegen backend: "cranelift" (default) or "llvm".
+    /// Codegen backend: "llvm" (default) or "cranelift".
+    /// LLVM produces correct cross-module struct field access; Cranelift has
+    /// a known FieldGet offset bug for fields at byte_offset > 0.
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
