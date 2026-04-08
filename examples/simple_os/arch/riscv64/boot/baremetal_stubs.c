@@ -2251,4 +2251,11 @@ RuntimeValue rt_string_to_float(RuntimeValue s) { (void)s; return ENCODE_INT(0);
 RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { return rt_array_join(a, sep); }
 RuntimeValue rt_int_to_string(RuntimeValue val) { return rt_value_to_string(val); }
 
+/* ===================================================================
+ * Crypto — shared portable implementation
+ * =================================================================== */
+#define RV_INT int64_t
+#define CRYPTO_HAS_SERIAL_PUTHEX
+#include "../../shared/crypto_common.h"
+
 /* End of RISC-V64 baremetal_stubs.c */

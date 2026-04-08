@@ -1973,4 +1973,11 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
 
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
+/* ===================================================================
+ * Crypto — shared portable implementation
+ * =================================================================== */
+#define RV_INT int64_t
+#define CRYPTO_HAS_SERIAL_PUTHEX
+#include "../../shared/crypto_common.h"
+
 /* End of ARM64 baremetal_stubs.c */
