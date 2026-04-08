@@ -38,7 +38,6 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
-| **t32** | Installing T32 MCP, CMM LSP plugin setup | `/t32` |
 | **sstack/*** | SStack phase agents (intake, research, arch, spec, implement, refactor, verify, ship) | `/sstack` |
 
 **Usage pattern:** When spawning a Task, include the relevant agent context:
@@ -94,7 +93,6 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `mcp` | MCP server implementation |
 | `release` | Release process and versioning |
 | `cuda` | GPU/CUDA/SIMD programming, kernel syntax, GPU memory |
-| `t32` | TRACE32 setup, `scripts/t32q.shs` container lifecycle, GUI reopen flow, RCL/GDB interfaces, PRACTICE scripts, probe troubleshooting |
 | `worktree` | JJ workspace isolation and parallel working-copy workflow |
 | `rule` | Engineering rules, doc folder map, ADR process |
 | `sstack` | SStack orchestrator -- Superpowers+GSD+GStack 8-phase pipeline |
@@ -159,8 +157,6 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 |--------|---------------|---------|
 | `simple-mcp` | `bin/simple_mcp_server` | Simple language compiler MCP |
 | `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | Simple LSP via MCP bridge |
-| `t32-mcp` | `bin/t32_mcp_server` | TRACE32 debugger MCP (fast-start wrapper) |
-| `t32-lsp-mcp` | `bin/t32_lsp_mcp_server` | TRACE32 CMM LSP via MCP |
 
 ---
 
