@@ -135,8 +135,9 @@ impl DynamicSymbolProvider {
 
 impl RuntimeSymbolProvider for DynamicSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
+        let normalized = name.strip_prefix('_').unwrap_or(name);
         // Check cache first
-        if let Some(&ptr) = self.cache.borrow().get(name) {
+        if let Some(&ptr) = self.cache.borrow().get(normalized) {
             return Some(ptr);
         }
 
@@ -147,12 +148,12 @@ impl RuntimeSymbolProvider for DynamicSymbolProvider {
         // symbol and dereferences the bytes at the function entry address. Resolve
         // them as function pointers first, then cast the function address.
         let ptr = unsafe {
-            let sym: Symbol<unsafe extern "C" fn()> = self.library.get(name.as_bytes()).ok()?;
+            let sym: Symbol<unsafe extern "C" fn()> = self.library.get(normalized.as_bytes()).ok()?;
             (*sym) as *const () as *const u8
         };
 
         // Cache for future lookups
-        self.cache.borrow_mut().insert(name.to_string(), ptr);
+        self.cache.borrow_mut().insert(normalized.to_string(), ptr);
         Some(ptr)
     }
 

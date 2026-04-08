@@ -115,9 +115,10 @@ impl Default for ChainedProvider {
 
 impl RuntimeSymbolProvider for ChainedProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
+        let normalized = name.strip_prefix('_').unwrap_or(name);
         // First match wins
         for provider in &self.providers {
-            if let Some(ptr) = provider.get_symbol(name) {
+            if let Some(ptr) = provider.get_symbol(normalized) {
                 return Some(ptr);
             }
         }
@@ -245,6 +246,17 @@ mod tests {
         assert_eq!(chain.get_symbol("sym_a"), Some(ptr1 as *const u8));
         assert_eq!(chain.get_symbol("sym_b"), Some(ptr2 as *const u8));
         assert!(chain.get_symbol("sym_c").is_none());
+    }
+
+    #[test]
+    fn test_leading_underscore_normalization() {
+        let ptr1: usize = 0x1000;
+        let p1 = Arc::new(MockProvider::new("first", vec![("sym_a", ptr1)]));
+
+        let mut chain = ChainedProvider::new();
+        chain.add(p1);
+
+        assert_eq!(chain.get_symbol("_sym_a"), Some(ptr1 as *const u8));
     }
 
     #[test]

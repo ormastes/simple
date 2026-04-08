@@ -11,6 +11,9 @@
 // Notes:
 // - The snapshot reuses the existing Electron UI render path
 //   (`generate_css` + `render_html_tree`) and does not generate a custom theme.
+// - If Electron IPC render cannot start in the current branch, the tool
+//   falls back to tools/electron-shell/export_snapshot.spl
+//   (`generate_html_page`) to keep output on the shared HTML/CSS path.
 // - The output HTML file is self-contained and suitable for Stitch ingestion.
 
 const fs = require('fs');
@@ -22,6 +25,20 @@ const defaultSimpleBin = path.join(repoRoot, 'bin', 'simple');
 const defaultTimeoutMs = 20000;
 const isWin = process.platform === 'win32';
 const electronBinName = isWin ? 'electron.cmd' : 'electron';
+
+function compactLog(text, maxLines = 30, maxChars = 4000) {
+    if (!text) return '';
+    let out = text;
+    if (out.length > maxChars) {
+        out = out.slice(0, maxChars);
+    }
+    const lines = out.split('\n');
+    if (lines.length > maxLines) {
+        out = lines.slice(0, maxLines).join('\n');
+        out += '\n... (truncated)';
+    }
+    return out;
+}
 
 function printHelp() {
     console.log([
@@ -38,6 +55,7 @@ function printHelp() {
         '  --height <n>           PNG height (default: 840).',
         '  --simple-bin <path>    Path to Simple binary (default: bin/simple in repo root).',
         '  --timeout-ms <n>       Timeout waiting for first render (default: 20000).',
+        '  --no-fallback          Disable fallback exporter (export_snapshot.spl).',
         '  -h, --help             Show help.',
         '',
         'Example:',
@@ -53,7 +71,8 @@ function parseArgs(argv) {
         width: 1360,
         height: 840,
         simpleBin: defaultSimpleBin,
-        timeoutMs: defaultTimeoutMs
+        timeoutMs: defaultTimeoutMs,
+        noFallback: false
     };
 
     for (let i = 0; i < argv.length; i++) {
@@ -88,6 +107,10 @@ function parseArgs(argv) {
         }
         if (token === '--timeout-ms' && i + 1 < argv.length) {
             args.timeoutMs = parseInt(argv[++i], 10);
+            continue;
+        }
+        if (token === '--no-fallback') {
+            args.noFallback = true;
             continue;
         }
         if (!token.startsWith('-') && !args.entry) {
@@ -173,7 +196,8 @@ function captureFirstRenderHtml(options) {
         };
 
         const timeoutId = setTimeout(() => {
-            const detail = stderrBuf.length > 0 ? `\nstderr:\n${stderrBuf}` : '';
+            const detailText = compactLog(stderrBuf);
+            const detail = detailText.length > 0 ? `\nstderr:\n${detailText}` : '';
             finish(new Error(`Timed out waiting for first render after ${options.timeoutMs}ms.${detail}`));
         }, options.timeoutMs);
 
@@ -207,9 +231,56 @@ function captureFirstRenderHtml(options) {
 
         child.on('close', (code) => {
             if (!finished) {
-                const detail = stderrBuf.length > 0 ? `\nstderr:\n${stderrBuf}` : '';
+                const detailText = compactLog(stderrBuf);
+                const detail = detailText.length > 0 ? `\nstderr:\n${detailText}` : '';
                 finish(new Error(`Simple process exited before first render (code=${code}).${detail}`));
             }
+        });
+    });
+}
+
+function exportViaSimpleHtmlGenerator(options, outHtmlPath) {
+    return new Promise((resolve, reject) => {
+        const simpleBinAbs = path.resolve(repoRoot, options.simpleBin);
+        const entryAbs = path.resolve(repoRoot, options.entry);
+        const fallbackScript = path.join(repoRoot, 'tools', 'electron-shell', 'export_snapshot.spl');
+
+        if (!fs.existsSync(fallbackScript)) {
+            reject(new Error(`Fallback script not found: ${fallbackScript}`));
+            return;
+        }
+
+        const child = spawn(
+            simpleBinAbs,
+            ['run', fallbackScript, '--entry', entryAbs, '--out', outHtmlPath, '--port', '3000'],
+            {
+                cwd: repoRoot,
+                env: {
+                    ...process.env,
+                    SIMPLE_HOME: repoRoot
+                },
+                stdio: ['ignore', 'pipe', 'pipe']
+            }
+        );
+        let stdoutBuf = '';
+        let stderrBuf = '';
+
+        child.stdout.on('data', (chunk) => {
+            stdoutBuf += chunk.toString();
+        });
+        child.stderr.on('data', (chunk) => {
+            stderrBuf += chunk.toString();
+        });
+        child.on('error', (err) => {
+            reject(new Error(`Fallback exporter failed to launch: ${err.message}`));
+        });
+        child.on('close', (code) => {
+            if (code === 0 && fs.existsSync(outHtmlPath)) {
+                resolve(stdoutBuf.trim());
+                return;
+            }
+            const details = [compactLog(stdoutBuf), compactLog(stderrBuf)].filter(Boolean).join('\n');
+            reject(new Error(`Fallback exporter failed (code=${code}).${details ? `\n${details}` : ''}`));
         });
     });
 }
@@ -284,10 +355,27 @@ async function main() {
     const outHtml = path.resolve(repoRoot, args.out || buildDefaultHtmlOut(args.entry));
     ensureDirFor(outHtml);
 
-    const rawHtml = await captureFirstRenderHtml(args);
-    const htmlDoc = normalizeHtmlDocument(rawHtml);
-    fs.writeFileSync(outHtml, htmlDoc, 'utf8');
-    console.log(`HTML snapshot: ${outHtml}`);
+    let usedFallback = false;
+    try {
+        const rawHtml = await captureFirstRenderHtml(args);
+        const htmlDoc = normalizeHtmlDocument(rawHtml);
+        fs.writeFileSync(outHtml, htmlDoc, 'utf8');
+        console.log(`HTML snapshot: ${outHtml}`);
+    } catch (ipcErr) {
+        if (args.noFallback) {
+            throw ipcErr;
+        }
+        console.warn(`Warning: Electron IPC snapshot failed, using fallback HTML generator.\n${ipcErr.message}`);
+        await exportViaSimpleHtmlGenerator(args, outHtml);
+        usedFallback = true;
+        console.log(`HTML snapshot: ${outHtml}`);
+    }
+
+    if (usedFallback) {
+        console.log('Snapshot source: shared generate_html_page fallback (tools/electron-shell/export_snapshot.spl)');
+    } else {
+        console.log('Snapshot source: Electron render IPC payload');
+    }
 
     if (args.png) {
         const pngOut = path.resolve(repoRoot, args.png);

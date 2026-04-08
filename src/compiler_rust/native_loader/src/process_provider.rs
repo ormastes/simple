@@ -33,12 +33,13 @@ impl ProcessSymbolProvider {
 
 impl RuntimeSymbolProvider for ProcessSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
-        if let Some(&ptr) = self.cache.borrow().get(name) {
+        let normalized = name.strip_prefix('_').unwrap_or(name);
+        if let Some(&ptr) = self.cache.borrow().get(normalized) {
             return Some(ptr);
         }
 
-        let ptr = lookup_symbol(self.handle, name)?;
-        self.cache.borrow_mut().insert(name.to_string(), ptr);
+        let ptr = lookup_symbol(self.handle, normalized)?;
+        self.cache.borrow_mut().insert(normalized.to_string(), ptr);
         Some(ptr)
     }
 

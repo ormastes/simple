@@ -38,6 +38,7 @@ macro_rules! match_runtime_symbol {
 
 impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
+        let normalized = name.strip_prefix('_').unwrap_or(name);
         use simple_runtime::value::{
             rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_condition_probe, rt_contains,
             rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd,
@@ -148,7 +149,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
         use simple_runtime::*;
 
         match_runtime_symbol!(
-            name,
+            normalized,
             // AOP runtime operations
             rt_aop_invoke_around,
             rt_aop_proceed,
@@ -474,8 +475,11 @@ mod tests {
 
         // Test some known symbols exist
         assert!(provider.get_symbol("rt_array_new").is_some());
+        assert!(provider.get_symbol("_rt_array_new").is_some());
         assert!(provider.get_symbol("rt_println_value").is_some());
+        assert!(provider.get_symbol("_rt_println_value").is_some());
         assert!(provider.get_symbol("rt_value_int").is_some());
+        assert!(provider.get_symbol("_rt_interp_call").is_some());
 
         // Test unknown symbol returns None
         assert!(provider.get_symbol("rt_nonexistent").is_none());

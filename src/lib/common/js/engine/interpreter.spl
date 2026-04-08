@@ -14,7 +14,7 @@ use std.js.engine.runtime.{dispatch_native}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, f64_to_i64}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
@@ -35,6 +35,8 @@ class JsInterpreter:
     thrown_value: JsValue
     has_thrown: bool
     native_id_map: [Pair<i64, i64>]
+    class_proto_fns: [i64]
+    class_proto_ids: [i64]
 
     static fn new(logger: Logger) -> JsInterpreter:
         var env_stack = EnvironmentStack.new()
@@ -53,6 +55,8 @@ class JsInterpreter:
             thrown_value: JsValue.Undefined,
             has_thrown: false,
             native_id_map: [],
+            class_proto_fns: [],
+            class_proto_ids: [],
         )
 
     # Register a native function placeholder and return its index
@@ -121,6 +125,16 @@ class JsInterpreter:
         self._define_global_native("setInterval", -41)
         self._define_global_native("clearTimeout", -42)
         self._define_global_native("clearInterval", -43)
+
+    # Find prototype id for a class constructor
+    fn _find_class_proto(fn_id: i64) -> i64:
+        var i = 0
+        val len = self.class_proto_fns.len()
+        while i < len:
+            if self.class_proto_fns.get(i) == fn_id:
+                return self.class_proto_ids.get(i)
+            i = i + 1
+        -1
 
     # Execute a full program (list of statements)
     me execute(program: [Statement]) -> BrowserResult<JsValue>:
@@ -543,8 +557,9 @@ class JsInterpreter:
                 val ctor_id = self.functions.len()
                 val ctor_fn = JsFunction(name: name, params: cparams, body: cbody, closure_env: env)
                 self.functions.push(ctor_fn)
-                # Store prototype id on the function for new operator
-                self.object_store.set_property(proto_id, "__constructor__", JsValue.Function(id: ctor_id))
+                # Track constructor → prototype mapping for new operator
+                self.class_proto_fns.push(ctor_id)
+                self.class_proto_ids.push(proto_id)
                 val class_val = JsValue.Function(id: ctor_id)
                 self.env_stack.define_var(env, name, class_val)
                 return Ok(class_val)
@@ -859,6 +874,12 @@ class JsInterpreter:
                     # Allocate new object
                     val obj_id = self.object_store.create_object()
                     val new_obj = JsValue.Object(id: obj_id)
+                    # Link prototype chain (for class methods)
+                    val ctor_fn_id = _get_fn_id(callee_val)
+                    if ctor_fn_id >= 0:
+                        val proto_id = self._find_class_proto(ctor_fn_id)
+                        if proto_id >= 0:
+                            self.object_store.set_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
                     # Call constructor with 'this' bound to new object
                     match callee_val:
                         JsValue.Function(fn_id):
@@ -1021,21 +1042,34 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
 
     # Member access: obj.prop
+    # Look up property on object, with prototype chain fallback
+    fn _proto_lookup(obj_id: i64, property: text) -> JsValue:
+        val prop = self.object_store.get_property(obj_id, property)
+        if strict_equals(prop, JsValue.Undefined):
+            # Check __proto__ chain
+            val proto = self.object_store.get_property(obj_id, "__proto__")
+            val proto_id = _get_obj_id(proto)
+            if proto_id >= 0:
+                return self.object_store.get_property(proto_id, property)
+        prop
+
     me eval_member(object: Expression, property: text, env: i64) -> BrowserResult<JsValue>:
         val obj_val = self.eval_expression(object, env)?
-        match obj_val:
-            JsValue.Object(id):
-                return Ok(self.object_store.get_property(id, property))
-            JsValue.Array(id):
-                if property == "length":
-                    return Ok(JsValue.Number(v: self.object_store.array_length(id).to_f64()))
-                return Ok(self.object_store.get_property(id, property))
-            JsValue.String(sv):
-                if property == "length":
-                    return Ok(JsValue.Number(v: sv.len().to_f64()))
-                return Ok(JsValue.Undefined)
-            _:
-                return Ok(JsValue.Undefined)
+        val obj_id = _get_obj_id(obj_val)
+        if obj_id >= 0:
+            # Object or Array — check array length first
+            if property == "length":
+                val len_val = self.object_store.get_property(obj_id, "length")
+                if not strict_equals(len_val, JsValue.Undefined):
+                    return Ok(len_val)
+            return Ok(self._proto_lookup(obj_id, property))
+        # String — use typeof_value to avoid match destructuring
+        val tv = typeof_value(obj_val)
+        if tv == "string":
+            if property == "length":
+                val str_val = js_to_string(obj_val)
+                return Ok(JsValue.Number(v: str_val.len().to_f64()))
+        Ok(JsValue.Undefined)
 
     # Assignment: target = value
     me eval_assignment(target: Expression, value: Expression, env: i64) -> BrowserResult<JsValue>:
