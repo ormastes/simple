@@ -375,8 +375,11 @@ impl Lowerer {
         // and struct field types in Pass 1.
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                // Silently ignore import loading failures for backward compatibility
-                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
+                // Log import loading failures -- silent failures cause cross-module
+                // FieldGet bugs (wrong byte_offset when type falls back to ANY).
+                if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
+                    eprintln!("[WARN] Failed to load imported types from {:?}: {}", use_stmt.path.segments, e);
+                }
             }
         }
 

@@ -24,13 +24,31 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let i8_type = self.context.i8_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
-        let array_type = i8_type.array_type(struct_size);
-        let alloc = builder
-            .build_alloca(array_type, "struct")
-            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
-        let struct_ptr = builder
-            .build_pointer_cast(alloc, i8_ptr_type, "struct_ptr")
-            .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
+        let i64_type = self.runtime_int_type();
+
+        // Allocate struct on the HEAP via rt_alloc (matching Cranelift behavior).
+        // Stack alloca would create dangling pointers when passed cross-module.
+        let module_ref = self.module.borrow();
+        let module = module_ref.as_ref().unwrap();
+        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        let alloc_fn = module
+            .get_function("rt_alloc")
+            .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
+        let size_val = i64_type.const_int(struct_size as u64, false);
+        let alloc_call = builder
+            .build_call(alloc_fn, &[size_val.into()], "struct_alloc")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
+        let struct_ptr = alloc_call
+            .try_as_basic_value()
+            .left()
+            .and_then(|v| v.into_pointer_value().try_into().ok())
+            .unwrap_or_else(|| {
+                // Fallback: if rt_alloc returns i64, convert to pointer
+                let ret_i64 = alloc_call.try_as_basic_value().left().unwrap();
+                builder
+                    .build_int_to_ptr(ret_i64.into_int_value(), i8_ptr_type, "alloc_ptr")
+                    .unwrap()
+            });
 
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;

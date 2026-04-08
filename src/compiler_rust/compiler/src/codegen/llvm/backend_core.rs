@@ -230,6 +230,11 @@ impl LlvmBackend {
             _ => return Err(crate::error::factory::unsupported_return_type()),
         };
 
+        // Check for existing declaration to avoid creating duplicates with suffixed names.
+        // When a function was already pre-declared (e.g., by runtime function loop), reuse it.
+        if let Some(existing) = module.get_function(name) {
+            return Ok(existing);
+        }
         Ok(module.add_function(name, fn_type, None))
     }
 

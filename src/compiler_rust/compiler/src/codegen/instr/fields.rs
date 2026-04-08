@@ -23,6 +23,17 @@ pub fn compile_field_get<M: Module>(
     field_type: TypeId,
 ) -> InstrResult<()> {
     let obj_ptr = get_vreg_or_default(ctx, builder, &object);
+
+    // Diagnostic: log FieldGet at non-zero offsets when tracing is enabled.
+    // This helps diagnose cross-module FieldGet bugs where byte_offset is
+    // computed incorrectly due to type falling back to ANY.
+    if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+        eprintln!(
+            "[TRACE FieldGet] dest={:?} object={:?} byte_offset={} field_type={:?} func={}",
+            dest, object, byte_offset, field_type, ctx.func.name
+        );
+    }
+
     // Always load as I64 since all struct fields are stored in 8-byte slots
     // (field_index * 8 layout). Loading a smaller type (e.g., I8 for bool)
     // would truncate values like enum RuntimeValue pointers to their lowest byte.
