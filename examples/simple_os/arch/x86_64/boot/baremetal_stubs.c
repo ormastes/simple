@@ -2127,6 +2127,25 @@ static int _vnet_setup_queue(uint16_t qsel,
     uint32_t pfn = (uint32_t)((uintptr_t)mem >> 12);
     _vnet_wr32(0x08, pfn);
 
+    serial_puts("[net] queue ");
+    serial_put_dec(qsel);
+    serial_puts(" PFN=0x");
+    serial_put_hex(pfn);
+    serial_puts(" mem=0x");
+    serial_put_hex((uint32_t)(uintptr_t)mem);
+    serial_puts(" desc[0].addr=0x");
+    serial_put_hex((uint32_t)(*out_desc)[0].addr);
+    serial_puts("\r\n");
+
+    /* Verify: read back PFN */
+    _vnet_wr16(0x0E, qsel);
+    uint32_t readback = _vnet_rd32(0x08);
+    serial_puts("[net] queue ");
+    serial_put_dec(qsel);
+    serial_puts(" PFN readback=0x");
+    serial_put_hex(readback);
+    serial_puts(readback == pfn ? " OK\r\n" : " MISMATCH!\r\n");
+
     return 0;
 }
 
@@ -2351,6 +2370,21 @@ static void _vnet_handle_frame(const uint8_t *frame, uint16_t frame_len)
     const struct eth_hdr *eth = (const struct eth_hdr *)frame;
     uint16_t ethertype = _net_ntohs(eth->ethertype);
 
+    serial_puts("[net-rx] frame len=");
+    serial_put_dec(frame_len);
+    serial_puts(" type=0x");
+    serial_put_hex(ethertype);
+    if (ethertype == ETH_P_IP) {
+        const struct ipv4_hdr *ip = (const struct ipv4_hdr *)(frame + ETH_HLEN);
+        serial_puts(" proto=");
+        serial_put_dec(ip->protocol);
+        serial_puts(" ");
+        _net_print_ip(ip->src_ip);
+        serial_puts("->");
+        _net_print_ip(ip->dst_ip);
+    }
+    serial_puts("\r\n");
+
     switch (ethertype) {
         case ETH_P_ARP:
             _vnet_handle_arp(frame, frame_len);
@@ -2374,6 +2408,21 @@ static int _virtio_net_poll(void)
     if (!_vnet.initialized) return -19;
 
     int processed = 0;
+
+    /* Periodic diagnostic: dump RX queue state every 10000 calls */
+    static int _poll_count = 0;
+    _poll_count++;
+    if (_poll_count == 1 || _poll_count % 50000 == 0) {
+        serial_puts("[net-poll] avail.idx=");
+        serial_put_dec(_vnet.rx_avail->idx);
+        serial_puts(" used.idx=");
+        serial_put_dec(_vnet.rx_used->idx);
+        serial_puts(" last_used=");
+        serial_put_dec(_vnet.rx_last_used);
+        serial_puts(" poll#=");
+        serial_put_dec(_poll_count);
+        serial_puts("\r\n");
+    }
 
     while (1) {
         /* Read used ring idx (device updates this) */
@@ -5057,10 +5106,29 @@ int64_t rt_net_accept(int64_t sock_fd)
     serial_put_dec(ls->local_port);
     serial_puts("\r\n");
 
+    /* Send a gratuitous ARP to provoke network traffic */
+    if (ls->aq_head == ls->aq_tail) {
+        _vnet_send_gratuitous_arp();
+        /* Also check ISR status */
+        uint8_t isr = _vnet_rd8(0x13);
+        serial_puts("[tcp-accept] ISR=0x");
+        serial_put_hex(isr);
+        serial_puts(" RX avail.flags=");
+        serial_put_dec(_vnet.rx_avail->flags);
+        serial_puts(" used.flags=");
+        serial_put_dec(_vnet.rx_used->flags);
+        serial_puts("\r\n");
+    }
+
     /* Poll for incoming connections (~2s per accept call) */
     int timeout = 0;
     while (ls->aq_head == ls->aq_tail && timeout < 20000) {
-        _virtio_net_poll();
+        int rc = _virtio_net_poll();
+        if (rc > 0) {
+            serial_puts("[tcp-accept] poll got ");
+            serial_put_dec(rc);
+            serial_puts(" frames!\r\n");
+        }
         timeout++;
         for (volatile int d = 0; d < 1000; d++) {}
     }

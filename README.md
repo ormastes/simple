@@ -1192,7 +1192,10 @@ scripts/t32_semihost_hello.shs --board stm32h7
 scripts/t32_semihost_hello.shs --board stm32wb --build-only
 ```
 
-### Install T32 MCP Servers
+### Optional: Install T32 MCP Servers
+
+These TRACE32 MCP servers are not installed by the default project MCP setup.
+Register them manually only if you actively use TRACE32 tooling.
 
 ```bash
 cd /path/to/simple

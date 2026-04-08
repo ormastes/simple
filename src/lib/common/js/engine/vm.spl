@@ -5,6 +5,7 @@ use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResu
 use std.js.types.pair.{Pair}
 use std.js.types.bytecode_types.{OpCode, BytecodeChunk, ConstantPool}
 use std.js.types.js_types.{JsValue, JsObject, JsProperty}
+use std.js.engine.interpreter_types.{f64_to_i64}
 
 # --- Native function binding ---
 
@@ -16,74 +17,93 @@ class NativeFunction:
 # --- Object heap ---
 
 class ObjectStore:
-    objects: [JsObject]
+    # Flat parallel arrays — avoids .get(i).field.mutate() copy bug in interpreter mode.
+    # Object metadata (indexed by obj_id)
+    obj_proto_ids: [i64]
     next_id: i64
+    # Property storage (one entry per property across all objects)
+    prop_obj_ids: [i64]
+    prop_keys: [text]
+    prop_values: [JsValue]
+    prop_enumerables: [bool]
+    prop_configurables: [bool]
 
     static fn new() -> ObjectStore:
-        ObjectStore(objects: [], next_id: 0)
+        ObjectStore(
+            obj_proto_ids: [], next_id: 0,
+            prop_obj_ids: [], prop_keys: [], prop_values: [],
+            prop_enumerables: [], prop_configurables: []
+        )
 
     me allocate() -> JsObject:
         val id = self.next_id
-        val obj = JsObject.create(id)
-        self.objects.push(obj)
         self.next_id = self.next_id + 1
-        obj
+        self.obj_proto_ids.push(-1)
+        JsObject.create(id)
 
     me create_object() -> i64:
         val obj = self.allocate()
         obj.id
 
     fn get_object(id: i64) -> JsObject:
-        self.objects.get(id)
+        # Reconstruct JsObject from flat arrays (read-only snapshot)
+        # Scan from end, deduplicate by key (latest entry wins)
+        var props: [JsProperty] = []
+        var seen_keys: [text] = []
+        var i = self.prop_keys.len() - 1
+        while i >= 0:
+            if self.prop_obj_ids.get(i) == id:
+                val key = self.prop_keys.get(i)
+                var already_seen = false
+                var si = 0
+                while si < seen_keys.len():
+                    if seen_keys.get(si) == key:
+                        already_seen = true
+                        si = seen_keys.len()
+                    si = si + 1
+                if not already_seen:
+                    seen_keys.push(key)
+                    val is_enum = self.prop_enumerables.get(i)
+                    if is_enum:
+                        props.push(JsProperty(
+                            key: key,
+                            value: self.prop_values.get(i),
+                            writable: true,
+                            enumerable: true,
+                            configurable: self.prop_configurables.get(i)
+                        ))
+            i = i - 1
+        var proto_id = -1
+        if id >= 0 and id < self.obj_proto_ids.len():
+            proto_id = self.obj_proto_ids.get(id)
+        JsObject(id: id, properties: props, prototype_id: proto_id)
 
     me set_property(obj_id: i64, key: text, value: JsValue):
-        var obj = self.objects.get(obj_id)
-        # Check if property exists
-        var found = false
-        var i = 0
-        while i < obj.properties.len():
-            val prop = obj.properties.get(i)
-            if prop.key == key:
-                obj.properties.set(i, JsProperty.data(key, value))
-                found = true
-                i = obj.properties.len()  # break
-            i = i + 1
-        if not found:
-            obj.properties.push(JsProperty.data(key, value))
-        # Write back — interpreter mode .get() returns copies
-        self.objects.set(obj_id, obj)
+        # Append-only — latest entry wins on read (no .set() in interpreter mode)
+        self.prop_obj_ids.push(obj_id)
+        self.prop_keys.push(key)
+        self.prop_values.push(value)
+        self.prop_enumerables.push(true)
+        self.prop_configurables.push(true)
 
     fn get_property(obj_id: i64, key: text) -> JsValue:
-        val obj = self.objects.get(obj_id)
-        var i = 0
-        while i < obj.properties.len():
-            val prop = obj.properties.get(i)
-            if prop.key == key:
-                return prop.value
-            i = i + 1
+        # Scan from end — latest entry wins
+        var i = self.prop_keys.len() - 1
+        while i >= 0:
+            if self.prop_obj_ids.get(i) == obj_id and self.prop_keys.get(i) == key:
+                return self.prop_values.get(i)
+            i = i - 1
         JsValue.Undefined
 
     fn array_length(obj_id: i64) -> i64:
         """Get the length of an array by reading its 'length' property."""
-        val obj = self.objects.get(obj_id)
-        if obj == nil:
-            return 0
-        var i = 0
-        val len = obj.properties.len()
-        while i < len:
-            val prop = obj.properties.get(i)
-            if prop.key == "length":
-                match prop.value:
-                    JsValue.Number(v): return v.to_i64()
-                    _: return 0
-            i = i + 1
-        0
+        match self.get_property(obj_id, "length"):
+            JsValue.Number(v): f64_to_i64(v)
+            _: 0
 
     fn get_by_index(obj_id: i64, idx: i64) -> JsValue:
         """Get array element by numeric index."""
-        val key = "{idx}"
-        val result = self.get_property(obj_id, key)
-        result
+        self.get_property(obj_id, "{idx}")
 
     me create_array_from(values: [JsValue]) -> i64:
         """Create a new array object from a list of values."""
@@ -96,18 +116,12 @@ class ObjectStore:
         id
 
     me remove_property(obj_id: i64, key: text):
-        """Remove a property from an object."""
-        var obj = self.objects.get(obj_id)
-        if obj == nil:
-            return
-        var i = 0
-        while i < obj.properties.len():
-            if obj.properties.get(i).key == key:
-                obj.properties.remove(i)
-                # Write back — interpreter mode .get() returns copies
-                self.objects.set(obj_id, obj)
-                return
-            i = i + 1
+        """Remove a property from an object. Pushes Undefined tombstone."""
+        self.prop_obj_ids.push(obj_id)
+        self.prop_keys.push(key)
+        self.prop_values.push(JsValue.Undefined)
+        self.prop_enumerables.push(false)
+        self.prop_configurables.push(false)
 
 # --- Call frame ---
 

@@ -40,44 +40,39 @@ class EnvironmentStack:
         -1
 
     # Get a variable by searching up the scope chain
+    # Scans from end — latest push wins (append-only, no .set())
     fn get_var(env_id: i64, name: text) -> Option<JsValue>:
         var current_id = env_id
         while current_id >= 0:
-            var j = 0
-            val vlen = self.var_names.len()
-            while j < vlen:
+            var j = self.var_names.len() - 1
+            while j >= 0:
                 if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
                     return Some(self.var_values.get(j))
-                j = j + 1
+                j = j - 1
             current_id = self._env_parent(current_id)
         nil
 
     # Set an existing variable (searches up scope chain)
+    # Appends new entry — latest wins on read
     me set_var(env_id: i64, name: text, value: JsValue):
         var current_id = env_id
         while current_id >= 0:
-            var j = 0
-            val vlen = self.var_names.len()
-            while j < vlen:
+            var j = self.var_names.len() - 1
+            while j >= 0:
                 if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
-                    self.var_values.set(j, value)
+                    # Found in this scope — push update
+                    self.var_names.push(name)
+                    self.var_values.push(value)
+                    self.var_env_ids.push(current_id)
                     return
-                j = j + 1
+                j = j - 1
             current_id = self._env_parent(current_id)
         # Variable not found — define in the given env
         self.define_var(env_id, name, value)
 
     # Define a new variable in the given environment
+    # Always appends — latest entry wins on read
     me define_var(env_id: i64, name: text, value: JsValue):
-        # Check if already exists in this exact scope
-        var j = 0
-        val vlen = self.var_names.len()
-        while j < vlen:
-            if self.var_env_ids.get(j) == env_id and self.var_names.get(j) == name:
-                self.var_values.set(j, value)
-                return
-            j = j + 1
-        # New variable — append to flat arrays
         self.var_names.push(name)
         self.var_values.push(value)
         self.var_env_ids.push(env_id)
@@ -100,6 +95,43 @@ class JsFunction:
 
 use std.js.types.ast_types.Statement
 
+# ── Float-to-int helper (interpreter mode has no .to_i64() on f64) ──────
+
+fn _digit_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn f64_to_i64(v: f64) -> i64:
+    val s = "{v}"
+    var n = 0
+    var neg = false
+    var i = 0
+    val slen = s.len()
+    if slen > 0 and s[0] == "-":
+        neg = true
+        i = 1
+    while i < slen:
+        val ch = s[i]
+        if ch == ".":
+            i = slen
+        else:
+            val d = _digit_val(ch)
+            if d >= 0:
+                n = n * 10 + d
+        i = i + 1
+    if neg:
+        return 0 - n
+    n
+
 # ── Type coercion helpers ────────────────────────────────────────────────
 
 fn to_number(value: JsValue) -> f64:
@@ -119,14 +151,25 @@ fn to_number(value: JsValue) -> f64:
             js_nan()  # NaN
         _: js_nan()  # NaN
 
-fn to_string(value: JsValue) -> text:
+fn js_to_string(value: JsValue) -> text:
     match value:
         JsValue.Undefined: "undefined"
         JsValue.Null: "null"
         JsValue.Boolean(v):
             if v: "true"
             else: "false"
-        JsValue.Number(v): "{v}"
+        JsValue.Number(v):
+            # JS: integer-valued floats display without decimal (1.0 → "1")
+            var s = "{v}"
+            val slen = s.len()
+            if slen >= 3 and s[slen - 2] == "." and s[slen - 1] == "0":
+                var result = ""
+                var ci = 0
+                while ci < slen - 2:
+                    result = result + s[ci]
+                    ci = ci + 1
+                return result
+            s
         JsValue.String(v): v
         JsValue.Object(id): "[object Object]"
         JsValue.Array(id): "[object Array]"
@@ -203,17 +246,15 @@ fn abstract_equals(a: JsValue, b: JsValue) -> bool:
     if ta == tb:
         return strict_equals(a, b)
 
-    # null == undefined
-    match a:
-        JsValue.Null:
-            match b:
-                JsValue.Undefined: return true
-                _: pass_dn
-        JsValue.Undefined:
-            match b:
-                JsValue.Null: return true
-                _: pass_dn
-        _: pass_dn
+    # null == undefined (avoid nested match — interpreter mode issue)
+    val a_null = strict_equals(a, JsValue.Null)
+    val b_null = strict_equals(b, JsValue.Null)
+    val a_undef = strict_equals(a, JsValue.Undefined)
+    val b_undef = strict_equals(b, JsValue.Undefined)
+    if (a_null and b_undef) or (a_undef and b_null):
+        return true
+    if a_null or b_null or a_undef or b_undef:
+        return false
 
     # Number comparisons with coercion
     val na = to_number(a)

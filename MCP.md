@@ -39,7 +39,7 @@ All three platforms now have submissions pending or live. Local skills/agents co
 
 ## MCP Servers
 
-Four MCP servers, all native binaries (no Node.js runtime needed). Each wraps `bin/release/simple` via thin shell/cmd launchers.
+Default project setup installs two MCP servers. TRACE32 MCP servers remain available as manual opt-ins for TRACE32 users.
 
 | MCP Server | Launcher | Source | Description |
 |------------|----------|--------|-------------|
@@ -61,6 +61,8 @@ copy config\mcp\win\.mcp.json .mcp.json
 ```
 
 Config files: `config/mcp/common/.mcp.json` (Linux/macOS), `config/mcp/win/.mcp.json` (Windows).
+
+The default install path registers `simple-mcp` and `simple-lsp-mcp` only. TRACE32 servers are not added automatically.
 
 ### Install via npm (global, for any project)
 
@@ -122,6 +124,11 @@ Marketplace definition: `tools/claude-plugin/marketplace/.claude-plugin/marketpl
 ```bash
 claude mcp add simple-mcp -- bin/simple_mcp_server
 claude mcp add simple-lsp-mcp -- bin/simple_lsp_mcp_server
+```
+
+Optional TRACE32 registrations:
+
+```bash
 claude mcp add t32-mcp -- bin/t32_mcp_server
 claude mcp add t32-lsp-mcp -- bin/t32_lsp_mcp_server
 ```
@@ -189,7 +196,7 @@ Auto-discovered via `gemini-cli-extension` GitHub topic. Manifest: `gemini-exten
 
 Commands: `coding`, `design`, `impl`, `refactor`, `release`, `research`, `sync`, `verify`, `ui_design`, `visual_test`, `browser_research`, `stitch`
 
-MCP servers in Gemini settings (`.gemini/settings.json`): `simple-mcp`, `simple-lsp-mcp`, `t32-mcp`, `t32-lsp-mcp`, plus `context-mode`, `context7`, `chrome-devtools`, `stitch-mcp`.
+MCP servers in Gemini settings (`.gemini/settings.json`): `simple-mcp`, `simple-lsp-mcp`, plus `context-mode`, `context7`, `chrome-mcp`, `stitch-mcp`.
 
 ### User Installation
 
@@ -218,7 +225,7 @@ Command parity guide: `doc/07_guide/tooling/ai_command_parity.md`
 
 ### MCP Servers (in config.toml)
 
-All 4 MCP servers registered: `simple-mcp`, `simple-lsp-mcp`, `t32-mcp`, `t32-lsp-mcp`
+Project `config.toml` registers `context7` only. Local install/setup scripts add `simple-mcp` and `simple-lsp-mcp`. TRACE32 MCP servers are optional manual registrations and are not part of the default Codex startup set.
 
 ### Skills (11, ad-hoc format)
 

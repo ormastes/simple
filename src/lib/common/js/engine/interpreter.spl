@@ -14,7 +14,7 @@ use std.js.engine.runtime.{dispatch_native}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, f64_to_i64}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
@@ -145,10 +145,7 @@ class JsInterpreter:
                         var i = 0
                         while i < props.len():
                             val dp = props.get(i)
-                            val prop_val = self.object_store.get_property(id, dp.key)
-                            var bound_val = JsValue.Undefined
-                            if val Some(pv) = prop_val:
-                                bound_val = pv
+                            val bound_val = self.object_store.get_property(id, dp.key)
                             match dp.value:
                                 Expression.Identifier(name):
                                     self.env_stack.define_var(env, name, bound_val)
@@ -422,17 +419,10 @@ class JsInterpreter:
         var result = JsValue.Undefined
         match iter_val:
             JsValue.Array(id):
-                val obj = self.object_store.get_object(id)
-                val length_prop = self.object_store.get_property(id, "length")
-                var arr_len = 0
-                if val Some(lv) = length_prop:
-                    arr_len = to_number(lv).to_i64()
+                val arr_len = self.object_store.array_length(id)
                 var i = 0
                 while i < arr_len:
-                    val elem_prop = self.object_store.get_property(id, "{i}")
-                    var elem_val = JsValue.Undefined
-                    if val Some(ev) = elem_prop:
-                        elem_val = ev
+                    val elem_val = self.object_store.get_by_index(id, i)
                     val iter_env = self.env_stack.create_env(env)
                     self.env_stack.define_var(iter_env, binding, elem_val)
                     var bi = 0
@@ -560,18 +550,16 @@ class JsInterpreter:
             Expression.InExpr(left, right):
                 val key = self.eval_expression(left, env)?
                 val obj = self.eval_expression(right, env)?
-                val key_str = to_string(key)
+                val key_str = js_to_string(key)
                 match obj:
                     JsValue.Object(id):
-                        val prop = self.object_store.get_property(id, key_str)
-                        if val Some(v) = prop:
-                            return Ok(JsValue.Boolean(v: true))
-                        return Ok(JsValue.Boolean(v: false))
+                        match self.object_store.get_property(id, key_str):
+                            JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
+                            _: return Ok(JsValue.Boolean(v: true))
                     JsValue.Array(id):
-                        val prop = self.object_store.get_property(id, key_str)
-                        if val Some(v) = prop:
-                            return Ok(JsValue.Boolean(v: true))
-                        return Ok(JsValue.Boolean(v: false))
+                        match self.object_store.get_property(id, key_str):
+                            JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
+                            _: return Ok(JsValue.Boolean(v: true))
                     _:
                         return Ok(JsValue.Boolean(v: false))
             Expression.NewExpr(callee, args):
@@ -579,18 +567,12 @@ class JsInterpreter:
             Expression.ComputedMember(object, property):
                 val obj_val = self.eval_expression(object, env)?
                 val key_val = self.eval_expression(property, env)?
-                val key_str = to_string(key_val)
+                val key_str = js_to_string(key_val)
                 match obj_val:
                     JsValue.Object(id):
-                        val prop = self.object_store.get_property(id, key_str)
-                        if val Some(v) = prop:
-                            return Ok(v)
-                        return Ok(JsValue.Undefined)
+                        return Ok(self.object_store.get_property(id, key_str))
                     JsValue.Array(id):
-                        val prop = self.object_store.get_property(id, key_str)
-                        if val Some(v) = prop:
-                            return Ok(v)
-                        return Ok(JsValue.Undefined)
+                        return Ok(self.object_store.get_property(id, key_str))
                     _:
                         return Ok(JsValue.Undefined)
             Expression.ObjectPattern(props):
@@ -664,7 +646,7 @@ class JsInterpreter:
             val ls = typeof_value(lv)
             val rs = typeof_value(rv)
             if ls == "string" or rs == "string":
-                val result = to_string(lv) + to_string(rv)
+                val result = js_to_string(lv) + js_to_string(rv)
                 return Ok(JsValue.String(v: result))
             val ln = to_number(lv)
             val rn = to_number(rv)
@@ -711,33 +693,25 @@ class JsInterpreter:
 
         # Bitwise
         if op == "&":
-            val li = to_number(lv).to_i64()
-            val ri = to_number(rv).to_i64()
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
             return Ok(JsValue.Number(v: (li & ri).to_f64()))
         if op == "|":
-            val li = to_number(lv).to_i64()
-            val ri = to_number(rv).to_i64()
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
             return Ok(JsValue.Number(v: (li | ri).to_f64()))
         if op == "^":
-            val li = to_number(lv).to_i64()
-            val ri = to_number(rv).to_i64()
+            val li = f64_to_i64(to_number(lv))
+            val ri = f64_to_i64(to_number(rv))
             return Ok(JsValue.Number(v: (li ^ ri).to_f64()))
 
         # Computed property access: obj[key]
         if op == "[]":
             match lv:
                 JsValue.Object(id):
-                    val key = to_string(rv)
-                    val prop = self.object_store.get_property(id, key)
-                    if val Some(pv) = prop:
-                        return Ok(pv)
-                    return Ok(JsValue.Undefined)
+                    return Ok(self.object_store.get_property(id, js_to_string(rv)))
                 JsValue.Array(id):
-                    val key = to_string(rv)
-                    val prop = self.object_store.get_property(id, key)
-                    if val Some(pv) = prop:
-                        return Ok(pv)
-                    return Ok(JsValue.Undefined)
+                    return Ok(self.object_store.get_property(id, js_to_string(rv)))
                 _:
                     return Ok(JsValue.Undefined)
 
@@ -766,7 +740,7 @@ class JsInterpreter:
         if op == "+":
             return Ok(JsValue.Number(v: to_number(v)))
         if op == "~":
-            val n = to_number(v).to_i64()
+            val n = f64_to_i64(to_number(v))
             return Ok(JsValue.Number(v: (0 - n - 1).to_f64()))
         if op == "void":
             return Ok(JsValue.Undefined)
@@ -942,7 +916,7 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
             _:
                 # Trying to call a non-function
-                self.logger.warn("TypeError: {to_string(callee_val)} is not a function")
+                self.logger.warn("TypeError: {js_to_string(callee_val)} is not a function")
                 return Ok(JsValue.Undefined)
 
     # Member access: obj.prop
@@ -950,20 +924,11 @@ class JsInterpreter:
         val obj_val = self.eval_expression(object, env)?
         match obj_val:
             JsValue.Object(id):
-                val prop = self.object_store.get_property(id, property)
-                if val Some(v) = prop:
-                    return Ok(v)
-                return Ok(JsValue.Undefined)
+                return Ok(self.object_store.get_property(id, property))
             JsValue.Array(id):
                 if property == "length":
-                    val len_prop = self.object_store.get_property(id, "length")
-                    if val Some(v) = len_prop:
-                        return Ok(v)
-                    return Ok(JsValue.Number(v: 0.0))
-                val prop = self.object_store.get_property(id, property)
-                if val Some(v) = prop:
-                    return Ok(v)
-                return Ok(JsValue.Undefined)
+                    return Ok(JsValue.Number(v: self.object_store.array_length(id).to_f64()))
+                return Ok(self.object_store.get_property(id, property))
             JsValue.String(sv):
                 if property == "length":
                     return Ok(JsValue.Number(v: sv.len().to_f64()))
@@ -1045,7 +1010,7 @@ class JsInterpreter:
             result = result + quasis.get(i)
             if i < expressions.len():
                 val expr_val = self.eval_expression(expressions.get(i), env)?
-                result = result + to_string(expr_val)
+                result = result + js_to_string(expr_val)
             i = i + 1
         Ok(JsValue.String(v: result))
 
@@ -1056,17 +1021,7 @@ class JsInterpreter:
                 val obj_val = self.eval_expression(object, env)?
                 match obj_val:
                     JsValue.Object(id):
-                        val obj = self.object_store.get_object(id)
-                        var i = 0
-                        val len = obj.properties.len()
-                        while i < len:
-                            val prop = obj.properties.get(i)
-                            if prop.key == property:
-                                if prop.configurable:
-                                    obj.properties.remove(i)
-                                    return Ok(JsValue.Boolean(v: true))
-                                return Ok(JsValue.Boolean(v: false))
-                            i = i + 1
+                        self.object_store.remove_property(id, property)
                         return Ok(JsValue.Boolean(v: true))
                     _:
                         return Ok(JsValue.Boolean(v: true))
@@ -1245,14 +1200,14 @@ class JsInterpreter:
             var sep = ","
             if args.len() > 0:
                 val sep_val = self.eval_expression(args.get(0), env)?
-                sep = to_string(sep_val)
+                sep = js_to_string(sep_val)
             var result = ""
             var i = 0
             while i < arr_len:
                 if i > 0:
                     result = result + sep
                 val elem = self.object_store.get_by_index(arr_id, i)
-                result = result + to_string(elem)
+                result = result + js_to_string(elem)
                 i = i + 1
             return Ok(JsValue.String(v: result))
 
@@ -1273,14 +1228,14 @@ class JsInterpreter:
             var end = arr_len
             if args.len() > 0:
                 val s = self.eval_expression(args.get(0), env)?
-                start = to_number(s).to_i64()
+                start = f64_to_i64(to_number(s))
                 if start < 0:
                     start = arr_len + start
                     if start < 0:
                         start = 0
             if args.len() > 1:
                 val e = self.eval_expression(args.get(1), env)?
-                end = to_number(e).to_i64()
+                end = f64_to_i64(to_number(e))
                 if end < 0:
                     end = arr_len + end
                 if end > arr_len:
@@ -1387,7 +1342,7 @@ class JsInterpreter:
             var start = 0
             if args.len() > 0:
                 val s = self.eval_expression(args.get(0), env)?
-                start = to_number(s).to_i64()
+                start = f64_to_i64(to_number(s))
                 if start < 0:
                     start = arr_len + start
                     if start < 0:
@@ -1395,7 +1350,7 @@ class JsInterpreter:
             var delete_count = arr_len - start
             if args.len() > 1:
                 val dc = self.eval_expression(args.get(1), env)?
-                delete_count = to_number(dc).to_i64()
+                delete_count = f64_to_i64(to_number(dc))
             # Collect removed elements
             val removed_id = self.object_store.create_object()
             var ri = 0
