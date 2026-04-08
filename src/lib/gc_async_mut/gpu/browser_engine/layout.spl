@@ -6,10 +6,10 @@
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
-    be_default_style, resolve_style}
+    be_default_style}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
 use common.text_layout.font_renderer.{FontRenderer}
-extern fn serial_println(msg: text)
+# extern fn serial_println(msg: text)  # disabled for native builds
 
 # =========================================================================
 # Layout Box
@@ -53,9 +53,18 @@ class BeLayoutBox:
 # Main Layout Entry Point
 # =========================================================================
 
+fn layout_resolve_style(node: BeDomNode, parent_style: StyleProps) -> StyleProps:
+    """Local resolve_style — avoids cross-module FieldGet issues."""
+    var s = node.style
+    if s.color == 0x000000FF and parent_style.color != 0x000000FF:
+        s.color = parent_style.color
+    if s.font_size == 16 and parent_style.font_size != 16:
+        s.font_size = parent_style.font_size
+    return s
+
 fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox:
     """Lay out the entire DOM tree within the given viewport dimensions."""
-    serial_println("[layout] tree start")
+    # serial_println("[layout] tree start")
     var container = BeLayoutBox(
         x: 0, y: 0,
         width: viewport_w, height: viewport_h,
@@ -63,11 +72,11 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
         content_width: viewport_w, content_height: viewport_h,
         node: root, children: []
     )
-    serial_println("[layout] tree container ok")
+    # serial_println("[layout] tree container ok")
     val base_style = be_default_style()
-    serial_println("[layout] tree default style ok")
+    # serial_println("[layout] tree default style ok")
     val result = layout_node(root, container, base_style)
-    serial_println("[layout] tree root ok")
+    # serial_println("[layout] tree root ok")
     return result
 
 # =========================================================================
@@ -76,9 +85,9 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a single node within its container, dispatching by display type."""
-    serial_println("[layout] node start")
-    val style = resolve_style(node, parent_style)
-    serial_println("[layout] resolve_style ok")
+    # serial_println("[layout] node start")
+    val style = layout_resolve_style(node, parent_style)
+    # serial_println("[layout] resolve_style ok")
 
     if style.display == "none":
         return BeLayoutBox.empty(node)
@@ -93,53 +102,65 @@ fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps
         pass_dn
 
     if node.is_text_node():
-        serial_println("[layout] text dispatch")
+        # serial_println("[layout] text dispatch")
         return layout_text(node, container)
 
     var result: BeLayoutBox
     if style.display == "flex" or style.display == "inline-flex":
-        serial_println("[layout] flex dispatch")
+        # serial_println("[layout] flex dispatch")
         result = layout_flex(node, container, style)
     else:
-        serial_println("[layout] block dispatch")
+        # serial_println("[layout] block dispatch")
         result = layout_block(node, container, style)
 
-    # Apply CSS positioning offsets
-    if style.position == "relative":
-        val dx = resolve_offset(style.left, container.content_width)
-        val dy = resolve_offset(style.top, container.content_height)
+    # Apply CSS positioning offsets — extract fields upfront
+    val s_position = style.position
+    val s_left = style.left
+    val s_top = style.top
+    val s_right = style.right
+    val s_bottom = style.bottom
+    val s_border_pos = style.border
+    val s_padding_pos = style.padding
+
+    if s_position == "relative":
+        val dx = resolve_offset(s_left, container.content_width)
+        val dy = resolve_offset(s_top, container.content_height)
         result.x = result.x + dx
         result.y = result.y + dy
         result.content_x = result.content_x + dx
         result.content_y = result.content_y + dy
-    else if style.position == "absolute":
-        # Position relative to container origin
-        if not style.left.is_auto():
-            val lx = style.left.resolve_px(container.content_width)
+    else if s_position == "absolute":
+        val pos_bw = s_border_pos.width
+        val pos_pl = s_padding_pos.left
+        val pos_pt = s_padding_pos.top
+        if not s_left.is_auto():
+            val lx = s_left.resolve_px(container.content_width)
             result.x = container.x + lx
-            result.content_x = result.x + style.border.width + style.padding.left
-        if not style.top.is_auto():
-            val ty = style.top.resolve_px(container.content_height)
+            result.content_x = result.x + pos_bw + pos_pl
+        if not s_top.is_auto():
+            val ty = s_top.resolve_px(container.content_height)
             result.y = container.y + ty
-            result.content_y = result.y + style.border.width + style.padding.top
-        if not style.right.is_auto() and style.left.is_auto():
-            val rx = style.right.resolve_px(container.content_width)
+            result.content_y = result.y + pos_bw + pos_pt
+        if not s_right.is_auto() and s_left.is_auto():
+            val rx = s_right.resolve_px(container.content_width)
             result.x = container.x + container.width - rx - result.width
-            result.content_x = result.x + style.border.width + style.padding.left
-        if not style.bottom.is_auto() and style.top.is_auto():
-            val by = style.bottom.resolve_px(container.content_height)
+            result.content_x = result.x + pos_bw + pos_pl
+        if not s_bottom.is_auto() and s_top.is_auto():
+            val by = s_bottom.resolve_px(container.content_height)
             result.y = container.y + container.height - by - result.height
-            result.content_y = result.y + style.border.width + style.padding.top
-    else if style.position == "fixed":
-        # Position relative to viewport (container at 0,0)
-        if not style.left.is_auto():
-            val lx = style.left.resolve_px(container.content_width)
+            result.content_y = result.y + pos_bw + pos_pt
+    else if s_position == "fixed":
+        val pos_bw = s_border_pos.width
+        val pos_pl = s_padding_pos.left
+        val pos_pt = s_padding_pos.top
+        if not s_left.is_auto():
+            val lx = s_left.resolve_px(container.content_width)
             result.x = lx
-            result.content_x = result.x + style.border.width + style.padding.left
-        if not style.top.is_auto():
-            val ty = style.top.resolve_px(container.content_height)
+            result.content_x = result.x + pos_bw + pos_pl
+        if not s_top.is_auto():
+            val ty = s_top.resolve_px(container.content_height)
             result.y = ty
-            result.content_y = result.y + style.border.width + style.padding.top
+            result.content_y = result.y + pos_bw + pos_pt
 
     return result
 
@@ -155,26 +176,34 @@ fn resolve_offset(value: CssValue, reference: i32) -> i32:
 
 fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
     """Lay out a block-level element: full width, children stacked vertically."""
-    serial_println("[layout] block start")
+    # Extract ALL style fields upfront to avoid chained FieldGet issues
     val margin = style.margin
     val padding = style.padding
-    val border_w = style.border.width
-    serial_println("[layout] block metrics ok")
+    val s_border = style.border
+    val border_w = s_border.width
+    val s_width = style.width
+    val s_height = style.height
+    val s_max_width = style.max_width
+    val s_min_width = style.min_width
+
+    # Also extract container fields upfront
+    val c_content_w = container.content_width
+    val c_content_h = container.content_height
+    val c_content_x = container.content_x
+    val c_content_y = container.content_y
 
     # Resolve width
-    var box_width = container.content_width - margin.horizontal()
-    if not style.width.is_auto():
-        box_width = style.width.resolve_px(container.content_width)
-    # Apply min/max width clamping
-    if not style.max_width.is_auto():
-        val max_w = style.max_width.resolve_px(container.content_width)
+    var box_width = c_content_w - margin.horizontal()
+    if not s_width.is_auto():
+        box_width = s_width.resolve_px(c_content_w)
+    if not s_max_width.is_auto():
+        val max_w = s_max_width.resolve_px(c_content_w)
         if box_width > max_w:
             box_width = max_w
-    if not style.min_width.is_auto():
-        val min_w = style.min_width.resolve_px(container.content_width)
+    if not s_min_width.is_auto():
+        val min_w = s_min_width.resolve_px(c_content_w)
         if box_width < min_w:
             box_width = min_w
-    serial_println("[layout] block width ok")
 
     # Content area
     val inset_h = padding.horizontal() + border_w * 2
@@ -182,18 +211,16 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
     val content_w = box_width - inset_h
 
     # Position
-    val box_x = container.content_x + margin.left
-    val box_y = container.content_y + margin.top
+    val box_x = c_content_x + margin.left
+    val box_y = c_content_y + margin.top
     val cont_x = box_x + border_w + padding.left
     val cont_y = box_y + border_w + padding.top
 
     # Layout children vertically
     var child_boxes: [BeLayoutBox] = []
     var cursor_y = cont_y
-    serial_println("[layout] block children start")
     var child_index: i32 = 0
     for child in node.children:
-        serial_println("[layout] block child setup start")
         var child_container = BeLayoutBox(
             x: cont_x, y: cursor_y,
             width: content_w, height: 0,
@@ -201,20 +228,16 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
             content_width: content_w, content_height: 0,
             node: child, children: []
         )
-        serial_println("[layout] block child setup ok")
-        serial_println("[layout] block child recurse start")
         val child_box = layout_node(child, child_container, style)
-        serial_println("[layout] block child recurse ok")
         cursor_y = cursor_y + child_box.height
         child_boxes = child_boxes + [child_box]
         child_index = child_index + 1
-    serial_println("[layout] block children ok")
 
     # Resolve height
     val children_height = cursor_y - cont_y
     var content_h = children_height
-    if not style.height.is_auto():
-        content_h = style.height.resolve_px(container.content_height) - inset_v
+    if not s_height.is_auto():
+        content_h = s_height.resolve_px(c_content_h) - inset_v
 
     val box_height = content_h + inset_v
 
@@ -236,25 +259,42 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
     align-self, flex-direction (row/column/row-reverse/column-reverse),
     flex-wrap, gap, min/max clamping.
     """
+    # Extract ALL style fields upfront to avoid chained FieldGet issues
     val margin = style.margin
     val padding = style.padding
-    val border_w = style.border.width
+    val s_border = style.border
+    val border_w = s_border.width
     val gap = style.gap
-    val is_row = style.flex_direction == "row" or style.flex_direction == "row-reverse"
-    val is_reverse = style.flex_direction == "row-reverse" or style.flex_direction == "column-reverse"
+    val s_flex_dir = style.flex_direction
+    val is_row = s_flex_dir == "row" or s_flex_dir == "row-reverse"
+    val is_reverse = s_flex_dir == "row-reverse" or s_flex_dir == "column-reverse"
+    val s_width = style.width
+    val s_height = style.height
+    val s_max_width = style.max_width
+    val s_min_width = style.min_width
+    val s_max_height = style.max_height
+    val s_min_height = style.min_height
+    val s_justify = style.justify_content
+    val s_align = style.align_items
+
+    # Extract container fields
+    val c_content_w = container.content_width
+    val c_content_h = container.content_height
+    val c_content_x = container.content_x
+    val c_content_y = container.content_y
 
     # Resolve width
-    var box_width = container.content_width - margin.horizontal()
-    if not style.width.is_auto():
-        box_width = style.width.resolve_px(container.content_width)
+    var box_width = c_content_w - margin.horizontal()
+    if not s_width.is_auto():
+        box_width = s_width.resolve_px(c_content_w)
 
     # Apply min/max width clamping
-    if not style.max_width.is_auto():
-        val max_w = style.max_width.resolve_px(container.content_width)
+    if not s_max_width.is_auto():
+        val max_w = s_max_width.resolve_px(c_content_w)
         if box_width > max_w:
             box_width = max_w
-    if not style.min_width.is_auto():
-        val min_w = style.min_width.resolve_px(container.content_width)
+    if not s_min_width.is_auto():
+        val min_w = s_min_width.resolve_px(c_content_w)
         if box_width < min_w:
             box_width = min_w
 
@@ -384,16 +424,16 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         if child_boxes.len() > 0:
             content_h = content_h - gap
 
-    if not style.height.is_auto():
-        content_h = style.height.resolve_px(container.content_height) - inset_v
+    if not s_height.is_auto():
+        content_h = s_height.resolve_px(c_content_h) - inset_v
 
     # Apply min/max height clamping
-    if not style.max_height.is_auto():
-        val max_h = style.max_height.resolve_px(container.content_height) - inset_v
+    if not s_max_height.is_auto():
+        val max_h = s_max_height.resolve_px(c_content_h) - inset_v
         if content_h > max_h:
             content_h = max_h
-    if not style.min_height.is_auto():
-        val min_h = style.min_height.resolve_px(container.content_height) - inset_v
+    if not s_min_height.is_auto():
+        val min_h = s_min_height.resolve_px(c_content_h) - inset_v
         if content_h < min_h:
             content_h = min_h
 
@@ -405,7 +445,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         total_used = total_used + total_gaps
         val free_space = content_w - total_used
 
-        val jc = style.justify_content
+        val jc = s_justify
         if jc == "center":
             val offset = free_space / 2
             flex_shift_boxes_x(child_boxes, offset)
@@ -430,7 +470,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         var bi = 0
         while bi < child_boxes.len():
             val child_style = visible_children[bi].style
-            val ai = if child_style.align_self != "auto": child_style.align_self else: style.align_items
+            val ai = if child_style.align_self != "auto": child_style.align_self else: s_align
             val cb_h = child_boxes[bi].height
             if ai == "center":
                 val offset = (content_h - cb_h) / 2
@@ -450,7 +490,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         var bi = 0
         while bi < child_boxes.len():
             val child_style = visible_children[bi].style
-            val ai = if child_style.align_self != "auto": child_style.align_self else: style.align_items
+            val ai = if child_style.align_self != "auto": child_style.align_self else: s_align
             val cb_w = child_boxes[bi].width
             if ai == "center":
                 val offset = (content_w - cb_w) / 2
