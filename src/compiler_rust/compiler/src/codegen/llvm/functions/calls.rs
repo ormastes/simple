@@ -303,6 +303,7 @@ impl LlvmBackend {
             "char_at" => Some("rt_string_char_at"),
             "to_text" | "to_string" => Some("rt_to_string"),
             "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+            "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "concat" => Some("rt_string_concat"),
             // Array methods (verified as T symbols)
             "push" => Some("rt_array_push"),

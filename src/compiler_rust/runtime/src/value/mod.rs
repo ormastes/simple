@@ -108,7 +108,7 @@ pub use collections::{
     rt_cstring_to_text, rt_index_get, rt_index_set, rt_len, rt_slice, rt_string_char_at, rt_string_concat,
     rt_string_data, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
     rt_string_len, rt_string_new, rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with,
-    rt_string_to_int, rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_to_string, rt_tuple_get,
+    rt_string_to_float, rt_string_to_int, rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_to_string, rt_tuple_get,
     rt_tuple_len, rt_tuple_new, rt_tuple_set,
 };
 

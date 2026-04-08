@@ -102,10 +102,11 @@ fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox
 
 fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
     """Lay out a single node within its container — dispatches by display type."""
-    val s = be_dom_get_style(node)
-    val disp = s.display
+    # Use accessor for display to avoid cross-module FieldGet bug on StyleProps
+    val disp = be_dom_get_display(node)
     if disp == "none":
         return BeLayoutBox.empty(node)
+    val s = be_dom_get_style(node)
     if disp == "flex":
         return layout_flex(node, container, s)
     if be_dom_get_is_text(node):
@@ -151,6 +152,9 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
         val min_w = s_min_w.resolve_px(cw)
         if box_width < min_w:
             box_width = min_w
+    # Clamp: negative margins can push box_width below 0
+    if box_width < 0:
+        box_width = 0
 
     # Content area insets
     val inset_h = s_padding.horizontal() + border_w * 2
@@ -183,27 +187,41 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
 
     # Resolve height
     var content_h = cursor_y - cont_y
+    # Clamp: negative margins on children can make cursor_y < cont_y
+    if content_h < 0:
+        content_h = 0
     if not s_height.is_auto():
         val explicit_h = s_height.resolve_px(ch)
-        content_h = if explicit_h > inset_v: explicit_h - inset_v else: explicit_h
+        var resolved_h = if explicit_h > inset_v: explicit_h - inset_v else: 0
+        if resolved_h < 0:
+            resolved_h = 0
+        content_h = resolved_h
 
     # Apply min/max height
     val s_max_h = s.max_height
     val s_min_h = s.min_height
     if not s_max_h.is_auto():
-        val max_h = s_max_h.resolve_px(ch) - inset_v
+        var max_h = s_max_h.resolve_px(ch) - inset_v
+        if max_h < 0:
+            max_h = 0
         if content_h > max_h:
             content_h = max_h
     if not s_min_h.is_auto():
-        val min_h = s_min_h.resolve_px(ch) - inset_v
+        var min_h = s_min_h.resolve_px(ch) - inset_v
+        if min_h < 0:
+            min_h = 0
         if content_h < min_h:
             content_h = min_h
 
     val box_height = content_h + inset_v
+    # Clamp total height: negative margins can make final height negative
+    var total_height = box_height + s_margin.vertical()
+    if total_height < 0:
+        total_height = 0
 
     BeLayoutBox(
         x: box_x, y: box_y,
-        width: box_width, height: box_height + s_margin.vertical(),
+        width: box_width, height: total_height,
         content_x: cont_x, content_y: cont_y,
         content_width: content_w, content_height: content_h,
         node: node, children: child_boxes
@@ -257,6 +275,9 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         val min_w = s_min_width.resolve_px(c_content_w)
         if box_width < min_w:
             box_width = min_w
+    # Clamp: negative margins can push box_width below 0
+    if box_width < 0:
+        box_width = 0
 
     # Content area
     val inset_h = padding.horizontal() + border_w * 2
@@ -273,8 +294,9 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
     var visible_children: [BeDomNode] = []
     val flex_kids = be_dom_get_children(node)
     for child in flex_kids:
-        val cs = be_dom_get_style(child)
-        if cs.display != "none":
+        # Use accessor to avoid cross-module FieldGet bug on StyleProps.display
+        val child_flex_disp = be_dom_get_display(child)
+        if child_flex_disp != "none":
             rt_array_push(visible_children, child)
 
     val visible_count = visible_children.len()
@@ -384,17 +406,27 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
         content_h = cursor_y - cont_y
         if child_boxes.len() > 0:
             content_h = content_h - gap
+    # Clamp: negative margins on children can make content_h negative
+    if content_h < 0:
+        content_h = 0
 
     if not s_height.is_auto():
-        content_h = s_height.resolve_px(c_content_h) - inset_v
+        var explicit_h = s_height.resolve_px(c_content_h) - inset_v
+        if explicit_h < 0:
+            explicit_h = 0
+        content_h = explicit_h
 
     # Apply min/max height clamping
     if not s_max_height.is_auto():
-        val max_h = s_max_height.resolve_px(c_content_h) - inset_v
+        var max_h = s_max_height.resolve_px(c_content_h) - inset_v
+        if max_h < 0:
+            max_h = 0
         if content_h > max_h:
             content_h = max_h
     if not s_min_height.is_auto():
-        val min_h = s_min_height.resolve_px(c_content_h) - inset_v
+        var min_h = s_min_height.resolve_px(c_content_h) - inset_v
+        if min_h < 0:
+            min_h = 0
         if content_h < min_h:
             content_h = min_h
 
@@ -444,7 +476,10 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
             elif ai == "stretch":
                 if child_style.height.is_auto() and cb_h < content_h:
                     child_boxes[bi].height = content_h
-                    child_boxes[bi].content_height = content_h - child_style.padding.vertical() - child_style.border.width * 2
+                    var stretch_ch = content_h - child_style.padding.vertical() - child_style.border.width * 2
+                    if stretch_ch < 0:
+                        stretch_ch = 0
+                    child_boxes[bi].content_height = stretch_ch
             bi = bi + 1
     else:
         # Column: cross axis is horizontal
@@ -485,10 +520,14 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
                 ri = ri + 1
 
     val box_height = content_h + inset_v
+    # Clamp total height: negative margins can make final height negative
+    var total_height = box_height + margin.vertical()
+    if total_height < 0:
+        total_height = 0
 
     return BeLayoutBox(
         x: box_x, y: box_y,
-        width: box_width, height: box_height + margin.vertical(),
+        width: box_width, height: total_height,
         content_x: cont_x, content_y: cont_y,
         content_width: content_w, content_height: content_h,
         node: node, children: child_boxes
@@ -540,13 +579,14 @@ fn layout_text(node: BeDomNode, container: BeLayoutBox) -> BeLayoutBox:
     val node_txt = be_dom_get_text(node)
     val text_w = renderer.measure_text_width(node_txt, font_size)
 
-    val wrapped_lines = if container.content_width > 0:
-        (text_w + container.content_width - 1) / container.content_width
+    val cont_cw = if container.content_width > 0: container.content_width else: 0
+    val wrapped_lines = if cont_cw > 0:
+        (text_w + cont_cw - 1) / cont_cw
     else:
         1
     val actual_lines = if wrapped_lines < 1: 1 else: wrapped_lines
     val h = actual_lines * line_h
-    val w = if text_w < container.content_width: text_w else: container.content_width
+    val w = if cont_cw > 0 and text_w < cont_cw: text_w else: cont_cw
 
     return BeLayoutBox(
         x: container.content_x, y: container.content_y,

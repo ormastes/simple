@@ -307,7 +307,7 @@ if let Value::Str(ref s) = recv_val {
                 Err(_) => return Ok(Value::none()),
             }
         }
-        "parse_float" => {
+        "parse_float" | "parse_f64" | "parse_f64_safe" => {
             match s.trim().parse::<f64>() {
                 Ok(n) => return Ok(Value::some(Value::Float(n))),
                 Err(_) => return Ok(Value::none()),

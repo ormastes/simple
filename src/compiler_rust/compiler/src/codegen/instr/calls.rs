@@ -517,6 +517,7 @@ pub fn compile_call<M: Module>(
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                 "index_of" | "find" | "find_str" => Some("rt_string_index_of"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "str" => Some("rt_to_string"),

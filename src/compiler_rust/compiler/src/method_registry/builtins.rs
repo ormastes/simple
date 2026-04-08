@@ -317,6 +317,27 @@ pub static STRING_METHODS: &[MethodInfo] = &[
         is_mutating: false,
         description: "checks if string is empty",
     },
+    MethodInfo {
+        name: "parse_f64",
+        runtime_fn: RuntimeFn::Simple("rt_string_to_float"),
+        param_count: 0,
+        is_mutating: false,
+        description: "parses string to f64, returns nil on failure",
+    },
+    MethodInfo {
+        name: "parse_float",
+        runtime_fn: RuntimeFn::Simple("rt_string_to_float"),
+        param_count: 0,
+        is_mutating: false,
+        description: "parses string to float, returns nil on failure",
+    },
+    MethodInfo {
+        name: "to_float",
+        runtime_fn: RuntimeFn::Simple("rt_string_to_float"),
+        param_count: 0,
+        is_mutating: false,
+        description: "converts string to float, returns 0.0 on failure",
+    },
 ];
 
 /// Tuple built-in methods.

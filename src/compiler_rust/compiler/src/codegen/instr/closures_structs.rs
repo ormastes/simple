@@ -614,6 +614,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
+        "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
         "index_of" | "find_str" => "rt_string_find",
         "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "str" => "rt_to_string",

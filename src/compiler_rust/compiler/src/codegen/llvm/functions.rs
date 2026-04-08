@@ -1450,6 +1450,7 @@ impl LlvmBackend {
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
                     "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                    "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                     "to_string" | "str" => Some("rt_to_string"),
                     // Index methods
                     "get" => Some("rt_index_get"),

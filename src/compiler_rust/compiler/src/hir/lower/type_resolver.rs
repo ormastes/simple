@@ -299,7 +299,18 @@ impl Lowerer {
             if let Some((idx, ty, _)) = best {
                 return Ok((idx, ty));
             }
-            return Ok((0, TypeId::ANY)); // Fallback: dynamic field access
+            // No struct with this field was found in the type registry.
+            // Return an error so the caller can fall back to dynamic method dispatch
+            // instead of generating a FieldGet with byte_offset=0 which reads the wrong field.
+            // This is the root cause of the cross-module FieldGet bug: when imported types
+            // aren't resolved (lenient_types=true), the fallback to (0, ANY) produces
+            // FieldGet instructions that always read field 0 regardless of which field
+            // was actually requested.
+            return Err(LowerError::CannotInferFieldType {
+                struct_name: "ANY".to_string(),
+                field: field.to_string(),
+                available_fields: vec![],
+            });
         }
 
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
@@ -323,7 +334,13 @@ impl Lowerer {
                     if let Some((idx, ty, _)) = best {
                         return Ok((idx, ty));
                     }
-                    Ok((0, TypeId::ANY))
+                    // No struct with this field found — return error to fall back to
+                    // dynamic method dispatch instead of wrong FieldGet at offset 0
+                    Err(LowerError::CannotInferFieldType {
+                        struct_name: "Any".to_string(),
+                        field: field.to_string(),
+                        available_fields: vec![],
+                    })
                 }
                 HirType::Struct { name, fields, .. } => {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {

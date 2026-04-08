@@ -470,6 +470,7 @@ impl Lowerer {
                 "to_string" | "to_text" => Some(TypeId::STRING),
                 "to_int" | "to_i64" => Some(TypeId::I64),
                 "to_float" | "to_f64" => Some(TypeId::F64),
+                "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),
                 _ => None,
             };

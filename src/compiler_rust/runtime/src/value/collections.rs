@@ -844,6 +844,25 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     }
 }
 
+/// Convert a string to a float (f64), returns the float as RuntimeValue.
+/// Returns the float RuntimeValue on success, RuntimeValue::NIL on failure.
+/// Callers can check `result != nil` to distinguish success from failure.
+#[no_mangle]
+pub extern "C" fn rt_string_to_float(string: RuntimeValue) -> RuntimeValue {
+    let len = rt_string_len(string);
+    if len <= 0 {
+        return RuntimeValue::NIL;
+    }
+    let data = rt_string_data(string);
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
+        match s.trim().parse::<f64>() {
+            Ok(f) => RuntimeValue::from_float(f),
+            Err(_) => RuntimeValue::NIL,
+        }
+    }
+}
+
 /// Find first occurrence of needle in string
 /// Returns the byte index, or -1 if not found
 #[no_mangle]

@@ -200,6 +200,16 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_2(ctx, builder, "rt_contains", receiver_val, arg_val);
             Some(super::helpers::safe_extend_to_i64(builder, result_i8))
         }
+        ("String", "parse_f64")
+        | ("string", "parse_f64")
+        | ("String", "parse_f64_safe")
+        | ("string", "parse_f64_safe")
+        | ("String", "parse_float")
+        | ("string", "parse_float")
+        | ("String", "to_float")
+        | ("string", "to_float")
+        | ("String", "to_f64")
+        | ("string", "to_f64") => Some(call_runtime_1(ctx, builder, "rt_string_to_float", receiver_val)),
         ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
             let slice_id = ctx.runtime_funcs["rt_slice"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);

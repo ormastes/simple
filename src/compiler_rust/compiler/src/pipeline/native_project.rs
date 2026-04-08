@@ -2774,6 +2774,7 @@ fn mangle_mir(
                     | "concat" | "char_at" | "at" | "join" | "trim"
                     | "split" | "replace" | "to_upper" | "upper"
                     | "to_lower" | "lower" | "to_int" | "to_i64" | "parse_int"
+                    | "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe"
                     | "to_string" | "str" | "slice" | "substring"
                     | "keys" | "values" | "filter" | "sort" | "reverse"
                     | "first" | "last" | "find" | "any" | "all"
