@@ -8,6 +8,7 @@
 
 use os.compositor.display_backend.{CompositorBackend}
 use os.drivers.framebuffer.fb_driver.{get_glyph_8x16}
+use common.text_layout.font_renderer.{FontRenderer, CachedGlyph}
 
 val CHAR_W: i32 = 8
 val CHAR_H: i32 = 16
@@ -428,3 +429,45 @@ fn draw_text_vector(backend: CompositorBackend, x: i32, y: i32,
             # Bitmap fallback
             backend.draw_text(cx, y, ch.to_text(), color, 0x00000000)
             cx = cx + 8
+
+# Shared font renderer instance for compositor
+var _compositor_font_renderer: FontRenderer? = nil
+
+fn get_compositor_font_renderer() -> FontRenderer:
+    if val Some(r) = _compositor_font_renderer:
+        return r
+    val r = FontRenderer.new()
+    _compositor_font_renderer = r
+    r
+
+fn draw_text_shared(backend: CompositorBackend, x: i32, y: i32,
+                    text_str: text, color: u32, alpha: u8, pixel_height: i32):
+    """Draw text using the shared font renderer module.
+    Uses the same glyph data and rasterization as the browser engine,
+    ensuring consistent text rendering across OS and browser.
+    """
+    var renderer = get_compositor_font_renderer()
+    var cx = x
+    for ch in text_str:
+        val cp = ch.char_code_at(0)
+        val glyph = renderer.get_glyph(cp, pixel_height)
+        if glyph.width > 0 and glyph.height > 0:
+            # Blit glyph using compositor backend's blend_rect (per-pixel)
+            var row = 0
+            while row < glyph.height:
+                var col = 0
+                while col < glyph.width:
+                    val idx = row * glyph.width + col
+                    if idx < glyph.pixels.len():
+                        val glyph_alpha = glyph.pixels[idx]
+                        if glyph_alpha > 0:
+                            val blended_alpha = alpha * glyph_alpha / 255
+                            backend.blend_rect(cx + col, y + row, 1, 1, color, blended_alpha.to_u8())
+                    col = col + 1
+                row = row + 1
+        cx = cx + glyph.advance
+
+fn measure_text_shared(text_str: text, pixel_height: i32) -> i32:
+    """Measure text width using the shared font renderer."""
+    var renderer = get_compositor_font_renderer()
+    renderer.measure_text_width(text_str, pixel_height)

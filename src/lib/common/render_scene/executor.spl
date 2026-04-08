@@ -7,6 +7,7 @@
 
 use common.render_scene.scene.{SceneCommand, RenderScene, argb_alpha, argb_red, argb_green, argb_blue, argb}
 use common.display_protocol.display_protocol.{DamageRect, damage_rect}
+use common.text_layout.font_renderer.{FontRenderer, blit_glyph}
 
 # ============================================================================
 # Clip rectangle
@@ -380,12 +381,30 @@ fn draw_char_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, ch
         row = row + 1
 
 fn draw_text_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_str: text, color: u32, clip_stack: [ClipRect]):
-    """Draw a text string using the 8x16 VGA font."""
+    """Draw a text string using the 8x16 VGA font (legacy fallback)."""
     var cx = x
     for ch in text_str:
         val ch_code = ch.to_i32()
         draw_char_to_buffer(buffer, buf_w, buf_h, cx, y, ch_code, color, clip_stack)
         cx = cx + 8
+
+# Shared font renderer instance (lazy-initialized)
+var _font_renderer: FontRenderer? = nil
+
+fn get_font_renderer() -> FontRenderer:
+    if val Some(r) = _font_renderer:
+        return r
+    val r = FontRenderer.new()
+    _font_renderer = r
+    r
+
+fn draw_text_scaled(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32,
+                    text_str: text, color: u32, font_size: i32, clip_stack: [ClipRect]):
+    """Draw text using the shared font renderer with vector/bitmap auto-selection.
+    Supports anti-aliased vector glyphs when available, falls back to scaled bitmap.
+    """
+    var renderer = get_font_renderer()
+    renderer.render_text(buffer, buf_w, buf_h, x, y, text_str, color, font_size)
 
 # ============================================================================
 # Main executor
@@ -411,7 +430,12 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
             draw_stroke_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw, clip_stack)
 
         if cmd.kind == "text":
-            draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
+            if cmd.font_size > 0 and cmd.font_size != 16:
+                # Use font renderer for non-default sizes (vector + AA)
+                draw_text_scaled(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, cmd.font_size, clip_stack)
+            else:
+                # Default 16px: use 8x16 bitmap (fastest path)
+                draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
 
         if cmd.kind == "line":
             # x/y = start, width/height = end point

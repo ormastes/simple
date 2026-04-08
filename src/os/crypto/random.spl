@@ -22,8 +22,8 @@ extern fn rt_rndr() -> u64
 @cfg(riscv64)
 extern fn rt_riscv_seed() -> u64
 
-# Pre-allocate arrays to work around baremetal rt_array_push growth bug
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_random_bytes_c(count: u64) -> [u8]
 
 # ============================================================================
 # ChaCha20 Quarter Round
@@ -70,7 +70,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
       [12]     = 32-bit counter
       [13..15] = 96-bit nonce (3 words)
     """
-    # Initialize state (pre-allocate capacity to avoid push growth bug)
+    # Initialize state
     var state: [u32] = rt_array_new_with_cap(16)
 
     # Constants: "expand 32-byte k" in little-endian
@@ -94,7 +94,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
         state.push(nonce[i])
         i = i + 1
 
-    # Working copy (pre-allocate capacity to avoid push growth bug)
+    # Working copy
     var working: [u32] = rt_array_new_with_cap(16)
     i = 0
     while i < 16:
@@ -118,7 +118,7 @@ fn _chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
 
         round = round + 1
 
-    # Add initial state to working state (pre-allocate capacity)
+    # Add initial state to working state
     var result: [u32] = rt_array_new_with_cap(16)
     i = 0
     while i < 16:
@@ -248,7 +248,7 @@ fn _csprng_fill_buffer():
     val block = _chacha20_block(g_csprng.key, g_csprng.counter, g_csprng.nonce)
     g_csprng.counter = _u32_mask(g_csprng.counter + 1)
 
-    # Convert u32 words to bytes (little-endian, pre-allocate 64 bytes)
+    # Convert u32 words to bytes (little-endian)
     var buf: [u8] = rt_array_new_with_cap(64)
     var i: u64 = 0
     while i < 16:
@@ -267,7 +267,7 @@ fn _csprng_fill_buffer():
 # ============================================================================
 
 fn random_bytes(count: u64) -> [u8]:
-    """Generate cryptographically secure random bytes.
+    """Generate random bytes.
 
     Uses ChaCha20-based CSPRNG seeded from hardware entropy.
     Automatically initializes on first use and reseeds periodically.
@@ -293,8 +293,8 @@ fn random_bytes(count: u64) -> [u8]:
             _csprng_fill_buffer()
 
         # Copy available bytes
-        val available = g_csprng.buffer.len() - g_csprng.buf_pos
-        val to_copy = if remaining < available: remaining else: available
+        var available: u64 = g_csprng.buffer.len() - g_csprng.buf_pos
+        var to_copy: u64 = if remaining < available: remaining else: available
 
         var i: u64 = 0
         while i < to_copy:

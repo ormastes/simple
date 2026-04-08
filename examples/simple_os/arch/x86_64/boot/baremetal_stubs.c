@@ -4752,147 +4752,6 @@ int64_t rt_ed25519_self_test(void)
     return 0;
 }
 
-/* rt_rdrand: hardware random using x86 RDRAND instruction.
- * Falls back to a simple xorshift if RDRAND is not available. */
-static uint64_t _xorshift_state = 0x12345678DEADBEEFULL;
-int64_t rt_rdrand(void)
-{
-#ifdef __x86_64__
-    uint64_t val;
-    int ok;
-    __asm__ volatile ("rdrand %0; setc %b1" : "=r"(val), "=r"(ok));
-    if (ok) return (int64_t)val;
-#endif
-    /* Fallback xorshift64 */
-    _xorshift_state ^= _xorshift_state << 13;
-    _xorshift_state ^= _xorshift_state >> 7;
-    _xorshift_state ^= _xorshift_state << 17;
-    return (int64_t)_xorshift_state;
-}
-
-/* rt_ed25519_sign_test: Sign-only test (no verify — verify has a deep bug).
- * Generates keypair, signs two different messages, checks signatures are
- * 64 bytes, non-zero, and differ from each other.
- * Returns 0 on success, -1 on failure. */
-int64_t rt_ed25519_sign_test(void)
-{
-    _ed25519_init_consts();
-
-    static const uint8_t seed[32] = {
-        0x9d,0x61,0xb1,0x9d,0xef,0xfd,0x5a,0x60,
-        0xba,0x84,0x4a,0xf4,0x92,0xec,0x2c,0xc4,
-        0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
-        0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
-    };
-
-    /* 1. Generate keypair */
-    serial_puts("[ed25519-sign] step 1: keypair gen...\r\n");
-    uint8_t pk[32], sk[64];
-    _ed25519_create_keypair(seed, pk, sk);
-    serial_puts("[ed25519-sign] step 1: OK\r\n");
-
-    /* 2. Sign empty message */
-    serial_puts("[ed25519-sign] step 2: sign empty msg...\r\n");
-    uint8_t sig1[64];
-    _ed25519_sign((const uint8_t *)"", 0, sk, sig1);
-
-    /* Check signature is not all-zero */
-    int all_zero = 1;
-    for (int i = 0; i < 64; i++) {
-        if (sig1[i] != 0) { all_zero = 0; break; }
-    }
-    if (all_zero) {
-        serial_puts("[ed25519-sign] FAIL: sig1 is all zeros\r\n");
-        return -1;
-    }
-    serial_puts("[ed25519-sign] step 2: OK (non-zero 64-byte sig)\r\n");
-
-    /* 3. Sign "Hi!" */
-    serial_puts("[ed25519-sign] step 3: sign 'Hi!'...\r\n");
-    static const uint8_t msg2[3] = {0x48, 0x69, 0x21}; /* "Hi!" */
-    uint8_t sig2[64];
-    _ed25519_sign(msg2, 3, sk, sig2);
-
-    /* Check the two signatures differ */
-    int differ = 0;
-    for (int i = 0; i < 64; i++) {
-        if (sig1[i] != sig2[i]) { differ = 1; break; }
-    }
-    if (!differ) {
-        serial_puts("[ed25519-sign] FAIL: sig1 == sig2 (different messages produced same sig)\r\n");
-        return -1;
-    }
-    serial_puts("[ed25519-sign] step 3: OK (sigs differ)\r\n");
-
-    serial_puts("[ed25519-sign] ALL PASSED\r\n");
-    return 0;
-}
-
-/* rt_ed25519_keypair_pk: generate keypair from seed, return 32-byte public key as [u8].
- * Workaround for tuple .0/.1 access being broken in baremetal Cranelift. */
-RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
-{
-    uint32_t seed_len = 0;
-    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
-    if (!seed || seed_len != 32) { if (seed) free(seed); return NIL_VALUE; }
-    uint8_t pk[32], sk[64];
-    _ed25519_create_keypair(seed, pk, sk);
-    free(seed);
-    /* Build a RuntimeArray with 32 ENCODE_INT(byte) entries */
-    size_t alloc = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
-    RuntimeArray *a = (RuntimeArray *)malloc(alloc);
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)alloc;
-    a->len = 32;
-    a->cap = 32;
-    for (int i = 0; i < 32; i++)
-        a->items[i] = ENCODE_INT(pk[i]);
-    return ENCODE_PTR(a);
-}
-
-/* rt_ed25519_keypair_sk: generate keypair from seed, return 32-byte seed as [u8].
- * The test expects "private key is 32 bytes" -- we return the seed itself. */
-RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
-{
-    uint32_t seed_len = 0;
-    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &seed_len);
-    if (!seed || seed_len != 32) { if (seed) free(seed); return NIL_VALUE; }
-    /* Return the 32-byte seed as the private key */
-    size_t alloc = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
-    RuntimeArray *a = (RuntimeArray *)malloc(alloc);
-    if (!a) { free(seed); return NIL_VALUE; }
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)alloc;
-    a->len = 32;
-    a->cap = 32;
-    for (int i = 0; i < 32; i++)
-        a->items[i] = ENCODE_INT(seed[i]);
-    free(seed);
-    return ENCODE_PTR(a);
-}
-
-/* rt_ed25519_keys_differ: generate keypairs from two seeds, compare public keys.
- * Returns 1 (raw i64) if public keys differ, 0 if same. */
-int64_t rt_ed25519_keys_differ(RuntimeValue seed1_rv, RuntimeValue seed2_rv)
-{
-    uint32_t s1_len = 0, s2_len = 0;
-    uint8_t *s1 = _ed_rv_to_bytes(seed1_rv, &s1_len);
-    uint8_t *s2 = _ed_rv_to_bytes(seed2_rv, &s2_len);
-    if (!s1 || s1_len != 32 || !s2 || s2_len != 32) {
-        if (s1) free(s1); if (s2) free(s2);
-        return 0;
-    }
-    uint8_t pk1[32], sk1[64], pk2[32], sk2[64];
-    _ed25519_create_keypair(s1, pk1, sk1);
-    _ed25519_create_keypair(s2, pk2, sk2);
-    free(s1); free(s2);
-    for (int i = 0; i < 32; i++) {
-        if (pk1[i] != pk2[i]) return 1;
-    }
-    return 0;
-}
-
 /* rt_string_from_byte_array: text.from_bytes([u8]) → text
  * Reads byte values from a RuntimeArray, creates a RuntimeString.
  * Byte values may be tagged (ENCODE_INT) from BoxInt push. */
@@ -4962,6 +4821,124 @@ int64_t rt_test_tuple(void)
     serial_puthex((uint8_t)(DECODE_INT(v1) & 0xFF));
     serial_puts("\r\n");
     return (DECODE_INT(v0) == 42 && DECODE_INT(v1) == 99) ? 0 : -1;
+}
+
+/* rt_random_bytes(count): generate random bytes entirely in C.
+ * Bypasses Simple CSPRNG which has ChaCha20 arithmetic bugs in baremetal. */
+RuntimeValue rt_random_bytes_c(int64_t count)
+{
+    if (count < 0 || count > 65536) count = 0;
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue));
+    a->len = (uint32_t)count;
+    a->cap = (uint32_t)count;
+    /* Use xorshift seeded from TSC */
+    static uint64_t _rng = 0;
+    if (_rng == 0) {
+#ifdef __x86_64__
+        uint32_t lo, hi;
+        __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+        _rng = ((uint64_t)hi << 32) | lo;
+#endif
+        if (_rng == 0) _rng = 0xDEADBEEF12345678ULL;
+    }
+    for (int64_t i = 0; i < count; i++) {
+        _rng ^= _rng << 13; _rng ^= _rng >> 7; _rng ^= _rng << 17;
+        a->items[i] = ENCODE_INT(_rng & 0xFF);
+    }
+    return ENCODE_PTR(a);
+}
+
+/* rt_rdrand: pseudo-random via xorshift64 seeded from TSC */
+static uint64_t _xorshift_state = 0;
+int64_t rt_rdrand(void)
+{
+    if (_xorshift_state == 0) {
+#ifdef __x86_64__
+        uint32_t lo, hi;
+        __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+        _xorshift_state = ((uint64_t)hi << 32) | lo;
+#endif
+        if (_xorshift_state == 0) _xorshift_state = 0x12345678DEADBEEFULL;
+    }
+    _xorshift_state ^= _xorshift_state << 13;
+    _xorshift_state ^= _xorshift_state >> 7;
+    _xorshift_state ^= _xorshift_state << 17;
+    return (int64_t)_xorshift_state;
+}
+
+/* rt_ed25519_sign_test: sign-only (skip broken verify). Returns 0=pass, -1=fail */
+int64_t rt_ed25519_sign_test(void)
+{
+    _ed25519_init_consts();
+    static const uint8_t seed[32] = {
+        0x9d,0x61,0xb1,0x9d,0xef,0xfd,0x5a,0x60,
+        0xba,0x84,0x4a,0xf4,0x92,0xec,0x2c,0xc4,
+        0x44,0x49,0xc5,0x69,0x7b,0x32,0x69,0x19,
+        0x70,0x3b,0xac,0x03,0x1c,0xae,0x7f,0x60
+    };
+    uint8_t pk[32], sk[64], sig1[64], sig2[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    _ed25519_sign((const uint8_t*)"", 0, sk, sig1);
+    /* Check sig1 not all zero */
+    int nz = 0;
+    for (int i = 0; i < 64; i++) if (sig1[i] != 0) nz = 1;
+    if (!nz) return -1;
+    /* Sign different message, check sigs differ */
+    static const uint8_t msg2[3] = {0x48, 0x69, 0x21};
+    _ed25519_sign(msg2, 3, sk, sig2);
+    int differ = 0;
+    for (int i = 0; i < 64; i++) if (sig1[i] != sig2[i]) differ = 1;
+    return differ ? 0 : -1;
+}
+
+/* rt_ed25519_keypair_pk: return 32-byte public key from seed */
+RuntimeValue rt_ed25519_keypair_pk(RuntimeValue seed_rv)
+{
+    uint32_t slen = 0;
+    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &slen);
+    if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
+    uint8_t pk[32], sk[64];
+    _ed25519_create_keypair(seed, pk, sk);
+    free(seed);
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    a->len = 32; a->cap = 32;
+    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(pk[i]);
+    return ENCODE_PTR(a);
+}
+
+/* rt_ed25519_keypair_sk: return 32-byte seed (private key) */
+RuntimeValue rt_ed25519_keypair_sk(RuntimeValue seed_rv)
+{
+    uint32_t slen = 0;
+    uint8_t *seed = _ed_rv_to_bytes(seed_rv, &slen);
+    if (!seed || slen != 32) { if (seed) free(seed); return NIL_VALUE; }
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue));
+    if (!a) { free(seed); return NIL_VALUE; }
+    a->hdr.type = HEAP_ARRAY; a->hdr.size = sizeof(RuntimeArray) + 32 * sizeof(RuntimeValue);
+    a->len = 32; a->cap = 32;
+    for (int i = 0; i < 32; i++) a->items[i] = ENCODE_INT(seed[i]);
+    free(seed);
+    return ENCODE_PTR(a);
+}
+
+/* rt_ed25519_keys_differ: 1 if different seeds produce different PKs, 0 if same */
+int64_t rt_ed25519_keys_differ(RuntimeValue seed1_rv, RuntimeValue seed2_rv)
+{
+    uint32_t l1 = 0, l2 = 0;
+    uint8_t *s1 = _ed_rv_to_bytes(seed1_rv, &l1);
+    uint8_t *s2 = _ed_rv_to_bytes(seed2_rv, &l2);
+    if (!s1 || !s2 || l1 != 32 || l2 != 32) { free(s1); free(s2); return 0; }
+    uint8_t pk1[32], pk2[32], sk[64];
+    _ed25519_create_keypair(s1, pk1, sk);
+    _ed25519_create_keypair(s2, pk2, sk);
+    free(s1); free(s2);
+    for (int i = 0; i < 32; i++) if (pk1[i] != pk2[i]) return 1;
+    return 0;
 }
 
 /* Also provide the unmangled name for direct extern fn calls */
@@ -7891,21 +7868,7 @@ RuntimeValue rt_disable_interrupts(void) { return rt_disable_interrupts_real(); 
 RuntimeValue rt_invlpg(RuntimeValue a) { return rt_invlpg_real(a); }
 RuntimeValue rt_rdtsc(void) { return rt_rdtsc_real(); }
 
-/* RDRAND — hardware random number generator (x86_64) */
-RuntimeValue rt_rdrand(void)
-{
-    uint64_t val;
-    uint8_t ok;
-    /* Try RDRAND up to 10 times (can fail transiently) */
-    for (int i = 0; i < 10; i++) {
-        __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
-        if (ok) return ENCODE_INT((int64_t)val);
-    }
-    /* Fallback: use RDTSC as entropy source (less secure but functional) */
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ENCODE_INT((int64_t)(((uint64_t)hi << 32) | lo));
-}
+/* RDRAND — see rt_rdrand() defined earlier (TSC-based, RDRAND not available in QEMU qemu64) */
 
 /* Generate random bytes as a [u8] array — C implementation for baremetal.
  * The Simple random_bytes() uses ChaCha20 which relies on unreliable
