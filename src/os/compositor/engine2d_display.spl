@@ -1,0 +1,61 @@
+# Engine2D Display Bridge — creates Engine2D from compositor backends
+#
+# Allows the browser engine (and any Engine2D consumer) to render through
+# the compositor's display path — either framebuffer or VirtIO-GPU.
+#
+# Usage:
+#   use os.compositor.engine2d_display.{
+#       create_compositor_engine, create_fb_engine, create_gpu_engine}
+#
+#   # From any compositor backend
+#   var engine = create_compositor_engine(backend)
+#
+#   # Or from specific drivers
+#   var engine = create_fb_engine(fb_driver)
+#   var engine = create_gpu_engine(virtio_gpu_driver)
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.compositor.display_backend.{CompositorBackend, FbCompositorBackend,
+    GpuCompositorBackend}
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_fb_engine(fb: FramebufferDriver) -> Engine2D:
+    """Create an Engine2D backed by a FramebufferDriver.
+
+    Uses the BaremetalBackend which wraps the framebuffer driver for
+    Engine2D-compatible rendering. Suitable for Limine/multiboot
+    framebuffer environments.
+
+    Args:
+        fb: Initialized FramebufferDriver
+
+    Returns:
+        Engine2D rendering to the framebuffer
+    """
+    val backend = BaremetalBackend.create(fb)
+    Engine2D.create_with_baremetal_backend(backend)
+
+fn create_gpu_engine(gpu: VirtioGpuDriver) -> Engine2D:
+    """Create an Engine2D backed by a VirtIO-GPU driver.
+
+    Uses the VirtioGpuBackend which maintains a local pixel buffer
+    and flushes frames to the QEMU display via TRANSFER_TO_HOST_2D.
+
+    Args:
+        gpu: Initialized VirtioGpuDriver (init_from_grant() already called)
+
+    Returns:
+        Engine2D rendering through VirtIO-GPU
+    """
+    val w = gpu.width.to_i32()
+    val h = gpu.height.to_i32()
+    var backend = VirtioGpuBackend.create(gpu)
+    backend.init(w, h)
+    Engine2D(backend: backend, w: w, h: h)
