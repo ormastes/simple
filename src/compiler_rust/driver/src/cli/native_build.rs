@@ -395,7 +395,7 @@ fn print_help() {
     println!("  --clean             Force clean rebuild (delete cache)");
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
-    println!("  --backend <name>    Compilation backend (cranelift, llvm)");
+    println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
     println!("  --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");

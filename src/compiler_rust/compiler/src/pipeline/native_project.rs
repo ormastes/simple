@@ -141,7 +141,7 @@ impl Default for NativeBuildConfig {
             cache_dir: None,
             clean: false,
             no_mangle: false,
-            backend: "cranelift".to_string(),
+            backend: if cfg!(feature = "llvm") { "llvm" } else { "cranelift" }.to_string(),
             runtime_path: None,
             runtime_bundle: "auto".to_string(),
             entry_closure: false,
