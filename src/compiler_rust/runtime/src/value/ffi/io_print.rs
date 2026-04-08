@@ -165,7 +165,12 @@ pub unsafe extern "C" fn rt_eprintln_str(ptr: *const u8, len: u64) {
     if is_stderr_capturing() {
         append_stderr("\n");
     } else {
-        eprintln!();
+        let mut err = std::io::stderr().lock();
+        if let Err(e) = writeln!(err) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
     }
 }
 
