@@ -71,8 +71,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut clean = false;
     let mut cache_dir: Option<PathBuf> = None;
     let mut no_mangle = false;
-    let mut backend = "cranelift".to_string();
+    let mut backend = if cfg!(feature = "llvm") { "llvm" } else { "cranelift" }.to_string();
     let mut runtime_path: Option<PathBuf> = None;
+    let mut runtime_bundle = "auto".to_string();
     let mut entry_closure = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
@@ -107,7 +108,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --clean             Force clean rebuild");
                 println!("  --cache-dir <dir>   Cache directory");
                 println!("  --no-mangle         Disable name mangling");
-                println!("  --backend <name>    Codegen backend: cranelift (default) or llvm");
+                println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
+                println!("  --runtime-bundle <mode> Runtime libs to link: auto (default), runtime, or all");
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
                 println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
@@ -209,6 +211,15 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            "--runtime-bundle" => {
+                if i + 1 < args_vec.len() {
+                    runtime_bundle = args_vec[i + 1].clone();
+                    i += 2;
+                } else {
+                    eprintln!("error: --runtime-bundle requires a value (auto, runtime, all)");
+                    return 1;
+                }
+            }
             "--runtime-path" => {
                 if i + 1 < args_vec.len() {
                     runtime_path = Some(PathBuf::from(&args_vec[i + 1]));
@@ -272,6 +283,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     target_triple = Some(val.to_string());
                 } else if let Some(val) = other.strip_prefix("--linker-script=") {
                     linker_script = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--runtime-bundle=") {
+                    runtime_bundle = val.to_string();
                 } else if other.starts_with("--") {
                     eprintln!("warning: unknown option '{}', ignoring", other);
                 } else {
@@ -358,7 +371,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     config.clean = clean;
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
+    config.backend = backend.clone();
     config.runtime_path = runtime_path;
+    config.runtime_bundle = runtime_bundle;
     config.entry_closure = entry_closure;
     config.linker_script = linker_script;
 
