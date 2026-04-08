@@ -1,3 +1,8 @@
+---
+name: sstack
+description: SStack 8-phase BDD/TDD pipeline orchestrator with cooperative workflow (Codex/Gemini fallback). Use for any dev task — /dev is an alias.
+---
+
 # SStack Skill -- Superpowers + GSD + GStack Orchestrator
 
 SStack is a full-lifecycle development pipeline that combines three frameworks:
@@ -8,33 +13,11 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 ## Invocation
 
 ```
-/sstack <user request>                    # full profile (default)
-/sstack --profile quick <user request>    # quick profile (same as /dev)
-/dev <user request>                       # alias for --profile quick
+/sstack <user request>
+/dev <user request>              # alias — same 8 phases
 ```
 
-## Profiles
-
-SStack supports **profiles** that select which phases to run and how:
-
-| Profile | Alias | Phases | Use Case |
-|---------|-------|--------|----------|
-| `full` (default) | `/sstack` | All 8 phases, each in fresh agent | Large features, BDD/TDD, multi-module |
-| `quick` | `/dev` | 5 merged phases, mostly inline | Bug fixes, small features, refactors |
-
-### Quick Profile Phase Mapping
-
-The quick profile merges sstack phases for speed while keeping the same state file and quality gates:
-
-| Quick Phase | SStack Phases Covered | Execution |
-|-------------|----------------------|-----------|
-| 1. Research | 1-dev + 2-research | Inline |
-| 2. Plan | 3-arch + 4-spec | Inline |
-| 3. Implement | 5-implement | Inline or spawned |
-| 4. Verify | 6-refactor + 7-verify | Inline or spawned |
-| 5. Sync | 8-ship | Inline |
-
-See `.claude/skills/dev.md` for quick profile details.
+`/dev` is an alias for `/sstack`. Both run the same 8-phase pipeline.
 
 ## How It Works
 
@@ -46,16 +29,58 @@ See `.claude/skills/dev.md` for quick profile details.
 
 ## Pipeline
 
-| # | Phase | Role | Agent Definition |
-|---|-------|------|-----------------|
-| 1 | dev | Developer Lead | `.claude/agents/sstack/dev.md` |
-| 2 | research | Analyst | `.claude/agents/sstack/research.md` |
-| 3 | arch | Architect | `.claude/agents/sstack/arch.md` |
-| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` |
-| 5 | implement | Engineer | `.claude/agents/sstack/implement.md` |
-| 6 | refactor | Tech Lead | `.claude/agents/sstack/refactor.md` |
-| 7 | verify | QA | `.claude/agents/sstack/verify.md` |
-| 8 | ship | Release Mgr | `.claude/agents/sstack/ship.md` |
+| # | Phase | Role | Agent Definition | Cooperative Skill |
+|---|-------|------|-----------------|-------------------|
+| 1 | dev | Developer Lead | `.claude/agents/sstack/dev.md` | (inline) |
+| 2 | research | Analyst | `.claude/agents/sstack/research.md` | `/research` + `/research_codex` |
+| 3 | arch | Architect | `.claude/agents/sstack/arch.md` | `/design` + `/gemini_ui_design` |
+| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` | `/sspec` |
+| 5 | implement | Engineer | `.claude/agents/sstack/implement.md` | `/coding` |
+| 6 | refactor | Tech Lead | `.claude/agents/sstack/refactor.md` | `/refactor` |
+| 7 | verify | QA | `.claude/agents/sstack/verify.md` | `/verify` |
+| 8 | ship | Release Mgr | `.claude/agents/sstack/ship.md` | `/sync` |
+
+## Cooperative Workflow Integration
+
+SStack phases map to the multi-LLM cooperative pipeline. Each phase tries the full cooperative chain first, then falls back to Claude-solo if external providers are unavailable.
+
+```
+Phase 2: Claude /research  →  Codex /research_codex  →  (merge)
+Phase 3: Gemini /gemini_ui_design  →  Codex $design (arch)  →  Claude /design (quality)
+```
+
+### Availability Detection & Fallback
+
+Before each phase that uses cooperative skills, the orchestrator checks availability:
+
+| Provider | Check | Fallback |
+|----------|-------|----------|
+| **Codex** | `/codex:setup` or check `codex` CLI exists | Claude handles research/design solo |
+| **Gemini** | Check `gemini` CLI or extension exists | Claude handles UI design solo |
+
+**Fallback behavior:**
+1. **Available** — Delegate to the cooperative skill as normal
+2. **Unavailable** — Log a notification in the state file: `> [!NOTE] Codex unavailable — Claude handling research solo`
+3. **Quota exceeded** — Same as unavailable; log: `> [!NOTE] Codex quota exceeded — falling back to Claude solo`
+4. Continue the phase with Claude doing the work that would have been delegated
+
+The pipeline **never blocks** on missing providers. Every phase is self-sufficient with Claude alone.
+
+### Per-Phase Cooperative Dispatch
+
+**Phase 2 (research):**
+1. Claude runs `/research` (local + domain search)
+2. If Codex available: run `/research_codex` for forked agent research + requirement selection
+3. Merge findings into state file
+4. If Codex unavailable: Claude completes full research solo, note in state file
+
+**Phase 3 (arch):**
+1. If Gemini available: run `/gemini_ui_design` for TUI/GUI design (if task has UI)
+2. If Codex available: Codex `$design` for architecture
+3. Claude runs `/design` for quality review and final architecture
+4. If Gemini/Codex unavailable: Claude handles all design solo, note in state file
+
+**Phases 4-8:** Claude-native skills only (`/sspec`, `/coding`, `/refactor`, `/verify`, `/sync`). No external provider dependency.
 
 ## Orchestrator Procedure
 
@@ -82,10 +107,11 @@ Run Phase 1 yourself:
 
 For each phase N (2 through 8):
 
-1. **Read** `.sstack/<feature>/state.md` to get current state
-2. **Read** the phase definitions from `.claude/skills/lib/sstack_phases.md` for phase N's entry/exit criteria
-3. **Verify entry criteria** -- if the previous phase output is missing or incomplete, re-run the previous phase
-4. **Spawn a fresh Agent** with this prompt:
+1. **Check cooperative availability** (Phase 2-3 only): detect Codex/Gemini. If unavailable, note fallback in state file
+2. **Read** `.sstack/<feature>/state.md` to get current state
+3. **Read** the phase definitions from `.claude/skills/lib/sstack_phases.md` for phase N's entry/exit criteria
+4. **Verify entry criteria** -- if the previous phase output is missing or incomplete, re-run the previous phase
+5. **Spawn a fresh Agent** with this prompt:
 
 ```
 Read .claude/agents/sstack/<phase-name>.md and follow its instructions.
@@ -93,6 +119,7 @@ Read .claude/agents/sstack/<phase-name>.md and follow its instructions.
 State file: .sstack/<feature>/state.md
 Feature: <feature>
 Phase: <N>-<phase-name>
+Cooperative: <available providers or "solo">
 
 Read the state file, perform your role, then update the state file with:
 - Your output summary under ## Phase Outputs / ### <N>-<phase-name>
@@ -100,10 +127,10 @@ Read the state file, perform your role, then update the state file with:
 - Ensure exit criteria from .claude/skills/lib/sstack_phases.md are met
 ```
 
-5. **After agent returns**, read `.sstack/<feature>/state.md`
-6. **Verify exit criteria** for phase N (from sstack_phases.md)
-7. If exit criteria fail: re-run the agent (max 2 retries), then escalate to user
-8. Proceed to next phase
+6. **After agent returns**, read `.sstack/<feature>/state.md`
+7. **Verify exit criteria** for phase N (from sstack_phases.md)
+8. If exit criteria fail: re-run the agent (max 2 retries), then escalate to user
+9. Proceed to next phase
 
 ### Completion
 
@@ -111,6 +138,7 @@ After Phase 8 (ship) succeeds:
 1. Read the final state file
 2. Report to the user: refined goal, all ACs checked, summary of each phase output
 3. Note any ACs that were not fully met
+4. Note which cooperative providers were used vs. solo fallback
 
 ## State File Format
 
@@ -129,6 +157,10 @@ Create `.sstack/<feature>/state.md` with this template:
 - [ ] AC-1: ...
 - [ ] AC-2: ...
 - [ ] AC-3: ...
+
+## Cooperative Providers
+- Codex: <available | unavailable | quota-exceeded>
+- Gemini: <available | unavailable | quota-exceeded>
 
 ## Phase Checklist
 - [ ] 1-dev (Developer Lead)
@@ -205,22 +237,25 @@ When spawning Phase 5 (implement) or Phase 6 (refactor), include:
 
 ## Integration with Existing Skills
 
-SStack agents may invoke existing skills internally:
-- Phase 2 (research): may use `/research` patterns
-- Phase 4 (spec): may use `/sspec` for test structure
-- Phase 5 (implement): may use `/coding` rules
-- Phase 6 (refactor): may use `/refactor` checklist
-- Phase 7 (verify): may use `/verify` checklist
-- Phase 8 (ship): may use `/sync` for VCS and `/release` for versioning
+SStack agents invoke existing skills per phase:
+- Phase 2 (research): `/research` + `/research_codex` (if Codex available)
+- Phase 3 (arch): `/design` + `/gemini_ui_design` (if Gemini available)
+- Phase 4 (spec): `/sspec` for test structure
+- Phase 5 (implement): `/coding` rules
+- Phase 6 (refactor): `/refactor` checklist
+- Phase 7 (verify): `/verify` checklist
+- Phase 8 (ship): `/sync` for VCS and `/release` for versioning
 
 ## Relationship to Other Workflows
 
 | Workflow | Relationship |
 |----------|-------------|
-| `/dev` | SStack quick profile — same pipeline, merged phases, inline execution |
+| `/dev` | Alias for `/sstack` — same 8 phases, same pipeline |
 | `/impl` | 15-phase heavyweight workflow — generates doc artifacts, uses agent teams. Independent of sstack but shares skill references (`/coding`, `/sspec`, `/verify`) |
-| `/research` | Standalone research skill — can feed into sstack Phase 2 or run independently |
-| `/design` | Standalone design skill — can feed into sstack Phase 3 or run independently |
-| `/verify` | Standalone verification — used within sstack Phase 7 or run independently |
+| `/research` | Standalone research skill — used within sstack Phase 2, also runs independently |
+| `/research_codex` | Codex cooperative research — used within sstack Phase 2 when Codex available |
+| `/gemini_ui_design` | Gemini UI design — used within sstack Phase 3 when Gemini available |
+| `/design` | Standalone design skill — used within sstack Phase 3, also runs independently |
+| `/verify` | Standalone verification — used within sstack Phase 7, also runs independently |
 
-**Underlying shared components:** All workflows share SSpec for BDD testing, `/coding` for language rules, and jj-based VCS sync. SStack unifies them under one state-file-driven orchestrator.
+**Self-sufficient:** Every phase works with Claude alone. Codex and Gemini enrich the pipeline when available but are never required.

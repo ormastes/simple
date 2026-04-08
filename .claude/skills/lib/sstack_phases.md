@@ -2,23 +2,6 @@
 
 Reference for all 8 SStack phases. Each phase has: role, focus, entry criteria, exit criteria, context budget, and key actions.
 
-## Profiles
-
-Phases can be run in different profiles:
-- **full** (default `/sstack`): All 8 phases, each in fresh agent
-- **quick** (`/dev`): 5 merged phases — 1+2, 3+4, 5, 6+7, 8
-
-| Phase | Full Profile | Quick Profile |
-|-------|-------------|---------------|
-| 1-dev | Inline | Merged with 2 (Research phase) |
-| 2-research | Spawned agent | Merged with 1 (Research phase) |
-| 3-arch | Spawned agent | Merged with 4 (Plan phase) |
-| 4-spec | Spawned agent | Merged with 3 (Plan phase) |
-| 5-implement | Spawned agent | Inline or spawned (Implement phase) |
-| 6-refactor | Spawned agent | Merged with 7 (Verify phase) |
-| 7-verify | Spawned agent | Merged with 6 (Verify phase) |
-| 8-ship | Spawned agent | Inline (Sync phase) |
-
 ---
 
 ## Phase 1: Dev
@@ -29,7 +12,6 @@ Phases can be run in different profiles:
 | **Agent** | `.claude/agents/sstack/dev.md` |
 | **Focus** | Analyze the task, categorize it, and refine into a testable goal with acceptance criteria |
 | **Context Budget** | 10% (runs inline in orchestrator) |
-| **Quick Profile** | Merged with Phase 2 as "Research" |
 
 **Entry Criteria:**
 - User request is available

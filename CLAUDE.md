@@ -49,13 +49,14 @@ Read .claude/agents/code.md and use its rules to implement <feature>
 
 ## Cooperative Phase Dev
 
-Claude owns **Step 1 (research)** and **Step 5 (design quality)** in multi-LLM cooperative pipeline:
+Integrated into SStack (`/sstack` or `/dev`). Phases 2-3 delegate to Codex/Gemini when available:
 ```
-Step 1: Claude /research  →  Step 2: Codex $research  →  Step 3: Gemini /design (UI)
-→  Step 4: Codex $design (arch)  →  Step 5: Claude /design (quality)
+Phase 2: Claude /research  →  Codex /research_codex  →  (merge)
+Phase 3: Gemini /gemini_ui_design  →  Codex $design (arch)  →  Claude /design (quality)
 ```
-Solo mode: `/research` → `/design` → `/impl` → `/verify` → `/release` (fully self-sufficient)
-See: `doc/guide/llm_cooperative_dev_phase.md`
+**Self-sufficient:** Every phase works with Claude alone. Codex/Gemini enrich but never block.
+If unavailable or quota-exceeded, Claude handles solo with a `[!NOTE]` in the state file.
+See: `doc/guide/llm_cooperative_dev_phase.md`, `.claude/skills/sstack.md` § "Cooperative Workflow Integration"
 
 ---
 
@@ -65,8 +66,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
-| `sstack` | SStack orchestrator — 8-phase BDD/TDD pipeline with profiles (full/quick), fresh agents, quality gates |
-| `dev` | SStack quick profile — 5 merged phases for lightweight tasks (alias for `sstack --profile quick`) |
+| `sstack` | SStack orchestrator — 8-phase BDD/TDD pipeline, cooperative workflow (Codex/Gemini fallback), fresh agents, quality gates |
+| `dev` | Alias for `sstack` — same 8 phases, same pipeline |
 | `sync` | Pull/rebase/push with file-count safety, worktree-aware |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
