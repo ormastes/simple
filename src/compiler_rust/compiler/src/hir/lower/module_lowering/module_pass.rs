@@ -370,9 +370,21 @@ impl Lowerer {
             }
         }
 
-        // Pass 0.5: Load types from imported modules BEFORE declaration registration.
-        // This ensures imported types are available when resolving function signatures
-        // and struct field types in Pass 1.
+        // Pass 0.5a: Pre-register type NAMES from ALL imported modules as empty placeholders.
+        // This is the first half of a two-pass import loading strategy that fixes
+        // cross-module type ordering bugs. For example, if dom.spl defines
+        // `BeDomNode { style: StyleProps }` and StyleProps is in css.spl,
+        // pre-registering ensures StyleProps exists when BeDomNode's fields
+        // are resolved in Pass 0.5b.
+        for item in &ast_module.items {
+            if let Node::UseStmt(use_stmt) = item {
+                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            }
+        }
+
+        // Pass 0.5b: Load full types from imported modules BEFORE declaration registration.
+        // Now that all type names are pre-registered (Pass 0.5a), field type resolution
+        // can find types from other imported modules.
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
                 // Log import loading failures -- silent failures cause cross-module
@@ -650,6 +662,67 @@ impl Lowerer {
     pub fn lower_module_with_warnings(mut self, ast_module: &Module) -> LowerResult<super::super::LoweringOutput> {
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
+
+        // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
+        for item in &ast_module.items {
+            match item {
+                Node::Struct(s) => {
+                    self.module.types.register_named(
+                        s.name.clone(),
+                        HirType::Struct {
+                            name: s.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: s.generic_params.clone(),
+                            is_generic_template: s.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+                Node::Class(c) => {
+                    self.module.types.register_named(
+                        c.name.clone(),
+                        HirType::Struct {
+                            name: c.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: c.generic_params.clone(),
+                            is_generic_template: c.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+                Node::Enum(e) => {
+                    self.module.types.register_named(
+                        e.name.clone(),
+                        HirType::Enum {
+                            name: e.name.clone(),
+                            variants: vec![],
+                            generic_params: e.generic_params.clone(),
+                            is_generic_template: e.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Pass 0.5a: Pre-register type NAMES from ALL imported modules as empty placeholders
+        for item in &ast_module.items {
+            if let Node::UseStmt(use_stmt) = item {
+                let _ = self.preregister_imported_type_names(&use_stmt.path, &use_stmt.target);
+            }
+        }
+
+        // Pass 0.5b: Load full types from imported modules
+        for item in &ast_module.items {
+            if let Node::UseStmt(use_stmt) = item {
+                if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
+                    eprintln!("[WARN] Failed to load imported types from {:?}: {}", use_stmt.path.segments, e);
+                }
+            }
+        }
 
         // First pass: collect type and function declarations
         for item in &ast_module.items {
