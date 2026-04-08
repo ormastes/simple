@@ -24,25 +24,20 @@ fn detect_project_dir() -> text:
 use app.ui.render.ansi.{RESET, BOLD, DIM}
 
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i64)
+extern fn native_enable_raw_mode() -> bool
+extern fn native_disable_raw_mode() -> bool
+extern fn stdin_read_char() -> text
 
 fn current_time_secs() -> i64:
     rt_time_now_unix_micros() / 1_000_000
 
 fn setup_raw_terminal():
-    """Set terminal to raw mode via stty for non-blocking key reads."""
-    rt_process_run("/bin/sh", ["-c", "stty raw -echo -icanon min 0 time 0 </dev/tty 2>/dev/null"])
+    """Enter raw terminal mode for single-key input."""
+    native_enable_raw_mode()
 
 fn restore_terminal():
-    """Restore terminal to normal mode."""
-    rt_process_run("/bin/sh", ["-c", "stty sane </dev/tty 2>/dev/null"])
-
-fn read_key_with_timeout(timeout_ms: i64) -> text:
-    """Read one key from terminal with timeout. Returns "" if no key pressed."""
-    val (out, _, _) = rt_process_run_timeout("/bin/dd",
-        ["bs=1", "count=1", "if=/dev/tty"], timeout_ms)
-    return out
+    """Restore normal terminal mode."""
+    native_disable_raw_mode()
 
 # =========================================================================
 # TUI App State
@@ -84,20 +79,26 @@ fn run_tui_dashboard(store: AgentDashboardStore):
     # Initial poll
     state.store.poll()
 
+    # Render initial frame before waiting for input
+    render_frame(state)
+
     while state.running:
-        # Poll for new data periodically
+        val key = stdin_read_char()
+        # Exit on EOF or quit key
+        if key == "" or key == "q" or key == "Q":
+            state.running = false
+            break
+        handle_key(state, key)
+
+        # Poll for new data on each keypress
         val now = current_time_secs()
         if (now - state.last_poll) * 1000 >= state.poll_interval_ms:
             state.store.poll()
             state.last_poll = now
 
-        # Render frame
+        # Re-render after input
         render_frame(state)
         state.refresh_count = state.refresh_count + 1
-
-        # Read key with 200ms timeout (also serves as frame delay ~5fps)
-        val key = read_key_with_timeout(200)
-        handle_key(state, key)
 
     # Restore terminal
     print ansi_show_cursor()
