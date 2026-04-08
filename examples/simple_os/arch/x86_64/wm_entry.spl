@@ -748,6 +748,101 @@ fn text_sec(theme: u64) -> u64:
     else: LIGHT_TEXT_SEC
 
 # ===========================================================================
+# WM Chrome Stylesheet (HTML/CSS-like token map)
+# ===========================================================================
+
+val CSS_CHROME_TITLEBAR: u64 = 1
+val CSS_CHROME_MENUBAR: u64 = 2
+val CSS_CHROME_DOCK: u64 = 3
+
+fn chrome_radius(role: u64) -> u64:
+    if role == CSS_CHROME_TITLEBAR: return WIN_CORNER_RADIUS
+    if role == CSS_CHROME_MENUBAR: return 0
+    if role == CSS_CHROME_DOCK: return DOCK_CORNER_RADIUS
+    return 8
+
+fn chrome_blur_radius(role: u64) -> u64:
+    if role == CSS_CHROME_TITLEBAR: return BLUR_SUBTLE
+    if role == CSS_CHROME_MENUBAR: return BLUR_ELEVATED
+    if role == CSS_CHROME_DOCK: return BLUR_ELEVATED
+    return BLUR_SUBTLE
+
+fn chrome_surface_alpha(theme: u64, role: u64) -> u64:
+    if role == CSS_CHROME_TITLEBAR: return elevated_a(theme)
+    if role == CSS_CHROME_MENUBAR: return elevated_a(theme)
+    if role == CSS_CHROME_DOCK: return surface_a(theme)
+    return surface_a(theme)
+
+fn chrome_vibrancy_alpha(role: u64) -> u64:
+    if role == CSS_CHROME_TITLEBAR: return 10
+    if role == CSS_CHROME_MENUBAR: return 5
+    if role == CSS_CHROME_DOCK: return 6
+    return 4
+
+fn chrome_topline_alpha(role: u64) -> u64:
+    if role == CSS_CHROME_TITLEBAR: return 30
+    if role == CSS_CHROME_MENUBAR: return 35
+    if role == CSS_CHROME_DOCK: return 35
+    return 20
+
+fn chrome_border_alpha(theme: u64, role: u64) -> u64:
+    val base = border_a(theme)
+    if role == CSS_CHROME_TITLEBAR: return base + 15
+    if role == CSS_CHROME_MENUBAR: return 38
+    if role == CSS_CHROME_DOCK: return base
+    return base
+
+fn chrome_draw_surface(role: u64, x: u64, y: u64, w: u64, h: u64, theme: u64):
+    """Reusable chrome surface renderer; acts like shared CSS class styles."""
+    val blur_r = chrome_blur_radius(role)
+    blur(x, y, w, h, blur_r)
+    if role == CSS_CHROME_MENUBAR:
+        blur(x, y, w, h, 10)
+    else:
+        if role == CSS_CHROME_DOCK:
+            blur(x, y, w, h, 12)
+            blur(x, y, w, h, 6)
+            blur(x, y, w, h, 4)
+
+    blend(x, y, w, h, accent(theme), chrome_vibrancy_alpha(role))
+    blend(x, y, w, h, 0x004080FF, 12)
+    if role != CSS_CHROME_DOCK:
+        blend(x, y, w, h, 0x00FF6B8A, 3)
+
+    if role == CSS_CHROME_TITLEBAR:
+        grad_rect(x, y, w, h, elevated(theme), chrome_radius(role), surface(theme), chrome_surface_alpha(theme, role))
+        val top_h = h * 40 / 100
+        val bot_start = h * 70 / 100
+        val bot_h = h - bot_start
+        blend(x + 1, y, w - 2, top_h, 0x00FFFFFF, 12)
+        blend(x + 1, y + bot_start, w - 2, bot_h, 0x00000000, 8)
+        noise(x + 1, y + 1, w - 2, h - 1, 1)
+    else:
+        grad_v(x, y, w, h, elevated(theme), surface(theme))
+        blend(x, y, w, h / 2, 0x00FFFFFF, 8)
+        blend(x, y + h / 2, w, h / 2, 0x00000000, 8)
+        if role == CSS_CHROME_DOCK:
+            rrect(x, y, w, h, surface(theme), chrome_radius(role), chrome_surface_alpha(theme, role))
+            rrect(x + 1, y + 1, w - 2, h - 2, 0x00FFFFFF, chrome_radius(role) - 1, 10)
+            blend(x + 2, y + 2, w - 4, h - 4, 0x00FFFFFF, 15)
+        else:
+            rrect_aa(x, y, w, h, surface(theme), chrome_radius(role), chrome_surface_alpha(theme, role))
+
+    blend(x + 1, y + 1, w - 2, 1, 0x00FFFFFF, chrome_topline_alpha(role))
+    if role == CSS_CHROME_DOCK:
+        rrect(x, y, w, h, border_c(theme), chrome_radius(role), chrome_border_alpha(theme, role))
+    else:
+        blend(x, y + h - 1, w, 1, border_c(theme), chrome_border_alpha(theme, role))
+
+fn chrome_draw_menu_item(x: u64, y: u64, w: u64, h: u64, theme: u64, is_active: u64, chars: u64, len: u64):
+    if is_active == 1:
+        rrect_aa(x - 2, y - 1, w + 4, h + 2, text_c(theme), 4, 25)
+        blend(x - 2, y - 1, w + 4, h + 2, accent(theme), 8)
+        blend(x, y + h - 2, w, 1, accent(theme), 120)
+        blend(x, y + h, w, 1, accent(theme), 40)
+    draw_label_vector(x + 2, y, text_c(theme), 220, chars, len, 14)
+
+# ===========================================================================
 # Glass Window Drawing
 # ===========================================================================
 
@@ -822,32 +917,17 @@ fn draw_glass_window(x: u64, y: u64, w: u64, h: u64, is_active: u64, theme: u64)
     blend(x + 6, y + 6, 30, 30, 0x00FFFFFF, 8)
     blend(x + 8, y + 8, 15, 15, 0x00FFFFFF, 12)
 
-    # 4. Title bar with 3-layer depth gradient (premium macOS-style)
-    val tb_light = elevated(theme)
-    val tb_dark = surface(theme)
-    # Base gradient (full title bar)
-    grad_rect(x + 1, y + 1, w - 2, TITLE_BAR_H, tb_light, WIN_CORNER_RADIUS, tb_dark, elevated_a(theme))
-    # Top 40%: lighter glass (white blend)
-    val tb_top_h = TITLE_BAR_H * 40 / 100
-    blend(x + 2, y + 1, w - 4, tb_top_h, 0x00FFFFFF, 12)
-    # Middle 30%: neutral (no additional blend — base gradient shows through)
-    # Bottom 30%: slightly darker (black blend for depth)
-    val tb_bot_start = TITLE_BAR_H * 70 / 100
-    val tb_bot_h = TITLE_BAR_H - tb_bot_start
-    blend(x + 2, y + 1 + tb_bot_start, w - 4, tb_bot_h, 0x00000000, 8)
-    # Frosted grain texture on title bar
-    noise(x + 2, y + 2, w - 4, TITLE_BAR_H - 2, 1)
+    # 4. Title bar via shared chrome stylesheet
+    chrome_draw_surface(CSS_CHROME_TITLEBAR, x + 1, y + 1, w - 2, TITLE_BAR_H, theme)
     # Warm accent glow on active title bar (color palette cohesion)
     if is_active == 1:
-        blend(x + 2, y + 2, w - 4, TITLE_BAR_H - 4, accent(theme), 10)
+        blend(x + 2, y + 2, w - 4, TITLE_BAR_H - 3, accent(theme), 10)
     # Soft top specular on title bar (refined, not harsh)
     blend(x + 6, y + 1, w - 12, 2, 0x00FFFFFF, 30)
     # Top highlight line (specular)
     blend(x + 14, y + 2, w - 28, 1, 0x00FFFFFF, 25)
     # App-specific accent gradient stripe (premium title bar identity — bolder 2px)
     grad_h(x + 20, y + 1, w - 40, 2, accent(theme), accent2(theme))
-    # Title bar bottom separator (single clean 1px line)
-    blend(x + 1, y + TITLE_BAR_H, w - 2, 1, border_c(theme), border_a(theme) + 15)
     # Accent glow line above separator (decorative depth detail — exceeds macOS)
     blend(x + 30, y + TITLE_BAR_H - 1, w - 60, 1, accent(theme), 8)
     # Subtle inner shadow at top of content area (depth between title bar and content)
@@ -1003,22 +1083,8 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     val y: u64 = 0
     val h = SYSTEM_BAR_H
 
-    # Double-pass blur for frosted menu bar
-    blur(0, y, SCREEN_W, h, BLUR_ELEVATED)
-    blur(0, y, SCREEN_W, h, 10)
-    # Menu bar vibrancy
-    blend(0, y, SCREEN_W, h, accent(theme), 5)
-    # Blue glass tint (matching windows for consistency)
-    blend(0, 0, SCREEN_W, 28, 0x004080FF, 12)
-    # Rose undertone (matching windows for consistency)
-    blend(0, 0, SCREEN_W, 28, 0x00FF6B8A, 3)
-
-    # Gradient menu bar (unique — not flat like macOS)
-    grad_v(0, y, SCREEN_W, h, elevated(theme), surface(theme))
-    blend(0, y, SCREEN_W, h / 2, 0x00FFFFFF, 8)
-    blend(0, y + h / 2, SCREEN_W, h / 2, 0x00000000, 8)
-    # Inner top highlight (premium)
-    blend(0, y + 1, SCREEN_W, 1, 0x00FFFFFF, 35)
+    # Shared chrome stylesheet surface for top menubar
+    chrome_draw_surface(CSS_CHROME_MENUBAR, 0, y, SCREEN_W, h, theme)
 
     # Bright top edge highlight
     blend(0, 0, SCREEN_W, 1, 0x00FFFFFF, 30)
@@ -1026,8 +1092,6 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     # Top-left light catch (consistent light source across all glass surfaces)
     blend(6, 2, 20, 15, 0x00FFFFFF, 5)
 
-    # Bottom border (clean single 1px separator)
-    blend(0, h - 1, SCREEN_W, 1, border_c(theme), 38)
     # Bottom accent stripe (visible color identity)
     blend(0, h - 2, SCREEN_W, 1, accent(theme), 15)
 
@@ -1122,23 +1186,12 @@ fn draw_glass_system_bar(theme: u64, active: u64):
     # App running indicator (green dot next to app name — exceeds macOS)
     circle(anx + 68, any_ + 6, 4, 0x0030D158, 180)
 
-    # Menu items — vector typography for the chrome
-    # "File" (active) — clean pill background (premium active state)
-    rrect_aa(layout_x(menu1) - 2, layout_y(menu1) - 1, layout_w(menu1) + 4, layout_h(menu1) + 2, text_c(theme), 4, 25)
-    blend(layout_x(menu1) - 2, layout_y(menu1) - 1, layout_w(menu1) + 4, layout_h(menu1) + 2, accent(theme), 8)
-    draw_label_vector(layout_x(menu1) + 2, layout_y(menu1), text_c(theme), 220, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4, 14)
-    # Active menu underline (stronger accent)
-    blend(layout_x(menu1), layout_y(menu1) + 14, layout_w(menu1), 1, accent(theme), 120)
-    # Bottom accent bar under active item (premium highlight)
-    blend(layout_x(menu1), layout_y(menu1) + 16, layout_w(menu1), 1, accent(theme), 40)
-    # "Edit"
-    draw_label_vector(layout_x(menu2) + 2, layout_y(menu2), text_c(theme), 200, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4, 14)
-    # "View"
-    draw_label_vector(layout_x(menu3) + 2, layout_y(menu3), text_c(theme), 200, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4, 14)
-    # "Go"
-    draw_label_vector(layout_x(menu4) + 2, layout_y(menu4), text_c(theme), 200, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2, 14)
-    # "Window"
-    draw_label_vector(layout_x(menu5) + 2, layout_y(menu5), text_c(theme), 200, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6, 14)
+    # Menu items rendered through shared menu-item style function
+    chrome_draw_menu_item(layout_x(menu1), layout_y(menu1), layout_w(menu1), layout_h(menu1), theme, 1, pack8(70, 105, 108, 101, 0, 0, 0, 0), 4)
+    chrome_draw_menu_item(layout_x(menu2), layout_y(menu2), layout_w(menu2), layout_h(menu2), theme, 0, pack8(69, 100, 105, 116, 0, 0, 0, 0), 4)
+    chrome_draw_menu_item(layout_x(menu3), layout_y(menu3), layout_w(menu3), layout_h(menu3), theme, 0, pack8(86, 105, 101, 119, 0, 0, 0, 0), 4)
+    chrome_draw_menu_item(layout_x(menu4), layout_y(menu4), layout_w(menu4), layout_h(menu4), theme, 0, pack8(71, 111, 0, 0, 0, 0, 0, 0), 2)
+    chrome_draw_menu_item(layout_x(menu5), layout_y(menu5), layout_w(menu5), layout_h(menu5), theme, 0, pack8(87, 105, 110, 100, 111, 119, 0, 0), 6)
 
     # Thin vertical divider between menu items and status area
     val div_x = layout_x(search_btn) - 6
@@ -1224,36 +1277,14 @@ fn draw_glass_dock(theme: u64, active: u64):
     val dock_x = (SCREEN_W - dock_w) / 2
     val dock_y = SCREEN_H - dock_h - DOCK_MARGIN_BOTTOM
 
-    # Dock shadow (floating depth effect)
+    # Dock shell through shared chrome stylesheet
     shadow(dock_x, dock_y, dock_w, dock_h, 24, 80, 8)
-
-    # Quad-pass blur for deep dock glass
-    blur(dock_x, dock_y, dock_w, dock_h, BLUR_ELEVATED)
-    blur(dock_x, dock_y, dock_w, dock_h, 12)
-    blur(dock_x, dock_y, dock_w, dock_h, 6)
-    blur(dock_x, dock_y, dock_w, dock_h, 4)
-    # Dock vibrancy saturation
-    blend(dock_x, dock_y, dock_w, dock_h, accent(theme), 6)
-    # Saturation boost for dock glass
-    blend(dock_x, dock_y, dock_w, dock_h, 0x00FFFFFF, 12)
-    # Blue glass tint (matching windows + menu bar for consistency)
-    blend(dock_x, dock_y, dock_w, dock_h, 0x004080FF, 12)
-
-    # Glass pill surface — ROUNDED with DOCK_CORNER_RADIUS
-    rrect(dock_x, dock_y, dock_w, dock_h, surface(theme), DOCK_CORNER_RADIUS, surface_a(theme))
-    # Inner glow (premium glass)
-    rrect(dock_x + 1, dock_y + 1, dock_w - 2, dock_h - 2, 0x00FFFFFF, DOCK_CORNER_RADIUS - 1, 10)
-    # White overlay for dock visibility
-    blend(dock_x + 2, dock_y + 2, dock_w - 4, dock_h - 4, 0x00FFFFFF, 15)
+    chrome_draw_surface(CSS_CHROME_DOCK, dock_x, dock_y, dock_w, dock_h, theme)
     # Warm accent undertone (color palette cohesion)
     blend(dock_x + 4, dock_y + 4, dock_w - 8, dock_h - 8, 0x00FF6B8A, 3)
-
     # Extra glass vibrancy layer
     blend(dock_x + 4, dock_y + 1, dock_w - 8, 1, 0x00FFFFFF, 40)
     blend(dock_x + 2, dock_y + 2, dock_w - 4, 1, 0x00FFFFFF, 15)
-
-    # Glass border
-    rrect(dock_x, dock_y, dock_w, dock_h, border_c(theme), DOCK_CORNER_RADIUS, border_a(theme))
     # Fresnel edge glow (edges brighter than center — premium glass optics)
     blend(dock_x + 2, dock_y, 3, dock_h, 0x00FFFFFF, 8)
     blend(dock_x + dock_w - 5, dock_y, 3, dock_h, 0x00FFFFFF, 8)
@@ -1995,15 +2026,15 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label_vector(x + 6, sb_y + 4, text_sec(theme), 80, pack8(69, 88, 80, 76, 79, 82, 69, 82), 8, 12)
     # Tree items
     # > src/
-    draw_label(x + 6, sb_y + 20, 0x00CCCCCC, 160, pack8(62, 32, 115, 114, 99, 47, 0, 0), 6)
+    draw_label_vector(x + 6, sb_y + 20, 0x00CCCCCC, 160, pack8(62, 32, 115, 114, 99, 47, 0, 0), 6, 12)
     #   main.spl (bold = open)
     draw_label_vector(x + 16, sb_y + 36, accent(theme), 200, pack8(109, 97, 105, 110, 46, 115, 112, 108), 8, 14)
     #   mod.spl
-    draw_label(x + 16, sb_y + 52, 0x00CCCCCC, 140, pack8(109, 111, 100, 46, 115, 112, 108, 0), 7)
+    draw_label_vector(x + 16, sb_y + 52, 0x00CCCCCC, 140, pack8(109, 111, 100, 46, 115, 112, 108, 0), 7, 12)
     # > test/
-    draw_label(x + 6, sb_y + 72, 0x00CCCCCC, 160, pack8(62, 32, 116, 101, 115, 116, 47, 0), 7)
+    draw_label_vector(x + 6, sb_y + 72, 0x00CCCCCC, 160, pack8(62, 32, 116, 101, 115, 116, 47, 0), 7, 12)
     #   spec.spl
-    draw_label(x + 16, sb_y + 88, 0x00CCCCCC, 140, pack8(115, 112, 101, 99, 46, 115, 112, 108), 8)
+    draw_label_vector(x + 16, sb_y + 88, 0x00CCCCCC, 140, pack8(115, 112, 101, 99, 46, 115, 112, 108), 8, 12)
 
     # --- Editor area (dark bg with code lines) ---
     val ed_x = x + sidebar_w + 1
@@ -2094,15 +2125,15 @@ fn draw_hello_content(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Dynamic "Ln N" using cursor position (1-based line number)
     val disp_ln = g_editor_cursor_y + 1
     # "Ln " prefix
-    draw_label(x + 8, st_y + 3, 0x00FFFFFF, 200, pack8(76, 110, 32, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 8, st_y + 3, 0x00FFFFFF, 200, pack8(76, 110, 32, 0, 0, 0, 0, 0), 3, 14)
     # Line number digit (0-9)
-    draw_label(x + 32, st_y + 3, 0x00FFFFFF, 200, pack8(48 + disp_ln, 0, 0, 0, 0, 0, 0, 0), 1)
+    draw_label_vector(x + 32, st_y + 3, 0x00FFFFFF, 200, pack8(48 + disp_ln, 0, 0, 0, 0, 0, 0, 0), 1, 14)
     # ", C" separator
-    draw_label(x + 40, st_y + 3, 0x00FFFFFF, 200, pack8(44, 32, 67, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 40, st_y + 3, 0x00FFFFFF, 200, pack8(44, 32, 67, 0, 0, 0, 0, 0), 3, 14)
     # Column number digit (0-based displayed as-is for simplicity)
-    draw_label(x + 64, st_y + 3, 0x00FFFFFF, 200, pack8(48 + g_editor_cursor_x, 0, 0, 0, 0, 0, 0, 0), 1)
+    draw_label_vector(x + 64, st_y + 3, 0x00FFFFFF, 200, pack8(48 + g_editor_cursor_x, 0, 0, 0, 0, 0, 0, 0), 1, 14)
     # "Simple" on right
-    draw_label_shadow(x + w - 56, st_y + 3, 0x00FFFFFF, 200, pack8(83, 105, 109, 112, 108, 101, 0, 0), 6, 60)
+    draw_label_vector(x + w - 56, st_y + 3, 0x00FFFFFF, 200, pack8(83, 105, 109, 112, 108, 101, 0, 0), 6, 14)
 
 fn render_term_input(tx: u64, ty: u64, color: u64):
     """Render the current input line from packed buffer."""
@@ -2582,11 +2613,11 @@ fn draw_page_home(x: u64, y: u64, w: u64, h: u64, theme: u64):
 
     # Subtitle: "Welcome " = 87,101,108,99,111,109,101,32
     val sub_y = title_y + 36
-    draw_label(x + w / 2 - 72, sub_y, dim_color, 160, pack8(87, 101, 108, 99, 111, 109, 101, 32), 8)
+    draw_label_vector(x + w / 2 - 72, sub_y, dim_color, 160, pack8(87, 101, 108, 99, 111, 109, 101, 32), 8, 14)
     # "to Simpl" = 116,111,32,83,105,109,112,108
-    draw_label(x + w / 2 - 8, sub_y, dim_color, 160, pack8(116, 111, 32, 83, 105, 109, 112, 108), 8)
+    draw_label_vector(x + w / 2 - 8, sub_y, dim_color, 160, pack8(116, 111, 32, 83, 105, 109, 112, 108), 8, 14)
     # "eOS" = 101,79,83
-    draw_label(x + w / 2 + 56, sub_y, dim_color, 160, pack8(101, 79, 83, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + w / 2 + 56, sub_y, dim_color, 160, pack8(101, 79, 83, 0, 0, 0, 0, 0), 3, 14)
 
     # Search/URL input hint box
     val box_x = x + 30
@@ -2615,28 +2646,28 @@ fn draw_page_home(x: u64, y: u64, w: u64, h: u64, theme: u64):
 
     # Link 1: "About Si" = 65,98,111,117,116,32,83,105
     circle(x + 24, link_start_y + 2, 8, accent_c, 160)
-    draw_label(x + 38, link_start_y, link_color, 220, pack8(65, 98, 111, 117, 116, 32, 83, 105), 8)
+    draw_label_vector(x + 38, link_start_y, link_color, 220, pack8(65, 98, 111, 117, 116, 32, 83, 105), 8, 14)
     # "mpleOS" = 109,112,108,101,79,83
-    draw_label(x + 102, link_start_y, link_color, 220, pack8(109, 112, 108, 101, 79, 83, 0, 0), 6)
+    draw_label_vector(x + 102, link_start_y, link_color, 220, pack8(109, 112, 108, 101, 79, 83, 0, 0), 6, 14)
 
     # Link 2: "System I" = 83,121,115,116,101,109,32,73
     val l2y = link_start_y + 24
     circle(x + 24, l2y + 2, 8, accent_c, 160)
-    draw_label(x + 38, l2y, link_color, 220, pack8(83, 121, 115, 116, 101, 109, 32, 73), 8)
+    draw_label_vector(x + 38, l2y, link_color, 220, pack8(83, 121, 115, 116, 101, 109, 32, 73), 8, 14)
     # "nfo" = 110,102,111
-    draw_label(x + 102, l2y, link_color, 220, pack8(110, 102, 111, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 102, l2y, link_color, 220, pack8(110, 102, 111, 0, 0, 0, 0, 0), 3, 14)
 
     # Link 3: "Help" = 72,101,108,112
     val l3y = l2y + 24
     circle(x + 24, l3y + 2, 8, accent_c, 160)
-    draw_label(x + 38, l3y, link_color, 220, pack8(72, 101, 108, 112, 0, 0, 0, 0), 4)
+    draw_label_vector(x + 38, l3y, link_color, 220, pack8(72, 101, 108, 112, 0, 0, 0, 0), 4, 14)
 
     # Link 4: "Network " = 78,101,116,119,111,114,107,32
     val l4y = l3y + 24
     circle(x + 24, l4y + 2, 8, 0x0030D158, 160)
-    draw_label(x + 38, l4y, link_color, 220, pack8(78, 101, 116, 119, 111, 114, 107, 32), 8)
+    draw_label_vector(x + 38, l4y, link_color, 220, pack8(78, 101, 116, 119, 111, 114, 107, 32), 8, 14)
     # "Status" = 83,116,97,116,117,115
-    draw_label(x + 102, l4y, link_color, 220, pack8(83, 116, 97, 116, 117, 115, 0, 0), 6)
+    draw_label_vector(x + 102, l4y, link_color, 220, pack8(83, 116, 97, 116, 117, 115, 0, 0), 6, 14)
 
 fn draw_page_help(x: u64, y: u64, w: u64, h: u64, theme: u64):
     """Render browser help page."""
@@ -2658,27 +2689,27 @@ fn draw_page_help(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label_vector(x + 74, ny + 1, heading_color, 220, pack8(111, 110, 0, 0, 0, 0, 0, 0), 2, 16)
 
     # "Click ad" = 67,108,105,99,107,32,97,100
-    draw_label(x + 20, ny + 20, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 97, 100), 8)
+    draw_label_vector(x + 20, ny + 20, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 97, 100), 8, 14)
     # "dress ba" = 100,114,101,115,115,32,98,97
-    draw_label(x + 84, ny + 20, text_color, 180, pack8(100, 114, 101, 115, 115, 32, 98, 97), 8)
+    draw_label_vector(x + 84, ny + 20, text_color, 180, pack8(100, 114, 101, 115, 115, 32, 98, 97), 8, 14)
     # "r to typ" = 114,32,116,111,32,116,121,112
-    draw_label(x + 148, ny + 20, text_color, 180, pack8(114, 32, 116, 111, 32, 116, 121, 112), 8)
+    draw_label_vector(x + 148, ny + 20, text_color, 180, pack8(114, 32, 116, 111, 32, 116, 121, 112), 8, 14)
     # "e URL" = 101,32,85,82,76
-    draw_label(x + 212, ny + 20, text_color, 180, pack8(101, 32, 85, 82, 76, 0, 0, 0), 5)
+    draw_label_vector(x + 212, ny + 20, text_color, 180, pack8(101, 32, 85, 82, 76, 0, 0, 0), 5, 14)
 
     # "Press En" = 80,114,101,115,115,32,69,110
-    draw_label(x + 20, ny + 38, text_color, 180, pack8(80, 114, 101, 115, 115, 32, 69, 110), 8)
+    draw_label_vector(x + 20, ny + 38, text_color, 180, pack8(80, 114, 101, 115, 115, 32, 69, 110), 8, 14)
     # "ter to n" = 116,101,114,32,116,111,32,110
-    draw_label(x + 84, ny + 38, text_color, 180, pack8(116, 101, 114, 32, 116, 111, 32, 110), 8)
+    draw_label_vector(x + 84, ny + 38, text_color, 180, pack8(116, 101, 114, 32, 116, 111, 32, 110), 8, 14)
     # "avigate" = 97,118,105,103,97,116,101
-    draw_label(x + 148, ny + 38, text_color, 180, pack8(97, 118, 105, 103, 97, 116, 101, 0), 7)
+    draw_label_vector(x + 148, ny + 38, text_color, 180, pack8(97, 118, 105, 103, 97, 116, 101, 0), 7, 14)
 
     # "Click li" = 67,108,105,99,107,32,108,105
-    draw_label(x + 20, ny + 56, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 108, 105), 8)
+    draw_label_vector(x + 20, ny + 56, text_color, 180, pack8(67, 108, 105, 99, 107, 32, 108, 105), 8, 14)
     # "nks to f" = 110,107,115,32,116,111,32,102
-    draw_label(x + 84, ny + 56, text_color, 180, pack8(110, 107, 115, 32, 116, 111, 32, 102), 8)
+    draw_label_vector(x + 84, ny + 56, text_color, 180, pack8(110, 107, 115, 32, 116, 111, 32, 102), 8, 14)
     # "ollow" = 111,108,108,111,119
-    draw_label(x + 148, ny + 56, text_color, 180, pack8(111, 108, 108, 111, 119, 0, 0, 0), 5)
+    draw_label_vector(x + 148, ny + 56, text_color, 180, pack8(111, 108, 108, 111, 119, 0, 0, 0), 5, 14)
 
     # Built-in pages section
     val py = ny + 84
@@ -2687,40 +2718,40 @@ fn draw_page_help(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label_vector(x + 74, py + 1, heading_color, 220, pack8(32, 80, 97, 103, 101, 115, 0, 0), 6, 16)
 
     # "about:ho" = 97,98,111,117,116,58,104,111
-    draw_label(x + 20, py + 20, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 111), 8)
+    draw_label_vector(x + 20, py + 20, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 111), 8, 14)
     # "me  Star" = 109,101,32,32,83,116,97,114
-    draw_label(x + 84, py + 20, text_color, 180, pack8(109, 101, 32, 32, 83, 116, 97, 114), 8)
+    draw_label_vector(x + 84, py + 20, text_color, 180, pack8(109, 101, 32, 32, 83, 116, 97, 114), 8, 14)
     # "t page" = 116,32,112,97,103,101
-    draw_label(x + 148, py + 20, text_color, 180, pack8(116, 32, 112, 97, 103, 101, 0, 0), 6)
+    draw_label_vector(x + 148, py + 20, text_color, 180, pack8(116, 32, 112, 97, 103, 101, 0, 0), 6, 14)
 
     # "about:he" = 97,98,111,117,116,58,104,101
-    draw_label(x + 20, py + 38, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 101), 8)
+    draw_label_vector(x + 20, py + 38, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 104, 101), 8, 14)
     # "lp  This" = 108,112,32,32,84,104,105,115
-    draw_label(x + 84, py + 38, text_color, 180, pack8(108, 112, 32, 32, 84, 104, 105, 115), 8)
+    draw_label_vector(x + 84, py + 38, text_color, 180, pack8(108, 112, 32, 32, 84, 104, 105, 115), 8, 14)
     # " page" = 32,112,97,103,101
-    draw_label(x + 148, py + 38, text_color, 180, pack8(32, 112, 97, 103, 101, 0, 0, 0), 5)
+    draw_label_vector(x + 148, py + 38, text_color, 180, pack8(32, 112, 97, 103, 101, 0, 0, 0), 5, 14)
 
     # "about:sy" = 97,98,111,117,116,58,115,121
-    draw_label(x + 20, py + 56, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 115, 121), 8)
+    draw_label_vector(x + 20, py + 56, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 115, 121), 8, 14)
     # "sinfo Sy" = 115,105,110,102,111,32,83,121
-    draw_label(x + 84, py + 56, text_color, 180, pack8(115, 105, 110, 102, 111, 32, 83, 121), 8)
+    draw_label_vector(x + 84, py + 56, text_color, 180, pack8(115, 105, 110, 102, 111, 32, 83, 121), 8, 14)
     # "stem inf" = 115,116,101,109,32,105,110,102
-    draw_label(x + 148, py + 56, text_color, 180, pack8(115, 116, 101, 109, 32, 105, 110, 102), 8)
+    draw_label_vector(x + 148, py + 56, text_color, 180, pack8(115, 116, 101, 109, 32, 105, 110, 102), 8, 14)
     # "o" = 111
-    draw_label(x + 212, py + 56, text_color, 180, pack8(111, 0, 0, 0, 0, 0, 0, 0), 1)
+    draw_label_vector(x + 212, py + 56, text_color, 180, pack8(111, 0, 0, 0, 0, 0, 0, 0), 1, 14)
 
     # "about:ab" = 97,98,111,117,116,58,97,98
-    draw_label(x + 20, py + 74, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 97, 98), 8)
+    draw_label_vector(x + 20, py + 74, text_color, 180, pack8(97, 98, 111, 117, 116, 58, 97, 98), 8, 14)
     # "out  Abo" = 111,117,116,32,32,65,98,111
-    draw_label(x + 84, py + 74, text_color, 180, pack8(111, 117, 116, 32, 32, 65, 98, 111), 8)
+    draw_label_vector(x + 84, py + 74, text_color, 180, pack8(111, 117, 116, 32, 32, 65, 98, 111), 8, 14)
     # "ut" = 117,116
-    draw_label(x + 148, py + 74, text_color, 180, pack8(117, 116, 0, 0, 0, 0, 0, 0), 2)
+    draw_label_vector(x + 148, py + 74, text_color, 180, pack8(117, 116, 0, 0, 0, 0, 0, 0), 2, 14)
 
     # Back link: "< Back t" = 60,32,66,97,99,107,32,116
     val by = py + 104
-    draw_label(x + 20, by, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    draw_label_vector(x + 20, by, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8, 14)
     # "o Home" = 111,32,72,111,109,101
-    draw_label(x + 84, by, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+    draw_label_vector(x + 84, by, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6, 14)
 
 fn draw_page_sysinfo(x: u64, y: u64, w: u64, h: u64, theme: u64):
     """Render system information page."""
@@ -2736,43 +2767,43 @@ fn draw_page_sysinfo(x: u64, y: u64, w: u64, h: u64, theme: u64):
 
     val sy = y + 40
     # "CPU: x86" = 67,80,85,58,32,120,56,54
-    draw_label(x + 20, sy, text_color, 180, pack8(67, 80, 85, 58, 32, 120, 56, 54), 8)
+    draw_label_vector(x + 20, sy, text_color, 180, pack8(67, 80, 85, 58, 32, 120, 56, 54), 8, 14)
     # "_64" = 95,54,52
-    draw_label(x + 84, sy, text_color, 180, pack8(95, 54, 52, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 84, sy, text_color, 180, pack8(95, 54, 52, 0, 0, 0, 0, 0), 3, 14)
 
     # "Display:" = 68,105,115,112,108,97,121,58
-    draw_label(x + 20, sy + 20, text_color, 180, pack8(68, 105, 115, 112, 108, 97, 121, 58), 8)
+    draw_label_vector(x + 20, sy + 20, text_color, 180, pack8(68, 105, 115, 112, 108, 97, 121, 58), 8, 14)
     # " 1024x76" = 32,49,48,50,52,120,55,54
-    draw_label(x + 84, sy + 20, text_color, 180, pack8(32, 49, 48, 50, 52, 120, 55, 54), 8)
+    draw_label_vector(x + 84, sy + 20, text_color, 180, pack8(32, 49, 48, 50, 52, 120, 55, 54), 8, 14)
     # "8x32" = 56,120,51,50
-    draw_label(x + 148, sy + 20, text_color, 180, pack8(56, 120, 51, 50, 0, 0, 0, 0), 4)
+    draw_label_vector(x + 148, sy + 20, text_color, 180, pack8(56, 120, 51, 50, 0, 0, 0, 0), 4, 14)
 
     # "Heap: 16" = 72,101,97,112,58,32,49,54
-    draw_label(x + 20, sy + 40, text_color, 180, pack8(72, 101, 97, 112, 58, 32, 49, 54), 8)
+    draw_label_vector(x + 20, sy + 40, text_color, 180, pack8(72, 101, 97, 112, 58, 32, 49, 54), 8, 14)
     # " MB" = 32,77,66
-    draw_label(x + 84, sy + 40, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 84, sy + 40, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3, 14)
 
     # "Stack: 8" = 83,116,97,99,107,58,32,56
-    draw_label(x + 20, sy + 60, text_color, 180, pack8(83, 116, 97, 99, 107, 58, 32, 56), 8)
+    draw_label_vector(x + 20, sy + 60, text_color, 180, pack8(83, 116, 97, 99, 107, 58, 32, 56), 8, 14)
     # " MB" = 32,77,66
-    draw_label(x + 84, sy + 60, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 84, sy + 60, text_color, 180, pack8(32, 77, 66, 0, 0, 0, 0, 0), 3, 14)
 
     # "Network" = 78,101,116,119,111,114,107
     draw_label_vector(x + 10, sy + 91, heading_color, 220, pack8(78, 101, 116, 119, 111, 114, 107, 0), 7, 16)
 
     # "VirtIO-n" = 86,105,114,116,73,79,45,110
-    draw_label(x + 20, sy + 110, dim_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8)
+    draw_label_vector(x + 20, sy + 110, dim_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8, 14)
     # "et: not " = 101,116,58,32,110,111,116,32
-    draw_label(x + 84, sy + 110, dim_color, 180, pack8(101, 116, 58, 32, 110, 111, 116, 32), 8)
+    draw_label_vector(x + 84, sy + 110, dim_color, 180, pack8(101, 116, 58, 32, 110, 111, 116, 32), 8, 14)
     # "connecte" = 99,111,110,110,101,99,116,101
-    draw_label(x + 148, sy + 110, dim_color, 180, pack8(99, 111, 110, 110, 101, 99, 116, 101), 8)
+    draw_label_vector(x + 148, sy + 110, dim_color, 180, pack8(99, 111, 110, 110, 101, 99, 116, 101), 8, 14)
     # "d" = 100
-    draw_label(x + 212, sy + 110, dim_color, 180, pack8(100, 0, 0, 0, 0, 0, 0, 0), 1)
+    draw_label_vector(x + 212, sy + 110, dim_color, 180, pack8(100, 0, 0, 0, 0, 0, 0, 0), 1, 14)
 
     # Back link: "< Back t" = 60,32,66,97,99,107,32,116
-    draw_label(x + 20, sy + 150, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    draw_label_vector(x + 20, sy + 150, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8, 14)
     # "o Home" = 111,32,72,111,109,101
-    draw_label(x + 84, sy + 150, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+    draw_label_vector(x + 84, sy + 150, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6, 14)
 
 fn draw_page_about(x: u64, y: u64, w: u64, h: u64, theme: u64):
     """Render about page."""
@@ -2785,39 +2816,39 @@ fn draw_page_about(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label_vector(x + 138, y + 9, heading_color, 240, pack8(115, 101, 114, 0, 0, 0, 0, 0), 3, 18)
 
     # "Version " = 86,101,114,115,105,111,110,32
-    draw_label(x + 20, y + 40, text_color, 180, pack8(86, 101, 114, 115, 105, 111, 110, 32), 8)
+    draw_label_vector(x + 20, y + 40, text_color, 180, pack8(86, 101, 114, 115, 105, 111, 110, 32), 8, 14)
     # "0.1" = 48,46,49
-    draw_label(x + 84, y + 40, text_color, 180, pack8(48, 46, 49, 0, 0, 0, 0, 0), 3)
+    draw_label_vector(x + 84, y + 40, text_color, 180, pack8(48, 46, 49, 0, 0, 0, 0, 0), 3, 14)
 
     # "Built fo" = 66,117,105,108,116,32,102,111
-    draw_label(x + 20, y + 60, text_color, 180, pack8(66, 117, 105, 108, 116, 32, 102, 111), 8)
+    draw_label_vector(x + 20, y + 60, text_color, 180, pack8(66, 117, 105, 108, 116, 32, 102, 111), 8, 14)
     # "r Simple" = 114,32,83,105,109,112,108,101
-    draw_label(x + 84, y + 60, text_color, 180, pack8(114, 32, 83, 105, 109, 112, 108, 101), 8)
+    draw_label_vector(x + 84, y + 60, text_color, 180, pack8(114, 32, 83, 105, 109, 112, 108, 101), 8, 14)
     # "OS" = 79,83
-    draw_label(x + 148, y + 60, text_color, 180, pack8(79, 83, 0, 0, 0, 0, 0, 0), 2)
+    draw_label_vector(x + 148, y + 60, text_color, 180, pack8(79, 83, 0, 0, 0, 0, 0, 0), 2, 14)
 
     # "Renderin" = 82,101,110,100,101,114,105,110
-    draw_label(x + 20, y + 80, text_color, 180, pack8(82, 101, 110, 100, 101, 114, 105, 110), 8)
+    draw_label_vector(x + 20, y + 80, text_color, 180, pack8(82, 101, 110, 100, 101, 114, 105, 110), 8, 14)
     # "g: glass" = 103,58,32,103,108,97,115,115
-    draw_label(x + 84, y + 80, text_color, 180, pack8(103, 58, 32, 103, 108, 97, 115, 115), 8)
+    draw_label_vector(x + 84, y + 80, text_color, 180, pack8(103, 58, 32, 103, 108, 97, 115, 115), 8, 14)
     # ".render." = 46,114,101,110,100,101,114,46
-    draw_label(x + 148, y + 80, text_color, 180, pack8(46, 114, 101, 110, 100, 101, 114, 46), 8)
+    draw_label_vector(x + 148, y + 80, text_color, 180, pack8(46, 114, 101, 110, 100, 101, 114, 46), 8, 14)
     # "c" = 99
-    draw_label(x + 212, y + 80, text_color, 180, pack8(99, 0, 0, 0, 0, 0, 0, 0), 1)
+    draw_label_vector(x + 212, y + 80, text_color, 180, pack8(99, 0, 0, 0, 0, 0, 0, 0), 1, 14)
 
     # "Font: 8x" = 70,111,110,116,58,32,56,120
-    draw_label(x + 20, y + 100, text_color, 180, pack8(70, 111, 110, 116, 58, 32, 56, 120), 8)
+    draw_label_vector(x + 20, y + 100, text_color, 180, pack8(70, 111, 110, 116, 58, 32, 56, 120), 8, 14)
     # "16 bitma" = 49,54,32,98,105,116,109,97
-    draw_label(x + 84, y + 100, text_color, 180, pack8(49, 54, 32, 98, 105, 116, 109, 97), 8)
+    draw_label_vector(x + 84, y + 100, text_color, 180, pack8(49, 54, 32, 98, 105, 116, 109, 97), 8, 14)
     # "p + vect" = 112,32,43,32,118,101,99,116
-    draw_label(x + 148, y + 100, text_color, 180, pack8(112, 32, 43, 32, 118, 101, 99, 116), 8)
+    draw_label_vector(x + 148, y + 100, text_color, 180, pack8(112, 32, 43, 32, 118, 101, 99, 116), 8, 14)
     # "or" = 111,114
-    draw_label(x + 212, y + 100, text_color, 180, pack8(111, 114, 0, 0, 0, 0, 0, 0), 2)
+    draw_label_vector(x + 212, y + 100, text_color, 180, pack8(111, 114, 0, 0, 0, 0, 0, 0), 2, 14)
 
     # Back link: "< Back t" = 60,32,66,97,99,107,32,116
-    draw_label(x + 20, y + 140, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    draw_label_vector(x + 20, y + 140, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8, 14)
     # "o Home" = 111,32,72,111,109,101
-    draw_label(x + 84, y + 140, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+    draw_label_vector(x + 84, y + 140, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6, 14)
 
 fn draw_page_network(x: u64, y: u64, w: u64, h: u64, theme: u64):
     """Render the network status page (about:network)."""
@@ -2834,32 +2865,32 @@ fn draw_page_network(x: u64, y: u64, w: u64, h: u64, theme: u64):
     # Interface status
     val sy = y + 40
     # "Interfac" = 73,110,116,101,114,102,97,99
-    draw_label(x + 20, sy, text_color, 180, pack8(73, 110, 116, 101, 114, 102, 97, 99), 8)
+    draw_label_vector(x + 20, sy, text_color, 180, pack8(73, 110, 116, 101, 114, 102, 97, 99), 8, 14)
     # "e: eth0" = 101,58,32,101,116,104,48
-    draw_label(x + 84, sy, text_color, 180, pack8(101, 58, 32, 101, 116, 104, 48, 0), 7)
+    draw_label_vector(x + 84, sy, text_color, 180, pack8(101, 58, 32, 101, 116, 104, 48, 0), 7, 14)
 
     # Status indicator (red circle = disconnected)
     circle(x + 20, sy + 22, 8, red, 200)
     # "Status: " = 83,116,97,116,117,115,58,32
-    draw_label(x + 34, sy + 20, red, 210, pack8(83, 116, 97, 116, 117, 115, 58, 32), 8)
+    draw_label_vector(x + 34, sy + 20, red, 210, pack8(83, 116, 97, 116, 117, 115, 58, 32), 8, 14)
     # "Not conn" = 78,111,116,32,99,111,110,110
-    draw_label(x + 98, sy + 20, red, 210, pack8(78, 111, 116, 32, 99, 111, 110, 110), 8)
+    draw_label_vector(x + 98, sy + 20, red, 210, pack8(78, 111, 116, 32, 99, 111, 110, 110), 8, 14)
     # "ected" = 101,99,116,101,100
-    draw_label(x + 162, sy + 20, red, 210, pack8(101, 99, 116, 101, 100, 0, 0, 0), 5)
+    draw_label_vector(x + 162, sy + 20, red, 210, pack8(101, 99, 116, 101, 100, 0, 0, 0), 5, 14)
 
     # "Driver: " = 68,114,105,118,101,114,58,32
-    draw_label(x + 20, sy + 42, text_color, 180, pack8(68, 114, 105, 118, 101, 114, 58, 32), 8)
+    draw_label_vector(x + 20, sy + 42, text_color, 180, pack8(68, 114, 105, 118, 101, 114, 58, 32), 8, 14)
     # "VirtIO-n" = 86,105,114,116,73,79,45,110
-    draw_label(x + 84, sy + 42, text_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8)
+    draw_label_vector(x + 84, sy + 42, text_color, 180, pack8(86, 105, 114, 116, 73, 79, 45, 110), 8, 14)
     # "et" = 101,116
-    draw_label(x + 148, sy + 42, text_color, 180, pack8(101, 116, 0, 0, 0, 0, 0, 0), 2)
+    draw_label_vector(x + 148, sy + 42, text_color, 180, pack8(101, 116, 0, 0, 0, 0, 0, 0), 2, 14)
 
     # "MAC: 52:" = 77,65,67,58,32,53,50,58
-    draw_label(x + 20, sy + 62, dim_color, 160, pack8(77, 65, 67, 58, 32, 53, 50, 58), 8)
+    draw_label_vector(x + 20, sy + 62, dim_color, 160, pack8(77, 65, 67, 58, 32, 53, 50, 58), 8, 14)
     # "54:00:12" = 53,52,58,48,48,58,49,50
-    draw_label(x + 84, sy + 62, dim_color, 160, pack8(53, 52, 58, 48, 48, 58, 49, 50), 8)
+    draw_label_vector(x + 84, sy + 62, dim_color, 160, pack8(53, 52, 58, 48, 48, 58, 49, 50), 8, 14)
     # ":34:56" = 58,51,52,58,53,54
-    draw_label(x + 148, sy + 62, dim_color, 160, pack8(58, 51, 52, 58, 53, 54, 0, 0), 6)
+    draw_label_vector(x + 148, sy + 62, dim_color, 160, pack8(58, 51, 52, 58, 53, 54, 0, 0), 6, 14)
 
     # Note about networking
     val ny = sy + 92
@@ -2871,27 +2902,27 @@ fn draw_page_network(x: u64, y: u64, w: u64, h: u64, theme: u64):
     draw_label_vector(x + 138, ny + 1, heading_color, 200, pack8(107, 105, 110, 103, 58, 0, 0, 0), 5, 16)
 
     # "Add -net" = 65,100,100,32,45,110,101,116
-    draw_label(x + 20, ny + 20, text_color, 180, pack8(65, 100, 100, 32, 45, 110, 101, 116), 8)
+    draw_label_vector(x + 20, ny + 20, text_color, 180, pack8(65, 100, 100, 32, 45, 110, 101, 116), 8, 14)
     # "dev user" = 100,101,118,32,117,115,101,114
-    draw_label(x + 84, ny + 20, text_color, 180, pack8(100, 101, 118, 32, 117, 115, 101, 114), 8)
+    draw_label_vector(x + 84, ny + 20, text_color, 180, pack8(100, 101, 118, 32, 117, 115, 101, 114), 8, 14)
     # " to QEMU" = 32,116,111,32,81,69,77,85
-    draw_label(x + 148, ny + 20, text_color, 180, pack8(32, 116, 111, 32, 81, 69, 77, 85), 8)
+    draw_label_vector(x + 148, ny + 20, text_color, 180, pack8(32, 116, 111, 32, 81, 69, 77, 85), 8, 14)
 
     # Packet counters
     val py = ny + 50
     # "Packets" = 80,97,99,107,101,116,115
     draw_label_vector(x + 10, py + 1, heading_color, 200, pack8(80, 97, 99, 107, 101, 116, 115, 0), 7, 16)
     # "TX: 0  R" = 84,88,58,32,48,32,32,82
-    draw_label(x + 20, py + 20, dim_color, 160, pack8(84, 88, 58, 32, 48, 32, 32, 82), 8)
+    draw_label_vector(x + 20, py + 20, dim_color, 160, pack8(84, 88, 58, 32, 48, 32, 32, 82), 8, 14)
     # "X: 0  Dr" = 88,58,32,48,32,32,68,114
-    draw_label(x + 84, py + 20, dim_color, 160, pack8(88, 58, 32, 48, 32, 32, 68, 114), 8)
+    draw_label_vector(x + 84, py + 20, dim_color, 160, pack8(88, 58, 32, 48, 32, 32, 68, 114), 8, 14)
     # "opped: 0" = 111,112,112,101,100,58,32,48
-    draw_label(x + 148, py + 20, dim_color, 160, pack8(111, 112, 112, 101, 100, 58, 32, 48), 8)
+    draw_label_vector(x + 148, py + 20, dim_color, 160, pack8(111, 112, 112, 101, 100, 58, 32, 48), 8, 14)
 
     # Back link: "< Back t" = 60,32,66,97,99,107,32,116
-    draw_label(x + 20, py + 50, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8)
+    draw_label_vector(x + 20, py + 50, 0x000A84FF, 220, pack8(60, 32, 66, 97, 99, 107, 32, 116), 8, 14)
     # "o Home" = 111,32,72,111,109,101
-    draw_label(x + 84, py + 50, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6)
+    draw_label_vector(x + 84, py + 50, 0x000A84FF, 220, pack8(111, 32, 72, 111, 109, 101, 0, 0), 6, 14)
 
 # ===========================================================================
 # Window Title Drawing
@@ -3152,8 +3183,9 @@ fn spl_start():
     # "SimpleOS" in vector font at 40px
     draw_label_vector(splash_x + 70, splash_y + 16, 0x00F5F5F7, 240, pack8(83, 105, 109, 112, 108, 101, 79, 83), 8, 40)
 
-    # Version text below (regular size)
-    draw_label_shadow(splash_x + 130, splash_y + 60, 0x00EBEBF5, 160, pack8(118, 49, 46, 48, 0, 0, 0, 0), 4, 40)
+    # Version text below (vector with soft shadow)
+    draw_label_vector(splash_x + 131, splash_y + 61, 0x00000000, 40, pack8(118, 49, 46, 48, 0, 0, 0, 0), 4, 16)
+    draw_label_vector(splash_x + 130, splash_y + 60, 0x00EBEBF5, 160, pack8(118, 49, 46, 48, 0, 0, 0, 0), 4, 16)
 
     # Loading bar (wider, more visible)
     val bar_y = splash_y + 90
@@ -3161,11 +3193,12 @@ fn spl_start():
     grad_h(splash_x + 40, bar_y + 1, (splash_w - 80) * 2 / 3, 6, DARK_ACCENT, DARK_ACCENT2)
     rrect_aa(splash_x + 40, bar_y, (splash_w - 80) * 2 / 3, 8, 0x00FFFFFF, 4, 20)
 
-    # "Starting..." below
-    draw_label_shadow((SCREEN_W - 72) / 2, splash_y + splash_h + 20, 0x00EBEBF5, 120, pack8(83, 116, 97, 114, 116, 105, 110, 103), 8, 40)
+    # "Starting..." below (vector with soft shadow)
+    draw_label_vector((SCREEN_W - 72) / 2 + 1, splash_y + splash_h + 21, 0x00000000, 30, pack8(83, 116, 97, 114, 116, 105, 110, 103), 8, 14)
+    draw_label_vector((SCREEN_W - 72) / 2, splash_y + splash_h + 20, 0x00EBEBF5, 120, pack8(83, 116, 97, 114, 116, 105, 110, 103), 8, 14)
 
-    # SimpleOS branding: "Powered " tagline
-    draw_label(splash_x + 56, splash_y + splash_h + 40, 0x00EBEBF5, 60, pack8(80, 111, 119, 101, 114, 101, 100, 32), 8)
+    # SimpleOS branding: "Powered " tagline in vector
+    draw_label_vector(splash_x + 56, splash_y + splash_h + 40, 0x00EBEBF5, 60, pack8(80, 111, 119, 101, 114, 101, 100, 32), 8, 12)
 
     rt_gui_present(0, 0, 0, 0)
 

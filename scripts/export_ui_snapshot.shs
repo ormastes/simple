@@ -1,0 +1,47 @@
+#!/bin/sh
+# Export a single-file HTML snapshot from the Electron UI renderer.
+#
+# Usage:
+#   sh scripts/export_ui_snapshot.shs <entry.spl> <out.html> [out.png]
+#
+# The script launches the Electron shell, captures the exact rendered HTML
+# payload to a standalone HTML file, and optionally renders a PNG preview.
+# This is the artifact you can hand to Stitch for visual analysis.
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+ENTRY="${1:-}"
+OUT_HTML="${2:-}"
+OUT_PNG="${3:-}"
+
+if [ -z "$ENTRY" ] || [ -z "$OUT_HTML" ]; then
+    echo "Usage: sh scripts/export_ui_snapshot.shs <entry.spl> <out.html> [out.png]"
+    exit 1
+fi
+
+if ! command -v electron >/dev/null 2>&1; then
+    echo "ERROR: electron not found in PATH"
+    exit 1
+fi
+
+mkdir -p "$(dirname "$OUT_HTML")"
+
+TMP_LOG="$(mktemp -t simple-ui-html.XXXXXX)"
+trap 'rm -f "$TMP_LOG"' EXIT
+
+SIMPLE_UI_DUMP_HTML_PATH="$OUT_HTML" \
+    electron "$REPO_ROOT/tools/electron-shell" "$ENTRY" >"$TMP_LOG" 2>&1 || {
+        cat "$TMP_LOG"
+        echo "ERROR: Electron render export failed"
+        exit 1
+    }
+
+echo "HTML snapshot written: $OUT_HTML"
+
+if [ -n "$OUT_PNG" ]; then
+    node tools/electron-shell/screenshot.js "$OUT_HTML" "$OUT_PNG" 1360 840
+    echo "PNG preview written: $OUT_PNG"
+fi

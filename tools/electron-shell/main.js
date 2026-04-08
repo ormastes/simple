@@ -17,6 +17,7 @@ let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
+const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
 const projectRoot = path.resolve(__dirname, '..', '..');
 
 function debugLog(message) {
@@ -25,6 +26,17 @@ function debugLog(message) {
         fs.appendFileSync(debugLogPath, line);
     } catch (err) {
         // Best-effort logging only.
+    }
+}
+
+function dumpRenderedHtml(html) {
+    if (!dumpHtmlPath) return;
+    try {
+        fs.mkdirSync(path.dirname(dumpHtmlPath), { recursive: true });
+        fs.writeFileSync(dumpHtmlPath, html, 'utf8');
+        debugLog(`dumped html to ${dumpHtmlPath}`);
+    } catch (err) {
+        debugLog(`failed to dump html: ${err.message}`);
     }
 }
 
@@ -77,6 +89,7 @@ function handleSimpleMessage(line) {
         switch (msg.type) {
             case 'render':
                 if (mainWindow) {
+                    dumpRenderedHtml(msg.html || '');
                     mainWindow.webContents.send('render', msg.html);
                 }
                 break;

@@ -45,33 +45,64 @@ fn parse_manifest(path: text) -> Result<SnpmManifest, text>:
         if line == "" or line.starts_with("#"):
             i = i + 1
             continue
-        # Section headers
-        if not line.starts_with(" ") and not line.starts_with("\t"):
-            if line.ends_with(":"):
-                current_section = line.slice(0, line.len() - 1).trim()
-                i = i + 1
-                continue
-        # Key-value pairs (indented)
+        # Section headers (e.g. "package:", "scripts:")
+        if line.ends_with(":"):
+            val section_parts = line.split(":")
+            if section_parts.len() >= 1:
+                current_section = section_parts[0].trim()
+            i = i + 1
+            continue
+        # Key-value pairs (e.g. "name: snpm-test")
         val stripped = line.trim()
         if stripped.contains(":"):
-            val colon_idx = _find_colon(stripped)
-            if colon_idx > 0:
-                val key = stripped.slice(0, colon_idx).trim()
-                var value = stripped.slice(colon_idx + 1, stripped.len()).trim()
+            val kv_parts = stripped.split(":")
+            if kv_parts.len() >= 2:
+                val key = kv_parts[0].trim()
+                # Rejoin remaining parts (value may contain colons)
+                var value = kv_parts[1]
+                var j = 2
+                while j < kv_parts.len():
+                    value = value + ":" + kv_parts[j]
+                    j = j + 1
+                value = value.trim()
                 # Strip quotes
                 if value.starts_with("\"") and value.ends_with("\""):
-                    value = value.slice(1, value.len() - 1)
-                _set_manifest_field(manifest, current_section, key, value)
+                    val quote_parts = value.split("\"")
+                    # "value" splits to ["", "value", ""]
+                    if quote_parts.len() >= 3:
+                        value = quote_parts[1]
+                # Inline field setting (interpreter passes classes by value to functions)
+                if current_section == "" or current_section == "package":
+                    match key:
+                        "name": manifest.name = value
+                        "version": manifest.version = value
+                        "description": manifest.description = value
+                        "main": manifest.main = value
+                        "license": manifest.license = value
+                        "author": manifest.author = value
+                        _: pass_dn
+                elif current_section == "dependencies":
+                    manifest.dependencies.push(Pair(first: key, second: value))
+                elif current_section == "dev_dependencies":
+                    manifest.dev_dependencies.push(Pair(first: key, second: value))
+                elif current_section == "scripts":
+                    manifest.scripts.push(Pair(first: key, second: value))
+                elif current_section == "workspaces":
+                    manifest.workspaces.push(value)
+                elif current_section == "engines":
+                    if key == "simple":
+                        manifest.engines_simple = value
+                elif current_section == "repository":
+                    if key == "url":
+                        manifest.repository_url = value
         i = i + 1
     Ok(manifest)
 
 fn _find_colon(s: text) -> i64:
-    var i = 0
-    while i < s.len():
-        if s.slice(i, i + 1) == ":":
-            return i
-        i = i + 1
-    -1
+    val parts = s.split(":")
+    if parts.len() < 2:
+        return -1
+    parts[0].len()
 
 fn _set_manifest_field(manifest: SnpmManifest, section: text, key: text, value: text):
     if section == "" or section == "package":
