@@ -2181,6 +2181,24 @@ fn generate_stub_object(
                 continue;
             }
 
+            // Core intrinsics → trampoline to rt_ prefixed runtime functions.
+            // Cranelift codegen generates calls to bare names (array_len, string_new, etc.)
+            // but the runtime library exports them with rt_ prefix (rt_array_len, etc.).
+            let bare = if sym.starts_with('_') { &sym[1..] } else { sym.as_str() };
+            let rt_sym = format!("_rt_{}", bare);
+            if matches!(bare,
+                "array_len" | "array_new" | "array_get" | "array_set" | "array_append"
+                | "array_push" | "array_pop" | "array_slice" | "array_contains"
+                | "string_new" | "string_len" | "string_concat" | "string_eq"
+                | "string_slice" | "string_char_at" | "string_data"
+                | "string_split" | "string_replace" | "string_find" | "string_rfind"
+                | "alloc" | "free" | "print_str" | "println_str"
+                | "print_value" | "println_value"
+            ) && defined.contains(&rt_sym) {
+                asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &rt_sym));
+                continue;
+            }
+
             asm_code.push_str(&plat_config.generate_stub_asm(sym, ret_nil));
         }
 
@@ -3840,7 +3858,7 @@ struct ImportMapResult {
 /// This replaces dots with `_dot_` to produce valid symbols, matching what
 /// `CommonBackend::sanitize_symbol` does during codegen.
 fn sanitize_mangled(name: String) -> String {
-    if cfg!(target_os = "macos") && name.contains('.') {
+    if name.contains('.') {
         name.replace('.', "_dot_")
     } else {
         name

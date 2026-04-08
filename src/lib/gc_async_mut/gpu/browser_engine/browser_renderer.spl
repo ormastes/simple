@@ -14,7 +14,7 @@ use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
 use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
 use common.render_scene.scene.{RenderScene, SceneCommand}
-use common.render_scene.executor.{execute_scene_to_buffer}
+use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -240,6 +240,22 @@ class BrowserRenderer:
         self.viewport_h = h
 
 # =========================================================================
+# Effect Engine Configuration
+# =========================================================================
+
+fn set_browser_effect_engine(platform: text):
+    """Configure the render_scene effect engine for browser rendering.
+
+    Call this before rendering to select the appropriate effect engine
+    for the current platform.  "hosted" or "float" selects the f64
+    FloatEffectEngine; anything else selects the integer-only engine.
+
+    Args:
+        platform: "hosted", "float", "baremetal", "int", etc.
+    """
+    select_effect_engine(platform)
+
+# =========================================================================
 # Helpers
 # =========================================================================
 
@@ -385,6 +401,29 @@ fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: t
         var s = dom.style
         s.display = "none"
         dom.style = s
+
+pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
+    """Render HTML to a flat pixel array (ARGB u32). Returns just pixels, no struct wrapper.
+    Use this from native-built tests to avoid cross-module struct layout issues."""
+    print "[render] parsing HTML"
+    val dom = browser_renderer_html_string_to_dom(html)
+    print "[render] DOM ok, layout..."
+    val layout = layout_tree(dom, width, height)
+    print "[render] layout ok, paint..."
+    val commands = generate_paint_list(layout)
+    print "[render] {commands.len()} paint cmds, scene..."
+    val scene = paint_commands_to_scene(commands, width, height)
+    print "[render] scene ok, buffer..."
+    var pixels: [u32] = []
+    val pixel_count = width * height
+    var i = 0
+    while i < pixel_count:
+        pixels = pixels + [0xFFFFFFFF]
+        i = i + 1
+    print "[render] buffer ({pixels.len()} pixels), executing..."
+    execute_scene_to_buffer(scene, pixels, width, height)
+    print "[render] done"
+    pixels
 
 pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
     """Convenience wrapper for compiled callers that prefer a module-level entrypoint."""

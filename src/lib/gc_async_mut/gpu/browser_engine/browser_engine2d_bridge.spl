@@ -15,6 +15,10 @@
 #   var renderer = create_software_browser_renderer(800, 600)
 
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_virtio_gpu.{VirtioGpuBackend}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 
 # ============================================================================
@@ -69,8 +73,38 @@ fn create_software_browser_renderer(w: i32, h: i32) -> BrowserRenderer:
     """
     BrowserRenderer.create(w, h)
 
-# For OS-level rendering with baremetal framebuffer:
-# fn create_baremetal_browser_renderer(fb: FramebufferDriver) -> BrowserRenderer:
-#     val backend = BaremetalBackend.create(fb)
-#     val engine = Engine2D.create_with_baremetal_backend(backend)
-#     BrowserRenderer.create_with_engine(engine.width(), engine.height(), engine)
+fn create_baremetal_browser_renderer(fb: FramebufferDriver) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by a baremetal framebuffer.
+
+    Wraps the FramebufferDriver in a BaremetalBackend, then in an Engine2D,
+    producing a BrowserRenderer suitable for OS-level rendering without
+    any hosted GPU stack.
+
+    Args:
+        fb: Initialized FramebufferDriver (from Limine/multiboot)
+
+    Returns:
+        BrowserRenderer rendering to the framebuffer
+    """
+    val backend = BaremetalBackend.create(fb)
+    val engine = Engine2D.create_with_baremetal_backend(backend)
+    BrowserRenderer.create_with_engine(engine.width(), engine.height(), engine)
+
+fn create_virtio_gpu_browser_renderer(gpu: VirtioGpuDriver) -> BrowserRenderer:
+    """Create a BrowserRenderer backed by a VirtIO-GPU driver.
+
+    Wraps the VirtioGpuDriver in a VirtioGpuBackend, then in an Engine2D,
+    producing a BrowserRenderer for QEMU/KVM virtual GPU rendering.
+
+    Args:
+        gpu: Initialized VirtioGpuDriver (init_from_grant() already called)
+
+    Returns:
+        BrowserRenderer rendering through VirtIO-GPU
+    """
+    val w = gpu.width.to_i32()
+    val h = gpu.height.to_i32()
+    var backend = VirtioGpuBackend.create(gpu)
+    backend.init(w, h)
+    val engine = Engine2D(backend: backend, w: w, h: h)
+    BrowserRenderer.create_with_engine(w, h, engine)

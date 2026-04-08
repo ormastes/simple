@@ -24,6 +24,11 @@ use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
 use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{ui_tree_to_dom}
 use common.render_scene.scene.{RenderScene}
 use common.render_scene.executor.{execute_scene_to_buffer}
+use common.render_scene.engine2d_executor.{execute_scene_to_engine2d_pixels}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
+use os.compositor.engine2d_display.{create_fb_engine, create_gpu_engine}
 
 # ============================================================================
 # Theme Color Constants (ARGB packed u32)
@@ -166,17 +171,24 @@ class BrowserBackend:
     Converts UI widget trees to browser DOM, runs CSS layout, generates
     paint commands, and rasterizes to an ARGB pixel buffer via the
     shared render_scene software executor.
+
+    When an Engine2D is attached (via with_engine/from_fb/from_gpu
+    constructors), the render pipeline routes through the Engine2D
+    backend for GPU-accelerated or framebuffer-direct rendering.
     """
     width: i32
     height: i32
     pixel_buffer: [u32]
     theme_name: text
     initialized: bool
+    engine: Engine2D?
 
 impl BrowserBackend:
 
     static fn new(width: i32, height: i32, theme_name: text) -> BrowserBackend:
-        """Create a browser backend with the given viewport size and theme."""
+        """Create a browser backend with the given viewport size and theme.
+        Uses the software rasterizer (no Engine2D).
+        """
         val buf_size = width * height
         var buf: [u32] = []
         var i = 0
@@ -188,14 +200,77 @@ impl BrowserBackend:
             height: height,
             pixel_buffer: buf,
             theme_name: theme_name,
-            initialized: false
+            initialized: false,
+            engine: nil
         )
+
+    static fn with_engine(width: i32, height: i32, theme_name: text, engine: Engine2D) -> BrowserBackend:
+        """Create a browser backend backed by an Engine2D instance.
+
+        When an Engine2D is present, render_tree() routes through the
+        Engine2D backend (GPU or optimized software) instead of the
+        default software rasterizer.
+
+        Args:
+            width: Viewport width in pixels
+            height: Viewport height in pixels
+            theme_name: Theme name ("dark" or "light")
+            engine: Initialized Engine2D instance
+        """
+        val buf_size = width * height
+        var buf: [u32] = []
+        var i = 0
+        while i < buf_size:
+            buf = buf + [0xFF000000]
+            i = i + 1
+        BrowserBackend(
+            width: width,
+            height: height,
+            pixel_buffer: buf,
+            theme_name: theme_name,
+            initialized: false,
+            engine: engine
+        )
+
+    static fn from_fb(width: i32, height: i32, theme_name: text, fb: FramebufferDriver) -> BrowserBackend:
+        """Create a browser backend backed by a FramebufferDriver.
+
+        Wraps the framebuffer in an Engine2D via the compositor bridge,
+        then uses Engine2D for rendering.
+
+        Args:
+            width: Viewport width in pixels
+            height: Viewport height in pixels
+            theme_name: Theme name ("dark" or "light")
+            fb: Initialized FramebufferDriver
+        """
+        val engine = create_fb_engine(fb)
+        BrowserBackend.with_engine(width, height, theme_name, engine)
+
+    static fn from_gpu(width: i32, height: i32, theme_name: text, gpu: VirtioGpuDriver) -> BrowserBackend:
+        """Create a browser backend backed by a VirtIO-GPU driver.
+
+        Wraps the GPU driver in an Engine2D via the compositor bridge,
+        then uses Engine2D for rendering.
+
+        Args:
+            width: Viewport width in pixels
+            height: Viewport height in pixels
+            theme_name: Theme name ("dark" or "light")
+            gpu: Initialized VirtioGpuDriver
+        """
+        val engine = create_gpu_engine(gpu)
+        BrowserBackend.with_engine(width, height, theme_name, engine)
 
     me render_tree(tree: UITree, state: UIState) -> [u32]:
         """Render a widget tree through the full browser engine pipeline.
 
         Pipeline:
           UITree -> DOM -> themed DOM -> layout -> paint -> scene -> pixels
+
+        When an Engine2D is attached, step 7 routes through Engine2D
+        (execute_scene_to_engine2d_pixels) for GPU or framebuffer
+        rendering.  Otherwise falls back to the software rasterizer.
 
         Returns the ARGB pixel buffer.
         """
@@ -214,15 +289,18 @@ impl BrowserBackend:
         # 5. Convert paint commands to RenderScene
         val scene = paint_commands_to_scene(commands, self.width, self.height)
 
-        # 6. Clear pixel buffer to theme background
-        val bg = theme_bg(self.theme_name)
-        var i = 0
-        while i < self.pixel_buffer.len():
-            self.pixel_buffer[i] = bg
-            i = i + 1
-
-        # 7. Execute scene into pixel buffer via software rasterizer
-        execute_scene_to_buffer(scene, self.pixel_buffer, self.width, self.height)
+        # 6 + 7. Execute scene — Engine2D path or software rasterizer
+        if val Some(e) = self.engine:
+            self.pixel_buffer = execute_scene_to_engine2d_pixels(scene, e)
+        else:
+            # Clear pixel buffer to theme background
+            val bg = theme_bg(self.theme_name)
+            var i = 0
+            while i < self.pixel_buffer.len():
+                self.pixel_buffer[i] = bg
+                i = i + 1
+            # Execute scene into pixel buffer via software rasterizer
+            execute_scene_to_buffer(scene, self.pixel_buffer, self.width, self.height)
 
         return self.pixel_buffer
 

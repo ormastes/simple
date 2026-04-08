@@ -8,6 +8,7 @@
 use common.render_scene.scene.{SceneCommand, RenderScene, argb_alpha, argb_red, argb_green, argb_blue, argb}
 use common.render_scene.engine_trait.{EffectEngine}
 use common.render_scene.engine_int.{IntEffectEngine, int_effect_engine}
+use common.render_scene.engine_float.{FloatEffectEngine, float_effect_engine}
 use common.display_protocol.display_protocol.{DamageRect, damage_rect}
 use common.text_layout.font_renderer.{FontRenderer, blit_glyph}
 
@@ -28,6 +29,22 @@ fn get_effect_engine() -> EffectEngine:
     val default_engine = int_effect_engine()
     _active_engine = default_engine
     default_engine
+
+fn select_effect_engine(platform: text):
+    """Select the effect engine based on the platform capability.
+
+    Hosted or float-capable platforms use the f64-based FloatEffectEngine
+    for higher-quality rendering (Gaussian shadows, exact trig, BT.709
+    grayscale).  Baremetal or integer-only platforms use the pure-integer
+    IntEffectEngine which needs no FPU.
+
+    Args:
+        platform: One of "hosted", "float", "baremetal", "int", etc.
+    """
+    if platform == "hosted" or platform == "float":
+        set_effect_engine(float_effect_engine())
+    else:
+        set_effect_engine(int_effect_engine())
 
 # ============================================================================
 # Clip rectangle
@@ -509,6 +526,12 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
         if cmd.kind == "gradient_rect":
             draw_gradient_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.color2, clip_stack)
 
+        if cmd.kind == "blur_rect":
+            # Backdrop blur: read pixels from buffer, apply box blur, write back
+            val blur_radius = cmd.font_size  # blur radius stored in font_size
+            if blur_radius > 0:
+                apply_box_blur(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, blur_radius)
+
         if cmd.kind == "image":
             draw_image(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels, cmd.pixel_width, cmd.pixel_height, clip_stack)
 
@@ -594,3 +617,119 @@ fn scene_bounds(scene: RenderScene) -> DamageRect:
     val bw = (max_x - min_x).to_u32()
     val bh = (max_y - min_y).to_u32()
     damage_rect(bx, by, bw, bh)
+
+# ============================================================================
+# Box Blur (for backdrop-filter)
+# ============================================================================
+
+fn apply_box_blur(buffer: [u32], buf_w: i32, buf_h: i32, rx: i32, ry: i32, rw: i32, rh: i32, radius: i32):
+    """Apply a box blur to a rectangular region of the pixel buffer.
+
+    Uses a separable two-pass approach (horizontal then vertical) with
+    a running sum accumulator for O(n) per-pixel cost regardless of radius.
+
+    Algorithm adapted from glass_effects_pure.spl and glass_render.c.
+    """
+    # Clamp region to buffer bounds
+    val x0 = if rx < 0: 0 else: rx
+    val y0 = if ry < 0: 0 else: ry
+    val x1 = if rx + rw > buf_w: buf_w else: rx + rw
+    val y1 = if ry + rh > buf_h: buf_h else: ry + rh
+
+    val region_w = x1 - x0
+    val region_h = y1 - y0
+    if region_w <= 0 or region_h <= 0:
+        return
+
+    val r = if radius > 50: 50 else: radius  # cap for performance
+    val kernel = r * 2 + 1
+
+    # Horizontal pass: blur each row
+    var y: i32 = y0
+    while y < y1:
+        # Read row into temp buffer
+        var row_r: [i32] = []
+        var row_g: [i32] = []
+        var row_b: [i32] = []
+        var xi: i32 = x0
+        while xi < x1:
+            val idx = y * buf_w + xi
+            val px = buffer[idx]
+            row_r = row_r + [((px >> 16) & 0xFF).to_i32()]
+            row_g = row_g + [((px >> 8) & 0xFF).to_i32()]
+            row_b = row_b + [(px & 0xFF).to_i32()]
+            xi = xi + 1
+
+        # Accumulate and write back
+        xi = 0
+        while xi < region_w:
+            var sum_r: i32 = 0
+            var sum_g: i32 = 0
+            var sum_b: i32 = 0
+            var count: i32 = 0
+
+            var ki: i32 = -r
+            while ki <= r:
+                val sx = xi + ki
+                if sx >= 0 and sx < region_w:
+                    sum_r = sum_r + row_r[sx]
+                    sum_g = sum_g + row_g[sx]
+                    sum_b = sum_b + row_b[sx]
+                    count = count + 1
+                ki = ki + 1
+
+            if count > 0:
+                val avg_r = (sum_r / count).to_u32()
+                val avg_g = (sum_g / count).to_u32()
+                val avg_b = (sum_b / count).to_u32()
+                val idx = y * buf_w + (x0 + xi)
+                val alpha = (buffer[idx] >> 24) & 0xFF
+                buffer[idx] = (alpha << 24) | (avg_r << 16) | (avg_g << 8) | avg_b
+
+            xi = xi + 1
+        y = y + 1
+
+    # Vertical pass: blur each column
+    var x: i32 = x0
+    while x < x1:
+        # Read column into temp buffer
+        var col_r: [i32] = []
+        var col_g: [i32] = []
+        var col_b: [i32] = []
+        var yi: i32 = y0
+        while yi < y1:
+            val idx = yi * buf_w + x
+            val px = buffer[idx]
+            col_r = col_r + [((px >> 16) & 0xFF).to_i32()]
+            col_g = col_g + [((px >> 8) & 0xFF).to_i32()]
+            col_b = col_b + [(px & 0xFF).to_i32()]
+            yi = yi + 1
+
+        # Accumulate and write back
+        yi = 0
+        while yi < region_h:
+            var sum_r: i32 = 0
+            var sum_g: i32 = 0
+            var sum_b: i32 = 0
+            var count: i32 = 0
+
+            var ki: i32 = -r
+            while ki <= r:
+                val sy = yi + ki
+                if sy >= 0 and sy < region_h:
+                    sum_r = sum_r + col_r[sy]
+                    sum_g = sum_g + col_g[sy]
+                    sum_b = sum_b + col_b[sy]
+                    count = count + 1
+                ki = ki + 1
+
+            if count > 0:
+                val avg_r = (sum_r / count).to_u32()
+                val avg_g = (sum_g / count).to_u32()
+                val avg_b = (sum_b / count).to_u32()
+                val idx = (y0 + yi) * buf_w + x
+                val alpha = (buffer[idx] >> 24) & 0xFF
+                buffer[idx] = (alpha << 24) | (avg_r << 16) | (avg_g << 8) | avg_b
+
+            yi = yi + 1
+        x = x + 1

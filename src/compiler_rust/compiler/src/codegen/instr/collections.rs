@@ -91,11 +91,9 @@ pub(crate) fn compile_collection_lit<M: Module>(
             let idx = builder.ins().iconst(types::I64, i as i64);
             adapted_call(builder, add_ref, &[current_collection, idx, elem_val]);
         } else {
-            let call = adapted_call(builder, add_ref, &[current_collection, elem_val]);
-            let results = builder.inst_results(call);
-            if !results.is_empty() {
-                current_collection = results[0];
-            }
+            // rt_array_push returns bool (success), NOT a new array pointer.
+            // The array is mutated in-place. Do NOT update current_collection.
+            adapted_call(builder, add_ref, &[current_collection, elem_val]);
         }
     }
 

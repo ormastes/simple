@@ -292,6 +292,14 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
                         None => continue, // skip relocations referencing corrupted symbols
                     }
                 }
+                RelocationTarget::Section(section_idx) => {
+                    // Section-relative relocation (r_extern=false on Mach-O).
+                    // Map to the output section's symbol.
+                    match section_map.get(&section_idx) {
+                        Some(&target_section) => out.section_symbol(target_section),
+                        None => continue,
+                    }
+                }
                 _ => continue,
             };
             if let Err(e) = out.add_relocation(out_section, write::Relocation {

@@ -22,6 +22,9 @@ use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_baremetal.{BaremetalBackend}
+use std.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gpu.engine2d.backend_rocm.{RocmBackend}
+use std.gpu.engine2d.backend_intel.{IntelBackend}
 
 # ============================================================================
 # Engine2D
@@ -104,6 +107,21 @@ class Engine2D:
             if opengl.init(width, height):
                 return Engine2D(backend: opengl, w: width, h: height)
 
+        if backend_name == "metal":
+            var metal = MetalBackend.create()
+            if metal.init(width, height):
+                return Engine2D(backend: metal, w: width, h: height)
+
+        if backend_name == "rocm":
+            var rocm = RocmBackend.create()
+            if rocm.init(width, height):
+                return Engine2D(backend: rocm, w: width, h: height)
+
+        if backend_name == "intel":
+            var intel = IntelBackend.create()
+            if intel.init(width, height):
+                return Engine2D(backend: intel, w: width, h: height)
+
         if backend_name == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
@@ -144,23 +162,41 @@ class Engine2D:
         Returns:
             Backend name string
         """
-        # Try CUDA
+        # Try CUDA (highest performance, NVIDIA discrete GPUs)
         var cuda = CudaBackend.create()
         if cuda.init(1, 1):
             cuda.shutdown()
             return "cuda"
 
-        # Try Vulkan
+        # Try ROCm (AMD discrete GPUs)
+        var rocm = RocmBackend.create()
+        if rocm.init(1, 1):
+            rocm.shutdown()
+            return "rocm"
+
+        # Try Metal (Apple GPUs, native on macOS)
+        var metal = MetalBackend.create()
+        if metal.init(1, 1):
+            metal.shutdown()
+            return "metal"
+
+        # Try Vulkan (cross-platform GPU)
         var vulkan = VulkanBackend.create()
         if vulkan.init(1, 1):
             vulkan.shutdown()
             return "vulkan"
 
-        # Try OpenGL
+        # Try OpenGL (legacy GPU support)
         var opengl = OpenGLBackend.create()
         if opengl.init(1, 1):
             opengl.shutdown()
             return "opengl"
+
+        # Try Intel oneAPI (Intel GPUs)
+        var intel = IntelBackend.create()
+        if intel.init(1, 1):
+            intel.shutdown()
+            return "intel"
 
         # Software is always available but use it over plain CPU
         "software"
@@ -178,6 +214,16 @@ class Engine2D:
             available.push("cuda")
             cuda.shutdown()
 
+        var rocm = RocmBackend.create()
+        if rocm.init(1, 1):
+            available.push("rocm")
+            rocm.shutdown()
+
+        var metal = MetalBackend.create()
+        if metal.init(1, 1):
+            available.push("metal")
+            metal.shutdown()
+
         var vulkan = VulkanBackend.create()
         if vulkan.init(1, 1):
             available.push("vulkan")
@@ -188,11 +234,36 @@ class Engine2D:
             available.push("opengl")
             opengl.shutdown()
 
+        var intel = IntelBackend.create()
+        if intel.init(1, 1):
+            available.push("intel")
+            intel.shutdown()
+
         # Software and CPU are always available
         available.push("software")
         available.push("cpu")
 
         available
+
+    static fn create_with_priority(width: i32, height: i32, priority: [text]) -> Engine2D:
+        """Create engine using a custom backend priority order.
+
+        Tries backends in the given order, falling back to CPU if none work.
+
+        Args:
+            width: Framebuffer width in pixels
+            height: Framebuffer height in pixels
+            priority: Ordered list of backend names to try
+
+        Returns:
+            Initialized Engine2D
+        """
+        for backend_name in priority:
+            val engine = Engine2D.create_with_backend(width, height, backend_name)
+            if engine.backend_name() == backend_name:
+                return engine
+        # Fallback
+        Engine2D.create_with_backend(width, height, "cpu")
 
     # ========================================================================
     # Backend Info

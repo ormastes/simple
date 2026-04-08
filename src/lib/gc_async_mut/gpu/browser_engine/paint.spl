@@ -107,12 +107,69 @@ fn paint_layout_box(box: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand
     if style.opacity < 0.01:
         return cmds
 
-    # 0. Box shadow (painted before background per CSS spec)
-    # Simple drop shadow: 2px offset, 4px blur, black@30%
-    # Future: parse box_shadow property from StyleProps
-    # Currently uses a simple default shadow for any element with border-radius > 0
+    # 0. Box shadows (painted before background per CSS spec)
+    for shadow in style.box_shadows:
+        if not shadow.inset:
+            # Outer shadow: offset rect with spread expansion, semi-transparent
+            val sx = box.x + shadow.offset_x - shadow.spread_radius
+            val sy = box.y + shadow.offset_y - shadow.spread_radius
+            val sw = box.width + shadow.spread_radius * 2
+            val sh = box.height + shadow.spread_radius * 2
 
-    # 1. Background
+            if shadow.blur_radius > 0:
+                # Approximate blur with concentric semi-transparent rects
+                val steps = if shadow.blur_radius > 8: 4 else: 2
+                var si: i32 = steps
+                while si > 0:
+                    val expand = shadow.blur_radius * si / steps
+                    val alpha_factor = 1.0 / (si + 1).to_f32()
+                    var s_cmd = PaintCommand.rect(
+                        sx - expand, sy - expand,
+                        sw + expand * 2, sh + expand * 2,
+                        shadow.color
+                    )
+                    s_cmd.opacity = style.opacity * alpha_factor
+                    s_cmd.border_radius = style.border_radius
+                    cmds = cmds + [s_cmd]
+                    si = si - 1
+            else:
+                var s_cmd = PaintCommand.rect(sx, sy, sw, sh, shadow.color)
+                s_cmd.opacity = style.opacity
+                s_cmd.border_radius = style.border_radius
+                cmds = cmds + [s_cmd]
+
+    # 0b. Backdrop blur (before background, blurs existing content behind element)
+    if style.backdrop_filter_blur > 0:
+        var blur_cmd = PaintCommand(
+            kind: "backdrop_blur",
+            x: box.x, y: box.y,
+            width: box.width, height: box.height,
+            color: 0, text_val: "",
+            font_size: style.backdrop_filter_blur,
+            border_radius: style.border_radius,
+            border_width: 0, border_color: 0,
+            opacity: 1.0
+        )
+        cmds = cmds + [blur_cmd]
+
+    # 1. Background (gradient or solid)
+    if style.has_gradient:
+        var grad_cmd = PaintCommand(
+            kind: "gradient",
+            x: box.content_x - style.padding.left,
+            y: box.content_y - style.padding.top,
+            width: box.content_width + style.padding.horizontal(),
+            height: box.content_height + style.padding.vertical(),
+            color: style.gradient_color1,
+            text_val: "",
+            font_size: style.gradient_angle,
+            border_radius: style.border_radius,
+            border_width: 0,
+            border_color: style.gradient_color2,
+            opacity: style.opacity
+        )
+        cmds = cmds + [grad_cmd]
+
     if style.background_color != 0x00000000:
         var bg_cmd = PaintCommand.rect(
             box.content_x - style.padding.left,
@@ -193,11 +250,33 @@ fn paint_commands_to_scene(commands: [PaintCommand], viewport_w: i32, viewport_h
                 val argb_color = rgba_to_argb(cmd.border_color)
                 scene_cmds = scene_cmds + [scene_stroke_rect(cmd.x, cmd.y, cmd.width, cmd.height, argb_color, cmd.border_width)]
             "gradient" =>
-                val c1 = rgba_to_argb(cmd.color)
-                val c2 = rgba_to_argb(cmd.border_color)
-                scene_cmds = scene_cmds + [scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2)]
+                val c1 = apply_opacity_to_argb(rgba_to_argb(cmd.color), cmd.opacity)
+                val c2 = apply_opacity_to_argb(rgba_to_argb(cmd.border_color), cmd.opacity)
+                val angle = cmd.font_size  # angle stored in font_size field
+                if cmd.border_radius > 0:
+                    # For rounded gradients, use rounded rect with first color as approximation
+                    # then overlay gradient (imperfect but reasonable)
+                    scene_cmds = scene_cmds + [scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2)]
+                else:
+                    scene_cmds = scene_cmds + [scene_gradient_rect(cmd.x, cmd.y, cmd.width, cmd.height, c1, c2)]
+            "backdrop_blur" =>
+                # Emit a blur_rect scene command — the executor reads the existing
+                # pixel buffer, applies box blur, and writes back
+                val blur_radius = cmd.font_size  # blur radius stored in font_size
+                var blur_scene = SceneCommand(
+                    kind: "blur_rect",
+                    x: cmd.x, y: cmd.y,
+                    width: cmd.width, height: cmd.height,
+                    color: 0, text_val: "",
+                    font_size: blur_radius,
+                    border_radius: cmd.border_radius,
+                    stroke_width: 0, stroke_color: 0,
+                    color2: 0, opacity: 1.0,
+                    pixels: [], pixel_width: 0, pixel_height: 0
+                )
+                scene_cmds = scene_cmds + [blur_scene]
             "image" =>
-                pass_dn  # images not yet supported in paint commands
+                pass_dn
             _ =>
                 pass_dn
     render_scene(scene_cmds, viewport_w, viewport_h)

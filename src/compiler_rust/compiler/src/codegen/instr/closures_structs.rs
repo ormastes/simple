@@ -56,7 +56,7 @@ pub(crate) fn compile_closure_create<M: Module>(
         }
 
         if let Some(resolved) = resolved_name {
-            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+            let resolved = if resolved.contains('.') {
                 std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
             } else {
                 std::borrow::Cow::Borrowed(resolved)
@@ -396,7 +396,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
 
         if let Some(resolved) = resolved_name {
-            let resolved = if cfg!(target_os = "macos") && resolved.contains('.') {
+            let resolved = if resolved.contains('.') {
                 std::borrow::Cow::Owned(resolved.replace('.', "_dot_"))
             } else {
                 std::borrow::Cow::Borrowed(resolved)

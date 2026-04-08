@@ -208,7 +208,14 @@ class BeDomNode:
                 s.padding = BoxEdges(top: s.padding.top, right: s.padding.right, bottom: s.padding.bottom, left: cv.value_as_i32())
             "background" =>
                 val bg_trimmed = value.trim()
-                if not bg_trimmed.starts_with("url(") and not bg_trimmed.starts_with("linear-gradient") and not bg_trimmed.starts_with("radial-gradient"):
+                if bg_trimmed.starts_with("linear-gradient"):
+                    val grad = parse_linear_gradient(bg_trimmed)
+                    if grad.has_gradient:
+                        s.has_gradient = true
+                        s.gradient_color1 = grad.gradient_color1
+                        s.gradient_color2 = grad.gradient_color2
+                        s.gradient_angle = grad.gradient_angle
+                elif not bg_trimmed.starts_with("url(") and not bg_trimmed.starts_with("radial-gradient"):
                     s.background_color = parse_color_value(bg_trimmed)
             "line-height" =>
                 pass_dn  # parsed but not stored yet
@@ -253,7 +260,7 @@ class BeDomNode:
             "border-spacing" =>
                 pass_dn
             "box-shadow" =>
-                pass_dn
+                s.box_shadows = parse_box_shadows(value)
             "text-shadow" =>
                 pass_dn
             "cursor" =>
@@ -266,6 +273,11 @@ class BeDomNode:
                 pass_dn
             "animation" =>
                 pass_dn
+            "backdrop-filter" =>
+                s.backdrop_filter_blur = parse_blur_value(value)
+            "-webkit-backdrop-filter" =>
+                if s.backdrop_filter_blur == 0:
+                    s.backdrop_filter_blur = parse_blur_value(value)
             "filter" =>
                 pass_dn
             "content" =>
@@ -917,3 +929,319 @@ fn sb_dom_split_ws(s: text) -> [text]:
     if current.len() > 0:
         parts = parts + [current]
     parts
+
+# =========================================================================
+# Linear Gradient Parser
+# =========================================================================
+
+struct GradientParseResult:
+    has_gradient: bool
+    gradient_color1: u32
+    gradient_color2: u32
+    gradient_angle: i32
+
+fn parse_linear_gradient(value: text) -> GradientParseResult:
+    """Parse linear-gradient(angle, color1, color2).
+
+    Handles common patterns from glass CSS:
+      linear-gradient(180deg, rgba(255,255,255,0.09), rgba(255,255,255,0.02))
+      linear-gradient(90deg, #007AFF, #30D158)
+
+    Multi-layer gradients (with commas separating gradient() calls) use
+    only the first gradient.
+    """
+    val empty = GradientParseResult(has_gradient: false, gradient_color1: 0, gradient_color2: 0, gradient_angle: 180)
+
+    # Find opening paren
+    val open = find_char_in(value, "(", 0)
+    if open < 0:
+        return empty
+
+    # Find matching closing paren (handle nested parens for rgba)
+    var depth: i32 = 0
+    var close: i32 = -1
+    var i: i32 = open
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                close = i
+                break
+        i = i + 1
+
+    if close < 0:
+        return empty
+
+    val inner = value.slice(open + 1, close).trim()
+
+    # Split by top-level commas (not inside parens)
+    val parts = split_top_level_commas(inner)
+    if parts.len() < 2:
+        return empty
+
+    # First part: angle or color
+    var angle: i32 = 180
+    var color_start_idx: i32 = 0
+
+    val first = parts[0].trim()
+    if first.ends_with("deg"):
+        val deg_str = first.slice(0, first.len() - 3).trim()
+        val parsed = deg_str.parse_f64()
+        if parsed != nil:
+            angle = parsed.to_i32()
+        color_start_idx = 1
+    elif first == "to bottom":
+        angle = 180
+        color_start_idx = 1
+    elif first == "to top":
+        angle = 0
+        color_start_idx = 1
+    elif first == "to right":
+        angle = 90
+        color_start_idx = 1
+    elif first == "to left":
+        angle = 270
+        color_start_idx = 1
+
+    if color_start_idx + 1 >= parts.len():
+        return empty
+
+    val c1_str = parts[color_start_idx].trim()
+    val c2_str = parts[color_start_idx + 1].trim()
+
+    # Strip optional stop positions (e.g., "rgba(0,0,0,0.2) 50%")
+    val c1 = parse_color_value(strip_stop_position(c1_str))
+    val c2 = parse_color_value(strip_stop_position(c2_str))
+
+    GradientParseResult(has_gradient: true, gradient_color1: c1, gradient_color2: c2, gradient_angle: angle)
+
+fn strip_stop_position(s: text) -> text:
+    """Strip trailing percentage or length from a gradient color stop."""
+    val trimmed = s.trim()
+    # If it ends with % or px after a space, strip the position
+    val last_space = find_last_space(trimmed)
+    if last_space > 0:
+        val after = trimmed.slice(last_space + 1, trimmed.len()).trim()
+        if after.ends_with("%") or after.ends_with("px"):
+            return trimmed.slice(0, last_space).trim()
+    trimmed
+
+fn find_last_space(s: text) -> i32:
+    var last: i32 = -1
+    var depth: i32 = 0
+    var i: i32 = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "(": depth = depth + 1
+        elif ch == ")": depth = depth - 1
+        elif ch == " " and depth == 0: last = i
+        i = i + 1
+    last
+
+fn split_top_level_commas(s: text) -> [text]:
+    """Split a string by commas, but not inside parentheses."""
+    var parts: [text] = []
+    var current = ""
+    var depth: i32 = 0
+
+    for ch in s:
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            depth = depth - 1
+            current = "{current}{ch}"
+        elif ch == "," and depth == 0:
+            parts = parts + [current.trim()]
+            current = ""
+        else:
+            current = "{current}{ch}"
+
+    if current.trim().len() > 0:
+        parts = parts + [current.trim()]
+
+    parts
+
+fn find_char_in(s: text, target: text, start: i32) -> i32:
+    """Find the first occurrence of target character in s starting at position start."""
+    var i = start
+    while i < s.len():
+        if s.slice(i, i + 1) == target:
+            return i
+        i = i + 1
+    return -1
+
+# =========================================================================
+# Box Shadow Parser
+# =========================================================================
+
+fn parse_box_shadows(value: text) -> [BoxShadow]:
+    """Parse CSS box-shadow value, supporting multiple comma-separated shadows.
+
+    Format: [inset] offset-x offset-y [blur [spread]] color
+    Multiple: shadow1, shadow2, ...
+    """
+    val shadow_strs = split_top_level_commas(value)
+    var shadows: [BoxShadow] = []
+
+    for shadow_str in shadow_strs:
+        val shadow = parse_single_box_shadow(shadow_str.trim())
+        if shadow.color != 0x00000000 or shadow.blur_radius > 0 or shadow.offset_x != 0 or shadow.offset_y != 0:
+            shadows = shadows + [shadow]
+
+    shadows
+
+fn parse_single_box_shadow(s: text) -> BoxShadow:
+    """Parse a single box-shadow value.
+
+    Examples:
+      0 2px 4px rgba(0,0,0,0.2)
+      0 0 0 1px rgba(255,255,255,0.05)
+      0 1px 0 rgba(255,255,255,0.1) inset
+      inset 0 1px 0 rgba(255,255,255,0.1)
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return BoxShadow.none()
+
+    var inset = false
+    var work = trimmed
+
+    # Check for 'inset' keyword
+    if work.starts_with("inset ") or work.starts_with("inset\t"):
+        inset = true
+        work = work.slice(6, work.len()).trim()
+    elif work.ends_with(" inset"):
+        inset = true
+        work = work.slice(0, work.len() - 6).trim()
+
+    # Split into tokens respecting parens
+    val tokens = split_shadow_tokens(work)
+    if tokens.len() < 3:
+        return BoxShadow.none()
+
+    # First 2-4 tokens are numeric values, last is color
+    var offset_x: i32 = 0
+    var offset_y: i32 = 0
+    var blur: i32 = 0
+    var spread: i32 = 0
+    var color: u32 = 0x000000FF
+
+    # Parse numeric values from the front
+    var num_count: i32 = 0
+    var nums: [i32] = []
+    var color_start: i32 = 0
+
+    for tok in tokens:
+        val tv = tok.trim()
+        if num_count < 4:
+            # Try to parse as a number (px value)
+            val stripped = if tv.ends_with("px"): tv.slice(0, tv.len() - 2) else: tv
+            val parsed = stripped.parse_f64()
+            if parsed != nil:
+                nums = nums + [parsed.to_i32()]
+                num_count = num_count + 1
+                color_start = color_start + 1
+                continue
+        # Not a number — must be start of color
+        break
+
+    if nums.len() >= 2:
+        offset_x = nums[0]
+        offset_y = nums[1]
+    if nums.len() >= 3:
+        blur = nums[2]
+    if nums.len() >= 4:
+        spread = nums[3]
+
+    # Remaining tokens form the color
+    if color_start < tokens.len():
+        var color_str = ""
+        var ci = color_start
+        while ci < tokens.len():
+            val t = tokens[ci].trim()
+            if t == "inset":
+                inset = true
+            else:
+                if color_str.len() > 0:
+                    color_str = "{color_str} {t}"
+                else:
+                    color_str = t
+            ci = ci + 1
+        if color_str.len() > 0:
+            color = parse_color_value(color_str)
+
+    BoxShadow(offset_x: offset_x, offset_y: offset_y,
+        blur_radius: blur, spread_radius: spread,
+        color: color, inset: inset)
+
+fn split_shadow_tokens(s: text) -> [text]:
+    """Split shadow value into tokens, keeping function calls like rgba(...) together."""
+    var tokens: [text] = []
+    var current = ""
+    var depth: i32 = 0
+
+    for ch in s:
+        if ch == "(":
+            depth = depth + 1
+            current = "{current}{ch}"
+        elif ch == ")":
+            depth = depth - 1
+            current = "{current}{ch}"
+        elif (ch == " " or ch == "\t") and depth == 0:
+            if current.trim().len() > 0:
+                tokens = tokens + [current.trim()]
+            current = ""
+        else:
+            current = "{current}{ch}"
+
+    if current.trim().len() > 0:
+        tokens = tokens + [current.trim()]
+
+    tokens
+
+# =========================================================================
+# Backdrop Filter Parser
+# =========================================================================
+
+fn parse_blur_value(value: text) -> i32:
+    """Parse backdrop-filter/filter value to extract blur radius.
+
+    Handles: blur(20px), blur(20px) saturate(180%), etc.
+    Returns blur radius in px, or 0 if not found.
+    """
+    val trimmed = value.trim()
+    val blur_idx = find_substr(trimmed, "blur(")
+    if blur_idx < 0:
+        return 0
+
+    val start = blur_idx + 5  # length of "blur("
+    val end = find_char_in(trimmed, ")", start)
+    if end < 0:
+        return 0
+
+    val inner = trimmed.slice(start, end).trim()
+    val num_str = if inner.ends_with("px"):
+        inner.slice(0, inner.len() - 2)
+    else:
+        inner
+
+    val parsed = num_str.parse_f64()
+    if parsed != nil:
+        return parsed.to_i32()
+    0
+
+fn find_substr(haystack: text, needle: text) -> i32:
+    """Find the first occurrence of needle in haystack. Returns -1 if not found."""
+    val nlen = needle.len()
+    if nlen == 0 or nlen > haystack.len():
+        return -1
+    var i: i32 = 0
+    while i + nlen <= haystack.len():
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    return -1

@@ -624,9 +624,10 @@ pub fn compile_call<M: Module>(
 
         let resolved_name = resolved_name.unwrap_or(func_name);
 
-        // Sanitize symbol name for macOS: Mach-O does not support dots in symbols.
-        // Apple ld crashes on dot-containing symbol names.
-        let resolved_name = if cfg!(target_os = "macos") && resolved_name.contains('.') {
+        // Sanitize symbol name: replace dots with _dot_ for linker compatibility.
+        // Mach-O does not support dots in symbols; keeping this unconditional
+        // ensures definition-side and reference-side names always match.
+        let resolved_name = if resolved_name.contains('.') {
             std::borrow::Cow::Owned(resolved_name.replace('.', "_dot_"))
         } else {
             std::borrow::Cow::Borrowed(resolved_name)

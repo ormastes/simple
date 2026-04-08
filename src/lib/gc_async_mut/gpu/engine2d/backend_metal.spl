@@ -1,0 +1,1293 @@
+@allow(primitive_api)
+# 2D Engine — Apple Metal GPU Backend
+#
+# Hardware-accelerated 2D rendering using Metal compute shaders.
+# Each draw operation launches a compute kernel operating on a
+# device-side framebuffer. present() copies the GPU framebuffer
+# back to host memory for display.
+#
+# Requires macOS/iOS with Metal-capable hardware.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_metal.{MetalBackend}
+
+use std.gpu.engine2d.backend.{RenderBackend}
+use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
+
+# ============================================================================
+# Additional Metal FFI declarations for compute encoder management
+# ============================================================================
+
+extern fn rt_metal_init() -> bool
+extern fn rt_metal_is_available() -> bool
+extern fn rt_metal_device_count() -> i64
+extern fn rt_metal_create_device(device_id: i64) -> i64
+extern fn rt_metal_destroy_device(device: i64) -> bool
+extern fn rt_metal_alloc_buffer(device: i64, size: i64) -> i64
+extern fn rt_metal_free_buffer(buffer: i64) -> bool
+extern fn rt_metal_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool
+extern fn rt_metal_buffer_download(data: [u8], buffer: i64, size: i64) -> bool
+extern fn rt_metal_compile_shader(device: i64, source: text) -> i64
+extern fn rt_metal_destroy_shader(shader: i64) -> bool
+extern fn rt_metal_create_compute_pipeline(device: i64, shader: i64, entry: text) -> i64
+extern fn rt_metal_destroy_pipeline(pipeline: i64) -> bool
+extern fn rt_metal_create_command_queue(device: i64) -> i64
+extern fn rt_metal_destroy_command_queue(queue: i64) -> bool
+extern fn rt_metal_create_command_buffer(queue: i64) -> i64
+extern fn rt_metal_commit_command_buffer(cmd_buffer: i64) -> bool
+extern fn rt_metal_wait_completed(cmd_buffer: i64) -> bool
+extern fn rt_metal_dispatch_compute(encoder: i64, pipeline: i64, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> bool
+extern fn rt_metal_create_compute_encoder(cmd_buffer: i64) -> i64
+extern fn rt_metal_end_compute_encoder(encoder: i64) -> bool
+extern fn rt_metal_set_buffer(encoder: i64, buffer: i64, offset: i64, index: i64) -> bool
+extern fn rt_metal_set_bytes(encoder: i64, data: [u8], length: i64, index: i64) -> bool
+
+# ============================================================================
+# Metal Backend
+# ============================================================================
+
+class MetalBackend:
+    """GPU-accelerated 2D renderer using Apple Metal compute shaders.
+
+    Architecture:
+    - Framebuffer lives in GPU device memory (d_framebuffer)
+    - Each draw call creates a command buffer, encodes a compute kernel,
+      and commits it synchronously
+    - present() copies GPU framebuffer to host buffer
+    - Host buffer is returned by read_pixels()
+
+    Kernel dispatch: Each primitive (rect, circle, line, etc.) has a
+    dedicated MSL compute kernel. Grid/threadgroup dimensions cover the
+    bounding box of the primitive being drawn.
+    """
+
+    host_buf: [u32]
+    w: i32
+    h: i32
+    device: i64               # Metal device handle
+    command_queue: i64         # Persistent command queue
+    d_framebuffer: i64         # Device buffer for framebuffer
+    shader_lib: i64            # Compiled MSL shader library
+    pipe_clear: i64            # Compute pipeline: clear
+    pipe_rect_filled: i64      # Compute pipeline: filled rect
+    pipe_rect_outline: i64     # Compute pipeline: rect outline
+    pipe_line: i64             # Compute pipeline: line
+    pipe_circle: i64           # Compute pipeline: circle outline
+    pipe_circle_filled: i64    # Compute pipeline: filled circle
+    pipe_rounded_rect: i64     # Compute pipeline: rounded rect
+    pipe_triangle: i64         # Compute pipeline: filled triangle
+    pipe_gradient: i64         # Compute pipeline: gradient rect
+    pipe_blit: i64             # Compute pipeline: image blit
+    clip_x: i32
+    clip_y: i32
+    clip_w: i32
+    clip_h: i32
+    clip_enabled: bool
+    initialized: bool
+    dirty: bool                # True when GPU has changes not yet copied to host
+
+    static fn create() -> MetalBackend:
+        """Create an uninitialized Metal backend. Call init() before drawing."""
+        MetalBackend(
+            host_buf: [],
+            w: 0,
+            h: 0,
+            device: 0,
+            command_queue: 0,
+            d_framebuffer: 0,
+            shader_lib: 0,
+            pipe_clear: 0,
+            pipe_rect_filled: 0,
+            pipe_rect_outline: 0,
+            pipe_line: 0,
+            pipe_circle: 0,
+            pipe_circle_filled: 0,
+            pipe_rounded_rect: 0,
+            pipe_triangle: 0,
+            pipe_gradient: 0,
+            pipe_blit: 0,
+            clip_x: 0,
+            clip_y: 0,
+            clip_w: 0,
+            clip_h: 0,
+            clip_enabled: false,
+            initialized: false,
+            dirty: false
+        )
+
+impl RenderBackend for MetalBackend:
+
+    fn name() -> text:
+        "metal"
+
+    fn init(width: i32, height: i32) -> bool:
+        # Check Metal availability
+        if not rt_metal_is_available():
+            return false
+
+        val init_ok = rt_metal_init()
+        if not init_ok:
+            return false
+
+        if rt_metal_device_count() < 1:
+            return false
+
+        self.w = width
+        self.h = height
+
+        # Create Metal device (device 0 = default GPU)
+        self.device = rt_metal_create_device(0)
+        if self.device == 0:
+            return false
+
+        # Create persistent command queue
+        self.command_queue = rt_metal_create_command_queue(self.device)
+        if self.command_queue == 0:
+            rt_metal_destroy_device(self.device)
+            self.device = 0
+            return false
+
+        # Allocate device framebuffer (4 bytes per pixel = u32 ARGB)
+        val fb_size = _i64(width) * _i64(height) * 4
+        self.d_framebuffer = rt_metal_alloc_buffer(self.device, fb_size)
+        if self.d_framebuffer == 0:
+            rt_metal_destroy_command_queue(self.command_queue)
+            rt_metal_destroy_device(self.device)
+            self.command_queue = 0
+            self.device = 0
+            return false
+
+        # Allocate host buffer
+        val total = width * height
+        self.host_buf = [0u32; total]
+
+        # Compile MSL shader library
+        self.shader_lib = rt_metal_compile_shader(self.device, _engine2d_msl())
+        if self.shader_lib == 0:
+            rt_metal_free_buffer(self.d_framebuffer)
+            rt_metal_destroy_command_queue(self.command_queue)
+            rt_metal_destroy_device(self.device)
+            self.d_framebuffer = 0
+            self.command_queue = 0
+            self.device = 0
+            return false
+
+        # Create compute pipelines for each kernel
+        self.pipe_clear = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
+        self.pipe_rect_filled = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
+        self.pipe_rect_outline = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
+        self.pipe_line = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
+        self.pipe_circle = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
+        self.pipe_circle_filled = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_rounded_rect = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
+        self.pipe_triangle = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
+        self.pipe_gradient = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_blit = rt_metal_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
+
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = width
+        self.clip_h = height
+        self.clip_enabled = false
+        self.initialized = true
+        self.dirty = false
+        true
+
+    fn shutdown():
+        # Destroy pipelines
+        if self.pipe_clear != 0:
+            rt_metal_destroy_pipeline(self.pipe_clear)
+            self.pipe_clear = 0
+        if self.pipe_rect_filled != 0:
+            rt_metal_destroy_pipeline(self.pipe_rect_filled)
+            self.pipe_rect_filled = 0
+        if self.pipe_rect_outline != 0:
+            rt_metal_destroy_pipeline(self.pipe_rect_outline)
+            self.pipe_rect_outline = 0
+        if self.pipe_line != 0:
+            rt_metal_destroy_pipeline(self.pipe_line)
+            self.pipe_line = 0
+        if self.pipe_circle != 0:
+            rt_metal_destroy_pipeline(self.pipe_circle)
+            self.pipe_circle = 0
+        if self.pipe_circle_filled != 0:
+            rt_metal_destroy_pipeline(self.pipe_circle_filled)
+            self.pipe_circle_filled = 0
+        if self.pipe_rounded_rect != 0:
+            rt_metal_destroy_pipeline(self.pipe_rounded_rect)
+            self.pipe_rounded_rect = 0
+        if self.pipe_triangle != 0:
+            rt_metal_destroy_pipeline(self.pipe_triangle)
+            self.pipe_triangle = 0
+        if self.pipe_gradient != 0:
+            rt_metal_destroy_pipeline(self.pipe_gradient)
+            self.pipe_gradient = 0
+        if self.pipe_blit != 0:
+            rt_metal_destroy_pipeline(self.pipe_blit)
+            self.pipe_blit = 0
+
+        # Destroy shader library
+        if self.shader_lib != 0:
+            rt_metal_destroy_shader(self.shader_lib)
+            self.shader_lib = 0
+
+        # Free framebuffer
+        if self.d_framebuffer != 0:
+            rt_metal_free_buffer(self.d_framebuffer)
+            self.d_framebuffer = 0
+
+        # Destroy command queue and device
+        if self.command_queue != 0:
+            rt_metal_destroy_command_queue(self.command_queue)
+            self.command_queue = 0
+        if self.device != 0:
+            rt_metal_destroy_device(self.device)
+            self.device = 0
+
+        self.host_buf = []
+        self.w = 0
+        self.h = 0
+        self.initialized = false
+
+    me clear(color: u32):
+        val params = _pack_clear_params(color, self.w, self.h)
+        val total = _i64(self.w) * _i64(self.h)
+        val block_size: i64 = 256
+        val grid_size = (total + block_size - 1) / block_size
+        _dispatch_1d(self, self.pipe_clear, grid_size * block_size, block_size, params)
+        self.dirty = true
+
+    me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
+        val grid = _grid_for_rect(w, h)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_rect_outline, grid, block, params)
+        self.dirty = true
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
+        val grid = _grid_for_rect(w, h)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_rect_filled, grid, block, params)
+        self.dirty = true
+
+    me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+        var dx = x2 - x1
+        var dy = y2 - y1
+        if dx < 0:
+            dx = -dx
+        if dy < 0:
+            dy = -dy
+        var line_len = dx
+        if dy > dx:
+            line_len = dy
+        if line_len == 0:
+            line_len = 1
+        val params = _pack_line_params(x1, y1, x2, y2, color, thickness, self.w, self.h)
+        val block_size: i64 = 256
+        val grid_size = (_i64(line_len) + block_size - 1) / block_size
+        _dispatch_1d(self, self.pipe_line, grid_size * block_size, block_size, params)
+        self.dirty = true
+
+    me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
+        val bw = 2 * r + 1
+        val bh = 2 * r + 1
+        val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 0)
+        val grid = _grid_for_rect(bw, bh)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_circle, grid, block, params)
+        self.dirty = true
+
+    me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
+        val bw = 2 * r + 1
+        val bh = 2 * r + 1
+        val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 1)
+        val grid = _grid_for_rect(bw, bh)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_circle_filled, grid, block, params)
+        self.dirty = true
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        val params = _pack_rounded_rect_params(x, y, w, h, radius, color, self.w, self.h)
+        val grid = _grid_for_rect(w, h)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_rounded_rect, grid, block, params)
+        self.dirty = true
+
+    me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        # Compute bounding box of triangle
+        var min_x = x1
+        if x2 < min_x: min_x = x2
+        if x3 < min_x: min_x = x3
+        var min_y = y1
+        if y2 < min_y: min_y = y2
+        if y3 < min_y: min_y = y3
+        var max_x = x1
+        if x2 > max_x: max_x = x2
+        if x3 > max_x: max_x = x3
+        var max_y = y1
+        if y2 > max_y: max_y = y2
+        if y3 > max_y: max_y = y3
+
+        val bw = max_x - min_x + 1
+        val bh = max_y - min_y + 1
+        val params = _pack_triangle_params(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y)
+        val grid = _grid_for_rect(bw, bh)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_triangle, grid, block, params)
+        self.dirty = true
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        val params = _pack_gradient_params(x, y, w, h, top_color, bottom_color, self.w, self.h)
+        val grid = _grid_for_rect(w, h)
+        val block = _block_for_rect()
+        _dispatch_2d(self, self.pipe_gradient, grid, block, params)
+        self.dirty = true
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        # Text rendering on GPU is complex; fall back to CPU-side rendering
+        # then upload the affected region. For production, a glyph atlas
+        # texture would be uploaded and sampled by a kernel.
+        _metal_draw_text_fallback(self, x, y, text_val, color, font_size)
+        self.dirty = true
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        # Upload pixel data to a temporary device buffer, then launch
+        # a blit kernel to copy it into the framebuffer
+        val pixel_count = _i64(w) * _i64(h)
+        val byte_size = pixel_count * 4
+        val d_src = rt_metal_alloc_buffer(self.device, byte_size)
+        if d_src != 0:
+            # Upload source pixels to device
+            val upload_data = _pixels_to_bytes(pixels, pixel_count)
+            rt_metal_buffer_upload(d_src, upload_data, byte_size)
+            # Launch blit kernel
+            val params = _pack_blit_params(x, y, w, h, self.w, self.h)
+            val grid = _grid_for_rect(w, h)
+            val block = _block_for_rect()
+            _dispatch_blit(self, self.pipe_blit, grid, block, params, d_src)
+            rt_metal_free_buffer(d_src)
+        self.dirty = true
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        self.clip_x = x
+        self.clip_y = y
+        self.clip_w = w
+        self.clip_h = h
+        self.clip_enabled = true
+
+    me clear_clip():
+        self.clip_enabled = false
+        self.clip_x = 0
+        self.clip_y = 0
+        self.clip_w = self.w
+        self.clip_h = self.h
+
+    me present():
+        # Copy GPU framebuffer to host memory
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            _download_framebuffer(self, fb_size)
+            self.dirty = false
+
+    fn read_pixels() -> [u32]:
+        # Ensure host buffer is up to date
+        if self.dirty:
+            val fb_size = _i64(self.w) * _i64(self.h) * 4
+            _download_framebuffer(self, fb_size)
+        var copy: [u32] = [0u32; self.w * self.h]
+        var i = 0
+        while i < self.w * self.h:
+            copy[i] = self.host_buf[i]
+            i = i + 1
+        copy
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+# ============================================================================
+# Compute Dispatch Helpers
+# ============================================================================
+
+fn _dispatch_1d(backend: MetalBackend, pipeline: i64, grid_x: i64, block_x: i64, params: [u8]):
+    """Create command buffer, encode a 1D compute dispatch, commit and wait."""
+    val cmd = rt_metal_create_command_buffer(backend.command_queue)
+    if cmd == 0:
+        return
+    val encoder = rt_metal_create_compute_encoder(cmd)
+    if encoder == 0:
+        return
+    # Bind framebuffer at index 0
+    rt_metal_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    # Bind push constants (params) at index 1
+    rt_metal_set_bytes(encoder, params, _i64(params.len()), 1)
+    # Dispatch
+    rt_metal_dispatch_compute(encoder, pipeline, grid_x, 1, 1, block_x, 1, 1)
+    rt_metal_end_compute_encoder(encoder)
+    rt_metal_commit_command_buffer(cmd)
+    rt_metal_wait_completed(cmd)
+
+fn _dispatch_2d(backend: MetalBackend, pipeline: i64, grid: GridDim, block: BlockDim, params: [u8]):
+    """Create command buffer, encode a 2D compute dispatch, commit and wait."""
+    val cmd = rt_metal_create_command_buffer(backend.command_queue)
+    if cmd == 0:
+        return
+    val encoder = rt_metal_create_compute_encoder(cmd)
+    if encoder == 0:
+        return
+    # Bind framebuffer at index 0
+    rt_metal_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    # Bind push constants (params) at index 1
+    rt_metal_set_bytes(encoder, params, _i64(params.len()), 1)
+    # Dispatch with 2D grid
+    rt_metal_dispatch_compute(encoder, pipeline, grid.x * block.x, grid.y * block.y, 1, block.x, block.y, 1)
+    rt_metal_end_compute_encoder(encoder)
+    rt_metal_commit_command_buffer(cmd)
+    rt_metal_wait_completed(cmd)
+
+fn _dispatch_blit(backend: MetalBackend, pipeline: i64, grid: GridDim, block: BlockDim, params: [u8], src_buffer: i64):
+    """Dispatch blit kernel with source image buffer bound at index 2."""
+    val cmd = rt_metal_create_command_buffer(backend.command_queue)
+    if cmd == 0:
+        return
+    val encoder = rt_metal_create_compute_encoder(cmd)
+    if encoder == 0:
+        return
+    # Bind framebuffer at index 0
+    rt_metal_set_buffer(encoder, backend.d_framebuffer, 0, 0)
+    # Bind push constants (params) at index 1
+    rt_metal_set_bytes(encoder, params, _i64(params.len()), 1)
+    # Bind source image buffer at index 2
+    rt_metal_set_buffer(encoder, src_buffer, 0, 2)
+    # Dispatch
+    rt_metal_dispatch_compute(encoder, pipeline, grid.x * block.x, grid.y * block.y, 1, block.x, block.y, 1)
+    rt_metal_end_compute_encoder(encoder)
+    rt_metal_commit_command_buffer(cmd)
+    rt_metal_wait_completed(cmd)
+
+# ============================================================================
+# Grid / Block Dimension Helpers
+# ============================================================================
+
+struct GridDim:
+    x: i64
+    y: i64
+
+struct BlockDim:
+    x: i64
+    y: i64
+
+fn _grid_for_rect(w: i32, h: i32) -> GridDim:
+    """Compute grid dimensions for a rectangular region with 16x16 threadgroups."""
+    val bx: i64 = 16
+    val by: i64 = 16
+    GridDim(
+        x: (_i64(w) + bx - 1) / bx,
+        y: (_i64(h) + by - 1) / by
+    )
+
+fn _block_for_rect() -> BlockDim:
+    """Standard 16x16 threadgroup for 2D operations."""
+    BlockDim(x: 16, y: 16)
+
+# ============================================================================
+# Parameter Packing
+#
+# Metal uses setBytes for small push-constant-style data. We pack
+# parameters into a [u8] byte array matching the MSL struct layout.
+# All fields are packed as little-endian 32-bit integers.
+# ============================================================================
+
+fn _pack_i32_le(buf: [u8], offset: i32, v: i32) -> i32:
+    """Pack a 32-bit integer as 4 little-endian bytes into buf at offset."""
+    buf[offset] = _i32_to_u8(v & 0xFF)
+    buf[offset + 1] = _i32_to_u8((v >> 8) & 0xFF)
+    buf[offset + 2] = _i32_to_u8((v >> 16) & 0xFF)
+    buf[offset + 3] = _i32_to_u8((v >> 24) & 0xFF)
+    offset + 4
+
+fn _pack_u32_le(buf: [u8], offset: i32, v: u32) -> i32:
+    """Pack a u32 as 4 little-endian bytes into buf at offset."""
+    _pack_i32_le(buf, offset, v as i32)
+
+fn _pack_clear_params(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for clear kernel: (color, width, height)."""
+    var buf: [u8] = [0u8; 12]
+    var off = 0
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_rect_params(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for rect kernels: (x, y, w, h, color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_line_params(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for line kernel: (x1, y1, x2, y2, color, thickness, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x1)
+    off = _pack_i32_le(buf, off, y1)
+    off = _pack_i32_le(buf, off, x2)
+    off = _pack_i32_le(buf, off, y2)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, thickness)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_circle_params(cx: i32, cy: i32, r: i32, color: u32, fb_w: i32, fb_h: i32, filled: i32) -> [u8]:
+    """Pack params for circle kernels: (cx, cy, r, color, fb_w, fb_h, filled)."""
+    var buf: [u8] = [0u8; 28]
+    var off = 0
+    off = _pack_i32_le(buf, off, cx)
+    off = _pack_i32_le(buf, off, cy)
+    off = _pack_i32_le(buf, off, r)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    off = _pack_i32_le(buf, off, filled)
+    buf
+
+fn _pack_rounded_rect_params(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for rounded rect kernel: (x, y, w, h, radius, color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_i32_le(buf, off, radius)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_triangle_params(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, fb_w: i32, fb_h: i32, min_x: i32, min_y: i32) -> [u8]:
+    """Pack params for triangle kernel: (x1..x3, y1..y3, color, fb_w, fb_h, min_x, min_y)."""
+    var buf: [u8] = [0u8; 44]
+    var off = 0
+    off = _pack_i32_le(buf, off, x1)
+    off = _pack_i32_le(buf, off, y1)
+    off = _pack_i32_le(buf, off, x2)
+    off = _pack_i32_le(buf, off, y2)
+    off = _pack_i32_le(buf, off, x3)
+    off = _pack_i32_le(buf, off, y3)
+    off = _pack_u32_le(buf, off, color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    off = _pack_i32_le(buf, off, min_x)
+    off = _pack_i32_le(buf, off, min_y)
+    buf
+
+fn _pack_gradient_params(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for gradient kernel: (x, y, w, h, top_color, bottom_color, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 32]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_u32_le(buf, off, top_color)
+    off = _pack_u32_le(buf, off, bottom_color)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+fn _pack_blit_params(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32) -> [u8]:
+    """Pack params for blit kernel: (x, y, w, h, fb_w, fb_h)."""
+    var buf: [u8] = [0u8; 24]
+    var off = 0
+    off = _pack_i32_le(buf, off, x)
+    off = _pack_i32_le(buf, off, y)
+    off = _pack_i32_le(buf, off, w)
+    off = _pack_i32_le(buf, off, h)
+    off = _pack_i32_le(buf, off, fb_w)
+    off = _pack_i32_le(buf, off, fb_h)
+    buf
+
+# ============================================================================
+# Device Memory Transfer
+# ============================================================================
+
+fn _download_framebuffer(backend: MetalBackend, byte_size: i64):
+    """Download device framebuffer to host buffer via Metal buffer download."""
+    val host_bytes: [u8] = [0u8; byte_size]
+    rt_metal_buffer_download(host_bytes, backend.d_framebuffer, byte_size)
+    # Convert byte array back to u32 pixel array
+    val pixel_count = backend.w * backend.h
+    var i = 0
+    while i < pixel_count:
+        val base = i * 4
+        val b0 = _u8_to_i32(host_bytes[base])
+        val b1 = _u8_to_i32(host_bytes[base + 1])
+        val b2 = _u8_to_i32(host_bytes[base + 2])
+        val b3 = _u8_to_i32(host_bytes[base + 3])
+        # Little-endian u32 reconstruction
+        var pixel: u32 = 0
+        pixel = pixel | (_to_u32(b0))
+        pixel = pixel | (_to_u32(b1) << 8)
+        pixel = pixel | (_to_u32(b2) << 16)
+        pixel = pixel | (_to_u32(b3) << 24)
+        backend.host_buf[i] = pixel
+        i = i + 1
+
+fn _upload_host_to_device(backend: MetalBackend, byte_size: i64):
+    """Upload host buffer to device framebuffer."""
+    val pixel_count = backend.w * backend.h
+    val host_bytes = _pixels_to_bytes(backend.host_buf, _i64(pixel_count))
+    rt_metal_buffer_upload(backend.d_framebuffer, host_bytes, byte_size)
+
+fn _pixels_to_bytes(pixels: [u32], count: i64) -> [u8]:
+    """Convert a u32 pixel array to a [u8] byte array (little-endian)."""
+    val byte_count = count * 4
+    var buf: [u8] = [0u8; byte_count]
+    var i: i64 = 0
+    while i < count:
+        val px = pixels[i]
+        val base = i * 4
+        buf[base] = _i32_to_u8(_to_i32(px & 0xFF))
+        buf[base + 1] = _i32_to_u8(_to_i32((px >> 8) & 0xFF))
+        buf[base + 2] = _i32_to_u8(_to_i32((px >> 16) & 0xFF))
+        buf[base + 3] = _i32_to_u8(_to_i32((px >> 24) & 0xFF))
+        i = i + 1
+    buf
+
+# ============================================================================
+# Text Rendering Fallback
+# ============================================================================
+
+fn _metal_draw_text_fallback(backend: MetalBackend, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    """Render text on CPU and upload affected region to GPU.
+
+    For production use, a glyph atlas would be pre-uploaded to GPU memory
+    and sampled by a text-rendering kernel. This fallback is acceptable
+    for low-frequency text draws (UI labels, debug overlays).
+    """
+    var scale = font_size / 7
+    if scale < 1:
+        scale = 1
+
+    val text_w = text_val.len() * 6 * scale
+    val text_h = 7 * scale
+
+    # Ensure host buffer is current
+    if backend.dirty:
+        val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+        _download_framebuffer(backend, fb_size)
+
+    # Render glyphs into host buffer
+    var cursor_x = x
+    var idx = 0
+    while idx < text_val.len():
+        val ch = text_val.slice(idx, idx + 1)
+        _render_glyph_to_host(backend, cursor_x, y, ch, color, scale)
+        cursor_x = cursor_x + 6 * scale
+        idx = idx + 1
+
+    # Re-upload entire framebuffer to GPU
+    val fb_size = _i64(backend.w) * _i64(backend.h) * 4
+    _upload_host_to_device(backend, fb_size)
+
+fn _render_glyph_to_host(backend: MetalBackend, x: i32, y: i32, ch: text, color: u32, scale: i32):
+    """Render a single glyph into the host buffer."""
+    val bitmap = _get_glyph(ch)
+    var row = 0
+    while row < 7:
+        val row_data = bitmap[row]
+        var col = 0
+        while col < 5:
+            val bit = (row_data >> (4 - col)) & 1
+            if bit != 0:
+                var sy = 0
+                while sy < scale:
+                    var sx = 0
+                    while sx < scale:
+                        val px = x + col * scale + sx
+                        val py = y + row * scale + sy
+                        if (px >= 0 and px < backend.w and
+                            py >= 0 and py < backend.h):
+                            val pidx = py * backend.w + px
+                            backend.host_buf[pidx] = color
+                        sx = sx + 1
+                    sy = sy + 1
+            col = col + 1
+        row = row + 1
+
+# ============================================================================
+# Minimal Glyph Data (shared with CPU backend pattern)
+# ============================================================================
+
+fn _get_glyph(ch: text) -> [i32]:
+    """5x7 bitmap glyph lookup. Returns 7-row array, each row 5 bits wide."""
+    if ch == "A" or ch == "a":
+        return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
+    if ch == "B" or ch == "b":
+        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]
+    if ch == "C" or ch == "c":
+        return [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]
+    if ch == "D" or ch == "d":
+        return [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100]
+    if ch == "E" or ch == "e":
+        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]
+    if ch == "F" or ch == "f":
+        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]
+    if ch == "G" or ch == "g":
+        return [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]
+    if ch == "H" or ch == "h":
+        return [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
+    if ch == "I" or ch == "i":
+        return [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
+    if ch == "J" or ch == "j":
+        return [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100]
+    if ch == "K" or ch == "k":
+        return [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]
+    if ch == "L" or ch == "l":
+        return [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]
+    if ch == "M" or ch == "m":
+        return [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]
+    if ch == "N" or ch == "n":
+        return [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]
+    if ch == "O" or ch == "o":
+        return [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
+    if ch == "P" or ch == "p":
+        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]
+    if ch == "Q" or ch == "q":
+        return [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]
+    if ch == "R" or ch == "r":
+        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]
+    if ch == "S" or ch == "s":
+        return [0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110]
+    if ch == "T" or ch == "t":
+        return [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]
+    if ch == "U" or ch == "u":
+        return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
+    if ch == "V" or ch == "v":
+        return [0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b01010, 0b00100]
+    if ch == "W" or ch == "w":
+        return [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]
+    if ch == "X" or ch == "x":
+        return [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001]
+    if ch == "Y" or ch == "y":
+        return [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100]
+    if ch == "Z" or ch == "z":
+        return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]
+    if ch == "0":
+        return [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]
+    if ch == "1":
+        return [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
+    if ch == "2":
+        return [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111]
+    if ch == "3":
+        return [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110]
+    if ch == "4":
+        return [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]
+    if ch == "5":
+        return [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]
+    if ch == "6":
+        return [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]
+    if ch == "7":
+        return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]
+    if ch == "8":
+        return [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]
+    if ch == "9":
+        return [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110]
+    if ch == " ":
+        return [0, 0, 0, 0, 0, 0, 0]
+    if ch == ".":
+        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100]
+    if ch == ",":
+        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]
+    if ch == "!":
+        return [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100]
+    if ch == ":":
+        return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000]
+    if ch == "-":
+        return [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]
+    if ch == "+":
+        return [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]
+    if ch == "=":
+        return [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000]
+    if ch == "(":
+        return [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]
+    if ch == ")":
+        return [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]
+    if ch == "/":
+        return [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000]
+    if ch == "_":
+        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111]
+    # Unknown character: filled block
+    [0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111]
+
+# ============================================================================
+# MSL Kernel Source (Metal Shading Language)
+# ============================================================================
+
+fn _engine2d_msl() -> text:
+    """Embedded MSL source for 2D rendering compute kernels.
+
+    These kernels operate on a u32 framebuffer in device memory.
+    Each pixel is ARGB packed as a 32-bit unsigned integer.
+
+    Buffer layout:
+    - buffer(0): device uint* framebuffer
+    - buffer(1): constant params (push constants via setBytes)
+    - buffer(2): device uint* source (blit only)
+
+    Kernel list:
+    - kernel_clear: Fill entire framebuffer with a color
+    - kernel_draw_rect_filled: Fill a rectangle region
+    - kernel_draw_rect_outline: Draw rectangle border (1px)
+    - kernel_draw_circle_filled: Fill a circle (distance check)
+    - kernel_draw_circle: Draw circle outline
+    - kernel_draw_line: Bresenham line on GPU (1 thread per step)
+    - kernel_draw_rounded_rect: Filled rect with rounded corners
+    - kernel_draw_triangle_filled: Barycentric triangle fill
+    - kernel_draw_gradient_rect: Vertical gradient fill
+    - kernel_blit_image: Copy source pixels to framebuffer region
+    """
+    r"""
+#include <metal_stdlib>
+using namespace metal;
+
+// ---- Parameter structs (match _pack_*_params byte layout) ----
+
+struct ClearParams {
+    uint color;
+    int width;
+    int height;
+};
+
+struct RectParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint color;
+    int fb_w;
+    int fb_h;
+};
+
+struct LineParams {
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    uint color;
+    int thickness;
+    int fb_w;
+    int fb_h;
+};
+
+struct CircleParams {
+    int cx;
+    int cy;
+    int r;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int filled;
+};
+
+struct RoundedRectParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int radius;
+    uint color;
+    int fb_w;
+    int fb_h;
+};
+
+struct TriangleParams {
+    int x1;
+    int y1;
+    int x2;
+    int y2;
+    int x3;
+    int y3;
+    uint color;
+    int fb_w;
+    int fb_h;
+    int min_x;
+    int min_y;
+};
+
+struct GradientParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    uint top_color;
+    uint bottom_color;
+    int fb_w;
+    int fb_h;
+};
+
+struct BlitParams {
+    int x;
+    int y;
+    int w;
+    int h;
+    int fb_w;
+    int fb_h;
+};
+
+// ---- Helper: extract ARGB channels ----
+
+static inline uint4 unpack_argb(uint c) {
+    return uint4(
+        (c >> 16) & 0xFF,  // R
+        (c >> 8)  & 0xFF,  // G
+        c         & 0xFF,  // B
+        (c >> 24) & 0xFF   // A
+    );
+}
+
+static inline uint pack_argb(uint r, uint g, uint b, uint a) {
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static inline uint lerp_channel(uint a, uint b, int t, int max_t) {
+    if (max_t <= 0) return a;
+    return (uint)((int)a + ((int)b - (int)a) * t / max_t);
+}
+
+// ---- kernel_clear ----
+
+kernel void kernel_clear(
+    device uint* fb        [[buffer(0)]],
+    constant ClearParams& p [[buffer(1)]],
+    uint tid               [[thread_position_in_grid]]
+) {
+    int total = p.width * p.height;
+    if ((int)tid >= total) return;
+    fb[tid] = p.color;
+}
+
+// ---- kernel_draw_rect_filled ----
+
+kernel void kernel_draw_rect_filled(
+    device uint* fb        [[buffer(0)]],
+    constant RectParams& p [[buffer(1)]],
+    uint2 tid              [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_rect_outline ----
+
+kernel void kernel_draw_rect_outline(
+    device uint* fb        [[buffer(0)]],
+    constant RectParams& p [[buffer(1)]],
+    uint2 tid              [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    // Only draw border pixels
+    bool on_border = (lx == 0 || lx == p.w - 1 || ly == 0 || ly == p.h - 1);
+    if (!on_border) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_line ----
+
+kernel void kernel_draw_line(
+    device uint* fb         [[buffer(0)]],
+    constant LineParams& p  [[buffer(1)]],
+    uint tid                [[thread_position_in_grid]]
+) {
+    int dx = p.x2 - p.x1;
+    int dy = p.y2 - p.y1;
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
+    int steps = adx > ady ? adx : ady;
+    if (steps == 0) steps = 1;
+    if ((int)tid > steps) return;
+
+    int t = (int)tid;
+    int px = p.x1 + dx * t / steps;
+    int py = p.y1 + dy * t / steps;
+
+    // Draw thickness
+    int half = p.thickness / 2;
+    for (int off = -half; off <= half; off++) {
+        int fx, fy;
+        if (adx >= ady) {
+            fx = px;
+            fy = py + off;
+        } else {
+            fx = px + off;
+            fy = py;
+        }
+        if (fx >= 0 && fx < p.fb_w && fy >= 0 && fy < p.fb_h) {
+            int idx = fy * p.fb_w + fx;
+            fb[idx] = p.color;
+        }
+    }
+}
+
+// ---- kernel_draw_circle ----
+
+kernel void kernel_draw_circle(
+    device uint* fb           [[buffer(0)]],
+    constant CircleParams& p  [[buffer(1)]],
+    uint2 tid                 [[thread_position_in_grid]]
+) {
+    int bw = 2 * p.r + 1;
+    int bh = 2 * p.r + 1;
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int dx = lx - p.r;
+    int dy = ly - p.r;
+    int dist_sq = dx * dx + dy * dy;
+    int r_sq = p.r * p.r;
+
+    // Outline: draw pixels near the circle edge
+    int inner_r = (p.r - 1) * (p.r - 1);
+    if (dist_sq > r_sq || dist_sq < inner_r) return;
+
+    int px = p.cx - p.r + lx;
+    int py = p.cy - p.r + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_circle_filled ----
+
+kernel void kernel_draw_circle_filled(
+    device uint* fb           [[buffer(0)]],
+    constant CircleParams& p  [[buffer(1)]],
+    uint2 tid                 [[thread_position_in_grid]]
+) {
+    int bw = 2 * p.r + 1;
+    int bh = 2 * p.r + 1;
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int dx = lx - p.r;
+    int dy = ly - p.r;
+    int dist_sq = dx * dx + dy * dy;
+    int r_sq = p.r * p.r;
+    if (dist_sq > r_sq) return;
+
+    int px = p.cx - p.r + lx;
+    int py = p.cy - p.r + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_rounded_rect ----
+
+kernel void kernel_draw_rounded_rect(
+    device uint* fb                  [[buffer(0)]],
+    constant RoundedRectParams& p    [[buffer(1)]],
+    uint2 tid                        [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int r = p.radius;
+    if (r > p.w / 2) r = p.w / 2;
+    if (r > p.h / 2) r = p.h / 2;
+
+    // Check if pixel is inside the rounded rect
+    bool inside = true;
+
+    // Top-left corner
+    if (lx < r && ly < r) {
+        int dx = lx - r;
+        int dy = ly - r;
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Top-right corner
+    else if (lx >= p.w - r && ly < r) {
+        int dx = lx - (p.w - 1 - r);
+        int dy = ly - r;
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Bottom-left corner
+    else if (lx < r && ly >= p.h - r) {
+        int dx = lx - r;
+        int dy = ly - (p.h - 1 - r);
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+    // Bottom-right corner
+    else if (lx >= p.w - r && ly >= p.h - r) {
+        int dx = lx - (p.w - 1 - r);
+        int dy = ly - (p.h - 1 - r);
+        if (dx * dx + dy * dy > r * r) inside = false;
+    }
+
+    if (!inside) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_triangle_filled ----
+
+kernel void kernel_draw_triangle_filled(
+    device uint* fb               [[buffer(0)]],
+    constant TriangleParams& p    [[buffer(1)]],
+    uint2 tid                     [[thread_position_in_grid]]
+) {
+    int bw = 0;  // computed from bounding box
+    int bh = 0;
+    int max_x = p.x1;
+    if (p.x2 > max_x) max_x = p.x2;
+    if (p.x3 > max_x) max_x = p.x3;
+    int max_y = p.y1;
+    if (p.y2 > max_y) max_y = p.y2;
+    if (p.y3 > max_y) max_y = p.y3;
+    bw = max_x - p.min_x + 1;
+    bh = max_y - p.min_y + 1;
+
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= bw || ly >= bh) return;
+
+    int px = p.min_x + lx;
+    int py = p.min_y + ly;
+
+    // Barycentric coordinate test (2x area method)
+    int d = (p.y2 - p.y3) * (p.x1 - p.x3) + (p.x3 - p.x2) * (p.y1 - p.y3);
+    if (d == 0) return;
+
+    int w1_num = (p.y2 - p.y3) * (px - p.x3) + (p.x3 - p.x2) * (py - p.y3);
+    int w2_num = (p.y3 - p.y1) * (px - p.x3) + (p.x1 - p.x3) * (py - p.y3);
+
+    // Check signs for inside test
+    bool inside;
+    if (d > 0) {
+        int w3_num = d - w1_num - w2_num;
+        inside = (w1_num >= 0 && w2_num >= 0 && w3_num >= 0);
+    } else {
+        int w3_num = d - w1_num - w2_num;
+        inside = (w1_num <= 0 && w2_num <= 0 && w3_num <= 0);
+    }
+    if (!inside) return;
+
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = p.color;
+}
+
+// ---- kernel_draw_gradient_rect ----
+
+kernel void kernel_draw_gradient_rect(
+    device uint* fb               [[buffer(0)]],
+    constant GradientParams& p    [[buffer(1)]],
+    uint2 tid                     [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    // Interpolate between top_color and bottom_color
+    uint4 tc = unpack_argb(p.top_color);
+    uint4 bc = unpack_argb(p.bottom_color);
+    int max_t = p.h - 1;
+    if (max_t < 1) max_t = 1;
+
+    uint r = lerp_channel(tc.x, bc.x, ly, max_t);
+    uint g = lerp_channel(tc.y, bc.y, ly, max_t);
+    uint b = lerp_channel(tc.z, bc.z, ly, max_t);
+    uint a = lerp_channel(tc.w, bc.w, ly, max_t);
+    uint c = pack_argb(r, g, b, a);
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int idx = py * p.fb_w + px;
+    fb[idx] = c;
+}
+
+// ---- kernel_blit_image ----
+
+kernel void kernel_blit_image(
+    device uint* fb             [[buffer(0)]],
+    constant BlitParams& p      [[buffer(1)]],
+    device const uint* src      [[buffer(2)]],
+    uint2 tid                   [[thread_position_in_grid]]
+) {
+    int lx = (int)tid.x;
+    int ly = (int)tid.y;
+    if (lx >= p.w || ly >= p.h) return;
+
+    int px = p.x + lx;
+    int py = p.y + ly;
+    if (px < 0 || px >= p.fb_w || py < 0 || py >= p.fb_h) return;
+
+    int src_idx = ly * p.w + lx;
+    int dst_idx = py * p.fb_w + px;
+    fb[dst_idx] = src[src_idx];
+}
+"""
+
+# ============================================================================
+# Conversion Helpers
+# ============================================================================
+
+fn _i64(v: i32) -> i64:
+    v as i64
+
+fn _i64_from_u32(v: u32) -> i64:
+    v as i64
+
+fn _to_u32(v: i32) -> u32:
+    v as u32
+
+fn _to_i32(v: u32) -> i32:
+    v as i32
+
+fn _i32_to_u8(v: i32) -> u8:
+    v as u8
+
+fn _u8_to_i32(v: u8) -> i32:
+    v as i32
