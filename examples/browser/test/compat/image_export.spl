@@ -14,6 +14,8 @@
 #   3. Take Chrome screenshot: headless Chrome or Puppeteer
 #   4. Compare with pixelmatch or ImageMagick: `compare -metric RMSE simple.png chrome.png diff.png`
 
+use std.io_runtime.{file_read}
+
 # =========================================================================
 # PPM Export (P6 binary format)
 # =========================================================================
@@ -92,7 +94,7 @@ class ComparisonMetrics:
 
 fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonMetrics:
     """Compare two ARGB pixel buffers and compute similarity metrics."""
-    val total = width.to_i64() * height.to_i64()
+    val total = width * height
     var matching = 0
     var different = 0
     var max_diff = 0
@@ -109,9 +111,9 @@ fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32) -> Compari
         else:
             different = different + 1
             # Per-channel difference
-            val dr = abs_i32(((pa >> 16) & 0xFF).to_i32() - ((pb >> 16) & 0xFF).to_i32())
-            val dg = abs_i32(((pa >> 8) & 0xFF).to_i32() - ((pb >> 8) & 0xFF).to_i32())
-            val db = abs_i32((pa & 0xFF).to_i32() - (pb & 0xFF).to_i32())
+            val dr = abs_i32(((pa >> 16) & 0xFF) - ((pb >> 16) & 0xFF))
+            val dg = abs_i32(((pa >> 8) & 0xFF) - ((pb >> 8) & 0xFF))
+            val db = abs_i32((pa & 0xFF) - (pb & 0xFF))
             val pixel_max = max_i32(dr, max_i32(dg, db))
             if pixel_max > max_diff:
                 max_diff = pixel_max
@@ -126,8 +128,8 @@ fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32) -> Compari
 
     ComparisonMetrics(
         total_pixels: total,
-        matching_pixels: matching.to_i64(),
-        different_pixels: different.to_i64(),
+        matching_pixels: matching,
+        different_pixels: different,
         max_channel_diff: max_diff,
         avg_channel_diff: avg_diff,
         match_percentage: match_pct,
@@ -187,8 +189,13 @@ fn sqrt_approx(v: f64) -> f64:
     guess
 
 extern fn rt_file_write_bytes(path: text, header: text, data: [u8])
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+fn read_file_bytes(path: text) -> [u8]:
+    """Normalize runtime file-byte reads for both source and compiled execution."""
+    if val Some(bytes) = rt_file_read_bytes(path):
+        return bytes
+    []
 
 # =========================================================================
 # PPM Loader — read P6 binary PPM back to ARGB u32 array
@@ -198,7 +205,7 @@ fn load_ppm_to_pixels(path: text) -> [u32]:
     """Read a PPM P6 binary file and return pixel data as ARGB u32 array.
     Returns empty list on failure.
     """
-    val raw = rt_file_read_bytes(path)
+    val raw = read_file_bytes(path)
     if raw.len() < 3:
         return []
     if raw[0] == 80 and raw[1] == 51:
@@ -216,7 +223,7 @@ fn load_ppm_to_pixels(path: text) -> [u32]:
         header_end = i
 
     # Parse width and height from header text
-    val header_text = rt_file_read_text(path)
+    val header_text = file_read(path)
     val dims = parse_ppm_header_dimensions(header_text)
     val width = dims.w
     val height = dims.h
@@ -229,9 +236,9 @@ fn load_ppm_to_pixels(path: text) -> [u32]:
     var pi = header_end
     var count = 0
     while count < expected and pi + 2 < raw.len():
-        val r = raw[pi].to_u32()
-        val g = raw[pi + 1].to_u32()
-        val b = raw[pi + 2].to_u32()
+        val r = raw[pi]
+        val g = raw[pi + 1]
+        val b = raw[pi + 2]
         # ARGB: alpha=255
         val argb = 0xFF000000 | (r << 16) | (g << 8) | b
         pixels = pixels + [argb]
@@ -242,7 +249,7 @@ fn load_ppm_to_pixels(path: text) -> [u32]:
 
 fn load_ppm_text_to_pixels(path: text) -> [u32]:
     """Read a plain-text PPM P3 image and return ARGB pixels."""
-    val content = rt_file_read_text(path)
+    val content = file_read(path)
     if content.len() < 2 or not content.starts_with("P3"):
         return []
 
@@ -265,9 +272,9 @@ fn load_ppm_text_to_pixels(path: text) -> [u32]:
     var pixels: [u32] = []
     var idx = 4
     while idx + 2 < tokens.len() and pixels.len() < width * height:
-        val r = (parse_int_simple(tokens[idx]) * 255 / max_value).to_u32()
-        val g = (parse_int_simple(tokens[idx + 1]) * 255 / max_value).to_u32()
-        val b = (parse_int_simple(tokens[idx + 2]) * 255 / max_value).to_u32()
+        val r = parse_int_simple(tokens[idx]) * 255 / max_value
+        val g = parse_int_simple(tokens[idx + 1]) * 255 / max_value
+        val b = parse_int_simple(tokens[idx + 2]) * 255 / max_value
         pixels = pixels + [0xFF000000 | (r << 16) | (g << 8) | b]
         idx = idx + 3
 
@@ -284,19 +291,19 @@ fn load_bmp_to_pixels(path: text) -> [u32]:
     """Read a BMP file written by Chrome screenshot conversion tools.
     Supports uncompressed 24-bit and 32-bit BMP variants.
     """
-    val raw = rt_file_read_bytes(path)
+    val raw = read_file_bytes(path)
     if raw.len() < 54:
         return []
     if raw[0] != 66 or raw[1] != 77:
         return []
 
-    val pixel_offset = read_le_u32(raw, 10).to_i32()
-    val header_size = read_le_u32(raw, 14).to_i32()
+    val pixel_offset = read_le_u32(raw, 10)
+    val header_size = read_le_u32(raw, 14)
     val width = read_le_i32(raw, 18)
     val height_signed = read_le_i32(raw, 22)
-    val planes = read_le_u16(raw, 26).to_i32()
-    val bits_per_pixel = read_le_u16(raw, 28).to_i32()
-    val compression = read_le_u32(raw, 30).to_i32()
+    val planes = read_le_u16(raw, 26)
+    val bits_per_pixel = read_le_u16(raw, 28)
+    val compression = read_le_u32(raw, 30)
 
     if header_size < 40 or width <= 0 or height_signed == 0:
         return []
@@ -330,10 +337,10 @@ fn load_bmp_to_pixels(path: text) -> [u32]:
             val px = row_start + col * bytes_per_pixel
             if px + bytes_per_pixel - 1 >= raw.len():
                 return []
-            val b = raw[px].to_u32()
-            val g = raw[px + 1].to_u32()
-            val r = raw[px + 2].to_u32()
-            val a = if bytes_per_pixel == 4: raw[px + 3].to_u32() else: 255
+            val b = raw[px]
+            val g = raw[px + 1]
+            val r = raw[px + 2]
+            val a = if bytes_per_pixel == 4: raw[px + 3] else: 255
             pixels = pixels + [(a << 24) | (r << 16) | (g << 8) | b]
             col = col + 1
         row = row + 1
@@ -346,98 +353,40 @@ class PpmDimensions:
 
 fn parse_ppm_header_dimensions(header: text) -> PpmDimensions:
     """Parse width and height from PPM P6 header text."""
-    # Header format: "P6\nWIDTH HEIGHT\nMAXVAL\n..."
-    # Find the second line which has "WIDTH HEIGHT"
-    var lines: [text] = []
-    var current = ""
-    var i = 0
-    while i < header.len() and lines.len() < 3:
-        val ch = header[i]
-        if ch == '\n':
-            lines = lines + [current]
-            current = ""
-        else:
-            current = "{current}{ch}"
-        i = i + 1
-
-    if lines.len() < 2:
+    val tokens = split_ppm_tokens(header)
+    if tokens.len() < 3:
         return PpmDimensions(w: 0, h: 0)
-
-    # Skip comment lines (start with #)
-    var dim_line = ""
-    for line in lines:
-        if line.len() > 0 and line[0] != '#' and line != "P6" and line != "P3":
-            dim_line = line
-            # Check if it contains a space (dimension line)
-            var has_space = false
-            var j = 0
-            while j < line.len():
-                if line[j] == ' ':
-                    has_space = true
-                j = j + 1
-            if has_space:
-                dim_line = line
-                # Stop at first dimension line
-                i = header.len()  # break outer loop
-
-    # Parse "WIDTH HEIGHT"
-    var w_str = ""
-    var h_str = ""
-    var in_height = false
-    var k = 0
-    while k < dim_line.len():
-        val ch = dim_line[k]
-        if ch == ' ':
-            in_height = true
-        else if not in_height:
-            w_str = "{w_str}{ch}"
-        else:
-            h_str = "{h_str}{ch}"
-        k = k + 1
-
-    val w = parse_int_simple(w_str)
-    val h = parse_int_simple(h_str)
+    val w = parse_int_simple(tokens[1])
+    val h = parse_int_simple(tokens[2])
     PpmDimensions(w: w, h: h)
 
 fn parse_int_simple(s: text) -> i32:
     """Parse a simple non-negative integer from text. Returns 0 on failure."""
-    var result = 0
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch >= '0' and ch <= '9':
-            result = result * 10 + (ch.to_i32() - '0'.to_i32())
-        i = i + 1
-    result
+    s.parse_i32() ?? 0
 
 fn split_ppm_tokens(content: text) -> [text]:
     var tokens: [text] = []
     var current = ""
     var in_comment = false
-    var i = 0
-    while i < content.len():
-        val ch = content[i]
+    for ch in content:
         if in_comment:
-            if ch == '\n':
+            if ch == "\n":
                 in_comment = false
-            i = i + 1
             continue
 
-        if ch == '#':
+        if ch == "#":
             if current.len() > 0:
                 tokens = tokens + [current]
                 current = ""
             in_comment = true
-            i = i + 1
             continue
 
-        if ch == ' ' or ch == '\n' or ch == '\t' or ch == '\r':
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
             if current.len() > 0:
                 tokens = tokens + [current]
                 current = ""
         else:
             current = "{current}{ch}"
-        i = i + 1
 
     if current.len() > 0:
         tokens = tokens + [current]
@@ -446,22 +395,22 @@ fn split_ppm_tokens(content: text) -> [text]:
 fn read_le_u16(raw: [u8], offset: i32) -> u32:
     if offset < 0 or offset + 1 >= raw.len():
         return 0
-    raw[offset].to_u32() | (raw[offset + 1].to_u32() << 8)
+    raw[offset] | (raw[offset + 1] << 8)
 
 fn read_le_u32(raw: [u8], offset: i32) -> u32:
     if offset < 0 or offset + 3 >= raw.len():
         return 0
-    raw[offset].to_u32() |
-    (raw[offset + 1].to_u32() << 8) |
-    (raw[offset + 2].to_u32() << 16) |
-    (raw[offset + 3].to_u32() << 24)
+    raw[offset] |
+    (raw[offset + 1] << 8) |
+    (raw[offset + 2] << 16) |
+    (raw[offset + 3] << 24)
 
 fn read_le_i32(raw: [u8], offset: i32) -> i32:
     val value = read_le_u32(raw, offset)
     if value >= 2147483648:
-        (value.to_i64() - 4294967296).to_i32()
+        value - 4294967296
     else:
-        value.to_i32()
+        value
 
 # =========================================================================
 # Diff Image Generator
@@ -489,9 +438,9 @@ fn generate_diff_image(a: [u32], b: [u32], w: i32, h: i32) -> [u32]:
                 diff = diff + [0xFF00AA00]
             else:
                 # Compute per-channel difference
-                val dr = abs_i32(((pa >> 16) & 0xFF).to_i32() - ((pb >> 16) & 0xFF).to_i32())
-                val dg = abs_i32(((pa >> 8) & 0xFF).to_i32() - ((pb >> 8) & 0xFF).to_i32())
-                val db = abs_i32((pa & 0xFF).to_i32() - (pb & 0xFF).to_i32())
+                val dr = abs_i32(((pa >> 16) & 0xFF) - ((pb >> 16) & 0xFF))
+                val dg = abs_i32(((pa >> 8) & 0xFF) - ((pb >> 8) & 0xFF))
+                val db = abs_i32((pa & 0xFF) - (pb & 0xFF))
                 val max_diff = max_i32(dr, max_i32(dg, db))
 
                 if max_diff <= 2:
@@ -503,8 +452,7 @@ fn generate_diff_image(a: [u32], b: [u32], w: i32, h: i32) -> [u32]:
                     var brightness = 80 + (max_diff * 175 / 255)
                     if brightness > 255:
                         brightness = 255
-                    val red_val = brightness.to_u32()
-                    diff = diff + [0xFF000000 | (red_val << 16)]
+                    diff = diff + [0xFF000000 | (brightness << 16)]
         i = i + 1
 
     diff

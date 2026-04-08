@@ -4,6 +4,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use std::sync::Arc;
 
 /// Convert a value to string representation
 ///
@@ -129,6 +130,54 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Provide a simple 8x16 bitmap glyph for source-mode font rendering.
+pub fn rt_gui_get_glyph_8x16_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let codepoint = match args.first() {
+        Some(Value::Int(i)) => *i as i32,
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("rt_gui_get_glyph_8x16 expects an integer codepoint");
+            return Err(CompileError::semantic_with_context(
+                "rt_gui_get_glyph_8x16 expects integer codepoint",
+                ctx,
+            ));
+        }
+    };
+
+    let glyph = glyph_8x16(codepoint);
+    let rows: Vec<Value> = glyph.into_iter().map(|b| Value::Int(b as i64)).collect();
+    Ok(Value::Array(Arc::new(rows)))
+}
+
+fn glyph_8x16(codepoint: i32) -> [u8; 16] {
+    if codepoint <= 0 || codepoint == 32 {
+        return [0; 16];
+    }
+
+    let ch = if (0x20..=0x7e).contains(&codepoint) {
+        codepoint as u8
+    } else {
+        b'?'
+    };
+
+    let mut rows = [0u8; 16];
+    rows[1] = 0x7E;
+    rows[2] = 0x42;
+    rows[13] = 0x42;
+    rows[14] = 0x7E;
+
+    let mut row = 3usize;
+    while row <= 12 {
+        let rotate = ((row - 3) % 8) as u32;
+        let inner = (ch.rotate_left(rotate) >> 1) & 0x3C;
+        rows[row] = 0x42 | inner;
+        row += 1;
+    }
+
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +203,14 @@ mod tests {
     fn test_to_int_from_bool() {
         assert_eq!(to_int(&[Value::Bool(true)]).unwrap(), Value::Int(1));
         assert_eq!(to_int(&[Value::Bool(false)]).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn test_rt_gui_get_glyph_8x16_returns_16_rows() {
+        let glyph = rt_gui_get_glyph_8x16_fn(&[Value::Int('A' as i64)]).unwrap();
+        match glyph {
+            Value::Array(rows) => assert_eq!(rows.len(), 16),
+            other => panic!("expected array, got {:?}", other),
+        }
     }
 }

@@ -400,6 +400,7 @@ pub(crate) fn call_extern_function(
         // Text/bytes conversion (2 functions)
         "rt_text_to_bytes" => conversion::rt_text_to_bytes_fn(&evaluated),
         "rt_bytes_to_text" => conversion::rt_bytes_to_text_fn(&evaluated),
+        "rt_gui_get_glyph_8x16" => conversion::rt_gui_get_glyph_8x16_fn(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)

@@ -17,6 +17,8 @@ use os.apps.sshd.ssh_auth.{SshUserDb, SshAuthRequest, SSH_MSG_USERAUTH_REQUEST, 
 use os.apps.sshd.ssh_channel.{ChannelTable, SshChannel, ChannelType, ChannelState, SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_window_adjust, ssh_build_channel_eof, ssh_build_channel_close, ssh_build_channel_success, ssh_build_channel_failure}
 use os.apps.sshd.ssh_pty.{SshPty}
 
+extern fn serial_println(msg: text)
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -82,6 +84,7 @@ impl SshSession:
 
     me run():
         """Main session loop. Drives the SSH protocol state machine."""
+        serial_println("[sshd-session] start")
         self.do_version_exchange()
         if self.state == SessionState.Closed:
             return
@@ -106,6 +109,7 @@ impl SshSession:
 
     me do_version_exchange():
         """Exchange SSH version strings (RFC 4253 section 4.2)."""
+        serial_println("[sshd-session] version exchange")
         # Send our version string
         val our_version = ssh_build_version_string()
         self.raw_send(our_version)
@@ -119,6 +123,7 @@ impl SshSession:
         val r = ssh_parse_version_string(client_data)
         if val version = r.ok():
             self.client_version = version
+            serial_println("[sshd-session] version exchange ok")
             self.state = SessionState.KexInit
         else:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "invalid version string")
@@ -129,6 +134,7 @@ impl SshSession:
 
     me do_kex():
         """Perform key exchange (curve25519-sha256)."""
+        serial_println("[sshd-session] kex start")
         # Send our KEXINIT
         val server_kexinit = ssh_build_kexinit()
         self.server_kexinit_payload = server_kexinit
@@ -220,10 +226,11 @@ impl SshSession:
         # Derive session keys and activate cipher based on negotiated algorithm
         val keys = ssh_derive_keys(shared_secret, exchange_hash, self.session_id)
         val algos = r_algos.unwrap()
-        if algos.cipher_c2s == "chacha20-poly1305@openssh.com":
-            self.cipher.activate_chacha20(keys)
-        else:
-            self.cipher.activate(keys)
+        if algos.cipher_c2s != "aes256-gcm@openssh.com" or algos.cipher_s2c != "aes256-gcm@openssh.com":
+            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "unsupported cipher negotiation")
+            return
+        self.cipher.activate(keys)
+        serial_println("[sshd-session] kex ok")
 
         self.state = SessionState.Authentication
 
@@ -233,6 +240,7 @@ impl SshSession:
 
     me do_service_request():
         """Handle SSH_MSG_SERVICE_REQUEST for 'ssh-userauth'."""
+        serial_println("[sshd-session] service request")
         val payload = self.recv_packet_payload()
         if payload.len() == 0:
             self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "no service request")
@@ -244,6 +252,7 @@ impl SshSession:
                 if service == "ssh-userauth":
                     val accept = ssh_build_service_accept("ssh-userauth")
                     self.send_packet(accept)
+                    serial_println("[sshd-session] service request ok")
                     return
 
             self.disconnect(7, "service not available")
@@ -256,6 +265,7 @@ impl SshSession:
 
     me do_auth():
         """Handle authentication requests. Loops until success or max attempts."""
+        serial_println("[sshd-session] auth")
         var attempts: u32 = 0
 
         # Send banner
@@ -294,6 +304,7 @@ impl SshSession:
                     self.authenticated_user = req.username
                     val success = ssh_build_auth_success()
                     self.send_packet(success)
+                    serial_println("[sshd-session] auth ok")
                     self.state = SessionState.Interactive
                     return
                 else:
@@ -337,6 +348,7 @@ impl SshSession:
         Main loop: receive packets, dispatch by message type.
         Simultaneously forwards data between PTY and SSH channel.
         """
+        serial_println("[sshd-session] interactive")
         while self.state == SessionState.Interactive:
             # Check for data from shell (PTY master read)
             self._forward_pty_output()

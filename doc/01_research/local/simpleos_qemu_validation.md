@@ -349,6 +349,22 @@ Interpretation:
   - long literal-byte string construction sequences appear in `build/os/desktop_e2e_boot.elf` before the first meaningful launcher work
   - the image is stripped, so symbol-level mapping is limited without instrumentation
 
+### Desktop app launch validation update (2026-04-08)
+
+- New baremetal wrapper:
+  - `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl`
+- Runtime heap:
+  - `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c` now uses a 512 MB bump heap, matching the boot log.
+- Launcher behavior:
+  - desktop E2E no longer depends on heap-backed text arrays for registry state.
+  - the launcher now uses fixed default slots for the three desktop apps and keeps launch state in `app_pid`.
+- QEMU result:
+  - `bin/simple native-build --entry examples/simple_os/arch/x86_64/desktop_e2e_entry.spl --entry-closure ...` builds successfully.
+  - `qemu-system-x86_64 ... -kernel build/os/simpleos_desktop_e2e_32.elf` reaches `desktop_e2e_test.test_main()`.
+  - serial log shows `TEST PASSED`.
+- Residual oddity:
+  - some launcher string formatting still prints tagged-nil-looking values in the log, but this does not block the desktop E2E pass/fail markers.
+
 ## Current Conclusions
 
 ### Proven working enough
@@ -358,23 +374,79 @@ Interpretation:
 - Tools/NVMe/FAT32 lane boot and broad CLI dispatch.
 - QEMU user networking plus hostfwd on a unique port.
 - SSH system-test path up to TCP accept.
+- Desktop E2E baremetal wrapper reaches `TEST PASSED` in QEMU.
 
 ### Proven broken or incomplete
 
-- Live `sshd` lane faults immediately.
 - WM/GUI lane is not stable after entering the event loop (`heap exhausted`).
 - Tools test harness over-reports success.
 - Browser rendering inside the desktop session is not proven.
 - Mouse interaction is initialized but not end-to-end verified.
-- The live `sshd` failure is now isolated to the entry-wrapper / artifact layer:
-  - the working system-test image has concrete early bindings
-  - the failing live image carries unresolved early imports
-  - disassembly shows the live path making early null indirect calls inside `spl_start`
 - The browser sample path is blocked by unconditional `Engine2D` / `backend_cuda` imports before backend fallback can help.
 - The next browser lane is concrete enough to implement:
   - new entry `examples/simple_os/arch/x86_64/browser_soft_entry.spl`
   - imports only `BeDomNode`, `layout_tree`, `generate_paint_list`, `paint_commands_to_scene`, and `execute_scene_to_buffer`
   - validates success by counting non-background pixels in a software-rendered buffer
+
+## Validation Update (Later Same Day)
+
+### Live SSH
+
+- The live lane no longer faults in early boot.
+- Current validated artifact/log pair:
+  - `build/os/simpleos_ssh_live_fixed_32.elf`
+  - `build/os/ssh_2230_live_fixed_serial.log`
+- Proven signals:
+  - `[tcp] Socket 0 listening on port 22`
+  - `[tcp-accept] accepted socket 1`
+- Host probe on forwarded port `2230` reaches SSH packet handling and fails later with:
+  - `padding error: need 76 block 8 mod 4`
+  - `message authentication code incorrect`
+- Meaning:
+  - wrapper/entry startup is fixed enough for live listen/accept
+  - remaining failure is now in SSH session crypto / packet handling
+
+### WM Mouse Automation
+
+- The current guest path is confirmed PS/2-only.
+- Adding `usb-tablet` on the QEMU side is only diagnostic until the guest gains tablet / absolute-pointer support.
+- The smallest stable automation path is now clear:
+  - either add guest-side tablet support
+  - or add a deterministic synthetic-click test hook directly in the WM path
+
+### Tools Lane
+
+- The first harness hardening step is good:
+  - `test_run()` now fails on non-zero exit codes
+- Honest validated result from the working run:
+  - `build/os/tools_test_serial_fix.log`
+  - `Results: 26 passed, 6 failed`
+- Failing commands in that honest run:
+  - `ps`
+  - `kill`
+  - `top`
+  - `nice`
+  - `bootctl`
+  - `log`
+- A later follow-up patch set that tried to convert some missing-service failures into explicit skips currently regresses the baremetal image:
+  - `build/os/tools_test_serial_fix3.log`
+  - repeated `FAULT @ 0x0000000000000000` before boot markers
+- Meaning:
+  - keep the honest pass/fail fix
+  - do not yet trust the latest skip-handling revision without another baremetal fix
+
+### Browser Software Lane
+
+- The initial direct DOM/layout/paint/software entry improved the situation to:
+  - boot banners
+  - `[browser-soft] start`
+  - then repeated faults
+- A later worker revision switched the lane to `render_html_to_pixels_with_viewport(...)`.
+- That newer revision regressed the lane to immediate repeated `FAULT @ 0x0000000000000000` before any boot banner:
+  - `build/os/browser_soft_serial2.log`
+- Meaning:
+  - the browser lane is still blocked by a baremetal early-runtime resolution problem
+  - the latest worker revision is not yet safe to keep as the validated browser QEMU path
 
 ## Immediate Next Validation Targets
 

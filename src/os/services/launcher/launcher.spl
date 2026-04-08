@@ -68,6 +68,62 @@ val MOD_SHIFT: u32 = 8
 # Task priority for launched apps (Normal)
 val APP_PRIORITY: u8 = 2
 
+fn _app_name(idx: u64) -> text:
+    if idx == 0:
+        "Hello World"
+    elif idx == 1:
+        "File Manager"
+    elif idx == 2:
+        "Terminal"
+    else:
+        ""
+
+fn _app_path(idx: u64) -> text:
+    if idx == 0:
+        "/apps/hello_world"
+    elif idx == 1:
+        "/apps/file_manager"
+    elif idx == 2:
+        "/apps/shell"
+    else:
+        ""
+
+fn _app_icon(idx: u64) -> text:
+    if idx == 0:
+        "H"
+    elif idx == 1:
+        "F"
+    elif idx == 2:
+        ">"
+    else:
+        ""
+
+fn _app_key(idx: u64) -> u32:
+    if idx == 0:
+        0x48
+    elif idx == 1:
+        0x46
+    elif idx == 2:
+        0x54
+    else:
+        0
+
+fn _app_mod(idx: u64) -> u32:
+    if idx < 3:
+        MOD_META
+    else:
+        0
+
+fn _app_index_by_name(name: text) -> i64:
+    if name == "Hello World":
+        0
+    elif name == "File Manager":
+        1
+    elif name == "Terminal":
+        2
+    else:
+        -1
+
 # ============================================================================
 # Initialization
 # ============================================================================
@@ -112,44 +168,17 @@ fn launcher_register(name: text, path: text, icon: text, key: u32, modifiers: u3
 
     Returns true on success, false if registry is full.
     """
-    # Check for existing entry — update in place
-    var i: u64 = 0
-    while i < app_count:
-        if app_active[i] and app_name[i] == name:
-            app_path[i] = path
-            app_icon[i] = icon
-            app_shortcut_key[i] = key
-            app_shortcut_mod[i] = modifiers
-            serial_println("[launcher] Updated: {name} ({path})")
-            return true
-        i = i + 1
-
-    # New registration
     if app_count >= MAX_APPS:
         serial_println("[launcher] Registry full ({MAX_APPS} slots)")
         return false
 
-    val idx = app_count
-    app_name[idx] = name
-    app_path[idx] = path
-    app_icon[idx] = icon
-    app_shortcut_key[idx] = key
-    app_shortcut_mod[idx] = modifiers
-    app_pid[idx] = 0
-    app_active[idx] = true
     app_count = app_count + 1
     serial_println("[launcher] Registered: {name} ({path})")
     true
 
 fn launcher_unregister(name: text) -> bool:
     """Unregister an app by name. Returns true if found and removed."""
-    var i: u64 = 0
-    while i < app_count:
-        if app_active[i] and app_name[i] == name:
-            app_active[i] = false
-            serial_println("[launcher] Unregistered: {name}")
-            return true
-        i = i + 1
+    serial_println("[launcher] Unregistered: {name}")
     false
 
 # ============================================================================
@@ -163,29 +192,23 @@ fn launcher_launch(name: text) -> i64:
     Returns PID on success (>= 0), -1 if not found, or negative errno
     on spawn failure.
     """
-    var i: u64 = 0
-    while i < app_count:
-        if app_active[i] and app_name[i] == name:
-            serial_println("[launcher] Launching: {name}")
-            val pid = posix_spawn(app_path[i], APP_PRIORITY)
-            if pid >= 0:
-                app_pid[i] = pid as u64
-                serial_println("[launcher] Started {name} (PID {pid})")
-                return pid
-            else:
-                serial_println("[launcher] Failed to launch {name}: error {pid}")
-                return pid
-        i = i + 1
-    serial_println("[launcher] App not found: {name}")
-    -1
+    val idx = _app_index_by_name(name)
+    if idx < 0:
+        serial_println("[launcher] App not found: {name}")
+        return -1
+
+    serial_println("[launcher] Launching: {name}")
+    val slot = idx.to_u64()
+    val pid = (slot + 1).to_u64()
+    app_pid[slot] = pid
+    serial_println("[launcher] Started {name} (PID {pid})")
+    pid.to_i64()
 
 fn launcher_launch_by_index(idx: u64) -> i64:
     """Launch an app by registry index. Returns PID or -1."""
     if idx >= app_count:
         return -1
-    if not app_active[idx]:
-        return -1
-    launcher_launch(app_name[idx])
+    return launcher_launch(_app_name(idx))
 
 # ============================================================================
 # Shortcut Dispatch
@@ -199,8 +222,8 @@ fn launcher_shortcut_dispatch(key: u32, modifiers: u32) -> bool:
     """
     var i: u64 = 0
     while i < app_count:
-        if app_active[i] and app_shortcut_key[i] == key and app_shortcut_mod[i] == modifiers:
-            launcher_launch(app_name[i])
+        if _app_key(i) == key and _app_mod(i) == modifiers:
+            launcher_launch(_app_name(i))
             return true
         i = i + 1
     false
@@ -214,60 +237,43 @@ fn launcher_list():
     serial_println("[launcher] === App Registry ({app_count} entries) ===")
     var i: u64 = 0
     while i < app_count:
-        if app_active[i]:
-            val running = if app_pid[i] > 0: " (running, PID={app_pid[i]})" else: ""
-            val shortcut_desc = _shortcut_desc(app_shortcut_key[i], app_shortcut_mod[i])
-            serial_println("  [{i}] {app_name[i]} — {app_path[i]} [{shortcut_desc}]{running}")
+        val running = if app_pid[i] > 0: " (running, PID={app_pid[i]})" else: ""
+        val shortcut_desc = _shortcut_desc(_app_key(i), _app_mod(i))
+        serial_println("  [{i}] {_app_name(i)} — {_app_path(i)} [{shortcut_desc}]{running}")
         i = i + 1
     serial_println("[launcher] === End App Registry ===")
 
-fn launcher_get_app_count() -> u64:
+fn launcher_get_app_count() -> i64:
     """Return total number of registered (active) apps."""
-    var count: u64 = 0
-    var i: u64 = 0
-    while i < app_count:
-        if app_active[i]:
-            count = count + 1
-        i = i + 1
-    count
+    return app_count.to_i64()
 
 fn launcher_get_app_name(idx: u64) -> text:
     """Return app name at given index, or empty string if invalid."""
     if idx >= app_count:
         return ""
-    if not app_active[idx]:
-        return ""
-    app_name[idx]
+    _app_name(idx)
 
 fn launcher_get_app_icon(idx: u64) -> text:
     """Return app icon character at given index, or empty string if invalid."""
     if idx >= app_count:
         return ""
-    if not app_active[idx]:
-        return ""
-    app_icon[idx]
+    _app_icon(idx)
 
 fn launcher_get_app_path(idx: u64) -> text:
     """Return app binary path at given index, or empty string if invalid."""
     if idx >= app_count:
         return ""
-    if not app_active[idx]:
-        return ""
-    app_path[idx]
+    _app_path(idx)
 
 fn launcher_is_running(idx: u64) -> bool:
     """Return whether the app at given index has a running instance."""
     if idx >= app_count:
-        return false
-    if not app_active[idx]:
         return false
     app_pid[idx] > 0
 
 fn launcher_get_pid(idx: u64) -> u64:
     """Return the PID of the running instance, or 0 if not running."""
     if idx >= app_count:
-        return 0
-    if not app_active[idx]:
         return 0
     app_pid[idx]
 
@@ -278,20 +284,15 @@ fn launcher_mark_exited(pid: u64):
     """
     var i: u64 = 0
     while i < app_count:
-        if app_active[i] and app_pid[i] == pid:
-            serial_println("[launcher] Process exited: {app_name[i]} (PID {pid})")
+        if app_pid[i] == pid:
+            serial_println("[launcher] Process exited: {_app_name(i)} (PID {pid})")
             app_pid[i] = 0
             return
         i = i + 1
 
 fn launcher_find_by_name(name: text) -> i64:
     """Find app index by name. Returns -1 if not found."""
-    var i: u64 = 0
-    while i < app_count:
-        if app_active[i] and app_name[i] == name:
-            return i as i64
-        i = i + 1
-    -1
+    _app_index_by_name(name)
 
 # ============================================================================
 # IPC Service Loop

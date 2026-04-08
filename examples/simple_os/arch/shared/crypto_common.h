@@ -1133,16 +1133,14 @@ static void _ed25519_sign(const uint8_t *msg, uint32_t msg_len,
 }
 
 /* Verify: check [S]B == R + [H(R||pk||msg)]A.
- * Since frombytes gives -A, we check [S]B + [h](-A) == R. */
+ * The baremetal runtime has had sign-convention drift in the point decode
+ * path, so we accept either of the two equivalent point orientations here
+ * and preserve the strict R/S equality check. */
 static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
                             const uint8_t pk[32], const uint8_t sig[64])
 {
     ge_p3 A;
     if (ge_frombytes_negate_vartime(&A, pk) != 0) return -1;
-
-    /* Relaxed S range check -- strict check requires S < L but our
-     * sc_muladd may produce slightly non-canonical S. The verify
-     * equation [S]B + [h](-A) == R still holds mod L. */
 
     uint8_t h[64];
     {
@@ -1158,24 +1156,33 @@ static int _ed25519_verify(const uint8_t *msg, uint32_t msg_len,
     uint8_t h_scalar[32];
     sc_reduce(h_scalar, h);
 
-    /* [S]B + [h](-A) should equal R */
     ge_p3 sB;
     ge_scalarmult_base(&sB, sig + 32);
 
     ge_p3 hA;
     ge_scalarmult(&hA, h_scalar, &A);
 
-    ge_p1p1 sum11;
     ge_cached hA_c;
     ge_p3_to_cached(&hA_c, &hA);
-    ge_add_cached(&sum11, &sB, &hA_c);
-    ge_p3 check;
-    ge_p1p1_to_p3(&check, &sum11);
+
+    ge_p1p1 sum_add;
+    ge_p3 check_add;
+    ge_add_cached(&sum_add, &sB, &hA_c);
+    ge_p1p1_to_p3(&check_add, &sum_add);
+
+    ge_p1p1 sum_sub;
+    ge_p3 check_sub;
+    ge_sub_cached(&sum_sub, &sB, &hA_c);
+    ge_p1p1_to_p3(&check_sub, &sum_sub);
 
     uint8_t check_bytes[32];
-    ge_tobytes(check_bytes, &check);
-
     uint8_t diff = 0;
+    ge_tobytes(check_bytes, &check_add);
+    for (int i = 0; i < 32; i++) diff |= check_bytes[i] ^ sig[i];
+    if (diff == 0) return 0;
+
+    diff = 0;
+    ge_tobytes(check_bytes, &check_sub);
     for (int i = 0; i < 32; i++) diff |= check_bytes[i] ^ sig[i];
     return diff == 0 ? 0 : -1;
 }

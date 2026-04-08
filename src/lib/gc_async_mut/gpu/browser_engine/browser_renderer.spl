@@ -6,14 +6,14 @@
 # This is the primary entry point for applications that want to render
 # UI through the browser engine onto a 2D pixel surface.
 
-use common.ui.widget.{UITree, UIState}
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.css.{default_style}
+use common.ui.widget.{WidgetNode, UITree, UIState}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_element,
+    be_dom_text}
+use std.gc_async_mut.gpu.browser_engine.css.{default_style, CssValue, BoxEdges}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
-use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{widget_to_dom,
-    ui_tree_to_dom, html_string_to_dom}
+use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
 use common.render_scene.scene.{RenderScene, SceneCommand}
 use common.render_scene.executor.{execute_scene_to_buffer}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
@@ -178,7 +178,13 @@ class BrowserRenderer:
         if val Some(e) = self.engine:
             pixels = execute_scene_to_engine2d_pixels(scene, e)
         else:
-            pixels = execute_scene_to_buffer(scene)
+            pixels = []
+            val pixel_count = self.viewport_w * self.viewport_h
+            var i = 0
+            while i < pixel_count:
+                pixels = pixels + [self.bg_color]
+                i = i + 1
+            execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
         result.format = "pixels"
         result.pixel_data = pixels
         return result
@@ -221,7 +227,7 @@ class BrowserRenderer:
 
         Pipeline: Widgets -> DOM -> Layout -> Paint -> Scene
         """
-        val dom = ui_tree_to_dom(tree, state)
+        val dom = browser_renderer_ui_tree_to_dom(tree, state)
         return self.render_dom(dom)
 
     me render_to_pixels(root: BeDomNode) -> [u32]:
@@ -245,7 +251,143 @@ fn count_nodes(node: BeDomNode) -> i32:
         count = count + count_nodes(child)
     return count
 
-fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
+fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
+    """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
+    val root_widget = tree.root_node()
+    var root_dom = be_dom_element("div")
+    root_dom.id = "ui-root"
+    root_dom.classes = ["ui-container"]
+
+    var s = root_dom.style
+    s.display = "flex"
+    s.flex_direction = "column"
+    s.width = CssValue.pct(100.0)
+    s.height = CssValue.pct(100.0)
+    root_dom.style = s
+
+    val content = browser_renderer_widget_to_dom(root_widget, state)
+    root_dom.add_child(content)
+    root_dom
+
+fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode:
+    val kind = node.kind_name()
+    val tag = browser_renderer_widget_kind_to_tag(kind)
+
+    var dom = be_dom_element(tag)
+    dom.id = node.id
+    browser_renderer_apply_widget_props(dom, node, kind)
+
+    if node.id == state.focused_id:
+        dom.classes = dom.classes + ["focused"]
+        var s = dom.style
+        s.border_width = BoxEdges.all(2)
+        s.border_color = BoxEdges.all(0x58A6FFFF)
+        dom.style = s
+
+    for child in node.children():
+        dom.add_child(browser_renderer_widget_to_dom(child, state))
+
+    dom
+
+fn browser_renderer_widget_kind_to_tag(kind: text) -> text:
+    match kind:
+        "panel" => "div"
+        "text" => "span"
+        "label" => "span"
+        "heading" => "h2"
+        "button" => "button"
+        "input" => "input"
+        "textfield" => "input"
+        "textarea" => "textarea"
+        "checkbox" => "input"
+        "dropdown" => "select"
+        "list" => "ul"
+        "table" => "table"
+        "tabs" => "nav"
+        "menubar" => "nav"
+        "statusbar" => "footer"
+        "progress" => "div"
+        "image" => "img"
+        "divider" => "hr"
+        "dialog" => "dialog"
+        "tooltip" => "div"
+        "tree" => "ul"
+        "treenode" => "li"
+        "scroll" => "div"
+        "card" => "div"
+        "switch" => "input"
+        "navigation_bar" => "nav"
+        "tab_bar" => "nav"
+        _ => "div"
+
+fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: text):
+    dom.classes = dom.classes + [kind]
+
+    val title = node.get_prop("title")
+    if title.len() > 0:
+        dom.set_attr("title", title)
+
+    val text_content = node.get_prop("text")
+    if text_content.len() > 0:
+        dom.add_child(be_dom_text(text_content))
+
+    val value = node.get_prop("value")
+    if value.len() > 0:
+        dom.set_attr("value", value)
+
+    val placeholder = node.get_prop("placeholder")
+    if placeholder.len() > 0:
+        dom.set_attr("placeholder", placeholder)
+
+    val layout = node.layout_name()
+    if layout == "hbox":
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = "row"
+        dom.style = s
+    elif layout == "vbox":
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = "column"
+        dom.style = s
+    elif layout == "grid":
+        var s = dom.style
+        s.display = "grid"
+        dom.style = s
+
+    val width_val = node.get_prop("width")
+    if width_val.len() > 0:
+        dom.set_style("width", width_val)
+
+    val height_val = node.get_prop("height")
+    if height_val.len() > 0:
+        dom.set_style("height", height_val)
+
+    val flex_val = node.get_prop("flex")
+    if flex_val.len() > 0:
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = flex_val
+        dom.style = s
+
+    val gap_val = node.get_prop("gap")
+    if gap_val.len() > 0:
+        dom.set_style("gap", gap_val)
+
+    val bg_val = node.get_prop("background")
+    if bg_val.len() > 0:
+        dom.set_style("background-color", bg_val)
+    else:
+        val bg2_val = node.get_prop("bg")
+        if bg2_val.len() > 0:
+            dom.set_style("background-color", bg2_val)
+
+    if not node.is_visible():
+        var s = dom.style
+        s.display = "none"
+        dom.style = s
+
+pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
     """Convenience wrapper for compiled callers that prefer a module-level entrypoint."""
     val renderer = BrowserRenderer.create(width, height)
     renderer.render_html_to_pixels(html)

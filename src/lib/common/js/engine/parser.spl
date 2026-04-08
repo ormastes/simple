@@ -406,6 +406,12 @@ class JsParser:
     # Expression statement
     me parse_expression_statement() -> BrowserResult<Statement>:
         val expr = self.parse_expression()?
+        # Check for labeled statement: Identifier followed by Colon
+        val ident_name = _get_ident_name(expr)
+        if ident_name != "" and self.check(JsTokenKind.Colon):
+            self.advance()
+            val body = self.parse_statement()?
+            return Ok(Statement.LabeledStmt(label: ident_name, body: body))
         self.match_token(JsTokenKind.Semicolon)
         Ok(Statement.ExprStmt(expr: expr))
 
@@ -851,7 +857,7 @@ class JsParser:
         # Template literal
         if kind == JsTokenKind.TemplateLiteral:
             val tok = self.advance()
-            return Ok(Expression.Literal(value: JsValue.String(v: tok.value)))
+            return self._parse_template_parts(tok.value)
 
         # Boolean true
         if kind == JsTokenKind.TrueKw:
@@ -928,38 +934,85 @@ class JsParser:
                 return self.parse_arrow_body(no_params)
             return Ok(Expression.Literal(value: JsValue.Undefined))
 
-        # Try to parse as expression first
-        val expr = self.parse_expression()?
+        # Parse first item as assignment (not full expression, to not consume commas)
+        val first = self.parse_assignment()?
 
-        # If followed by comma, could be arrow param list
+        # If comma follows, could be arrow params OR comma expression
         if self.check(JsTokenKind.Comma):
-            # Collect identifiers for arrow params
-            var params: [text] = []
-            val first_name = _get_ident_name(expr)
-            if first_name != "":
-                params.push(first_name)
-
+            var items: [Expression] = []
+            items.push(first)
             while self.match_token(JsTokenKind.Comma):
-                val param_tok = self.expect(JsTokenKind.Identifier)?
-                params.push(param_tok.value)
-
+                val item = self.parse_assignment()?
+                items.push(item)
             self.expect(JsTokenKind.CloseParen)?
+            # Check for arrow after close paren
             if self.check(JsTokenKind.Arrow):
+                var params: [text] = []
+                var pi = 0
+                while pi < items.len():
+                    val pname = _get_ident_name(items.get(pi))
+                    if pname != "":
+                        params.push(pname)
+                    pi = pi + 1
                 return self.parse_arrow_body(params)
-            # Fall through — shouldn't happen but be safe
-            return Ok(expr)
+            # Not arrow — comma expression, fold left
+            var result = items.get(0)
+            var ci = 1
+            while ci < items.len():
+                result = Expression.Binary(op: ",", left: result, right: items.get(ci))
+                ci = ci + 1
+            return Ok(result)
 
         self.expect(JsTokenKind.CloseParen)?
 
         # Check for arrow after single-param parens: (x) => ...
-        # Avoid nested match/return — interpreter mode doesn't propagate return from match
-        val ident_name = _get_ident_name(expr)
+        val ident_name = _get_ident_name(first)
         if ident_name != "" and self.check(JsTokenKind.Arrow):
             var single_param: [text] = []
             single_param.push(ident_name)
             return self.parse_arrow_body(single_param)
 
-        Ok(expr)
+        Ok(first)
+
+    # Parse template literal parts — split raw string into quasis and ${...} expressions
+    me _parse_template_parts(raw: text) -> BrowserResult<Expression>:
+        var quasis: [text] = []
+        var exprs: [Expression] = []
+        var current = ""
+        var i = 0
+        val len = raw.len()
+        while i < len:
+            val c = raw[i]
+            if c == "$" and i + 1 < len and raw[i + 1] == "{":
+                quasis.push(current)
+                current = ""
+                i = i + 2
+                # Find matching closing brace
+                var depth = 1
+                var expr_text = ""
+                while i < len and depth > 0:
+                    val ec = raw[i]
+                    if ec == "{":
+                        depth = depth + 1
+                        expr_text = expr_text + ec
+                    if ec == "}":
+                        depth = depth - 1
+                        if depth > 0:
+                            expr_text = expr_text + ec
+                    if depth > 0 and ec != "{" and ec != "}":
+                        expr_text = expr_text + ec
+                    i = i + 1
+                # Parse the expression
+                var sub_parser = JsParser.new(expr_text, self.logger)
+                val expr = sub_parser.parse_expression()?
+                exprs.push(expr)
+            else:
+                current = current + c
+                i = i + 1
+        quasis.push(current)
+        if exprs.len() == 0:
+            return Ok(Expression.Literal(value: JsValue.String(v: raw)))
+        Ok(Expression.TemplateLiteral(quasis: quasis, expressions: exprs))
 
     # Parse arrow function body: => expr or => { stmts }
     me parse_arrow_body(params: [text]) -> BrowserResult<Expression>:

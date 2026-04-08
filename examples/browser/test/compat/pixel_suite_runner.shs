@@ -2,102 +2,52 @@
 # Pixel Suite Runner — Full pixel comparison pipeline
 #
 # 1. Takes Chrome screenshots of all HTML test files
-# 2. Converts PNG to PPM for pixel comparison
-# 3. Runs Simple renderer on same files (placeholder — generates white canvas)
-# 4. Compares pixels
+# 2. Converts PNG to BMP for pixel comparison
+# 3. Runs Simple renderer on same files
+# 4. Compares pixels via Simple test-mode helpers
 # 5. Generates markdown report
-#
-# Usage:
-#   ./pixel_suite_runner.shs [output_dir]
-#
-# Output:
-#   output_dir/chrome/   — Chrome screenshots (PNG + PPM)
-#   output_dir/simple/   — Simple renderer output (PPM)
-#   output_dir/diff/     — Visual diff images (PPM)
-#   output_dir/report.md — Comparison report
-#
-# Dependencies:
-#   - Chrome/Chromium
-#   - ImageMagick (convert command for PNG→PPM)
 
 OUTPUT_DIR="${1:-/tmp/pixel_suite}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$PROJECT_ROOT/src/compiler_rust/target/debug/simple}"
 HTML_DIR="$SCRIPT_DIR/html"
 CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+RENDER_HELPER="$SCRIPT_DIR/simple_render_html.spl"
 COMPARE_HELPER="$SCRIPT_DIR/compare_render_pair.spl"
 
-WIDTH=800
-HEIGHT=600
+# Source-mode smoke-suite viewport. Larger sizes currently exceed the interpreter watchdog.
+WIDTH=64
+HEIGHT=64
 
 echo "=== Pixel Suite Runner ==="
 echo "HTML dir: $HTML_DIR"
 echo "Output:   $OUTPUT_DIR"
 echo "Viewport: ${WIDTH}x${HEIGHT}"
+echo "Simple:   $SIMPLE_BIN"
 echo ""
 
 mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/simple" "$OUTPUT_DIR/diff"
 
-COMPARE_BINARY="$OUTPUT_DIR/compare_render_pair.smf"
-if [ ! -f "$COMPARE_BINARY" ]; then
-    ./bin/simple compile "$COMPARE_HELPER" -o "$COMPARE_BINARY" >/dev/null 2>&1
-fi
-if [ ! -f "$COMPARE_BINARY" ]; then
-    echo "Error: failed to compile comparison helper"
-    exit 1
-fi
-
-COMPARE_SELFTEST_A="$OUTPUT_DIR/.compare_selftest_a.ppm"
-COMPARE_SELFTEST_B="$OUTPUT_DIR/.compare_selftest_b.ppm"
-COMPARE_SELFTEST_METRICS="$OUTPUT_DIR/.compare_selftest.txt"
-COMPARE_SELFTEST_DIFF="$OUTPUT_DIR/.compare_selftest_diff.ppm"
-cat >"$COMPARE_SELFTEST_A" <<'EOF'
-P3
-1 1
-255
-255 255 255
-EOF
-cp "$COMPARE_SELFTEST_A" "$COMPARE_SELFTEST_B"
-if ! ./bin/simple "$COMPARE_BINARY" \
-    "$COMPARE_SELFTEST_A" \
-    "$COMPARE_SELFTEST_B" \
-    1 1 \
-    "$COMPARE_SELFTEST_METRICS" \
-    "$COMPARE_SELFTEST_DIFF" \
-    >/dev/null 2>&1; then
-    echo "Error: Simple standalone runtime cannot execute compat helpers yet (_rt_interp_call unresolved)"
-    echo "Chrome screenshots still work via chrome_screenshot.shs, but full pixel diff needs the runtime loader fixed first."
-    exit 1
-fi
-
 render_with_simple_test() {
     html_file="$1"
     output_ppm="$2"
-    temp_spec="$OUTPUT_DIR/render_one_spec.spl"
-    cat >"$temp_spec" <<EOF
-use std.spec.*
-use std.io.{file_write}
-use examples.browser.test.compat.chrome_compare.{render_simple_test}
-use examples.browser.test.compat.image_export.{export_ppm_text}
-extern fn rt_file_read_text(path: text) -> text
-
-describe "render one":
-    it "renders html fixture to ppm":
-        val html = rt_file_read_text("$html_file")
-        val pixels = render_simple_test(html, $WIDTH, $HEIGHT)
-        expect(pixels.len()).to_equal($((WIDTH * HEIGHT)))
-        expect(file_write("$output_ppm", export_ppm_text("", pixels, $WIDTH, $HEIGHT))).to_equal(true)
-EOF
-    ./bin/simple test "$temp_spec" >/dev/null 2>&1
+    "$SIMPLE_BIN" "$RENDER_HELPER" "$html_file" "$output_ppm" "$WIDTH" "$HEIGHT" >/dev/null 2>&1
 }
 
-# Check dependencies
+compare_with_simple_test() {
+    baseline_path="$1"
+    candidate_path="$2"
+    metrics_path="$3"
+    diff_path="$4"
+    "$SIMPLE_BIN" "$COMPARE_HELPER" "$baseline_path" "$candidate_path" "$WIDTH" "$HEIGHT" "$metrics_path" "$diff_path" >/dev/null 2>&1
+}
+
 if ! sh "$CHROME_SCRIPT" --help >/dev/null 2>&1; then
     echo "Warning: Chrome may not be available"
 fi
 
-# Collect all HTML test files
 TOTAL=0
-PASS=0
 FAIL=0
 SKIP=0
 
@@ -110,7 +60,6 @@ echo "" >> "$REPORT"
 echo "| Test | Category | Chrome | Simple | Status |" >> "$REPORT"
 echo "|------|----------|--------|--------|--------|" >> "$REPORT"
 
-# Walk the html/ directory
 for category_dir in "$HTML_DIR"/*/; do
     category="$(basename "$category_dir")"
     for html_file in "$category_dir"*.html; do
@@ -120,7 +69,6 @@ for category_dir in "$HTML_DIR"/*/; do
 
         echo "--- [$category] $test_name ---"
 
-        # Step 1: Chrome screenshot
         chrome_png="$OUTPUT_DIR/chrome/${test_name}.png"
         sh "$CHROME_SCRIPT" "$html_file" "$chrome_png" "$WIDTH" "$HEIGHT" 2>/dev/null
 
@@ -133,7 +81,6 @@ for category_dir in "$HTML_DIR"/*/; do
             echo "  Chrome: FAILED"
         fi
 
-        # Step 2: Simple renderer
         simple_ppm="$OUTPUT_DIR/simple/${test_name}.ppm"
         render_with_simple_test "$html_file" "$simple_ppm"
         if [ ! -f "$simple_ppm" ]; then
@@ -144,12 +91,11 @@ for category_dir in "$HTML_DIR"/*/; do
         fi
         echo "  Simple: OK"
 
-        # Step 3: Compare with the built-in Simple helper.
         chrome_bmp="$OUTPUT_DIR/chrome/${test_name}.bmp"
         metrics_txt="$OUTPUT_DIR/diff/${test_name}.txt"
         diff_ppm="$OUTPUT_DIR/diff/${test_name}.ppm"
         if [ "$chrome_ok" = "YES" ] && [ -f "$chrome_bmp" ]; then
-            ./bin/simple "$COMPARE_BINARY" "$chrome_bmp" "$simple_ppm" "$WIDTH" "$HEIGHT" "$metrics_txt" "$diff_ppm" >/dev/null 2>&1
+            compare_with_simple_test "$chrome_bmp" "$simple_ppm" "$metrics_txt" "$diff_ppm"
             if [ -f "$metrics_txt" ]; then
                 match_pct=$(awk -F= '/^match_percentage=/{print $2}' "$metrics_txt")
                 rmse=$(awk -F= '/^rmse=/{print $2}' "$metrics_txt")

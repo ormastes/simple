@@ -29,9 +29,13 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Failure: client SSH version read is not fully passing.
 
 5. Live `sshd`
-   - Status: FAIL
-   - Host port: `2224`
-   - Evidence: immediate `FAULT @ 0x0000000000000003`
+   - Status: PARTIAL
+   - Host ports: `2228`, `2230`
+   - Evidence:
+     - `[tcp] Socket 0 listening on port 22`
+     - `[tcp-accept] accepted socket 1`
+   - Failure:
+     - SSH negotiation now fails later at the packet crypto layer (`padding` / `MAC`), not in startup
 
 ## Remaining Lanes
 
@@ -70,6 +74,9 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Revised approach:
      - use the direct software browser pipeline from `browser_backend.spl` / `backend_factory.spl`
      - avoid `BrowserRenderer.create(...)` and all `Engine2D` imports entirely
+   - Current status:
+     - one version reached `[browser-soft] start` and faulted later
+     - the latest worker revision regressed to immediate `FAULT @ 0x0000000000000000` before boot markers
 
 3. WM mouse automation lane
    - Entry: `examples/simple_os/arch/x86_64/wm_entry.spl`
@@ -89,9 +96,10 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - QEMU GUI launch does not provision an explicit tablet/pointer device
      - explicit QMP device routing is unavailable in this VM shape
      - generic `input-send-event` is accepted by QEMU but does not yield guest-visible clicks
-   - Next experiment:
-     - add `-device usb-tablet` as the first diagnostic
-     - if clicks still do not arrive, shift focus to guest-side input support instead of more QMP routing work
+   - Current conclusion:
+     - the guest is PS/2-only
+     - `usb-tablet` is diagnostic only until the guest gains absolute-pointer support
+     - the next real fix is guest-side tablet support or a synthetic-click test hook
 
 4. Live `sshd` fault isolation lane
    - Entry: live SSH daemon path
@@ -104,12 +112,10 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
      - `[sshd] SSH daemon listening on port 22`
      - banner exchange proceeds beyond TCP connect
    - Current blocker:
-     - live multiboot image carries unresolved early bindings
-     - fault occurs before first serial print
-     - earliest unresolved edge is `serial_println`
-     - `ssh_live_entry__SshDaemon` is also unresolved, but later
-     - disassembly now confirms early null indirect calls inside `spl_start`
-     - strongest current mapping is that the first two null indirect calls correspond to the opening `serial_println(...)` calls in `ssh_live_entry.spl`
+     - early wrapper fault is fixed
+     - live listener state is proven
+     - remaining blocker is SSH session crypto / packet handling after accept
+     - separate Ed25519 C verify work is still in progress in the baremetal runtime
 
 ### P1
 
@@ -130,6 +136,9 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
    - Pass signals:
      - negative tool paths fail the lane
      - all-pass summary becomes meaningful
+   - Current status:
+     - the base pass/fail hardening is done and exposed a real `26 passed, 6 failed` result
+     - the latest skip-handling follow-up currently regresses the baremetal image to immediate `FAULT @ 0x0000000000000000`
 
 7. Headless full-stack lane
    - Scenario: `x64-full-stack`
@@ -180,8 +189,21 @@ Goal: validate SimpleOS end-to-end across boot, WM/GUI, browser surfaces, mouse 
 
 ## Exit Criteria
 
-1. A bootable wrapper for `desktop_e2e_test.spl` reaches `test_main()` and passes in QEMU.
+1. A bootable wrapper for `desktop_e2e_test.spl` reaches `test_main()` and passes in QEMU. 
 2. A browser software-render lane passes in QEMU without touching `Engine2D` / `backend_cuda`.
 3. WM lane either supports provable automated input, or the repo has a different routable GUI lane selected for automation.
 4. Live `sshd` image is rebuilt without unresolved early bindings, with non-null early `spl_start` calls, and reaches listening state.
 5. Tools lane reports meaningful pass/fail based on real tool exit codes.
+
+## Status Update (2026-04-08)
+
+- Desktop E2E exit criterion 1 is now met by `examples/simple_os/arch/x86_64/desktop_e2e_entry.spl`.
+- Live SSH exit criterion 4 is partially met:
+  - listener and accept are proven
+  - packet crypto still fails after accept
+- WM routing is now clear:
+  - more QMP work is low value until the guest gets tablet support or a synthetic-click hook
+- Tools exit criterion 5 is partially met:
+  - honest pass/fail reporting exists
+  - the latest skip-handling follow-up is not yet boot-safe
+- The current remaining work items are browser software-render validation, WM input automation implementation, SSH session crypto follow-up, and tools baremetal regression cleanup.
