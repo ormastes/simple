@@ -12,6 +12,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a}
+use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.gc_async_mut.cuda.{
     cuda_available, cuda_init, cuda_device_count,
     cuda_mem_alloc, cuda_mem_free,
@@ -419,92 +420,23 @@ fn _gpu_draw_text_fallback(backend: CudaBackend, x: i32, y: i32, text_val: text,
     and sampled by a text-rendering kernel. This fallback is acceptable
     for low-frequency text draws (UI labels, debug overlays).
     """
-    # Use CPU backend's bitmap font implementation via direct pixel writes
-    # to host buffer, then upload the dirty region
-    var scale = font_size / 7
-    if scale < 1:
-        scale = 1
-
-    val text_w = text_val.len() * 6 * scale
-    val text_h = 7 * scale
-
     # Ensure host buffer is current
     if backend.dirty:
         val fb_size = _i64(backend.w) * _i64(backend.h) * 4
         _download_framebuffer(backend.d_framebuffer, backend.host_buf, fb_size)
         cuda_sync()
 
-    # Render glyphs into host buffer
-    var cursor_x = x
-    var idx = 0
-    while idx < text_val.len():
-        val ch = text_val.slice(idx, idx + 1)
-        _render_glyph_to_host(backend, cursor_x, y, ch, color, scale)
-        cursor_x = cursor_x + 6 * scale
-        idx = idx + 1
+    # Render glyphs into host buffer using shared glyph module
+    render_text_to_buffer(backend.host_buf, backend.w, backend.h, x, y, text_val, color, font_size)
 
-    # Upload the modified text region back to GPU
-    val region_size = _i64(text_w) * _i64(text_h) * 4
-    val fb_size = _i64(backend.w) * _i64(backend.h) * 4
     # Re-upload entire framebuffer (simpler; for production, upload only the dirty rect)
+    val fb_size = _i64(backend.w) * _i64(backend.h) * 4
     _upload_host_to_device(backend.d_framebuffer, backend.host_buf, fb_size)
-
-fn _render_glyph_to_host(backend: CudaBackend, x: i32, y: i32, ch: text, color: u32, scale: i32):
-    """Render a single glyph into the host buffer."""
-    val bitmap = _get_glyph(ch)
-    var row = 0
-    while row < 7:
-        val row_data = bitmap[row]
-        var col = 0
-        while col < 5:
-            val bit = (row_data >> (4 - col)) & 1
-            if bit != 0:
-                var sy = 0
-                while sy < scale:
-                    var sx = 0
-                    while sx < scale:
-                        val px = x + col * scale + sx
-                        val py = y + row * scale + sy
-                        if (px >= 0 and px < backend.w and
-                            py >= 0 and py < backend.h):
-                            val idx = py * backend.w + px
-                            backend.host_buf[idx] = color
-                        sx = sx + 1
-                    sy = sy + 1
-            col = col + 1
-        row = row + 1
 
 extern fn rt_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64
 
 fn _upload_host_to_device(d_dst: i64, host_buf: [u32], byte_size: i64):
     rt_engine2d_upload_host_buf(d_dst, host_buf, byte_size)
-
-# ============================================================================
-# Minimal Glyph Data (shared with CPU backend pattern)
-# ============================================================================
-
-fn _get_glyph(ch: text) -> [i32]:
-    """5x7 bitmap glyph lookup. Returns 7-row array, each row 5 bits wide."""
-    if ch == "A" or ch == "a":
-        return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
-    if ch == "B" or ch == "b":
-        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]
-    if ch == "C" or ch == "c":
-        return [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]
-    if ch == "D" or ch == "d":
-        return [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100]
-    if ch == "E" or ch == "e":
-        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]
-    if ch == "F" or ch == "f":
-        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]
-    if ch == " ":
-        return [0, 0, 0, 0, 0, 0, 0]
-    if ch == "0":
-        return [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]
-    if ch == "1":
-        return [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
-    # Default: filled block for unknown chars
-    [0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111]
 
 # ============================================================================
 # PTX Kernel Source

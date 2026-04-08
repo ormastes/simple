@@ -22,6 +22,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
+use std.gpu.engine2d.glyph.{glyph_data, render_text_to_buffer}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 
@@ -259,16 +260,7 @@ impl RenderBackend for VirtioGpuBackend:
             row = row + 1
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
-        var scale = font_size / 7
-        if scale < 1:
-            scale = 1
-        var cursor_x = x
-        var idx = 0
-        while idx < text_val.len():
-            val ch = text_val.slice(idx, idx + 1)
-            _vg_draw_glyph(self, cursor_x, y, ch, color, scale)
-            cursor_x = cursor_x + 6 * scale
-            idx = idx + 1
+        render_text_to_buffer(self.buf, self.w, self.h, x, y, text_val, color, font_size)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
@@ -437,130 +429,7 @@ fn _vg_edge_x(x1: i32, y1: i32, x2: i32, y2: i32, y: i32) -> i32:
         return x1
     x1 + (x2 - x1) * (y - y1) / dy
 
-# ============================================================================
-# Text Rendering (5x7 bitmap font)
-# ============================================================================
-
-fn _vg_draw_glyph(backend: VirtioGpuBackend, x: i32, y: i32, ch: text, color: u32, scale: i32):
-    """Render a single character glyph at (x, y) with given scale."""
-    val bitmap = _vg_get_glyph(ch)
-    var row = 0
-    while row < 7:
-        val row_data = bitmap[row]
-        var col = 0
-        while col < 5:
-            val bit = (row_data >> (4 - col)) & 1
-            if bit != 0:
-                var sy = 0
-                while sy < scale:
-                    var sx = 0
-                    while sx < scale:
-                        _vg_set_pixel(backend, x + col * scale + sx, y + row * scale + sy, color)
-                        sx = sx + 1
-                    sy = sy + 1
-            col = col + 1
-        row = row + 1
-
-fn _vg_get_glyph(ch: text) -> [i32]:
-    """Return 7-row bitmap for a character. Each row is 5 bits wide."""
-    if ch == "A" or ch == "a":
-        return [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
-    if ch == "B" or ch == "b":
-        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]
-    if ch == "C" or ch == "c":
-        return [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]
-    if ch == "D" or ch == "d":
-        return [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100]
-    if ch == "E" or ch == "e":
-        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]
-    if ch == "F" or ch == "f":
-        return [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]
-    if ch == "G" or ch == "g":
-        return [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]
-    if ch == "H" or ch == "h":
-        return [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]
-    if ch == "I" or ch == "i":
-        return [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
-    if ch == "J" or ch == "j":
-        return [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100]
-    if ch == "K" or ch == "k":
-        return [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]
-    if ch == "L" or ch == "l":
-        return [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]
-    if ch == "M" or ch == "m":
-        return [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]
-    if ch == "N" or ch == "n":
-        return [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]
-    if ch == "O" or ch == "o":
-        return [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
-    if ch == "P" or ch == "p":
-        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]
-    if ch == "Q" or ch == "q":
-        return [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]
-    if ch == "R" or ch == "r":
-        return [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]
-    if ch == "S" or ch == "s":
-        return [0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110]
-    if ch == "T" or ch == "t":
-        return [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]
-    if ch == "U" or ch == "u":
-        return [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]
-    if ch == "V" or ch == "v":
-        return [0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b01010, 0b00100]
-    if ch == "W" or ch == "w":
-        return [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]
-    if ch == "X" or ch == "x":
-        return [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001]
-    if ch == "Y" or ch == "y":
-        return [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100]
-    if ch == "Z" or ch == "z":
-        return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]
-    if ch == "0":
-        return [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]
-    if ch == "1":
-        return [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]
-    if ch == "2":
-        return [0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111]
-    if ch == "3":
-        return [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110]
-    if ch == "4":
-        return [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]
-    if ch == "5":
-        return [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]
-    if ch == "6":
-        return [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]
-    if ch == "7":
-        return [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]
-    if ch == "8":
-        return [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]
-    if ch == "9":
-        return [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110]
-    if ch == " ":
-        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000]
-    if ch == ".":
-        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100]
-    if ch == ",":
-        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]
-    if ch == "!":
-        return [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100]
-    if ch == ":":
-        return [0b00000, 0b00100, 0b00000, 0b00000, 0b00000, 0b00100, 0b00000]
-    if ch == "-":
-        return [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000]
-    if ch == "+":
-        return [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000]
-    if ch == "=":
-        return [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000]
-    if ch == "(":
-        return [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]
-    if ch == ")":
-        return [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]
-    if ch == "/":
-        return [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000]
-    if ch == "_":
-        return [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111]
-    # Unknown character: filled block
-    [0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111]
+# Text rendering now uses shared glyph module (std.gpu.engine2d.glyph)
 
 # ============================================================================
 # Conversion Helper
