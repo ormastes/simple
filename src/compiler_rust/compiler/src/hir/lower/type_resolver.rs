@@ -377,15 +377,35 @@ impl Lowerer {
                     }
                 }
                 _ => {
+                    // For VOID, Pointer, or other non-struct types (often caused by
+                    // cross-module imports where field types resolve to VOID because
+                    // the dependency wasn't loaded yet), search ALL known structs for
+                    // a matching field name — same heuristic as the ANY case.
+                    // This is the fix for the cross-module FieldGet bug where all
+                    // field accesses incorrectly used byte_offset=0.
                     if self.lenient_types {
-                        Ok((0, TypeId::ANY))
-                    } else {
-                        Err(LowerError::CannotInferFieldType {
-                            struct_name: format!("{:?}", hir_ty),
-                            field: field.to_string(),
-                            available_fields: vec![],
-                        })
+                        let mut best: Option<(usize, TypeId, usize)> = None;
+                        for (_, hty) in self.module.types.iter() {
+                            if let HirType::Struct { fields, .. } = hty {
+                                for (idx, (fname, fty)) in fields.iter().enumerate() {
+                                    if fname == field {
+                                        let count = fields.len();
+                                        if best.as_ref().is_none_or(|(_, _, c)| count > *c) {
+                                            best = Some((idx, *fty, count));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((idx, ty, _)) = best {
+                            return Ok((idx, ty));
+                        }
                     }
+                    Err(LowerError::CannotInferFieldType {
+                        struct_name: format!("{:?}", hir_ty),
+                        field: field.to_string(),
+                        available_fields: vec![],
+                    })
                 }
             }
         } else {
