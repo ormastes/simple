@@ -14,7 +14,7 @@ use std.js.engine.runtime.{dispatch_native}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, f64_to_i64}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, f64_to_i64}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
@@ -54,6 +54,73 @@ class JsInterpreter:
             has_thrown: false,
             native_id_map: [],
         )
+
+    # Register a native function placeholder and return its index
+    me _register_native(name: text, native_id: i64) -> i64:
+        val fn_idx = self.functions.len()
+        val placeholder = JsFunction(name: name, params: [], body: [], closure_env: -1)
+        self.functions.push(placeholder)
+        self.native_id_map.push(Pair(first: fn_idx, second: native_id))
+        fn_idx
+
+    # Define a native function in the global scope
+    me _define_global_native(name: text, native_id: i64):
+        val fn_idx = self._register_native(name, native_id)
+        self.env_stack.define_var(self.global_env, name, JsValue.Function(id: fn_idx))
+
+    # Define a native method on an object
+    me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
+        val fn_idx = self._register_native(method_name, native_id)
+        self.object_store.set_property(obj_id, method_name, JsValue.Function(id: fn_idx))
+
+    # Initialize global environment with built-in objects and functions.
+    # Must be a `me` method on JsInterpreter — JsRuntime wrapper hits copy-semantics bug.
+    me setup_globals():
+        # Global values
+        self.env_stack.define_var(self.global_env, "undefined", JsValue.Undefined)
+        self.env_stack.define_var(self.global_env, "NaN", JsValue.Number(v: js_nan()))
+        self.env_stack.define_var(self.global_env, "Infinity", JsValue.Number(v: js_infinity()))
+
+        # Global functions (native IDs from runtime.spl)
+        self._define_global_native("parseInt", -10)
+        self._define_global_native("parseFloat", -11)
+        self._define_global_native("isNaN", -12)
+        self._define_global_native("isFinite", -13)
+
+        # console object
+        val console_id = self.object_store.create_object()
+        self._define_method_on(console_id, "log", -1)
+        self._define_method_on(console_id, "error", -2)
+        self._define_method_on(console_id, "warn", -3)
+        self.env_stack.define_var(self.global_env, "console", JsValue.Object(id: console_id))
+
+        # Math object
+        val math_id = self.object_store.create_object()
+        self.object_store.set_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
+        self.object_store.set_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
+        self.object_store.set_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
+        self._define_method_on(math_id, "floor", -20)
+        self._define_method_on(math_id, "ceil", -21)
+        self._define_method_on(math_id, "round", -22)
+        self._define_method_on(math_id, "random", -23)
+        self._define_method_on(math_id, "abs", -24)
+        self._define_method_on(math_id, "max", -25)
+        self._define_method_on(math_id, "min", -26)
+        self._define_method_on(math_id, "sqrt", -27)
+        self._define_method_on(math_id, "pow", -28)
+        self.env_stack.define_var(self.global_env, "Math", JsValue.Object(id: math_id))
+
+        # JSON object
+        val json_id = self.object_store.create_object()
+        self._define_method_on(json_id, "parse", -30)
+        self._define_method_on(json_id, "stringify", -31)
+        self.env_stack.define_var(self.global_env, "JSON", JsValue.Object(id: json_id))
+
+        # Timer stubs
+        self._define_global_native("setTimeout", -40)
+        self._define_global_native("setInterval", -41)
+        self._define_global_native("clearTimeout", -42)
+        self._define_global_native("clearInterval", -43)
 
     # Execute a full program (list of statements)
     me execute(program: [Statement]) -> BrowserResult<JsValue>:
@@ -853,6 +920,18 @@ class JsInterpreter:
                 _: pass_dn
             if is_array:
                 return self._dispatch_array_method(arr_id, member_method, args, env)
+
+        if is_member and _is_string_method(member_method):
+            val obj_val_s = self.eval_expression(member_obj_expr, env)?
+            var is_string = false
+            var str_val = ""
+            match obj_val_s:
+                JsValue.String(sv):
+                    is_string = true
+                    str_val = sv
+                _: pass_dn
+            if is_string:
+                return self._dispatch_string_method(str_val, member_method, args, env)
 
         val callee_val = self.eval_expression(callee, env)?
 

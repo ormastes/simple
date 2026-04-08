@@ -1,0 +1,537 @@
+# Browser session for the main Simple web/browser surface.
+#
+# Scope:
+# - page lifecycle state: begin/open/commit/stop/reload/back/forward
+# - HTML body rendering through the existing browser renderer
+# - inline script execution through the shared JS runtime
+# - minimal browser-like host globals: window/document/location/navigator/chrome
+#
+# Non-goals:
+# - network-backed HTTP/HTTPS navigation
+# - full DOM API parity
+# - CSS stylesheet parsing (<style> / linked CSS)
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+extern fn rt_file_read_text(path: text) -> text
+
+class BrowserHistoryEntry:
+    url: text
+    title: text
+    source_html: text
+
+    static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
+        BrowserHistoryEntry(url: url, title: title, source_html: source_html)
+
+class BrowserRuntimeState:
+    runtime: JsRuntime
+    window_id: i64
+    document_id: i64
+    body_id: i64
+    location_id: i64
+    navigator_id: i64
+    chrome_id: i64
+
+    static fn create(url: text, title: text, body_html: text) -> BrowserRuntimeState:
+        val logger = Logger.new("browser-session-js", LogLevel.Error)
+        var runtime = JsRuntime.new(logger)
+        val global_env = runtime.interpreter.global_env
+
+        val body_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(body_id, "innerHTML", JsValue.String(v: body_html))
+        runtime.interpreter.object_store.set_property(body_id, "textContent", JsValue.String(v: html_to_text(body_html)))
+
+        val location_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(location_id, "href", JsValue.String(v: url))
+        runtime.interpreter.object_store.set_property(location_id, "protocol", JsValue.String(v: url_protocol(url)))
+        runtime.interpreter.object_store.set_property(location_id, "pathname", JsValue.String(v: url_pathname(url)))
+
+        val navigator_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(
+            navigator_id,
+            "userAgent",
+            JsValue.String(v: chrome_user_agent())
+        )
+        runtime.interpreter.object_store.set_property(
+            navigator_id,
+            "vendor",
+            JsValue.String(v: "Google Inc.")
+        )
+        runtime.interpreter.object_store.set_property(
+            navigator_id,
+            "platform",
+            JsValue.String(v: "Linux x86_64")
+        )
+        runtime.interpreter.object_store.set_property(
+            navigator_id,
+            "language",
+            JsValue.String(v: "en-US")
+        )
+
+        val chrome_id = runtime.interpreter.object_store.create_object()
+        val chrome_runtime_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
+
+        val document_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(document_id, "title", JsValue.String(v: title))
+        runtime.interpreter.object_store.set_property(document_id, "readyState", JsValue.String(v: "loading"))
+        runtime.interpreter.object_store.set_property(document_id, "body", JsValue.Object(id: body_id))
+        runtime.interpreter.object_store.set_property(document_id, "URL", JsValue.String(v: url))
+        runtime.interpreter.object_store.set_property(document_id, "location", JsValue.Object(id: location_id))
+
+        val window_id = runtime.interpreter.object_store.create_object()
+        runtime.interpreter.object_store.set_property(window_id, "window", JsValue.Object(id: window_id))
+        runtime.interpreter.object_store.set_property(window_id, "self", JsValue.Object(id: window_id))
+        runtime.interpreter.object_store.set_property(window_id, "top", JsValue.Object(id: window_id))
+        runtime.interpreter.object_store.set_property(window_id, "document", JsValue.Object(id: document_id))
+        runtime.interpreter.object_store.set_property(window_id, "location", JsValue.Object(id: location_id))
+        runtime.interpreter.object_store.set_property(window_id, "navigator", JsValue.Object(id: navigator_id))
+        runtime.interpreter.object_store.set_property(window_id, "chrome", JsValue.Object(id: chrome_id))
+
+        if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
+            runtime.interpreter.object_store.set_property(window_id, "console", console_val)
+        if val Some(math_val) = runtime.interpreter.env_stack.get_var(global_env, "Math"):
+            runtime.interpreter.object_store.set_property(window_id, "Math", math_val)
+        if val Some(json_val) = runtime.interpreter.env_stack.get_var(global_env, "JSON"):
+            runtime.interpreter.object_store.set_property(window_id, "JSON", json_val)
+        if val Some(timeout_val) = runtime.interpreter.env_stack.get_var(global_env, "setTimeout"):
+            runtime.interpreter.object_store.set_property(window_id, "setTimeout", timeout_val)
+        if val Some(interval_val) = runtime.interpreter.env_stack.get_var(global_env, "setInterval"):
+            runtime.interpreter.object_store.set_property(window_id, "setInterval", interval_val)
+
+        runtime.interpreter.env_stack.define_var(global_env, "window", JsValue.Object(id: window_id))
+        runtime.interpreter.env_stack.define_var(global_env, "self", JsValue.Object(id: window_id))
+        runtime.interpreter.env_stack.define_var(global_env, "document", JsValue.Object(id: document_id))
+        runtime.interpreter.env_stack.define_var(global_env, "location", JsValue.Object(id: location_id))
+        runtime.interpreter.env_stack.define_var(global_env, "navigator", JsValue.Object(id: navigator_id))
+        runtime.interpreter.env_stack.define_var(global_env, "chrome", JsValue.Object(id: chrome_id))
+
+        BrowserRuntimeState(
+            runtime: runtime,
+            window_id: window_id,
+            document_id: document_id,
+            body_id: body_id,
+            location_id: location_id,
+            navigator_id: navigator_id,
+            chrome_id: chrome_id
+        )
+
+class BrowserSession:
+    current_url: text
+    current_title: text
+    current_body_html: text
+    source_html: text
+    history: [BrowserHistoryEntry]
+    current_index: i32
+    is_loading: bool
+    pending_url: text
+    stop_requested: bool
+    warnings: [text]
+    runtime_state: BrowserRuntimeState?
+
+    static fn new() -> BrowserSession:
+        BrowserSession(
+            current_url: "about:blank",
+            current_title: "about:blank",
+            current_body_html: "",
+            source_html: blank_page_html(),
+            history: [],
+            current_index: -1,
+            is_loading: false,
+            pending_url: "",
+            stop_requested: false,
+            warnings: [],
+            runtime_state: nil
+        )
+
+impl BrowserSession:
+
+    me begin_navigation(url: text):
+        self.pending_url = normalize_browser_url(url)
+        self.is_loading = true
+        self.stop_requested = false
+        self.warnings = []
+
+    me stop_loading():
+        if self.is_loading:
+            self.stop_requested = true
+            self.is_loading = false
+            self.pending_url = ""
+
+    me open_html(url: text, html: text) -> Result<bool, text>:
+        self.begin_navigation(url)
+        self.commit_navigation_html(html)
+
+    me open_url(url: text) -> Result<bool, text>:
+        val normalized = normalize_browser_url(url)
+        if normalized == "about:blank":
+            return self.open_html(normalized, blank_page_html())
+        if normalized.starts_with("file://"):
+            val path = normalized.slice(7, normalized.len())
+            val html = rt_file_read_text(path) ?? ""
+            return self.open_html(normalized, html)
+        return Err("network navigation is not implemented for '{normalized}'")
+
+    me commit_navigation_html(html: text) -> Result<bool, text>:
+        if not self.is_loading:
+            return Err("no pending navigation")
+        if self.stop_requested:
+            self.pending_url = ""
+            self.is_loading = false
+            return Err("navigation stopped")
+        val pending = self.pending_url
+        self.pending_url = ""
+        self.is_loading = false
+        self._load_page_source(pending, html, -1, true)
+
+    me reload() -> Result<bool, text>:
+        if self.current_index < 0 or self.current_index >= self.history.len():
+            return Err("no page to reload")
+        val entry = self.history[self.current_index]
+        self.begin_navigation(entry.url)
+        self.pending_url = ""
+        self.is_loading = false
+        self.stop_requested = false
+        self._load_page_source(entry.url, entry.source_html, self.current_index, false)
+
+    me go_back() -> Result<bool, text>:
+        if not self.can_go_back():
+            return Err("cannot go back")
+        val target = self.current_index - 1
+        val entry = self.history[target]
+        self._load_page_source(entry.url, entry.source_html, target, false)
+
+    me go_forward() -> Result<bool, text>:
+        if not self.can_go_forward():
+            return Err("cannot go forward")
+        val target = self.current_index + 1
+        val entry = self.history[target]
+        self._load_page_source(entry.url, entry.source_html, target, false)
+
+    fn can_go_back() -> bool:
+        self.current_index > 0
+
+    fn can_go_forward() -> bool:
+        self.current_index >= 0 and self.current_index < self.history.len() - 1
+
+    me eval_script(script: text) -> Result<JsValue, text>:
+        if val Some(state) = self.runtime_state:
+            val result = state.runtime.eval(script)
+            match result:
+                Ok(value):
+                    self._sync_from_runtime(state)
+                    self._refresh_current_history()
+                    return Ok(value)
+                Err(e):
+                    return Err(e.message)
+        Err("no active page runtime")
+
+    fn render(width: i32, height: i32) -> BeRenderResult:
+        var renderer = BrowserRenderer(
+            viewport_w: width,
+            viewport_h: height,
+            bg_color: 0xFFFFFFFF
+        )
+        val body_html = if self.current_body_html.len() > 0:
+            self.current_body_html
+        else:
+            ""
+        renderer.render_html("<div>{body_html}</div>")
+
+    fn current_entry() -> BrowserHistoryEntry?:
+        if self.current_index >= 0 and self.current_index < self.history.len():
+            return Some(self.history[self.current_index])
+        nil
+
+    me _load_page_source(
+        url: text,
+        html: text,
+        target_index: i32,
+        push_history: bool
+    ) -> Result<bool, text>:
+        val cleaned_html = strip_style_and_script_blocks(html)
+        val initial_title = extract_title_text(html)
+        val initial_body_html = extract_body_inner_html(cleaned_html)
+        val body_html = if initial_body_html.len() > 0:
+            initial_body_html
+        else:
+            cleaned_html
+
+        var state = BrowserRuntimeState.create(url, initial_title, body_html)
+        self.runtime_state = Some(state)
+        self.current_url = url
+        self.current_title = if initial_title.len() > 0: initial_title else: url
+        self.current_body_html = body_html
+        self.source_html = html
+
+        val script_blocks = extract_script_blocks(html)
+        var script_warnings: [text] = []
+        for block in script_blocks:
+            if block.kind == "external":
+                script_warnings = script_warnings + ["external script loading is not implemented"]
+            else if block.kind == "inline":
+                val eval_result = state.runtime.eval(block.content)
+                match eval_result:
+                    Ok(_) => pass_dn
+                    Err(e) =>
+                        script_warnings = script_warnings + ["inline script error: {e.message}"]
+
+        self._sync_from_runtime(state)
+        self._update_history(url, html, target_index, push_history)
+
+        var merged_warnings = script_warnings
+        if contains_style_block(html):
+            merged_warnings = merged_warnings + ["style tags are ignored by the software browser renderer"]
+        self.warnings = merged_warnings
+        Ok(true)
+
+    me _sync_from_runtime(state: BrowserRuntimeState):
+        val title_val = state.runtime.interpreter.object_store.get_property(
+            state.document_id,
+            "title"
+        )
+        if val JsValue.String(title) = title_val:
+            if title.len() > 0:
+                self.current_title = title
+
+        val href_val = state.runtime.interpreter.object_store.get_property(
+            state.location_id,
+            "href"
+        )
+        if val JsValue.String(href) = href_val:
+            if href.len() > 0:
+                self.current_url = href
+                state.runtime.interpreter.object_store.set_property(
+                    state.document_id,
+                    "URL",
+                    JsValue.String(v: href)
+                )
+
+        val inner_html_val = state.runtime.interpreter.object_store.get_property(
+            state.body_id,
+            "innerHTML"
+        )
+        val text_content_val = state.runtime.interpreter.object_store.get_property(
+            state.body_id,
+            "textContent"
+        )
+
+        var next_body_html = self.current_body_html
+        if val JsValue.String(body_html) = inner_html_val:
+            next_body_html = body_html
+
+        if val JsValue.String(body_text) = text_content_val:
+            val rendered_text = escape_html_text(body_text)
+            if rendered_text != escape_html_text(html_to_text(next_body_html)):
+                next_body_html = rendered_text
+
+        self.current_body_html = next_body_html
+        state.runtime.interpreter.object_store.set_property(
+            state.document_id,
+            "readyState",
+            JsValue.String(v: "complete")
+        )
+
+    me _update_history(url: text, html: text, target_index: i32, push_history: bool):
+        val entry = BrowserHistoryEntry.create(
+            url: self.current_url,
+            title: self.current_title,
+            source_html: html
+        )
+
+        if target_index >= 0 and target_index < self.history.len():
+            self.history[target_index] = entry
+            self.current_index = target_index
+            return
+
+        if push_history:
+            if self.current_index < self.history.len() - 1:
+                var trimmed: [BrowserHistoryEntry] = []
+                var i = 0
+                while i <= self.current_index:
+                    if i >= 0 and i < self.history.len():
+                        trimmed = trimmed + [self.history[i]]
+                    i = i + 1
+                self.history = trimmed
+            self.history = self.history + [entry]
+            self.current_index = self.history.len() - 1
+
+    me _refresh_current_history():
+        if self.current_index >= 0 and self.current_index < self.history.len():
+            self.history[self.current_index] = BrowserHistoryEntry.create(
+                url: self.current_url,
+                title: self.current_title,
+                source_html: self.history[self.current_index].source_html
+            )
+
+class BrowserScriptBlock:
+    kind: text
+    content: text
+
+    static fn inline(content: text) -> BrowserScriptBlock:
+        BrowserScriptBlock(kind: "inline", content: content)
+
+    static fn external() -> BrowserScriptBlock:
+        BrowserScriptBlock(kind: "external", content: "")
+
+fn blank_page_html() -> text:
+    "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
+
+fn chrome_user_agent() -> text:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+fn normalize_browser_url(input: text) -> text:
+    if input.len() == 0:
+        return "about:blank"
+    if input.starts_with("about:") or
+       input.starts_with("file://") or
+       input.starts_with("http://") or
+       input.starts_with("https://"):
+        return input
+    if input.starts_with("/"):
+        return "file://{input}"
+    if input.contains(".") and not input.contains(" "):
+        return "https://{input}"
+    "https://search.example.com/?q={input}"
+
+fn url_protocol(url: text) -> text:
+    if url.starts_with("https://"):
+        return "https:"
+    if url.starts_with("http://"):
+        return "http:"
+    if url.starts_with("file://"):
+        return "file:"
+    if url.starts_with("about:"):
+        return "about:"
+    ""
+
+fn url_pathname(url: text) -> text:
+    if url.starts_with("file://"):
+        return url.slice(7, url.len())
+    if url.starts_with("about:"):
+        return url
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return "/"
+    val path_start = find_text(url, "/", scheme_pos + 3)
+    if path_start < 0:
+        return "/"
+    url.slice(path_start, url.len())
+
+fn extract_title_text(html: text) -> text:
+    val start = find_text(html, "<title>", 0)
+    if start < 0:
+        return ""
+    val content_start = start + 7
+    val end = find_text(html, "</title>", content_start)
+    if end < 0:
+        return ""
+    html.slice(content_start, end).trim()
+
+fn extract_body_inner_html(html: text) -> text:
+    val body_open = find_text(html, "<body", 0)
+    if body_open < 0:
+        return ""
+    val open_end = find_text(html, ">", body_open)
+    if open_end < 0:
+        return ""
+    val body_close = find_text(html, "</body>", open_end + 1)
+    if body_close < 0:
+        return html.slice(open_end + 1, html.len())
+    html.slice(open_end + 1, body_close)
+
+fn strip_style_and_script_blocks(html: text) -> text:
+    val without_scripts = strip_tag_block(html, "script")
+    strip_tag_block(without_scripts, "style")
+
+fn contains_style_block(html: text) -> bool:
+    find_text(html, "<style", 0) >= 0
+
+fn strip_tag_block(html: text, tag_name: text) -> text:
+    var result = ""
+    var pos = 0
+    val open_tag = "<{tag_name}"
+    val close_tag = "</{tag_name}>"
+    while pos < html.len():
+        val start = find_text(html, open_tag, pos)
+        if start < 0:
+            result = "{result}{html.slice(pos, html.len())}"
+            return result
+        result = "{result}{html.slice(pos, start)}"
+        val open_end = find_text(html, ">", start)
+        if open_end < 0:
+            return result
+        val end = find_text(html, close_tag, open_end + 1)
+        if end < 0:
+            return result
+        pos = end + close_tag.len()
+    result
+
+fn extract_script_blocks(html: text) -> [BrowserScriptBlock]:
+    var blocks: [BrowserScriptBlock] = []
+    var pos = 0
+    while pos < html.len():
+        val start = find_text(html, "<script", pos)
+        if start < 0:
+            return blocks
+        val tag_end = find_text(html, ">", start)
+        if tag_end < 0:
+            return blocks
+        val tag_content = html.slice(start, tag_end + 1)
+        val close = find_text(html, "</script>", tag_end + 1)
+        if tag_content.contains("src="):
+            blocks = blocks + [BrowserScriptBlock.external()]
+        else if close >= 0:
+            val content = html.slice(tag_end + 1, close)
+            if content.trim().len() > 0:
+                blocks = blocks + [BrowserScriptBlock.inline(content)]
+        if close < 0:
+            return blocks
+        pos = close + 9
+    blocks
+
+fn find_text(haystack: text, needle: text, start: i32) -> i32:
+    if needle.len() == 0:
+        return start
+    var i = start
+    while i + needle.len() <= haystack.len():
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn html_to_text(html: text) -> text:
+    var out = ""
+    var in_tag = false
+    var i = 0
+    while i < html.len():
+        val ch = html.slice(i, i + 1)
+        if ch == "<":
+            in_tag = true
+        else if ch == ">":
+            in_tag = false
+        else if not in_tag:
+            out = "{out}{ch}"
+        i = i + 1
+    out.trim()
+
+fn escape_html_text(text_value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < text_value.len():
+        val ch = text_value.slice(i, i + 1)
+        if ch == "&":
+            out = "{out}&amp;"
+        else if ch == "<":
+            out = "{out}&lt;"
+        else if ch == ">":
+            out = "{out}&gt;"
+        else if ch == "\"":
+            out = "{out}&quot;"
+        else:
+            out = "{out}{ch}"
+        i = i + 1
+    out

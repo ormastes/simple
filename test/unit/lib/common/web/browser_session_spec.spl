@@ -1,0 +1,176 @@
+use std.spec.*
+
+use std.common.web.browser_session.{BrowserSession}
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "BrowserSession lifecycle":
+
+    it "opens about blank":
+        var session = BrowserSession.new()
+        val result = session.open_url("about:blank")
+        match result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:blank")
+                expect(session.current_title).to_equal("about:blank")
+                expect(session.history.len()).to_equal(1)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "stops pending navigation before commit":
+        var session = BrowserSession.new()
+        session.begin_navigation("about:pending")
+        session.stop_loading()
+        val result = session.commit_navigation_html("<html><body>ignored</body></html>")
+        match result:
+            Ok(_) =>
+                expect(false).to_equal(true)
+            Err(e) =>
+                expect(e).to_equal("no pending navigation")
+                expect(session.history.len()).to_equal(0)
+
+    it "rejects network navigation honestly":
+        var session = BrowserSession.new()
+        val result = session.open_url("https://example.com")
+        match result:
+            Ok(_) =>
+                expect(false).to_equal(true)
+            Err(e) =>
+                expect(e).to_contain("network navigation is not implemented")
+
+describe "BrowserSession page loading":
+
+    it "extracts title and body from html":
+        var session = BrowserSession.new()
+        val result = session.open_html(
+            "about:test",
+            "<!DOCTYPE html><html><head><title>Test Page</title></head><body><h1>Hello</h1></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:test")
+                expect(session.current_title).to_equal("Test Page")
+                expect(session.current_body_html).to_contain("<h1>Hello</h1>")
+                expect(session.history.len()).to_equal(1)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "runs inline scripts against document and body":
+        var session = BrowserSession.new()
+        val result = session.open_html(
+            "about:scripted",
+            "<html><head><title>Before</title></head><body><p>Old</p><script>document.title = 'After'; document.body.innerHTML = '<section>New</section>';</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_title).to_equal("After")
+                expect(session.current_body_html).to_contain("<section>New</section>")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "records style and external script limitations as warnings":
+        var session = BrowserSession.new()
+        val result = session.open_html(
+            "about:warnings",
+            "<html><head><style>body { color: red; }</style></head><body><script src='app.js'></script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.warnings.len()).to_be_greater_than(1)
+                expect(session.warnings[0]).to_contain("external script")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+describe "BrowserSession script bridge":
+
+    it "exposes browser like globals":
+        var session = BrowserSession.new()
+        session.open_html("about:globals", "<html><body><p>Hi</p></body></html>")
+
+        val ua_result = session.eval_script("navigator.userAgent")
+        match ua_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_contain("Chrome/")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val href_result = session.eval_script("window.location.href")
+        match href_result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("about:globals")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "syncs eval script changes back into session state":
+        var session = BrowserSession.new()
+        session.open_html("about:eval", "<html><head><title>A</title></head><body><p>Hi</p></body></html>")
+
+        val result = session.eval_script("document.title = 'B'; document.body.textContent = 'Plain'; document.title")
+        match result:
+            Ok(value) =>
+                expect(_display_js(value)).to_equal("B")
+                expect(session.current_title).to_equal("B")
+                expect(session.current_body_html).to_equal("Plain")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+describe "BrowserSession history and rendering":
+
+    it "supports back forward and reload":
+        var session = BrowserSession.new()
+        session.open_html("about:one", "<html><head><title>One</title></head><body>One</body></html>")
+        session.open_html("about:two", "<html><head><title>Two</title></head><body>Two</body></html>")
+
+        expect(session.can_go_back()).to_equal(true)
+        expect(session.can_go_forward()).to_equal(false)
+
+        val back_result = session.go_back()
+        match back_result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:one")
+                expect(session.current_title).to_equal("One")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val forward_result = session.go_forward()
+        match forward_result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:two")
+                expect(session.current_title).to_equal("Two")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+        val reload_result = session.reload()
+        match reload_result:
+            Ok(_) =>
+                expect(session.current_url).to_equal("about:two")
+                expect(session.current_body_html).to_contain("Two")
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "renders current body through browser renderer":
+        var session = BrowserSession.new()
+        session.open_html(
+            "about:render",
+            "<html><body><div style='background-color: #ff0000'><span>Hello</span></div></body></html>"
+        )
+        val render = session.render(320, 200)
+        expect(render.width).to_equal(320)
+        expect(render.height).to_equal(200)
+        expect(render.node_count).to_be_greater_than(0)

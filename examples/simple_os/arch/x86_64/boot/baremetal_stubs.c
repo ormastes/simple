@@ -2010,7 +2010,7 @@ static void _net_print_ip(const uint8_t *ip) {
 }
 
 /* --- VirtIO-net driver state --- */
-#define VIRTIO_NET_QUEUE_SIZE 128  /* max descriptors per queue */
+#define VIRTIO_NET_QUEUE_SIZE 256  /* must match QEMU's vring-num-default */
 #define VIRTIO_NET_BUF_SIZE  2048  /* per-buffer size for RX/TX */
 
 static struct {
