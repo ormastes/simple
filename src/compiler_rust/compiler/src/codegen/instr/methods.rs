@@ -107,14 +107,12 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.get_vreg(&args[0])?;
             let wrapped = wrap_value(ctx, builder, arg_val);
-            // rt_array_push returns a (possibly new) array pointer when the
-            // array grows beyond its capacity.  We must capture the return
-            // value and write it back to the receiver vreg so subsequent
-            // operations (including the next push) use the grown array.
-            let new_arr = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, wrapped);
-            // Update the receiver vreg so the caller sees the grown array.
-            ctx.vreg_values.insert(receiver, new_arr);
-            Some(new_arr)
+            // rt_array_push returns bool (success), NOT a new array pointer.
+            // The array is mutated in-place. Do NOT update the receiver vreg —
+            // overwriting it with the bool return value (1 = true) would corrupt
+            // subsequent uses of the array variable.
+            let push_result = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, wrapped);
+            Some(push_result)
         }
         ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {

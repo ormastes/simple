@@ -202,6 +202,20 @@ pub(crate) fn compile_method_call_static<M: Module>(
         let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
         if method == "push" {
             ctx.vreg_values.insert(receiver, result);
+            // Also update the Cranelift Variable if the receiver is backed by a local.
+            // Without this, subsequent Load from the Variable gets the stale pointer.
+            for (&vreg, &local_index) in ctx.local_addr_map.iter() {
+                if vreg == receiver || ctx.vreg_values.get(&vreg).copied() == Some(result) {
+                    if let Some(&var) = ctx.variables.get(&local_index) {
+                        builder.def_var(var, result);
+                        break;
+                    }
+                    if let Some(&var) = ctx.extra_variables.get(&local_index) {
+                        builder.def_var(var, result);
+                        break;
+                    }
+                }
+            }
         }
         return Ok(());
     }
