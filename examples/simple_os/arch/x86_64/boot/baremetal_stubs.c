@@ -4752,6 +4752,24 @@ int64_t rt_ed25519_self_test(void)
     return 0;
 }
 
+/* rt_rdrand: hardware random using x86 RDRAND instruction.
+ * Falls back to a simple xorshift if RDRAND is not available. */
+static uint64_t _xorshift_state = 0x12345678DEADBEEFULL;
+int64_t rt_rdrand(void)
+{
+#ifdef __x86_64__
+    uint64_t val;
+    int ok;
+    __asm__ volatile ("rdrand %0; setc %b1" : "=r"(val), "=r"(ok));
+    if (ok) return (int64_t)val;
+#endif
+    /* Fallback xorshift64 */
+    _xorshift_state ^= _xorshift_state << 13;
+    _xorshift_state ^= _xorshift_state >> 7;
+    _xorshift_state ^= _xorshift_state << 17;
+    return (int64_t)_xorshift_state;
+}
+
 /* rt_ed25519_sign_test: Sign-only test (no verify — verify has a deep bug).
  * Generates keypair, signs two different messages, checks signatures are
  * 64 bytes, non-zero, and differ from each other.
