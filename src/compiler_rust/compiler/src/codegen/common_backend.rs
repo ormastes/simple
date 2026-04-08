@@ -502,6 +502,32 @@ impl<M: Module> CodegenBackend<M> {
                 continue;
             }
 
+            // Also skip data slot creation for cross-module function references
+            // resolvable via use_map/import_map. Declare them as function imports
+            // instead, so GlobalLoad + IndirectCall in MIR compiles to a direct
+            // function call at codegen time. Without this, the codegen creates a
+            // DATA import that the linker can't match to the FUNCTION symbol in
+            // the defining module — leaving the data slot as NULL (0x1) on macOS.
+            if !local_globals.contains(name) {
+                if let Some(resolved) = self.use_map.get(name.as_str())
+                    .or_else(|| self.import_map.get(name.as_str()))
+                {
+                    let sanitized = self.sanitize_symbol(resolved);
+                    let call_conv = super::shared::platform_call_conv();
+                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    if let Ok(fid) = self.module.declare_function(
+                        &sanitized,
+                        cranelift_module::Linkage::Import,
+                        &sig,
+                    ) {
+                        self.func_ids.entry(name.clone()).or_insert(fid);
+                        continue;
+                    }
+                }
+            }
+
             let is_local = local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:

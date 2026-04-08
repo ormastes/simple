@@ -41,17 +41,23 @@ pub fn compile_load<M: Module>(
     addr: VReg,
 ) -> InstrResult<()> {
     if let Some(&local_index) = ctx.local_addr_map.get(&addr) {
-        if let Some(&var) = ctx.variables.get(&local_index) {
-            let val = builder.use_var(var);
-            ctx.vreg_values.insert(dest, val);
+        let var = if let Some(&var) = ctx.variables.get(&local_index) {
+            var
+        } else if let Some(&var) = ctx.extra_variables.get(&local_index) {
+            var
         } else {
-            eprintln!(
-                "[CODEGEN-WARN] Load: func={} local_index={} has no Variable! variables has {:?}",
-                ctx.func.name,
-                local_index,
-                ctx.variables.keys().collect::<Vec<_>>()
-            );
-        }
+            // Variable not pre-allocated (temp local created during MIR lowering).
+            // Declare it on-the-fly so subsequent Store/Load work correctly.
+            let next_idx = (ctx.variables.len() + ctx.extra_variables.len()) as u32 + 1000;
+            let var = cranelift_frontend::Variable::from_u32(next_idx + local_index as u32);
+            builder.declare_var(var, types::I64);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.def_var(var, zero);
+            ctx.extra_variables.insert(local_index, var);
+            var
+        };
+        let val = builder.use_var(var);
+        ctx.vreg_values.insert(dest, val);
     } else if let Some(&val) = ctx.vreg_values.get(&addr) {
         ctx.vreg_values.insert(dest, val);
     }
@@ -66,50 +72,64 @@ pub fn compile_store<M: Module>(
     value: VReg,
 ) -> InstrResult<()> {
     if let Some(&local_index) = ctx.local_addr_map.get(&addr) {
-        if let Some(&var) = ctx.variables.get(&local_index) {
-            // Get the expected type for this local
-            let local_ty = if local_index < ctx.func.params.len() {
-                ctx.func.params[local_index].ty
-            } else {
-                ctx.func.locals[local_index - ctx.func.params.len()].ty
-            };
-            let expected_cl_ty = super::super::types_util::type_id_to_cranelift(local_ty);
+        let var = if let Some(&var) = ctx.variables.get(&local_index) {
+            var
+        } else if let Some(&var) = ctx.extra_variables.get(&local_index) {
+            var
+        } else {
+            // Variable not pre-allocated — declare on-the-fly (same as Load fix)
+            let next_idx = (ctx.variables.len() + ctx.extra_variables.len()) as u32 + 1000;
+            let var = cranelift_frontend::Variable::from_u32(next_idx + local_index as u32);
+            builder.declare_var(var, types::I64);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.def_var(var, zero);
+            ctx.extra_variables.insert(local_index, var);
+            var
+        };
 
-            // Helper to create default value of correct type
-            let create_default = |builder: &mut FunctionBuilder| match expected_cl_ty {
-                types::F32 => builder.ins().f32const(0.0),
-                types::F64 => builder.ins().f64const(0.0),
-                types::I8 => builder.ins().iconst(types::I8, 0),
-                types::I16 => builder.ins().iconst(types::I16, 0),
-                types::I32 => builder.ins().iconst(types::I32, 0),
-                _ => builder.ins().iconst(types::I64, 0),
-            };
+        // Get the expected Cranelift type for this local
+        let expected_cl_ty = if local_index < ctx.func.params.len() {
+            super::super::types_util::type_id_to_cranelift(ctx.func.params[local_index].ty)
+        } else if local_index - ctx.func.params.len() < ctx.func.locals.len() {
+            super::super::types_util::type_id_to_cranelift(
+                ctx.func.locals[local_index - ctx.func.params.len()].ty,
+            )
+        } else {
+            types::I64 // default for dynamically-created locals
+        };
 
-            // Get the value, handling missing VRegs and type mismatches
-            let val = if let Some(&v) = ctx.vreg_values.get(&value) {
-                // Check type match - can mismatch in complex control flow
-                let actual_ty = builder.func.dfg.value_type(v);
-                if actual_ty != expected_cl_ty {
-                    // Try to coerce between integer types
-                    if actual_ty.is_int() && expected_cl_ty.is_int() {
-                        if actual_ty.bits() > expected_cl_ty.bits() {
-                            builder.ins().ireduce(expected_cl_ty, v)
-                        } else if actual_ty.bits() < expected_cl_ty.bits() {
-                            builder.ins().uextend(expected_cl_ty, v)
-                        } else {
-                            v // same size, no conversion needed
-                        }
+        // Helper to create default value of correct type
+        let create_default = |builder: &mut FunctionBuilder| match expected_cl_ty {
+            types::F32 => builder.ins().f32const(0.0),
+            types::F64 => builder.ins().f64const(0.0),
+            types::I8 => builder.ins().iconst(types::I8, 0),
+            types::I16 => builder.ins().iconst(types::I16, 0),
+            types::I32 => builder.ins().iconst(types::I32, 0),
+            _ => builder.ins().iconst(types::I64, 0),
+        };
+
+        // Get the value, handling missing VRegs and type mismatches
+        let val = if let Some(&v) = ctx.vreg_values.get(&value) {
+            let actual_ty = builder.func.dfg.value_type(v);
+            if actual_ty != expected_cl_ty {
+                if actual_ty.is_int() && expected_cl_ty.is_int() {
+                    if actual_ty.bits() > expected_cl_ty.bits() {
+                        builder.ins().ireduce(expected_cl_ty, v)
+                    } else if actual_ty.bits() < expected_cl_ty.bits() {
+                        builder.ins().uextend(expected_cl_ty, v)
                     } else {
-                        create_default(builder)
+                        v
                     }
                 } else {
-                    v
+                    create_default(builder)
                 }
             } else {
-                create_default(builder)
-            };
-            builder.def_var(var, val);
-        }
+                v
+            }
+        } else {
+            create_default(builder)
+        };
+        builder.def_var(var, val);
     }
     Ok(())
 }

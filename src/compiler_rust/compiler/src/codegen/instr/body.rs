@@ -121,6 +121,8 @@ pub fn compile_function_body<M: Module>(
 
     // Track values and blocks
     let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
+    // Dynamically-created variables for local indices not in the pre-allocated `variables` map
+    let mut extra_variables: HashMap<usize, cranelift_frontend::Variable> = HashMap::new();
 
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
@@ -430,6 +432,7 @@ pub fn compile_function_body<M: Module>(
                     vreg_values: &mut vreg_values,
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
+                    extra_variables: &mut extra_variables,
                     func,
                     entry_block,
                     blocks: &blocks,
@@ -453,6 +456,7 @@ pub fn compile_function_body<M: Module>(
                     vreg_values: &mut vreg_values,
                     local_addr_map: &mut local_addr_map,
                     variables: &variables,
+                    extra_variables: &mut extra_variables,
                     func,
                     entry_block,
                     blocks: &blocks,

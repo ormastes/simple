@@ -116,6 +116,14 @@ class MetalBackend:
             dirty: false
         )
 
+struct GridDim:
+    x: i64
+    y: i64
+
+struct BlockDim:
+    x: i64
+    y: i64
+
 impl RenderBackend for MetalBackend:
 
     fn name() -> text:
@@ -260,16 +268,16 @@ impl RenderBackend for MetalBackend:
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
-        val grid = _grid_for_rect(w, h)
+        val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_rect_outline, grid, block, params)
+        _dispatch_2d(self, self.pipe_rect_outline, grid_dim, block, params)
         self.dirty = true
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         val params = _pack_rect_params(x, y, w, h, color, self.w, self.h)
-        val grid = _grid_for_rect(w, h)
+        val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_rect_filled, grid, block, params)
+        _dispatch_2d(self, self.pipe_rect_filled, grid_dim, block, params)
         self.dirty = true
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
@@ -294,25 +302,25 @@ impl RenderBackend for MetalBackend:
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 0)
-        val grid = _grid_for_rect(bw, bh)
+        val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_circle, grid, block, params)
+        _dispatch_2d(self, self.pipe_circle, grid_dim, block, params)
         self.dirty = true
 
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         val bw = 2 * r + 1
         val bh = 2 * r + 1
         val params = _pack_circle_params(cx, cy, r, color, self.w, self.h, 1)
-        val grid = _grid_for_rect(bw, bh)
+        val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_circle_filled, grid, block, params)
+        _dispatch_2d(self, self.pipe_circle_filled, grid_dim, block, params)
         self.dirty = true
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         val params = _pack_rounded_rect_params(x, y, w, h, radius, color, self.w, self.h)
-        val grid = _grid_for_rect(w, h)
+        val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_rounded_rect, grid, block, params)
+        _dispatch_2d(self, self.pipe_rounded_rect, grid_dim, block, params)
         self.dirty = true
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
@@ -333,16 +341,16 @@ impl RenderBackend for MetalBackend:
         val bw = max_x - min_x + 1
         val bh = max_y - min_y + 1
         val params = _pack_triangle_params(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y)
-        val grid = _grid_for_rect(bw, bh)
+        val grid_dim = _grid_for_rect(bw, bh)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_triangle, grid, block, params)
+        _dispatch_2d(self, self.pipe_triangle, grid_dim, block, params)
         self.dirty = true
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         val params = _pack_gradient_params(x, y, w, h, top_color, bottom_color, self.w, self.h)
-        val grid = _grid_for_rect(w, h)
+        val grid_dim = _grid_for_rect(w, h)
         val block = _block_for_rect()
-        _dispatch_2d(self, self.pipe_gradient, grid, block, params)
+        _dispatch_2d(self, self.pipe_gradient, grid_dim, block, params)
         self.dirty = true
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
@@ -364,9 +372,9 @@ impl RenderBackend for MetalBackend:
             rt_metal_buffer_upload(d_src, upload_data, byte_size)
             # Launch blit kernel
             val params = _pack_blit_params(x, y, w, h, self.w, self.h)
-            val grid = _grid_for_rect(w, h)
+            val grid_dim = _grid_for_rect(w, h)
             val block = _block_for_rect()
-            _dispatch_blit(self, self.pipe_blit, grid, block, params, d_src)
+            _dispatch_blit(self, self.pipe_blit, grid_dim, block, params, d_src)
             rt_metal_free_buffer(d_src)
         self.dirty = true
 
@@ -431,7 +439,7 @@ fn _dispatch_1d(backend: MetalBackend, pipeline: i64, grid_x: i64, block_x: i64,
     rt_metal_commit_command_buffer(cmd)
     rt_metal_wait_completed(cmd)
 
-fn _dispatch_2d(backend: MetalBackend, pipeline: i64, grid: GridDim, block: BlockDim, params: [u8]):
+fn _dispatch_2d(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8]):
     """Create command buffer, encode a 2D compute dispatch, commit and wait."""
     val cmd = rt_metal_create_command_buffer(backend.command_queue)
     if cmd == 0:
@@ -444,12 +452,12 @@ fn _dispatch_2d(backend: MetalBackend, pipeline: i64, grid: GridDim, block: Bloc
     # Bind push constants (params) at index 1
     rt_metal_set_bytes(encoder, params, _i64(params.len()), 1)
     # Dispatch with 2D grid
-    rt_metal_dispatch_compute(encoder, pipeline, grid.x * block.x, grid.y * block.y, 1, block.x, block.y, 1)
+    rt_metal_dispatch_compute(encoder, pipeline, grid_dim.x * block_dim.x, grid_dim.y * block_dim.y, 1, block_dim.x, block_dim.y, 1)
     rt_metal_end_compute_encoder(encoder)
     rt_metal_commit_command_buffer(cmd)
     rt_metal_wait_completed(cmd)
 
-fn _dispatch_blit(backend: MetalBackend, pipeline: i64, grid: GridDim, block: BlockDim, params: [u8], src_buffer: i64):
+fn _dispatch_blit(backend: MetalBackend, pipeline: i64, grid_dim: GridDim, block_dim: BlockDim, params: [u8], src_buffer: i64):
     """Dispatch blit kernel with source image buffer bound at index 2."""
     val cmd = rt_metal_create_command_buffer(backend.command_queue)
     if cmd == 0:
@@ -464,7 +472,7 @@ fn _dispatch_blit(backend: MetalBackend, pipeline: i64, grid: GridDim, block: Bl
     # Bind source image buffer at index 2
     rt_metal_set_buffer(encoder, src_buffer, 0, 2)
     # Dispatch
-    rt_metal_dispatch_compute(encoder, pipeline, grid.x * block.x, grid.y * block.y, 1, block.x, block.y, 1)
+    rt_metal_dispatch_compute(encoder, pipeline, grid_dim.x * block_dim.x, grid_dim.y * block_dim.y, 1, block_dim.x, block_dim.y, 1)
     rt_metal_end_compute_encoder(encoder)
     rt_metal_commit_command_buffer(cmd)
     rt_metal_wait_completed(cmd)
@@ -472,14 +480,6 @@ fn _dispatch_blit(backend: MetalBackend, pipeline: i64, grid: GridDim, block: Bl
 # ============================================================================
 # Grid / Block Dimension Helpers
 # ============================================================================
-
-struct GridDim:
-    x: i64
-    y: i64
-
-struct BlockDim:
-    x: i64
-    y: i64
 
 fn _grid_for_rect(w: i32, h: i32) -> GridDim:
     """Compute grid dimensions for a rectangular region with 16x16 threadgroups."""

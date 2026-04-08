@@ -1,0 +1,146 @@
+# Glass Pixel Comparison Runner
+# Standalone entry point for native-build execution
+#
+# Run interpreted: bin/simple run test/system/gui/glass_pixel_runner.spl
+# Run compiled:
+#   SIMPLE_LIB=$(pwd)/src SIMPLE_BOOTSTRAP=1 \
+#     src/compiler_rust/target/bootstrap/simple native-build \
+#     --source src/compiler --source src/lib --source src/app --source src/os \
+#     --entry test/system/gui/glass_pixel_runner.spl \
+#     -o build/glass_test_runner --strip
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges}
+use os.compositor.screenshot_compare.{compare_pixel_buffers, compare_per_channel,
+    print_comparison_report, print_channel_report}
+
+var total_checks: i32 = 0
+var passed_checks: i32 = 0
+var failed_checks: i32 = 0
+
+fn check(name: text, condition: bool):
+    total_checks = total_checks + 1
+    if condition:
+        passed_checks = passed_checks + 1
+        print "  PASS: {name}"
+    else:
+        failed_checks = failed_checks + 1
+        print "  FAIL: {name}"
+
+# ============================================================================
+# Test 1: Render a single glass-dark styled panel to pixels
+# ============================================================================
+
+print "=== Glass Pixel Comparison Runner ==="
+print ""
+print "=== Test 1: Single Glass Panel ==="
+
+var root_a = BeDomNode.element("div")
+root_a.set_style("background-color", "rgba(30,30,35,0.72)")
+root_a.set_style("width", "200px")
+root_a.set_style("height", "100px")
+root_a.set_style("border-radius", "20px")
+root_a.set_style("border-width", "1px")
+root_a.set_style("border-color", "rgba(255,255,255,0.08)")
+var text_a = BeDomNode.text("Hello Glass")
+root_a.add_child(text_a)
+
+var renderer_a = BrowserRenderer.create(200, 100)
+val result_a = renderer_a.render_dom_to_pixels(root_a)
+print "  DOM A rendered: {result_a.pixel_data.len()} pixels, {result_a.node_count} nodes"
+check("DOM A has pixels", result_a.pixel_data.len() > 0)
+check("DOM A pixel count is 200*100", result_a.pixel_data.len() == 20000)
+
+# ============================================================================
+# Test 2: Render a slightly different glass panel
+# ============================================================================
+
+print ""
+print "=== Test 2: Variant Glass Panel ==="
+
+var root_b = BeDomNode.element("div")
+root_b.set_style("background-color", "rgba(30,30,35,0.80)")
+root_b.set_style("width", "200px")
+root_b.set_style("height", "100px")
+root_b.set_style("border-radius", "20px")
+var text_b = BeDomNode.text("Hello Glass")
+root_b.add_child(text_b)
+
+var renderer_b = BrowserRenderer.create(200, 100)
+val result_b = renderer_b.render_dom_to_pixels(root_b)
+print "  DOM B rendered: {result_b.pixel_data.len()} pixels, {result_b.node_count} nodes"
+check("DOM B has pixels", result_b.pixel_data.len() > 0)
+check("DOM B pixel count is 200*100", result_b.pixel_data.len() == 20000)
+
+# ============================================================================
+# Test 3: Compare the two panels (they differ in alpha)
+# ============================================================================
+
+print ""
+print "=== Test 3: Pixel Comparison (A vs B) ==="
+
+val comparison = compare_pixel_buffers(result_a.pixel_data, result_b.pixel_data, 200, 100, 4)
+print_comparison_report(comparison)
+check("comparison total pixels is 20000", comparison.total_pixels == 20000)
+check("comparison ran without zero total", comparison.total_pixels > 0)
+
+val channels = compare_per_channel(result_a.pixel_data, result_b.pixel_data, 200, 100, 4)
+print_channel_report(channels)
+check("per-channel returns 4 entries", channels.len() == 4)
+
+# ============================================================================
+# Test 4: Self-comparison (identical panels)
+# ============================================================================
+
+print ""
+print "=== Test 4: Self-Comparison (A vs A) ==="
+
+val self_cmp = compare_pixel_buffers(result_a.pixel_data, result_a.pixel_data, 200, 100, 0)
+print_comparison_report(self_cmp)
+check("self-comparison is 100%", self_cmp.match_percentage == 10000)
+check("self-comparison has 0 different pixels", self_cmp.different_pixels == 0)
+
+# ============================================================================
+# Test 5: Glass dark vs glass light via HTML rendering
+# ============================================================================
+
+print ""
+print "=== Test 5: HTML Glass Panel Rendering ==="
+
+val html_dark = "<div style=\"background-color: rgba(30,30,35,0.72); width: 100px; height: 50px; border-radius: 12px;\">Dark</div>"
+val html_light = "<div style=\"background-color: rgba(245,245,247,0.72); width: 100px; height: 50px; border-radius: 12px;\">Light</div>"
+
+var renderer_c = BrowserRenderer.create(100, 50)
+val result_dark = renderer_c.render_html_to_pixels(html_dark)
+print "  Dark panel: {result_dark.pixel_data.len()} pixels"
+check("dark HTML has pixels", result_dark.pixel_data.len() > 0)
+
+var renderer_d = BrowserRenderer.create(100, 50)
+val result_light = renderer_d.render_html_to_pixels(html_light)
+print "  Light panel: {result_light.pixel_data.len()} pixels"
+check("light HTML has pixels", result_light.pixel_data.len() > 0)
+
+val theme_cmp = compare_pixel_buffers(result_dark.pixel_data, result_light.pixel_data, 100, 50, 0)
+print_comparison_report(theme_cmp)
+check("dark vs light are not identical", theme_cmp.different_pixels > 0)
+
+val theme_channels = compare_per_channel(result_dark.pixel_data, result_light.pixel_data, 100, 50, 0)
+print_channel_report(theme_channels)
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+print ""
+print "========================================"
+print "  Glass Pixel Runner Summary"
+print "========================================"
+print "  Total checks: {total_checks}"
+print "  Passed:       {passed_checks}"
+print "  Failed:       {failed_checks}"
+if failed_checks == 0:
+    print "  Result: ALL PASSED"
+else:
+    print "  Result: {failed_checks} FAILURES"
+print "========================================"
