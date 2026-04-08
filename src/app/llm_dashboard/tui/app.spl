@@ -14,15 +14,35 @@ use app.llm_dashboard.tui.rooms.{RoomState, create_room_set,
 use app.llm_dashboard.tui.agent_panel.{render_agent_tree}
 use app.llm_dashboard.tui.activity_feed.{FeedState, render_feed}
 use app.llm_dashboard.tui.status_bar.{render_status_bar, render_availability_banner}
-use app.llm_dashboard.tui.env_panel.{render_env_panel}
-use app.llm_dashboard.tui.stats_panel.{render_stats_panel, render_stats_compact}
-use app.llm_dashboard.data.env_collector.{env_collect, detect_project_dir}
-use app.llm_dashboard.data.project_stats.{collect_project_stats}
+extern fn rt_env_get(key: text) -> text
+
+fn detect_project_dir() -> text:
+    val pwd = rt_env_get("PWD")
+    if pwd.len() > 0:
+        return pwd
+    "."
 use app.ui.render.ansi.{RESET, BOLD, DIM}
 
-extern fn rt_sleep_ms(ms: i64)
-extern fn rt_time_unix() -> i64
-extern fn rt_term_read_key_nonblocking() -> text
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i64)
+
+fn current_time_secs() -> i64:
+    rt_time_now_unix_micros() / 1_000_000
+
+fn setup_raw_terminal():
+    """Set terminal to raw mode via stty for non-blocking key reads."""
+    rt_process_run("/bin/sh", ["-c", "stty raw -echo -icanon min 0 time 0 </dev/tty 2>/dev/null"])
+
+fn restore_terminal():
+    """Restore terminal to normal mode."""
+    rt_process_run("/bin/sh", ["-c", "stty sane </dev/tty 2>/dev/null"])
+
+fn read_key_with_timeout(timeout_ms: i64) -> text:
+    """Read one key from terminal with timeout. Returns "" if no key pressed."""
+    val (out, _, _) = rt_process_run_timeout("/bin/dd",
+        ["bs=1", "count=1", "if=/dev/tty"], timeout_ms)
+    return out
 
 # =========================================================================
 # TUI App State
@@ -56,7 +76,8 @@ fn run_tui_dashboard(store: AgentDashboardStore):
     """Run the TUI dashboard main loop."""
     var state = TuiAppState.new(store)
 
-    # Enter alternate screen
+    # Enter raw mode + alternate screen
+    setup_raw_terminal()
     print ansi_enable_alt_screen()
     print ansi_hide_cursor()
 
@@ -65,7 +86,7 @@ fn run_tui_dashboard(store: AgentDashboardStore):
 
     while state.running:
         # Poll for new data periodically
-        val now = rt_time_unix()
+        val now = current_time_secs()
         if (now - state.last_poll) * 1000 >= state.poll_interval_ms:
             state.store.poll()
             state.last_poll = now
@@ -74,16 +95,14 @@ fn run_tui_dashboard(store: AgentDashboardStore):
         render_frame(state)
         state.refresh_count = state.refresh_count + 1
 
-        # Handle input (non-blocking)
-        val key = rt_term_read_key_nonblocking()
+        # Read key with 200ms timeout (also serves as frame delay ~5fps)
+        val key = read_key_with_timeout(200)
         handle_key(state, key)
-
-        # Sleep to avoid busy loop (50ms = ~20fps)
-        rt_sleep_ms(50)
 
     # Restore terminal
     print ansi_show_cursor()
     print ansi_disable_alt_screen()
+    restore_terminal()
     print "Dashboard closed."
 
 # =========================================================================
@@ -129,43 +148,34 @@ fn render_frame(state: TuiAppState):
 
     print screen.render()
 
+fn _set_room(rooms: [RoomState], idx: i32, lines: [text], active: bool):
+    """Set room content using intermediate var to avoid indexed field assignment."""
+    var room = rooms[idx]
+    room.content_lines = lines
+    room.active = active
+    rooms[idx] = room
+
 fn build_rooms(state: TuiAppState) -> [RoomState]:
     """Build room states with current content."""
     var rooms = create_room_set()
     val feed = state.store.activity_feed
 
-    # Research room
     if rooms.len() > 0:
-        rooms[0].content_lines = build_research_content(feed, 8)
-        rooms[0].active = state.active_tab == 0
-
-    # Code room
+        _set_room(rooms, 0, build_research_content(feed, 8), state.active_tab == 0)
     if rooms.len() > 1:
-        rooms[1].content_lines = build_code_content(feed, 8)
-        rooms[1].active = state.active_tab == 1
-
-    # Skills room
+        _set_room(rooms, 1, build_code_content(feed, 8), state.active_tab == 1)
     if rooms.len() > 2:
-        rooms[2].content_lines = build_skills_content(feed, 8)
-        rooms[2].active = state.active_tab == 2
-
-    # Servers room
+        _set_room(rooms, 2, build_skills_content(feed, 8), state.active_tab == 2)
     if rooms.len() > 3:
-        rooms[3].content_lines = build_server_content(feed, 8)
-        rooms[3].active = state.active_tab == 3
-
-    # Environment room (tab 4)
+        _set_room(rooms, 3, build_server_content(feed, 8), state.active_tab == 3)
     if rooms.len() > 4:
-        val env_data = env_collect(detect_project_dir())
-        rooms[4].content_lines = render_env_panel(env_data, 8)
-        rooms[4].active = state.active_tab == 4
-
-    # Project stats room (tab 5)
+        # env_collect uses env_scanner which has interpreter compat issues;
+        # provide lightweight fallback content instead.
+        val env_lines = ["  Environment: {detect_project_dir()}", "  (env scanner unavailable in interpreter mode)"]
+        _set_room(rooms, 4, env_lines, state.active_tab == 4)
     if rooms.len() > 5:
-        val proj_dir = detect_project_dir()
-        val proj_stats = collect_project_stats(proj_dir)
-        rooms[5].content_lines = render_stats_panel(proj_stats, 8)
-        rooms[5].active = state.active_tab == 5
+        val stats_lines = ["  Project stats: use compiled mode for full data"]
+        _set_room(rooms, 5, stats_lines, state.active_tab == 5)
 
     return rooms
 
@@ -201,7 +211,7 @@ fn handle_key(state: TuiAppState, key: text):
         # Refresh
         "r" =>
             state.store.poll()
-            state.last_poll = rt_time_unix()
+            state.last_poll = current_time_secs()
 
         # Clear filters
         "c" => state.feed_state.clear_filters()

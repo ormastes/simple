@@ -2,8 +2,8 @@
 #
 # Parses Claude Code JSONL transcript lines into typed dashboard events.
 # Each line in a transcript is a JSON object with type, name, and content fields.
+# Uses string-based JSON extraction (no std.json dependency for interpreter compat).
 
-use std.json.{parse_json, JsonValue}
 use app.llm_dashboard.data.types.{
     AgentActivity, LLMProvider, RoomKind, FileActivity, URLActivity, ActivityEntry,
     tool_to_room, provider_from_text
@@ -38,11 +38,9 @@ fn parse_line(parser: JsonlParser, line: text) -> DashboardEvent:
     val trimmed = line.trim()
     if trimmed == "" or trimmed.starts_with("#"):
         return DashboardEvent.Unknown
-
-    val json_result = parse_json(trimmed)
-    match json_result:
-        Err(_): return DashboardEvent.Unknown
-        Ok(json): return classify_event(parser.session_id, json)
+    if not trimmed.starts_with("{"):
+        return DashboardEvent.Unknown
+    return classify_event(parser.session_id, trimmed)
 
 fn parse_lines(parser: JsonlParser, lines: [text]) -> [DashboardEvent]:
     """Parse multiple JSONL lines, filtering out Unknown events."""
@@ -58,62 +56,59 @@ fn parse_lines(parser: JsonlParser, lines: [text]) -> [DashboardEvent]:
 # Event Classification
 # =========================================================================
 
-fn classify_event(agent_id: text, json: JsonValue) -> DashboardEvent:
+fn classify_event(agent_id: text, json: text) -> DashboardEvent:
     """Classify a JSON object into a dashboard event type."""
-    val msg_type = json_text(json, "type")
+    val msg_type = json_str(json, "type")
     val timestamp = json_int(json, "timestamp")
 
     match msg_type:
         "tool_use" => classify_tool_use(agent_id, json, timestamp)
-        "tool_result" => DashboardEvent.Unknown  # we track tool_use, not result
+        "tool_result" => DashboardEvent.Unknown
         "assistant" => classify_assistant(agent_id, json, timestamp)
         "human" => DashboardEvent.UserMessage(agent_id: agent_id, timestamp: timestamp)
         "user" => DashboardEvent.UserMessage(agent_id: agent_id, timestamp: timestamp)
         "system" => classify_system(agent_id, json, timestamp)
         "error" =>
-            val msg = json_text(json, "message")
+            val msg = json_str(json, "message")
             DashboardEvent.Error(agent_id: agent_id, message: msg, timestamp: timestamp)
         _ => DashboardEvent.Unknown
 
-fn classify_tool_use(agent_id: text, json: JsonValue, timestamp: i64) -> DashboardEvent:
+fn classify_tool_use(agent_id: text, json: text, timestamp: i64) -> DashboardEvent:
     """Classify a tool_use message."""
-    val tool_name = json_text(json, "name")
+    val tool_name = json_str(json, "name")
     var args: [text] = []
 
-    # Extract key arguments based on tool
-    val input_obj = json_get(json, "input")
+    val input_obj = json_obj(json, "input")
     match tool_name:
         "Read" =>
-            val path = json_text(input_obj, "file_path")
+            val path = json_str(input_obj, "file_path")
             args.push(path)
         "Write" =>
-            val path = json_text(input_obj, "file_path")
+            val path = json_str(input_obj, "file_path")
             args.push(path)
         "Edit" =>
-            val path = json_text(input_obj, "file_path")
+            val path = json_str(input_obj, "file_path")
             args.push(path)
         "Grep" =>
-            val pattern = json_text(input_obj, "pattern")
+            val pattern = json_str(input_obj, "pattern")
             args.push(pattern)
         "Glob" =>
-            val pattern = json_text(input_obj, "pattern")
+            val pattern = json_str(input_obj, "pattern")
             args.push(pattern)
         "WebFetch" =>
-            val url = json_text(input_obj, "url")
+            val url = json_str(input_obj, "url")
             args.push(url)
         "WebSearch" =>
-            val query = json_text(input_obj, "query")
+            val query = json_str(input_obj, "query")
             args.push(query)
         "Bash" =>
-            val cmd = json_text(input_obj, "command")
-            # Truncate long commands
+            val cmd = json_str(input_obj, "command")
             if cmd.len() > 60:
                 args.push("{cmd.slice(0, 57)}...")
             else:
                 args.push(cmd)
         "Agent" =>
-            val desc = json_text(input_obj, "description")
-            val child_type = json_text(input_obj, "subagent_type")
+            val desc = json_str(input_obj, "description")
             return DashboardEvent.AgentSpawn(
                 parent_id: agent_id,
                 child_id: "{agent_id}#{desc}",
@@ -121,7 +116,7 @@ fn classify_tool_use(agent_id: text, json: JsonValue, timestamp: i64) -> Dashboa
                 timestamp: timestamp
             )
         "Skill" =>
-            val skill = json_text(input_obj, "skill")
+            val skill = json_str(input_obj, "skill")
             args.push(skill)
         _ =>
             pass_dn
@@ -133,16 +128,16 @@ fn classify_tool_use(agent_id: text, json: JsonValue, timestamp: i64) -> Dashboa
         timestamp: timestamp
     )
 
-fn classify_assistant(agent_id: text, json: JsonValue, timestamp: i64) -> DashboardEvent:
+fn classify_assistant(agent_id: text, json: text, timestamp: i64) -> DashboardEvent:
     """Classify an assistant message — extract token usage."""
-    val usage = json_get(json, "usage")
+    val usage = json_obj(json, "usage")
     var tokens: i64 = 0
-    if usage != nil:
+    if usage != "":
         val output_tokens = json_int(usage, "output_tokens")
         val input_tokens = json_int(usage, "input_tokens")
         tokens = output_tokens + input_tokens
 
-    val model = json_text(json, "model")
+    val model = json_str(json, "model")
     if model != "":
         return DashboardEvent.SessionStart(
             session_id: agent_id,
@@ -157,11 +152,11 @@ fn classify_assistant(agent_id: text, json: JsonValue, timestamp: i64) -> Dashbo
         timestamp: timestamp
     )
 
-fn classify_system(agent_id: text, json: JsonValue, timestamp: i64) -> DashboardEvent:
+fn classify_system(agent_id: text, json: text, timestamp: i64) -> DashboardEvent:
     """Classify system messages — detect session start/end."""
-    val content = json_text(json, "content")
+    val content = json_str(json, "content")
     if content.contains("session started") or content.contains("init"):
-        val model = json_text(json, "model")
+        val model = json_str(json, "model")
         return DashboardEvent.SessionStart(
             session_id: agent_id,
             model: model,
@@ -176,43 +171,98 @@ fn classify_system(agent_id: text, json: JsonValue, timestamp: i64) -> Dashboard
     return DashboardEvent.Unknown
 
 # =========================================================================
-# JSON Helpers
+# String-Based JSON Helpers
 # =========================================================================
 
-fn json_text(json: JsonValue, key: text) -> text:
-    """Safely extract a text field from a JSON object."""
-    if json == nil:
-        return ""
-    val val_node = json_get(json, key)
-    if val_node == nil:
-        return ""
-    match val_node:
-        JsonValue.String(s): return s
-        _: return "{val_node}"
+fn json_str(json: text, key: text) -> text:
+    """Extract a string value for a key from raw JSON text."""
+    val needle = "\"{key}\":"
+    val idx = json.index_of(needle)
+    match idx:
+        nil: return ""
+        Some(pos):
+            val after = pos + needle.len()
+            if after >= json.len():
+                return ""
+            val rest = json.slice(after, json.len()).trim()
+            if rest.len() == 0:
+                return ""
+            if rest.starts_with("\""):
+                # String value — find closing unescaped quote
+                var i = 1
+                var result = ""
+                while i < rest.len():
+                    val ch = rest.slice(i, i + 1)
+                    if ch == "\\" and i + 1 < rest.len():
+                        val next_ch = rest.slice(i + 1, i + 2)
+                        result = "{result}{next_ch}"
+                        i = i + 2
+                    elif ch == "\"":
+                        return result
+                    else:
+                        result = "{result}{ch}"
+                        i = i + 1
+                return result
+            # Not a string — return raw token up to comma/brace
+            var end_pos = 0
+            while end_pos < rest.len():
+                val ch = rest.slice(end_pos, end_pos + 1)
+                if ch == "," or ch == "}" or ch == "]":
+                    return rest.slice(0, end_pos).trim()
+                end_pos = end_pos + 1
+            return rest.trim()
 
-fn json_int(json: JsonValue, key: text) -> i64:
-    """Safely extract an integer field from a JSON object."""
-    if json == nil:
+fn json_int(json: text, key: text) -> i64:
+    """Extract an integer value for a key from raw JSON text."""
+    val raw = json_str(json, key)
+    if raw == "":
         return 0
-    val val_node = json_get(json, key)
-    if val_node == nil:
+    var digits = ""
+    for ch in raw.chars():
+        if ch >= "0" and ch <= "9":
+            digits = "{digits}{ch}"
+        elif digits.len() > 0:
+            break
+    if digits.len() == 0:
         return 0
-    match val_node:
-        JsonValue.Number(n): return n.to_i64()
-        JsonValue.String(s): return s.to_i64()
-        _: return 0
+    return digits.to_i64() ?? 0
 
-fn json_get(json: JsonValue, key: text) -> JsonValue?:
-    """Safely get a field from a JSON object."""
-    if json == nil:
-        return nil
-    match json:
-        JsonValue.Object(fields):
-            for (k, v) in fields:
-                if k == key:
-                    return v
-            return nil
-        _: return nil
+fn json_obj(json: text, key: text) -> text:
+    """Extract a nested JSON object for a key, returned as raw text."""
+    val needle = "\"{key}\":"
+    val idx = json.index_of(needle)
+    match idx:
+        nil: return ""
+        Some(pos):
+            val after = pos + needle.len()
+            if after >= json.len():
+                return ""
+            val rest = json.slice(after, json.len()).trim()
+            if not rest.starts_with("{"):
+                return ""
+            # Match braces
+            var depth = 0
+            var i = 0
+            while i < rest.len():
+                val ch = rest.slice(i, i + 1)
+                if ch == "{":
+                    depth = depth + 1
+                elif ch == "}":
+                    depth = depth - 1
+                    if depth == 0:
+                        return rest.slice(0, i + 1)
+                elif ch == "\"":
+                    # Skip string contents
+                    i = i + 1
+                    while i < rest.len():
+                        val sc = rest.slice(i, i + 1)
+                        if sc == "\\":
+                            i = i + 1
+                        elif sc == "\"":
+                            break
+                        i = i + 1
+                i = i + 1
+            return ""
 
 # =========================================================================
 # Activity Mapping
