@@ -4,6 +4,15 @@
 
 use std.js.types.js_types.{JsValue}
 
+fn _substr(s: text, start: i64, end_idx: i64) -> text:
+    """Subscript-based substring that works in interpreter mode."""
+    var result = ""
+    var i = start
+    while i < end_idx and i < s.len():
+        result = result + s[i]
+        i = i + 1
+    result
+
 # ── RegExp types ───────────────────────────────────────────────────────
 
 class RegExpObj:
@@ -55,7 +64,7 @@ fn regexp_exec(re: RegExpObj, input: text) -> MatchResult:
     while i <= input_len:
         val result = _try_match(pattern, 0, input, i, re.ignore_case)
         if result.matched:
-            return MatchResult.found(value: input.slice(i, i + result.value.len()), index: i)
+            return MatchResult.found(value: _substr(input, i, i + result.value.len()), index: i)
         i = i + 1
     MatchResult.no_match()
 
@@ -69,7 +78,7 @@ fn string_match(input: text, pattern: text, flags: text) -> [text]:
         while i <= input_len:
             val result = _try_match(pattern, 0, input, i, re.ignore_case)
             if result.matched:
-                results.push(input.slice(i, i + result.value.len()))
+                results.push(_substr(input, i, i + result.value.len()))
                 i = i + result.value.len()
                 if result.value.len() == 0:
                     i = i + 1
@@ -98,7 +107,7 @@ fn string_replace(input: text, pattern: text, replacement: text, flags: text) ->
             i = i + (if match_len > 0: match_len else: 1)
             replaced_once = true
         else:
-            result = result + input.slice(i, i + 1)
+            result = result + _substr(input, i, i + 1)
             i = i + 1
     result
 
@@ -111,12 +120,12 @@ fn string_split_regex(input: text, pattern: text) -> [text]:
     while i < input_len:
         val m = _try_match(pattern, 0, input, i, false)
         if m.matched and m.value.len() > 0:
-            results.push(input.slice(last, i))
+            results.push(_substr(input, last, i))
             i = i + m.value.len()
             last = i
         else:
             i = i + 1
-    results.push(input.slice(last, input_len))
+    results.push(_substr(input, last, input_len))
     results
 
 # ── Pattern matching engine (recursive backtracking) ───────────────────
@@ -129,7 +138,7 @@ fn _try_match(pattern: text, pi: i64, input: text, si: i64, ignore_case: bool) -
     val slen = input.len()
 
     while p < plen:
-        val pch = pattern.slice(p, p + 1)
+        val pch = _substr(pattern, p, p + 1)
 
         # Alternation
         if pch == "|":
@@ -161,7 +170,7 @@ fn _try_match(pattern: text, pi: i64, input: text, si: i64, ignore_case: bool) -
         var min_rep = 1
         var max_rep = 1
         if atom_end < plen:
-            val qch = pattern.slice(atom_end, atom_end + 1)
+            val qch = _substr(pattern, atom_end, atom_end + 1)
             if qch == "*":
                 quantifier = "*"
                 min_rep = 0
@@ -190,7 +199,7 @@ fn _try_match(pattern: text, pi: i64, input: text, si: i64, ignore_case: bool) -
             while try_s >= best_s + min_rep:
                 val rest = _try_match(pattern, atom_end + 1, input, try_s, ignore_case)
                 if rest.matched:
-                    return MatchResult.found(value: input.slice(si, try_s + rest.value.len()), index: si)
+                    return MatchResult.found(value: _substr(input, si, try_s + rest.value.len()), index: si)
                 try_s = try_s - 1
             if min_rep == 0:
                 val rest = _try_match(pattern, atom_end + 1, input, best_s, ignore_case)
@@ -206,23 +215,23 @@ fn _try_match(pattern: text, pi: i64, input: text, si: i64, ignore_case: bool) -
             s = s + 1
             p = atom_end
 
-    MatchResult.found(value: input.slice(si, s), index: si)
+    MatchResult.found(value: _substr(input, si, s), index: si)
 
 fn _match_atom(pattern: text, start: i64, end_idx: i64, input: text, si: i64, ignore_case: bool) -> bool:
     """Match a single atom (char, escape, class) at position si."""
-    val pch = pattern.slice(start, start + 1)
+    val pch = _substr(pattern, start, start + 1)
 
     # Dot: match any except newline
     if pch == ".":
-        val ich = input.slice(si, si + 1)
+        val ich = _substr(input, si, si + 1)
         return ich != "\n"
 
     # Escape sequences
     if pch == "\\":
         if start + 1 >= pattern.len():
             return false
-        val ech = pattern.slice(start + 1, start + 2)
-        val ich = input.slice(si, si + 1)
+        val ech = _substr(pattern, start + 1, start + 2)
+        val ich = _substr(input, si, si + 1)
         match ech:
             "d": return _is_digit(ich)
             "D": return not _is_digit(ich)
@@ -237,25 +246,25 @@ fn _match_atom(pattern: text, start: i64, end_idx: i64, input: text, si: i64, ig
         return _match_char_class(pattern, start, end_idx, input, si, ignore_case)
 
     # Literal character
-    val ich = input.slice(si, si + 1)
+    val ich = _substr(input, si, si + 1)
     if ignore_case:
         return ich.to_lowercase() == pch.to_lowercase()
     ich == pch
 
 fn _match_char_class(pattern: text, start: i64, end_idx: i64, input: text, si: i64, ignore_case: bool) -> bool:
     """Match a character class [abc], [a-z], [^abc]."""
-    val ich = input.slice(si, si + 1)
+    val ich = _substr(input, si, si + 1)
     var negate = false
     var p = start + 1
-    if p < end_idx and pattern.slice(p, p + 1) == "^":
+    if p < end_idx and _substr(pattern, p, p + 1) == "^":
         negate = true
         p = p + 1
     var matched = false
     while p < end_idx - 1:
-        val c = pattern.slice(p, p + 1)
+        val c = _substr(pattern, p, p + 1)
         # Range: a-z
-        if p + 2 < end_idx - 1 and pattern.slice(p + 1, p + 2) == "-":
-            val c2 = pattern.slice(p + 2, p + 3)
+        if p + 2 < end_idx - 1 and _substr(pattern, p + 1, p + 2) == "-":
+            val c2 = _substr(pattern, p + 2, p + 3)
             var ic = ich
             var lo = c
             var hi = c2
@@ -283,12 +292,12 @@ fn _find_bracket_end(pattern: text, start: i64) -> i64:
     """Find closing ] for character class."""
     var i = start + 1
     val plen = pattern.len()
-    if i < plen and pattern.slice(i, i + 1) == "^":
+    if i < plen and _substr(pattern, i, i + 1) == "^":
         i = i + 1
-    if i < plen and pattern.slice(i, i + 1) == "]":
+    if i < plen and _substr(pattern, i, i + 1) == "]":
         i = i + 1  # literal ]
     while i < plen:
-        if pattern.slice(i, i + 1) == "]":
+        if _substr(pattern, i, i + 1) == "]":
             return i + 1
         i = i + 1
     plen
@@ -299,7 +308,7 @@ fn _find_group_end(pattern: text, start: i64) -> i64:
     var i = start
     val plen = pattern.len()
     while i < plen:
-        val ch = pattern.slice(i, i + 1)
+        val ch = _substr(pattern, i, i + 1)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":

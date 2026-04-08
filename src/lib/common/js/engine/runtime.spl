@@ -3,7 +3,8 @@
 # global functions (parseInt, parseFloat, isNaN, isFinite), prototypes,
 # and provides the top-level eval() entry point.
 
-use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
@@ -161,7 +162,7 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             val parsed = s.parse_i64_safe()
             if val Some(n) = parsed:
                 return JsValue.Number(v: n.to_f64())
-        return JsValue.Number(v: 0.0 / 0.0)  # NaN
+        return JsValue.Number(v: js_nan())  # NaN
 
     if fn_id == NATIVE_PARSE_FLOAT:
         if args.len() > 0:
@@ -169,20 +170,20 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             val parsed = s.parse_float()
             if val Some(n) = parsed:
                 return JsValue.Number(v: n)
-        return JsValue.Number(v: 0.0 / 0.0)  # NaN
+        return JsValue.Number(v: js_nan())  # NaN
 
     if fn_id == NATIVE_IS_NAN:
         if args.len() > 0:
             val n = to_number(args.get(0))
-            return JsValue.Boolean(v: n != n)  # NaN != NaN is true
+            return JsValue.Boolean(v: is_nan(n))
         return JsValue.Boolean(v: true)
 
     if fn_id == NATIVE_IS_FINITE:
         if args.len() > 0:
             val n = to_number(args.get(0))
-            val is_nan = n != n
-            val is_inf = n == 1.0 / 0.0
-            val is_neg_inf = n == -1.0 / 0.0
+            val is_nan = is_nan(n)
+            val is_inf = n == js_infinity()
+            val is_neg_inf = n == js_neg_infinity()
             val not_finite = is_nan or is_inf or is_neg_inf
             return JsValue.Boolean(v: not not_finite)
         return JsValue.Boolean(v: false)
@@ -191,19 +192,19 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.floor())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_CEIL:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.ceil())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_ROUND:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.round())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_RANDOM:
         # Simple pseudo-random using runtime clock
@@ -215,11 +216,11 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             if n < 0.0:
                 return JsValue.Number(v: 0.0 - n)
             return JsValue.Number(v: n)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_MAX:
         if args.len() == 0:
-            return JsValue.Number(v: -1.0 / 0.0)  # -Infinity
+            return JsValue.Number(v: js_neg_infinity())  # -Infinity
         var max_val = to_number(args.get(0))
         var i = 1
         while i < args.len():
@@ -231,7 +232,7 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
 
     if fn_id == NATIVE_MATH_MIN:
         if args.len() == 0:
-            return JsValue.Number(v: 1.0 / 0.0)  # Infinity
+            return JsValue.Number(v: js_infinity())  # Infinity
         var min_val = to_number(args.get(0))
         var i = 1
         while i < args.len():
@@ -245,14 +246,14 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n ** 0.5)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_POW:
         if args.len() >= 2:
             val base = to_number(args.get(0))
             val exp = to_number(args.get(1))
             return JsValue.Number(v: base ** exp)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_JSON_STRINGIFY:
         if args.len() > 0:
@@ -344,8 +345,8 @@ class JsRuntime:
 
         # ── Global values ────────────────────────────────────────────
         self.interpreter.env_stack.define_var(self.interpreter.global_env, "undefined", JsValue.Undefined)
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "NaN", JsValue.Number(v: 0.0 / 0.0))
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "Infinity", JsValue.Number(v: 1.0 / 0.0))
+        self.interpreter.env_stack.define_var(self.interpreter.global_env, "NaN", JsValue.Number(v: js_nan()))
+        self.interpreter.env_stack.define_var(self.interpreter.global_env, "Infinity", JsValue.Number(v: js_infinity()))
 
         # ── Global functions ─────────────────────────────────────────
         self._define_global_fn("parseInt", NATIVE_PARSE_INT)
