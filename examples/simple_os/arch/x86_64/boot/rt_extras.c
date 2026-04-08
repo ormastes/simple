@@ -394,6 +394,7 @@ RuntimeValue rt_ptr_to_value(RuntimeValue ptr) {
 
 RuntimeValue rt_tuple_new(RuntimeValue len_rv) {
     int64_t len = (int64_t)len_rv;
+    serial_puts("[tup] new len="); serial_puthex((uint8_t)(len & 0xFF)); serial_puts("\r\n");
     if (len <= 0) len = 0;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
@@ -402,17 +403,28 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv) {
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
     for (uint32_t i = 0; i < (uint32_t)len; i++) a->items[i] = NIL_VALUE;
-    return ENCODE_PTR(a);
+    RuntimeValue result = ENCODE_PTR(a);
+    serial_puts("[tup] new -> 0x"); serial_puthex((uint8_t)((result >> 8) & 0xFF)); serial_puthex((uint8_t)(result & 0xFF)); serial_puts("\r\n");
+    return result;
 }
 
 RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index) {
+    serial_puts("[tup] get tuple=0x"); serial_puthex((uint8_t)((tuple >> 8) & 0xFF)); serial_puthex((uint8_t)(tuple & 0xFF));
+    serial_puts(" idx="); serial_puthex((uint8_t)(index & 0xFF)); serial_puts("\r\n");
     RuntimeArray *a = _decode_arr(tuple);
     int64_t i = (int64_t)index;
-    if (!a || i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-    return a->items[i];
+    if (!a || i < 0 || (uint32_t)i >= a->len) {
+        serial_puts("[tup] get -> NIL (a="); serial_puthex(a ? 1 : 0); serial_puts(")\r\n");
+        return NIL_VALUE;
+    }
+    RuntimeValue val = a->items[i];
+    serial_puts("[tup] get -> 0x"); serial_puthex((uint8_t)((val >> 8) & 0xFF)); serial_puthex((uint8_t)(val & 0xFF)); serial_puts("\r\n");
+    return val;
 }
 
 RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value) {
+    serial_puts("[tup] set idx="); serial_puthex((uint8_t)(index & 0xFF));
+    serial_puts(" val=0x"); serial_puthex((uint8_t)((value >> 8) & 0xFF)); serial_puthex((uint8_t)(value & 0xFF)); serial_puts("\r\n");
     RuntimeArray *a = _decode_arr(tuple);
     int64_t i = (int64_t)index;
     if (!a || i < 0 || (uint32_t)i >= a->len) return 0;

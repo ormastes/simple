@@ -6797,6 +6797,47 @@ RuntimeValue rt_array_len(RuntimeValue arr)
     if (!a || a->hdr.type != HEAP_ARRAY) return 0;
     return (RuntimeValue)a->len;
 }
+/* ---- Tuple functions (rt_extras.c not linked in baremetal build) ---- */
+RuntimeValue rt_tuple_new(RuntimeValue len_rv)
+{
+    int64_t len = (int64_t)len_rv;
+    if (len <= 0) len = 0;
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
+    a->len = (uint32_t)len;
+    a->cap = (uint32_t)len;
+    for (uint32_t i = 0; i < (uint32_t)len; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index)
+{
+    if (!IS_HEAP(tuple)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(tuple);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = (int64_t)index;
+    if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
+    return a->items[i];
+}
+RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value)
+{
+    if (!IS_HEAP(tuple)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(tuple);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    int64_t i = (int64_t)index;
+    if (i < 0 || (uint32_t)i >= a->len) return 0;
+    a->items[i] = value;
+    return 1;
+}
+RuntimeValue rt_tuple_len(RuntimeValue tuple)
+{
+    if (!IS_HEAP(tuple)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(tuple);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (RuntimeValue)(int64_t)a->len;
+}
+
 /* rt_array_slice(arr, start, end) — return sub-array */
 RuntimeValue rt_array_slice(RuntimeValue arr, RuntimeValue start, RuntimeValue end)
 {
