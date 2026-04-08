@@ -470,23 +470,23 @@ fn parse_color_value(s: text) -> u32:
     # rgba/rgb — unified parser handles both
     if lower.starts_with("rgba(") and cleaned.ends_with(")"):
         val rgba_inner = cleaned.slice(5, cleaned.len() - 1)
-        print "[RGB] rgba inner='{rgba_inner}'"
         return parse_rgb_unified(rgba_inner)
     if lower.starts_with("rgb(") and cleaned.ends_with(")"):
         val rgb_inner = cleaned.slice(4, cleaned.len() - 1)
-        print "[RGB] rgb inner='{rgb_inner}'"
         return parse_rgb_unified(rgb_inner)
 
     if cleaned.starts_with("var("):
         return 0x00000000
 
     val named = named_color_to_u32(cleaned)
-    if val Some(c) = named:
+    if named != nil:
+        val c = named ?? 0
         return c
 
     val num = cleaned.parse_i64()
     if num != nil:
-        return num.to_u32()
+        val nval = num ?? 0
+        return nval.to_u32()
     return 0x000000FF
 
 fn strip_css_comments(s: text) -> text:
@@ -545,11 +545,8 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
     - Space-separated: '128 0 255' or '128 0 255 / 0.5'
     - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
     """
-    print "[RGBu] enter raw='{inner_raw}'"
     val inner_stripped = strip_css_comments(inner_raw)
-    print "[RGBu] stripped='{inner_stripped}'"
     val inner = inner_stripped.trim()
-    print "[RGBu] inner='{inner}' len={inner.len()}"
     if inner.len() == 0:
         return 0x000000FF
 
@@ -557,21 +554,17 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
     var has_comma = false
     var idx_1 = 0
     val inner_len = inner.len()
-    print "[RGBu] scanning for comma, inner_len={inner_len}"
     while idx_1 < inner_len:
         val ch = inner.slice(idx_1, idx_1 + 1)
         if ch == ",":
             has_comma = true
         idx_1 = idx_1 + 1
-    print "[RGBu] has_comma={has_comma}"
 
     var color_parts: [text] = []
     var alpha_str = ""
 
     if has_comma:
-        print "[RGBu] calling split_comma"
         val comma_parts = split_comma(inner)
-        print "[RGBu] split_comma done, parts={comma_parts.len()}"
         color_parts = comma_parts
     else:
         # Space-separated, may have / for alpha
@@ -585,22 +578,15 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
         else:
             color_parts = dom_split_ws(inner)
 
-    print "[RGBu] color_parts len={color_parts.len()}"
     if color_parts.len() < 3:
         return 0x000000FF
 
     val r_str = color_parts[0].trim()
-    print "[RGBu] r_str='{r_str}'"
     val r = parse_color_component(r_str)
-    print "[RGBu] r={r}"
     val g_str = color_parts[1].trim()
-    print "[RGBu] g_str='{g_str}'"
     val g = parse_color_component(g_str)
-    print "[RGBu] g={g}"
     val b_str = color_parts[2].trim()
-    print "[RGBu] b_str='{b_str}'"
     val b = parse_color_component(b_str)
-    print "[RGBu] b={b}"
 
     var a: u32 = 255
     if alpha_str.len() > 0:
@@ -610,63 +596,127 @@ fn parse_rgb_unified(inner_raw: text) -> u32:
         val a4_str = color_parts[3].trim()
         a = parse_alpha_component(a4_str)
 
-    print "[RGBu] r={r} g={g} b={b} a={a}"
     return (r * 16777216) + (g * 65536) + (b * 256) + a
 
 fn parse_color_component(s: text) -> u32:
     """Parse a single color component (integer 0-255 or percentage 0%-100%)."""
     val trimmed = s.trim()
     if trimmed.ends_with("%"):
+        # Parse percentage: manual integer parse of number before %
         val pct_str = trimmed.slice(0, trimmed.len() - 1)
-        val pct = pct_str.parse_f64()
-        if pct != nil:
-            var v = (pct * 255.0 / 100.0).to_i32()
-            if v < 0:
-                v = 0
-            if v > 255:
-                v = 255
-            return v.to_u32()
-        return 0
-    val f = trimmed.parse_f64()
-    if val Some(fval) = f:
-        var v = fval.to_i32()
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
         if v < 0:
             v = 0
         if v > 255:
             v = 255
         return v.to_u32()
-    0
+    # Parse integer directly — avoid f64? optional bug in Cranelift
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+fn pcc_parse_int(s: text) -> i64:
+    """Manual integer parser that avoids optional types (Cranelift f64? bug)."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if trimmed.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif trimmed.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = trimmed.len()
+    while idx < slen:
+        val ch = trimmed.slice(idx, idx + 1)
+        if ch == "." or ch == "e" or ch == "E":
+            break
+        val d = pcc_digit(ch)
+        if d < 0:
+            break
+        result = result * 10 + d
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+fn pcc_digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return 0 - 1
 
 fn parse_alpha_component(s: text) -> u32:
     """Parse an alpha component (float 0-1, percentage 0%-100%, or integer)."""
     val trimmed = s.trim()
     if trimmed.ends_with("%"):
         val pct_str = trimmed.slice(0, trimmed.len() - 1)
-        val pct = pct_str.parse_f64()
-        if pct != nil:
-            var v = (pct * 255.0 / 100.0).to_i32()
-            if v < 0:
-                v = 0
-            if v > 255:
-                v = 255
-            return v.to_u32()
-        return 255
-    val f = trimmed.parse_f64()
-    if f != nil:
-        if f <= 1.0 and f >= 0.0:
-            var v = (f * 255.0).to_i32()
-            if v < 0:
-                v = 0
-            if v > 255:
-                v = 255
-            return v.to_u32()
-        # Might be integer 0-255
-        var v = f.to_i32()
+        val pct_i = pcc_parse_int(pct_str)
+        var v = (pct_i * 255) / 100
         if v < 0:
             v = 0
         if v > 255:
             v = 255
         return v.to_u32()
+    # Check if it looks like a decimal 0.0-1.0 (contains '.')
+    var has_dot = false
+    var ai = 0
+    val alen = trimmed.len()
+    while ai < alen:
+        if trimmed.slice(ai, ai + 1) == ".":
+            has_dot = true
+        ai = ai + 1
+    if has_dot:
+        # Parse as integer fraction: "0.5" → 5/10 → 127
+        # Simple approach: parse the part before and after dot
+        val dot_pos = pcc_find_dot(trimmed)
+        val int_part = pcc_parse_int(trimmed.slice(0, dot_pos))
+        val frac_str = trimmed.slice(dot_pos + 1, alen)
+        val frac_val = pcc_parse_int(frac_str)
+        var divisor = 1
+        var di = 0
+        while di < frac_str.len():
+            divisor = divisor * 10
+            di = di + 1
+        # Combined value in thousandths
+        val combined = int_part * 1000 + (frac_val * 1000) / divisor
+        if combined <= 1000:
+            var v = (combined * 255) / 1000
+            if v < 0:
+                v = 0
+            if v > 255:
+                v = 255
+            return v.to_u32()
+    # Plain integer 0-255
+    val n = pcc_parse_int(trimmed)
+    if n < 0:
+        return 0
+    if n > 255:
+        return 255
+    return n.to_u32()
+
+fn pcc_find_dot(s: text) -> i64:
+    var i = 0
+    val slen = s.len()
+    while i < slen:
+        if s.slice(i, i + 1) == ".":
+            return i
+        i = i + 1
+    999999999
     255
 
 fn dom_split_ws(s: text) -> [text]:
@@ -731,10 +781,14 @@ fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
     val s_str = parts[1].trim()
     val l_str = parts[2].trim()
 
-    var h_val = h_str.parse_f64()
-    if h_val == nil:
+    val h_val_opt = h_str.parse_f64()
+    if h_val_opt == nil:
         return 0x000000FF
-    var h = h_val.to_f32()
+    var h_val_unwrapped: f64 = 0.0
+    if h_val_opt != nil:
+        val hv = h_val_opt ?? 0.0
+        h_val_unwrapped = hv
+    var h = h_val_unwrapped.to_f32()
     # Normalize hue to [0, 360)
     while h < 0.0:
         h = h + 360.0
@@ -801,11 +855,13 @@ fn parse_pct_value(s: text) -> f32:
         val num_str = trimmed.slice(0, trimmed.len() - 1)
         val n = num_str.parse_f64()
         if n != nil:
-            return n.to_f32()
+            val nval = n ?? 0.0
+            return nval.to_f32()
         return 0.0
     val n = trimmed.parse_f64()
     if n != nil:
-        return n.to_f32()
+        val nval = n ?? 0.0
+        return nval.to_f32()
     0.0
 
 fn f32_abs(v: f32) -> f32:
@@ -840,7 +896,10 @@ fn parse_int_clamped(s: text, min_val: u32, max_val: u32) -> u32:
     val n = s.parse_i64()
     if n == nil:
         return 0
-    var v = n.to_u32()
+    var v: u32 = 0
+    if n != nil:
+        val nval = n ?? 0
+        v = nval.to_u32()
     if v < min_val:
         v = min_val
     if v > max_val:
@@ -889,18 +948,18 @@ fn hex_digit(ch: text) -> u32:
         _ => 0
 
 fn parse_float_value(s: text) -> f32:
-    """Parse a string to f32. Returns 1.0 on failure."""
-    val f = s.parse_f64()
-    if f != nil:
-        return f.to_f32()
+    """Parse a string to f32. Returns 1.0 on failure.
+    Uses manual int parser to avoid Cranelift f64? optional bug."""
+    val n = pcc_parse_int(s)
+    if n != 0 or s.trim() == "0":
+        return n.to_f32()
     return 1.0
 
 fn parse_int_value(s: text) -> i32:
-    """Parse a string to i32. Returns 0 on failure."""
-    val n = s.parse_i64()
-    if n != nil:
-        return n.to_i32()
-    return 0
+    """Parse a string to i32. Returns 0 on failure.
+    Uses manual int parser to avoid Cranelift optional bug."""
+    val n = pcc_parse_int(s)
+    return n.to_i32()
 
 # =========================================================================
 # CSS Level 4 Named Color Table (148 colors)
@@ -1133,7 +1192,8 @@ fn parse_linear_gradient(value: text) -> GradientParseResult:
         val deg_str = deg_str_raw.trim()
         val parsed = deg_str.parse_f64()
         if parsed != nil:
-            angle = parsed.to_i32()
+            val pval = parsed ?? 0.0
+            angle = pval.to_i32()
         color_start_idx = 1
     elif first == "to bottom":
         angle = 180
@@ -1292,7 +1352,8 @@ fn parse_single_box_shadow(s: text) -> BoxShadow:
             val stripped = if tv.ends_with("px"): tv.slice(0, tv.len() - 2) else: tv
             val parsed = stripped.parse_f64()
             if parsed != nil:
-                rt_array_push(nums, parsed.to_i32())
+                val pval = parsed ?? 0.0
+                rt_array_push(nums, pval.to_i32())
                 num_count = num_count + 1
                 color_start = color_start + 1
                 continue
@@ -1385,7 +1446,8 @@ fn parse_blur_value(value: text) -> i32:
 
     val parsed = num_str.parse_f64()
     if parsed != nil:
-        return parsed.to_i32()
+        val pval = parsed ?? 0.0
+        return pval.to_i32()
     0
 
 fn find_substr(haystack: text, needle: text) -> i32:
