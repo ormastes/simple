@@ -368,24 +368,14 @@ impl NativeProjectBuilder {
                     candidates.push((runtime, false));
                 }
                 if native_all.exists() {
-                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
-                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
-                    let lib = if is_bootstrap {
-                        strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
-                    } else {
-                        native_all.clone()
-                    };
+                    // LIM-010: Always strip LLVM constructors from native_all to prevent
+                    // segfaults from ManagedStatic initialization (not just in bootstrap mode).
+                    let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
                     candidates.push((lib, true));
                 }
             } else {
                 if native_all.exists() {
-                    let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
-                        || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
-                    let lib = if is_bootstrap {
-                        strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
-                    } else {
-                        native_all.clone()
-                    };
+                    let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
                     candidates.push((lib, true));
                 }
                 if runtime.exists() {
@@ -403,13 +393,7 @@ impl NativeProjectBuilder {
                 }
             }
             if let Some(native_all) = find_native_all_library() {
-                let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").is_ok()
-                    || std::env::var("LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING").is_ok();
-                let lib = if is_bootstrap {
-                    strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone())
-                } else {
-                    native_all.clone()
-                };
+                let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
                 if prefer_runtime_only {
                     if !candidates.iter().any(|(p, _)| p == &lib) {
                         candidates.push((lib, true));
@@ -2228,6 +2212,32 @@ fn generate_stub_object(
     }
 }
 
+/// Find an objcopy tool that can handle the host object format.
+/// Prefers llvm-objcopy (handles both ELF and Mach-O) over GNU objcopy.
+fn find_objcopy_tool() -> Option<String> {
+    // Try llvm-objcopy from known LLVM prefixes first (macOS Homebrew)
+    for prefix in &[
+        "/opt/homebrew/opt/llvm@18/bin",
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm@18/bin",
+        "/usr/local/opt/llvm/bin",
+    ] {
+        let path = format!("{}/llvm-objcopy", prefix);
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    // Try llvm-objcopy in PATH
+    if std::process::Command::new("llvm-objcopy").arg("--version").output().is_ok() {
+        return Some("llvm-objcopy".to_string());
+    }
+    // Fall back to GNU objcopy (ELF-only, won't work on macOS Mach-O)
+    if std::process::Command::new("objcopy").arg("--version").output().is_ok() {
+        return Some("objcopy".to_string());
+    }
+    None
+}
+
 /// Strip LLVM static constructors from a static archive to prevent segfaults (LIM-010).
 ///
 /// LLVM backend objects (e.g., M68kAsmParser.cpp) contain `_GLOBAL__sub_I_*` constructors
@@ -2238,10 +2248,13 @@ fn generate_stub_object(
 /// Fix: extract the archive, use `objcopy --remove-section=.init_array` on LLVM objects
 /// to strip their constructors (keeps symbols for linking), then repackage.
 fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
-    // Only attempt if objcopy is available
-    if std::process::Command::new("objcopy").arg("--version").output().is_err() {
-        return Ok(lib.to_path_buf());
-    }
+    // Find an objcopy tool — prefer llvm-objcopy (handles both ELF and Mach-O).
+    // Search order: llvm-objcopy in LLVM prefix, then PATH, then GNU objcopy.
+    let objcopy = find_objcopy_tool();
+    let objcopy = match objcopy {
+        Some(cmd) => cmd,
+        None => return Ok(lib.to_path_buf()), // No objcopy available — skip stripping
+    };
 
     let archive_path = safe_canonicalize(lib);
 
@@ -2258,22 +2271,36 @@ fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, Strin
         return Ok(lib.to_path_buf());
     }
 
-    // Strip .init_array/.ctors from ALL C++ objects (*.cpp.o) in the archive.
+    // Strip static constructors from ALL C++ objects (*.cpp.o) in the archive.
     // These are all LLVM objects (2600+) — the Simple runtime is in Rust .rcgu.o files.
     // LLVM static constructors register CLI options via ManagedStatic which
     // segfaults when stubbed-out infrastructure is called.
+    //
+    // Section names differ by object format:
+    //   ELF:   .init_array, .ctors, .fini_array, .dtors
+    //   Mach-O: __DATA,__mod_init_func  __DATA,__mod_term_func
     if let Ok(entries) = std::fs::read_dir(&extract_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".cpp.o") {
                 let path = entry.path();
-                let _ = std::process::Command::new("objcopy")
+                // Try ELF section names
+                let _ = std::process::Command::new(&objcopy)
                     .arg("--remove-section=.init_array")
                     .arg("--remove-section=.ctors")
                     .arg("--remove-section=.fini_array")
                     .arg("--remove-section=.dtors")
                     .arg(&path)
                     .status();
+                // Try Mach-O section names (llvm-objcopy handles both)
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new(&objcopy)
+                        .arg("--remove-section=__DATA,__mod_init_func")
+                        .arg("--remove-section=__DATA,__mod_term_func")
+                        .arg(&path)
+                        .status();
+                }
             }
         }
     }

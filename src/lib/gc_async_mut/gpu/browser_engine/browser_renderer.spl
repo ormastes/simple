@@ -7,7 +7,9 @@
 # UI through the browser engine onto a 2D pixel surface.
 
 use common.ui.widget.{WidgetNode, UITree, UIState}
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
+    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_is_text,
+    be_dom_get_children, be_dom_get_style, be_dom_get_text}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
@@ -267,7 +269,8 @@ fn set_browser_effect_engine(platform: text):
 fn count_nodes(node: BeDomNode) -> i32:
     """Count total nodes in a DOM tree."""
     var count = 1
-    for child in node.children:
+    val kids = be_dom_get_children(node)
+    for child in kids:
         count = count + count_nodes(child)
     return count
 
@@ -411,8 +414,11 @@ pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     """Render HTML to a flat pixel array (ARGB u32). Returns just pixels, no struct wrapper.
     Uses layout_to_scene() which does layout+paint in one module to avoid
     cross-module FieldGet bug with struct/array fields."""
+    print "[RHPA] enter len={html.len()}"
     val dom = browser_renderer_html_string_to_dom(html)
+    print "[RHPA] dom done"
     val scene = layout_to_scene(dom, width, height)
+    print "[RHPA] scene done"
     val pixel_count = width * height
     var pixels: [u32] = rt_array_new(pixel_count)
     var i = 0
@@ -428,9 +434,11 @@ pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) 
     renderer.render_html_to_pixels(html)
 
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
+    print "[DOM] enter"
     var root = BeDomNode.element("div")
+    print "[DOM] root created"
     root.id = "html-root"
-    print "[PARSE] start len={html.len()}"
+    print "[DOM] id set"
 
     # Store raw HTML for later <style> block processing
     val raw_html = html
@@ -438,22 +446,31 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var stack: [BeDomNode] = [root]
     var pos = 0
     val len = html.len()
-    print "[PARSE] entering loop len={len}"
+    print "[DOM] loop start len={len}"
 
     while pos < len:
-        print "[PARSE] pos={pos}"
+        print "[DOM] pos={pos}"
         val ch = html.slice(pos, pos + 1)
+        print "[DOM] ch='{ch}'"
         if ch == "<":
+            print "[DOM] tag start at pos={pos}"
             # Check for HTML comment <!-- ... -->
-            if pos + 3 < len and html.slice(pos, pos + 4) == "<!--":
-                val comment_end = br_find_str(html, "-->", pos + 4)
-                if comment_end < 999999999:
-                    pos = comment_end + 3
-                else:
-                    pos = len
-                continue
+            val check_comment = pos + 3 < len
+            print "[DOM] comment check={check_comment}"
+            if check_comment:
+                val comment_prefix = html.slice(pos, pos + 4)
+                print "[DOM] comment_prefix='{comment_prefix}'"
+                if comment_prefix == "<!--":
+                    val comment_end = br_find_str(html, "-->", pos + 4)
+                    if comment_end < 999999999:
+                        pos = comment_end + 3
+                    else:
+                        pos = len
+                    continue
 
+            print "[DOM] finding >"
             val tag_end = browser_renderer_find_char(html, ">", pos)
+            print "[DOM] tag_end={tag_end}"
             if tag_end >= 999999999:
                 val remaining = html.slice(pos, len)
                 val txt = BeDomNode.text(remaining)
@@ -464,14 +481,22 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 break
 
             val tag_content = html.slice(pos + 1, tag_end)
+            print "[DOM] tag_content='{tag_content}'"
 
             # Skip <!DOCTYPE ...>
             if tag_content.starts_with("!DOCTYPE") or tag_content.starts_with("!doctype"):
                 pos = tag_end + 1
                 continue
 
-            if tag_content.starts_with("/"):
-                val close_tag = tag_content.slice(1, tag_content.len()).trim().to_lower()
+            print "[DOM] checking starts_with /"
+            val is_close = tag_content.starts_with("/")
+            print "[DOM] is_close={is_close}"
+            if is_close:
+                # Break chained method call into intermediate vars
+                val close_raw = tag_content.slice(1, tag_content.len())
+                val close_trimmed = close_raw.trim()
+                val close_tag = close_trimmed.to_lower()
+                print "[DOM] close_tag='{close_tag}'"
                 # Skip closing structural tags
                 if close_tag == "html" or close_tag == "head" or close_tag == "body":
                     pos = tag_end + 1
@@ -493,14 +518,23 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                         new_parent.add_child(completed)
                         stack[stack.len() - 1] = new_parent
             else:
+                print "[DOM] open tag"
                 val is_self_closing = tag_content.ends_with("/")
-                val clean_content = if is_self_closing:
-                    tag_content.slice(0, tag_content.len() - 1).trim()
-                else:
-                    tag_content.trim()
+                print "[DOM] self_closing={is_self_closing}"
+                var clean_content = tag_content.trim()
+                print "[DOM] clean='{clean_content}'"
+                if is_self_closing:
+                    val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
+                    clean_content = trimmed_sc.trim()
 
+                print "[DOM] calling parse_tag"
                 var new_node = browser_renderer_parse_tag(clean_content)
-                val tag_lower = new_node.tag.to_lower()
+                print "[DOM] parse_tag done"
+                # Use accessor to avoid cross-module FieldGet bug
+                val raw_tag = be_dom_get_tag(new_node)
+                print "[DOM] raw_tag='{raw_tag}'"
+                val tag_lower = raw_tag.to_lower()
+                print "[DOM] tag_lower='{tag_lower}'"
 
                 # Skip html/head — let content flow into root
                 if tag_lower == "html" or tag_lower == "head":
@@ -511,15 +545,11 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 if tag_lower == "body":
                     if stack.len() > 0:
                         val root_node = stack[0]
-                        # Parse body's attributes and copy styles to root
-                        val body_parsed = new_node
-                        val body_style = body_parsed.style
-                        if body_style.background_color != 0x00000000:
-                            root_node.set_style("background-color", clean_content)
                         # Apply inline style from body tag directly
+                        val body_parts = browser_renderer_split_tag_parts(clean_content)
                         var bi = 1
-                        while bi < browser_renderer_split_tag_parts(clean_content).len():
-                            val bpart = browser_renderer_split_tag_parts(clean_content)[bi]
+                        while bi < body_parts.len():
+                            val bpart = body_parts[bi]
                             val beq = browser_renderer_find_char(bpart, "=", 0)
                             if beq > 0:
                                 val bkey = bpart.slice(0, beq)
@@ -538,7 +568,8 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
 
                 # <style> is a raw-text element — skip ahead to </style>
                 if tag_lower == "style":
-                    val style_close = br_find_str(html.to_lower(), "</style", tag_end + 1)
+                    val html_lower = html.to_lower()
+                    val style_close = br_find_str(html_lower, "</style", tag_end + 1)
                     if style_close < 999999999:
                         val style_tag_end = browser_renderer_find_char(html, ">", style_close)
                         pos = if style_tag_end < 999999999: style_tag_end + 1 else: style_close + 8
@@ -546,7 +577,9 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                         pos = len
                     continue
 
-                if is_self_closing or browser_renderer_is_void_element(new_node.tag):
+                # Use accessor for void element check too
+                val node_tag_for_void = be_dom_get_tag(new_node)
+                if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
                     if stack.len() > 0:
                         var parent = stack[stack.len() - 1]
                         parent.add_child(new_node)
@@ -557,7 +590,8 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
         else:
             val text_end = browser_renderer_find_char(html, "<", pos)
             val end_pos = if text_end >= 999999999: len else: text_end
-            val text_content = html.slice(pos, end_pos).trim()
+            val text_raw = html.slice(pos, end_pos)
+            val text_content = text_raw.trim()
             if text_content.len() > 0:
                 val txt = BeDomNode.text(text_content)
                 if stack.len() > 0:
@@ -719,9 +753,9 @@ fn br_find_str(s: text, needle: text, start: i32) -> i32:
 
 fn br_apply_ua_defaults(node: BeDomNode):
     """Apply user-agent default styles to common HTML elements."""
-    if node.is_text_node():
+    if be_dom_get_is_text(node):
         return
-    val tag = node.tag
+    val tag = be_dom_get_tag(node)
     if tag == "body":
         node.set_style("margin", "8px")
     elif tag == "p":
@@ -787,5 +821,6 @@ fn br_apply_ua_defaults(node: BeDomNode):
     elif tag == "section" or tag == "article" or tag == "nav" or tag == "aside" or tag == "header" or tag == "footer" or tag == "main":
         node.set_style("display", "block")
 
-    for child in node.children:
+    val ua_kids = be_dom_get_children(node)
+    for child in ua_kids:
         br_apply_ua_defaults(child)
