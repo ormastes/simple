@@ -1,0 +1,260 @@
+# WPT (Web Platform Tests) Format Support
+#
+# Parses WPT-style ref test metadata from HTML test files.
+# WPT ref tests use <link rel="match" href="..."> to specify reference files
+# and <meta name="assert" content="..."> for test assertions.
+#
+# See: https://web-platform-tests.org/writing-tests/reftests.html
+#
+# Usage:
+#   val info = parse_wpt_metadata(html_content)
+#   if info.has_ref_match:
+#       print "Reference: {info.ref_match_href}"
+#       print "Assert: {info.assertion}"
+
+extern fn rt_file_read_text(path: text) -> text
+
+# =========================================================================
+# WPT Test Info
+# =========================================================================
+
+class WptTestInfo:
+    has_ref_match: bool
+    ref_match_href: text
+    has_ref_mismatch: bool
+    ref_mismatch_href: text
+    assertion: text
+    title: text
+    flags: [text]
+    help_links: [text]
+
+    static fn empty() -> WptTestInfo:
+        WptTestInfo(
+            has_ref_match: false,
+            ref_match_href: "",
+            has_ref_mismatch: false,
+            ref_mismatch_href: "",
+            assertion: "",
+            title: "",
+            flags: [],
+            help_links: []
+        )
+
+    fn is_ref_test() -> bool:
+        self.has_ref_match or self.has_ref_mismatch
+
+    fn summary() -> text:
+        var s = "WPT Test"
+        if self.title != "":
+            s = "{s}: {self.title}"
+        if self.has_ref_match:
+            s = "{s}\n  ref-match: {self.ref_match_href}"
+        if self.has_ref_mismatch:
+            s = "{s}\n  ref-mismatch: {self.ref_mismatch_href}"
+        if self.assertion != "":
+            s = "{s}\n  assert: {self.assertion}"
+        if self.flags.len() > 0:
+            s = "{s}\n  flags: {join_texts(self.flags, ", ")}"
+        if self.help_links.len() > 0:
+            s = "{s}\n  help: {join_texts(self.help_links, ", ")}"
+        s
+
+# =========================================================================
+# Parser
+# =========================================================================
+
+fn parse_wpt_metadata(html: text) -> WptTestInfo:
+    """Parse WPT-style metadata from HTML content.
+    Looks for:
+      <link rel="match" href="reference-file.html">
+      <link rel="mismatch" href="notref-file.html">
+      <meta name="assert" content="...">
+      <title>...</title>
+      <meta name="flags" content="...">
+      <link rel="help" href="...">
+    """
+    var info = WptTestInfo.empty()
+
+    # Parse <link rel="match" href="...">
+    val match_href = extract_link_href(html, "match")
+    if match_href != "":
+        info.has_ref_match = true
+        info.ref_match_href = match_href
+
+    # Parse <link rel="mismatch" href="...">
+    val mismatch_href = extract_link_href(html, "mismatch")
+    if mismatch_href != "":
+        info.has_ref_mismatch = true
+        info.ref_mismatch_href = mismatch_href
+
+    # Parse <meta name="assert" content="...">
+    info.assertion = extract_meta(html, "assert")
+
+    # Parse <title>...</title>
+    info.title = extract_tag_content(html, "title")
+
+    # Parse <meta name="flags" content="...">
+    val flags_str = extract_meta(html, "flags")
+    if flags_str != "":
+        info.flags = split_on_space(flags_str)
+
+    # Parse <link rel="help" href="..."> (may be multiple)
+    info.help_links = extract_all_link_hrefs(html, "help")
+
+    info
+
+fn parse_wpt_file(path: text) -> WptTestInfo:
+    """Load and parse WPT metadata from an HTML file."""
+    val content = rt_file_read_text(path)
+    parse_wpt_metadata(content)
+
+# =========================================================================
+# HTML Extraction Helpers
+# =========================================================================
+
+fn extract_link_href(html: text, rel_value: text) -> text:
+    """Extract href from first <link rel="rel_value" href="...">."""
+    # Search for: rel="match" href="
+    val pattern1 = "rel=\"{rel_value}\" href=\""
+    var idx = wpt_text_find(html, pattern1)
+    if idx >= 0:
+        val start = idx + pattern1.len()
+        return extract_until_quote(html, start)
+
+    # Also try: href="..." rel="match" order
+    val pattern2 = "rel=\"{rel_value}\""
+    idx = wpt_text_find(html, pattern2)
+    if idx < 0:
+        return ""
+
+    # Found rel= , now find nearest href= in the same tag
+    # Walk backward to find the tag start '<'
+    var tag_start = idx
+    while tag_start > 0 and html[tag_start] != '<':
+        tag_start = tag_start - 1
+
+    # Extract the full tag content
+    var tag_end = idx
+    while tag_end < html.len() and html[tag_end] != '>':
+        tag_end = tag_end + 1
+
+    val tag = wpt_text_substring(html, tag_start, tag_end + 1)
+    val href_pattern = "href=\""
+    val href_idx = wpt_text_find(tag, href_pattern)
+    if href_idx >= 0:
+        val href_start = href_idx + href_pattern.len()
+        return extract_until_quote(tag, href_start)
+
+    ""
+
+fn extract_all_link_hrefs(html: text, rel_value: text) -> [text]:
+    """Extract all href values from <link rel="rel_value" href="..."> tags."""
+    var results: [text] = []
+    val pattern = "rel=\"{rel_value}\" href=\""
+    var search_from = 0
+
+    while search_from < html.len():
+        val remaining = wpt_text_substring(html, search_from, html.len())
+        val idx = wpt_text_find(remaining, pattern)
+        if idx < 0:
+            return results
+        val abs_idx = search_from + idx
+        val start = abs_idx + pattern.len()
+        val href = extract_until_quote(html, start)
+        if href != "":
+            results = results + [href]
+        search_from = start + href.len() + 1
+
+    results
+
+fn extract_meta(html: text, meta_name: text) -> text:
+    """Extract content attribute from <meta name="meta_name" content="...">."""
+    val pattern = "name=\"{meta_name}\" content=\""
+    val idx = wpt_text_find(html, pattern)
+    if idx < 0:
+        return ""
+    val start = idx + pattern.len()
+    extract_until_quote(html, start)
+
+fn extract_tag_content(html: text, tag_name: text) -> text:
+    """Extract text content from <tag_name>...</tag_name>."""
+    val open_tag = "<{tag_name}>"
+    val close_tag = "</{tag_name}>"
+    val open_idx = wpt_text_find(html, open_tag)
+    if open_idx < 0:
+        return ""
+    val start = open_idx + open_tag.len()
+    val rest = wpt_text_substring(html, start, html.len())
+    val close_idx = wpt_text_find(rest, close_tag)
+    if close_idx < 0:
+        return ""
+    wpt_text_substring(rest, 0, close_idx)
+
+fn extract_until_quote(text_val: text, start: i64) -> text:
+    """Extract text from start position until the next double quote."""
+    var result = ""
+    var i = start
+    while i < text_val.len():
+        val ch = text_val[i]
+        if ch == '"':
+            return result
+        result = "{result}{ch}"
+        i = i + 1
+    result
+
+# =========================================================================
+# Text Utilities
+# =========================================================================
+
+fn wpt_text_find(haystack: text, needle: text) -> i64:
+    """Find first occurrence of needle in haystack. Returns -1 if not found."""
+    val hlen = haystack.len()
+    val nlen = needle.len()
+    if nlen > hlen:
+        return -1
+    var i = 0
+    while i <= hlen - nlen:
+        val slice = wpt_text_substring(haystack, i.to_i64(), (i + nlen).to_i64())
+        if slice == needle:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn wpt_text_substring(s: text, start: i64, end: i64) -> text:
+    """Extract substring from start to end (exclusive)."""
+    var result = ""
+    var i = start
+    while i < end:
+        if i >= 0 and i < s.len():
+            result = "{result}{s[i]}"
+        i = i + 1
+    result
+
+fn split_on_space(s: text) -> [text]:
+    """Split text on spaces, ignoring empty segments."""
+    var parts: [text] = []
+    var current = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == ' ':
+            if current != "":
+                parts = parts + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+    if current != "":
+        parts = parts + [current]
+    parts
+
+fn join_texts(items: [text], sep: text) -> text:
+    """Join text list with separator."""
+    var result = ""
+    var first = true
+    for item in items:
+        if not first:
+            result = "{result}{sep}"
+        result = "{result}{item}"
+        first = false
+    result

@@ -16,6 +16,9 @@ use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{widget_to_dom,
     ui_tree_to_dom, html_string_to_dom}
 use common.render_scene.scene.{RenderScene, SceneCommand}
 use common.render_scene.executor.{execute_scene_to_buffer}
+use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
+    execute_scene_to_engine2d_pixels}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
 # =========================================================================
 # Render Result
@@ -83,19 +86,49 @@ class BrowserRenderer:
     viewport_w: i32
     viewport_h: i32
     bg_color: u32
+    engine: Engine2D?
 
     static fn create(w: i32, h: i32) -> BrowserRenderer:
-        """Create a browser renderer with the given viewport size."""
+        """Create a browser renderer with the given viewport size.
+        Uses the software rasterizer (no Engine2D).
+        """
         return BrowserRenderer(
             viewport_w: w,
             viewport_h: h,
-            bg_color: 0xFFFFFFFF
+            bg_color: 0xFFFFFFFF,
+            engine: nil
+        )
+
+    static fn create_with_engine(w: i32, h: i32, engine: Engine2D) -> BrowserRenderer:
+        """Create a browser renderer backed by an Engine2D instance.
+
+        When an Engine2D is attached, render_dom_to_pixels() and
+        render_dom_to_engine() will route through the Engine2D backend
+        (GPU or optimized software) instead of the default software
+        rasterizer.
+
+        Args:
+            w: Viewport width in pixels
+            h: Viewport height in pixels
+            engine: Initialized Engine2D instance (any backend)
+        """
+        return BrowserRenderer(
+            viewport_w: w,
+            viewport_h: h,
+            bg_color: 0xFFFFFFFF,
+            engine: engine
         )
 
     static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
-        """Create a browser renderer with a specific backend.
-        Currently only 'software' is supported. Future: 'gpu', 'vulkan'.
+        """Create a browser renderer with a specific backend name.
+
+        For Engine2D backends ('cuda', 'vulkan', 'opengl', 'cpu'), creates
+        an Engine2D instance with that backend. For 'software' (or unknown),
+        falls back to the default software rasterizer.
         """
+        if backend == "cuda" or backend == "vulkan" or backend == "opengl" or backend == "cpu":
+            val engine = Engine2D.create_with_backend(w, h, backend)
+            return BrowserRenderer.create_with_engine(w, h, engine)
         return BrowserRenderer.create(w, h)
 
     me set_background(color: u32):
@@ -131,15 +164,43 @@ class BrowserRenderer:
         )
 
     me render_dom_to_pixels(root: BeDomNode) -> BeRenderResult:
-        """Render a DOM tree all the way to pixels via the software rasterizer.
+        """Render a DOM tree all the way to pixels.
 
-        Pipeline: DOM -> Layout -> Paint -> Scene -> Pixels
+        When an Engine2D is attached, renders through the Engine2D backend
+        (GPU or optimized software). Otherwise falls back to the default
+        software rasterizer.
+
+        Pipeline: DOM -> Layout -> Paint -> Scene -> Engine2D/Software -> Pixels
         """
         var result = self.render_dom(root)
         val scene = result.to_scene()
-        val pixels = execute_scene_to_buffer(scene)
+        var pixels: [u32] = []
+        if val Some(e) = self.engine:
+            pixels = execute_scene_to_engine2d_pixels(scene, e)
+        else:
+            pixels = execute_scene_to_buffer(scene)
         result.format = "pixels"
         result.pixel_data = pixels
+        return result
+
+    me render_dom_to_engine(root: BeDomNode) -> BeRenderResult:
+        """Render a DOM tree through Engine2D without pixel readback.
+
+        Executes the full rendering pipeline through the Engine2D backend
+        but skips reading pixels back from the framebuffer. This is optimal
+        for display-only scenarios (e.g., OS compositor, direct framebuffer)
+        where pixels are presented directly by the backend.
+
+        Falls back to render_dom() (scene only, no pixels) if no Engine2D
+        is attached.
+
+        Pipeline: DOM -> Layout -> Paint -> Scene -> Engine2D -> present()
+        """
+        var result = self.render_dom(root)
+        if val Some(e) = self.engine:
+            val scene = result.to_scene()
+            execute_scene_to_engine2d(scene, e)
+            result.format = "engine2d"
         return result
 
     me render_html(html: text) -> BeRenderResult:
