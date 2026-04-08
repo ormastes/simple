@@ -1,0 +1,79 @@
+#!/bin/sh
+# Chrome vs Simple Comparison Runner
+#
+# Takes Chrome screenshots and compares them against Simple renderer output.
+# Simplified version of pixel_suite_runner.shs for quick comparison.
+#
+# Usage:
+#   ./chrome_vs_simple_runner.shs [html_dir] [output_dir]
+#
+# Output:
+#   output_dir/report.md — Comparison report with per-test RMSE
+#
+# Dependencies:
+#   - Chrome/Chromium
+#   - ImageMagick (convert + compare commands)
+
+HTML_DIR="${1:-$(cd "$(dirname "$0")" && pwd)/html}"
+OUTPUT_DIR="${2:-/tmp/chrome_vs_simple}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+
+WIDTH=800
+HEIGHT=600
+
+echo "=== Chrome vs Simple Runner ==="
+echo "HTML dir: $HTML_DIR"
+echo "Output:   $OUTPUT_DIR"
+echo ""
+
+mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/simple" "$OUTPUT_DIR/diff"
+
+TOTAL=0
+COMPARED=0
+SUM_RMSE=0
+
+for category_dir in "$HTML_DIR"/*/; do
+    category="$(basename "$category_dir")"
+    for html_file in "$category_dir"*.html; do
+        [ -f "$html_file" ] || continue
+        test_name="$(basename "$html_file" .html)"
+        TOTAL=$((TOTAL + 1))
+
+        # Chrome screenshot
+        chrome_png="$OUTPUT_DIR/chrome/${test_name}.png"
+        sh "$CHROME_SCRIPT" "$html_file" "$chrome_png" "$WIDTH" "$HEIGHT" 2>/dev/null
+
+        if [ ! -f "$chrome_png" ]; then
+            echo "SKIP $category/$test_name (no Chrome)"
+            continue
+        fi
+
+        # Simple renderer output (placeholder white)
+        simple_png="$OUTPUT_DIR/simple/${test_name}.png"
+        if [ ! -f "$simple_png" ]; then
+            # Generate white placeholder PNG via ImageMagick
+            if command -v convert >/dev/null 2>&1; then
+                convert -size ${WIDTH}x${HEIGHT} xc:white "$simple_png" 2>/dev/null
+            else
+                echo "SKIP $category/$test_name (no convert)"
+                continue
+            fi
+        fi
+
+        # Compare
+        if command -v compare >/dev/null 2>&1; then
+            metric=$(compare -metric RMSE \
+                "$chrome_png" "$simple_png" \
+                "$OUTPUT_DIR/diff/${test_name}.png" 2>&1 | head -1)
+            echo "$category/$test_name: RMSE=$metric"
+            COMPARED=$((COMPARED + 1))
+        fi
+    done
+done
+
+echo ""
+echo "=== Results: $COMPARED/$TOTAL compared ==="
+echo "Chrome:  $OUTPUT_DIR/chrome/"
+echo "Simple:  $OUTPUT_DIR/simple/"
+echo "Diff:    $OUTPUT_DIR/diff/"

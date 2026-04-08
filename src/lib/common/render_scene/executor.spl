@@ -6,8 +6,28 @@
 # rounded_rect, gradient_rect, image blit, and clip push/pop.
 
 use common.render_scene.scene.{SceneCommand, RenderScene, argb_alpha, argb_red, argb_green, argb_blue, argb}
+use common.render_scene.engine_trait.{EffectEngine}
+use common.render_scene.engine_int.{IntEffectEngine, int_effect_engine}
 use common.display_protocol.display_protocol.{DamageRect, damage_rect}
 use common.text_layout.font_renderer.{FontRenderer, blit_glyph}
+
+# ============================================================================
+# Effect engine selection
+# ============================================================================
+
+var _active_engine: EffectEngine? = nil
+
+fn set_effect_engine(engine: EffectEngine):
+    """Set the active effect engine for rendering operations."""
+    _active_engine = engine
+
+fn get_effect_engine() -> EffectEngine:
+    """Return the active effect engine, creating a default IntEffectEngine if none set."""
+    if val Some(e) = _active_engine:
+        return e
+    val default_engine = int_effect_engine()
+    _active_engine = default_engine
+    default_engine
 
 # ============================================================================
 # Clip rectangle
@@ -41,7 +61,9 @@ fn put_pixel(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, color: u32
     buffer[idx] = color
 
 fn put_pixel_blend(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, color: u32, clip_stack: [ClipRect]):
-    """Write a pixel with simple alpha blending (source-over)."""
+    """Write a pixel with simple alpha blending (source-over).
+    Delegates to the active EffectEngine when one is set.
+    """
     if px < 0 or py < 0 or px >= buf_w or py >= buf_h:
         return
 
@@ -62,6 +84,13 @@ fn put_pixel_blend(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, colo
 
     val idx = py * buf_w + px
     val dst = buffer[idx]
+
+    # Delegate to effect engine when available
+    if val Some(engine) = _active_engine:
+        buffer[idx] = engine.blend_pixel(color, dst)
+        return
+
+    # Fallback: original inline blending for backwards compatibility
     val da = argb_alpha(dst)
     val dr = argb_red(dst)
     val dg = argb_green(dst)
@@ -217,7 +246,14 @@ fn draw_quarter_circle_filled(buffer: [u32], buf_w: i32, buf_h: i32, cx: i32, cy
         yy = yy + 1
 
 fn lerp_channel(a: u32, b: u32, t_num: i32, t_den: i32) -> u32:
-    """Linearly interpolate a single 8-bit color channel."""
+    """Linearly interpolate a single 8-bit color channel.
+    Delegates to the active EffectEngine when one is set.
+    """
+    # Delegate to effect engine when available
+    if val Some(engine) = _active_engine:
+        return engine.lerp_channel(a, b, t_num, t_den)
+
+    # Fallback: original inline interpolation for backwards compatibility
     val av = a & 0xFF
     val bv = b & 0xFF
     if t_den == 0:
@@ -225,8 +261,19 @@ fn lerp_channel(a: u32, b: u32, t_num: i32, t_den: i32) -> u32:
     val result = av + ((bv - av) * t_num.to_u32()) / t_den.to_u32()
     result & 0xFF
 
-fn draw_gradient_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect]):
-    """Fill a rectangle with horizontal linear gradient from c1 to c2."""
+fn draw_gradient_rect_engine(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect], engine: EffectEngine):
+    """Fill a gradient rectangle using the given EffectEngine for color computation."""
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val color = engine.gradient_color(c1, c2, col, w)
+            put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
+            col = col + 1
+        row = row + 1
+
+fn draw_gradient_rect_fallback(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect]):
+    """Fill a gradient rectangle using original per-channel lerp (no engine)."""
     var row: i32 = 0
     while row < h:
         var col: i32 = 0
@@ -239,6 +286,15 @@ fn draw_gradient_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: 
             put_pixel(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
             col = col + 1
         row = row + 1
+
+fn draw_gradient_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, c1: u32, c2: u32, clip_stack: [ClipRect]):
+    """Fill a rectangle with horizontal linear gradient from c1 to c2.
+    Delegates gradient color computation to the active EffectEngine when set.
+    """
+    if val Some(engine) = _active_engine:
+        draw_gradient_rect_engine(buffer, buf_w, buf_h, x, y, w, h, c1, c2, clip_stack, engine)
+        return
+    draw_gradient_rect_fallback(buffer, buf_w, buf_h, x, y, w, h, c1, c2, clip_stack)
 
 fn draw_image(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, pixels: [u32], pw: i32, ph: i32, clip_stack: [ClipRect]):
     """Blit a pixel array into the buffer with bounds checking."""

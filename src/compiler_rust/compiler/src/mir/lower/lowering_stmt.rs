@@ -6,6 +6,7 @@
 use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
 use crate::hir::{HirContract, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir::blocks::Terminator;
+use crate::mir::effects::CallTarget;
 use crate::mir::instructions::MirInst;
 
 impl<'a> MirLowerer<'a> {
@@ -60,21 +61,54 @@ impl<'a> MirLowerer<'a> {
 
                 // Handle different assignment targets
                 match &target.kind {
-                    // Field assignment: obj.field = value -> FieldSet
+                    // Field assignment: obj.field = value -> FieldSet (or rt_tuple_set for tuples)
                     HirExprKind::FieldAccess { receiver, field_index } => {
                         let receiver_reg = self.lower_expr(receiver)?;
                         let field_index = *field_index;
-                        let byte_offset = (field_index as u32) * 8;
+                        let receiver_ty = receiver.ty;
 
-                        self.with_func(|func, current_block| {
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::FieldSet {
-                                object: receiver_reg,
-                                byte_offset,
-                                field_type: ty,
-                                value: val_reg,
-                            });
-                        })?;
+                        // Check if the receiver is a tuple type — tuples use
+                        // rt_tuple_set, not raw memory stores.
+                        let is_tuple = self
+                            .type_registry
+                            .and_then(|tr| tr.get(receiver_ty))
+                            .is_some_and(|t| matches!(t, HirType::Tuple(_)));
+
+                        if is_tuple {
+                            // Emit: index_reg = ConstInt(field_index)
+                            //        Call rt_tuple_set(receiver_reg, index_reg, val_reg)
+                            let index_reg = self.with_func(|func, current_block| {
+                                let idx = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::ConstInt {
+                                    dest: idx,
+                                    value: field_index as i64,
+                                });
+                                idx
+                            })?;
+
+                            let target = CallTarget::from_name("rt_tuple_set");
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target,
+                                    args: vec![receiver_reg, index_reg, val_reg],
+                                });
+                            })?;
+                        } else {
+                            let byte_offset = (field_index as u32) * 8;
+
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::FieldSet {
+                                    object: receiver_reg,
+                                    byte_offset,
+                                    field_type: ty,
+                                    value: val_reg,
+                                });
+                            })?;
+                        }
                     }
 
                     // Index assignment: arr[i] = value -> rt_index_set call

@@ -187,3 +187,169 @@ fn sqrt_approx(v: f64) -> f64:
     guess
 
 extern fn rt_file_write_bytes(path: text, header: text, data: [u8])
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+# =========================================================================
+# PPM Loader — read P6 binary PPM back to ARGB u32 array
+# =========================================================================
+
+fn load_ppm_to_pixels(path: text) -> [u32]:
+    """Read a PPM P6 binary file and return pixel data as ARGB u32 array.
+    Returns empty list on failure.
+    """
+    val raw = rt_file_read_bytes(path)
+    if raw.len() < 3:
+        return []
+
+    # Parse header: "P6\nWIDTH HEIGHT\nMAXVAL\n"
+    # Find end of header by scanning for 3 newlines
+    var newline_count = 0
+    var header_end = 0
+    var i = 0
+    while i < raw.len() and newline_count < 3:
+        if raw[i] == 10:  # '\n'
+            newline_count = newline_count + 1
+        i = i + 1
+        header_end = i
+
+    # Parse width and height from header text
+    val header_text = rt_file_read_text(path)
+    val dims = parse_ppm_header_dimensions(header_text)
+    val width = dims.w
+    val height = dims.h
+    if width <= 0 or height <= 0:
+        return []
+
+    # Read RGB triplets from binary data after header
+    var pixels: [u32] = []
+    val expected = width * height
+    var pi = header_end
+    var count = 0
+    while count < expected and pi + 2 < raw.len():
+        val r = raw[pi].to_u32()
+        val g = raw[pi + 1].to_u32()
+        val b = raw[pi + 2].to_u32()
+        # ARGB: alpha=255
+        val argb = 0xFF000000 | (r << 16) | (g << 8) | b
+        pixels = pixels + [argb]
+        pi = pi + 3
+        count = count + 1
+
+    pixels
+
+class PpmDimensions:
+    w: i32
+    h: i32
+
+fn parse_ppm_header_dimensions(header: text) -> PpmDimensions:
+    """Parse width and height from PPM P6 header text."""
+    # Header format: "P6\nWIDTH HEIGHT\nMAXVAL\n..."
+    # Find the second line which has "WIDTH HEIGHT"
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < header.len() and lines.len() < 3:
+        val ch = header[i]
+        if ch == '\n':
+            lines = lines + [current]
+            current = ""
+        else:
+            current = "{current}{ch}"
+        i = i + 1
+
+    if lines.len() < 2:
+        return PpmDimensions(w: 0, h: 0)
+
+    # Skip comment lines (start with #)
+    var dim_line = ""
+    for line in lines:
+        if line.len() > 0 and line[0] != '#' and line != "P6" and line != "P3":
+            dim_line = line
+            # Check if it contains a space (dimension line)
+            var has_space = false
+            var j = 0
+            while j < line.len():
+                if line[j] == ' ':
+                    has_space = true
+                j = j + 1
+            if has_space:
+                dim_line = line
+                # Stop at first dimension line
+                i = header.len()  # break outer loop
+
+    # Parse "WIDTH HEIGHT"
+    var w_str = ""
+    var h_str = ""
+    var in_height = false
+    var k = 0
+    while k < dim_line.len():
+        val ch = dim_line[k]
+        if ch == ' ':
+            in_height = true
+        else if not in_height:
+            w_str = "{w_str}{ch}"
+        else:
+            h_str = "{h_str}{ch}"
+        k = k + 1
+
+    val w = parse_int_simple(w_str)
+    val h = parse_int_simple(h_str)
+    PpmDimensions(w: w, h: h)
+
+fn parse_int_simple(s: text) -> i32:
+    """Parse a simple non-negative integer from text. Returns 0 on failure."""
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch.to_i32() - '0'.to_i32())
+        i = i + 1
+    result
+
+# =========================================================================
+# Diff Image Generator
+# =========================================================================
+
+fn generate_diff_image(a: [u32], b: [u32], w: i32, h: i32) -> [u32]:
+    """Generate a visual diff image comparing two ARGB pixel buffers.
+    - Green pixels: match (within tolerance of 2 per channel)
+    - Red pixels: mismatch, brightness proportional to difference magnitude
+    - Dark pixels: one buffer shorter than expected
+    """
+    val total = w * h
+    var diff: [u32] = []
+    var i = 0
+
+    while i < total:
+        if i >= a.len() or i >= b.len():
+            # Out of bounds — dark gray
+            diff = diff + [0xFF333333]
+        else:
+            val pa = a[i]
+            val pb = b[i]
+            if pa == pb:
+                # Exact match — green
+                diff = diff + [0xFF00AA00]
+            else:
+                # Compute per-channel difference
+                val dr = abs_i32(((pa >> 16) & 0xFF).to_i32() - ((pb >> 16) & 0xFF).to_i32())
+                val dg = abs_i32(((pa >> 8) & 0xFF).to_i32() - ((pb >> 8) & 0xFF).to_i32())
+                val db = abs_i32((pa & 0xFF).to_i32() - (pb & 0xFF).to_i32())
+                val max_diff = max_i32(dr, max_i32(dg, db))
+
+                if max_diff <= 2:
+                    # Within tolerance — dark green (near match)
+                    diff = diff + [0xFF006600]
+                else:
+                    # Mismatch — red with brightness scaled by magnitude
+                    # Scale: max_diff 3..255 → brightness 80..255
+                    var brightness = 80 + (max_diff * 175 / 255)
+                    if brightness > 255:
+                        brightness = 255
+                    val red_val = brightness.to_u32()
+                    diff = diff + [0xFF000000 | (red_val << 16)]
+        i = i + 1
+
+    diff

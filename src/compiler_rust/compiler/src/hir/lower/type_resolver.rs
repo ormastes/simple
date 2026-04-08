@@ -342,6 +342,23 @@ impl Lowerer {
                 HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
                 // Enum types - field access returns ANY (dynamic variant access)
                 HirType::Enum { .. } => Ok((0, TypeId::ANY)),
+                // Tuple types — numeric field access (.0, .1, ...)
+                HirType::Tuple(element_types) => {
+                    if let Ok(idx) = field.parse::<usize>() {
+                        let elem_ty = element_types.get(idx).copied().unwrap_or(TypeId::ANY);
+                        Ok((idx, elem_ty))
+                    } else if self.lenient_types {
+                        Ok((0, TypeId::ANY))
+                    } else {
+                        Err(LowerError::CannotInferFieldType {
+                            struct_name: "Tuple".to_string(),
+                            field: field.to_string(),
+                            available_fields: (0..element_types.len())
+                                .map(|i| i.to_string())
+                                .collect(),
+                        })
+                    }
+                }
                 _ => {
                     if self.lenient_types {
                         Ok((0, TypeId::ANY))

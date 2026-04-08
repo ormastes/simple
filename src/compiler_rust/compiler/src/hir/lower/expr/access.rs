@@ -251,6 +251,33 @@ impl Lowerer {
         Ok(None)
     }
 
+    /// Lower a tuple index expression (`tup.0`, `tup.1`) to HIR
+    ///
+    /// Converts the numeric field access into an `Index` expression with an
+    /// integer literal so that MIR lowering will emit `rt_tuple_get`.
+    pub(super) fn lower_tuple_index(
+        &mut self,
+        receiver: &Expr,
+        index: usize,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        let elem_ty = self.get_index_element_type(recv_hir.ty).unwrap_or(TypeId::ANY);
+
+        let idx_hir = Box::new(HirExpr {
+            kind: HirExprKind::Integer(index as i64),
+            ty: TypeId::I64,
+        });
+
+        Ok(HirExpr {
+            kind: HirExprKind::Index {
+                receiver: recv_hir,
+                index: idx_hir,
+            },
+            ty: elem_ty,
+        })
+    }
+
     /// Lower an index expression to HIR
     ///
     /// For SIMD types, uses SimdExtract intrinsic.

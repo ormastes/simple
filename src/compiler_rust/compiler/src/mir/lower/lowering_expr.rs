@@ -1136,21 +1136,55 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::FieldAccess { receiver, field_index } => {
                 let receiver_reg = self.lower_expr(receiver)?;
                 let field_index = *field_index;
+                let receiver_ty = receiver.ty;
 
-                // Compute byte offset - assume 8 bytes per field for now
-                let byte_offset = (field_index as u32) * 8;
+                // Check if the receiver is a tuple type — tuples are opaque runtime
+                // objects accessed via rt_tuple_get, not flat structs.
+                let is_tuple = self
+                    .type_registry
+                    .and_then(|tr| tr.get(receiver_ty))
+                    .is_some_and(|t| matches!(t, HirType::Tuple(_)));
 
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::FieldGet {
-                        dest,
-                        object: receiver_reg,
-                        byte_offset,
-                        field_type: expr_ty,
-                    });
-                    dest
-                })
+                if is_tuple {
+                    // Emit: index_reg = ConstInt(field_index)
+                    //        dest     = Call rt_tuple_get(receiver_reg, index_reg)
+                    let index_reg = self.with_func(|func, current_block| {
+                        let idx = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ConstInt {
+                            dest: idx,
+                            value: field_index as i64,
+                        });
+                        idx
+                    })?;
+
+                    let target = CallTarget::from_name("rt_tuple_get");
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target,
+                            args: vec![receiver_reg, index_reg],
+                        });
+                        dest
+                    })
+                } else {
+                    // Struct field access — direct memory load at byte offset
+                    let byte_offset = (field_index as u32) * 8;
+
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::FieldGet {
+                            dest,
+                            object: receiver_reg,
+                            byte_offset,
+                            field_type: expr_ty,
+                        });
+                        dest
+                    })
+                }
             }
 
             // Index expression: array[index] or string[index]
@@ -1280,6 +1314,19 @@ impl<'a> MirLowerer<'a> {
                 args,
                 dispatch,
             } => {
+                // For push: capture the receiver's local index so we can store
+                // the (possibly reallocated) array pointer back after the call.
+                // Without this, rt_array_push may return a new pointer but the
+                // local variable's stack slot still holds the stale old pointer.
+                let receiver_local_index = if method == "push" {
+                    match &receiver.kind {
+                        HirExprKind::Local(idx) => Some(*idx),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
                 let receiver_reg = self.lower_expr(receiver)?;
                 let mut arg_regs = Vec::new();
                 for arg in args {
@@ -1329,18 +1376,45 @@ impl<'a> MirLowerer<'a> {
                     method.clone()
                 };
 
+                let receiver_ty = receiver.ty;
                 match dispatch {
-                    DispatchMode::Static | DispatchMode::Dynamic => self.with_func(|func, current_block| {
-                        let dest = func.new_vreg();
-                        let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::MethodCallStatic {
-                            dest: Some(dest),
-                            receiver: receiver_reg,
-                            func_name,
-                            args: arg_regs,
-                        });
-                        dest
-                    }),
+                    DispatchMode::Static | DispatchMode::Dynamic => {
+                        let dest = self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::MethodCallStatic {
+                                dest: Some(dest),
+                                receiver: receiver_reg,
+                                func_name,
+                                args: arg_regs,
+                            });
+                            dest
+                        })?;
+
+                        // For push on a local variable: store the result back to
+                        // the receiver's stack slot.  rt_array_push may reallocate
+                        // the array, returning a new pointer.  Without this
+                        // store-back the local keeps the stale pre-reallocation
+                        // pointer, causing subsequent reads (e.g. arr.len()) to
+                        // see the old capacity instead of the true length.
+                        if let Some(local_idx) = receiver_local_index {
+                            self.with_func(|func, current_block| {
+                                let addr = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::LocalAddr {
+                                    dest: addr,
+                                    local_index: local_idx,
+                                });
+                                block.instructions.push(MirInst::Store {
+                                    addr,
+                                    value: dest,
+                                    ty: receiver_ty,
+                                });
+                            })?;
+                        }
+
+                        Ok(dest)
+                    },
                 }
             }
 

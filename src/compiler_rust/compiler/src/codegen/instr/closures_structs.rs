@@ -194,7 +194,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // variable see the new array.  Extract the plain method name first.
         let method = func_name.rsplit('.').next().unwrap_or(func_name);
         if method == "push" {
-            eprintln!("[codegen-push] updating receiver vreg {:?} for push in func_name={}", receiver, func_name);
             ctx.vreg_values.insert(receiver, result);
         }
         return Ok(());
@@ -690,9 +689,7 @@ fn try_compile_builtin_method_call<M: Module>(
 
     if runtime_func == "rt_array_push" {
         // rt_array_push returns the (possibly reallocated) array pointer.
-        eprintln!("[codegen-push-result] results.len()={} receiver_val={:?}", results.len(), receiver_val);
         if results.is_empty() {
-            eprintln!("[codegen-push-result] EMPTY results — falling back to receiver_val");
             Ok(Some(receiver_val))
         } else {
             let new_arr = results[0];

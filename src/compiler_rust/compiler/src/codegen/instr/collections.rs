@@ -80,19 +80,26 @@ pub(crate) fn compile_collection_lit<M: Module>(
     let add_id = ctx.runtime_funcs[spec.add_fn];
     let add_ref = ctx.module.declare_func_in_func(add_id, builder.func);
 
-    // Add each element (elements are pre-boxed as RuntimeValues at MIR level)
+    // Add each element (elements are pre-boxed as RuntimeValues at MIR level).
+    // For array push: rt_array_push may reallocate and return a new pointer,
+    // so we track the latest collection pointer across iterations.
+    let mut current_collection = collection;
     for (i, elem) in elements.iter().enumerate() {
         let elem_val = get_vreg_or_default(ctx, builder, elem);
 
         if spec.needs_index {
             let idx = builder.ins().iconst(types::I64, i as i64);
-            adapted_call(builder, add_ref, &[collection, idx, elem_val]);
+            adapted_call(builder, add_ref, &[current_collection, idx, elem_val]);
         } else {
-            adapted_call(builder, add_ref, &[collection, elem_val]);
+            let call = adapted_call(builder, add_ref, &[current_collection, elem_val]);
+            let results = builder.inst_results(call);
+            if !results.is_empty() {
+                current_collection = results[0];
+            }
         }
     }
 
-    ctx.vreg_values.insert(dest, collection);
+    ctx.vreg_values.insert(dest, current_collection);
 }
 
 pub(crate) fn compile_array_lit<M: Module>(

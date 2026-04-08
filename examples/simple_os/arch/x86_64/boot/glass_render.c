@@ -618,7 +618,7 @@ RuntimeValue rt_gui_read_pixel(RuntimeValue x_y, RuntimeValue u1,
     uint32_t x = (uint32_t)((uint64_t)x_y >> 32);
     uint32_t y = (uint32_t)((uint64_t)x_y & 0xFFFFFFFF);
     if (x >= g_fb_w || y >= SCREEN_H) return 0;
-    return (RuntimeValue)fb_read(x, y);
+    return (RuntimeValue)(uint64_t)fb_read(x, y);
 }
 
 /* ===================================================================

@@ -36,6 +36,7 @@ impl Lowerer {
             Expr::Unary { op, operand } => self.lower_unary(op, operand, ctx),
             Expr::Call { callee, args } => self.lower_call(callee, args, ctx),
             Expr::FieldAccess { receiver, field } => self.lower_field_access(receiver, field, ctx),
+            Expr::TupleIndex { receiver, index } => self.lower_tuple_index(receiver, *index, ctx),
             Expr::Index { receiver, index } => self.lower_index(receiver, index, ctx),
             Expr::Slice {
                 receiver,

@@ -22,7 +22,12 @@
 
 use examples.browser.test.compat.image_export.{ComparisonMetrics, compare_pixel_buffers,
     export_ppm_text, generate_comparison_report}
+use examples.browser.test.compat.test_manifest.{TestManifest, TestEntry}
 use examples.browser.shared.logging.{Logger, LogLevel}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_fs_list_dir(path: text) -> [text]
+extern fn rt_fs_is_dir(path: text) -> bool
 
 # =========================================================================
 # Test Page Definitions
@@ -298,3 +303,50 @@ class ChromeCompare:
 
         self.logger.info(suite.report())
         suite
+
+# =========================================================================
+# Directory-based Test Loading
+# =========================================================================
+
+fn build_test_pages_from_directory(dir: text) -> [TestPage]:
+    """Load HTML test files from a directory and convert them to TestPage objects.
+    Reads each .html file's content and extracts category/description from meta tags.
+    """
+    val manifest = TestManifest.from_directory(dir)
+    var pages: [TestPage] = []
+
+    for entry in manifest.all_tests():
+        val html_content = rt_file_read_text(entry.path)
+        val page = TestPage(
+            name: entry.name,
+            html: html_content,
+            category: entry.category,
+            description: "{entry.feature} test from {entry.category} suite"
+        )
+        pages = pages + [page]
+
+    pages
+
+fn render_simple_test(html: text, w: i32, h: i32) -> [u32]:
+    """Render HTML through Simple's BrowserRenderer and return pixel buffer.
+    Returns an ARGB u32 pixel array of size w*h.
+    Falls back to a blank white canvas if renderer is not available.
+    """
+    # Attempt to use the runtime browser renderer
+    # If BrowserRenderer is not linked, generate a blank white canvas
+    var pixels: [u32] = []
+    val total = w * h
+    var i = 0
+    while i < total:
+        pixels = pixels + [0xFFFFFFFF]  # white
+        i = i + 1
+
+    # Try actual rendering via extern — this will be wired when
+    # the browser engine is compiled into the binary
+    val rendered = try_render_html(html, w, h)
+    if rendered.len() == total:
+        return rendered
+
+    pixels
+
+extern fn try_render_html(html: text, w: i32, h: i32) -> [u32]
