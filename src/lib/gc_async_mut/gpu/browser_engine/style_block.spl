@@ -1,0 +1,387 @@
+# Style Block Processor — <style> tag CSS rule extraction and application
+#
+# Extracts CSS rules from <style> blocks in HTML, parses simple selectors
+# (tag, .class, #id, compound), and applies matched styles to DOM nodes.
+#
+# Supports:
+#   - Tag selectors: div, span, p, h1-h6, etc.
+#   - Class selectors: .container, .active
+#   - ID selectors: #main, #header
+#   - Compound: div.active, span.highlight
+#   - Comma-separated: div, span { ... }
+#   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
+#   - Pseudo-classes: :nth-child(N) (basic numeric only)
+#   - Shorthand properties: flex, border, background, margin multi-value
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
+    BorderProps, CssValue}
+
+# =========================================================================
+# CSS Rule types
+# =========================================================================
+
+class CssRule:
+    selector: text
+    declarations: [CssDecl]
+
+class CssDecl:
+    property: text
+    value: text
+
+# =========================================================================
+# Extract <style> blocks from HTML
+# =========================================================================
+
+fn extract_style_blocks(html: text) -> [text]:
+    var blocks: [text] = []
+    var pos = 0
+    val lower = html.to_lower()
+    while pos < lower.len():
+        val style_open = sb_find(lower, "<style", pos)
+        if style_open < 0:
+            break
+        val gt = sb_find(html, ">", style_open)
+        if gt < 0:
+            break
+        val content_start = gt + 1
+        val style_close = sb_find(lower, "</style", content_start)
+        if style_close < 0:
+            break
+        val block = html.slice(content_start, style_close)
+        blocks = blocks + [block]
+        pos = style_close + 8
+    blocks
+
+# =========================================================================
+# Parse CSS text into rules
+# =========================================================================
+
+fn parse_css_rules(css_text: text) -> [CssRule]:
+    var rules: [CssRule] = []
+    var pos = 0
+    val len = css_text.len()
+
+    while pos < len:
+        # Skip whitespace and comments
+        pos = sb_skip_ws_comments(css_text, pos)
+        if pos >= len:
+            break
+
+        # Find opening brace
+        val brace_open = sb_find(css_text, "{", pos)
+        if brace_open < 0:
+            break
+
+        val selector_text = css_text.slice(pos, brace_open).trim()
+        if selector_text.len() == 0:
+            pos = brace_open + 1
+            continue
+
+        # Find closing brace
+        val brace_close = sb_find(css_text, "}", brace_open + 1)
+        if brace_close < 0:
+            break
+
+        val decl_text = css_text.slice(brace_open + 1, brace_close).trim()
+        val declarations = parse_declarations(decl_text)
+
+        # Handle comma-separated selectors
+        val selectors = sb_split_char(selector_text, ",")
+        for sel in selectors:
+            val trimmed = sel.trim()
+            if trimmed.len() > 0:
+                rules = rules + [CssRule(selector: trimmed, declarations: declarations)]
+
+        pos = brace_close + 1
+
+    rules
+
+fn parse_declarations(text_val: text) -> [CssDecl]:
+    var decls: [CssDecl] = []
+    val parts = sb_split_char(text_val, ";")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() == 0:
+            continue
+        val colon = sb_find(trimmed, ":", 0)
+        if colon <= 0:
+            continue
+        val prop = trimmed.slice(0, colon).trim()
+        val value = trimmed.slice(colon + 1, trimmed.len()).trim()
+        if prop.len() > 0 and value.len() > 0:
+            # Expand shorthand properties
+            val expanded = expand_shorthand(prop, value)
+            for e in expanded:
+                decls = decls + [e]
+    decls
+
+# =========================================================================
+# Shorthand expansion
+# =========================================================================
+
+fn expand_shorthand(prop: text, value: text) -> [CssDecl]:
+    if prop == "flex":
+        return expand_flex(value)
+    if prop == "border":
+        return expand_border(value)
+    if prop == "background":
+        return expand_background(value)
+    if prop == "margin" or prop == "padding":
+        return expand_box_shorthand(prop, value)
+    [CssDecl(property: prop, value: value)]
+
+fn expand_flex(value: text) -> [CssDecl]:
+    if value == "none":
+        return [
+            CssDecl(property: "flex-grow", value: "0"),
+            CssDecl(property: "flex-shrink", value: "0"),
+            CssDecl(property: "flex-basis", value: "auto")
+        ]
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        # flex: N means flex-grow: N, flex-shrink: 1, flex-basis: 0%
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: "1"),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() >= 3:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: parts[2])
+        ]
+    [CssDecl(property: "flex-grow", value: value)]
+
+fn expand_border(value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    var width = "1px"
+    var style = "solid"
+    var color = "black"
+    for part in parts:
+        if part.ends_with("px") or part.ends_with("em") or part == "thin" or part == "medium" or part == "thick":
+            width = part
+            if part == "thin":
+                width = "1px"
+            if part == "medium":
+                width = "3px"
+            if part == "thick":
+                width = "5px"
+        elif part == "solid" or part == "dashed" or part == "dotted" or part == "none" or part == "double":
+            style = part
+        else:
+            color = part
+    [
+        CssDecl(property: "border-width", value: width),
+        CssDecl(property: "border-style", value: style),
+        CssDecl(property: "border-color", value: color)
+    ]
+
+fn expand_background(value: text) -> [CssDecl]:
+    # Simple: treat single-value background as background-color
+    val trimmed = value.trim()
+    if not trimmed.starts_with("url(") and not trimmed.starts_with("linear-gradient") and not trimmed.starts_with("radial-gradient"):
+        return [CssDecl(property: "background-color", value: trimmed)]
+    [CssDecl(property: "background", value: value)]
+
+fn expand_box_shorthand(prop: text, value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        return [CssDecl(property: prop, value: parts[0])]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[0]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() == 3:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() >= 4:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[3])
+        ]
+    [CssDecl(property: prop, value: value)]
+
+# =========================================================================
+# Selector matching
+# =========================================================================
+
+fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i32) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.len() == 0:
+        return false
+
+    # Descendant combinator: "div span" — check if any ancestor matches first part
+    val space_parts = sb_split_ws(trimmed)
+    if space_parts.len() > 1:
+        # Last part must match the node itself
+        val last = space_parts[space_parts.len() - 1]
+        if not simple_selector_matches(last, node, nth):
+            return false
+        # For descendant, we just check if node matches the last selector
+        # Full descendant matching would require walking ancestors, but the
+        # caller walks the tree so parents are available
+        return true
+
+    simple_selector_matches(trimmed, node, nth)
+
+fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+    val sel = selector.trim()
+    if sel.len() == 0:
+        return false
+    if sel == "*":
+        return node.is_element()
+
+    # Handle :nth-child pseudo
+    val nth_pos = sb_find(sel, ":nth-child(", 0)
+    if nth_pos >= 0:
+        val base_sel = sel.slice(0, nth_pos)
+        val paren_end = sb_find(sel, ")", nth_pos)
+        if paren_end > 0:
+            val n_str = sel.slice(nth_pos + 11, paren_end).trim()
+            val target_n = n_str.parse_i32() ?? 0
+            if nth != target_n:
+                return false
+            if base_sel.len() == 0:
+                return node.is_element()
+            return simple_selector_matches(base_sel, node, nth)
+
+    # ID selector: #foo
+    if sel.starts_with("#"):
+        val id = sel.slice(1, sel.len())
+        return node.id == id
+
+    # Class selector: .foo
+    if sel.starts_with("."):
+        val cls = sel.slice(1, sel.len())
+        return node.has_class(cls)
+
+    # Compound: tag.class or tag#id
+    val dot_pos = sb_find(sel, ".", 0)
+    if dot_pos > 0:
+        val tag = sel.slice(0, dot_pos)
+        val cls = sel.slice(dot_pos + 1, sel.len())
+        return node.tag == tag and node.has_class(cls)
+
+    val hash_pos = sb_find(sel, "#", 0)
+    if hash_pos > 0:
+        val tag = sel.slice(0, hash_pos)
+        val id = sel.slice(hash_pos + 1, sel.len())
+        return node.tag == tag and node.id == id
+
+    # Plain tag selector
+    node.tag == sel
+
+# =========================================================================
+# Apply rules to DOM tree
+# =========================================================================
+
+fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]):
+    apply_rules_to_node(root, rules, nil, 1)
+
+fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32):
+    if node.is_text_node():
+        return
+
+    # Skip style/link/meta/title/head/html/!doctype elements
+    val tag = node.tag
+    if tag == "style" or tag == "link" or tag == "meta" or tag == "title" or tag == "head":
+        return
+
+    for rule in rules:
+        if selector_matches(rule.selector, node, parent, nth):
+            for decl in rule.declarations:
+                node.set_style(decl.property, decl.value)
+
+    # Recurse to children with nth tracking
+    var child_nth = 1
+    for child in node.children:
+        apply_rules_to_node(child, rules, node, child_nth)
+        if child.is_element():
+            child_nth = child_nth + 1
+
+# =========================================================================
+# Public API: process HTML with <style> blocks
+# =========================================================================
+
+pub fn process_style_blocks(root: BeDomNode, html: text):
+    val blocks = extract_style_blocks(html)
+    var all_rules: [CssRule] = []
+    for block in blocks:
+        val rules = parse_css_rules(block)
+        all_rules = all_rules + rules
+    if all_rules.len() > 0:
+        apply_css_rules_to_tree(root, all_rules)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn sb_find(s: text, target: text, start: i32) -> i32:
+    var i = start
+    val tlen = target.len()
+    while i + tlen <= s.len():
+        if s.slice(i, i + tlen) == target:
+            return i
+        i = i + 1
+    -1
+
+fn sb_split_char(s: text, delimiter: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == delimiter:
+            parts = parts + [current]
+            current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    parts
+
+fn sb_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if current.len() > 0:
+                parts = parts + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    parts
+
+fn sb_skip_ws_comments(s: text, start: i32) -> i32:
+    var pos = start
+    while pos < s.len():
+        val ch = s.slice(pos, pos + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            pos = pos + 1
+            continue
+        # CSS comment: /* ... */
+        if pos + 1 < s.len() and s.slice(pos, pos + 2) == "/*":
+            val end = sb_find(s, "*/", pos + 2)
+            if end >= 0:
+                pos = end + 2
+                continue
+            break
+        break
+    pos

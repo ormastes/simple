@@ -2503,6 +2503,12 @@ fn resolve_name_variants(
     use_map: &std::collections::HashMap<String, String>,
     import_map: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
+    if name.contains("_dot_") {
+        let dotted = name.replace("_dot_", ".");
+        if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
+            return Some(resolved.clone());
+        }
+    }
     // Try Type__method → Type.method
     if let Some(pos) = name.find("__") {
         let type_part = &name[..pos];
@@ -3101,6 +3107,13 @@ fn mangle_mir(
                             let converted = func_name.replace("_dot_", ".");
                             if known_mangled.contains(converted.as_str()) {
                                 *func_name = converted;
+                                continue;
+                            }
+                            if let Some(resolved) = use_map
+                                .get(converted.as_str())
+                                .or_else(|| import_map.get(converted.as_str()))
+                            {
+                                *func_name = resolved.clone();
                                 continue;
                             }
                         }

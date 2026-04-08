@@ -7,13 +7,12 @@
 # UI through the browser engine onto a 2D pixel surface.
 
 use common.ui.widget.{WidgetNode, UITree, UIState}
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_element,
-    be_dom_text}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{default_style, CssValue, BoxEdges}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
-use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{html_string_to_dom}
+use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
 use common.render_scene.scene.{RenderScene, SceneCommand}
 use common.render_scene.executor.{execute_scene_to_buffer}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
@@ -214,12 +213,12 @@ class BrowserRenderer:
 
         Pipeline: HTML -> DOM -> Layout -> Paint -> Scene
         """
-        val dom = html_string_to_dom(html)
+        val dom = browser_renderer_html_string_to_dom(html)
         return self.render_dom(dom)
 
     me render_html_to_pixels(html: text) -> BeRenderResult:
         """Render an HTML string directly to pixels."""
-        val dom = html_string_to_dom(html)
+        val dom = browser_renderer_html_string_to_dom(html)
         return self.render_dom_to_pixels(dom)
 
     me render_widget_tree(tree: UITree, state: UIState) -> BeRenderResult:
@@ -254,7 +253,7 @@ fn count_nodes(node: BeDomNode) -> i32:
 fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
     """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
     val root_widget = tree.root_node()
-    var root_dom = be_dom_element("div")
+    var root_dom = BeDomNode.element("div")
     root_dom.id = "ui-root"
     root_dom.classes = ["ui-container"]
 
@@ -273,7 +272,7 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
     val kind = node.kind_name()
     val tag = browser_renderer_widget_kind_to_tag(kind)
 
-    var dom = be_dom_element(tag)
+    var dom = BeDomNode.element(tag)
     dom.id = node.id
     browser_renderer_apply_widget_props(dom, node, kind)
 
@@ -329,7 +328,7 @@ fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: t
 
     val text_content = node.get_prop("text")
     if text_content.len() > 0:
-        dom.add_child(be_dom_text(text_content))
+        dom.add_child(BeDomNode.text(text_content))
 
     val value = node.get_prop("value")
     if value.len() > 0:
@@ -391,3 +390,200 @@ pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) 
     """Convenience wrapper for compiled callers that prefer a module-level entrypoint."""
     val renderer = BrowserRenderer.create(width, height)
     renderer.render_html_to_pixels(html)
+
+fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
+    var root = BeDomNode.element("div")
+    root.id = "html-root"
+
+    # Store raw HTML for later <style> block processing
+    val raw_html = html
+
+    var stack: [BeDomNode] = [root]
+    var pos = 0
+    val len = html.len()
+
+    while pos < len:
+        val ch = html.slice(pos, pos + 1)
+        if ch == "<":
+            val tag_end = browser_renderer_find_char(html, ">", pos)
+            if tag_end < 0:
+                val remaining = html.slice(pos, len)
+                val txt = BeDomNode.text(remaining)
+                if stack.len() > 0:
+                    var parent = stack[stack.len() - 1]
+                    parent.add_child(txt)
+                    stack[stack.len() - 1] = parent
+                break
+
+            val tag_content = html.slice(pos + 1, tag_end)
+            if tag_content.starts_with("/"):
+                if stack.len() > 1:
+                    val completed = stack[stack.len() - 1]
+                    var new_stack: [BeDomNode] = []
+                    var si = 0
+                    while si < stack.len() - 1:
+                        new_stack = new_stack + [stack[si]]
+                        si = si + 1
+                    stack = new_stack
+                    if stack.len() > 0:
+                        var new_parent = stack[stack.len() - 1]
+                        new_parent.add_child(completed)
+                        stack[stack.len() - 1] = new_parent
+            else:
+                val is_self_closing = tag_content.ends_with("/")
+                val clean_content = if is_self_closing:
+                    tag_content.slice(0, tag_content.len() - 1).trim()
+                else:
+                    tag_content.trim()
+
+                var new_node = browser_renderer_parse_tag(clean_content)
+                if is_self_closing or browser_renderer_is_void_element(new_node.tag):
+                    if stack.len() > 0:
+                        var parent = stack[stack.len() - 1]
+                        parent.add_child(new_node)
+                        stack[stack.len() - 1] = parent
+                else:
+                    stack = stack + [new_node]
+            pos = tag_end + 1
+        else:
+            val text_end = browser_renderer_find_char(html, "<", pos)
+            val end_pos = if text_end < 0: len else: text_end
+            val text_content = html.slice(pos, end_pos).trim()
+            if text_content.len() > 0:
+                val txt = BeDomNode.text(text_content)
+                if stack.len() > 0:
+                    var parent = stack[stack.len() - 1]
+                    parent.add_child(txt)
+                    stack[stack.len() - 1] = parent
+            pos = end_pos
+
+    while stack.len() > 1:
+        val completed = stack[stack.len() - 1]
+        var new_stack: [BeDomNode] = []
+        var si = 0
+        while si < stack.len() - 1:
+            new_stack = new_stack + [stack[si]]
+            si = si + 1
+        stack = new_stack
+        if stack.len() > 0:
+            var parent = stack[stack.len() - 1]
+            parent.add_child(completed)
+            stack[stack.len() - 1] = parent
+
+    var result = root
+    if stack.len() > 0:
+        result = stack[0]
+
+    # Apply <style> block rules to the built DOM tree
+    process_style_blocks(result, raw_html)
+
+    result
+
+fn browser_renderer_parse_tag(content: text) -> BeDomNode:
+    val parts = browser_renderer_split_tag_parts(content)
+    if parts.len() == 0:
+        return BeDomNode.element("div")
+
+    val tag_name = parts[0]
+    var node = BeDomNode.element(tag_name)
+    var i = 1
+    while i < parts.len():
+        val part = parts[i]
+        val eq_pos = browser_renderer_find_char(part, "=", 0)
+        if eq_pos > 0:
+            val key = part.slice(0, eq_pos)
+            var value = part.slice(eq_pos + 1, part.len())
+            if value.starts_with("\"") and value.ends_with("\""):
+                value = value.slice(1, value.len() - 1)
+            elif value.starts_with("'") and value.ends_with("'"):
+                value = value.slice(1, value.len() - 1)
+
+            if key == "id":
+                node.id = value
+            elif key == "class":
+                node.classes = browser_renderer_split_spaces(value)
+            elif key == "style":
+                browser_renderer_apply_inline_style(node, value)
+            else:
+                node.set_attr(key, value)
+        i = i + 1
+    node
+
+fn browser_renderer_split_tag_parts(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    var in_quote = false
+    var quote_char = ""
+    for ch in s:
+        if in_quote:
+            current = "{current}{ch}"
+            if ch == quote_char:
+                in_quote = false
+        elif ch == "\"" or ch == "'":
+            in_quote = true
+            quote_char = ch
+            current = "{current}{ch}"
+        elif ch == " ":
+            if current.len() > 0:
+                parts = parts + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    parts
+
+fn browser_renderer_split_spaces(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == " " or ch == "\t":
+            if current.len() > 0:
+                parts = parts + [current]
+                current = ""
+        else:
+            current = "{current}{ch}"
+    if current.len() > 0:
+        parts = parts + [current]
+    parts
+
+fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
+    val declarations = browser_renderer_split_semicolons(style_str)
+    for decl in declarations:
+        val colon_pos = browser_renderer_find_char(decl, ":", 0)
+        if colon_pos > 0:
+            val prop = decl.slice(0, colon_pos).trim()
+            val value = decl.slice(colon_pos + 1, decl.len()).trim()
+            node.set_style(prop, value)
+
+fn browser_renderer_split_semicolons(s: text) -> [text]:
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == ";":
+            if current.trim().len() > 0:
+                parts = parts + [current.trim()]
+            current = ""
+        else:
+            current = "{current}{ch}"
+    if current.trim().len() > 0:
+        parts = parts + [current.trim()]
+    parts
+
+fn browser_renderer_find_char(s: text, target: text, start: i32) -> i32:
+    var i = start
+    while i < s.len():
+        if s.slice(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1
+
+fn browser_renderer_is_void_element(tag: text) -> bool:
+    match tag:
+        "br" => true
+        "hr" => true
+        "img" => true
+        "input" => true
+        "meta" => true
+        "link" => true
+        _ => false

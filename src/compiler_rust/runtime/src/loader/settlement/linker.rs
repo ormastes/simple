@@ -212,12 +212,12 @@ impl SettlementLinker {
 
     /// Resolve a symbol by name.
     pub fn resolve_symbol(&self, name: &str) -> Option<usize> {
-        self.exports.get(name).map(|e| e.address)
+        self.resolve_export(name).map(|e| e.address)
     }
 
     /// Resolve a symbol and get the table index.
     pub fn resolve_symbol_with_index(&self, name: &str) -> Option<(usize, TableIndex)> {
-        self.exports.get(name).map(|e| (e.address, e.table_index))
+        self.resolve_export(name).map(|e| (e.address, e.table_index))
     }
 
     /// Get all modules that depend on the given module.
@@ -324,6 +324,40 @@ impl SettlementLinker {
     pub fn export_count(&self) -> usize {
         self.exports.len()
     }
+
+    fn resolve_export(&self, name: &str) -> Option<&ExportedSymbol> {
+        if let Some(export) = self.exports.get(name) {
+            return Some(export);
+        }
+
+        let normalized = normalize_symbol_lookup_name(name);
+        if normalized != name {
+            if let Some(export) = self.exports.get(normalized.as_str()) {
+                return Some(export);
+            }
+        }
+
+        let suffix = format!("__{}", normalized);
+        let mut matches = self.exports.values().filter(|export| {
+            let export_name = normalize_symbol_lookup_name(&export.name);
+            export_name == normalized
+                || export_name.ends_with(normalized.as_str())
+                || export_name.ends_with(suffix.as_str())
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+}
+
+fn normalize_symbol_lookup_name(name: &str) -> String {
+    let mut normalized = name;
+    while let Some(stripped) = normalized.strip_prefix('_') {
+        normalized = stripped;
+    }
+    normalized.to_string()
 }
 
 impl Default for SettlementLinker {

@@ -183,16 +183,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
     func_name: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
+    let lookup_name_storage = if func_name.contains("_dot_") {
+        Some(func_name.replace("_dot_", "."))
+    } else {
+        None
+    };
+    let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
+
     // First check if this is a builtin method (String, Array methods)
     // Try to compile as builtin - these have runtime function implementations
-    if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, func_name, args)? {
+    if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
         // For push: rt_array_push may return a new (grown) array pointer.
         // We must update the receiver vreg so subsequent uses of the same
         // variable see the new array.  Extract the plain method name first.
-        let method = func_name.rsplit('.').next().unwrap_or(func_name);
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
         if method == "push" {
             ctx.vreg_values.insert(receiver, result);
         }
@@ -202,20 +209,20 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // Try to find the function - check multiple patterns
     // 1. Exact match (func_name or sanitized variant with _dot_)
     // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
-    let sanitized_name = func_name.replace('.', "_dot_");
-    let func_id = ctx.func_ids.get(func_name).copied()
+    let sanitized_name = lookup_name.replace('.', "_dot_");
+    let func_id = ctx.func_ids.get(lookup_name).copied()
         .or_else(|| ctx.func_ids.get(&sanitized_name).copied())
         .or_else(|| {
             // Search for a function ending with ".func_name" or "_dot_func_name"
             // If func_name is already qualified (contains '.'), extract the method part only
-            let method_part = func_name.rsplit('.').next().unwrap_or(func_name);
+            let method_part = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
             let dot_suffix = format!(".{}", method_part);
             let underscore_suffix = format!("_dot_{}", method_part);
 
             // If we have a type qualifier (e.g., "VirtioGpuDriver.init_from_grant"),
             // prefer functions whose full path contains the type name
-            let type_qualifier = if func_name.contains('.') {
-                func_name.split('.').next()
+            let type_qualifier = if lookup_name.contains('.') {
+                lookup_name.split('.').next()
             } else {
                 None
             };
@@ -298,7 +305,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         if resolved_name.is_none() {
             let method_suffix = format!(".{}", func_name);
             for (raw, mangled) in ctx.use_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > func_name.len() + 1 {
+                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
                     resolved_name = Some(mangled.as_str());
                     break;
                 }
@@ -306,9 +313,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
         // Also check import_map for qualified entries where type is imported
         if resolved_name.is_none() {
-            let method_suffix = format!(".{}", func_name);
+            let method_suffix = format!(".{}", lookup_name);
             for (raw, mangled) in ctx.import_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > func_name.len() + 1 {
+                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
                     let type_part = &raw[..raw.len() - method_suffix.len()];
                     if ctx.use_map.contains_key(type_part) {
                         resolved_name = Some(mangled.as_str());
@@ -319,7 +326,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         }
         // Final fallback: import_map bare name (may pick wrong overload)
         if resolved_name.is_none() {
-            resolved_name = ctx.import_map.get(func_name).map(|s| s.as_str());
+            resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
         // If not found and func_name contains '.', try additional name variants.
@@ -327,9 +334,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
         let mut type_prefixed_storage = String::new();
         let mut dunder_storage = String::new();
         if resolved_name.is_none() {
-            if let Some(dot_pos) = func_name.rfind('.') {
-                let type_name = &func_name[..dot_pos];
-                let method = &func_name[dot_pos + 1..];
+            if let Some(dot_pos) = lookup_name.rfind('.') {
+                let type_name = &lookup_name[..dot_pos];
+                let method = &lookup_name[dot_pos + 1..];
 
                 // Try: Type__method (double underscore variant)
                 dunder_storage = format!("{}__{}", type_name, method);
