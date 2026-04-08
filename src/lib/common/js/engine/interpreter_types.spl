@@ -16,89 +16,71 @@ class Environment:
         Environment(variables: [], parent_id: parent_id, id: id)
 
 class EnvironmentStack:
-    envs: [Environment]
+    # Flat parallel arrays — avoids .get(i).field.mutate() copy bug in interpreter mode.
+    # Environment metadata (indexed by env_id)
+    env_parent_ids: [i64]
     next_id: i64
+    # Variable storage (one entry per variable across all envs)
+    var_names: [text]
+    var_values: [JsValue]
+    var_env_ids: [i64]
 
     static fn new() -> EnvironmentStack:
-        EnvironmentStack(envs: [], next_id: 0)
+        EnvironmentStack(env_parent_ids: [], next_id: 0, var_names: [], var_values: [], var_env_ids: [])
 
     me create_env(parent_id: i64) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
-        val env = Environment.create(id, parent_id)
-        self.envs.push(env)
+        self.env_parent_ids.push(parent_id)
         id
 
-    fn _find_env(env_id: i64) -> Option<Environment>:
-        var i = 0
-        val len = self.envs.len()
-        while i < len:
-            val env = self.envs.get(i)
-            if env.id == env_id:
-                return Some(env)
-            i = i + 1
-        nil
+    fn _env_parent(env_id: i64) -> i64:
+        if env_id >= 0 and env_id < self.env_parent_ids.len():
+            return self.env_parent_ids.get(env_id)
+        -1
 
     # Get a variable by searching up the scope chain
     fn get_var(env_id: i64, name: text) -> Option<JsValue>:
         var current_id = env_id
         while current_id >= 0:
-            val env_opt = self._find_env(current_id)
-            if val Some(env) = env_opt:
-                var j = 0
-                val vlen = env.variables.len()
-                while j < vlen:
-                    val pair = env.variables.get(j)
-                    if pair.first == name:
-                        return Some(pair.second)
-                    j = j + 1
-                current_id = env.parent_id
-            else:
-                break
+            var j = 0
+            val vlen = self.var_names.len()
+            while j < vlen:
+                if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
+                    return Some(self.var_values.get(j))
+                j = j + 1
+            current_id = self._env_parent(current_id)
         nil
 
     # Set an existing variable (searches up scope chain)
     me set_var(env_id: i64, name: text, value: JsValue):
         var current_id = env_id
         while current_id >= 0:
-            var i = 0
-            val len = self.envs.len()
-            while i < len:
-                if self.envs.get(i).id == current_id:
-                    var j = 0
-                    val vlen = self.envs.get(i).variables.len()
-                    while j < vlen:
-                        val pair = self.envs.get(i).variables.get(j)
-                        if pair.first == name:
-                            self.envs.get(i).variables.set(j, Pair(first: name, second: value))
-                            return
-                        j = j + 1
-                    current_id = self.envs.get(i).parent_id
-                    break
-                i = i + 1
-            if i >= len:
-                break
+            var j = 0
+            val vlen = self.var_names.len()
+            while j < vlen:
+                if self.var_env_ids.get(j) == current_id and self.var_names.get(j) == name:
+                    self.var_values.set(j, value)
+                    return
+                j = j + 1
+            current_id = self._env_parent(current_id)
         # Variable not found — define in the given env
         self.define_var(env_id, name, value)
 
     # Define a new variable in the given environment
     me define_var(env_id: i64, name: text, value: JsValue):
-        var i = 0
-        val len = self.envs.len()
-        while i < len:
-            if self.envs.get(i).id == env_id:
-                # Check if already exists in this scope
-                var j = 0
-                val vlen = self.envs.get(i).variables.len()
-                while j < vlen:
-                    val pair = self.envs.get(i).variables.get(j)
-                    if pair.first == name:
-                        self.envs.get(i).variables.set(j, Pair(first: name, second: value))
-                        return
-                    j = j + 1
-                self.envs.get(i).variables.push(Pair(first: name, second: value))
+        # Check if already exists in this exact scope
+        var j = 0
+        val vlen = self.var_names.len()
+        while j < vlen:
+            if self.var_env_ids.get(j) == env_id and self.var_names.get(j) == name:
+                self.var_values.set(j, value)
                 return
-            i = i + 1
+            j = j + 1
+        # New variable — append to flat arrays
+        self.var_names.push(name)
+        self.var_values.push(value)
+        self.var_env_ids.push(env_id)
 
 # ── Call frame ───────────────────────────────────────────────────────────
 

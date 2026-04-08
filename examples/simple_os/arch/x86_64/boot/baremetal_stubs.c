@@ -3189,28 +3189,46 @@ static int64_t _ipc_send_handler(uint64_t port, uint64_t method,
     }
     case 5: { /* NET_ACCEPT: payload = [method(4)] + [fd(4)] */
         int32_t fd = _read_i32(payload, 4);
+        serial_puts("[tcp-accept] fd=");
+        serial_put_dec(fd);
         if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use ||
             _sockets[fd].state != TCP_LISTEN) {
+            serial_puts(" EBADF\r\n");
             _ipc_reply.status = -9;
             break;
         }
         /* Poll for incoming connections */
         struct tcp_socket *ls = &_sockets[fd];
+        serial_puts(" aq_head=");
+        serial_put_dec(ls->aq_head);
+        serial_puts(" aq_tail=");
+        serial_put_dec(ls->aq_tail);
+        serial_puts(" port=");
+        serial_put_dec(ls->local_port);
+        serial_puts("\r\n");
         int timeout = 0;
         while (ls->aq_head == ls->aq_tail && timeout < 100000) {
             _virtio_net_poll();
             timeout++;
             for (volatile int d = 0; d < 1000; d++) {}
         }
+        serial_puts("[tcp-accept] poll done, timeout=");
+        serial_put_dec(timeout);
+        serial_puts(" aq_head=");
+        serial_put_dec(ls->aq_head);
+        serial_puts(" aq_tail=");
+        serial_put_dec(ls->aq_tail);
+        serial_puts("\r\n");
         if (ls->aq_head == ls->aq_tail) {
             _ipc_reply.status = -11; /* EAGAIN — no connections */
+            serial_puts("[tcp-accept] EAGAIN\r\n");
             break;
         }
         int accepted_sid = ls->accept_queue[ls->aq_head];
         ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
         _ipc_reply.status = 0;
         _ipc_reply.value = accepted_sid;
-        serial_puts("[tcp] Accepted connection -> socket ");
+        serial_puts("[tcp-accept] accepted socket ");
         serial_put_dec(accepted_sid);
         serial_puts("\r\n");
         break;
@@ -4946,6 +4964,230 @@ int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
                 uint64_t a2, uint64_t a3, uint64_t a4)
 {
     return userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+}
+
+/* ===================================================================
+ * Direct IPC send/recv — bypasses Cranelift-stubbed syscall function.
+ * =================================================================== */
+
+int64_t rt_ipc_send(uint64_t port, uint64_t method, uint64_t flags,
+                     uint64_t buf_addr, uint64_t buf_len)
+{
+    return _ipc_send_handler(port, method, flags, buf_addr, buf_len);
+}
+
+int64_t rt_ipc_recv(uint64_t port, uint64_t buf_addr, uint64_t max_len)
+{
+    return _ipc_recv_handler(port, buf_addr, max_len);
+}
+
+/* ===================================================================
+ * Direct socket API — bypasses IPC payload encoding entirely.
+ *
+ * The socket_compat.spl IPC path has issues on baremetal because:
+ *   1. Cranelift can't compile inline asm (syscall instruction)
+ *   2. unsafe_addr_of returns RuntimeArray header, not data pointer
+ *
+ * These functions take raw parameters and call the TCP stack directly.
+ * =================================================================== */
+
+int64_t rt_net_socket(int64_t proto)
+{
+    /* Find free socket */
+    int sid = -1;
+    for (int i = 0; i < MAX_SOCKETS; i++) {
+        if (!_sockets[i].in_use) { sid = i; break; }
+    }
+    if (sid < 0) return -24; /* EMFILE */
+    __builtin_memset(&_sockets[sid], 0, sizeof(_sockets[sid]));
+    _sockets[sid].in_use = 1;
+    _sockets[sid].state = TCP_CLOSED;
+    _sockets[sid].rcv_wnd = TCP_RXBUF_SIZE;
+    serial_puts("[tcp] Created socket ");
+    serial_put_dec(sid);
+    serial_puts("\r\n");
+    return (int64_t)sid;
+}
+
+int64_t rt_net_bind(int64_t sock_fd, int64_t port_num)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    _sockets[fd].local_port = (uint16_t)port_num;
+    serial_puts("[tcp] Bound socket ");
+    serial_put_dec(fd);
+    serial_puts(" to port ");
+    serial_put_dec((int)port_num);
+    serial_puts("\r\n");
+    return 0;
+}
+
+int64_t rt_net_listen(int64_t sock_fd, int64_t backlog)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    _sockets[fd].state = TCP_LISTEN;
+    _sockets[fd].backlog = (int)backlog;
+    serial_puts("[tcp] Socket ");
+    serial_put_dec(fd);
+    serial_puts(" listening on port ");
+    serial_put_dec(_sockets[fd].local_port);
+    serial_puts("\r\n");
+    return 0;
+}
+
+int64_t rt_net_accept(int64_t sock_fd)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use ||
+        _sockets[fd].state != TCP_LISTEN) {
+        serial_puts("[tcp-accept] EBADF fd=");
+        serial_put_dec(fd);
+        serial_puts("\r\n");
+        return -9;
+    }
+    struct tcp_socket *ls = &_sockets[fd];
+    serial_puts("[tcp-accept] fd=");
+    serial_put_dec(fd);
+    serial_puts(" aq=");
+    serial_put_dec(ls->aq_head);
+    serial_puts("/");
+    serial_put_dec(ls->aq_tail);
+    serial_puts(" port=");
+    serial_put_dec(ls->local_port);
+    serial_puts("\r\n");
+
+    /* Poll for incoming connections (~2s per accept call) */
+    int timeout = 0;
+    while (ls->aq_head == ls->aq_tail && timeout < 20000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    if (ls->aq_head == ls->aq_tail) {
+        serial_puts("[tcp-accept] EAGAIN (timeout=");
+        serial_put_dec(timeout);
+        serial_puts(")\r\n");
+        return -11; /* EAGAIN */
+    }
+    int accepted_sid = ls->accept_queue[ls->aq_head];
+    ls->aq_head = (ls->aq_head + 1) % TCP_ACCEPT_QUEUE;
+    serial_puts("[tcp-accept] accepted socket ");
+    serial_put_dec(accepted_sid);
+    serial_puts("\r\n");
+    return (int64_t)accepted_sid;
+}
+
+int64_t rt_net_close(int64_t sock_fd)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) return -9;
+    if (_sockets[fd].state == TCP_ESTABLISHED) {
+        _tcp_send_segment(fd, TCP_FIN | TCP_ACK, NULL, 0);
+    }
+    _sockets[fd].in_use = 0;
+    _sockets[fd].state = TCP_CLOSED;
+    return 0;
+}
+
+/* rt_net_send_bytes: send byte array data on an established socket.
+ * data_rv is a RuntimeValue pointing to a RuntimeArray of u8.
+ * Returns bytes sent or negative errno. */
+int64_t rt_net_send_bytes(int64_t sock_fd, RuntimeValue data_rv)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use ||
+        _sockets[fd].state != TCP_ESTABLISHED) {
+        serial_puts("[tcp-send] EBADF fd=");
+        serial_put_dec(fd);
+        serial_puts(" state=");
+        serial_put_dec(_sockets[fd].state);
+        serial_puts("\r\n");
+        return -9;
+    }
+    /* Extract byte array from RuntimeValue */
+    if (!IS_HEAP(data_rv)) {
+        serial_puts("[tcp-send] data not heap ptr\r\n");
+        return -22;
+    }
+    RuntimeArray *arr = (RuntimeArray *)(uintptr_t)DECODE_PTR(data_rv);
+    if (!arr || arr->len == 0) return 0;
+
+    /* Copy items to contiguous buffer (items are tagged RuntimeValues) */
+    uint32_t data_len = (uint32_t)arr->len;
+    uint8_t *buf = (uint8_t *)malloc(data_len);
+    if (!buf) return -12;
+    for (uint32_t i = 0; i < data_len; i++) {
+        buf[i] = (uint8_t)DECODE_INT(arr->items[i]);
+    }
+
+    /* Send in chunks */
+    uint32_t sent = 0;
+    while (sent < data_len) {
+        uint16_t chunk = (data_len - sent > 1400) ? 1400 : (uint16_t)(data_len - sent);
+        _tcp_send_segment(fd, TCP_ACK | TCP_PSH, buf + sent, chunk);
+        sent += chunk;
+    }
+    free(buf);
+    serial_puts("[tcp-send] sent ");
+    serial_put_dec(sent);
+    serial_puts(" bytes on fd=");
+    serial_put_dec(fd);
+    serial_puts("\r\n");
+    return (int64_t)sent;
+}
+
+/* rt_net_recv_bytes: receive data from a socket as a byte array RuntimeValue.
+ * Returns a RuntimeValue pointing to RuntimeArray of u8, or nil on error. */
+RuntimeValue rt_net_recv_bytes(int64_t sock_fd, int64_t max_len)
+{
+    int fd = (int)sock_fd;
+    if (fd < 0 || fd >= MAX_SOCKETS || !_sockets[fd].in_use) {
+        return NIL_VALUE; /* nil */
+    }
+    /* Poll until data available or timeout */
+    int timeout = 0;
+    while (_tcp_rx_available(fd) == 0 &&
+           _sockets[fd].state == TCP_ESTABLISHED &&
+           timeout < 50000) {
+        _virtio_net_poll();
+        timeout++;
+        for (volatile int d = 0; d < 1000; d++) {}
+    }
+    uint32_t avail = _tcp_rx_available(fd);
+    if (avail == 0) {
+        /* Return empty array */
+        RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
+        if (!a) return NIL_VALUE;
+        a->hdr.type = HEAP_ARRAY;
+        a->hdr.size = sizeof(RuntimeArray);
+        a->len = 0;
+        a->cap = 0;
+        return ENCODE_PTR(a);
+    }
+    uint32_t read_len = avail;
+    if ((int64_t)read_len > max_len) read_len = (uint32_t)max_len;
+
+    /* Read data from socket rx buffer */
+    RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = sizeof(RuntimeArray) + read_len * sizeof(RuntimeValue);
+    a->len = read_len;
+    a->cap = read_len;
+
+    struct tcp_socket *s = &_sockets[fd];
+    for (uint32_t i = 0; i < read_len; i++) {
+        uint8_t byte = s->rxbuf[s->rx_tail];
+        s->rx_tail = (s->rx_tail + 1) % TCP_RXBUF_SIZE;
+        a->items[i] = ENCODE_INT(byte);
+    }
+    serial_puts("[tcp-recv] read ");
+    serial_put_dec(read_len);
+    serial_puts(" bytes from fd=");
+    serial_put_dec(fd);
+    serial_puts("\r\n");
+    return ENCODE_PTR(a);
 }
 
 /* Direct PCI cache access — bypasses syscall for pcimgr */
@@ -7380,14 +7622,12 @@ S1(rt_sleep_ms)
 S1(rt_timer_create)
 S1(rt_timer_cancel)
 
-/* --- Network (no network stack on baremetal) --- */
+/* --- Network: socket/bind/listen/accept/close now have real impls above --- */
 TRAP_STUB_RET(rt_net_connect, 2)
-TRAP_STUB_RET(rt_net_listen, 1)
 TRAP_STUB_RET(rt_net_send, 2)
 TRAP_STUB_RET(rt_net_recv, 1)
-TRAP_STUB_RET(rt_net_close, 1)
-TRAP_STUB_RET(rt_net_bind, 2)
-TRAP_STUB_RET(rt_net_accept, 1)
+/* rt_net_socket, rt_net_bind, rt_net_listen, rt_net_accept, rt_net_close
+ * are implemented above in the direct socket API section */
 TRAP_STUB_RET(rt_net_set_timeout, 2)
 TRAP_STUB_RET(rt_net_get_addr, 1)
 

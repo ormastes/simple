@@ -10,6 +10,8 @@
 
 extern fn serial_println(msg: text)
 extern fn rt_port_outb(port: u64, value: u64)
+extern fn rt_ipc_send(port: u64, method: u64, flags: u64, buf_addr: u64, buf_len: u64) -> i64
+extern fn rt_ipc_recv(port: u64, buf_addr: u64, max_len: u64) -> i64
 
 # POSIX layer
 use os.posix.fd_table.{fd_table_init}
@@ -61,6 +63,14 @@ fn _start():
     serial_println("")
 
     # ================================================================
+    # Test 0: Direct IPC sanity check
+    # ================================================================
+    serial_println("--- Test 0: Direct IPC sanity ---")
+    var ipc_rc = rt_ipc_send(2, 0, 0, 0, 0)
+    serial_println("  rt_ipc_send(2,0,0,0,0) = {ipc_rc}")
+    assert_test("Direct IPC send returns non-nil", ipc_rc != 3)
+
+    # ================================================================
     # Test 1: Socket creation
     # ================================================================
     serial_println("--- Test 1: Socket creation ---")
@@ -86,12 +96,19 @@ fn _start():
     assert_test("Listen backlog=5", listen_rc == 0)
 
     # ================================================================
-    # Test 4: Accept (non-blocking poll)
+    # Test 4: Accept returns negative when no client connected
     # ================================================================
     serial_println("--- Test 4: Accept poll (no client yet) ---")
+    serial_println("  Calling posix_accept with listen_fd={fd}...")
     var accept_rc = posix_accept(fd.to_i32())
     serial_println("  posix_accept returned: {accept_rc}")
-    assert_test("Accept returns EAGAIN (-11) with no client", accept_rc < 0)
+    # On baremetal, accept polls for ~100k iterations then returns EAGAIN (-11)
+    # If it returns >= 0, a spurious connection was accepted (accept queue bug)
+    if accept_rc >= 0:
+        serial_println("  WARNING: accept returned valid fd={accept_rc} with no client!")
+        serial_println("  This indicates accept queue not properly initialized")
+        posix_close_socket(accept_rc.to_i32())
+    assert_test("Accept returns negative with no client", accept_rc < 0)
 
     # ================================================================
     # Test 5: Host key generation
@@ -113,9 +130,11 @@ fn _start():
     # Test 6: SSH version string
     # ================================================================
     serial_println("--- Test 6: SSH version string ---")
-    var version = ssh_build_version_string()
-    serial_println("  Version: {version}")
-    assert_test("Version string not empty", version.len() > 0)
+    var version_bytes = ssh_build_version_string()
+    serial_println("  Version bytes len: {version_bytes.len()}")
+    # Check starts with 'S','S','H' (0x53,0x53,0x48)
+    var ver_ok = version_bytes.len() > 10 and version_bytes[0] == 0x53 and version_bytes[1] == 0x53 and version_bytes[2] == 0x48
+    assert_test("Version string starts with SSH", ver_ok)
 
     # ================================================================
     # Test 7: User database
@@ -139,7 +158,7 @@ fn _start():
     serial_println("")
 
     var attempt: i64 = 0
-    var max_attempts: i64 = 30  # 30 accept polls (~30 seconds)
+    var max_attempts: i64 = 200  # 200 accept polls with shorter timeout per poll
     var client_fd: i64 = -1
 
     while attempt < max_attempts:
@@ -154,36 +173,23 @@ fn _start():
     if client_fd >= 0:
         assert_test("Client connection accepted", true)
 
-        # Send SSH version string
-        var ver_str = ssh_build_version_string()
-        var ver_bytes: [u8] = []
-        var vi: u64 = 0
-        while vi < ver_str.len():
-            ver_bytes.push(ver_str[vi])
-            vi = vi + 1
-        ver_bytes.push(13)  # \r
-        ver_bytes.push(10)  # \n
-
+        # Send SSH version string (already includes \r\n)
+        var ver_bytes = ssh_build_version_string()
+        serial_println("  Sending version string ({ver_bytes.len()} bytes)...")
         var send_rc = posix_send_bytes(client_fd.to_i32(), ver_bytes, 0)
-        serial_println("  Sent version ({send_rc} bytes): {ver_str}")
+        serial_println("  Send result: {send_rc}")
         assert_test("Version string sent", send_rc > 0)
 
         # Read client version string
+        serial_println("  Waiting for client version...")
         var recv_result = posix_recv_bytes(client_fd.to_i32(), 256, 0)
         if recv_result.is_ok():
             var client_data = recv_result.unwrap()
             serial_println("  Received {client_data.len()} bytes from client")
-            # Convert to text for display (first line)
-            var client_ver: text = ""
-            var ci: u64 = 0
-            while ci < client_data.len() and ci < 80:
-                var ch = client_data[ci]
-                if ch == 13 or ch == 10:
-                    break
-                client_ver = client_ver + ch.to_char()
-                ci = ci + 1
-            serial_println("  Client version: {client_ver}")
-            assert_test("Client version starts with SSH-", client_ver.starts_with("SSH-"))
+            # Check first 4 bytes are 'S','S','H','-' (0x53,0x53,0x48,0x2D)
+            var is_ssh = client_data.len() >= 4 and client_data[0] == 0x53 and client_data[1] == 0x53 and client_data[2] == 0x48 and client_data[3] == 0x2D
+            serial_println("  First bytes: {client_data[0]} {client_data[1]} {client_data[2]} {client_data[3]}")
+            assert_test("Client version starts with SSH-", is_ssh)
         else:
             serial_println("  Recv failed (client may have disconnected)")
             assert_test("Client data received", false)

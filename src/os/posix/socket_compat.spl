@@ -13,15 +13,10 @@
 
 use os.posix.errno.{EBADF, EINVAL, ENOSYS, ECONNREFUSED, ENOTCONN, ENOTSOCK, EIO, EAGAIN, EMFILE, EADDRINUSE}
 use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_types, fd_ports, FD_TYPE_SOCKET, MAX_FDS, O_RDWR}
-use os.userlib.syscall_raw.{syscall}
 use os.userlib.ipc_protocol.{NET_SOCKET, NET_BIND, NET_LISTEN, NET_CONNECT, NET_ACCEPT, NET_SEND, NET_RECV, NET_CLOSE}
 
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
-
-# Syscall numbers for IPC
-val _SYS_IPC_SEND: u64 = 20
-val _SYS_IPC_RECV: u64 = 21
 
 # Socket types (POSIX)
 val SOCK_STREAM: i32 = 1   # TCP
@@ -29,6 +24,21 @@ val SOCK_DGRAM: i32 = 2    # UDP
 val AF_INET: i32 = 2
 
 extern fn unsafe_addr_of(ref: any) -> u64
+
+# Direct IPC functions — bypasses Cranelift-stubbed syscall
+# (inline asm in syscall_raw.spl not supported by Cranelift)
+extern fn rt_ipc_send(port: u64, method: u64, flags: u64, buf_addr: u64, buf_len: u64) -> i64
+extern fn rt_ipc_recv(port: u64, buf_addr: u64, max_len: u64) -> i64
+
+# Direct socket API — bypasses IPC payload encoding entirely
+# (unsafe_addr_of returns RuntimeArray header, not data pointer on baremetal)
+extern fn rt_net_socket(proto: i64) -> i64
+extern fn rt_net_bind(sock_fd: i64, port_num: i64) -> i64
+extern fn rt_net_listen(sock_fd: i64, backlog: i64) -> i64
+extern fn rt_net_accept(sock_fd: i64) -> i64
+extern fn rt_net_close(sock_fd: i64) -> i64
+extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
+extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
 
 # ============================================================================
 # Socket Address
@@ -59,71 +69,33 @@ fn posix_socket(domain: i32, type_: i32, protocol: i32) -> i64:
     domain:   AF_INET (2)
     type_:    SOCK_STREAM (1) for TCP, SOCK_DGRAM (2) for UDP
     protocol: 0 (auto-select based on type)
+
+    On baremetal, returns the C-side socket ID directly (fd_set is auto-stubbed).
     """
     if domain != AF_INET:
         return 0 - EINVAL as i64
 
     # Map POSIX type to netstack protocol byte
-    var proto_byte: u8 = 0
+    var proto: i64 = 0
     if type_ == SOCK_STREAM:
-        proto_byte = 1  # TCP
+        proto = 1  # TCP
     elif type_ == SOCK_DGRAM:
-        proto_byte = 2  # UDP
+        proto = 2  # UDP
     else:
         return 0 - EINVAL as i64
 
-    # Send NET_SOCKET IPC to netstack
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_SOCKET)
-    payload.push(proto_byte)
-
-    val reply = _net_ipc_request(payload)
-    if reply.status < 0:
-        return reply.status as i64
-
-    # Netstack returned a socket fd in its own table.
-    # Allocate a local POSIX fd that maps to the netstack fd.
-    val net_fd = reply.value_i32
-    val local_fd = fd_alloc()
-    if local_fd < 0:
-        # Close the netstack socket since we can't track it
-        _net_close_remote(net_fd)
-        return 0 - EMFILE as i64
-
-    # Store netstack fd in the ipc_port field
-    fd_set(local_fd, FD_TYPE_SOCKET, O_RDWR, net_fd as u64)
-    local_fd as i64
+    # Direct C call — returns C-side socket ID
+    rt_net_socket(proto)
 
 fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
     """Bind socket to address. Returns 0 or -errno."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return net_fd as i64
-
-    # Payload: fd(i32) | ip(u32) | port(u16)
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_BIND)
-    _sock_push_i32(payload, net_fd)
-    _sock_push_u32(payload, addr.addr)
-    _sock_push_u16(payload, addr.port)
-
-    val reply = _net_ipc_request(payload)
-    reply.status as i64
+    # On baremetal, fd IS the C-side socket ID (no fd_table indirection)
+    rt_net_bind(fd as i64, addr.port as i64)
 
 fn posix_listen(fd: i32, backlog: i32) -> i64:
     """Start listening for connections. Returns 0 or -errno."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return net_fd as i64
-
-    # Payload: fd(i32) | backlog(u32)
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_LISTEN)
-    _sock_push_i32(payload, net_fd)
-    _sock_push_u32(payload, backlog as u32)
-
-    val reply = _net_ipc_request(payload)
-    reply.status as i64
+    # On baremetal, fd IS the C-side socket ID
+    rt_net_listen(fd as i64, backlog as i64)
 
 fn posix_connect(fd: i32, addr: SockaddrIn) -> i64:
     """Connect to remote address. Returns 0 or -errno."""
@@ -143,28 +115,8 @@ fn posix_connect(fd: i32, addr: SockaddrIn) -> i64:
 
 fn posix_accept(fd: i32) -> i64:
     """Accept incoming connection. Returns new fd or -errno."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return net_fd as i64
-
-    # Payload: fd(i32)
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_ACCEPT)
-    _sock_push_i32(payload, net_fd)
-
-    val reply = _net_ipc_request(payload)
-    if reply.status < 0:
-        return reply.status as i64
-
-    # Netstack returned a new socket fd for the accepted connection
-    val new_net_fd = reply.value_i32
-    val new_local_fd = fd_alloc()
-    if new_local_fd < 0:
-        _net_close_remote(new_net_fd)
-        return 0 - EMFILE as i64
-
-    fd_set(new_local_fd, FD_TYPE_SOCKET, O_RDWR, new_net_fd as u64)
-    new_local_fd as i64
+    # On baremetal, fd IS the C-side socket ID, return accepted socket ID directly
+    rt_net_accept(fd as i64)
 
 fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
     """Send data on connected socket. Returns bytes sent or -errno."""
@@ -191,23 +143,8 @@ fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
 
 fn posix_send_bytes(fd: i32, data: [u8], flags: i32) -> i64:
     """Send byte array on connected socket. Returns bytes sent or -errno."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return net_fd as i64
-
-    # Payload: fd(i32) | data(bytes)
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_SEND)
-    _sock_push_i32(payload, net_fd)
-    var i: u64 = 0
-    while i < data.len():
-        payload.push(data[i])
-        i = i + 1
-
-    val reply = _net_ipc_request(payload)
-    if reply.status < 0:
-        return reply.status as i64
-    reply.value_i32 as i64
+    # On baremetal, fd IS the C-side socket ID
+    rt_net_send_bytes(fd as i64, data)
 
 fn posix_recv(fd: i32, buf_addr: u64, max_len: u64, flags: i32) -> i64:
     """Receive data from socket into user buffer. Returns bytes received or -errno."""
@@ -236,33 +173,14 @@ fn posix_recv(fd: i32, buf_addr: u64, max_len: u64, flags: i32) -> i64:
 
 fn posix_recv_bytes(fd: i32, max_len: u64, flags: i32) -> Result<[u8], text>:
     """Receive data from socket as byte array. Returns bytes or error text."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return Err("invalid socket fd")
-
-    var payload: [u8] = []
-    _sock_push_u32(payload, NET_RECV)
-    _sock_push_i32(payload, net_fd)
-    _sock_push_u32(payload, max_len as u32)
-
-    val reply = _net_ipc_request_bytes(payload)
-    if reply.status < 0:
-        return Err("recv failed with status {reply.status}")
-
-    Ok(reply.data)
+    # On baremetal, fd IS the C-side socket ID
+    var data = rt_net_recv_bytes(fd as i64, max_len as i64)
+    Ok(data)
 
 fn posix_close_socket(fd: i32) -> i64:
     """Close a socket. Returns 0 or -errno."""
-    val net_fd = _get_net_fd(fd)
-    if net_fd < 0:
-        return net_fd as i64
-
-    # Send NET_CLOSE to netstack
-    _net_close_remote(net_fd)
-
-    # Close local FD
-    fd_close(fd)
-    0
+    # On baremetal, fd IS the C-side socket ID
+    rt_net_close(fd as i64)
 
 # ============================================================================
 # Internal Helpers
@@ -295,14 +213,15 @@ fn _net_ipc_request(payload: [u8]) -> _NetIpcReply:
     # Extract method from first 4 bytes for the IPC method field
     val method = if payload.len() >= 4: _sock_read_u32(payload, 0) else: 0
 
-    val send_result = syscall(_SYS_IPC_SEND, _NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    # Use direct rt_ipc_send/recv (bypasses Cranelift-stubbed syscall)
+    val send_result = rt_ipc_send(_NET_PORT, method as u64, 0, payload_ptr, payload_len)
     if send_result < 0:
         return _NetIpcReply(status: 0 - EIO, value_i32: 0)
 
     # Receive reply: status(i32) | value(i32)
     var reply_buf: [u8; 64] = [0; 64]
     val reply_ptr = unsafe_addr_of(reply_buf)
-    val recv_result = syscall(_SYS_IPC_RECV, _NET_PORT, reply_ptr, 64, 0, 0)
+    val recv_result = rt_ipc_recv(_NET_PORT, reply_ptr, 64)
     if recv_result < 0:
         return _NetIpcReply(status: 0 - EIO, value_i32: 0)
 
@@ -317,14 +236,15 @@ fn _net_ipc_request_bytes(payload: [u8]) -> _NetIpcReplyBytes:
 
     val method = if payload.len() >= 4: _sock_read_u32(payload, 0) else: 0
 
-    val send_result = syscall(_SYS_IPC_SEND, _NET_PORT, method as u64, 0, payload_ptr, payload_len)
+    # Use direct rt_ipc_send/recv (bypasses Cranelift-stubbed syscall)
+    val send_result = rt_ipc_send(_NET_PORT, method as u64, 0, payload_ptr, payload_len)
     if send_result < 0:
         return _NetIpcReplyBytes(status: 0 - EIO, data: [])
 
     # Receive reply: status(i32) | data(bytes)
     var reply_buf: [u8; 4096] = [0; 4096]
     val reply_ptr = unsafe_addr_of(reply_buf)
-    val recv_result = syscall(_SYS_IPC_RECV, _NET_PORT, reply_ptr, 4096, 0, 0)
+    val recv_result = rt_ipc_recv(_NET_PORT, reply_ptr, 4096)
     if recv_result < 0:
         return _NetIpcReplyBytes(status: 0 - EIO, data: [])
 
@@ -348,7 +268,7 @@ fn _net_close_remote(net_fd: i32):
     _sock_push_u32(payload, NET_CLOSE)
     _sock_push_i32(payload, net_fd)
     val payload_ptr = unsafe_addr_of(payload)
-    syscall(_SYS_IPC_SEND, _NET_PORT, NET_CLOSE as u64, 0, payload_ptr, payload.len())
+    rt_ipc_send(_NET_PORT, NET_CLOSE as u64, 0, payload_ptr, payload.len())
     # Best-effort close: ignore IPC errors
 
 # ============================================================================
