@@ -14,7 +14,7 @@ use std.js.engine.runtime.{dispatch_native}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, f64_to_i64}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, f64_to_i64}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
@@ -671,6 +671,8 @@ class JsInterpreter:
                         self.env_stack.define_var(fn_env, js_fn.params.get(pi), pv)
                         pi = pi + 1
                     self.env_stack.define_var(fn_env, "this", this_val)
+                    val frame = CallFrame(function_name: js_fn.name, env_id: fn_env, line: 0, this_value: this_val)
+                    self.call_stack.push(frame)
                     val saved = self.has_return
                     self.has_return = false
                     var bi = 0
@@ -679,6 +681,7 @@ class JsInterpreter:
                         if self.has_return:
                             break
                         bi = bi + 1
+                    self.call_stack.pop()
                     self.has_return = saved
                 return Ok(this_val)
             _:
@@ -1044,13 +1047,9 @@ class JsInterpreter:
                 return Ok(rhs)
             Expression.Member(object, property):
                 val obj_val = self.eval_expression(object, env)?
-                match obj_val:
-                    JsValue.Object(id):
-                        self.object_store.set_property(id, property, rhs)
-                    JsValue.Array(id):
-                        self.object_store.set_property(id, property, rhs)
-                    _:
-                        self.logger.warn("Cannot set property on non-object")
+                val obj_id = _get_obj_id(obj_val)
+                if obj_id >= 0:
+                    self.object_store.set_property(obj_id, property, rhs)
                 return Ok(rhs)
             _:
                 self.logger.warn("Invalid assignment target")

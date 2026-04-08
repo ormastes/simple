@@ -9,7 +9,9 @@
 #   ./chrome_screenshot.shs test.html output.png 800 600
 #   ./chrome_screenshot.shs "<div style='background:red;width:100px;height:100px'></div>" red_box.png
 #
-# Dependencies: Chrome/Chromium installed
+# Dependencies:
+#   - Chrome/Chromium installed, OR
+#   - Playwright CLI with Chromium installed
 
 HTML_INPUT="$1"
 OUTPUT="${2:-screenshot.png}"
@@ -35,15 +37,27 @@ elif [ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then
     CHROME="/Applications/Chromium.app/Contents/MacOS/Chromium"
 fi
 
+USE_PLAYWRIGHT=0
 if [ -z "$CHROME" ]; then
-    echo "Error: Chrome/Chromium not found"
-    exit 1
+    if command -v npx >/dev/null 2>&1; then
+        USE_PLAYWRIGHT=1
+    else
+        echo "Error: Chrome/Chromium not found and npx is unavailable"
+        exit 1
+    fi
 fi
 
-# If input is not a file, create a temp HTML file
-if [ ! -f "$HTML_INPUT" ]; then
-    TEMP_HTML=$(mktemp /tmp/chrome_compare_XXXXXX.html)
-    cat > "$TEMP_HTML" << HTMLEOF
+# Normalize local file paths to file:// URLs for Playwright/Chrome
+case "$HTML_INPUT" in
+    http://*|https://*|file://*)
+        ;;
+    *)
+        if [ -f "$HTML_INPUT" ]; then
+            ABS_HTML="$(cd "$(dirname "$HTML_INPUT")" && pwd)/$(basename "$HTML_INPUT")"
+            HTML_INPUT="file://$ABS_HTML"
+        else
+            TEMP_HTML=$(mktemp /tmp/chrome_compare_XXXXXX.html)
+            cat > "$TEMP_HTML" << HTMLEOF
 <!DOCTYPE html>
 <html>
 <head>
@@ -55,21 +69,32 @@ $HTML_INPUT
 </body>
 </html>
 HTMLEOF
-    HTML_INPUT="file://$TEMP_HTML"
-    CLEANUP_TEMP=1
-fi
+            HTML_INPUT="file://$TEMP_HTML"
+            CLEANUP_TEMP=1
+        fi
+        ;;
+esac
 
-# Take screenshot with headless Chrome
-"$CHROME" \
-    --headless \
-    --disable-gpu \
-    --no-sandbox \
-    --window-size="${WIDTH},${HEIGHT}" \
-    --screenshot="$OUTPUT" \
-    --hide-scrollbars \
-    --default-background-color=0 \
-    "$HTML_INPUT" \
-    2>/dev/null
+if [ "$USE_PLAYWRIGHT" = "1" ]; then
+    npx playwright screenshot \
+        --browser=chromium \
+        --viewport-size="${WIDTH},${HEIGHT}" \
+        --wait-for-timeout=500 \
+        "$HTML_INPUT" \
+        "$OUTPUT" \
+        >/dev/null 2>&1
+else
+    "$CHROME" \
+        --headless \
+        --disable-gpu \
+        --no-sandbox \
+        --window-size="${WIDTH},${HEIGHT}" \
+        --screenshot="$OUTPUT" \
+        --hide-scrollbars \
+        --default-background-color=0 \
+        "$HTML_INPUT" \
+        2>/dev/null
+fi
 
 # Cleanup temp file
 if [ -n "$CLEANUP_TEMP" ] && [ -f "$TEMP_HTML" ]; then

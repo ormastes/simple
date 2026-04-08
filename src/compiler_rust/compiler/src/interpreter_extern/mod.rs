@@ -762,6 +762,10 @@ pub(crate) fn call_extern_function(
         "rt_current_dir" => file_io::rt_current_dir(&evaluated),
         "rt_set_current_dir" => file_io::rt_set_current_dir(&evaluated),
         "rt_dir_remove_all" => file_io::rt_dir_remove_all(&evaluated),
+        // Aliases for snpm compatibility
+        "rt_get_cwd" => file_io::rt_get_cwd(&evaluated),
+        "rt_mkdir" => file_io::rt_dir_create(&evaluated),
+        "rt_file_list_dir" => file_io::rt_dir_list(&evaluated),
         // File descriptor operations
         "rt_file_open" => file_io::rt_file_open(&evaluated),
         "rt_file_get_size" => file_io::rt_file_get_size(&evaluated),

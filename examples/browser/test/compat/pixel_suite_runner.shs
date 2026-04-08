@@ -24,6 +24,7 @@ OUTPUT_DIR="${1:-/tmp/pixel_suite}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HTML_DIR="$SCRIPT_DIR/html"
 CHROME_SCRIPT="$SCRIPT_DIR/chrome_screenshot.shs"
+COMPARE_HELPER="$SCRIPT_DIR/compare_render_pair.spl"
 
 WIDTH=800
 HEIGHT=600
@@ -36,14 +37,39 @@ echo ""
 
 mkdir -p "$OUTPUT_DIR/chrome" "$OUTPUT_DIR/simple" "$OUTPUT_DIR/diff"
 
+COMPARE_BINARY="$OUTPUT_DIR/compare_render_pair.smf"
+if [ ! -f "$COMPARE_BINARY" ]; then
+    ./bin/simple compile "$COMPARE_HELPER" -o "$COMPARE_BINARY" >/dev/null 2>&1
+fi
+if [ ! -f "$COMPARE_BINARY" ]; then
+    echo "Error: failed to compile comparison helper"
+    exit 1
+fi
+
+render_with_simple_test() {
+    html_file="$1"
+    output_ppm="$2"
+    temp_spec="$OUTPUT_DIR/render_one_spec.spl"
+    cat >"$temp_spec" <<EOF
+use std.spec.*
+use std.io.{file_write}
+use examples.browser.test.compat.chrome_compare.{render_simple_test}
+use examples.browser.test.compat.image_export.{export_ppm_text}
+extern fn rt_file_read_text(path: text) -> text
+
+describe "render one":
+    it "renders html fixture to ppm":
+        val html = rt_file_read_text("$html_file")
+        val pixels = render_simple_test(html, $WIDTH, $HEIGHT)
+        expect(pixels.len()).to_equal($((WIDTH * HEIGHT)))
+        expect(file_write("$output_ppm", export_ppm_text("", pixels, $WIDTH, $HEIGHT))).to_equal(true)
+EOF
+    ./bin/simple test "$temp_spec" >/dev/null 2>&1
+}
+
 # Check dependencies
 if ! sh "$CHROME_SCRIPT" --help >/dev/null 2>&1; then
     echo "Warning: Chrome may not be available"
-fi
-
-HAS_CONVERT=0
-if command -v convert >/dev/null 2>&1; then
-    HAS_CONVERT=1
 fi
 
 # Collect all HTML test files
@@ -79,37 +105,36 @@ for category_dir in "$HTML_DIR"/*/; do
         if [ -f "$chrome_png" ]; then
             chrome_ok="YES"
             echo "  Chrome: OK"
-            # Convert PNG to PPM if ImageMagick available
-            if [ "$HAS_CONVERT" = "1" ]; then
-                convert "$chrome_png" "$OUTPUT_DIR/chrome/${test_name}.ppm" 2>/dev/null
-            fi
+            /usr/bin/sips -s format bmp "$chrome_png" --out "$OUTPUT_DIR/chrome/${test_name}.bmp" >/dev/null 2>&1
         else
             echo "  Chrome: FAILED"
         fi
 
-        # Step 2: Simple renderer (placeholder — white canvas PPM)
+        # Step 2: Simple renderer
         simple_ppm="$OUTPUT_DIR/simple/${test_name}.ppm"
-        # Generate a white W*H PPM as placeholder
-        {
-            echo "P6"
-            echo "$WIDTH $HEIGHT"
-            echo "255"
-            # Write W*H white pixels (3 bytes each = 0xFF 0xFF 0xFF)
-            dd if=/dev/zero bs=1 count=$((WIDTH * HEIGHT * 3)) 2>/dev/null | tr '\0' '\377'
-        } > "$simple_ppm"
-        echo "  Simple: placeholder (white canvas)"
+        render_with_simple_test "$html_file" "$simple_ppm"
+        if [ ! -f "$simple_ppm" ]; then
+            echo "  Simple: FAILED"
+            SKIP=$((SKIP + 1))
+            echo "| $test_name | $category | $chrome_ok | NO | simple render failed |" >> "$REPORT"
+            continue
+        fi
+        echo "  Simple: OK"
 
-        # Step 3: Compare (using ImageMagick if available)
-        if [ "$chrome_ok" = "YES" ] && [ "$HAS_CONVERT" = "1" ] && [ -f "$OUTPUT_DIR/chrome/${test_name}.ppm" ]; then
-            if command -v compare >/dev/null 2>&1; then
-                metric=$(compare -metric RMSE \
-                    "$OUTPUT_DIR/chrome/${test_name}.ppm" \
-                    "$simple_ppm" \
-                    "$OUTPUT_DIR/diff/${test_name}.ppm" 2>&1 | head -1)
-                echo "  Diff RMSE: $metric"
-                echo "| $test_name | $category | $chrome_ok | YES | RMSE: $metric |" >> "$REPORT"
+        # Step 3: Compare with the built-in Simple helper.
+        chrome_bmp="$OUTPUT_DIR/chrome/${test_name}.bmp"
+        metrics_txt="$OUTPUT_DIR/diff/${test_name}.txt"
+        diff_ppm="$OUTPUT_DIR/diff/${test_name}.ppm"
+        if [ "$chrome_ok" = "YES" ] && [ -f "$chrome_bmp" ]; then
+            ./bin/simple "$COMPARE_BINARY" "$chrome_bmp" "$simple_ppm" "$WIDTH" "$HEIGHT" "$metrics_txt" "$diff_ppm" >/dev/null 2>&1
+            if [ -f "$metrics_txt" ]; then
+                match_pct=$(awk -F= '/^match_percentage=/{print $2}' "$metrics_txt")
+                rmse=$(awk -F= '/^rmse=/{print $2}' "$metrics_txt")
+                echo "  Diff match: ${match_pct}%"
+                echo "| $test_name | $category | $chrome_ok | YES | match ${match_pct}% rmse ${rmse} |" >> "$REPORT"
             else
-                echo "| $test_name | $category | $chrome_ok | YES | no compare |" >> "$REPORT"
+                FAIL=$((FAIL + 1))
+                echo "| $test_name | $category | $chrome_ok | YES | compare failed |" >> "$REPORT"
             fi
         else
             SKIP=$((SKIP + 1))
@@ -121,6 +146,7 @@ done
 echo "" >> "$REPORT"
 echo "## Summary" >> "$REPORT"
 echo "- Total: $TOTAL" >> "$REPORT"
+echo "- Failed: $FAIL" >> "$REPORT"
 echo "- Skipped: $SKIP" >> "$REPORT"
 
 echo ""

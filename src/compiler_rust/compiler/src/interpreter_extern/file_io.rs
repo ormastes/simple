@@ -459,11 +459,19 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(results))
 }
 
-/// Get current directory
+/// Get current directory (returns Option<text>)
 pub fn rt_current_dir(_args: &[Value]) -> Result<Value, CompileError> {
     match std::env::current_dir() {
         Ok(cwd) => Ok(make_some(Value::Str(cwd.to_string_lossy().to_string()))),
         Err(_) => Ok(make_none()),
+    }
+}
+
+/// Get current directory (returns plain text, for snpm compatibility)
+pub fn rt_get_cwd(_args: &[Value]) -> Result<Value, CompileError> {
+    match std::env::current_dir() {
+        Ok(cwd) => Ok(Value::Str(cwd.to_string_lossy().to_string())),
+        Err(_) => Ok(Value::Str(String::new())),
     }
 }
 

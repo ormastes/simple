@@ -11,6 +11,7 @@ const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron'
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 let mainWindow = null;
 let simpleProcess = null;
@@ -203,14 +204,20 @@ function spawnSimpleProcess() {
 app.whenReady().then(() => {
     debugLog('app.whenReady');
     const isMac = process.platform === 'darwin';
+    const isWin = process.platform === 'win32';
     mainWindow = new BrowserWindow({
-        width: 1280,
-        height: 720,
-        backgroundColor: '#0A0A0F',
+        width: 1360,
+        height: 840,
+        minWidth: 1024,
+        minHeight: 640,
+        backgroundColor: isMac ? '#00000000' : '#0A0A0F',
         transparent: isMac,
+        show: false,
         titleBarStyle: isMac ? 'hiddenInset' : 'default',
-        trafficLightPosition: isMac ? { x: 18, y: 16 } : undefined,
+        trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
         vibrancy: isMac ? 'under-window' : undefined,
+        visualEffectState: isMac ? 'active' : undefined,
+        hasShadow: true,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
@@ -220,8 +227,30 @@ app.whenReady().then(() => {
     });
     debugLog('browser window created');
 
+    if (isMac) {
+        mainWindow.setWindowButtonVisibility(true);
+    }
+
+    if (isWin) {
+        const buildPart = parseInt(os.release().split('.')[2] || '0', 10);
+        if (buildPart >= 22000) {
+            try {
+                mainWindow.setBackgroundMaterial('mica');
+            } catch (err) {
+                debugLog(`setBackgroundMaterial(mica) failed: ${err.message}`);
+            }
+        }
+    }
+
     mainWindow.loadFile(path.join(__dirname, 'index.html'));
     debugLog('loadFile(index.html) requested');
+
+    mainWindow.once('ready-to-show', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            debugLog('window ready-to-show');
+            mainWindow.show();
+        }
+    });
 
     mainWindow.webContents.on('did-finish-load', () => {
         debugLog('window did-finish-load');
