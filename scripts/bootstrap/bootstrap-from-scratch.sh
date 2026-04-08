@@ -25,7 +25,7 @@ FreeBSD / --target=freebsd-x86_64:
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 
 Options:
-  --backend=<name>   Backend for Linux stage2/stage3 (default: llvm-lib)
+  --backend=<name>   Backend for stage2/stage3/stage4 (default: cranelift)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --target=<triple>  Target platform (freebsd-x86_64 dispatches to FreeBSD flow)

@@ -212,18 +212,20 @@ bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 
 # Bootstrap (Rust seed → Simple → Self-host)
+# All platforms (Linux/macOS/FreeBSD — same script, auto-detects platform):
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+# Windows:
+scripts/bootstrap/bootstrap-windows.sh --deploy
+# Manual bootstrap stages (Cranelift backend, platform triple auto-detected):
 # Stage 1: Build Rust seed
-cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver
-# Stage 2: Compile Simple compiler with Rust seed
-src/compiler_rust/target/bootstrap/simple native-build \
-  --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/simple_stage2
-# Stage 3: Self-host recompile
-build/bootstrap/simple_stage2 native-build \
-  --entry src/app/cli/main.spl -o bin/release/simple
-# Windows: use bootstrap-windows.sh (handles .exe, MSVC/MinGW detection)
-scripts/bootstrap/bootstrap-windows.sh
-# Linux/FreeBSD: use bootstrap-from-scratch.sh
-scripts/bootstrap/bootstrap-from-scratch.sh
+cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
+# Stage 2: Seed compiles bootstrap_main.spl
+SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
+  --source src/compiler --source src/lib --source src/app \
+  --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
+# Stage 3: Stage 2 recompiles (self-host verification)
+# Stage 4: Compile full CLI (main.spl) → build/bootstrap/full/<triple>/simple
+# --deploy copies to bin/release/<triple>/simple and runs setup.sh
 
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
 CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl

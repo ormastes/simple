@@ -140,46 +140,56 @@ Stage 1: Rust Seed Binary
   -> src/compiler_rust/target/bootstrap/simple
   -> Backend: Cranelift (hardcoded)
 
-Stage 2: Pure Simple (compiled by Stage 1)
-  simple native-build
-  -> bin/release/simple
+Stage 2: Pure Simple (compiled by Rust seed)
+  seed native-build --entry bootstrap_main.spl
+  -> build/bootstrap/stage2/<triple>/simple
   -> Backend: Cranelift
 
 Stage 3: Self-Hosted (compiled by Stage 2)
-  bin/release/simple build --release
-  -> bin/release/simple
-  -> Backend: auto (LLVM-lib > llc > Cranelift)
+  stage2 native-build --entry bootstrap_main.spl
+  -> build/bootstrap/stage3/<triple>/simple
+  -> Backend: Cranelift
+
+Stage 4: Full CLI (compiled by verified stage)
+  stage3 native-build --entry main.spl
+  -> build/bootstrap/full/<triple>/simple
+  -> Backend: Cranelift
 ```
 
 ### Quick Bootstrap
 
 ```bash
-# Linux / macOS
+# Linux / macOS (same script, auto-detects platform)
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
-scripts/setup.sh
 
 # Windows (Git Bash / MSYS2)
 scripts/bootstrap/bootstrap-windows.sh --deploy
-scripts/setup.sh          # or: scripts\setup.cmd
 
 # Keep artifacts in a separate directory
 scripts/bootstrap/bootstrap-from-scratch.sh --output=build/bootstrap
 ```
 
+The `--deploy` flag copies the final binary to `bin/release/<triple>/simple` and runs `scripts/setup.sh` automatically to create the `bin/simple` symlink.
+
 Bootstrap output uses `<arch>-<vendor>-<os>-<abi>` target triples:
 
 ```
-build/bootstrap/stage1/x86_64-unknown-linux-gnu/simple
-build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple
-build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
+build/bootstrap/stage2/<triple>/simple
+build/bootstrap/stage3/<triple>/simple
+build/bootstrap/full/<triple>/simple
+
+# Examples:
+#   x86_64-unknown-linux-gnu
+#   aarch64-apple-darwin-macho
+#   x86_64-pc-windows-msvc
 ```
 
 ### Bootstrap Flags
 
 | Flag | Description |
 |------|-------------|
-| `--deploy` | Copy result to `bin/release/simple` |
-| `--backend=X` | Override Stage 2/3 backend (`llvm-lib` by default) |
+| `--deploy` | Copy result to `bin/release/<triple>/simple` and run `setup.sh` |
+| `--backend=X` | Override bootstrap backend (`cranelift` by default) |
 | `--output=DIR` | Write stage outputs to a custom directory |
 | `--keep-artifacts` | Keep `build/` directory |
 | `--no-verify` | Compatibility flag; wrapper still verifies stage hashes |
@@ -190,7 +200,7 @@ build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple
 |--------|---------|
 | `scripts/setup.sh` | Post-bootstrap setup — creates `bin/simple` symlink |
 | `scripts/setup.cmd` | Windows CMD/PowerShell equivalent |
-| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux/FreeBSD bootstrap |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Verified staged Linux/macOS/FreeBSD bootstrap |
 | `scripts/bootstrap/bootstrap-windows.sh` | Windows bootstrap (MSVC / MinGW auto-detect) |
 
 ---
@@ -223,10 +233,11 @@ rustc --version     # 1.75+
 
 | Artifact | Path | Description |
 |----------|------|-------------|
-| Production binary | `bin/release/simple` | Self-sufficient compiler/interpreter |
+| Entry point | `bin/simple` | Symlink → `release/<triple>/simple` |
+| Platform binary | `bin/release/<triple>/simple` | Self-sufficient compiler/interpreter |
 | Build artifacts | `build/` | Intermediate files (safe to delete) |
 
-The production binary (`bin/release/simple`) is fully self-sufficient. All compilation, interpretation, and test running happens in-process. The only external tool calls are to system compilers and linkers (`clang`, `gcc`, `mold`/`lld`/`ld`, `llc`).
+The platform binary is fully self-sufficient. All compilation, interpretation, and test running happens in-process. The only external tool calls are to system compilers and linkers (`clang`, `gcc`, `mold`/`lld`/`ld`, `llc`). The `scripts/setup.sh` script creates the `bin/simple` symlink pointing to the correct platform binary.
 
 ---
 
