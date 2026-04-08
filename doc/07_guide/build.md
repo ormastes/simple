@@ -143,17 +143,17 @@ Stage 1: Rust Seed Binary
 Stage 2: Pure Simple (compiled by Rust seed)
   seed native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage2/<triple>/simple
-  -> Backend: Cranelift
+  -> Backend: llvm-lib (default)
 
 Stage 3: Self-Hosted (compiled by Stage 2)
   stage2 native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage3/<triple>/simple
-  -> Backend: Cranelift
+  -> Backend: llvm-lib (default)
 
 Stage 4: Full CLI (compiled by verified stage)
   stage3 native-build --entry main.spl
   -> build/bootstrap/full/<triple>/simple
-  -> Backend: Cranelift
+  -> Backend: llvm-lib (default)
 ```
 
 ### Quick Bootstrap
@@ -189,7 +189,7 @@ build/bootstrap/full/<triple>/simple
 | Flag | Description |
 |------|-------------|
 | `--deploy` | Copy result to `bin/release/<triple>/simple` and run `setup.sh` |
-| `--backend=X` | Override bootstrap backend (`cranelift` by default) |
+| `--backend=X` | Override bootstrap backend (`llvm-lib` by default) |
 | `--output=DIR` | Write stage outputs to a custom directory |
 | `--keep-artifacts` | Keep `build/` directory |
 | `--no-verify` | Compatibility flag; wrapper still verifies stage hashes |

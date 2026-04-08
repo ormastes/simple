@@ -216,7 +216,7 @@ bin/simple bug-gen                  # Generate bug report
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 # Windows:
 scripts/bootstrap/bootstrap-windows.sh --deploy
-# Manual bootstrap stages (Cranelift backend, platform triple auto-detected):
+# Manual bootstrap stages (llvm-lib backend default, platform triple auto-detected):
 # Stage 1: Build Rust seed
 cd src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all
 # Stage 2: Seed compiles bootstrap_main.spl
