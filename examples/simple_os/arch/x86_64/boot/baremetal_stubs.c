@@ -2179,6 +2179,45 @@ static void _vnet_rx_fill(void)
     /* Memory barrier: ensure idx is visible before we notify */
     __asm__ volatile("mfence" ::: "memory");
 
+    /* Diagnostic: dump first descriptor and avail ring state */
+    serial_puts("[net-rx-fill] desc[0].addr=0x");
+    serial_put_hex((uint32_t)_vnet.rx_desc[0].addr);
+    serial_puts(" len=");
+    serial_put_dec(_vnet.rx_desc[0].len);
+    serial_puts(" flags=0x");
+    serial_put_hex(_vnet.rx_desc[0].flags);
+    serial_puts("\r\n");
+    serial_puts("[net-rx-fill] avail.flags=");
+    serial_put_dec(_vnet.rx_avail->flags);
+    serial_puts(" avail.idx=");
+    serial_put_dec(_vnet.rx_avail->idx);
+    serial_puts(" avail.ring[0]=");
+    serial_put_dec(_vnet.rx_avail->ring[0]);
+    serial_puts("\r\n");
+    serial_puts("[net-rx-fill] used.flags=");
+    serial_put_dec(_vnet.rx_used->flags);
+    serial_puts(" used.idx=");
+    serial_put_dec(_vnet.rx_used->idx);
+    serial_puts("\r\n");
+    serial_puts("[net-rx-fill] rx_buffers=0x");
+    serial_put_hex((uint32_t)(uintptr_t)_vnet.rx_buffers);
+    serial_puts(" desc=0x");
+    serial_put_hex((uint32_t)(uintptr_t)_vnet.rx_desc);
+    serial_puts(" avail=0x");
+    serial_put_hex((uint32_t)(uintptr_t)_vnet.rx_avail);
+    serial_puts(" used=0x");
+    serial_put_hex((uint32_t)(uintptr_t)_vnet.rx_used);
+    serial_puts("\r\n");
+
+    /* Also verify TX queue state */
+    serial_puts("[net-tx-diag] desc=0x");
+    serial_put_hex((uint32_t)(uintptr_t)_vnet.tx_desc);
+    serial_puts(" avail.idx=");
+    serial_put_dec(_vnet.tx_avail->idx);
+    serial_puts(" used.idx=");
+    serial_put_dec(_vnet.tx_used->idx);
+    serial_puts("\r\n");
+
     /* Notify device about RX buffers (queue 0) */
     _vnet_wr16(0x10, 0);
 }
@@ -2226,8 +2265,21 @@ static int _vnet_send_frame(const void *frame, uint16_t frame_len)
     _vnet.tx_avail->idx = avail_idx + 1;
 
     /* Notify device (queue 1 = TX) */
+    __asm__ volatile("mfence" ::: "memory");
     _vnet_wr16(0x10, 1);
     _vnet.tx_count++;
+
+    /* Diagnostic: check if TX used ring advances */
+    for (volatile int w = 0; w < 100000; w++) {}
+    serial_puts("[net-tx] sent desc=");
+    serial_put_dec(di);
+    serial_puts(" tx_avail.idx=");
+    serial_put_dec(_vnet.tx_avail->idx);
+    serial_puts(" tx_used.idx=");
+    serial_put_dec(_vnet.tx_used->idx);
+    serial_puts(" rx_used.idx=");
+    serial_put_dec(_vnet.rx_used->idx);
+    serial_puts("\r\n");
 
     return 0;
 }
@@ -2653,9 +2705,30 @@ static int _virtio_net_init(void)
     /* Legacy VirtIO: skip FEATURES_OK (that's VirtIO 1.0+ only).
      * Go directly from DRIVER to queue setup, then DRIVER_OK. */
 
-    /* Step 7: Read MAC address from BAR0 + 0x14..0x19 */
+    /* Detect MSI-X layout: read 16-bit values at offsets 0x14 and 0x16.
+     * If MSI-X is present, 0x14 = config vector (0xFFFF initially),
+     * 0x16 = queue vector (0xFFFF initially), and MAC starts at 0x18.
+     * If no MSI-X, 0x14 = first 2 MAC bytes (0x5452 for 52:54). */
+    {
+        uint16_t probe14 = _vnet_rd16(0x14);
+        uint16_t probe16 = _vnet_rd16(0x16);
+        serial_puts("[net] MSI-X probe: off14=0x");
+        serial_put_hex(probe14);
+        serial_puts(" off16=0x");
+        serial_put_hex(probe16);
+        serial_puts("\r\n");
+    }
+
+    /* Step 7: Read MAC address — detect whether MSI-X vectors
+     * occupy offsets 0x14..0x17 (shifting MAC to 0x18).
+     * Heuristic: if 16-bit read at 0x14 == 0xFFFF, MSI-X is present. */
+    uint16_t msix_probe = _vnet_rd16(0x14);
+    uint16_t dev_cfg_off = (msix_probe == 0xFFFF) ? 0x18 : 0x14;
+    serial_puts("[net] Device config offset: 0x");
+    serial_put_hex(dev_cfg_off);
+    serial_puts(msix_probe == 0xFFFF ? " (MSI-X present)\r\n" : " (no MSI-X)\r\n");
     for (int i = 0; i < 6; i++) {
-        _vnet.mac[i] = _vnet_rd8(0x14 + (uint16_t)i);
+        _vnet.mac[i] = _vnet_rd8(dev_cfg_off + (uint16_t)i);
     }
     serial_puts("[net] MAC address: ");
     _net_print_mac(_vnet.mac);
@@ -2722,6 +2795,19 @@ static int _virtio_net_init(void)
 
     /* Now fill RX queue — device is live and will see the notify */
     _vnet_rx_fill();
+
+    /* Verify RX queue state after fill */
+    serial_puts("[net] Post-fill: desc[0].addr=0x");
+    serial_put_hex((uint32_t)_vnet.rx_desc[0].addr);
+    serial_puts(" len=");
+    serial_put_dec(_vnet.rx_desc[0].len);
+    serial_puts(" flags=");
+    serial_put_dec(_vnet.rx_desc[0].flags);
+    serial_puts(" avail[0]=");
+    serial_put_dec(_vnet.rx_avail->ring[0]);
+    serial_puts(" avail.idx=");
+    serial_put_dec(_vnet.rx_avail->idx);
+    serial_puts("\r\n");
 
     serial_puts("[net] VirtIO-net initialized: MAC=");
     _net_print_mac(_vnet.mac);

@@ -126,6 +126,9 @@ class JsParser:
             self.match_token(JsTokenKind.Semicolon)
             return Ok(Statement.ContinueStmt)
 
+        if kind == JsTokenKind.Do:
+            return self.parse_do_while_statement()
+
         self.parse_expression_statement()
 
     # var/let/const declaration
@@ -285,43 +288,109 @@ class JsParser:
 
         Ok(Statement.While(cond: cond, body: body))
 
-    # for loop — basic C-style: for (init; cond; update) { body }
+    # do...while loop
+    me parse_do_while_statement() -> BrowserResult<Statement>:
+        self.advance()  # consume 'do'
+        var body: [Statement] = []
+        if self.check(JsTokenKind.OpenBrace):
+            body = self.parse_block()?
+        else:
+            body.push(self.parse_statement()?)
+        self.expect(JsTokenKind.While)?
+        self.expect(JsTokenKind.OpenParen)?
+        val cond = self.parse_expression()?
+        self.expect(JsTokenKind.CloseParen)?
+        self.match_token(JsTokenKind.Semicolon)
+        Ok(Statement.DoWhile(cond: cond, body: body))
+
+    # for loop — C-style, for-in, for-of
     me parse_for_statement() -> BrowserResult<Statement>:
         self.advance()  # consume 'for'
         self.expect(JsTokenKind.OpenParen)?
 
-        # Init
-        var init_stmt = Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined))
+        # Check for for-in / for-of
         val kind = self.current.kind
         if kind == JsTokenKind.Var or kind == JsTokenKind.Let or kind == JsTokenKind.Const:
-            init_stmt = self.parse_var_declaration(self.current.value)?
-        else if not self.check(JsTokenKind.Semicolon):
+            val decl_kind = self.current.value
+            self.advance()  # consume var/let/const
+            val binding_tok = self.expect(JsTokenKind.Identifier)?
+            val binding = binding_tok.value
+
+            if self.check(JsTokenKind.In):
+                # for (var k in obj) { ... }
+                self.advance()  # consume 'in'
+                val obj_expr = self.parse_expression()?
+                self.expect(JsTokenKind.CloseParen)?
+                var body: [Statement] = []
+                if self.check(JsTokenKind.OpenBrace):
+                    body = self.parse_block()?
+                else:
+                    body.push(self.parse_statement()?)
+                return Ok(Statement.ForIn(binding: binding, object: obj_expr, body: body))
+
+            if self.check(JsTokenKind.Of):
+                # for (var x of arr) { ... }
+                self.advance()  # consume 'of'
+                val iter_expr = self.parse_expression()?
+                self.expect(JsTokenKind.CloseParen)?
+                var body: [Statement] = []
+                if self.check(JsTokenKind.OpenBrace):
+                    body = self.parse_block()?
+                else:
+                    body.push(self.parse_statement()?)
+                return Ok(Statement.ForOf(binding: binding, iterable: iter_expr, body: body))
+
+            # C-style for: var x = init; cond; update
+            # We already consumed "var x", now need "= expr;"
+            var init_expr = Expression.Literal(value: JsValue.Undefined)
+            if self.match_token(JsTokenKind.Eq):
+                init_expr = self.parse_expression()?
+            val init_stmt = Statement.VarDecl(name: binding, init: init_expr)
+            self.match_token(JsTokenKind.Semicolon)
+
+            # Condition
+            var cond = Expression.Literal(value: JsValue.Boolean(v: true))
+            if not self.check(JsTokenKind.Semicolon):
+                cond = self.parse_expression()?
+            self.expect(JsTokenKind.Semicolon)?
+
+            # Update
+            var update = Expression.Literal(value: JsValue.Undefined)
+            if not self.check(JsTokenKind.CloseParen):
+                update = self.parse_expression()?
+            self.expect(JsTokenKind.CloseParen)?
+
+            var body: [Statement] = []
+            if self.check(JsTokenKind.OpenBrace):
+                body = self.parse_block()?
+            else:
+                body.push(self.parse_statement()?)
+            return Ok(Statement.For(init: init_stmt, cond: cond, update: update, body: body))
+
+        # Non-var init
+        var init_stmt = Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined))
+        if not self.check(JsTokenKind.Semicolon):
             val expr = self.parse_expression()?
             init_stmt = Statement.ExprStmt(expr: expr)
             self.match_token(JsTokenKind.Semicolon)
         else:
             self.match_token(JsTokenKind.Semicolon)
 
-        # Condition
         var cond = Expression.Literal(value: JsValue.Boolean(v: true))
         if not self.check(JsTokenKind.Semicolon):
             cond = self.parse_expression()?
         self.expect(JsTokenKind.Semicolon)?
 
-        # Update
         var update = Expression.Literal(value: JsValue.Undefined)
         if not self.check(JsTokenKind.CloseParen):
             update = self.parse_expression()?
-
         self.expect(JsTokenKind.CloseParen)?
 
         var body: [Statement] = []
         if self.check(JsTokenKind.OpenBrace):
             body = self.parse_block()?
         else:
-            val single = self.parse_statement()?
-            body.push(single)
-
+            body.push(self.parse_statement()?)
         Ok(Statement.For(init: init_stmt, cond: cond, update: update, body: body))
 
     # Block { ... }

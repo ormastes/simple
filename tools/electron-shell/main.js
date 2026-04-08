@@ -202,9 +202,15 @@ function spawnSimpleProcess() {
 // Create the main window and start the subprocess
 app.whenReady().then(() => {
     debugLog('app.whenReady');
+    const isMac = process.platform === 'darwin';
     mainWindow = new BrowserWindow({
         width: 1280,
         height: 720,
+        backgroundColor: '#0A0A0F',
+        transparent: isMac,
+        titleBarStyle: isMac ? 'hiddenInset' : 'default',
+        trafficLightPosition: isMac ? { x: 18, y: 16 } : undefined,
+        vibrancy: isMac ? 'under-window' : undefined,
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
