@@ -825,16 +825,29 @@ class JsInterpreter:
 
     # Function call
     me eval_call(callee: Expression, args: [Expression], env: i64) -> BrowserResult<JsValue>:
-        # Array method dispatch
+        # Array method dispatch — avoid nested match/return (interpreter mode issue)
+        var is_member = false
+        var member_method = ""
+        var member_obj_expr = Expression.Literal(value: JsValue.Undefined)
         match callee:
             Expression.Member(obj_expr, method_name):
-                val obj_val = self.eval_expression(obj_expr, env)?
-                match obj_val:
-                    JsValue.Array(arr_id):
-                        if _is_array_method(method_name):
-                            return self._dispatch_array_method(arr_id, method_name, args, env)
-                    _: pass_dn
+                is_member = true
+                member_method = method_name
+                member_obj_expr = obj_expr
             _: pass_dn
+
+        if is_member and _is_array_method(member_method):
+            val obj_val = self.eval_expression(member_obj_expr, env)?
+            var is_array = false
+            var arr_id = 0
+            match obj_val:
+                JsValue.Array(id):
+                    is_array = true
+                    arr_id = id
+                _: pass_dn
+            if is_array:
+                return self._dispatch_array_method(arr_id, member_method, args, env)
+
         val callee_val = self.eval_expression(callee, env)?
 
         # Evaluate arguments

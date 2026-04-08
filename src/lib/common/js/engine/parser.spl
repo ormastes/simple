@@ -10,6 +10,13 @@ use std.js.engine.lexer.JsLexer
 use std.js.engine.lexer.JsToken
 use std.js.engine.lexer.JsTokenKind
 
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+fn _get_ident_name(expr: Expression) -> text:
+    match expr:
+        Expression.Identifier(name): name
+        _: ""
+
 # ── Parser ───────────────────────────────────────────────────────────────
 
 class JsParser:
@@ -813,7 +820,9 @@ class JsParser:
             # Check for single-param arrow: ident => expr
             val ident_tok = self.advance()
             if self.check(JsTokenKind.Arrow):
-                return self.parse_arrow_body([text].of(ident_tok.value))
+                var single_param: [text] = []
+                single_param.push(ident_tok.value)
+                return self.parse_arrow_body(single_param)
             return Ok(Expression.Identifier(name: ident_tok.value))
 
         # Grouped expression or arrow function params
@@ -857,12 +866,9 @@ class JsParser:
         if self.check(JsTokenKind.Comma):
             # Collect identifiers for arrow params
             var params: [text] = []
-            # Extract name from first expression
-            match expr:
-                Expression.Identifier(name):
-                    params.push(name)
-                _:
-                    pass_dn
+            val first_name = _get_ident_name(expr)
+            if first_name != "":
+                params.push(first_name)
 
             while self.match_token(JsTokenKind.Comma):
                 val param_tok = self.expect(JsTokenKind.Identifier)?
@@ -877,12 +883,12 @@ class JsParser:
         self.expect(JsTokenKind.CloseParen)?
 
         # Check for arrow after single-param parens: (x) => ...
-        match expr:
-            Expression.Identifier(name):
-                if self.check(JsTokenKind.Arrow):
-                    return self.parse_arrow_body([text].of(name))
-            _:
-                pass_dn
+        # Avoid nested match/return — interpreter mode doesn't propagate return from match
+        val ident_name = _get_ident_name(expr)
+        if ident_name != "" and self.check(JsTokenKind.Arrow):
+            var single_param: [text] = []
+            single_param.push(ident_name)
+            return self.parse_arrow_body(single_param)
 
         Ok(expr)
 
@@ -964,6 +970,7 @@ class JsParser:
         Ok(Pair(first: key, second: value))
 
     # Function expression: function(params) { body }
+    # Reuses ArrowFunction AST node — interpreter handles both the same way
     me parse_function_expression() -> BrowserResult<Expression>:
         self.advance()  # consume 'function'
 
@@ -983,10 +990,5 @@ class JsParser:
 
         val body = self.parse_block()?
 
-        # Encode as a special identifier that the interpreter recognizes
-        # The interpreter registers the function when evaluating this expression
-        var args: [Expression] = []
-        for p in params:
-            args.push(Expression.Identifier(name: p))
-        val callee = Expression.Identifier(name: "__fn_expr__")
-        Ok(Expression.Call(callee: callee, args: args))
+        # Use ArrowFunction node — interpreter registers it as a closure
+        Ok(Expression.ArrowFunction(params: params, body: body))

@@ -2641,25 +2641,17 @@ static int _virtio_net_init(void)
     serial_put_hex(host_features);
     serial_puts("\r\n");
 
-    /* We only need MAC read capability */
+    /* We only need MAC read capability.
+     * NOTE: Do NOT set VIRTIO_NET_F_STATUS — it's feature bit 16 which
+     * would require the FEATURES_OK transition (VirtIO 1.0+).
+     * For legacy VirtIO, keep features minimal. */
     uint32_t guest_features = 0;
     if (host_features & VIRTIO_NET_F_MAC)
         guest_features |= VIRTIO_NET_F_MAC;
-    if (host_features & VIRTIO_NET_F_STATUS)
-        guest_features |= VIRTIO_NET_F_STATUS;
     _vnet_wr32(0x04, guest_features);
 
-    /* Step 6: Features OK (for legacy, set DRIVER_OK which includes this) */
-    uint8_t status = _vnet_rd8(0x12);
-    _vnet_wr8(0x12, status | VIRTIO_STATUS_FEATURES_OK);
-
-    /* Verify features were accepted */
-    status = _vnet_rd8(0x12);
-    if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
-        serial_puts("[net] Features not accepted by device\r\n");
-        _vnet_wr8(0x12, VIRTIO_STATUS_FAILED);
-        return -5;
-    }
+    /* Legacy VirtIO: skip FEATURES_OK (that's VirtIO 1.0+ only).
+     * Go directly from DRIVER to queue setup, then DRIVER_OK. */
 
     /* Step 7: Read MAC address from BAR0 + 0x14..0x19 */
     for (int i = 0; i < 6; i++) {
@@ -2713,12 +2705,14 @@ static int _virtio_net_init(void)
 
     /* Step 11: Set DRIVER_OK *before* filling RX queue.
      * The VirtIO spec says the device MUST NOT process virtqueue entries
-     * until DRIVER_OK is set. If we fill the RX queue first and then set
-     * DRIVER_OK, the device never sees the already-posted buffers because
-     * there is no new notification after the status change.
-     * Fix: set DRIVER_OK first, then fill RX buffers and notify. */
-    status = _vnet_rd8(0x12);
-    _vnet_wr8(0x12, status | VIRTIO_STATUS_DRIVER_OK);
+     * until DRIVER_OK is set. */
+    {
+        uint8_t s = _vnet_rd8(0x12);
+        _vnet_wr8(0x12, s | VIRTIO_STATUS_DRIVER_OK);
+        serial_puts("[net] Status after DRIVER_OK: 0x");
+        serial_put_hex(_vnet_rd8(0x12));
+        serial_puts("\r\n");
+    }
 
     _vnet.initialized = 1;
     _vnet.rx_count = 0;
@@ -5442,10 +5436,11 @@ static void serial_hex(uint64_t v) {
 
 RuntimeValue rt_gui_set_fb(RuntimeValue addr, RuntimeValue w)
 {
-    g_fb_addr = (uint64_t)addr;
-    g_fb_w = (uint64_t)w;
-    /* Ensure BGA VIRT_WIDTH matches XRES so pitch = width * bpp/8 */
-    bga_write(0x06, (uint16_t)(uint64_t)w);
+    uint32_t width = (uint32_t)(uint64_t)w;
+    /* Initialize BGA display mode (1024x768x32) before setting fb params */
+    bga_init(width, 768, 32);
+    g_fb_addr = g_fb_addr ? g_fb_addr : (uint64_t)addr;  /* prefer PCI-detected addr */
+    g_fb_w = (uint64_t)width;
     /* Diagnostic: print fb address and width */
     serial_puts("[GUI] fb_addr=0x");
     serial_hex(g_fb_addr);
