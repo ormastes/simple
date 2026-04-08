@@ -222,11 +222,14 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
     use object::read::macho::{MachOFile64, MachHeader as _};
     use object::read::{Object, ObjectSection, ObjectSymbol};
     use object::write;
-    use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope};
+    use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope, RelocationTarget, RelocationFlags};
 
     let file = MachOFile64::<object::endian::LittleEndian>::parse(malformed).map_err(|e| format!("parse: {}", e))?;
 
-    let mut out = write::Object::new(BinaryFormat::MachO, Architecture::Aarch64, Endianness::Little);
+    // Derive architecture and endianness from the input file
+    let arch = file.architecture();
+    let endian = if file.is_little_endian() { Endianness::Little } else { Endianness::Big };
+    let mut out = write::Object::new(BinaryFormat::MachO, arch, endian);
 
     // Copy sections
     let mut section_map = std::collections::HashMap::new();
@@ -252,7 +255,7 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
             continue;
         }
         let section = symbol.section_index().and_then(|idx| section_map.get(&idx).copied());
-        let mut out_sym = write::Symbol {
+        let out_sym = write::Symbol {
             name: name.as_bytes().to_vec(),
             value: symbol.address(),
             size: symbol.size(),
@@ -273,6 +276,33 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
         };
         let out_sym_id = out.add_symbol(out_sym);
         sym_map.insert(symbol.index(), out_sym_id);
+    }
+
+    // Copy relocations for each section (critical for function call resolution)
+    for section in file.sections() {
+        let out_section = match section_map.get(&section.index()) {
+            Some(&s) => s,
+            None => continue,
+        };
+        for (offset, reloc) in section.relocations() {
+            let target_sym = match reloc.target() {
+                RelocationTarget::Symbol(idx) => {
+                    match sym_map.get(&idx) {
+                        Some(&s) => s,
+                        None => continue, // skip relocations referencing corrupted symbols
+                    }
+                }
+                _ => continue,
+            };
+            if let Err(e) = out.add_relocation(out_section, write::Relocation {
+                offset,
+                symbol: target_sym,
+                addend: reloc.addend(),
+                flags: reloc.flags(),
+            }) {
+                eprintln!("[MACHO-FIX] relocation copy warning: {}", e);
+            }
+        }
     }
 
     out.write().map_err(|e| format!("write: {}", e))

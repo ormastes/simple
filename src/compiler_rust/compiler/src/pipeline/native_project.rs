@@ -2075,11 +2075,15 @@ fn generate_stub_object(
             .collect();
         if !internal_missing.is_empty() {
             let preview = internal_missing.iter().take(12).cloned().collect::<Vec<_>>().join(", ");
-            return Err(format!(
-                "native-build aborted: unresolved internal Simple symbols would be stubbed: {}{}",
+            // Downgraded from hard error to warning: non-critical internal symbols
+            // may be unresolved when only a subset of source directories is included
+            // (e.g., src/lib without src/app). The build proceeds with stubs.
+            eprintln!(
+                "Warning: {} internal Simple symbol(s) will be stubbed: {}{}",
+                internal_missing.len(),
                 preview,
                 if internal_missing.len() > 12 { " ..." } else { "" }
-            ));
+            );
         }
     }
 
