@@ -67,7 +67,7 @@ const simpleLib = [
   path.join(repoRoot, 'src')
 ].join(sep);
 
-const child = spawn(binary, [entryPath, ...passArgs], {
+const child = spawn(binary, ['run', entryPath, ...passArgs], {
   stdio: 'inherit',
   env: {
     ...process.env,

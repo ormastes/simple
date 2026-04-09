@@ -513,6 +513,16 @@ impl Target {
     /// Falls back to `TargetArch::triple_str()` for unrecognized combinations.
     pub const fn triple_str(&self) -> &'static str {
         match (&self.arch, &self.os) {
+            (TargetArch::Wasm32, _) => match self.wasm_runtime {
+                Some(WasmRuntime::Wasi) => "wasm32-wasi",
+                Some(WasmRuntime::Emscripten) => "wasm32-unknown-emscripten",
+                Some(WasmRuntime::Browser) | Some(WasmRuntime::Standalone) | None => "wasm32-unknown-unknown",
+            },
+            (TargetArch::Wasm64, _) => match self.wasm_runtime {
+                Some(WasmRuntime::Wasi) => "wasm64-wasi",
+                Some(WasmRuntime::Emscripten) => "wasm64-unknown-emscripten",
+                Some(WasmRuntime::Browser) | Some(WasmRuntime::Standalone) | None => "wasm64-unknown-unknown",
+            },
             // Baremetal / freestanding targets (TargetOS::None, non-WASM)
             (TargetArch::X86_64, TargetOS::None) => "x86_64-unknown-none-elf",
             (TargetArch::X86, TargetOS::None) => "i686-unknown-none-elf",
@@ -537,8 +547,6 @@ impl Target {
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
             (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
-            (TargetArch::Wasm32, _) => "wasm32-unknown-unknown",
-            (TargetArch::Wasm64, _) => "wasm64-unknown-unknown",
             _ => self.arch.triple_str(),
         }
     }
@@ -642,7 +650,14 @@ impl Default for Target {
 
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.arch, self.os)
+        if self.is_wasm() {
+            match self.wasm_runtime {
+                Some(runtime) => write!(f, "{}-{}", self.arch, runtime),
+                None => write!(f, "{}-{}", self.arch, self.os),
+            }
+        } else {
+            write!(f, "{}-{}", self.arch, self.os)
+        }
     }
 }
 
@@ -675,6 +690,16 @@ mod tests {
         assert_eq!("armv7".parse::<TargetArch>().unwrap(), TargetArch::Arm);
         assert_eq!("riscv64".parse::<TargetArch>().unwrap(), TargetArch::Riscv64);
         assert_eq!("riscv32".parse::<TargetArch>().unwrap(), TargetArch::Riscv32);
+    }
+
+    #[test]
+    fn test_parse_wasm_wasi_target() {
+        let target = Target::parse("wasm32-wasi").unwrap();
+        assert_eq!(target.arch, TargetArch::Wasm32);
+        assert_eq!(target.os, TargetOS::None);
+        assert_eq!(target.wasm_runtime, Some(WasmRuntime::Wasi));
+        assert_eq!(target.triple_str(), "wasm32-wasi");
+        assert_eq!(target.to_string(), "wasm32-wasi");
     }
 
     #[test]

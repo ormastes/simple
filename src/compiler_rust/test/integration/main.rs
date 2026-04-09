@@ -13,8 +13,8 @@ fn init() {
     init_integration_tests!("simple_integration");
 }
 
-mod compiler_integration;
-mod compiler_integration2;
+mod compiler_pipeline_integration;
+mod compiler_types_integration;
 mod driver_integration;
 
 #[cfg(feature = "vulkan")]

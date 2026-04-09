@@ -82,6 +82,59 @@ code --install-extension simple-language-0.1.0.vsix
 - **VSCode** 1.80.0 or higher
 - **Simple LSP Server** (`simple-lsp`) must be in your PATH
 
+### Optional Bundled WASM Artifacts
+
+The extension can bundle prebuilt WASM artifacts under `wasm/`:
+
+- `wasm/simple-lsp.wasm`
+- `wasm/math-core.wasm`
+
+`npm run compile` now runs a staging step after TypeScript compilation. It copies
+WASM files into `wasm/` from either explicit source paths or a shared build
+directory:
+
+```bash
+# Stage artifacts from explicit files
+export SIMPLE_VSCODE_LSP_WASM_SOURCE=/abs/path/to/simple-lsp.wasm
+export SIMPLE_VSCODE_MATH_WASM_SOURCE=/abs/path/to/math-core.wasm
+npm run compile
+
+# Or stage both from one build directory
+export SIMPLE_VSCODE_WASM_BUILD_DIR=/abs/path/to/generated-wasm
+npm run compile
+```
+
+If no WASM source paths are provided, the staging step is skipped and the
+extension still packages normally.
+
+### Building WASM On macOS
+
+For LLVM-backed WASM builds on this machine, the working environment was:
+
+```bash
+export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18
+export PATH=/opt/homebrew/opt/llvm@18/bin:$PATH
+export LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH
+export DYLD_LIBRARY_PATH=/opt/homebrew/lib:/opt/homebrew/opt/zstd/lib:$DYLD_LIBRARY_PATH
+```
+
+Then build the driver with LLVM enabled:
+
+```bash
+cd src/compiler_rust
+cargo build -p simple-driver --bin simple --features llvm
+```
+
+Example artifact generation:
+
+```bash
+# Generic target compile
+src/compiler_rust/target/debug/simple compile /tmp/simple_vscode_smoke.spl --target=wasm32-wasi -o /tmp/simple_vscode_smoke.smf
+
+# VSCode scaffold build
+src/compiler_rust/target/debug/simple vscode build /tmp/simple_vscode_smoke.spl -o /tmp/simple-vscode-out --name math-core-test --display-name "Math Core Test" --publisher ormastes --version 0.0.1 --release
+```
+
 ### Installing Simple LSP Server
 
 ```bash

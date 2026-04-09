@@ -40,12 +40,12 @@ function findRuntime() {
   }
   const devBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
   if (fs.existsSync(devBinary)) {
-    return { command: devBinary, args: [path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+    return { command: devBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
   }
   // Fallback: bin/simple symlink (common dev setup)
   const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);
   if (fs.existsSync(devSymlink)) {
-    return { command: devSymlink, args: [path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+    return { command: devSymlink, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
   }
 
   // 2. Check extracted bootstrap package
@@ -60,18 +60,18 @@ function findRuntime() {
       // Primary: bin/simple (correct packaging)
       const binary = path.join(pkgDir, 'bin', `simple${ext}`);
       if (fs.existsSync(binary)) {
-        return { command: binary, args: [path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+        return { command: binary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
       }
       // Fallback: src/compiler_rust/bin/release/simple (legacy SPK layout)
       const legacyBinary = path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`);
       if (fs.existsSync(legacyBinary)) {
-        return { command: legacyBinary, args: [path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+        return { command: legacyBinary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
       }
     }
   }
 
   // 3. Fall back to PATH
-  return { command: `simple${ext}`, args: [path.join(process.cwd(), ENTRY)], repoRoot: process.cwd(), mode: 'runtime' };
+  return { command: `simple${ext}`, args: ['run', path.join(process.cwd(), ENTRY)], repoRoot: process.cwd(), mode: 'runtime' };
 }
 
 const { command, args, repoRoot, mode } = findRuntime();

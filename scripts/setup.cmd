@@ -137,13 +137,14 @@ REM simple_mcp_server.cmd
 echo @echo off
 echo setlocal
 echo set "SCRIPT_DIR=%%~dp0"
-echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo set "RUNTIME=%%SCRIPT_DIR%%..\..\src\compiler_rust\target\release\simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
 echo set "ENTRY=%%SCRIPT_DIR%%..\..\src\app\mcp\main.spl"
 echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\src"
 echo set "SIMPLE_LOG=error"
 echo set "RUST_LOG=error"
-echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+echo "%%RUNTIME%%" run "%%ENTRY%%" %%* 2^>nul
 ) > "%RELEASE_DIR%\simple_mcp_server.cmd"
 echo   simple_mcp_server.cmd
 
@@ -152,14 +153,15 @@ REM simple_lsp_mcp_server.cmd
 echo @echo off
 echo setlocal
 echo set "SCRIPT_DIR=%%~dp0"
-echo set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
+echo set "RUNTIME=%%SCRIPT_DIR%%..\..\src\compiler_rust\target\release\simple.exe"
+echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple.exe"
 echo if not exist "%%RUNTIME%%" set "RUNTIME=%%SCRIPT_DIR%%simple"
 echo set "ENTRY=%%SCRIPT_DIR%%..\..\src\app\simple_lsp_mcp\main.spl"
 echo set "SIMPLE_LIB=%%SCRIPT_DIR%%..\..\src"
 echo set "SIMPLE_BINARY=%%RUNTIME%%"
 echo set "SIMPLE_LOG=error"
 echo set "RUST_LOG=error"
-echo "%%RUNTIME%%" "%%ENTRY%%" %%* 2^>nul
+echo "%%RUNTIME%%" run "%%ENTRY%%" %%* 2^>nul
 ) > "%RELEASE_DIR%\simple_lsp_mcp_server.cmd"
 echo   simple_lsp_mcp_server.cmd
 

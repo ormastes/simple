@@ -67,7 +67,7 @@ let fallbackSemanticTokensRegistration;
 function activate(context) {
     console.log('Simple Language extension activating...');
     // Create output channel for LSP communication
-    outputChannel = vscode.window.createOutputChannel('Simple Language Server');
+    outputChannel = vscode.window.createOutputChannel('Simple Language Server', { log: true });
     context.subscriptions.push(outputChannel);
     // Create output channel for AI features
     aiOutputChannel = vscode.window.createOutputChannel('Simple AI Assistant');

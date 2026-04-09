@@ -330,10 +330,10 @@ done
 SCRIPT_DIR="\$(cd "\$(dirname "\$SELF")" && pwd)"
 REPO_ROOT="\$(cd "\${SCRIPT_DIR}/../.." && pwd)"
 cd "\$REPO_ROOT"
-RUNTIME="\${REPO_ROOT}/bin/simple"
-if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
+RUNTIME="\${REPO_ROOT}/bin/release/simple"
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/release/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; fi
+if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then echo "error: no runtime found for ${name}" >&2; exit 1; fi
 ENTRY="\${REPO_ROOT}/${entry}"
 STDERR_LOG="\${REPO_ROOT}/.simple/logs/${name}_stderr.log"
@@ -344,7 +344,7 @@ export SIMPLE_BINARY="\$RUNTIME"
 export SIMPLE_TIMEOUT_SECONDS=86400
 export SIMPLE_MEMORY_LIMIT_MB=\${SIMPLE_MEMORY_LIMIT_MB:-\${SIMPLE_TEST_MEMORY_LIMIT_MB:-100}}
 ${extra_env}
-RUST_LOG=error exec "\$RUNTIME" "\$ENTRY" "\$@" 2>>"\$STDERR_LOG"
+RUST_LOG=error exec "\$RUNTIME" run "\$ENTRY" "\$@" 2>>"\$STDERR_LOG"
 LAUNCHER_EOF
   chmod +x "${launcher}"
 }

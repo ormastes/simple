@@ -55,7 +55,7 @@ function findRuntime() {
 const { binary, repoRoot } = findRuntime();
 const entryPath = path.join(repoRoot, ENTRY);
 
-const child = spawn(binary, [entryPath, ...process.argv.slice(2)], {
+const child = spawn(binary, ['run', entryPath, ...process.argv.slice(2)], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: {

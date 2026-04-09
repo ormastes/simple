@@ -77,6 +77,7 @@ const env = {
 const child = fs.existsSync(wrapperPath)
   ? spawn(wrapperPath, process.argv.slice(2), { stdio: 'inherit', env })
   : spawn(binary, [
+      'run',
       path.join(repoRoot, T32_ROOT_REL, 't32_lsp_mcp', 'main.spl'),
       ...process.argv.slice(2)
     ], {
