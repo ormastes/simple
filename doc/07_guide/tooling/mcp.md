@@ -37,8 +37,8 @@ Configure in the Claude Desktop config file:
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/path/to/simple/bin/simple_mcp_server_optimized",
-      "args": ["server"],
+      "command": "/path/to/simple/bin/simple_mcp_server",
+      "args": [],
       "env": {
         "SIMPLE_PROJECT_ROOT": "/path/to/simple"
       }

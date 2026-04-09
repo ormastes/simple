@@ -1,10 +1,11 @@
 #!/bin/sh
 # check-bin-violations.shs — Detect bin/ binaries pointing to Rust instead of self-hosted Simple
 #
-# Rule: bin/simple and bin/release/simple must be the SELF-HOSTED Simple binary
-#       compiled by Simple itself, NOT the Rust bootstrap seed.
+# Rule: bin/simple must resolve to a self-hosted or deployed release binary.
+#       bin/release/simple is optional when platform-specific binaries under
+#       bin/release/<triple>/ are the canonical deployed layout.
 #       Rust bootstrap goes to src/compiler_rust/target/bootstrap/simple only.
-#       Shell wrappers must resolve to Simple binaries, not Rust fallbacks.
+#       Shell wrappers must resolve to deployed Simple binaries, not Rust-only links.
 
 set -eu
 
@@ -158,9 +159,9 @@ fi
 echo
 
 # ─────────────────────────────────────────────────────────
-# 2. Check bin/release/simple (self-hosted binary)
+# 2. Check bin/release/simple (optional flat self-hosted binary)
 # ─────────────────────────────────────────────────────────
-printf "${BOLD}--- 2. bin/release/simple (self-hosted) ---${NC}\n"
+printf "${BOLD}--- 2. bin/release/simple (optional flat binary) ---${NC}\n"
 check
 BIN_RELEASE_SIMPLE="${REPO_ROOT}/bin/release/simple"
 if [ -L "$BIN_RELEASE_SIMPLE" ]; then
@@ -181,8 +182,19 @@ elif [ -f "$BIN_RELEASE_SIMPLE" ]; then
       "$(file "$BIN_RELEASE_SIMPLE" 2>/dev/null)"
   fi
 else
-  violation "bin/release/simple MISSING" \
-    "Self-hosted binary does not exist — all shell wrappers will fall back to Rust"
+  PLATFORM_SIMPLE_FOUND=0
+  for PLATFORM_SIMPLE in "${REPO_ROOT}"/bin/release/*/simple; do
+    if [ -f "$PLATFORM_SIMPLE" ] || [ -L "$PLATFORM_SIMPLE" ]; then
+      PLATFORM_SIMPLE_FOUND=1
+      break
+    fi
+  done
+  if [ "$PLATFORM_SIMPLE_FOUND" = "1" ]; then
+    info "bin/release/simple missing (platform-specific layout in use)"
+  else
+    violation "bin/release/simple MISSING" \
+      "No flat or platform-specific deployed binary found under bin/release/"
+  fi
 fi
 echo
 
@@ -225,23 +237,30 @@ echo
 # 4. Check shell wrapper runtime resolution
 # ─────────────────────────────────────────────────────────
 printf "${BOLD}--- 4. Shell wrapper runtime fallback analysis ---${NC}\n"
-for WRAPPER in "${REPO_ROOT}"/bin/release/*_server "${REPO_ROOT}"/bin/release/*_server.cmd; do
+for WRAPPER in \
+  "${REPO_ROOT}"/bin/release/*_server \
+  "${REPO_ROOT}"/bin/release/*_server.cmd \
+  "${REPO_ROOT}"/bin/release/*/*_server \
+  "${REPO_ROOT}"/bin/release/*/*_server.cmd
+do
   [ -f "$WRAPPER" ] || continue
   # Skip .cmd (Windows)
   case "$WRAPPER" in *.cmd) continue ;; esac
   WNAME="$(basename "$WRAPPER")"
+  WPATH="${WRAPPER#${REPO_ROOT}/}"
   check
   # Check if wrapper references Rust paths as fallback
   if grep -q 'compiler_rust/target' "$WRAPPER" 2>/dev/null; then
-    # Check if it would actually USE the Rust binary (does bin/release/simple exist?)
-    if [ ! -f "$BIN_RELEASE_SIMPLE" ] && [ ! -L "$BIN_RELEASE_SIMPLE" ]; then
-      warning "$WNAME will fall back to Rust binary" \
-        "bin/release/simple missing, wrapper will resolve to src/compiler_rust/target/"
+    if grep -q '\${SCRIPT_DIR}/simple\|%SCRIPT_DIR%simple.exe' "$WRAPPER" 2>/dev/null; then
+      ok "$WPATH prefers platform binary before Rust fallback"
+    elif [ ! -f "$BIN_RELEASE_SIMPLE" ] && [ ! -L "$BIN_RELEASE_SIMPLE" ]; then
+      warning "$WPATH may fall back to Rust binary" \
+        "No colocated platform runtime or flat bin/release/simple detected"
     else
-      ok "$WNAME has Rust fallback (but bin/release/simple exists, so won't be used)"
+      ok "$WPATH has Rust fallback after deployed runtime"
     fi
   else
-    ok "$WNAME does not reference Rust target"
+    ok "$WPATH does not reference Rust target"
   fi
 done
 echo
@@ -397,9 +416,9 @@ echo
 
 if [ "$VIOLATIONS" -gt 0 ]; then
   printf "${RED}${BOLD}FAIL${NC} — %d violation(s) found.\n" "$VIOLATIONS"
-  printf "Fix: Run bootstrap to produce self-hosted binary, then update symlinks:\n"
-  printf "  bin/simple -> bin/release/simple (or bin/release/<triple>/simple)\n"
-  printf "  bin/release/simple = self-hosted ELF (NOT Rust bootstrap)\n"
+  printf "Fix: deploy a self-hosted binary, then update symlinks:\n"
+  printf "  bin/simple -> bin/release/<triple>/simple (or bin/release/simple)\n"
+  printf "  MCP wrappers should live in bin/release/<triple>/ and prefer colocated runtime\n"
   exit 1
 fi
 

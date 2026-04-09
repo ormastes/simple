@@ -9,13 +9,10 @@ use std::process::Command;
 pub fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize, String> {
     use simple_common::target::{Target, TargetArch, WasmRuntime};
 
-    // Read source file
-    let source_code = fs::read_to_string(source).map_err(|e| format!("Failed to read source file: {}", e))?;
-
     // Compile to WASM using existing compiler infrastructure
     let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
 
-    let wasm_bytes = compile_source_to_wasm(&source_code, target)?;
+    let wasm_bytes = compile_file_to_wasm(source, target)?;
 
     fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;
 
@@ -32,13 +29,13 @@ pub fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<u
     Ok(size)
 }
 
-/// Compile source code to WASM bytes using the compiler pipeline.
-fn compile_source_to_wasm(source: &str, target: simple_common::target::Target) -> Result<Vec<u8>, String> {
+/// Compile a source file to WASM bytes using the compiler pipeline.
+fn compile_file_to_wasm(source_path: &Path, target: simple_common::target::Target) -> Result<Vec<u8>, String> {
     use simple_compiler::pipeline::CompilerPipeline;
 
     let mut compiler = CompilerPipeline::new().map_err(|e| format!("{e:?}"))?;
     compiler
-        .compile_source_to_memory_for_target(source, target)
+        .compile_file_to_memory_for_target(source_path, target)
         .map_err(|e| {
             let message = format!("compile failed: {e}");
             if message.contains("32-bit targets require the LLVM backend") {

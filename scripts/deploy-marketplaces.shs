@@ -45,6 +45,26 @@ warn() { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
 fail() { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 info() { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
 
+find_release_assets() {
+    for FILE in \
+        "$PROJECT_ROOT"/bin/release/simple \
+        "$PROJECT_ROOT"/bin/release/simple.exe \
+        "$PROJECT_ROOT"/bin/release/*/simple \
+        "$PROJECT_ROOT"/bin/release/*/simple.exe \
+        "$PROJECT_ROOT"/bin/release/*/simple_mcp_server \
+        "$PROJECT_ROOT"/bin/release/*/simple_mcp_server.exe \
+        "$PROJECT_ROOT"/bin/release/*/simple_lsp_mcp_server \
+        "$PROJECT_ROOT"/bin/release/*/simple_lsp_mcp_server.exe \
+        "$PROJECT_ROOT"/bin/release/*/t32_mcp_server \
+        "$PROJECT_ROOT"/bin/release/*/t32_mcp_server.exe \
+        "$PROJECT_ROOT"/bin/release/*/t32_lsp_mcp_server \
+        "$PROJECT_ROOT"/bin/release/*/t32_lsp_mcp_server.exe
+    do
+        [ -f "$FILE" ] || continue
+        printf '%s\n' "${FILE#${PROJECT_ROOT}/}"
+    done | sort -u
+}
+
 # --- Version detection ---
 detect_version() {
     if [ -f "$PROJECT_ROOT/VERSION" ]; then
@@ -118,10 +138,10 @@ check_prerequisites() {
     check_repo_public || ERRORS=$((ERRORS + 1))
     echo ""
 
-    if [ -f "bin/release/simple" ] || [ -f "bin/release/simple.exe" ]; then
+    if find_release_assets | grep -q .; then
         ok "Release binary exists"
     else
-        fail "No release binary — run: bin/simple build --release"
+        fail "No deployed release binaries — run: bin/simple build --release"
         ERRORS=$((ERRORS + 1))
     fi
 
@@ -146,27 +166,12 @@ deploy_github_release() {
         return 0
     fi
 
-    # Collect platform binaries
-    ASSETS=""
-    for TRIPLE in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-freebsd; do
-        case "$TRIPLE" in
-            *windows*) EXT=".exe" ;;
-            *) EXT="" ;;
-        esac
-        for BIN in simple simple_mcp_server simple_lsp_mcp_server; do
-            FILE="bin/release/${TRIPLE}/${BIN}${EXT}"
-            if [ -f "$FILE" ]; then
-                ASSETS="$ASSETS $FILE"
-            fi
-        done
-    done
+    # Collect deployed platform binaries and wrappers.
+    ASSETS="$(find_release_assets | tr '\n' ' ')"
 
     if [ -z "$ASSETS" ]; then
-        warn "No platform binaries found in bin/release/<triple>/"
-        warn "Only local binary will be included"
-        if [ -f "bin/release/simple" ]; then
-            ASSETS="bin/release/simple"
-        fi
+        fail "No deployed binaries found under bin/release/"
+        return 1
     fi
 
     if [ "$DRY_RUN" = true ]; then

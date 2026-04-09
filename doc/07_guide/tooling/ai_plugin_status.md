@@ -6,24 +6,24 @@ Status of all MCP servers, LSP plugins, agent plugins, and their cross-platform 
 
 | Server | Binary | Config Key | Status | Startup |
 |--------|--------|-----------|--------|---------|
-| simple-mcp | `bin/release/simple_mcp_server` | `simple-mcp` | Working | Shared lib + background cache |
-| simple-lsp-mcp | `bin/release/simple_lsp_mcp_server` | `simple-lsp-mcp` | Working | Shared lib + background cache |
-| t32-mcp | `bin/release/t32_mcp_server` | `t32-mcp` | Working | Shared lib + native probe + cold/full frontend |
-| t32-lsp-mcp | `bin/release/t32_lsp_mcp_server` | `t32-lsp-mcp` | Working | Shared lib + native probe + daemon support |
+| simple-mcp | `bin/simple_mcp_server` -> `bin/release/<platform>/simple_mcp_server` | `simple-mcp` | Working | Platform wrapper + background cache |
+| simple-lsp-mcp | `bin/simple_lsp_mcp_server` -> `bin/release/<platform>/simple_lsp_mcp_server` | `simple-lsp-mcp` | Working | Platform wrapper + background cache |
+| t32-mcp | `bin/t32_mcp_server` -> `bin/release/<platform>/t32_mcp_server` | `t32-mcp` | Working | Platform wrapper + native probe + cold/full frontend |
+| t32-lsp-mcp | `bin/t32_lsp_mcp_server` -> `bin/release/<platform>/t32_lsp_mcp_server` | `t32-lsp-mcp` | Working | Platform wrapper + native probe + daemon support |
 | obsidian-lsp-mcp | `bin/obsidian_lsp_mcp_server` | `obsidian-lsp-mcp` | Working | Direct exec |
 
 **Shared startup library:** `config/mcp/mcp_startup_lib.sh`
 - Compile cache (background, >1KB size check)
 - Debug logging (env: `<SERVER>_DEBUG_LOG=1`)
 - Native binary health probe with caching
-- Runtime fallback chain: `SIMPLE_BINARY` > `bin/simple` > `bin/release/simple` > Rust bootstrap
+- Runtime fallback chain: `SIMPLE_BINARY` > colocated `bin/release/<platform>/simple` > `bin/simple` > Rust build outputs
 
 ## LSP Plugins (Claude Code Marketplace)
 
 | Plugin | Marketplace | Server | Status |
 |--------|------------|--------|--------|
-| simple-lsp | `simple-local` | `bin/release/simple_lsp_mcp_server` | Enabled |
-| cmm-lsp | `simple-local` | `bin/release/t32_lsp_mcp_server` | Disabled (optional) |
+| simple-lsp | `simple-local` | `bin/simple_lsp_mcp_server` | Enabled |
+| cmm-lsp | `simple-local` | `bin/t32_lsp_mcp_server` | Disabled (optional) |
 | markdown-oxide-lsp | `simple-local` | System `markdown-oxide` | Enabled |
 
 **Marketplace:** `tools/claude-plugin/marketplace/.claude-plugin/marketplace.json`

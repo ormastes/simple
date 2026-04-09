@@ -15,12 +15,16 @@
 
 import * as vscode from 'vscode';
 import { MathDecorationProvider } from './mathDecorationProvider';
+import { MathCoreWasmBridge } from './mathCoreWasm';
 import { simpleToLatex, simpleToUnicode } from './mathConverter';
 
 export class MathHoverProvider implements vscode.HoverProvider {
     private lspRunning: boolean = false;
 
-    constructor(private decorationProvider: MathDecorationProvider) {}
+    constructor(
+        private decorationProvider: MathDecorationProvider,
+        private mathCoreBridge: MathCoreWasmBridge,
+    ) {}
 
     /**
      * Set whether the LSP client is currently running.
@@ -71,25 +75,38 @@ export class MathHoverProvider implements vscode.HoverProvider {
      * Uses local TypeScript converters from mathConverter.ts which mirror
      * the Simple-side rendering in src/lib/math_repr.spl.
      */
-    private createHover(content: string, range: vscode.Range): vscode.Hover {
+    private async createHover(content: string, range: vscode.Range): Promise<vscode.Hover> {
         const markdown = new vscode.MarkdownString();
         markdown.isTrusted = true;
         markdown.supportHtml = true;
+
+        const wasmResult = await this.mathCoreBridge.render(content);
 
         // Header
         markdown.appendMarkdown('**Math Block** `m{ }`\n\n');
         markdown.appendMarkdown('---\n\n');
 
         // Display math via VSCode's built-in KaTeX rendering
-        const latex = simpleToLatex(content);
+        const latex = wasmResult?.latex ?? simpleToLatex(content);
         markdown.appendMarkdown(`$$${latex}$$\n\n`);
 
         // Separator
         markdown.appendMarkdown('---\n\n');
 
         // Unicode pretty text (mirrors to_pretty() from src/lib/math_repr.spl)
-        const pretty = simpleToUnicode(content);
+        const pretty = wasmResult?.pretty ?? simpleToUnicode(content);
         markdown.appendMarkdown(`**Pretty:** ${pretty}\n\n`);
+
+        if (wasmResult && (wasmResult.text || wasmResult.debug)) {
+            if (wasmResult.text) {
+                markdown.appendMarkdown(`**Text:** ${wasmResult.text}\n\n`);
+            }
+            if (wasmResult.debug) {
+                markdown.appendMarkdown(`**Debug:** \`${wasmResult.debug}\`\n\n`);
+            }
+        } else if (this.mathCoreBridge.getUnavailableReason()) {
+            markdown.appendMarkdown(`_Math core WASM fallback active:_ ${this.mathCoreBridge.getUnavailableReason()}\n\n`);
+        }
 
         // Source
         markdown.appendMarkdown(`**Source:** \`${content}\`\n\n`);

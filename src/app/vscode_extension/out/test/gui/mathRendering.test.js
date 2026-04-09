@@ -40,6 +40,7 @@ const assert = __importStar(require("assert"));
 const vscode = __importStar(require("vscode"));
 const mocha_1 = require("mocha");
 const mathDecorationProvider_1 = require("../../math/mathDecorationProvider");
+const mathCoreWasm_1 = require("../../math/mathCoreWasm");
 const mathHoverProvider_1 = require("../../math/mathHoverProvider");
 const mathPreviewPanel_1 = require("../../math/mathPreviewPanel");
 const mathSvgRenderer_1 = require("../../math/mathSvgRenderer");
@@ -76,9 +77,9 @@ function makeFakeDecorationProvider() {
     });
     (0, mocha_1.test)('Fallback hover renders math blocks when LSP mode is disabled', async () => {
         const document = await testUtils_1.TestUtils.createTestFile('test-math-rendering.spl', 'fn main():\n    val y = m{ frac(1, 2) + x }\n');
-        const provider = new mathHoverProvider_1.MathHoverProvider(makeFakeDecorationProvider());
+        const provider = new mathHoverProvider_1.MathHoverProvider(makeFakeDecorationProvider(), new mathCoreWasm_1.MathCoreWasmBridge());
         provider.setLspRunning(false);
-        const hover = provider.provideHover(document, new vscode.Position(1, 18), {});
+        const hover = await provider.provideHover(document, new vscode.Position(1, 18), {});
         assert.ok(hover, 'expected hover for math block');
         const markdown = hover.contents[0];
         assert.ok(markdown.value.includes('Math Block'));
@@ -87,7 +88,7 @@ function makeFakeDecorationProvider() {
     });
     (0, mocha_1.test)('Fallback hover defers when LSP mode is enabled', async () => {
         const document = await testUtils_1.TestUtils.createTestFile('test-math-rendering.spl', 'fn main():\n    val y = m{ frac(1, 2) + x }\n');
-        const provider = new mathHoverProvider_1.MathHoverProvider(makeFakeDecorationProvider());
+        const provider = new mathHoverProvider_1.MathHoverProvider(makeFakeDecorationProvider(), new mathCoreWasm_1.MathCoreWasmBridge());
         provider.setLspRunning(true);
         const hover = provider.provideHover(document, new vscode.Position(1, 18), {});
         assert.strictEqual(hover, null);

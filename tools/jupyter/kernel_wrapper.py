@@ -13,7 +13,7 @@ Architecture:
     kernel_wrapper.py (this file)
         |
         v  (stdin/stdout JSON-lines)
-    Simple Kernel (bin/release/simple src/app/jupyter_kernel/main.spl)
+    Simple Kernel (bin/simple src/app/jupyter_kernel/main.spl)
 """
 
 import argparse
@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import uuid
+from glob import glob
 
 import zmq
 
@@ -46,6 +47,23 @@ def find_project_root():
             return d
         d = os.path.dirname(d)
     return os.getcwd()
+
+
+def find_simple_runtime(project_root):
+    """Resolve the preferred Simple runtime for the current checkout."""
+    candidates = [
+        os.path.join(project_root, "src", "compiler_rust", "target", "release", "simple"),
+        os.path.join(project_root, "src", "compiler_rust", "target", "bootstrap", "simple"),
+        os.path.join(project_root, "bin", "simple"),
+        os.path.join(project_root, "bin", "release", "simple"),
+    ]
+    candidates.extend(sorted(glob(os.path.join(project_root, "bin", "release", "*", "simple"))))
+
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    return os.path.join(project_root, "bin", "simple")
 
 
 def new_header(msg_type, session):
@@ -150,10 +168,10 @@ class SimpleKernel:
 
         # Start Simple kernel process
         kernel_path = os.path.join(self.project_root, "src", "app", "jupyter_kernel", "main.spl")
-        simple_bin = os.path.join(self.project_root, "bin", "release", "simple")
+        simple_bin = find_simple_runtime(self.project_root)
 
         self.proc = subprocess.Popen(
-            [simple_bin, kernel_path],
+            [simple_bin, "run", kernel_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

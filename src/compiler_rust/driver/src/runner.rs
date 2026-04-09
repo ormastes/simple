@@ -178,6 +178,12 @@ impl Runner {
         self.core.compile_source_for_target(source, out, target)
     }
 
+    /// Compile a source file to target-specific output with import resolution.
+    #[instrument(skip(self, source_path))]
+    pub fn compile_file_to_smf_for_target(&self, source_path: &Path, out: &Path, target: Target) -> Result<(), String> {
+        self.core.compile_file_for_target(source_path, out, target)
+    }
+
     /// Compile source to SMF bytes in memory (no disk I/O).
     #[instrument(skip(self, source))]
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {

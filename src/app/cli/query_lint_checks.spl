@@ -1,0 +1,518 @@
+# Simple Language - Query Lint Advanced Checks
+#
+# Advanced lint check implementations: match exhaustiveness, closure capture,
+# ignored return value, multiline boolean, safety, visibility.
+
+use app.cli.query_helpers.{_count_indent}
+use app.cli.query_rich_common.{_diag_emit_or_collect, _find_in_line, _find_in_line_from, _extract_decl_name}
+use std.report.emitter.lsp.{LspEmitter}
+
+# ============================================================================
+# MEXH001-005: Match exhaustiveness (text-based heuristic)
+# ============================================================================
+
+fn _check_match_exhaustiveness_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for match exhaustiveness.
+
+    Checks:
+    - MEXH001: Enum match missing variant(s)
+    - MEXH002: Match without wildcard/default case
+    - MEXH003: Boolean match missing true or false
+    - MEXH004: Unreachable arm (after wildcard or duplicate)
+    - MEXH005: Option/Result match missing variant(s)
+
+    Pass 1: Collect enum definitions from the file.
+    Pass 2: Scan match expressions for exhaustiveness.
+    """
+    var count = 0
+
+    # Pass 1: Collect enum definitions  { name -> [variant_names] }
+    var enum_defs: {text: [text]} = {}
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if trimmed.starts_with("enum ") and trimmed.ends_with(":"):
+            val enum_name = trimmed.substring(5, trimmed.len() - 1).trim()
+            val enum_indent = _count_indent(line)
+            var variants: [text] = []
+            var vi = li + 1
+            while vi < lines.len():
+                val vline = lines[vi]
+                val vt = vline.trim()
+                if vt == "":
+                    vi = vi + 1
+                    continue
+                val vindent = _count_indent(vline)
+                if vindent <= enum_indent:
+                    break
+                # Variant line: just a name (possibly with payload)
+                val vname = vt.split("(")[0].split(" ")[0].trim()
+                if vname != "" and not vname.starts_with("#"):
+                    variants.push(vname)
+                vi = vi + 1
+            if variants.len() > 0:
+                enum_defs[enum_name] = variants
+        li = li + 1
+
+    # Add built-in exhaustible types
+    if not enum_defs.contains_key("bool"):
+        enum_defs["bool"] = ["true", "false"]
+    if not enum_defs.contains_key("Bool"):
+        enum_defs["Bool"] = ["true", "false"]
+    if not enum_defs.contains_key("Option"):
+        enum_defs["Option"] = ["Some", "nil"]
+    if not enum_defs.contains_key("Result"):
+        enum_defs["Result"] = ["Ok", "Err"]
+
+    # Pass 2: Scan match expressions
+    li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("match ") and trimmed.ends_with(":"):
+            val match_indent = _count_indent(line)
+            val line_num = li + 1
+
+            # Scan case arms
+            var has_wildcard = false
+            var wildcard_pos = -1
+            var arm_count = 0
+            var arm_patterns: [text] = []
+            var ai = li + 1
+            while ai < lines.len():
+                val aline = lines[ai]
+                val at = aline.trim()
+                if at == "":
+                    ai = ai + 1
+                    continue
+                val aindent = _count_indent(aline)
+                if aindent <= match_indent:
+                    break
+
+                # Extract the pattern name from "case PATTERN:" or "PATTERN:"
+                var pat_name = ""
+                if at.starts_with("case "):
+                    pat_name = at.substring(5).split(":")[0].split("(")[0].trim()
+                elif at.contains(":"):
+                    pat_name = at.split(":")[0].split("(")[0].trim()
+
+                if pat_name == "_":
+                    if not has_wildcard:
+                        has_wildcard = true
+                        wildcard_pos = arm_count
+                    else:
+                        # Duplicate wildcard — unreachable
+                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                            "unreachable match arm: duplicate wildcard '_'", format)
+                elif pat_name != "":
+                    # Check for duplicate exact pattern
+                    var is_dup = false
+                    for prev in arm_patterns:
+                        if prev == pat_name:
+                            is_dup = true
+                    if is_dup:
+                        count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                            "unreachable match arm: duplicate pattern '{pat_name}'", format)
+
+                # Check for unreachable arm after wildcard
+                if has_wildcard and arm_count > wildcard_pos:
+                    count = count + _emit_mexh(file, ai + 1, at.len(), "MEXH004",
+                        "unreachable match arm after wildcard '_'", format)
+
+                if pat_name != "" and pat_name != "_":
+                    arm_patterns.push(pat_name)
+                arm_count = arm_count + 1
+                ai = ai + 1
+
+            # Exhaustiveness checks (only if no wildcard)
+            if arm_count > 0 and not has_wildcard:
+                # Try to infer type from arm patterns
+                var inferred_type = _infer_type_from_patterns(arm_patterns, enum_defs)
+
+                if inferred_type != "":
+                    if enum_defs.contains_key(inferred_type):
+                        val all_variants = enum_defs[inferred_type]
+                        var missing: [text] = []
+                        for v in all_variants:
+                            var found = false
+                            for p in arm_patterns:
+                                if p == v:
+                                    found = true
+                            if not found:
+                                missing.push(v)
+
+                        if missing.len() > 0:
+                            val missing_text = missing.join(", ")
+                            val warn_code = if (inferred_type == "bool" or inferred_type == "Bool"):
+                                "MEXH003"
+                            elif (inferred_type == "Option" or inferred_type == "Result"):
+                                "MEXH005"
+                            else:
+                                "MEXH001"
+                            val type_label = if (inferred_type == "bool" or inferred_type == "Bool"):
+                                "boolean"
+                            elif inferred_type == "Option":
+                                "Option<T>"
+                            elif inferred_type == "Result":
+                                "Result<T, E>"
+                            else:
+                                "enum '{inferred_type}'"
+                            count = count + _emit_mexh(file, line_num, trimmed.len(), warn_code,
+                                "non-exhaustive match on {type_label}: missing [{missing_text}]", format)
+                else:
+                    # Unknown type — generic MEXH002
+                    count = count + _emit_mexh(file, line_num, trimmed.len(), "MEXH002",
+                        "match expression has no wildcard/default case", format)
+
+        li = li + 1
+    count
+
+fn _emit_mexh(file: text, line_num: i64, end_col: i64, code: text, message: text, format: text) -> i64:
+    """Emit a MEXH warning in the requested format. Returns 1."""
+    if format == "json":
+        _diag_emit_or_collect("{\"severity\":2,\"code\":\"{code}\",\"message\":\"{message}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{end_col},\"tags\":[],\"source\":\"simple-lint\"}")
+    else:
+        print "{file}:{line_num}: warning[{code}]: {message}"
+    1
+
+fn _infer_type_from_patterns(patterns: [text], enums: {text: [text]}) -> text:
+    """Infer the match scrutinee type from arm pattern names.
+
+    Checks built-in types first (bool, Option, Result), then
+    user-defined enums. Returns the type name or "" if ambiguous.
+    """
+    if patterns.len() == 0:
+        return ""
+
+    # Boolean check
+    var all_bool = true
+    for p in patterns:
+        if p != "true" and p != "false":
+            all_bool = false
+    if all_bool and patterns.len() > 0:
+        return "bool"
+
+    # Option check
+    var all_option = true
+    for p in patterns:
+        if p != "Some" and p != "nil" and p != "None":
+            all_option = false
+    if all_option and patterns.len() > 0:
+        return "Option"
+
+    # Result check
+    var all_result = true
+    for p in patterns:
+        if p != "Ok" and p != "Err":
+            all_result = false
+    if all_result and patterns.len() > 0:
+        return "Result"
+
+    # General enum check: find enums whose variants are a superset
+    var matches: [text] = []
+    for enum_name in enums.keys():
+        if (enum_name == "bool" or enum_name == "Bool" or
+            enum_name == "Option" or enum_name == "Result"):
+            continue
+        val variants = enums[enum_name]
+        var is_subset = true
+        for p in patterns:
+            var found = false
+            for v in variants:
+                if v == p:
+                    found = true
+            if not found:
+                is_subset = false
+        if is_subset:
+            matches.push(enum_name)
+
+    if matches.len() == 1:
+        return matches[0]
+
+    ""
+
+# ============================================================================
+# CLOS001: Closure modifies outer variable (text-based heuristic)
+# ============================================================================
+
+fn _check_closure_capture_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for closure capture modification detection."""
+    var count = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
+            val fn_indent = _count_indent(line)
+            if fn_indent > 0:
+                var outer_vars: [text] = []
+                _collect_outer_vars_clos(lines, li, fn_indent, outer_vars)
+                var body_start = li + 1
+                while body_start < lines.len():
+                    val bline = lines[body_start]
+                    val bt = bline.trim()
+                    if bt == "":
+                        body_start = body_start + 1
+                        continue
+                    val bindent = _count_indent(bline)
+                    if bindent <= fn_indent:
+                        break
+                    for ovar in outer_vars:
+                        if _is_assign_to_clos(bt, ovar):
+                            val bline_num = body_start + 1
+                            if format == "json":
+                                _diag_emit_or_collect("{\"severity\":2,\"code\":\"CLOS001\",\"message\":\"closure modifies outer variable '{ovar}' — changes won't persist (capture-by-value)\",\"line\":{bline_num},\"col\":1,\"end_line\":{bline_num},\"end_col\":{bt.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                            else:
+                                print "{file}:{bline_num}: warning[CLOS001]: closure modifies outer variable '{ovar}'"
+                            count = count + 1
+                    body_start = body_start + 1
+        li = li + 1
+    count
+
+fn _collect_outer_vars_clos(lines: [text], fn_line: i64, fn_indent: i64, vars: [text]):
+    """Collect var declarations from the enclosing scope above fn_line."""
+    var si = fn_line - 1
+    while si >= 0:
+        val sline = lines[si]
+        val st = sline.trim()
+        val sindent = _count_indent(sline)
+        if sindent < fn_indent and st != "" and not st.starts_with("#"):
+            if (st.starts_with("fn ") or st.starts_with("me ") or
+                st.starts_with("static fn ") or st.starts_with("class ") or
+                st.starts_with("struct ")):
+                break
+        if st.starts_with("var ") and sindent <= fn_indent:
+            val var_name = _extract_decl_name(st.substring(4))
+            if var_name != "":
+                vars.push(var_name)
+        si = si - 1
+
+fn _is_assign_to_clos(trimmed: text, var_name: text) -> bool:
+    """Check if a trimmed line assigns to the given variable name."""
+    if trimmed.starts_with(var_name):
+        val after = trimmed.substring(var_name.len())
+        val at = after.trim()
+        if at.starts_with("= ") or at.starts_with("=\t") or at == "=":
+            return true
+        if (at.starts_with("+= ") or at.starts_with("-= ") or
+            at.starts_with("*= ") or at.starts_with("/= ")):
+            return true
+    false
+
+# ============================================================================
+# RET001: Ignored function return value (text-based heuristic)
+# ============================================================================
+
+fn _check_ignored_return_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for ignored return value detection."""
+    var count = 0
+    val side_effects: [text] = [
+        "print", "println", "eprint", "eprintln",
+        "push", "pop", "clear", "sort", "reverse", "remove", "insert",
+        "write", "close", "flush", "set", "delete", "reset", "append",
+        "log", "info", "warn", "error", "debug", "trace",
+        "sleep", "exit", "abort", "send", "emit", "notify",
+        "lock", "unlock", "continue", "break", "return",
+        "pass_todo", "pass_do_nothing", "pass_dn"
+    ]
+    val side_prefixes: [text] = [
+        "set_", "add_", "remove_", "delete_", "clear_", "reset_",
+        "push_", "init_", "register_", "emit_", "on_", "handle_",
+        "log_", "print_", "write_", "assert", "expect", "check_", "_"
+    ]
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val line_num = li + 1
+        val indent = _count_indent(line)
+        if indent > 0 and trimmed.len() > 0:
+            val call_name = _extract_call_name_ret(trimmed)
+            if call_name != "":
+                if (not trimmed.starts_with("val ") and not trimmed.starts_with("var ") and
+                    not _is_any_assign_ret(trimmed)):
+                    var is_side_effect = false
+                    for se in side_effects:
+                        if call_name == se:
+                            is_side_effect = true
+                            break
+                    if not is_side_effect:
+                        for prefix in side_prefixes:
+                            if call_name.starts_with(prefix):
+                                is_side_effect = true
+                                break
+                    if not is_side_effect:
+                        if not _is_last_stmt_ret(lines, li):
+                            if format == "json":
+                                _diag_emit_or_collect("{\"severity\":3,\"code\":\"RET001\",\"message\":\"return value of '{call_name}()' is discarded\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[1],\"source\":\"simple-lint\"}")
+                            else:
+                                print "{file}:{line_num}: info[RET001]: return value of '{call_name}()' is discarded"
+                            count = count + 1
+        li = li + 1
+    count
+
+fn _extract_call_name_ret(trimmed: text) -> text:
+    """Extract function/method call name from a trimmed line."""
+    val paren_pos = _find_in_line_from(trimmed, "(", 0)
+    if paren_pos <= 0:
+        return ""
+    val before_paren = trimmed.substring(0, paren_pos)
+    if (before_paren == "if" or before_paren == "while" or before_paren == "for" or
+        before_paren == "match" or before_paren == "return" or before_paren == "elif"):
+        return ""
+    var end_idx = before_paren.len()
+    var start_idx = end_idx - 1
+    while start_idx >= 0:
+        val ch = before_paren.substring(start_idx, start_idx + 1)
+        val is_id = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_id:
+            break
+        start_idx = start_idx - 1
+    start_idx = start_idx + 1
+    if start_idx >= end_idx:
+        return ""
+    before_paren.substring(start_idx, end_idx)
+
+fn _is_any_assign_ret(trimmed: text) -> bool:
+    """Check if a line contains an assignment before a function call."""
+    val eq_pos = _find_in_line_from(trimmed, " = ", 0)
+    val paren_pos = _find_in_line_from(trimmed, "(", 0)
+    if eq_pos >= 0 and (paren_pos < 0 or eq_pos < paren_pos):
+        return true
+    val walrus_pos = _find_in_line_from(trimmed, ":=", 0)
+    if walrus_pos >= 0 and (paren_pos < 0 or walrus_pos < paren_pos):
+        return true
+    false
+
+fn _is_last_stmt_ret(lines: [text], idx: i64) -> bool:
+    """Check if the line at idx is the last non-empty statement at its indent level."""
+    val target_indent = _count_indent(lines[idx])
+    var ni = idx + 1
+    while ni < lines.len():
+        val next_line = lines[ni]
+        val nt = next_line.trim()
+        if nt == "":
+            ni = ni + 1
+            continue
+        val next_indent = _count_indent(next_line)
+        if next_indent < target_indent:
+            return true
+        if next_indent == target_indent:
+            return false
+        ni = ni + 1
+    true
+
+# ============================================================================
+# BOOL001: Multiline boolean without parentheses (text-based heuristic)
+# ============================================================================
+
+fn _check_multiline_bool_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for multiline boolean detection."""
+    var count = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val line_num = li + 1
+        var keyword = ""
+        var cond_start = ""
+        if trimmed.starts_with("if "):
+            keyword = "if"
+            cond_start = trimmed.substring(3)
+        elif trimmed.starts_with("elif "):
+            keyword = "elif"
+            cond_start = trimmed.substring(5)
+        elif trimmed.starts_with("while "):
+            keyword = "while"
+            cond_start = trimmed.substring(6)
+        if keyword != "":
+            val cs = cond_start.trim()
+            var stripped = trimmed
+            if stripped.ends_with(":"):
+                stripped = stripped.substring(0, stripped.len() - 1).trim()
+            val ends_with_bool = (stripped.ends_with(" and") or stripped.ends_with(" or"))
+            var next_starts_bool = false
+            if li + 1 < lines.len():
+                val next_t = lines[li + 1].trim()
+                next_starts_bool = (next_t.starts_with("and ") or next_t.starts_with("or "))
+            if ends_with_bool or next_starts_bool:
+                if not cs.starts_with("("):
+                    if format == "json":
+                        _diag_emit_or_collect("{\"severity\":2,\"code\":\"BOOL001\",\"message\":\"multiline boolean in '{keyword}' without parentheses — may parse incorrectly\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                    else:
+                        print "{file}:{line_num}: warning[BOOL001]: multiline boolean in '{keyword}' without parentheses"
+                    count = count + 1
+        li = li + 1
+    count
+
+# ============================================================================
+# SAFE001/SAFE003: Safety violations (text-based heuristic)
+# ============================================================================
+
+fn _check_safety_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for safety checking."""
+    var count = 0
+    var in_unsafe = false
+    var unsafe_indent = -1
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val line_num = li + 1
+        val indent = _count_indent(line)
+        if trimmed.starts_with("unsafe:") or trimmed.starts_with("unsafe {"):
+            in_unsafe = true
+            unsafe_indent = indent
+        if in_unsafe and indent <= unsafe_indent and trimmed != "" and not trimmed.starts_with("unsafe"):
+            in_unsafe = false
+            unsafe_indent = -1
+        if not in_unsafe and indent > 0:
+            if trimmed.starts_with("asm ") or trimmed.starts_with("asm(") or trimmed == "asm":
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE001\",\"message\":\"inline assembly outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{line_num}: error[SAFE001]: inline assembly outside unsafe block"
+                count = count + 1
+            if (trimmed.contains("ptr_read(") or trimmed.contains("ptr_write(") or
+                trimmed.contains("ptr_cast(") or trimmed.contains("ptr_offset(") or
+                trimmed.contains("mem_copy(") or trimmed.contains("mem_set(")):
+                if format == "json":
+                    _diag_emit_or_collect("{\"severity\":1,\"code\":\"SAFE003\",\"message\":\"raw pointer operation outside unsafe block\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":{trimmed.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                else:
+                    print "{file}:{line_num}: error[SAFE003]: raw pointer operation outside unsafe block"
+                count = count + 1
+        li = li + 1
+    count
+
+# ============================================================================
+# W0401: Visibility violations (text-based heuristic)
+# ============================================================================
+
+fn _check_visibility_text(lines: [text], file: text, format: text, emitter: LspEmitter) -> i64:
+    """Text-based heuristic for visibility checking."""
+    var count = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val line_num = li + 1
+        if trimmed.starts_with("use ") and trimmed.contains(".{"):
+            val brace_start = _find_in_line_from(trimmed, "{", 0)
+            val brace_end = _find_in_line_from(trimmed, "}", 0)
+            if brace_start >= 0 and brace_end > brace_start:
+                val imports_str = trimmed.substring(brace_start + 1, brace_end)
+                val imports = imports_str.split(",")
+                for imp in imports:
+                    val imp_name = imp.trim()
+                    if (imp_name.starts_with("_") and not imp_name.starts_with("__") and
+                        imp_name.len() > 1):
+                        if format == "json":
+                            val col = _find_in_line(trimmed, imp_name) + 1
+                            _diag_emit_or_collect("{\"severity\":2,\"code\":\"W0401\",\"message\":\"importing private symbol '{imp_name}' from another module\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + imp_name.len()},\"tags\":[],\"source\":\"simple-lint\"}")
+                        else:
+                            print "{file}:{line_num}: warning[W0401]: importing private symbol '{imp_name}' from another module"
+                        count = count + 1
+        li = li + 1
+    count

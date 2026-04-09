@@ -51,8 +51,9 @@ exports.MathHoverProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const mathConverter_1 = require("./mathConverter");
 class MathHoverProvider {
-    constructor(decorationProvider) {
+    constructor(decorationProvider, mathCoreBridge) {
         this.decorationProvider = decorationProvider;
+        this.mathCoreBridge = mathCoreBridge;
         this.lspRunning = false;
     }
     /**
@@ -94,21 +95,33 @@ class MathHoverProvider {
      * Uses local TypeScript converters from mathConverter.ts which mirror
      * the Simple-side rendering in src/lib/math_repr.spl.
      */
-    createHover(content, range) {
+    async createHover(content, range) {
         const markdown = new vscode.MarkdownString();
         markdown.isTrusted = true;
         markdown.supportHtml = true;
+        const wasmResult = await this.mathCoreBridge.render(content);
         // Header
         markdown.appendMarkdown('**Math Block** `m{ }`\n\n');
         markdown.appendMarkdown('---\n\n');
         // Display math via VSCode's built-in KaTeX rendering
-        const latex = (0, mathConverter_1.simpleToLatex)(content);
+        const latex = wasmResult?.latex ?? (0, mathConverter_1.simpleToLatex)(content);
         markdown.appendMarkdown(`$$${latex}$$\n\n`);
         // Separator
         markdown.appendMarkdown('---\n\n');
         // Unicode pretty text (mirrors to_pretty() from src/lib/math_repr.spl)
-        const pretty = (0, mathConverter_1.simpleToUnicode)(content);
+        const pretty = wasmResult?.pretty ?? (0, mathConverter_1.simpleToUnicode)(content);
         markdown.appendMarkdown(`**Pretty:** ${pretty}\n\n`);
+        if (wasmResult && (wasmResult.text || wasmResult.debug)) {
+            if (wasmResult.text) {
+                markdown.appendMarkdown(`**Text:** ${wasmResult.text}\n\n`);
+            }
+            if (wasmResult.debug) {
+                markdown.appendMarkdown(`**Debug:** \`${wasmResult.debug}\`\n\n`);
+            }
+        }
+        else if (this.mathCoreBridge.getUnavailableReason()) {
+            markdown.appendMarkdown(`_Math core WASM fallback active:_ ${this.mathCoreBridge.getUnavailableReason()}\n\n`);
+        }
         // Source
         markdown.appendMarkdown(`**Source:** \`${content}\`\n\n`);
         // Action link to open preview panel

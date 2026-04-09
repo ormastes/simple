@@ -8,7 +8,7 @@ Interactive Read-Eval-Print Loop for the Simple language.
 
 ```bash
 # Start the REPL
-bin/release/simple src/app/repl/main.spl
+bin/simple src/app/repl/main.spl
 
 # Or via CLI dispatch (if wired)
 bin/simple repl
@@ -131,7 +131,7 @@ REPL Main Loop (src/app/repl/main.spl)
 Write temp file (/tmp/simple_repl_{pid}.spl)
     |
     v
-rt_process_run("bin/release/simple", temp_file)
+rt_process_run("bin/simple", temp_file)
     |
     +-- Success --> Print output, keep in accumulated
     +-- Failure --> Print error, rollback
@@ -139,7 +139,7 @@ rt_process_run("bin/release/simple", temp_file)
 
 **Key design decisions:**
 - No compiler imports (avoids 40s+ startup from loading full compiler tree)
-- Subprocess execution via `bin/release/simple` for isolation
+- Subprocess execution via `bin/simple` or `bin/release/<platform>/simple` for isolation
 - Module-level `var` state (avoids nested closure mutation bug)
 - Text accumulation instead of arrays (avoids `.len()`/`.push()` path call issues)
 

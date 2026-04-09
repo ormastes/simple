@@ -48,15 +48,18 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathPreviewPanel = exports.MathDecorationProvider = void 0;
+exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathPreviewPanel = exports.MathCoreWasmBridge = exports.MathDecorationProvider = void 0;
 exports.activateMathFeatures = activateMathFeatures;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const mathDecorationProvider_1 = require("./mathDecorationProvider");
+const mathCoreWasm_1 = require("./mathCoreWasm");
 const mathPreviewPanel_1 = require("./mathPreviewPanel");
 const mathHoverProvider_1 = require("./mathHoverProvider");
 var mathDecorationProvider_2 = require("./mathDecorationProvider");
 Object.defineProperty(exports, "MathDecorationProvider", { enumerable: true, get: function () { return mathDecorationProvider_2.MathDecorationProvider; } });
+var mathCoreWasm_2 = require("./mathCoreWasm");
+Object.defineProperty(exports, "MathCoreWasmBridge", { enumerable: true, get: function () { return mathCoreWasm_2.MathCoreWasmBridge; } });
 var mathPreviewPanel_2 = require("./mathPreviewPanel");
 Object.defineProperty(exports, "MathPreviewPanel", { enumerable: true, get: function () { return mathPreviewPanel_2.MathPreviewPanel; } });
 var mathHoverProvider_2 = require("./mathHoverProvider");
@@ -83,6 +86,11 @@ function activateMathFeatures(context, onLspStateChanged) {
     // Create the shared decoration provider
     const decorationProvider = new mathDecorationProvider_1.MathDecorationProvider();
     context.subscriptions.push(decorationProvider);
+    // Initialize optional math-core WASM bridge. Until the Simple-side ABI is
+    // exported, this stays in graceful fallback mode and hover uses the local
+    // TypeScript converter.
+    const mathCoreBridge = new mathCoreWasm_1.MathCoreWasmBridge();
+    void mathCoreBridge.initialize(context.extensionUri);
     // Set up SVG cache directory for inline math rendering
     const svgCacheDir = path.join(context.globalStorageUri.fsPath, 'math-svg-cache');
     decorationProvider.setSvgCacheDir(svgCacheDir);
@@ -90,7 +98,7 @@ function activateMathFeatures(context, onLspStateChanged) {
     const inlineEnabled = config.get('math.renderInline', true);
     decorationProvider.setEnabled(inlineEnabled);
     // Register hover provider (acts as fallback when LSP is not connected)
-    const hoverProvider = new mathHoverProvider_1.MathHoverProvider(decorationProvider);
+    const hoverProvider = new mathHoverProvider_1.MathHoverProvider(decorationProvider, mathCoreBridge);
     // Expose LSP state setter so the extension can notify when LSP starts/stops.
     // When LSP is running, the hover handler in src/app/lsp/handlers/hover.spl
     // provides full rendering and this provider defers to it.

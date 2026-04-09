@@ -14,10 +14,12 @@
  */
 import * as vscode from 'vscode';
 import { MathDecorationProvider } from './mathDecorationProvider';
+import { MathCoreWasmBridge } from './mathCoreWasm';
 export declare class MathHoverProvider implements vscode.HoverProvider {
     private decorationProvider;
+    private mathCoreBridge;
     private lspRunning;
-    constructor(decorationProvider: MathDecorationProvider);
+    constructor(decorationProvider: MathDecorationProvider, mathCoreBridge: MathCoreWasmBridge);
     /**
      * Set whether the LSP client is currently running.
      * When the LSP is running, the query-backed hover path provides math block

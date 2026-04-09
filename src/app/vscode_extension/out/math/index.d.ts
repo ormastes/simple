@@ -15,6 +15,7 @@
  */
 import * as vscode from 'vscode';
 export { MathDecorationProvider } from './mathDecorationProvider';
+export { MathCoreWasmBridge } from './mathCoreWasm';
 export { MathPreviewPanel } from './mathPreviewPanel';
 export { MathHoverProvider } from './mathHoverProvider';
 export { simpleToLatex, simpleToUnicode } from './mathConverter';

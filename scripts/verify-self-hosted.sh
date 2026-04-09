@@ -83,6 +83,14 @@ echo "Checking bin/ links:"
 
 check_link "bin/simple" "${REPO_ROOT}/bin/simple"
 check_link "bin/simple.exe" "${REPO_ROOT}/bin/simple.exe"
+check_link "bin/simple_mcp_server" "${REPO_ROOT}/bin/simple_mcp_server"
+check_link "bin/simple_lsp_mcp_server" "${REPO_ROOT}/bin/simple_lsp_mcp_server"
+check_link "bin/t32_mcp_server" "${REPO_ROOT}/bin/t32_mcp_server"
+check_link "bin/t32_lsp_mcp_server" "${REPO_ROOT}/bin/t32_lsp_mcp_server"
+check_link "bin/simple_mcp_server.cmd" "${REPO_ROOT}/bin/simple_mcp_server.cmd"
+check_link "bin/simple_lsp_mcp_server.cmd" "${REPO_ROOT}/bin/simple_lsp_mcp_server.cmd"
+check_link "bin/t32_mcp_server.cmd" "${REPO_ROOT}/bin/t32_mcp_server.cmd"
+check_link "bin/t32_lsp_mcp_server.cmd" "${REPO_ROOT}/bin/t32_lsp_mcp_server.cmd"
 
 echo ""
 echo "Checking bin/release/ links:"
@@ -91,7 +99,7 @@ echo "Checking bin/release/ links:"
 for subdir in "${REPO_ROOT}/bin/release"/*/; do
   if [ -d "$subdir" ]; then
     dirname="$(basename "$subdir")"
-    for exe in simple simple.exe; do
+    for exe in simple simple.exe simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_server simple_mcp_server.cmd simple_lsp_mcp_server.cmd t32_mcp_server.cmd t32_lsp_mcp_server.cmd; do
       if [ -e "${subdir}${exe}" ] || [ -L "${subdir}${exe}" ]; then
         check_link "bin/release/${dirname}/${exe}" "${subdir}${exe}"
       fi
@@ -123,10 +131,12 @@ if [ "$FAIL" -gt 0 ]; then
     PASS=0
     FAIL=0
     check_link "bin/simple" "${REPO_ROOT}/bin/simple"
+    check_link "bin/simple_mcp_server" "${REPO_ROOT}/bin/simple_mcp_server"
+    check_link "bin/simple_lsp_mcp_server" "${REPO_ROOT}/bin/simple_lsp_mcp_server"
     for subdir in "${REPO_ROOT}/bin/release"/*/; do
       if [ -d "$subdir" ]; then
         dirname="$(basename "$subdir")"
-        for exe in simple simple.exe; do
+        for exe in simple simple.exe simple_mcp_server simple_lsp_mcp_server t32_mcp_server t32_lsp_mcp_server simple_mcp_server.cmd simple_lsp_mcp_server.cmd t32_mcp_server.cmd t32_lsp_mcp_server.cmd; do
           if [ -e "${subdir}${exe}" ] || [ -L "${subdir}${exe}" ]; then
             check_link "bin/release/${dirname}/${exe}" "${subdir}${exe}"
           fi

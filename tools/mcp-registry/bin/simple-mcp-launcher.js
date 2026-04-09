@@ -10,13 +10,44 @@ const os = require('os');
 
 const ENTRY = 'src/app/mcp/main.spl';
 
+function platformDirs() {
+  const platform = os.platform();
+  const arch = os.arch();
+  if (platform === 'darwin' && arch === 'arm64') {
+    return ['aarch64-apple-darwin-macho', 'aarch64-apple-darwin', 'darwin-aarch64', 'macos-arm64'];
+  }
+  if (platform === 'darwin' && arch === 'x64') {
+    return ['x86_64-apple-darwin-macho', 'x86_64-apple-darwin', 'darwin-x86_64', 'macos-x86_64'];
+  }
+  if (platform === 'linux' && arch === 'x64') {
+    return ['x86_64-unknown-linux-gnu', 'linux-x86_64'];
+  }
+  if (platform === 'linux' && arch === 'arm64') {
+    return ['aarch64-unknown-linux-gnu', 'linux-aarch64'];
+  }
+  if (platform === 'win32' && arch === 'x64') {
+    return ['x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnu', 'windows-x86_64'];
+  }
+  if (platform === 'win32' && arch === 'arm64') {
+    return ['aarch64-pc-windows-msvc', 'aarch64-pc-windows-gnu', 'windows-aarch64'];
+  }
+  if (platform === 'freebsd' && arch === 'x64') {
+    return ['x86_64-unknown-freebsd', 'freebsd-x86_64'];
+  }
+  return [];
+}
+
 function resolveNativeServer(rootDir) {
   const ext = os.platform() === 'win32' ? '.exe' : '';
-  const candidates = [
+  const candidates = [];
+  for (const platformDir of platformDirs()) {
+    candidates.push(path.join(rootDir, 'bin', 'release', platformDir, `simple_mcp_server${ext}`));
+  }
+  candidates.push(
     path.join(rootDir, 'bin', 'release', `simple_mcp_server${ext}`),
     path.join(rootDir, 'bin', `simple_mcp_server${ext}`),
     path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', `simple_mcp_server${ext}`)
-  ];
+  );
 
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -38,9 +69,15 @@ function findRuntime() {
   if (devServer) {
     return { command: devServer, args: [], repoRoot: projectRoot, mode: 'native' };
   }
-  const devBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
-  if (fs.existsSync(devBinary)) {
-    return { command: devBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+  for (const platformDir of platformDirs()) {
+    const devBinary = path.join(projectRoot, 'bin', 'release', platformDir, `simple${ext}`);
+    if (fs.existsSync(devBinary)) {
+      return { command: devBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+    }
+  }
+  const flatDevBinary = path.join(projectRoot, 'bin', 'release', `simple${ext}`);
+  if (fs.existsSync(flatDevBinary)) {
+    return { command: flatDevBinary, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
   }
   // Fallback: bin/simple symlink (common dev setup)
   const devSymlink = path.join(projectRoot, 'bin', `simple${ext}`);

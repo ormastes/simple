@@ -97,9 +97,21 @@ async function main() {
     const ext = os.platform() === 'win32' ? '.exe' : '';
     const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
     if (entries.length > 0) {
-      const binary = path.join(nativeDir, entries[0], 'bin', `simple${ext}`);
-      if (fs.existsSync(binary) && os.platform() !== 'win32') {
-        fs.chmodSync(binary, 0o755);
+      const pkgDir = path.join(nativeDir, entries[0]);
+      const binaries = new Set([path.join(pkgDir, 'bin', `simple${ext}`)]);
+      const releaseRoot = path.join(pkgDir, 'bin', 'release');
+      if (fs.existsSync(releaseRoot)) {
+        for (const entry of fs.readdirSync(releaseRoot)) {
+          binaries.add(path.join(releaseRoot, entry, `simple${ext}`));
+          binaries.add(path.join(releaseRoot, entry, `simple_lsp_mcp_server${ext}`));
+        }
+      }
+      if (os.platform() !== 'win32') {
+        for (const binary of binaries) {
+          if (fs.existsSync(binary)) {
+            fs.chmodSync(binary, 0o755);
+          }
+        }
       }
     }
 

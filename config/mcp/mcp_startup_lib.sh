@@ -28,6 +28,18 @@ mcp_log_line() {
 # Call: mcp_resolve_self "$0"
 # Sets: MCP_SCRIPT_DIR, MCP_REPO_ROOT (only if REPO_ROOT not already set)
 
+mcp_find_repo_root_from() {
+  _mcp_search_dir="$1"
+  while [ "$_mcp_search_dir" != "/" ]; do
+    if [ -d "${_mcp_search_dir}/src" ] && [ -d "${_mcp_search_dir}/bin" ]; then
+      printf '%s' "$_mcp_search_dir"
+      return 0
+    fi
+    _mcp_search_dir="$(dirname "$_mcp_search_dir")"
+  done
+  return 1
+}
+
 mcp_resolve_self() {
   _mcp_self="$1"
   while [ -L "$_mcp_self" ]; do
@@ -37,7 +49,11 @@ mcp_resolve_self() {
   done
   MCP_SCRIPT_DIR="$(cd "$(dirname "$_mcp_self")" && pwd)"
   if [ -z "${REPO_ROOT:-}" ]; then
-    REPO_ROOT="$(cd "${MCP_SCRIPT_DIR}/../.." && pwd)"
+    REPO_ROOT="$(mcp_find_repo_root_from "$MCP_SCRIPT_DIR")"
+  fi
+  if [ -z "${REPO_ROOT:-}" ]; then
+    echo "error: failed to locate repo root for ${MCP_SERVER}" >&2
+    exit 1
   fi
 }
 
@@ -94,7 +110,10 @@ mcp_find_runtime() {
     MCP_RUNTIME_KIND="env-simple-binary"
     return 0
   fi
-  if [ -x "${REPO_ROOT}/bin/simple" ]; then
+  if [ -n "${MCP_SCRIPT_DIR:-}" ] && [ -x "${MCP_SCRIPT_DIR}/simple" ]; then
+    MCP_RUNTIME="${MCP_SCRIPT_DIR}/simple"
+    MCP_RUNTIME_KIND="platform-release"
+  elif [ -x "${REPO_ROOT}/bin/simple" ]; then
     MCP_RUNTIME="${REPO_ROOT}/bin/simple"
     MCP_RUNTIME_KIND="bin-simple"
   elif [ -x "${REPO_ROOT}/bin/release/simple" ]; then

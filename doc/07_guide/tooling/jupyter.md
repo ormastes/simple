@@ -49,7 +49,7 @@ jupyter lab
 # Python packages
 pip install notebook jupyter_client pyzmq
 
-# Simple binary must be built
+# Simple runtime must be built or deployed
 bin/simple build --release
 ```
 
@@ -99,7 +99,7 @@ kernel_wrapper.py (Python ZMQ bridge)
 Simple Kernel (src/app/jupyter_kernel/main.spl)
     |
     v  (subprocess)
-bin/release/simple (executes accumulated code)
+bin/simple or bin/release/<platform>/simple (executes accumulated code)
 ```
 
 ### Message Flow
@@ -176,12 +176,12 @@ sh scripts/test/jupyter-docker-test.shs
 
 ```bash
 # All Jupyter specs
-bin/release/simple test test/system/jupyter/
+bin/simple test test/system/jupyter/
 
 # Individual specs
-bin/release/simple test test/system/jupyter/jupyter_notebook_server_system_spec.spl
-bin/release/simple test test/system/jupyter/jupyter_kernel_install_system_spec.spl
-bin/release/simple test test/system/jupyter/jupyter_execution_system_spec.spl
+bin/simple test test/system/jupyter/jupyter_notebook_server_system_spec.spl
+bin/simple test test/system/jupyter/jupyter_kernel_install_system_spec.spl
+bin/simple test test/system/jupyter/jupyter_execution_system_spec.spl
 ```
 
 ### Test Coverage
@@ -225,10 +225,10 @@ jupyter kernelspec list | grep simple
 **Kernel dies immediately:**
 ```bash
 # Check Simple binary exists
-ls -la bin/release/simple
+ls -la bin/simple
 # Test kernel directly
 echo '{"msg_type":"kernel_info_request","msg_id":"t1","session":"s1","content":{}}' | \
-    bin/release/simple src/app/jupyter_kernel/main.spl
+    bin/simple run src/app/jupyter_kernel/main.spl
 ```
 
 **Missing Python dependencies:**

@@ -391,21 +391,42 @@ impl CompilerPipeline {
         source: &str,
         target: Target,
     ) -> Result<Vec<u8>, CompileError> {
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
+        self.compile_module_to_memory_for_target_with_context(ast_module, target, None)
+    }
+
+    /// Compile a source file to target-specific bytes with import resolution.
+    ///
+    /// Unlike the source-string entrypoint, this preserves the module/file
+    /// context so `use` imports and type checking across modules still work.
+    #[instrument(skip(self, source_path))]
+    pub fn compile_file_to_memory_for_target(
+        &mut self,
+        source_path: &Path,
+        target: Target,
+    ) -> Result<Vec<u8>, CompileError> {
+        let ast_module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        self.compile_module_to_memory_for_target_with_context(ast_module, target, Some(source_path))
+    }
+
+    fn compile_module_to_memory_for_target_with_context(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        target: Target,
+        source_path: Option<&Path>,
+    ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
 
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
 
-        // 1. Parse source to AST
-        let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
-
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
 
         // 3. Run lint checks
-        self.run_lint_checks(&ast_module.items, None)?;
+        self.run_lint_checks(&ast_module.items, source_path)?;
 
         // 4. Validate capabilities
         self.validate_capabilities(&ast_module.items)?;
@@ -431,7 +452,11 @@ impl CompilerPipeline {
             .collect();
 
         // 5-7. Type check and lower to MIR
-        let mut mir_module = self.type_check_and_lower(&ast_module)?;
+        let mut mir_module = if let Some(path) = source_path {
+            self.type_check_and_lower_with_context(&ast_module, path)?
+        } else {
+            self.type_check_and_lower(&ast_module)?
+        };
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);

@@ -5,6 +5,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { suite, teardown, test } from 'mocha';
 import { MathDecorationProvider } from '../../math/mathDecorationProvider';
+import { MathCoreWasmBridge } from '../../math/mathCoreWasm';
 import { MathHoverProvider } from '../../math/mathHoverProvider';
 import { buildMathPreviewHtml } from '../../math/mathPreviewPanel';
 import { renderToSvgFile } from '../../math/mathSvgRenderer';
@@ -56,10 +57,10 @@ suite('GUI - Math Rendering', function() {
             'fn main():\n    val y = m{ frac(1, 2) + x }\n'
         );
 
-        const provider = new MathHoverProvider(makeFakeDecorationProvider());
+        const provider = new MathHoverProvider(makeFakeDecorationProvider(), new MathCoreWasmBridge());
         provider.setLspRunning(false);
 
-        const hover = provider.provideHover(
+        const hover = await provider.provideHover(
             document,
             new vscode.Position(1, 18),
             {} as vscode.CancellationToken
@@ -78,7 +79,7 @@ suite('GUI - Math Rendering', function() {
             'fn main():\n    val y = m{ frac(1, 2) + x }\n'
         );
 
-        const provider = new MathHoverProvider(makeFakeDecorationProvider());
+        const provider = new MathHoverProvider(makeFakeDecorationProvider(), new MathCoreWasmBridge());
         provider.setLspRunning(true);
 
         const hover = provider.provideHover(

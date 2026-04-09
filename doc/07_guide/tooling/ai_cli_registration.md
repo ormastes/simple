@@ -154,16 +154,15 @@ bin/simple build --release
 gh release create v0.9.2 \
   --title "v0.9.2" \
   --notes "Release with MCP server binaries" \
-  bin/release/x86_64-unknown-linux-gnu/simple_mcp_server \
-  bin/release/aarch64-apple-darwin/simple_mcp_server \
-  bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe
+  bin/release/<platform>/simple_mcp_server \
+  bin/release/<platform>/simple_mcp_server.exe
 ```
 
 **Important:** Binary assets must be named `simple_mcp_server-<triple>[.exe]` to match the download script. Rename during upload if needed:
 
 ```bash
 gh release upload v0.9.2 \
-  bin/release/x86_64-unknown-linux-gnu/simple_mcp_server#simple_mcp_server-x86_64-unknown-linux-gnu
+  bin/release/<platform>/simple_mcp_server#simple_mcp_server-<platform>
 ```
 
 #### Step C: Publish to npm

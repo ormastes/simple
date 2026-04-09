@@ -297,9 +297,8 @@ Local marketplace already set up. To publish externally:
 ```bash
 # 1. Build and upload platform binaries to GitHub Release
 gh release create v<ver> \
-  bin/release/x86_64-unknown-linux-gnu/simple_mcp_server \
-  bin/release/aarch64-apple-darwin/simple_mcp_server \
-  bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe
+  bin/release/<platform>/simple_mcp_server \
+  bin/release/<platform>/simple_mcp_server.exe
 
 # 2. Publish npm wrapper
 cd tools/mcp-registry && npm publish --access public

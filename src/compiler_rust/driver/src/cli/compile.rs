@@ -67,22 +67,8 @@ fn compile_file_impl(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if let Some(target) = target {
             println!("Cross-compiling for target: {}", target);
-            // For cross-compilation, we still need to read the source content
-            let source_content = match std::fs::read_to_string(source) {
-                Ok(content) => {
-                    // Normalize CRLF → LF for cross-platform compatibility
-                    if content.contains('\r') {
-                        content.replace('\r', "")
-                    } else {
-                        content
-                    }
-                }
-                Err(e) => {
-                    return Err(format!("cannot read {}: {}", source.display(), e));
-                }
-            };
             runner
-                .compile_to_smf_for_target(&source_content, &out_path, target)
+                .compile_file_to_smf_for_target(source, &out_path, target)
                 .map_err(|error| annotate_target_compile_error(target, error))
         } else {
             // Use file-based compilation which enables import resolution

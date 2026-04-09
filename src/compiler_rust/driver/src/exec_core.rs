@@ -255,6 +255,12 @@ impl ExecCore {
         fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
     }
 
+    /// Compile a source file to target-specific bytes with import resolution.
+    pub fn compile_file_for_target(&self, source_path: &Path, out: &Path, target: Target) -> Result<(), String> {
+        let smf_bytes = self.compile_file_to_memory_for_target(source_path, target)?;
+        fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
+    }
+
     /// Compile source string to SMF bytes in memory (no disk I/O)
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {
         let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
@@ -292,6 +298,14 @@ impl ExecCore {
         let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile_source_to_memory_for_target(source, target)
+            .map_err(|e| format!("compile failed: {e}"))
+    }
+
+    /// Compile a source file to target-specific bytes with import resolution.
+    pub fn compile_file_to_memory_for_target(&self, source_path: &Path, target: Target) -> Result<Vec<u8>, String> {
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile_file_to_memory_for_target(source_path, target)
             .map_err(|e| format!("compile failed: {e}"))
     }
 

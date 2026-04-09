@@ -37,7 +37,7 @@ mod codegen_instr_tests;
 
 #[cfg(test)]
 #[cfg(not(doctest))]
-#[path = "codegen_shared_tests.rs"]
+#[path = "codegen_shared_tests/mod.rs"]
 mod codegen_shared_tests;
 
 #[cfg(all(test, not(doctest), target_arch = "x86_64"))]

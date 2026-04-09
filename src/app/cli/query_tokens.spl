@@ -1,0 +1,429 @@
+# Simple Language - Query Tokens Subcommands
+#
+# Token-related query implementations: semantic-tokens, inlay-hints.
+
+use app.cli.query_sanitize.{sanitize_path}
+use app.cli.query_helpers.{_collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _extract_flag, _extract_call_name}
+use app.cli.query_rich_common.{query_file_read_rich, _find_in_line_from}
+
+fn query_semantic_tokens(file: text, cmd_args: [text]) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "Error: invalid file path"
+        return 1
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+
+    val content = query_file_read_rich(clean_file)
+    if content == "":
+        print "Could not read file: {clean_file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    # Build symbol sets from outline for classification
+    var fn_names: [text] = []
+    var type_names: [text] = []
+    var param_names: [text] = []
+    _collect_symbol_sets(content, fn_names, type_names, param_names)
+
+    val keywords = "fn,class,struct,enum,trait,if,elif,else,for,while,match,case,return,val,var,use,import,export,extern,static,me,break,continue,in,not,and,or,true,false,nil,self,impl,type,alias"
+    val kw_list = keywords.split(",")
+
+    val operators = "->,:=,==,!=,>=,<=,|>,>>,~>,**,+=,-=,*=,/=,%=,??,?.,.?"
+    val op_list = operators.split(",")
+
+    var token_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        var ci = 0
+        while ci < line.len() and token_count < 500:
+            val ch = line.substring(ci, ci + 1)
+
+            if ch == " " or ch == "\t":
+                ci = ci + 1
+                continue
+
+            # Comment
+            if ch == "#":
+                val comment_len = line.len() - ci
+                print "{li}:{ci}:{comment_len}:comment"
+                token_count = token_count + 1
+                break
+
+            # String literal
+            if ch == "\"":
+                var si = ci + 1
+                while si < line.len():
+                    val sc = line.substring(si, si + 1)
+                    if sc == "\\":
+                        si = si + 2
+                        continue
+                    if sc == "\"":
+                        si = si + 1
+                        break
+                    si = si + 1
+                val str_len = si - ci
+                print "{li}:{ci}:{str_len}:string"
+                token_count = token_count + 1
+                ci = si
+                continue
+
+            # Number
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                var ni = ci + 1
+                while ni < line.len():
+                    val nc = line.substring(ni, ni + 1)
+                    val nd = nc >= "0" and nc <= "9"
+                    if (not nd and nc != "." and nc != "_" and
+                        nc != "x" and nc != "b" and nc != "o" and
+                        nc != "a" and nc != "c" and nc != "d" and
+                        nc != "e" and nc != "f" and nc != "A" and
+                        nc != "B" and nc != "C" and nc != "D" and
+                        nc != "E" and nc != "F"):
+                        break
+                    ni = ni + 1
+                val num_len = ni - ci
+                print "{li}:{ci}:{num_len}:number"
+                token_count = token_count + 1
+                ci = ni
+                continue
+
+            # Identifier or keyword
+            val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            if is_alpha:
+                var wi = ci + 1
+                while wi < line.len():
+                    val wc = line.substring(wi, wi + 1)
+                    val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                    if not ww:
+                        break
+                    wi = wi + 1
+                val word = line.substring(ci, wi)
+                val word_len = wi - ci
+
+                val token_type = _classify_token(word, ci, line, kw_list, fn_names, type_names, param_names)
+                print "{li}:{ci}:{word_len}:{token_type}"
+                token_count = token_count + 1
+                ci = wi
+                continue
+
+            # Operator (multi-char)
+            if ci + 1 < line.len():
+                val two = line.substring(ci, ci + 2)
+                var is_op = false
+                for op in op_list:
+                    if two == op:
+                        is_op = true
+                        break
+                if is_op:
+                    print "{li}:{ci}:2:operator"
+                    token_count = token_count + 1
+                    ci = ci + 2
+                    continue
+
+            ci = ci + 1
+
+        li = li + 1
+
+    if token_count >= 500:
+        print "# (truncated at 500 tokens)"
+    0
+
+fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "Error: invalid file path"
+        return 1
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+    val format = _extract_flag(cmd_args, "--format", "text")
+
+    val content = query_file_read_rich(clean_file)
+    if content == "":
+        print "Could not read file: {clean_file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    # Build function return type map from outline for better inference
+    var fn_names: [text] = []
+    var fn_returns: [text] = []
+    _collect_fn_return_types(content, fn_names, fn_returns)
+
+    # Build function parameter name map for parameter hints
+    var fn_param_map_names: [text] = []
+    var fn_param_map_params: [text] = []
+    _collect_fn_param_names(content, fn_param_map_names, fn_param_map_params)
+
+    var hint_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        val trimmed = line.trim()
+
+        # --- Type hints for val/var bindings ---
+        var binding_prefix = ""
+        var name_start = 0
+        if trimmed.starts_with("val "):
+            binding_prefix = "val"
+            name_start = 4
+        elif trimmed.starts_with("var "):
+            binding_prefix = "var"
+            name_start = 4
+
+        if binding_prefix != "":
+            val after_kw = trimmed.substring(name_start)
+            var name_chars: [text] = []
+            var ni = 0
+            for nc in after_kw:
+                val nw = (nc >= "a" and nc <= "z") or (nc >= "A" and nc <= "Z") or (nc >= "0" and nc <= "9") or nc == "_"
+                if not nw:
+                    break
+                name_chars.push(nc)
+                ni = ni + 1
+            val var_name = name_chars.join("")
+
+            if var_name != "":
+                val after_name = after_kw.substring(ni).trim()
+                var has_annotation = false
+                if after_name.starts_with(":"):
+                    if after_name.len() > 1:
+                        val next = after_name.substring(1, 2)
+                        if next != "=":
+                            has_annotation = true
+
+                if not has_annotation and after_name.contains("="):
+                    var eq_pos = 0
+                    var found_eq = false
+                    var eqi = 0
+                    for ec in after_name:
+                        if ec == "=" and not found_eq:
+                            eq_pos = eqi
+                            found_eq = true
+                            break
+                        eqi = eqi + 1
+                    if found_eq:
+                        val rhs = after_name.substring(eq_pos + 1).trim()
+                        val inferred = _infer_type_from_rhs(rhs, fn_names, fn_returns)
+                        if inferred != "":
+                            val indent_len = line.len() - trimmed.len()
+                            val col_pos = indent_len + name_start + var_name.len()
+                            if format == "json":
+                                print "{\"line\":{li},\"col\":{col_pos},\"label\":\": {inferred}\",\"kind\":\"type\"}"
+                            else:
+                                print "{li}:{col_pos}: {var_name}: {inferred} [type]"
+                            hint_count = hint_count + 1
+
+        # --- Parameter name hints at call sites ---
+        hint_count = hint_count + _emit_param_hints_for_line(line, li, fn_param_map_names, fn_param_map_params, format)
+
+        li = li + 1
+
+    if hint_count == 0:
+        print "No inlay hints in range"
+    0
+
+fn _collect_fn_param_names(content: text, fn_names: [text], fn_params: [text]):
+    """Collect function names and their parameter lists from source outline.
+    fn_params stores comma-separated parameter names (without types) for each function.
+    """
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        var rest = ""
+        if trimmed.starts_with("fn "):
+            rest = trimmed.substring(3)
+        elif trimmed.starts_with("static fn "):
+            rest = trimmed.substring(10)
+        elif trimmed.starts_with("me "):
+            rest = trimmed.substring(3)
+        elif trimmed.starts_with("extern fn "):
+            rest = trimmed.substring(10)
+        if rest != "":
+            val name = _extract_ident_from_str(rest)
+            if name != "":
+                val params_str = _extract_param_names_from(rest)
+                fn_names.push(name)
+                fn_params.push(params_str)
+
+fn _extract_ident_from_str(s: text) -> text:
+    """Extract leading identifier from a string."""
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _extract_param_names_from(s: text) -> text:
+    """Extract parameter names (without types) from a function signature string.
+    Returns comma-separated names like 'x,y,z'.
+    """
+    # Find opening paren
+    var paren_start = -1
+    var pi = 0
+    while pi < s.len():
+        if s.substring(pi, pi + 1) == "(":
+            paren_start = pi
+            break
+        pi = pi + 1
+    if paren_start < 0:
+        return ""
+    # Find matching close paren
+    var depth = 0
+    var paren_end = -1
+    var qi = paren_start
+    while qi < s.len():
+        val ch = s.substring(qi, qi + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                paren_end = qi
+                break
+        qi = qi + 1
+    if paren_end < 0:
+        return ""
+    val inner = s.substring(paren_start + 1, paren_end)
+    if inner.trim() == "":
+        return ""
+    # Split by commas and extract each param name
+    val params = inner.split(",")
+    var names: [text] = []
+    for param in params:
+        val pt = param.trim()
+        if pt == "":
+            continue
+        val pname = _extract_ident_from_str(pt)
+        if pname != "" and pname != "self":
+            names.push(pname)
+    names.join(",")
+
+fn _emit_param_hints_for_line(line: text, line_num: i64, fn_names: [text], fn_params: [text], format: text) -> i64:
+    """Scan a line for function calls and emit parameter name hints.
+    Returns the number of hints emitted.
+    """
+    var count = 0
+    var ci = 0
+    while ci < line.len():
+        val ch = line.substring(ci, ci + 1)
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        if is_alpha:
+            var end_ci = ci + 1
+            while end_ci < line.len():
+                val wc = line.substring(end_ci, end_ci + 1)
+                val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                if not ww:
+                    break
+                end_ci = end_ci + 1
+            val call_name = line.substring(ci, end_ci)
+            # Check if followed by (
+            if end_ci < line.len() and line.substring(end_ci, end_ci + 1) == "(":
+                # Look up parameter names for this function
+                val param_str = _lookup_params(call_name, fn_names, fn_params)
+                if param_str != "":
+                    val param_list = param_str.split(",")
+                    # Find the arguments in the call
+                    val args_info = _extract_call_arg_positions(line, end_ci)
+                    var ai = 0
+                    while ai < args_info.len() and ai < param_list.len():
+                        val arg_col = args_info[ai]
+                        val pname = param_list[ai]
+                        # Only emit if the argument doesn't already have a named label
+                        val arg_text = _get_arg_text_at(line, arg_col)
+                        if not arg_text.contains(pname + ":"):
+                            if format == "json":
+                                print "{\"line\":{line_num},\"col\":{arg_col},\"label\":\"{pname}:\",\"kind\":\"parameter\"}"
+                            else:
+                                print "{line_num}:{arg_col}: {pname}: [parameter]"
+                            count = count + 1
+                        ai = ai + 1
+            ci = end_ci
+        else:
+            ci = ci + 1
+    count
+
+fn _lookup_params(fn_name: text, fn_names: [text], fn_params: [text]) -> text:
+    """Look up parameter names for a function by name."""
+    var i = 0
+    while i < fn_names.len():
+        if fn_names[i] == fn_name and i < fn_params.len():
+            return fn_params[i]
+        i = i + 1
+    ""
+
+fn _extract_call_arg_positions(line: text, paren_pos: i64) -> [i64]:
+    """Extract the column positions where each argument starts in a function call.
+    paren_pos is the position of the opening parenthesis.
+    Returns a list of 0-based column positions.
+    """
+    var positions: [i64] = []
+    var depth = 0
+    var ci = paren_pos
+    var in_string = false
+    while ci < line.len():
+        val ch = line.substring(ci, ci + 1)
+        if ch == "\"" and not in_string:
+            in_string = true
+            ci = ci + 1
+            continue
+        if ch == "\"" and in_string:
+            in_string = false
+            ci = ci + 1
+            continue
+        if ch == "\\" and in_string:
+            ci = ci + 2
+            continue
+        if in_string:
+            ci = ci + 1
+            continue
+
+        if ch == "(":
+            depth = depth + 1
+            if depth == 1:
+                # Start of first argument
+                val arg_start = _skip_whitespace(line, ci + 1)
+                if arg_start < line.len() and line.substring(arg_start, arg_start + 1) != ")":
+                    positions.push(arg_start)
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                break
+        elif ch == "," and depth == 1:
+            val arg_start = _skip_whitespace(line, ci + 1)
+            positions.push(arg_start)
+        ci = ci + 1
+    positions
+
+fn _skip_whitespace(line: text, pos: i64) -> i64:
+    """Skip whitespace characters starting at pos. Returns the new position."""
+    var ci = pos
+    while ci < line.len():
+        val ch = line.substring(ci, ci + 1)
+        if ch != " " and ch != "\t":
+            break
+        ci = ci + 1
+    ci
+
+fn _get_arg_text_at(line: text, col: i64) -> text:
+    """Get a short preview of the argument text at a column position."""
+    if col >= line.len():
+        return ""
+    val end_pos = if col + 30 < line.len(): col + 30 else: line.len()
+    line.substring(col, end_pos)
