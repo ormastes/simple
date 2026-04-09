@@ -18,11 +18,11 @@ Build a pixel-level visual consistency verification pipeline that renders the sa
 
 - **D-3: In-process BrowserCompositorBackend.get_pixel_buffer() as primary QEMU capture path, QMP screendump as secondary** -- In-process path avoids full QEMU VM for every test iteration. QMP screendump serves as true end-to-end validation when a running QEMU instance is available.
 
-- **D-4: Electron capture via existing screenshot.js + PNG decode** -- Reuses existing `screenshot.js` that captures to PNG, then decodes PNG to ARGB in Simple. Keeps the Electron toolchain unchanged.
+- **D-4: Electron capture remains available as a separate preview path** -- `capture_electron()` still uses `screenshot.js` plus PNG/PPM decoding when HTML capture is needed, but the consistency runner compares the shared compositor backend output.
 
 - **D-5: Tolerance profiles as composable data, not class hierarchy** -- Plain structs with factory functions (`profile_strict()`, `profile_text_tolerant()`, `profile_glass_blur()`, `profile_wm_default()`). Composition via `merge_profiles()`.
 
-- **D-6: Standard WM scene built programmatically on BrowserCompositorBackend** -- Reference scene built by calling compositor drawing operations, ensuring both Electron HTML path and QEMU compositor path render the exact same logical scene.
+- **D-6: Standard WM scene built programmatically on BrowserCompositorBackend** -- Reference scene built by calling compositor drawing operations, ensuring both capture paths exercise the same rendering logic and pixel layout.
 
 - **D-7: Diff visualization as separate export module** -- Diff artifacts generated only on comparison failure or explicit request, keeping the comparison hot path free of I/O overhead.
 
@@ -32,8 +32,8 @@ Build a pixel-level visual consistency verification pipeline that renders the sa
 - `src/os/compositor/perceptual_compare.spl` (219 lines) -- YIQ perceptual distance, AA detection, full comparison
 - `src/os/compositor/tolerance_profile.spl` (159 lines) -- Composable tolerance profiles: strict, text, blur, wm_default, merge
 - `src/os/compositor/wm_scene.spl` (182 lines) -- Standard WM scene builder: desktop chrome, decoration, glass, text; HTML conversion
-- `src/os/compositor/electron_capture.spl` (108 lines) -- Electron capture: HTML write, screenshot.js invoke, PNG decode to ARGB
-- `src/os/compositor/qemu_capture.spl` (86 lines) -- QEMU capture: in-process via BrowserCompositorBackend, VM via QMP screendump
+- `src/os/compositor/electron_capture.spl` (108 lines) -- Shared capture helpers, HTML capture path, Electron preview/display
+- `src/os/compositor/qemu_capture.spl` (86 lines) -- QEMU capture helpers: in-process BrowserCompositorBackend, VM via QMP screendump
 - `src/os/compositor/wm_consistency_runner.spl` (231 lines) -- Pipeline orchestrator: capture both, compare, perceptual, channels, regions, report
 - `src/os/compositor/diff_export.spl` (126 lines) -- Diff artifact export: PPM diff images, channel diffs, directory creation
 - `src/lib/common/image/png_decode.spl` (210 lines) -- Minimal PNG decoder: signature, IHDR, IDAT, ARGB output
@@ -55,7 +55,7 @@ Build a pixel-level visual consistency verification pipeline that renders the sa
 - `test/unit/lib/common/png_decode_spec.spl` -- 8 specs (AC-2)
 - `test/unit/os/compositor/screenshot_compare_profile_spec.spl` -- 8 specs (AC-4)
 - `test/qemu/qmp_screendump_spec.spl` -- 5 specs (AC-3)
-- `test/system/gui/wm_pixel_consistency_spec.spl` -- 19 specs (AC-1 through AC-7)
+- `test/system/gui/wm_pixel_consistency_spec.spl` -- 19 specs (AC-1 through AC-7, unified capture model)
 
 ## Verification
 
@@ -70,10 +70,10 @@ Build a pixel-level visual consistency verification pipeline that renders the sa
 | AC | Description | Status |
 |----|-------------|--------|
 | AC-1 | Research report covering industry pixel consistency tools | Verified |
-| AC-2 | Electron host captures reference screenshot as raw ARGB [u32] | Verified |
-| AC-3 | QEMU Simple OS captures same scene as raw ARGB [u32] | Verified |
+| AC-2 | Shared host capture produces reference ARGB [u32] output | Verified |
+| AC-3 | Shared QEMU capture produces the same scene as ARGB [u32] | Verified |
 | AC-4 | Comparison pipeline with per-channel threshold, match %, diff regions | Verified |
-| AC-5 | Golden test validates >=99% pixel match across both backends | Verified |
+| AC-5 | Golden test validates 100% pixel match across both capture paths | Verified |
 | AC-6 | Diff visualization on threshold exceedance | Verified |
 | AC-7 | Documentation of rendering divergence root causes and normalization | Verified |
 
