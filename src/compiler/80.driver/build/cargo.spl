@@ -10,7 +10,37 @@
 # 2. Cache .len() calls where used multiple times
 
 use app.build.types (BuildResult, BuildError, TestResult, TestError, BuildConfig, BuildProfile, profile_to_string)
-use app.io.mod (cargo_build, cargo_test, cargo_test_doc, cargo_clean, cargo_check, cargo_lint, cargo_fmt, file_copy, file_exists, dir_create)
+use app.io.mod (cargo_build, cargo_test, cargo_test_doc, cargo_clean, cargo_check, cargo_lint, cargo_fmt, file_copy, file_exists, dir_create, host_os, host_arch)
+
+fn _runtime_ext() -> text:
+    if host_os() == "windows":
+        return ".exe"
+    ""
+
+fn _platform_release_dir() -> text:
+    val os = host_os()
+    val arch = host_arch()
+    if os == "macos" and arch == "aarch64":
+        return "macos-arm64"
+    if os == "macos" and arch == "x86_64":
+        return "macos-x86_64"
+    if os == "linux" and arch == "x86_64":
+        return "linux-x86_64"
+    if os == "linux" and arch == "aarch64":
+        return "linux-aarch64"
+    if os == "windows" and arch == "x86_64":
+        return "x86_64-pc-windows-msvc"
+    if os == "windows" and arch == "aarch64":
+        return "aarch64-pc-windows-msvc"
+    "{os}-{arch}"
+
+fn _bootstrap_binary_dst() -> text:
+    "bin/release/{_platform_release_dir()}/simple{_runtime_ext()}"
+
+fn _active_binary_dst(config: BuildConfig) -> text:
+    match config.profile:
+        case BuildProfile.Bootstrap: _bootstrap_binary_dst()
+        case _: "bin/simple{_runtime_ext()}"
 
 # Helper: Convert dict to BuildResult
 fn dict_to_build_result(d: dict) -> BuildResult:
@@ -37,19 +67,16 @@ fn dict_to_test_result(d: dict) -> TestResult:
 # Copy binary to bin/ directory after successful build
 fn copy_binary_to_bin(config: BuildConfig) -> bool:
     val profile_str = profile_to_string(config.profile)
-    val src = "{config.workspace_root}/target/{profile_str}/simple"
+    val src = "{config.workspace_root}/target/{profile_str}/simple{_runtime_ext()}"
 
     if not file_exists(src):
         return false
 
-    # Determine destination based on profile
-    val dst = match config.profile:
-        case BuildProfile.Bootstrap: "bin/release/simple"
-        case _: "bin/simple"
+    val dst = _active_binary_dst(config)
 
     # Create directory if needed
     if config.profile == BuildProfile.Bootstrap:
-        dir_create("bin/release", false)
+        dir_create("bin/release/{_platform_release_dir()}", true)
 
     file_copy(src, dst)
 
@@ -66,9 +93,7 @@ class Cargo:
         if result.success:
             val copied = copy_binary_to_bin(config)
             if copied:
-                val dest = match config.profile:
-                    case BuildProfile.Bootstrap: "bin/release/simple"
-                    case _: "bin/simple"
+                val dest = _active_binary_dst(config)
                 print "✓ Binary copied to {dest}"
 
         result

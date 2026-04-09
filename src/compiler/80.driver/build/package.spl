@@ -5,6 +5,49 @@
 
 use app.io.{file_read_lines, file_exists, file_size, file_copy, dir_create, process_run, file_hash_sha256, current_time_ms, host_os, host_arch, dir_walk}
 
+fn runtime_binary_ext() -> text:
+    if host_os() == "windows":
+        return ".exe"
+    ""
+
+fn platform_release_dir() -> text:
+    val os = host_os()
+    val arch = host_arch()
+    if os == "macos" and arch == "aarch64":
+        return "macos-arm64"
+    if os == "macos" and arch == "x86_64":
+        return "macos-x86_64"
+    if os == "linux" and arch == "x86_64":
+        return "linux-x86_64"
+    if os == "linux" and arch == "aarch64":
+        return "linux-aarch64"
+    if os == "windows" and arch == "x86_64":
+        return "x86_64-pc-windows-msvc"
+    if os == "windows" and arch == "aarch64":
+        return "aarch64-pc-windows-msvc"
+    "{os}-{arch}"
+
+fn find_packaged_runtime_source() -> text:
+    val ext = runtime_binary_ext()
+    val platform_dir = platform_release_dir()
+    val primary = "bin/release/{platform_dir}/simple{ext}"
+    if file_exists(primary):
+        return primary
+    if file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if host_os() == "macos" and host_arch() == "aarch64":
+        if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+    if file_exists("bin/release/simple{ext}"):
+        return "bin/release/simple{ext}"
+    if file_exists("src/compiler_rust/target/release/simple{ext}"):
+        return "src/compiler_rust/target/release/simple{ext}"
+    if file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        return "src/compiler_rust/target/bootstrap/simple{ext}"
+    ""
+
 # Generate unique temporary directory in /tmp
 fn create_temp_dir(prefix: text) -> text:
     val timestamp = current_time_ms()
@@ -86,11 +129,11 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
 
     # Step 1: Verify pre-built runtime exists
     print "\nStep 1: Verifying pre-built runtime..."
-    val runtime_src = "bin/release/simple"
+    val runtime_src = find_packaged_runtime_source()
 
-    if not file_exists(runtime_src):
-        print "✗ Pre-built runtime not found at: {runtime_src}"
-        print "  Please ensure bin/release/simple exists"
+    if runtime_src == "" or not file_exists(runtime_src):
+        print "✗ Pre-built runtime not found"
+        print "  Please ensure bin/simple or bin/release/<platform>/simple exists"
         return PackageResult(
             success: false,
             package_path: "",
@@ -110,7 +153,7 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
 
     # Step 3: Copy runtime binary
     print "\nStep 3: Copying runtime binary..."
-    val runtime_dst = "{pkg_dir}/bin/simple"
+    val runtime_dst = "{pkg_dir}/bin/simple{runtime_binary_ext()}"
 
     if not file_copy(runtime_src, runtime_dst):
         print "✗ Failed to copy runtime binary"
@@ -238,9 +281,9 @@ fn create_custom_package(config: PackageConfig) -> PackageResult:
     dir_create("{pkg_dir}/bin", false)
 
     # Always copy runtime
-    val runtime_src = "bin/release/simple"
-    if file_exists(runtime_src):
-        file_copy(runtime_src, "{pkg_dir}/bin/simple")
+    val runtime_src = find_packaged_runtime_source()
+    if runtime_src != "" and file_exists(runtime_src):
+        file_copy(runtime_src, "{pkg_dir}/bin/simple{runtime_binary_ext()}")
 
     # Copy sources if requested
     if config.include_sources:
@@ -320,9 +363,7 @@ fn cleanup_package_dir(pkg_dir: text):
 
 # Helper: Detect platform
 fn detect_platform() -> text:
-    val os = host_os()
-    val arch = host_arch()
-    "{os}-{arch}"
+    platform_release_dir()
 
 # Print package result
 fn print_package_result(result: PackageResult):

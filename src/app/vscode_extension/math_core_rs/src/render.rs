@@ -154,6 +154,14 @@ fn render_with_prec(expr: &Expr, parent_prec: u8, mode: RenderMode) -> String {
         }
         Expr::Binary { op, left, right } => render_binary(op, left, right, mode),
         Expr::Call { name, args } => render_call(name, args, mode),
+        Expr::BoundSpec { var, lower, upper } => {
+            let rendered = format!(
+                "{var}={}..{}",
+                render_with_prec(lower, 0, mode),
+                render_with_prec(upper, 0, mode)
+            );
+            (rendered, 6)
+        }
         Expr::Group(inner) => {
             let rendered = render_with_prec(inner, 0, mode);
             match mode {
@@ -237,11 +245,14 @@ fn render_call(name: &str, args: &[Expr], mode: RenderMode) -> (String, u8) {
             RenderMode::Pretty => format!("√{}", rendered_args[0]),
             RenderMode::Text => format!("sqrt({})", rendered_args[0]),
         },
-        "sin" | "cos" | "tan" | "log" | "ln" | "exp" if args.len() == 1 => match mode {
+        "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "tanh" if args.len() == 1 => match mode {
             RenderMode::Latex => format!("\\{}\\left({}\\right)", name, rendered_args[0]),
             RenderMode::Pretty => format!("{name}({})", rendered_args[0]),
             RenderMode::Text => format!("{name}({})", rendered_args[0]),
         },
+        "sum" | "product" | "integral" => {
+            return (render_fold_like(name, args, mode), 6);
+        }
         _ => {
             let args_joined = rendered_args.join(", ");
             match mode {
@@ -255,6 +266,75 @@ fn render_call(name: &str, args: &[Expr], mode: RenderMode) -> (String, u8) {
     };
 
     (rendered, 6)
+}
+
+fn render_fold_like(name: &str, args: &[Expr], mode: RenderMode) -> String {
+    let body = args
+        .get(0)
+        .map(|expr| render_with_prec(expr, 0, mode))
+        .unwrap_or_default();
+
+    let bound = args.get(1).and_then(|expr| match expr {
+        Expr::BoundSpec { var, lower, upper } => Some((
+            render_ident(var, mode),
+            render_with_prec(lower, 0, mode),
+            render_with_prec(upper, 0, mode),
+        )),
+        _ => None,
+    });
+
+    match (name, bound, mode) {
+        ("sum", Some((var, lower, upper)), RenderMode::Latex) => {
+            format!("\\sum_{{{var}={lower}}}^{{{upper}}} {body}")
+        }
+        ("sum", Some((var, lower, upper)), RenderMode::Pretty) => {
+            format!("∑_{{{var}={lower}..{upper}}} {body}")
+        }
+        ("sum", Some((var, lower, upper)), RenderMode::Text) => {
+            format!("sum({body}, {var}={lower}..{upper})")
+        }
+        ("sum", None, RenderMode::Latex) => format!("\\sum {body}"),
+        ("sum", None, RenderMode::Pretty) => format!("∑ {body}"),
+        ("sum", None, RenderMode::Text) => format!("sum({body})"),
+        ("product", Some((var, lower, upper)), RenderMode::Latex) => {
+            format!("\\prod_{{{var}={lower}}}^{{{upper}}} {body}")
+        }
+        ("product", Some((var, lower, upper)), RenderMode::Pretty) => {
+            format!("∏_{{{var}={lower}..{upper}}} {body}")
+        }
+        ("product", Some((var, lower, upper)), RenderMode::Text) => {
+            format!("product({body}, {var}={lower}..{upper})")
+        }
+        ("product", None, RenderMode::Latex) => format!("\\prod {body}"),
+        ("product", None, RenderMode::Pretty) => format!("∏ {body}"),
+        ("product", None, RenderMode::Text) => format!("product({body})"),
+        ("integral", Some((var, lower, upper)), RenderMode::Latex) => {
+            format!("\\int_{{{lower}}}^{{{upper}}} {body} \\, d{var}")
+        }
+        ("integral", Some((var, lower, upper)), RenderMode::Pretty) => {
+            format!("∫_{{{lower}..{upper}}} {body} d{var}")
+        }
+        ("integral", Some((var, lower, upper)), RenderMode::Text) => {
+            format!("integral({body}, {var}={lower}..{upper})")
+        }
+        ("integral", None, RenderMode::Latex) => format!("\\int {body}"),
+        ("integral", None, RenderMode::Pretty) => format!("∫ {body}"),
+        ("integral", None, RenderMode::Text) => format!("integral({body})"),
+        _ => {
+            let args_joined = args
+                .iter()
+                .map(|arg| render_with_prec(arg, 0, mode))
+                .collect::<Vec<_>>()
+                .join(", ");
+            match mode {
+                RenderMode::Latex => {
+                    format!("\\operatorname{{{name}}}\\left({args_joined}\\right)")
+                }
+                RenderMode::Pretty => format!("{name}({args_joined})"),
+                RenderMode::Text => format!("{name}({args_joined})"),
+            }
+        }
+    }
 }
 
 fn render_ident(name: &str, mode: RenderMode) -> String {
@@ -427,6 +507,46 @@ mod tests {
         assert!(latex.contains("\\sqrt{x}"));
         assert!(latex.contains("\\beta"));
         assert!(pretty.contains('β'));
+    }
+
+    #[test]
+    fn renders_fold_like_calls_with_bounds() {
+        let expr = parse_expression(
+            "sum(x, i=1..n) + product(y, j=2..m) + integral(sin(x), t=0..1)",
+        )
+        .unwrap();
+        let latex = render_latex(&expr);
+        let pretty = render_pretty(&expr);
+        let text = render_text(&expr);
+
+        assert!(latex.contains("\\sum_{i=1}^{n} x"));
+        assert!(latex.contains("\\prod_{j=2}^{m} y"));
+        assert!(latex.contains("\\int_{0}^{1} \\sin\\left(x\\right) \\,"));
+        assert!(latex.contains("dt"));
+        assert!(pretty.contains("∑_{i=1..n} x"));
+        assert!(pretty.contains("∏_{j=2..m} y"));
+        assert!(pretty.contains("∫_{0..1}"));
+        assert!(text.contains("sum(x, i=1..n)"));
+        assert!(text.contains("product(y, j=2..m)"));
+        assert!(text.contains("integral(sin(x), t=0..1)"));
+    }
+
+    #[test]
+    fn renders_trig_and_exp_functions_consistently() {
+        let expr = parse_expression("sin(x) + cos(y) + tan(z) + log(u) + ln(v) + exp(w) + tanh(t)").unwrap();
+        let latex = render_latex(&expr);
+        let pretty = render_pretty(&expr);
+
+        assert!(latex.contains("\\sin\\left(x\\right)"));
+        assert!(latex.contains("\\cos\\left(y\\right)"));
+        assert!(latex.contains("\\tan\\left(z\\right)"));
+        assert!(latex.contains("\\log\\left(u\\right)"));
+        assert!(latex.contains("\\ln\\left(v\\right)"));
+        assert!(latex.contains("\\exp\\left(w\\right)"));
+        assert!(latex.contains("\\tanh\\left(t\\right)"));
+        assert!(pretty.contains("sin(x)"));
+        assert!(pretty.contains("cos(y)"));
+        assert!(pretty.contains("tan(z)"));
     }
 
     #[test]

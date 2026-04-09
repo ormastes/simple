@@ -17,7 +17,7 @@ Usage: scripts/bootstrap/bootstrap-from-scratch.sh [options]
 Bootstrap wrapper.
 
 Linux:
-  Runs the verified staged bootstrap pipeline using bin/release/simple.
+  Runs the verified staged bootstrap pipeline using the active runtime binary.
 
 FreeBSD / --target=freebsd-x86_64:
   Runs the FreeBSD seed bootstrap verifier using bin/freebsd/simple.
@@ -214,7 +214,7 @@ if [ "${can_full_bootstrap}" -eq 1 ]; then
   echo "  mode:     full CLI (build bootstrap)"
   RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
-    bin/release/simple build bootstrap "--backend=${backend}" "--output=${output_dir}"
+    "${seed_bin}" run src/app/cli/main.spl build bootstrap "--backend=${backend}" "--output=${output_dir}"
 else
   # Bootstrap-only or missing — manual staged bootstrap via seed
   echo "  mode:     manual (seed → bootstrap_main → bootstrap_main)"
