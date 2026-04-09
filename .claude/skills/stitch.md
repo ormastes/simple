@@ -70,6 +70,15 @@ This markdown is passed as the `designMd` field in `create_design_system`. It te
 Every surface is a frosted glass pane floating over a deep-space gradient background.
 No flat solid backgrounds. All surfaces use semi-transparent backgrounds with backdrop-filter blur.
 
+## 5-Level Surface Hierarchy
+Every UI element maps to exactly one surface level:
+- **Surface 0 (bg)**: App background, solid #0b0d10, no blur, no shadow
+- **Surface 1 (sidebar/title)**: rgba(255,255,255,0.04), blur(10px), subtle 1px shadow
+- **Surface 2 (card/section)**: rgba(255,255,255,0.06), blur(12px), 4px shadow, radius 12px
+- **Surface 3 (floating/palette)**: rgba(255,255,255,0.09), blur(16px), 8px shadow, radius 16px
+- **Surface 4 (modal/spotlight)**: rgba(255,255,255,0.12), blur(20px), 12px dual shadow, radius 20px
+Use CSS classes `.surface-0` through `.surface-4`. Higher level = more translucent + more blur + deeper shadow.
+
 ## Background
 - Dark gradient from #060612 (top) to #1A0830 (bottom) -- deep space feel
 - Light gradient from #C8B8E8 (top lavender) to #F0ECF5 (bottom soft white)
@@ -86,6 +95,14 @@ No flat solid backgrounds. All surfaces use semi-transparent backgrounds with ba
 - Tertiary: rgba(255,255,255,0.36) with backdrop-filter: blur(8px)
 - Elevated: rgba(255,255,255,0.85) with backdrop-filter: blur(40px)
 
+## CSS Custom Properties
+- `--surface-0` through `--surface-4`: 5-level surface colors
+- `--border`: rgba(255,255,255,0.10)
+- `--text`: rgba(255,255,255,0.92)
+- `--muted`: rgba(255,255,255,0.62)
+- `--accent`: theme accent color
+- `--radius-sm`: 12px, `--radius-md`: 16px, `--radius-lg`: 20px
+
 ## Borders
 - Subtle: 1px solid rgba(255,255,255,0.08) -- barely visible glass edge
 - Prominent: 1px solid rgba(255,255,255,0.18) -- active/focused elements
@@ -95,6 +112,12 @@ No flat solid backgrounds. All surfaces use semi-transparent backgrounds with ba
 - Active windows: 9+ shadow layers creating realistic depth
 - Layer pattern: wide soft (20px blur, low alpha) + blue tint + tight contact + bottom accent + ambient halo
 - Inactive windows: 3 layers, reduced alpha
+
+## Shell Components
+- **Title bar** (`.shell-titlebar`): Surface 1, 38px, traffic light buttons, drag region, centered title
+- **Sidebar** (`.shell-sidebar`): Surface 1, 220px, scrollable nav, translucent
+- **Command palette** (`.shell-command-palette`): Surface 3, centered overlay, search input + result list, 520px wide
+- **Dock** (`.shell-dock`): Surface 2, pill shape 26px radius, icon row with active indicators
 
 ## Window Chrome
 - Title bar: 24px, glass surface with blur, traffic light buttons (close #FF5F57, minimize #FFBD2E, maximize #28CA41) on left
@@ -114,6 +137,35 @@ No flat solid backgrounds. All surfaces use semi-transparent backgrounds with ba
 - Bounce animation for launching apps
 - Active indicator: 4px dot below icon
 - Apps: Terminal, Files, Calculator, Clock, Settings, Browser, Editor
+
+## Interaction Pieces
+- **Toast / snackbar** (`.glass-toast`): Surface 3, fade+rise animation (260ms)
+- **Modal** (`.glass-modal`): Surface 4, scale-up entry, overlay backdrop-blur
+- **Context menu** (`.glass-context-menu`): Surface 3, hover-highlight items, separator dividers
+- **Inspector** (`.glass-inspector`): Surface 2, right panel, scrollable
+- **Status chips** (`.glass-status-chip`): Pill shape, semantic color variants (success/warning/error)
+
+## Visual Effects
+- `.glass`: Starter glass panel (surface 2, blur 20px, dual shadow, border, radius 20px)
+- `.glass-hairline`: 1px bright top edge
+- `.glass-inset-highlight`: Soft inner top light
+- `.glass-dual-shadow`: Outer shadow + inner highlight
+- `.glass-accent-glow`: Active-item accent glow via color-mix()
+- `.glass-noise`: 1-2% opacity fractal noise overlay (::after pseudo)
+- `.glass-hover-lift`: translateY(-2px) + shadow increase on hover (150ms)
+- `.glass-pressed`: Inner shadow + scale(0.98) on :active
+- `.glass-focus-ring`: 2px accessible accent outline
+- `.glass-scrollbar`: Thin translucent scrollbar (scrollbar-width/color)
+
+## Motion System
+- **Hover**: 120-160ms (`.motion-hover`, 150ms)
+- **Panel open/close**: 180-240ms (`.motion-panel`, 220ms)
+- **Modal / sheet**: 220-300ms (`.motion-modal`, 260ms)
+- Sidebar collapse: opacity + width + slight blur
+- List selection: pill slide, not bounce
+- Notification: fade + 6-10px rise
+- Page change: crossfade + small content shift
+- `@media (prefers-reduced-motion: reduce)`: All transitions/animations set to 0.01ms
 
 ## Typography
 - System font stack, 15px base body size
@@ -139,7 +191,15 @@ No flat solid backgrounds. All surfaces use semi-transparent backgrounds with ba
 - Sidebars: secondary glass surface, 200-240px wide
 - Toolbars: primary glass surface with nav blur
 
-## DO NOT
+## Anti-Patterns (DO NOT)
+- Full-window fake transparency
+- Blur behind body text blocks
+- More than one strong accent color
+- Heavy neon glows on every control
+- Many border radii (use 12/16/20 scale only)
+- Bouncy animation everywhere
+- Bright gradients behind dense tables
+- Ultra-thin low-contrast text
 - Use flat solid colored backgrounds
 - Use sharp corners (minimum 8px radius)
 - Use heavy drop shadows without blur
@@ -191,88 +251,88 @@ mcp__stitch__generate_variants(
 
 ### Desktop / Launcher
 ```
-Design a macOS-inspired desktop OS home screen with glassmorphism effects.
+Design a macOS-inspired desktop OS home screen with glassmorphism 5-level surface system.
 
-Background: Deep space gradient from dark navy-purple (#060612) at top to deep violet (#1A0830) at bottom.
+Background: Surface 0 -- solid #0b0d10 with deep space gradient overlay from #060612 (top) to #1A0830 (bottom).
 
-Top system bar (28px tall): Frosted glass surface with blur, showing a small logo left, app name "Finder", menu items (File, Edit, View, Go, Window, Help) in 13px text. Right side: search icon, control center grid icon, Wi-Fi icon, battery percentage "97%", volume icon, and clock "9:41 AM". Subtle bottom border separator.
+Top system bar (28px tall, Surface 1): rgba(255,255,255,0.04), blur(10px). Shows logo left, app name "Finder", menu items (File, Edit, View, Go, Window, Help) in 13px text. Right side: search icon, control center grid icon, Wi-Fi icon, battery "97%", volume icon, clock "9:41 AM". 1px bottom border rgba(255,255,255,0.10).
 
-Main desktop area: Empty with just the gradient background showing through. Optional: 2-3 desktop file/folder icons in a grid aligned to top-right.
+Main desktop area: Surface 0 background showing through. Optional: 2-3 desktop file/folder icons in a grid aligned to top-right.
 
-Bottom dock: Pill-shaped frosted glass container centered at bottom with 6px margin. Contains 7 app icons as rounded squares (40px) with labels below: Terminal (blue), Files (green), Calculator (red), Clock (orange), Settings (purple), Browser (orange), Editor (teal). Active dot indicator below Terminal icon.
+Bottom dock (Surface 2): rgba(255,255,255,0.06), blur(12px), pill shape 26px radius. Contains 7 app icons as rounded squares (40px): Terminal (blue), Files (green), Calculator (red), Clock (orange), Settings (purple), Browser (orange), Editor (teal). Active dot indicator below Terminal.
 
-Style: All surfaces use semi-transparent backgrounds (rgba with 0.72 opacity) and backdrop-filter blur. Borders are 1px rgba(255,255,255,0.08). Corner radius 12px for windows, 26px for dock pill. Multi-layer drop shadows. Dark mode with #F5F5F7 text.
+Surface hierarchy: system bar = Surface 1, desktop = Surface 0, dock = Surface 2. Radius scale: 12/16/20px only. Borders rgba(255,255,255,0.10). Dark mode text rgba(255,255,255,0.92).
 ```
 
 ### Window Manager (3 Windows)
 ```
-Design a desktop OS window manager showing 3 overlapping glassmorphism windows on a dark gradient background.
+Design a desktop OS window manager showing 3 overlapping glassmorphism windows on a 5-level surface system.
 
-Background: Deep space gradient (#060612 to #1A0830).
+Background: Surface 0 (#0b0d10) with deep space gradient overlay (#060612 to #1A0830).
 
-System bar at top: Frosted glass, 28px, showing "Editor" app name, File/Edit/View menus, clock and status icons on right.
+System bar at top (Surface 1): blur(10px), 28px, "Editor" app name, File/Edit/View menus, clock and status icons right.
 
-Window 1 (focused, front): "Editor" window, 500x350px, centered-right. Title bar with traffic light buttons (red #FF5F57, yellow #FFBD2E, green #28CA41) on left, "Editor" title centered. Window body shows a code editor with syntax-highlighted code (blue keywords, green strings, white identifiers) on a frosted glass surface. Multi-layer drop shadows (9 layers, soft blur).
+Window 1 (focused, front, Surface 2): "Editor" window, 500x350px. Title bar (Surface 1) with traffic lights (red #FF5F57, yellow #FFBD2E, green #28CA41). Body shows code editor with syntax highlighting on Surface 2. Glass dual-shadow + hairline border.
 
-Window 2 (behind, left): "Terminal" window, 450x300px, offset left. Frosted glass surface showing a terminal with green prompt "simpleos$", white command text, and command output. Dimmed slightly (inactive state). Reduced shadow layers.
+Window 2 (behind, left, Surface 2): "Terminal" window, 450x300px. Green prompt "simpleos$", command output. Inactive state (dimmed). Reduced shadow.
 
-Window 3 (behind, right): "File Manager" window, 400x280px, partially hidden. Shows a sidebar with folder list and main area with file icons in a grid. Inactive state.
+Window 3 (behind, right, Surface 2): "File Manager", 400x280px. Sidebar (Surface 1) with folder list, main area (Surface 0) with file grid. Inactive state.
 
-Bottom dock: Glass pill with 7 app icons, Terminal and Editor showing active indicators (dots).
+Bottom dock (Surface 2): Glass pill 26px radius, 7 app icons, Terminal and Editor active indicators.
 
-Style: Semi-transparent surfaces, backdrop-filter blur(20px), 12px corner radius on windows, subtle rgba(255,255,255,0.08) borders, text in #F5F5F7. Focused window has prominent borders and stronger shadows.
+Surface hierarchy: bg=0, system bar/sidebar/titlebar=1, windows/cards/dock=2, floating panels=3, modals=4. Radius: 12/16/20px. Border: rgba(255,255,255,0.10). Motion: hover 150ms, panel 220ms.
 ```
 
 ### Settings Panel
 ```
-Design a macOS-style System Settings panel as a glassmorphism desktop window.
+Design a macOS-style System Settings panel using the 5-level surface hierarchy.
 
-Background: Deep space gradient (#060612 to #1A0830).
+Background: Surface 0 (#0b0d10) with deep space gradient overlay.
 
-System bar at top: Frosted glass showing "Settings" app name.
+System bar at top (Surface 1): blur(10px), "Settings" app name.
 
-Settings window (600x450px, centered): Frosted glass surface with 12px corner radius, traffic light buttons, "Settings" title centered in title bar.
+Settings window (600x450px, centered, Surface 2): blur(12px), 12px radius, traffic lights, "Settings" title.
 
-Left sidebar (200px wide): Secondary glass surface (rgba(40,40,48,0.52)). Navigation items as a vertical list: "General" (selected, highlighted with accent blue #0A84FF background), "Appearance", "Display", "Sound", "Network", "Bluetooth", "Keyboard", "Mouse", "Storage". Each item 36px tall with icon and label.
+Left sidebar (200px, Surface 1): Navigation list: "General" (selected, accent highlight), "Appearance", "Display", "Sound", "Network", "Bluetooth", "Keyboard", "Mouse", "Storage". 36px items. Thin scrollbar.
 
-Right content area: Shows "General" settings panel with card-based layout:
-- Card 1: "About This Computer" -- SimpleOS v1.0, processor info, memory
-- Card 2: "Appearance" toggle -- Dark/Light mode switch with preview circles
-- Card 3: "Desktop & Dock" -- Dock size slider, magnification toggle
-Each card is a tertiary glass surface with subtle border, 12px radius, internal padding.
+Right content (Surface 0): Card-based layout:
+- Card 1 (Surface 2): "About This Computer" -- SimpleOS v1.0, processor, memory
+- Card 2 (Surface 2): "Appearance" toggle -- Dark/Light with preview circles
+- Card 3 (Surface 2): "Desktop & Dock" -- Dock size slider, magnification toggle
+Each card: 12px radius, glass-hover-lift effect.
 
-Bottom dock: Glass pill with active indicator on Settings icon.
+Bottom dock (Surface 2): Glass pill, Settings active indicator.
 
-Style: Nested glass layers -- window surface over sidebar surface over card surfaces. Each layer progressively more translucent. All corners rounded. Subtle borders.
+Surface levels: bg=0, sidebar/titlebar=1, window/cards=2. Radius 12/16/20. Border rgba(255,255,255,0.10). Use .glass-hover-lift on cards, .glass-scrollbar on sidebar.
 ```
 
 ### File Manager
 ```
-Design a macOS Finder-style file manager as a glassmorphism desktop window.
+Design a macOS Finder-style file manager using the 5-level surface hierarchy.
 
-Background: Deep space gradient (#060612 to #1A0830).
+Background: Surface 0 (#0b0d10) with deep space gradient overlay.
 
-System bar at top: Frosted glass showing "Finder" app name with File/Edit/View/Go menus.
+System bar (Surface 1): "Finder" with File/Edit/View/Go menus, blur(10px).
 
-File Manager window (550x400px, centered): Frosted glass surface, traffic light buttons, title "Documents".
+File Manager window (550x400px, Surface 2): blur(12px), traffic lights, "Documents".
 
-Toolbar (40px): Glass surface below title bar with navigation buttons (back, forward arrows), view mode toggles (icon/list/column icons), search field (glass input with magnifying glass icon, placeholder "Search", 8px radius).
+Toolbar (40px, Surface 1): Back/forward arrows, view mode toggles, search field (glass input, 12px radius).
 
-Left sidebar (180px): Secondary glass surface. Sections with headers:
-- "Favorites": Desktop, Documents, Downloads, Applications (folder icons, blue accent on selected "Documents")
-- "Locations": SimpleOS HD, Network (disk/network icons)
-- "Tags": Red, Blue, Green, Orange (colored circles)
+Left sidebar (180px, Surface 1): Scrollable, glass-scrollbar.
+- "Favorites": Desktop, Documents (selected, accent), Downloads, Applications
+- "Locations": SimpleOS HD, Network
+- "Tags": Red, Blue, Green, Orange circles
 
-Main content area: Grid view showing 12 file/folder items in a 4x3 grid:
-- Folders: Projects (blue), Photos (green), Music (orange), Code (teal)
-- Files: readme.txt (document icon), image.png (image preview), notes.md, config.spl
-Each item shows icon (48px) + name below + file size in tertiary text.
+Main content (Surface 0): 4x3 grid of items with glass-hover-lift:
+- Folders: Projects, Photos, Music, Code (colored icons)
+- Files: readme.txt, image.png, notes.md, config.spl
+Each: 48px icon + name + file size (--muted color).
 
-Status bar (24px bottom): Glass surface showing "8 items, 2.3 GB available".
+Status bar (24px, Surface 1): "8 items, 2.3 GB available".
 
-Bottom dock with active Files indicator.
+Bottom dock (Surface 2): Active Files indicator.
 
-Style: Layered glass surfaces with increasing translucency. Sidebar items have hover state. Selected folder has accent blue highlight. Grid items have subtle hover card elevation.
+Surface mapping: bg=0, sidebar/toolbar/statusbar=1, window/cards=2, command palette=3, modal=4. Glass effects: hover-lift on grid items, scrollbar on sidebar. Radius 12/16/20 only.
 ```
 
 ## Critical Rules

@@ -23,16 +23,33 @@ for (let i = 0; i < args.length; i++) {
 }
 
 app.whenReady().then(() => {
-    mainWindow = new BrowserWindow({
+    const platform = process.platform;
+
+    const winOptions = {
         width: 1280,
         height: 720,
+        titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
+        titleBarOverlay: platform !== 'darwin'
+            ? { color: '#0b0d10', symbolColor: '#ffffff', height: 28 }
+            : undefined,
+        backgroundColor: '#0b0d10',
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')
         },
         title: 'Simple UI'
-    });
+    };
+
+    // Platform-specific material support
+    if (platform === 'darwin') {
+        winOptions.vibrancy = 'sidebar';
+    }
+    if (platform === 'win32') {
+        winOptions.backgroundMaterial = 'mica';
+    }
+
+    mainWindow = new BrowserWindow(winOptions);
 
     // Load the web UI from the Simple server
     mainWindow.loadURL(`http://localhost:${port}`);
