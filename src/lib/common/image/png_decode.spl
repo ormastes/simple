@@ -6,6 +6,8 @@
 #
 # PNG format reference: http://www.w3.org/TR/PNG/
 
+use std.common.image.deflate_inflate.{deflate_inflate}
+
 # ============================================================================
 # Data Structures
 # ============================================================================
@@ -118,27 +120,24 @@ fn decode_png_to_argb(data: [u8]) -> Result<PngImage, text>:
     if raw_pixels.len() == 0:
         return Err("Failed to decompress IDAT data")
 
-    # Convert to ARGB [u32]
+    # Convert reconstructed bytes to ARGB [u32]
+    # raw_pixels is already filter-reconstructed: pure RGB(A) bytes, no filter prefix
     var pixels: [u32] = []
     val channels: i32 = if color_type == 6: 4 else: 3
-    val stride = img_width * channels + 1  # +1 for filter byte per row
 
-    var row: i32 = 0
-    while row < img_height:
-        val row_start = row * stride + 1  # skip filter byte
-        var col: i32 = 0
-        while col < img_width:
-            val px_start = row_start + col * channels
-            if px_start + channels <= raw_pixels.len().to_i32():
-                val r = raw_pixels[px_start].to_u32()
-                val g = raw_pixels[px_start + 1].to_u32()
-                val b = raw_pixels[px_start + 2].to_u32()
-                val a: u32 = if color_type == 6: raw_pixels[px_start + 3].to_u32() else: 255
-                pixels = pixels + [(a << 24) | (r << 16) | (g << 8) | b]
-            else:
-                pixels = pixels + [0xFF000000]  # black fallback
-            col = col + 1
-        row = row + 1
+    var i: i32 = 0
+    val total_pixels = img_width * img_height
+    while i < total_pixels:
+        val px_start = i * channels
+        if px_start + channels <= raw_pixels.len().to_i32():
+            val r = raw_pixels[px_start].to_u32()
+            val g = raw_pixels[px_start + 1].to_u32()
+            val b = raw_pixels[px_start + 2].to_u32()
+            val a: u32 = if color_type == 6: raw_pixels[px_start + 3].to_u32() else: 255
+            pixels = pixels + [(a << 24) | (r << 16) | (g << 8) | b]
+        else:
+            pixels = pixels + [0xFF000000]  # black fallback
+        i = i + 1
 
     Ok(PngImage(pixels: pixels, width: img_width, height: img_height))
 
@@ -155,56 +154,125 @@ fn read_u32_be(data: [u8], offset: i32) -> u32:
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 fn decompress_idat(compressed: [u8], width: i32, height: i32, color_type: u8) -> [u8]:
-    """Decompress zlib-compressed IDAT data.
+    """Decompress zlib-compressed IDAT data and apply PNG filter reconstruction.
 
-    Minimal implementation: handles uncompressed (stored) blocks
-    and attempts inflate for compressed blocks. Falls back to
-    returning empty on complex compressed data.
+    Uses deflate_inflate to decompress the zlib stream, then reconstructs
+    scanlines by applying PNG filter reversal (None/Sub/Up/Average/Paeth).
+
+    Returns raw RGB(A) bytes without filter byte prefixes.
     """
-    # Skip zlib header (2 bytes: CMF + FLG)
     if compressed.len() < 3:
         return []
 
-    var result: [u8] = []
     val channels: i32 = if color_type == 6: 4 else: 3
-    val expected_size = height * (width * channels + 1)  # +1 filter byte per row
+    val bpp = channels  # bytes per pixel (8-bit depth)
+    val stride = width * channels  # bytes per row (without filter byte)
 
-    # Simple zlib: CMF byte, FLG byte, then deflate data
-    var pos: i32 = 2  # skip zlib header
+    # Inflate the DEFLATE stream, skipping 2-byte zlib header
+    val inflated = deflate_inflate(compressed, 2)
 
-    # Try to decompress deflate blocks
-    while pos < compressed.len().to_i32() and result.len().to_i32() < expected_size:
-        if pos >= compressed.len().to_i32():
-            break
+    if inflated.len() == 0:
+        return []
 
-        val header_byte = compressed[pos]
-        val bfinal = header_byte & 0x01
-        val btype = (header_byte >> 1) & 0x03
+    # Apply PNG filter reconstruction
+    val reconstructed = reconstruct_scanlines(inflated, width, height, bpp, stride)
 
-        if btype == 0:
-            # Stored block (no compression)
-            pos = pos + 1
-            if pos + 4 > compressed.len().to_i32():
-                break
-            val len_lo = compressed[pos].to_i32()
-            val len_hi = compressed[pos + 1].to_i32()
-            val block_len = len_lo | (len_hi << 8)
-            pos = pos + 4  # skip LEN and NLEN
+    reconstructed
 
-            var i: i32 = 0
-            while i < block_len and pos < compressed.len().to_i32():
-                result = result + [compressed[pos]]
-                pos = pos + 1
-                i = i + 1
-        else:
-            # For compressed blocks, copy remaining bytes as raw
-            # (simplified: real deflate would need Huffman decoding)
-            while pos < compressed.len().to_i32() and result.len().to_i32() < expected_size:
-                result = result + [compressed[pos]]
-                pos = pos + 1
-            break
+# ============================================================================
+# PNG Filter Reconstruction
+# ============================================================================
 
-        if bfinal == 1:
-            break
+fn reconstruct_scanlines(data: [u8], width: i32, height: i32, bpp: i32, stride: i32) -> [u8]:
+    """Reconstruct pixels from filtered scanlines.
 
-    result
+    Each scanline is prefixed with a 1-byte filter type.
+    Output is raw pixel bytes without filter prefix.
+
+    Args:
+        data: Inflated data with filter bytes
+        width: Image width in pixels
+        height: Image height in pixels
+        bpp: Bytes per pixel
+        stride: Bytes per row (width * channels)
+
+    Returns:
+        Reconstructed pixel bytes (stride * height bytes)
+    """
+    var pixels: [u8] = []
+    var prev_row: [u8] = []
+
+    # Initialize previous row to zeros
+    var init: i32 = 0
+    while init < stride:
+        prev_row = prev_row + [0]
+        init = init + 1
+
+    var row: i32 = 0
+    var data_pos: i32 = 0
+
+    while row < height:
+        # Read filter type byte
+        val filter_type: i32 = if data_pos < data.len().to_i32(): data[data_pos].to_i32() else: 0
+        data_pos = data_pos + 1
+
+        var current_row: [u8] = []
+        var col: i32 = 0
+
+        while col < stride:
+            val raw_byte: i32 = if data_pos < data.len().to_i32(): data[data_pos].to_i32() else: 0
+            data_pos = data_pos + 1
+
+            var reconstructed: i32 = 0
+
+            if filter_type == 0:
+                # None
+                reconstructed = raw_byte
+            else if filter_type == 1:
+                # Sub: Recon(x) = Filt(x) + Recon(a)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                reconstructed = (raw_byte + a) % 256
+            else if filter_type == 2:
+                # Up: Recon(x) = Filt(x) + Recon(b)
+                val b: i32 = prev_row[col].to_i32()
+                reconstructed = (raw_byte + b) % 256
+            else if filter_type == 3:
+                # Average: Recon(x) = Filt(x) + floor((Recon(a) + Recon(b)) / 2)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                val b: i32 = prev_row[col].to_i32()
+                reconstructed = (raw_byte + (a + b) / 2) % 256
+            else if filter_type == 4:
+                # Paeth: Recon(x) = Filt(x) + PaethPredictor(a, b, c)
+                val a: i32 = if col >= bpp: current_row[col - bpp].to_i32() else: 0
+                val b: i32 = prev_row[col].to_i32()
+                val c: i32 = if col >= bpp: prev_row[col - bpp].to_i32() else: 0
+                val paeth = paeth_predictor(a, b, c)
+                reconstructed = (raw_byte + paeth) % 256
+            else:
+                reconstructed = raw_byte
+
+            current_row = current_row + [reconstructed.to_u8()]
+            pixels = pixels + [reconstructed.to_u8()]
+            col = col + 1
+
+        prev_row = current_row
+        row = row + 1
+
+    pixels
+
+fn paeth_predictor(a: i32, b: i32, c: i32) -> i32:
+    """Paeth predictor function per PNG spec."""
+    val p = a + b - c
+    val pa = abs_i32(p - a)
+    val pb = abs_i32(p - b)
+    val pc = abs_i32(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    c
+
+fn abs_i32(x: i32) -> i32:
+    """Absolute value for i32."""
+    if x < 0: return -x
+    x

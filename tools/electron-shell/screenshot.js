@@ -1,6 +1,6 @@
 // Electron Screenshot Tool — Headless page capture for pixel comparison
 //
-// Renders an HTML file in a hidden BrowserWindow and exports a PNG screenshot.
+// Renders an HTML file in a hidden BrowserWindow and exports a PNG or PPM screenshot.
 // Used by the Simple browser engine test suite for reference image generation.
 //
 // Usage:
@@ -66,10 +66,30 @@ app.whenReady().then(async () => {
         await new Promise(resolve => setTimeout(resolve, 200));
 
         const image = await win.webContents.capturePage();
-        const pngBuffer = image.toPNG();
 
-        fs.writeFileSync(outputPath, pngBuffer);
-        console.log(`Screenshot saved: ${outputPath} (${width}x${height})`);
+        if (outputPath.endsWith('.ppm')) {
+            // PPM P6 output: raw RGB bytes, no compression
+            const size = image.getSize();
+            const bitmap = image.toBitmap();
+            const w = size.width;
+            const h = size.height;
+            const header = `P6\n${w} ${h}\n255\n`;
+            const headerBuf = Buffer.from(header, 'ascii');
+            // bitmap is BGRA, convert to RGB
+            const rgbBuf = Buffer.alloc(w * h * 3);
+            for (let i = 0; i < w * h; i++) {
+                rgbBuf[i * 3]     = bitmap[i * 4 + 2]; // R (from B position in BGRA)
+                rgbBuf[i * 3 + 1] = bitmap[i * 4 + 1]; // G
+                rgbBuf[i * 3 + 2] = bitmap[i * 4];     // B (from R position in BGRA)
+            }
+            fs.writeFileSync(outputPath, Buffer.concat([headerBuf, rgbBuf]));
+            console.log(`PPM screenshot saved: ${outputPath} (${w}x${h})`);
+        } else {
+            // Default PNG output
+            const pngBuffer = image.toPNG();
+            fs.writeFileSync(outputPath, pngBuffer);
+            console.log(`Screenshot saved: ${outputPath} (${width}x${height})`);
+        }
     } catch (err) {
         console.error('Screenshot failed:', err.message);
         process.exit(1);

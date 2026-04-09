@@ -14,17 +14,18 @@
 import * as vscode from 'vscode';
 import { MathDecorationProvider } from './mathDecorationProvider';
 /**
- * Generate offline-safe HTML content for the math preview webview.
+ * Generate HTML content for the math preview webview with KaTeX rendering.
  *
- * The previous implementation depended on CDN-hosted KaTeX assets, which made
- * the panel hard to test offline. This version keeps the preview deterministic
- * and self-contained so extension tests can verify it without network access.
+ * Uses bundled KaTeX CSS and fonts served as webview resources — fully offline-safe.
+ * The `katexCssUri` parameter is a webview URI pointing to the bundled katex.min.css.
+ * When called without a URI (e.g. in tests), falls back to inline Unicode preview.
  */
-export declare function buildMathPreviewHtml(latex: string, source: string): string;
+export declare function buildMathPreviewHtml(latex: string, source: string, katexCssUri?: string): string;
 export declare class MathPreviewPanel implements vscode.Disposable {
     static currentPanel: MathPreviewPanel | undefined;
     private readonly panel;
     private readonly decorationProvider;
+    private readonly extensionUri;
     private disposables;
     /** Currently displayed math content (to avoid redundant updates) */
     private currentContent;
@@ -32,7 +33,7 @@ export declare class MathPreviewPanel implements vscode.Disposable {
     /**
      * Show or create the math preview panel.
      */
-    static show(decorationProvider: MathDecorationProvider): void;
+    static show(decorationProvider: MathDecorationProvider, extensionUri: vscode.Uri): void;
     /**
      * Check if the panel is currently visible.
      */
@@ -59,8 +60,12 @@ export declare class MathPreviewPanel implements vscode.Disposable {
      */
     private toLatex;
     /**
+     * Get the webview URI for the bundled KaTeX CSS file.
+     */
+    private getKatexCssUri;
+    /**
      * Generate the full HTML content for the webview.
-     * Uses an offline-safe preview so tests do not depend on network assets.
+     * Uses bundled KaTeX for high-quality math rendering (offline-safe).
      */
     private getHtmlContent;
     /**

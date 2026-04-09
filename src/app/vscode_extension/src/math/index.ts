@@ -83,7 +83,7 @@ export function activateMathFeatures(
             if (MathPreviewPanel.isVisible()) {
                 MathPreviewPanel.close();
             } else {
-                MathPreviewPanel.show(decorationProvider);
+                MathPreviewPanel.show(decorationProvider, context.extensionUri);
             }
         })
     );
@@ -107,6 +107,15 @@ export function activateMathFeatures(
             vscode.window.showInformationMessage(message);
         })
     );
+
+    // Auto-open preview panel if a .spl file with math blocks is already active
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.languageId === 'simple') {
+        const blocks = decorationProvider.detectMathBlocks(activeEditor.document);
+        if (blocks.length > 0) {
+            MathPreviewPanel.show(decorationProvider, context.extensionUri);
+        }
+    }
 
     // Listen for configuration changes to math.enabled
     context.subscriptions.push(

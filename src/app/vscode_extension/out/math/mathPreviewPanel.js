@@ -45,10 +45,14 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MathPreviewPanel = void 0;
 exports.buildMathPreviewHtml = buildMathPreviewHtml;
 const vscode = __importStar(require("vscode"));
+const katex_1 = __importDefault(require("katex"));
 const mathConverter_1 = require("./mathConverter");
 /**
  * Escape a string for safe embedding in HTML.
@@ -62,18 +66,41 @@ function escapeForHtml(text) {
         .replace(/'/g, '&#039;');
 }
 /**
- * Generate offline-safe HTML content for the math preview webview.
- *
- * The previous implementation depended on CDN-hosted KaTeX assets, which made
- * the panel hard to test offline. This version keeps the preview deterministic
- * and self-contained so extension tests can verify it without network access.
+ * Render a LaTeX string to HTML using KaTeX (server-side, no browser needed).
+ * Falls back to escaped plain text if KaTeX fails to parse.
  */
-function buildMathPreviewHtml(latex, source) {
+function renderKatex(latex) {
+    try {
+        return katex_1.default.renderToString(latex, {
+            displayMode: true,
+            throwOnError: false,
+            output: 'html',
+            trust: false,
+        });
+    }
+    catch {
+        return `<span class="katex-error">${escapeForHtml(latex)}</span>`;
+    }
+}
+/**
+ * Generate HTML content for the math preview webview with KaTeX rendering.
+ *
+ * Uses bundled KaTeX CSS and fonts served as webview resources — fully offline-safe.
+ * The `katexCssUri` parameter is a webview URI pointing to the bundled katex.min.css.
+ * When called without a URI (e.g. in tests), falls back to inline Unicode preview.
+ */
+function buildMathPreviewHtml(latex, source, katexCssUri) {
     const hasContent = Boolean(latex || source);
-    const escapedLatex = escapeForHtml(latex);
     const escapedSource = escapeForHtml(source);
-    const renderedPreview = source ? (0, mathConverter_1.simpleToUnicode)(source) : '';
-    const escapedRenderedPreview = escapeForHtml(renderedPreview);
+    const katexHtml = latex ? renderKatex(latex) : '';
+    const unicodeFallback = source ? escapeForHtml((0, mathConverter_1.simpleToUnicode)(source)) : '';
+    // Use KaTeX CSS if URI provided, otherwise no external styles
+    const katexStyleLink = katexCssUri
+        ? `<link rel="stylesheet" href="${katexCssUri}">`
+        : '';
+    // CSP: allow KaTeX styles from extension resources, inline styles, and KaTeX fonts
+    const fontSrc = katexCssUri ? `${katexCssUri.replace(/\/[^/]*$/, '/')}*` : "'none'";
+    const styleSrc = katexCssUri ? `${katexCssUri} 'unsafe-inline'` : "'unsafe-inline'";
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,10 +108,11 @@ function buildMathPreviewHtml(latex, source) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy"
           content="default-src 'none';
-                   style-src 'unsafe-inline';
-                   script-src 'none';
-                   font-src 'none';">
+                   style-src ${styleSrc};
+                   font-src ${fontSrc};
+                   script-src 'none';">
     <title>Math Preview</title>
+    ${katexStyleLink}
     <style>
         body {
             font-family: var(--vscode-font-family);
@@ -139,17 +167,14 @@ function buildMathPreviewHtml(latex, source) {
         }
 
         .math-unicode {
-            font-size: 1.4em;
-            font-weight: 600;
-            line-height: 1.5;
+            font-size: 1.1em;
+            color: var(--vscode-descriptionForeground);
+            margin-top: 4px;
         }
 
-        .math-latex {
+        .katex-error {
             font-family: var(--vscode-editor-font-family);
-            font-size: var(--vscode-editor-font-size);
-            color: var(--vscode-descriptionForeground);
-            white-space: pre-wrap;
-            word-break: break-all;
+            color: var(--vscode-errorForeground);
         }
 
         .source-block {
@@ -175,8 +200,8 @@ function buildMathPreviewHtml(latex, source) {
     <div class="section">
         <div class="section-label">Rendered</div>
         <div id="math-rendered">
-            <div class="math-unicode">${escapedRenderedPreview || '&#8212;'}</div>
-            ${escapedLatex ? `<div class="math-latex">${escapedLatex}</div>` : ''}
+            ${katexHtml || `<div class="math-unicode">${unicodeFallback || '&#8212;'}</div>`}
+            ${katexHtml ? `<div class="math-unicode">${unicodeFallback}</div>` : ''}
         </div>
     </div>
 
@@ -189,12 +214,13 @@ function buildMathPreviewHtml(latex, source) {
 </html>`;
 }
 class MathPreviewPanel {
-    constructor(panel, decorationProvider) {
+    constructor(panel, decorationProvider, extensionUri) {
         this.disposables = [];
         /** Currently displayed math content (to avoid redundant updates) */
         this.currentContent = null;
         this.panel = panel;
         this.decorationProvider = decorationProvider;
+        this.extensionUri = extensionUri;
         // Set initial HTML
         this.panel.webview.html = this.getHtmlContent('', '');
         // Listen for cursor changes to update preview
@@ -218,7 +244,7 @@ class MathPreviewPanel {
     /**
      * Show or create the math preview panel.
      */
-    static show(decorationProvider) {
+    static show(decorationProvider, extensionUri) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
@@ -227,15 +253,18 @@ class MathPreviewPanel {
             MathPreviewPanel.currentPanel.panel.reveal(column ? column + 1 : vscode.ViewColumn.Beside);
             return;
         }
+        // Allow webview to load KaTeX CSS and fonts from node_modules
+        const katexDistUri = vscode.Uri.joinPath(extensionUri, 'node_modules', 'katex', 'dist');
         // Create new panel
         const panel = vscode.window.createWebviewPanel('simpleMathPreview', 'Math Preview', {
             viewColumn: vscode.ViewColumn.Beside,
             preserveFocus: true,
         }, {
-            enableScripts: true,
+            enableScripts: false,
             retainContextWhenHidden: true,
+            localResourceRoots: [katexDistUri],
         });
-        MathPreviewPanel.currentPanel = new MathPreviewPanel(panel, decorationProvider);
+        MathPreviewPanel.currentPanel = new MathPreviewPanel(panel, decorationProvider, extensionUri);
     }
     /**
      * Check if the panel is currently visible.
@@ -304,11 +333,18 @@ class MathPreviewPanel {
         return (0, mathConverter_1.simpleToLatex)(mathContent);
     }
     /**
+     * Get the webview URI for the bundled KaTeX CSS file.
+     */
+    getKatexCssUri() {
+        const katexCssPath = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist', 'katex.min.css');
+        return this.panel.webview.asWebviewUri(katexCssPath).toString();
+    }
+    /**
      * Generate the full HTML content for the webview.
-     * Uses an offline-safe preview so tests do not depend on network assets.
+     * Uses bundled KaTeX for high-quality math rendering (offline-safe).
      */
     getHtmlContent(latex, source) {
-        return buildMathPreviewHtml(latex, source);
+        return buildMathPreviewHtml(latex, source, this.getKatexCssUri());
     }
     /**
      * Dispose of all resources.

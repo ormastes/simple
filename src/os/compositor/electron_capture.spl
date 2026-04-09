@@ -1,16 +1,16 @@
 # Electron Capture — Electron host screenshot capture
 #
 # Captures a screenshot via the Electron screenshot.js tool, then
-# decodes the resulting PNG to ARGB [u32] pixel buffer for comparison
+# decodes the resulting PPM to ARGB [u32] pixel buffer for comparison
 # with the QEMU/compositor rendering path.
 #
 # Depends on:
-#   - tools/electron-shell/screenshot.js (PNG capture)
-#   - std.common.image.png_decode (PNG -> ARGB)
+#   - tools/electron-shell/screenshot.js (PPM capture)
+#   - std.common.image.ppm_decode (PPM -> ARGB)
 #   - os.compositor.wm_scene (scene -> HTML conversion)
 
 use os.compositor.wm_scene.{WmSceneSpec, scene_to_html}
-use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
 use std.nogc_sync_mut.ffi.io.{file_write_text, file_read_bytes}
 use std.io.{shell}
 
@@ -46,7 +46,7 @@ fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
     """Capture a screenshot of HTML via Electron's screenshot.js.
 
     Writes the HTML to a temporary file, invokes screenshot.js to render
-    it headlessly, reads the resulting PNG, and decodes to ARGB.
+    it headlessly, reads the resulting PPM, and decodes to ARGB.
 
     Args:
         html: Full HTML document string
@@ -61,26 +61,26 @@ fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
 
     # Write HTML to temp file
     val html_path = "/tmp/wm_consistency_electron_input.html"
-    val png_path = "/tmp/wm_consistency_electron_output.png"
+    val ppm_path = "/tmp/wm_consistency_electron_output.ppm"
 
     val write_ok = file_write_text(html_path, html)
     if not write_ok:
         return capture_error("electron", width, height, "Failed to write HTML to temp file")
 
-    # Invoke Electron screenshot.js
-    val electron_cmd = "cd tools/electron-shell && npx electron screenshot.js --html={html_path} --width={width} --height={height} --output={png_path}"
+    # Invoke Electron screenshot.js (positional args, PPM output)
+    val electron_cmd = "cd tools/electron-shell && npx electron screenshot.js {html_path} {ppm_path} {width} {height}"
     val (out, err, exit_code) = shell(electron_cmd)
 
     if exit_code != 0:
         return capture_error("electron", width, height, "Electron screenshot failed: {err}")
 
-    # Read PNG file and decode to ARGB
-    val png_data = file_read_bytes(png_path)
-    if png_data.len() == 0:
-        return capture_error("electron", width, height, "Failed to read PNG output file")
+    # Read PPM file and decode to ARGB
+    val ppm_data = file_read_bytes(ppm_path)
+    if ppm_data.len() == 0:
+        return capture_error("electron", width, height, "Failed to read PPM output file")
 
-    # Decode PNG to ARGB pixels
-    val decode_result = decode_png_to_argb(png_data)
+    # Decode PPM to ARGB pixels
+    val decode_result = decode_ppm_to_argb(ppm_data)
     match decode_result:
         Ok(img):
             return CaptureResult(
@@ -92,8 +92,8 @@ fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
                 error: ""
             )
         Err(msg):
-            print "[electron_capture] PNG decode warning: {msg}"
-            return capture_error("electron", width, height, "PNG decode failed: {msg}")
+            print "[electron_capture] PPM decode warning: {msg}"
+            return capture_error("electron", width, height, "PPM decode failed: {msg}")
 
 # ============================================================================
 # Scene-Level Capture

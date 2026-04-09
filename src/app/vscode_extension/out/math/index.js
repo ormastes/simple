@@ -102,7 +102,7 @@ function activateMathFeatures(context, onLspStateChanged) {
             mathPreviewPanel_1.MathPreviewPanel.close();
         }
         else {
-            mathPreviewPanel_1.MathPreviewPanel.show(decorationProvider);
+            mathPreviewPanel_1.MathPreviewPanel.show(decorationProvider, context.extensionUri);
         }
     }));
     // Register toggle inline rendering command
@@ -116,6 +116,14 @@ function activateMathFeatures(context, onLspStateChanged) {
             : 'Math inline rendering disabled';
         vscode.window.showInformationMessage(message);
     }));
+    // Auto-open preview panel if a .spl file with math blocks is already active
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.languageId === 'simple') {
+        const blocks = decorationProvider.detectMathBlocks(activeEditor.document);
+        if (blocks.length > 0) {
+            mathPreviewPanel_1.MathPreviewPanel.show(decorationProvider, context.extensionUri);
+        }
+    }
     // Listen for configuration changes to math.enabled
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('simple.math.enabled')) {

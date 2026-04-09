@@ -96,8 +96,12 @@ suite('GUI - Math Rendering', function() {
         const html = buildMathPreviewHtml('x^{2} + 1', 'm{ x^2 + 1 }');
 
         assert.ok(html.includes('Math Preview'));
-        assert.ok(html.includes('x^{2} + 1'));
-        assert.ok(html.includes('m{ x^2 + 1 }'));
+        // KaTeX renders to HTML spans — check for katex class or the source in source-block
+        assert.ok(
+            html.includes('katex') || html.includes('x^{2} + 1'),
+            'Should contain KaTeX-rendered output or raw LaTeX'
+        );
+        assert.ok(html.includes('m{ x^2 + 1 }'), 'Should contain source block');
         assert.ok(html.includes('Rendered'));
         assert.ok(html.includes('Source'));
         assert.ok(!html.includes('cdn.jsdelivr.net'));

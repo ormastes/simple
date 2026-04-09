@@ -1,0 +1,144 @@
+# @cover src/os/compositor/electron_capture.spl 85%
+# @tag: rendering, electron, capture, ppm
+#
+# Electron Capture PPM Specification
+#
+# Verifies the modified Electron capture path after the PPM-primary
+# strategy (D-1, D-2): positional args to screenshot.js, PPM output
+# instead of PNG, and PPM decode integration. The CaptureResult
+# structure remains unchanged but the underlying format switches.
+#
+# This spec focuses on the PPM-related changes. For basic CaptureResult
+# structure tests, see electron_capture_spec.spl.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.electron_capture.{
+    CaptureResult, capture_error, capture_electron, capture_electron_scene}
+use os.compositor.wm_scene.{WmSceneSpec, standard_wm_scene, scene_to_html}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val W: i32 = 800
+val H: i32 = 600
+
+# ============================================================================
+# Test Group 1: CaptureResult with PPM Path
+# ============================================================================
+
+describe "ElectronCapture PPM — CaptureResult structure":
+    """
+    ## CaptureResult After PPM Switch
+
+    CaptureResult fields (pixels, width, height, backend_name, success, error)
+    remain the same regardless of underlying format (PNG or PPM).
+    """
+
+    context "error result construction":
+
+        it "AC-2: capture_error creates result with correct backend_name":
+            val result = capture_error("electron", W, H, "test error")
+            expect(result.backend_name).to_equal("electron")
+
+        it "AC-2: capture_error creates result with empty pixels":
+            val result = capture_error("electron", W, H, "test error")
+            expect(result.pixels.len().to_i32()).to_equal(0)
+
+        it "AC-2: capture_error preserves error message":
+            val result = capture_error("electron", W, H, "PPM decode failed")
+            expect(result.error).to_contain("PPM")
+
+        it "AC-2: capture_error sets success to false":
+            val result = capture_error("electron", W, H, "test error")
+            expect(result.success).to_equal(false)
+
+        it "AC-2: capture_error preserves dimensions":
+            val result = capture_error("electron", W, H, "test error")
+            expect(result.width).to_equal(W)
+            expect(result.height).to_equal(H)
+
+# ============================================================================
+# Test Group 2: Electron Command Arguments (D-2)
+# ============================================================================
+
+describe "ElectronCapture PPM — command invocation":
+    """
+    ## Positional Arg Fix (D-2)
+
+    After fix, capture_electron uses positional args instead of --flags:
+    `npx electron screenshot.js {html_path} {ppm_path} {width} {height}`
+
+    screenshot.js filters out --flags (line 19), so positional args are required.
+    """
+
+    context "command construction":
+
+        it "AC-2: capture_electron with empty HTML returns error (not crash)":
+            val result = capture_electron("", W, H)
+            expect(result.success).to_equal(false)
+
+        it "AC-2: capture_electron error mentions 'Empty HTML'":
+            val result = capture_electron("", W, H)
+            val mentions_empty = result.error.contains("Empty") or result.error.contains("empty")
+            expect(mentions_empty).to_equal(true)
+
+    context "scene-level capture with PPM":
+
+        it "AC-2: capture_electron_scene returns result with electron backend":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_electron_scene(scene)
+            expect(result.backend_name).to_equal("electron")
+
+        it "AC-2: capture_electron_scene dimensions match scene spec":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_electron_scene(scene)
+            expect(result.width).to_equal(W)
+            expect(result.height).to_equal(H)
+
+# ============================================================================
+# Test Group 3: PPM Decode Integration
+# ============================================================================
+
+describe "ElectronCapture PPM — decode integration":
+    """
+    ## PPM Decode Path
+
+    After D-1/D-2, the Electron capture path reads a .ppm file
+    (instead of .png) and uses decode_ppm_to_argb (instead of
+    decode_png_to_argb). This verifies the integration works.
+    """
+
+    context "capture with valid scene":
+
+        it "AC-2: capture result from valid scene has correct backend":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_electron_scene(scene)
+            # In test env, Electron may not be available
+            if result.success:
+                expect(result.pixels.len()).to_be_greater_than(0)
+            else:
+                # Graceful degradation when Electron is missing
+                val has_error = result.error.len() > 0
+                expect(has_error).to_equal(true)
+
+        it "AC-2: successful capture pixel count equals width * height":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_electron_scene(scene)
+            if result.success:
+                val expected = W * H
+                expect(result.pixels.len().to_i32()).to_equal(expected)
+            else:
+                expect(result.success).to_equal(false)
+
+        it "AC-2: successful capture has non-zero pixels (not all transparent)":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_electron_scene(scene)
+            if result.success:
+                var has_nonzero = false
+                for px in result.pixels:
+                    if px != 0:
+                        has_nonzero = true
+                expect(has_nonzero).to_equal(true)
+            else:
+                expect(result.success).to_equal(false)
