@@ -15,7 +15,7 @@ Made the wm-pixel-consistency pipeline functional end-to-end by implementing a P
 - **D-3: PPM decoder as new stdlib module.** PPM P6 binary parser alongside png_decode in image module.
 - **D-4: DEFLATE inflater adapted from browser example.** Handles stored blocks, fixed Huffman + LZ77. Dynamic Huffman falls back to fixed (known limitation; PPM bypass makes this non-blocking).
 - **D-5: QEMU VM capture switched to PPM.** QMP screendump natively supports PPM format.
-- **D-6: No changes needed to comparison/rendering modules.** browser_compositor_backend, screenshot_compare, perceptual_compare, tolerance_profile all work as-is.
+- **D-6: No changes were needed to the comparison/rendering modules at that implementation stage.** The PPM/DEFLATE work fit the existing browser_compositor_backend, screenshot_compare, perceptual_compare, and tolerance_profile pipeline.
 
 ## Files
 
