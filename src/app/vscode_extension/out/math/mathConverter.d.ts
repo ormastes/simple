@@ -19,13 +19,4 @@
  *   src/app/lsp/handlers/hover.spl - LSP hover handler using render_latex_raw() + to_pretty()
  */
 export declare function simpleToLatex(source: string): string;
-/**
- * Convert Simple math expression to Unicode pretty text.
- *
- * Handles:
- * - `^2` → `²`, `^3` → `³`, `^n` → `ⁿ`
- * - Greek names → Unicode Greek (α, β, π, etc.)
- * - `sqrt` → `√`
- * - `*` → `·`
- */
 export declare function simpleToUnicode(source: string): string;
