@@ -20,6 +20,8 @@ pub fn print_help() {
     eprintln!("  simple examples-check [path] [--compile|--run] [--timeout <secs>]");
     eprintln!("                            Validate examples one by one with per-file isolation");
     eprintln!("  files under examples/       Run with automatic timeout safety defaults");
+    eprintln!("  simple vscode build <file.spl> [options]   Build VSCode extension WASM assets");
+    eprintln!("  simple electron build <file.spl> [options] Build Electron app WASM assets");
     eprintln!("  simple targets              List available target architectures");
     eprintln!("  simple linkers              List available native linkers");
     eprintln!();
@@ -75,6 +77,13 @@ pub fn print_help() {
     eprintln!("  simple sspec-docgen <files...>           Generate docs from SSpec test files");
     eprintln!("  simple sspec-docgen <files...> -o <dir>  Output to specific directory");
     eprintln!("  simple ffi-gen <file.spl> [options]      Generate FFI wrappers from @Lib extern declarations");
+    eprintln!();
+    eprintln!("WASM App Packaging:");
+    eprintln!("  simple vscode build <file.spl> [options]     Emit WASM + VSCode extension scaffold");
+    eprintln!("  simple vscode package [dir] [options]        Create a .vsix with vsce");
+    eprintln!("  simple vscode publish <file.vsix> --token <PAT>  Publish a .vsix");
+    eprintln!("  simple electron build <file.spl> [options]   Emit WASM + Electron scaffold");
+    eprintln!("  simple electron package [dir] [options]      Package Electron artifacts");
     eprintln!();
     eprintln!("Build & Audit (#911-915):");
     eprintln!("  simple query --generated           Find all LLM-generated code");
@@ -135,7 +144,7 @@ pub fn print_help() {
     eprintln!("  --macro-trace  Enable macro expansion tracing");
     eprintln!("  --debug        Enable debug mode (dprint statements will output)");
     eprintln!("  --lang <code>  Set output language for diagnostics (e.g., ko, ja)");
-    eprintln!("  --target <arch>  Target architecture for cross-compilation");
+    eprintln!("  --target <target>  Target triple or architecture for cross-compilation");
     eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");
     eprintln!();
@@ -185,6 +194,7 @@ pub fn print_help() {
     eprintln!("  armv7    32-bit ARM");
     eprintln!("  riscv64  64-bit RISC-V");
     eprintln!("  riscv32  32-bit RISC-V");
+    eprintln!("  wasm32   32-bit WebAssembly (use wasm32-unknown-unknown or wasm32-wasi)");
     eprintln!();
     eprintln!("Add Options:");
     eprintln!("  --path <path>  Add as path dependency");

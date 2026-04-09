@@ -259,6 +259,20 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         needs_rust_flags: &[],
     },
     CommandEntry {
+        name: "vscode",
+        app_path: "",
+        rust_handler: Handler::Args(handle_vscode),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
+        name: "electron",
+        app_path: "",
+        rust_handler: Handler::Args(handle_electron),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
+    CommandEntry {
         name: "ui",
         app_path: "src/app/ui/cli_entry.spl",
         rust_handler: Handler::Custom(handle_ui_wrapper),

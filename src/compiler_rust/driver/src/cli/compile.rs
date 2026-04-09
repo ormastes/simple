@@ -81,7 +81,9 @@ fn compile_file_impl(
                     return Err(format!("cannot read {}: {}", source.display(), e));
                 }
             };
-            runner.compile_to_smf_for_target(&source_content, &out_path, target)
+            runner
+                .compile_to_smf_for_target(&source_content, &out_path, target)
+                .map_err(|error| annotate_target_compile_error(target, error))
         } else {
             // Use file-based compilation which enables import resolution
             runner.compile_file_to_smf_with_options(source, &out_path, &options)
@@ -176,6 +178,16 @@ fn compile_file_impl(
     }
 }
 
+fn annotate_target_compile_error(target: Target, error: String) -> String {
+    if target.arch.is_wasm() && error.contains("32-bit targets require the LLVM backend") {
+        format!(
+            "{error}\nHint: rebuild `simple-driver` with `--features wasm` (or at minimum `--features llvm`) for WebAssembly targets."
+        )
+    } else {
+        error
+    }
+}
+
 /// List available target architectures
 pub fn list_targets() -> i32 {
     println!("Available target architectures:");
@@ -192,7 +204,11 @@ pub fn list_targets() -> i32 {
     println!("  armv7    - ARM 32-bit");
     println!("  riscv32  - RISC-V 32-bit");
     println!();
-    println!("Usage: simple compile <source.spl> --target <arch>");
+    println!("WebAssembly targets:");
+    println!("  wasm32-unknown-unknown  - Standalone/browser WASM module");
+    println!("  wasm32-wasi             - WASI-compatible WASM module");
+    println!();
+    println!("Usage: simple compile <source.spl> --target <target>");
     0
 }
 

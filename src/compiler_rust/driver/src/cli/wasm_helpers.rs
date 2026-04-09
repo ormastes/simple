@@ -39,7 +39,16 @@ fn compile_source_to_wasm(source: &str, target: simple_common::target::Target) -
     let mut compiler = CompilerPipeline::new().map_err(|e| format!("{e:?}"))?;
     compiler
         .compile_source_to_memory_for_target(source, target)
-        .map_err(|e| format!("compile failed: {e}"))
+        .map_err(|e| {
+            let message = format!("compile failed: {e}");
+            if message.contains("32-bit targets require the LLVM backend") {
+                format!(
+                    "{message}\nRebuild `simple-driver` with `--features wasm` (or at minimum `--features llvm`) before invoking `simple vscode build` or `simple electron build`."
+                )
+            } else {
+                message
+            }
+        })
 }
 
 /// Run wasm-opt on the given WASM file for size/speed optimization.

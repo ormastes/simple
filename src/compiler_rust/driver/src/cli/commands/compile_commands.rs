@@ -1,7 +1,7 @@
 //! Compilation command handlers
 
 use std::path::PathBuf;
-use simple_common::target::{Target, TargetArch};
+use simple_common::target::Target;
 use simple_compiler::linker::NativeLinker;
 use crate::cli::compile::{compile_file, compile_file_native, compile_file_to_ptx, list_linkers, list_targets};
 use crate::CompileOptions;
@@ -113,18 +113,39 @@ pub fn handle_linkers() -> i32 {
 
 fn parse_target_flag(args: &[String]) -> Result<Option<Target>, String> {
     args.iter()
-        .position(|a| a == "--target")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.parse::<TargetArch>().map_err(|e| e.to_string()))
+        .enumerate()
+        .find_map(|(idx, arg)| {
+            if arg == "--target" {
+                Some(
+                    args.get(idx + 1)
+                        .cloned()
+                        .ok_or_else(|| "--target requires a value".to_string()),
+                )
+            } else {
+                arg.strip_prefix("--target=").map(|value| Ok(value.to_string()))
+            }
+        })
+        .transpose()?
+        .map(|value| Target::parse(&value).map_err(|e| e.to_string()))
         .transpose()
-        .map(|arch| arch.map(|arch| Target::new(arch, simple_common::target::TargetOS::host())))
 }
 
 fn parse_linker_flag(args: &[String]) -> Result<Option<NativeLinker>, String> {
     args.iter()
-        .position(|a| a == "--linker")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| NativeLinker::from_name(s).ok_or_else(|| format!("unknown linker '{}'. Available: mold, lld, ld", s)))
+        .enumerate()
+        .find_map(|(idx, arg)| {
+            if arg == "--linker" {
+                Some(
+                    args.get(idx + 1)
+                        .cloned()
+                        .ok_or_else(|| "--linker requires a value".to_string()),
+                )
+            } else {
+                arg.strip_prefix("--linker=").map(|value| Ok(value.to_string()))
+            }
+        })
+        .transpose()?
+        .map(|s| NativeLinker::from_name(&s).ok_or_else(|| format!("unknown linker '{}'. Available: mold, lld, ld", s)))
         .transpose()
 }
 
@@ -148,15 +169,17 @@ fn print_compile_help(show_error: bool) {
         eprintln!("error: compile requires a source file");
     }
     eprintln!(
-        "Usage: simple compile <source.spl> [-o <output>] [--native] [--backend=<name>] [--target <arch>] [--linker <name>] [--snapshot]"
+        "Usage: simple compile <source.spl> [-o <output>] [--native] [--backend=<name>] [--target <target>] [--linker <name>] [--snapshot]"
     );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
     eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output), vhdl (Simple frontend only)");
-    eprintln!("  --target <arch>     Target architecture (x86_64, aarch64, etc.)");
+    eprintln!("  --target <target>   Target triple or arch (x86_64, aarch64, wasm32-wasi, etc.)");
+    eprintln!("  --target=<target>   Same as above");
     eprintln!("  --linker <name>     Native linker to use (mold, lld, ld)");
+    eprintln!("  --linker=<name>     Same as above");
     eprintln!("  --layout-optimize   Enable 4KB page layout optimization");
     eprintln!("  --strip             Strip symbols from output");
     eprintln!("  --pie               Create position-independent executable (default)");
@@ -182,6 +205,17 @@ mod tests {
         ];
         let target = parse_target_flag(&args).unwrap();
         assert!(target.is_some());
+    }
+
+    #[test]
+    fn test_parse_target_flag_equals_form() {
+        let args = vec![
+            "compile".to_string(),
+            "test.spl".to_string(),
+            "--target=wasm32-wasi".to_string(),
+        ];
+        let target = parse_target_flag(&args).unwrap().unwrap();
+        assert_eq!(target.to_string(), "wasm32-wasi");
     }
 
     #[test]
