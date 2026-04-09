@@ -38,6 +38,7 @@ export async function createWasmServerOptions(
     // Check if @vscode/wasm-wasi is available
     let wasmWasi: any;
     try {
+        // @ts-ignore - optional dependency, loaded dynamically
         wasmWasi = await import('@vscode/wasm-wasi');
     } catch {
         outputChannel.appendLine('WASM WASI module not available - falling back to native LSP');
@@ -90,6 +91,7 @@ export async function createWasmServerOptions(
         // Try to use @vscode/wasm-wasi-lsp for LSP wrapping
         let wasmLsp: any;
         try {
+            // @ts-ignore - optional dependency, loaded dynamically
             wasmLsp = await import('@vscode/wasm-wasi-lsp');
         } catch {
             outputChannel.appendLine('WASM WASI LSP module not available');

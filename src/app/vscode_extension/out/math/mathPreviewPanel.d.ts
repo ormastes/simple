@@ -2,17 +2,25 @@
  * Math Preview Panel - Webview panel for LaTeX math preview
  *
  * Shows a side panel that renders LaTeX for the math block under the cursor.
- * Uses KaTeX (loaded from CDN) for rendering inside the webview.
+ * Uses an offline-safe HTML preview inside the webview.
  * Updates automatically when the cursor moves to a different math block.
  *
  * LaTeX conversion mirrors src/lib/math_repr.spl render_latex_raw() for local
  * preview. The full Simple rendering pipeline is:
  *   src/lib/math_repr.spl  - Parser + renderers (to_pretty, render_latex_raw, to_md)
  *   src/lib/mathjax.spl    - MathJax SFFI wrapper (SVG/HTML rendering via Node.js)
- *   src/app/lsp/handlers/hover.spl - LSP hover uses both for server-side rendering
+ *   src/app/cli/query_visibility.spl - query/LSP hover uses both for server-side rendering
  */
 import * as vscode from 'vscode';
 import { MathDecorationProvider } from './mathDecorationProvider';
+/**
+ * Generate offline-safe HTML content for the math preview webview.
+ *
+ * The previous implementation depended on CDN-hosted KaTeX assets, which made
+ * the panel hard to test offline. This version keeps the preview deterministic
+ * and self-contained so extension tests can verify it without network access.
+ */
+export declare function buildMathPreviewHtml(latex: string, source: string): string;
 export declare class MathPreviewPanel implements vscode.Disposable {
     static currentPanel: MathPreviewPanel | undefined;
     private readonly panel;
@@ -52,13 +60,9 @@ export declare class MathPreviewPanel implements vscode.Disposable {
     private toLatex;
     /**
      * Generate the full HTML content for the webview.
-     * Uses KaTeX from CDN for rendering.
+     * Uses an offline-safe preview so tests do not depend on network assets.
      */
     private getHtmlContent;
-    /**
-     * Escape a string for safe embedding in HTML.
-     */
-    private escapeForHtml;
     /**
      * Dispose of all resources.
      */

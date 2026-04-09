@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
+const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 const languageModelClient_1 = require("./ai/languageModelClient");
@@ -112,14 +113,42 @@ async function createServerOptions(context) {
     // Native subprocess (default)
     usingWasmLsp = false;
     const config = vscode.workspace.getConfiguration('simple');
-    const serverPath = config.get('lsp.serverPath', 'simple');
-    outputChannel?.appendLine(`Using native LSP server: ${serverPath} lsp`);
+    let serverPath = config.get('lsp.serverPath', '');
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!serverPath) {
+        // Auto-detect: look for simple_lsp_server wrapper relative to repo root
+        if (workspaceRoot) {
+            const candidates = [
+                path.join(workspaceRoot, 'bin', 'simple_lsp_server'),
+                path.join(workspaceRoot, 'bin', 'simple'),
+            ];
+            const fs = require('fs');
+            for (const candidate of candidates) {
+                try {
+                    fs.accessSync(candidate, fs.constants.X_OK);
+                    serverPath = candidate;
+                    break;
+                }
+                catch { /* not found */ }
+            }
+        }
+        if (!serverPath) {
+            serverPath = 'simple';
+        }
+    }
+    // If using simple_lsp_server wrapper, it handles args internally
+    const isWrapper = serverPath.endsWith('simple_lsp_server');
+    const args = isWrapper ? [] : ['lsp'];
+    outputChannel?.appendLine(`Using native LSP server: ${serverPath} ${args.join(' ')}`);
     return {
         command: serverPath,
-        args: ['lsp'],
+        args,
         transport: node_1.TransportKind.stdio,
         options: {
-            env: process.env
+            env: {
+                ...process.env,
+                SIMPLE_LIB: workspaceRoot ? path.join(workspaceRoot, 'src') : process.env.SIMPLE_LIB || '',
+            }
         }
     };
 }
@@ -153,6 +182,11 @@ async function startLspClient(context) {
             pullDiagnostics: config.get('lsp.enablePullDiagnostics', true),
             debounceDelay: config.get('lsp.debounceDelay', 300),
             wasmMode: usingWasmLsp,
+        },
+        // Limit restart attempts — the LSP server may not be compiled yet
+        errorHandler: {
+            error: () => ({ action: node_1.ErrorAction.Shutdown }),
+            closed: () => ({ action: node_1.CloseAction.DoNotRestart }),
         }
     };
     // Create LSP client
@@ -171,7 +205,9 @@ async function startLspClient(context) {
         updateStatusBar(node_1.State.Stopped);
         setMathLspRunning?.(false);
         outputChannel?.appendLine(`Failed to start LSP server: ${error}`);
-        vscode.window.showErrorMessage(`Failed to start Simple LSP server. Check output for details.`, 'Show Output').then(selection => {
+        outputChannel?.appendLine('Note: LSP features require a compiled Simple LSP server binary.');
+        outputChannel?.appendLine('Basic features (syntax highlighting, CodeLens, math) work without LSP.');
+        vscode.window.showWarningMessage('Simple LSP server not available. Syntax highlighting and other basic features still work.', 'Show Output').then(selection => {
             if (selection === 'Show Output') {
                 outputChannel?.show();
             }

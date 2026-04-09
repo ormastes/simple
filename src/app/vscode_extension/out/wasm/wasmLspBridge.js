@@ -60,6 +60,7 @@ async function createWasmServerOptions(options) {
     // Check if @vscode/wasm-wasi is available
     let wasmWasi;
     try {
+        // @ts-ignore - optional dependency, loaded dynamically
         wasmWasi = await Promise.resolve().then(() => __importStar(require('@vscode/wasm-wasi')));
     }
     catch {
@@ -107,6 +108,7 @@ async function createWasmServerOptions(options) {
         // Try to use @vscode/wasm-wasi-lsp for LSP wrapping
         let wasmLsp;
         try {
+            // @ts-ignore - optional dependency, loaded dynamically
             wasmLsp = await Promise.resolve().then(() => __importStar(require('@vscode/wasm-wasi-lsp')));
         }
         catch {
