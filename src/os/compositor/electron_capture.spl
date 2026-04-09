@@ -1,0 +1,108 @@
+# Electron Capture — Electron host screenshot capture
+#
+# Captures a screenshot via the Electron screenshot.js tool, then
+# decodes the resulting PNG to ARGB [u32] pixel buffer for comparison
+# with the QEMU/compositor rendering path.
+#
+# Depends on:
+#   - tools/electron-shell/screenshot.js (PNG capture)
+#   - std.common.image.png_decode (PNG -> ARGB)
+#   - os.compositor.wm_scene (scene -> HTML conversion)
+
+use os.compositor.wm_scene.{WmSceneSpec, scene_to_html}
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.nogc_sync_mut.ffi.io.{file_write_text, file_read_bytes}
+use std.io.{shell}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct CaptureResult:
+    """Result of a screenshot capture from any backend."""
+    pixels: [u32]
+    width: i32
+    height: i32
+    backend_name: text
+    success: bool
+    error: text
+
+fn capture_error(backend_name: text, width: i32, height: i32, error: text) -> CaptureResult:
+    """Create an error CaptureResult with empty pixels."""
+    CaptureResult(
+        pixels: [],
+        width: width,
+        height: height,
+        backend_name: backend_name,
+        success: false,
+        error: error
+    )
+
+# ============================================================================
+# Electron Capture
+# ============================================================================
+
+fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
+    """Capture a screenshot of HTML via Electron's screenshot.js.
+
+    Writes the HTML to a temporary file, invokes screenshot.js to render
+    it headlessly, reads the resulting PNG, and decodes to ARGB.
+
+    Args:
+        html: Full HTML document string
+        width: Viewport width
+        height: Viewport height
+
+    Returns:
+        CaptureResult with ARGB pixel buffer or error
+    """
+    if html.len() == 0:
+        return capture_error("electron", width, height, "Empty HTML provided")
+
+    # Write HTML to temp file
+    val html_path = "/tmp/wm_consistency_electron_input.html"
+    val png_path = "/tmp/wm_consistency_electron_output.png"
+
+    val write_ok = file_write_text(html_path, html)
+    if not write_ok:
+        return capture_error("electron", width, height, "Failed to write HTML to temp file")
+
+    # Invoke Electron screenshot.js
+    val electron_cmd = "cd tools/electron-shell && npx electron screenshot.js --html={html_path} --width={width} --height={height} --output={png_path}"
+    val (out, err, exit_code) = shell(electron_cmd)
+
+    if exit_code != 0:
+        return capture_error("electron", width, height, "Electron screenshot failed: {err}")
+
+    # Read PNG file and decode to ARGB
+    val png_data = file_read_bytes(png_path)
+    if png_data.len() == 0:
+        return capture_error("electron", width, height, "Failed to read PNG output file")
+
+    # Decode PNG to ARGB pixels
+    val decode_result = decode_png_to_argb(png_data)
+    match decode_result:
+        Ok(img):
+            return CaptureResult(
+                pixels: img.pixels,
+                width: width,
+                height: height,
+                backend_name: "electron",
+                success: true,
+                error: ""
+            )
+        Err(msg):
+            print "[electron_capture] PNG decode warning: {msg}"
+            return capture_error("electron", width, height, "PNG decode failed: {msg}")
+
+# ============================================================================
+# Scene-Level Capture
+# ============================================================================
+
+fn capture_electron_scene(scene: WmSceneSpec) -> CaptureResult:
+    """Capture Electron screenshot of a WM scene.
+
+    Converts scene to HTML, then captures via Electron.
+    """
+    val html = scene_to_html(scene)
+    capture_electron(html, scene.width, scene.height)

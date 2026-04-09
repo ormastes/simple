@@ -1,0 +1,86 @@
+# QEMU Capture — QEMU screenshot capture for consistency testing
+#
+# Two capture paths:
+# (a) In-process: renders scene on BrowserCompositorBackend, returns pixel buffer
+# (b) VM: captures running QEMU framebuffer via QMP screendump
+#
+# Both paths return CaptureResult for uniform comparison.
+
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_screendump}
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes}
+
+# ============================================================================
+# In-Process Capture
+# ============================================================================
+
+fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
+    """Capture by rendering scene on BrowserCompositorBackend in-process.
+
+    This uses the same software compositor that runs inside Simple OS.
+    No actual QEMU VM is needed — the pixel buffer is produced directly.
+
+    Args:
+        scene: WM scene specification to render
+
+    Returns:
+        CaptureResult with ARGB pixel buffer
+    """
+    val pixels = render_scene_to_backend(scene, nil)
+
+    CaptureResult(
+        pixels: pixels,
+        width: scene.width,
+        height: scene.height,
+        backend_name: "qemu_inprocess",
+        success: pixels.len() > 0,
+        error: if pixels.len() > 0: "" else: "Failed to render scene"
+    )
+
+# ============================================================================
+# VM Capture via QMP
+# ============================================================================
+
+fn capture_qemu_vm(qmp_socket: text, output_path: text) -> CaptureResult:
+    """Capture QEMU framebuffer via QMP screendump command.
+
+    Connects to a running QEMU instance via QMP socket, captures the
+    framebuffer to a PNG file, then decodes it to ARGB pixel buffer.
+
+    Args:
+        qmp_socket: Path to QEMU QMP Unix socket
+        output_path: Path for the screenshot output file
+
+    Returns:
+        CaptureResult with ARGB pixel buffer or error
+    """
+    val client = QmpClient(socket_path: qmp_socket)
+
+    # Attempt QMP screendump
+    val success = qmp_screendump(client, output_path, "png")
+
+    if not success:
+        return capture_error("qemu_vm", 0, 0, "QMP screendump failed for socket: {qmp_socket}")
+
+    # Read and decode the screenshot file
+    val png_data = file_read_bytes(output_path)
+    if png_data.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "Failed to read screenshot file: {output_path}")
+
+    # Decode PNG to ARGB
+    val decode_result = decode_png_to_argb(png_data)
+    match decode_result:
+        Ok(img):
+            return CaptureResult(
+                pixels: img.pixels,
+                width: img.width,
+                height: img.height,
+                backend_name: "qemu_vm",
+                success: true,
+                error: ""
+            )
+        Err(msg):
+            return capture_error("qemu_vm", 0, 0, "PNG decode failed: {msg}")

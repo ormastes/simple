@@ -6,6 +6,8 @@
 #
 # All comparisons operate on [u32] arrays in ARGB (0xAARRGGBB) format.
 
+use os.compositor.tolerance_profile.{ToleranceProfile}
+
 # ============================================================================
 # Comparison Result
 # ============================================================================
@@ -114,48 +116,7 @@ fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
 
     Returns a new [u32] pixel buffer.
     """
-    var result: [u32] = []
-    val len = if a.len() < b.len(): a.len() else: b.len()
-    var i: i32 = 0
-    while i < len:
-        val pa = a[i]
-        val pb = b[i]
-
-        val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
-        val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
-        val ba_ch: i32 = (pa & 0xFF).to_i32()
-
-        val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
-        val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
-        val bb: i32 = (pb & 0xFF).to_i32()
-
-        val dr = abs_i32(ra - rb)
-        val dg = abs_i32(ga - gb)
-        val db = abs_i32(ba_ch - bb)
-        val max_ch = max3_i32(dr, dg, db)
-
-        if max_ch == 0:
-            # Match — green tint on original
-            val green_r = (ra / 2).to_u32()
-            val green_g = (ga / 2 + 128).to_u32()
-            val green_b = (ba_ch / 2).to_u32()
-            val clamped_g = if green_g > 255: 255 else: green_g
-            result = result + [0xFF000000 | (green_r << 16) | (clamped_g << 8) | green_b]
-        else:
-            # Difference — red, brightness = diff magnitude
-            val brightness = if max_ch * 3 > 255: 255 else: max_ch * 3
-            val red_val = (128 + brightness / 2).to_u32()
-            val clamped_r = if red_val > 255: 255 else: red_val
-            result = result + [0xFF000000 | (clamped_r << 16)]
-
-        i = i + 1
-
-    # Pad if sizes differ
-    while i < width * height:
-        result = result + [0xFFFF0000]  # Red for missing pixels
-        i = i + 1
-
-    result
+    generate_diff_image_threshold(a, b, width, height, 0)
 
 # ============================================================================
 # Report Generation
@@ -429,6 +390,77 @@ fn find_diff_regions(a: [u32], b: [u32], width: i32, height: i32, threshold: i32
         y = y + 1
 
     regions
+
+# ============================================================================
+# Profile-Based Comparison
+# ============================================================================
+
+fn compare_with_profile(a: [u32], b: [u32], width: i32, height: i32, profile: ToleranceProfile) -> ComparisonResult:
+    """Compare two pixel buffers using a tolerance profile.
+
+    Uses the profile's default_threshold for the comparison.
+
+    Args:
+        a, b: Pixel buffers to compare
+        width, height: Image dimensions
+        profile: ToleranceProfile with default_threshold field
+
+    Returns:
+        ComparisonResult with match statistics
+    """
+    val threshold: i32 = profile.default_threshold
+    compare_pixel_buffers(a, b, width, height, threshold)
+
+# ============================================================================
+# Extended Diff Image (with threshold)
+# ============================================================================
+
+fn generate_diff_image_threshold(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> [u32]:
+    """Generate a visual diff image with threshold-based matching.
+
+    Pixels within threshold are shown in green, beyond threshold in red.
+    """
+    var result: [u32] = []
+    val len = if a.len() < b.len(): a.len() else: b.len()
+    var i: i32 = 0
+    while i < len:
+        val pa = a[i]
+        val pb = b[i]
+
+        val ra: i32 = ((pa >> 16) & 0xFF).to_i32()
+        val ga: i32 = ((pa >> 8) & 0xFF).to_i32()
+        val ba_ch: i32 = (pa & 0xFF).to_i32()
+
+        val rb: i32 = ((pb >> 16) & 0xFF).to_i32()
+        val gb: i32 = ((pb >> 8) & 0xFF).to_i32()
+        val bb: i32 = (pb & 0xFF).to_i32()
+
+        val dr = abs_i32(ra - rb)
+        val dg = abs_i32(ga - gb)
+        val db = abs_i32(ba_ch - bb)
+        val max_ch = max3_i32(dr, dg, db)
+
+        if max_ch <= threshold:
+            # Match — green tint
+            val green_r = (ra / 2).to_u32()
+            val green_g = (ga / 2 + 128).to_u32()
+            val green_b = (ba_ch / 2).to_u32()
+            val clamped_g = if green_g > 255: 255 else: green_g
+            result = result + [0xFF000000 | (green_r << 16) | (clamped_g << 8) | green_b]
+        else:
+            # Difference — red
+            val brightness = if max_ch * 3 > 255: 255 else: max_ch * 3
+            val red_val = (128 + brightness / 2).to_u32()
+            val clamped_r = if red_val > 255: 255 else: red_val
+            result = result + [0xFF000000 | (clamped_r << 16)]
+
+        i = i + 1
+
+    while i < width * height:
+        result = result + [0xFFFF0000]
+        i = i + 1
+
+    result
 
 # ============================================================================
 # Single-Channel Diff Image

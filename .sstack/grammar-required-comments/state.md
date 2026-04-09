@@ -10,13 +10,13 @@ feature
 > Require string comment arguments on `pass_todo`, `pass_do_nothing`, `pass_dn`, and a new extensible `dangerous-token-but-needs` keyword category (including `loss` and other dangerous keywords); emit warnings when comments are missing; log comments in debug mode; add a lint rule registered in the textual DB with incremental hash-based caching and symbol-reference invalidation; and add an agent-key signing mechanism for lint verification results with per-agent key isolation.
 
 ## Acceptance Criteria
-- [ ] AC-1: `pass_todo`, `pass_do_nothing`, `pass_dn` grammar requires a string comment argument — missing comment emits a warning (not error, so existing code still compiles)
-- [ ] AC-2: In debug mode, the comment string is printed as a log message at the `pass_*` site
-- [ ] AC-3: New extensible "dangerous keyword" category (e.g., `dangerous_token_but_needs("reason", [Symbol1, Symbol2])`) with required comment + optional symbol references — `loss` and similar ML/security keywords registered in this system
-- [ ] AC-4: Lint rule `required_comment` that checks all `pass_*` and dangerous keywords have comments, registered in the textual lint DB (SDN format)
-- [ ] AC-5: Parse-tree hash-based incremental lint caching — if the AST subtree hash of the enclosing scope hasn't changed, the lint result is reused
-- [ ] AC-6: Symbol-reference invalidation — tracked symbols (class, trait, function references) invalidate cached lint results when those symbols change, not just when the enclosing class changes
-- [ ] AC-7: Agent signing mechanism — lint verification results are signed with an agent's private key, with a verification API to check signatures
+- [x] AC-1: `pass_todo`, `pass_do_nothing`, `pass_dn` grammar requires a string comment argument — missing comment emits a warning (not error, so existing code still compiles)
+- [x] AC-2: In debug mode, the comment string is printed as a log message at the `pass_*` site
+- [x] AC-3: New extensible "dangerous keyword" category (e.g., `dangerous_token_but_needs("reason", [Symbol1, Symbol2])`) with required comment + optional symbol references — `loss` and similar ML/security keywords registered in this system
+- [x] AC-4: Lint rule `required_comment` that checks all `pass_*` and dangerous keywords have comments, registered in the textual lint DB (SDN format)
+- [x] AC-5: Parse-tree hash-based incremental lint caching — if the AST subtree hash of the enclosing scope hasn't changed, the lint result is reused
+- [x] AC-6: Symbol-reference invalidation — tracked symbols (class, trait, function references) invalidate cached lint results when those symbols change, not just when the enclosing class changes
+- [x] AC-7: Agent signing mechanism — lint verification results are signed with an agent's private key, with a verification API to check signatures
 
 ## Cooperative Providers
 - Codex: unavailable
@@ -28,9 +28,9 @@ feature
 - [x] 3-arch (Architect) — 2026-04-09
 - [x] 4-spec (QA Lead) — 2026-04-09
 - [x] 5-implement (Engineer) — 2026-04-09
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 6-refactor (Tech Lead) — 2026-04-09
+- [x] 7-verify (QA) — 2026-04-09
+- [x] 8-ship (Release Mgr) — 2026-04-09
 
 ## Phase Outputs
 

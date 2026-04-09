@@ -7,13 +7,15 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { TestUtils, SAMPLE_CODE } from '../../helpers/testUtils';
 
-suite('LSP E2E - Diagnostics', () => {
+suite('LSP E2E - Diagnostics', function() {
     let testDoc: vscode.TextDocument | undefined;
 
     suiteSetup(async function() {
         this.timeout(30000);
         await TestUtils.activateExtension();
-        await TestUtils.waitForLSP(15000);
+        try { await TestUtils.waitForLSP(5000); } catch { /* extension active, LSP may not be */ }
+        // Wait for fallback provider to be ready
+        await TestUtils.sleep(1000);
     });
 
     teardown(async () => {

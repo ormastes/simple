@@ -1,0 +1,219 @@
+# Perceptual Compare — YIQ color-space pixel comparison
+#
+# Implements Kotsarenko & Ramos (2010) YIQ perceptual distance
+# and Vyshniauskas (2009) anti-aliasing detection for pixel-level
+# visual consistency testing across rendering backends.
+#
+# YIQ decomposition: Y (luminance), I (chrominance in-phase), Q (chrominance quadrature)
+# Better correlates with human perception than raw RGB channel diff.
+
+# ============================================================================
+# Result Struct
+# ============================================================================
+
+struct PerceptualResult:
+    """Result of a perceptual pixel comparison."""
+    mismatched_pixels: i64
+    total_pixels: i64
+    match_percentage: i64    # 0-10000 (100.00% * 100)
+    aa_pixels: i64           # count of anti-aliased pixels detected
+
+# ============================================================================
+# YIQ Color Space Conversion
+# ============================================================================
+
+fn rgb_to_y(r: f64, g: f64, b: f64) -> f64:
+    """Luminance component."""
+    0.29889531 * r + 0.58662247 * g + 0.11448223 * b
+
+fn rgb_to_i(r: f64, g: f64, b: f64) -> f64:
+    """In-phase chrominance component."""
+    0.59597799 * r - 0.27417610 * g - 0.32180189 * b
+
+fn rgb_to_q(r: f64, g: f64, b: f64) -> f64:
+    """Quadrature chrominance component."""
+    0.21147017 * r - 0.52261711 * g + 0.31114694 * b
+
+fn pixel_to_rgb(pixel: u32) -> [f64]:
+    """Extract RGB from ARGB u32 as normalized [0.0, 1.0] floats."""
+    val r = ((pixel >> 16) & 0xFF).to_f64() / 255.0
+    val g = ((pixel >> 8) & 0xFF).to_f64() / 255.0
+    val b = (pixel & 0xFF).to_f64() / 255.0
+    [r, g, b]
+
+# ============================================================================
+# YIQ Distance
+# ============================================================================
+
+fn yiq_distance(pixel_a: u32, pixel_b: u32) -> f64:
+    """Compute YIQ perceptual color distance between two ARGB pixels.
+
+    Returns a value in [0.0, 1.0+] where 0.0 means identical
+    and larger values indicate greater perceptual difference.
+    Based on Kotsarenko & Ramos (2010).
+    """
+    val rgb_a = pixel_to_rgb(pixel_a)
+    val rgb_b = pixel_to_rgb(pixel_b)
+
+    val ra = rgb_a[0]
+    val ga = rgb_a[1]
+    val ba = rgb_a[2]
+
+    val rb = rgb_b[0]
+    val gb = rgb_b[1]
+    val bb = rgb_b[2]
+
+    val y_a = rgb_to_y(ra, ga, ba)
+    val i_a = rgb_to_i(ra, ga, ba)
+    val q_a = rgb_to_q(ra, ga, ba)
+
+    val y_b = rgb_to_y(rb, gb, bb)
+    val i_b = rgb_to_i(rb, gb, bb)
+    val q_b = rgb_to_q(rb, gb, bb)
+
+    val dy = y_a - y_b
+    val di = i_a - i_b
+    val dq = q_a - q_b
+
+    # Weighted YIQ distance: Y is most perceptually significant
+    # Weights: Y=0.5053, I=0.299, Q=0.1957 (from pixelmatch)
+    val dist_sq = 0.5053 * dy * dy + 0.299 * di * di + 0.1957 * dq * dq
+    sqrt_f64(dist_sq)
+
+fn sqrt_f64(x: f64) -> f64:
+    """Approximate square root using Newton's method."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x / 2.0
+    if guess < 0.001:
+        guess = 0.001
+    # 10 iterations of Newton's method for good precision
+    var i: i32 = 0
+    while i < 10:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn abs_f64(x: f64) -> f64:
+    if x < 0.0: return 0.0 - x
+    x
+
+# ============================================================================
+# Anti-Aliasing Detection
+# ============================================================================
+
+fn is_antialiased(pixels: [u32], x: i32, y: i32, width: i32, height: i32) -> bool:
+    """Detect if a pixel is anti-aliased based on neighbor analysis.
+
+    A pixel is considered AA if it has significantly different luminance
+    from at least 2 neighbors while being between the min and max luminance
+    of its neighborhood, AND the neighborhood has a large luminance range.
+    Based on Vyshniauskas (2009) Anti-aliased Pixel and Intensity Slope Detector.
+    """
+    val center = pixels[y * width + x]
+    val center_rgb = pixel_to_rgb(center)
+    val center_y = rgb_to_y(center_rgb[0], center_rgb[1], center_rgb[2])
+
+    var min_y: f64 = center_y
+    var max_y: f64 = center_y
+    var diff_count: i32 = 0
+    var neighbor_count: i32 = 0
+
+    # Check 3x3 neighborhood
+    var dy: i32 = -1
+    while dy <= 1:
+        var dx: i32 = -1
+        while dx <= 1:
+            if dx == 0 and dy == 0:
+                dx = dx + 1
+                continue
+            val nx = x + dx
+            val ny = y + dy
+            if nx >= 0 and nx < width and ny >= 0 and ny < height:
+                val neighbor = pixels[ny * width + nx]
+                val n_rgb = pixel_to_rgb(neighbor)
+                val n_y = rgb_to_y(n_rgb[0], n_rgb[1], n_rgb[2])
+                neighbor_count = neighbor_count + 1
+
+                if n_y < min_y:
+                    min_y = n_y
+                if n_y > max_y:
+                    max_y = n_y
+
+                val lum_diff = abs_f64(center_y - n_y)
+                if lum_diff > 0.1:
+                    diff_count = diff_count + 1
+            dx = dx + 1
+        dy = dy + 1
+
+    # AA detection: center luminance is between min and max of neighbors,
+    # neighborhood has significant luminance range, and multiple neighbors differ
+    val range = max_y - min_y
+    if range < 0.2:
+        return false
+    if diff_count < 2:
+        return false
+    # Center should be an intermediate value (not at the extremes)
+    val margin = range * 0.15
+    val is_intermediate = center_y > min_y + margin and center_y < max_y - margin
+    is_intermediate
+
+# ============================================================================
+# Full Perceptual Comparison
+# ============================================================================
+
+fn compare_perceptual(a: [u32], b: [u32], width: i32, height: i32, yiq_threshold: f64, include_aa: bool) -> PerceptualResult:
+    """Full perceptual comparison of two pixel buffers.
+
+    Args:
+        a, b: ARGB pixel buffers to compare
+        width, height: Image dimensions
+        yiq_threshold: Maximum YIQ distance to consider a match (0.0 = exact)
+        include_aa: If false, AA pixels are excluded from the mismatch count
+
+    Returns:
+        PerceptualResult with mismatch count, match percentage, AA pixel count
+    """
+    val total: i64 = width.to_i64() * height.to_i64()
+    val len = if a.len() < b.len(): a.len() else: b.len()
+
+    var mismatched: i64 = 0
+    var aa_count: i64 = 0
+
+    var idx: i32 = 0
+    while idx < len:
+        val pa = a[idx]
+        val pb = b[idx]
+
+        if pa == pb:
+            idx = idx + 1
+            continue
+
+        val dist = yiq_distance(pa, pb)
+        if dist > yiq_threshold:
+            val px = idx % width
+            val py = idx / width
+
+            # Check if this pixel is AA in either image
+            val aa_in_a = is_antialiased(a, px, py, width, height)
+            val aa_in_b = is_antialiased(b, px, py, width, height)
+            val is_aa = aa_in_a or aa_in_b
+
+            if is_aa:
+                aa_count = aa_count + 1
+                if include_aa:
+                    mismatched = mismatched + 1
+            else:
+                mismatched = mismatched + 1
+
+        idx = idx + 1
+
+    val matched = total - mismatched
+    val pct = if total > 0: (matched * 10000) / total else: 10000
+
+    PerceptualResult(
+        mismatched_pixels: mismatched,
+        total_pixels: total,
+        match_percentage: pct,
+        aa_pixels: aa_count
+    )

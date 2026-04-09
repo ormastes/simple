@@ -3,7 +3,7 @@
 # Communicates with QEMU via QMP over Unix socket using socat.
 # Supports savevm/loadvm for snapshot-based test session sharing.
 
-use std.io.{shell, shell_output}
+use std.io.{shell}
 
 # ============================================================================
 # QMP Client
@@ -13,16 +13,42 @@ struct QmpClient:
     socket_path: text
 
 # ============================================================================
+# Internal: Send QMP Command
+# ============================================================================
+
+fn qmp_send(client: QmpClient, json_payload: text) -> (text, text, i32):
+    """Send a QMP JSON command to the QEMU instance via socat.
+
+    Returns (stdout, stderr, exit_code) from the shell invocation.
+    """
+    val cmd = "echo '{json_payload}' | socat - UNIX-CONNECT:{client.socket_path}"
+    shell(cmd)
+
+fn qmp_send_check(client: QmpClient, json_payload: text, label: text) -> bool:
+    """Send a QMP command and return true on success, false on error.
+
+    Checks both exit code and response for error strings.
+    """
+    val (out, err, exit_code) = qmp_send(client, json_payload)
+    if exit_code != 0:
+        print "[qmp] {label} failed: {err}"
+        return false
+    if out.contains("error"):
+        print "[qmp] {label} error: {out}"
+        return false
+    true
+
+# ============================================================================
 # Connection
 # ============================================================================
 
 fn qmp_connect(socket_path: text) -> QmpClient:
     # Send QMP capabilities handshake
-    val cmd = "echo '{\"execute\": \"qmp_capabilities\"}' | socat - UNIX-CONNECT:{socket_path}"
-    val (out, err, exit_code) = shell(cmd)
+    val client = QmpClient(socket_path: socket_path)
+    val (out, err, exit_code) = qmp_send(client, "{\"execute\": \"qmp_capabilities\"}")
     if exit_code != 0:
         print "[qmp] handshake failed for {socket_path}: {err}"
-    QmpClient(socket_path: socket_path)
+    client
 
 # ============================================================================
 # Snapshot Operations
@@ -31,49 +57,44 @@ fn qmp_connect(socket_path: text) -> QmpClient:
 fn qmp_savevm(client: QmpClient, name: text) -> bool:
     val hmc = "savevm {name}"
     val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"{hmc}\"}}"
-    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
-    val (out, err, exit_code) = shell(cmd)
-    if exit_code != 0:
-        print "[qmp] savevm '{name}' failed: {err}"
-        return false
-    # Check for error in response
-    if out.contains("error"):
-        print "[qmp] savevm '{name}' error: {out}"
-        return false
-    true
+    qmp_send_check(client, json, "savevm '{name}'")
 
 fn qmp_loadvm(client: QmpClient, name: text) -> bool:
     val hmc = "loadvm {name}"
     val json = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"{hmc}\"}}"
-    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
-    val (out, err, exit_code) = shell(cmd)
-    if exit_code != 0:
-        print "[qmp] loadvm '{name}' failed: {err}"
-        return false
-    if out.contains("error"):
-        print "[qmp] loadvm '{name}' error: {out}"
-        return false
-    true
+    qmp_send_check(client, json, "loadvm '{name}'")
 
 # ============================================================================
 # Status Queries
 # ============================================================================
 
 fn qmp_query_status(client: QmpClient) -> text:
-    val json = "{\"execute\": \"query-status\"}"
-    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
-    val (out, err, exit_code) = shell(cmd)
+    val (out, err, exit_code) = qmp_send(client, "{\"execute\": \"query-status\"}")
     if exit_code != 0:
         return "error: {err}"
     out
 
 fn qmp_system_reset(client: QmpClient) -> bool:
-    val json = "{\"execute\": \"system_reset\"}"
-    val cmd = "echo '{json}' | socat - UNIX-CONNECT:{client.socket_path}"
-    val (out, err, exit_code) = shell(cmd)
+    val (out, err, exit_code) = qmp_send(client, "{\"execute\": \"system_reset\"}")
     exit_code == 0
 
 # ============================================================================
-# Exports
+# Screenshot Capture
 # ============================================================================
 
+fn qmp_screendump(client: QmpClient, filename: text, format: text) -> bool:
+    """Capture QEMU framebuffer to file via QMP screendump command.
+
+    Args:
+        client: QMP client connected to QEMU instance
+        filename: Output file path for the screenshot
+        format: Image format ("png" or "ppm")
+
+    Returns:
+        true if screendump was successful, false on error
+    """
+    if client.socket_path.len() == 0:
+        print "[qmp] screendump failed: empty socket path"
+        return false
+    val json = "{\"execute\": \"screendump\", \"arguments\": {\"filename\": \"{filename}\", \"format\": \"{format}\"}}"
+    qmp_send_check(client, json, "screendump")

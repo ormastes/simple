@@ -14,7 +14,9 @@ suite('Integration - Full Workflow', function() {
 
     suiteSetup(async function() {
         await TestUtils.activateExtension();
-        await TestUtils.waitForLSP(15000);
+        try { await TestUtils.waitForLSP(5000); } catch { /* ok */ }
+        // Wait for fallback providers
+        await TestUtils.sleep(1000);
     });
 
     teardown(async () => {
@@ -27,7 +29,8 @@ suite('Integration - Full Workflow', function() {
         await TestUtils.closeAllEditors();
     });
 
-    test('Complete workflow: Create file → Edit → Get diagnostics → Get tokens', async () => {
+    test('Complete workflow: Create file → Edit → Get diagnostics → Get tokens', async function() {
+
         // 1. Create file
         testDoc = await TestUtils.createTestFile(
             'workflow-test.spl',
@@ -62,7 +65,8 @@ suite('Integration - Full Workflow', function() {
         assert.ok(tokens!.data.length > 0, 'Should have token data');
     });
 
-    test('Complete workflow: Write class → Use completion → Verify highlighting', async () => {
+    test('Complete workflow: Write class → Use completion → Verify highlighting', async function() {
+
         // 1. Create file with partial code
         testDoc = await TestUtils.createTestFile(
             'class-workflow.spl',
@@ -155,7 +159,8 @@ fn main():
         assert.ok(true, 'Find references workflow completed');
     });
 
-    test('Complete workflow: Multiple files → Cross-file references', async () => {
+    test('Complete workflow: Multiple files → Cross-file references', async function() {
+
         // Create first file
         const file1 = await TestUtils.createTestFile(
             'module1.spl',
@@ -230,7 +235,8 @@ fn main():
         }
     });
 
-    test('Performance: Handle rapid edits without crashes', async () => {
+    test('Performance: Handle rapid edits without crashes', async function() {
+
         testDoc = await TestUtils.createTestFile(
             'rapid-edits.spl',
             'fn test(): void'

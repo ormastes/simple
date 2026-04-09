@@ -16,6 +16,8 @@ import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDete
 import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
 import { activateMathFeatures } from './math';
 import { TestCodeLensProvider, runTestFile, runSdoctest, runTestAtCursor } from './testing/testCodeLensProvider';
+import { SimpleSemanticTokensProvider, TOKEN_LEGEND } from './fallback/semanticTokensProvider';
+import { SimpleDiagnosticsProvider } from './fallback/diagnosticsProvider';
 
 /** Path to bundled WASM LSP binary (relative to extension root) */
 const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
@@ -31,6 +33,10 @@ let inlineCompletionProvider: AIInlineCompletionProvider | undefined;
 let usingWasmLsp = false;
 /** Callback to notify math hover provider of LSP state changes */
 let setMathLspRunning: ((running: boolean) => void) | undefined;
+/** Fallback providers active when LSP is not running */
+let fallbackSemanticTokensProvider: SimpleSemanticTokensProvider | undefined;
+let fallbackDiagnosticsProvider: SimpleDiagnosticsProvider | undefined;
+let fallbackSemanticTokensRegistration: vscode.Disposable | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Simple Language extension activating...');
@@ -46,11 +52,30 @@ export function activate(context: vscode.ExtensionContext) {
     // Log environment info
     outputChannel.appendLine(getEnvironmentDescription());
 
+    // Register commands and status bar first (before LSP, so they work even if LSP fails)
+    setupStatusBar(context);
+    registerCommands(context);
+
+    // Register fallback semantic tokens + diagnostics (active until LSP connects)
+    fallbackSemanticTokensProvider = new SimpleSemanticTokensProvider();
+    fallbackSemanticTokensRegistration = vscode.languages.registerDocumentSemanticTokensProvider(
+        { language: 'simple' },
+        fallbackSemanticTokensProvider,
+        TOKEN_LEGEND
+    );
+    context.subscriptions.push(fallbackSemanticTokensRegistration);
+    fallbackDiagnosticsProvider = new SimpleDiagnosticsProvider();
+    context.subscriptions.push(fallbackDiagnosticsProvider);
+
     // Start LSP (async - determines native vs WASM)
-    startLspClient(context).then(() => {
-        // Initialize AI features after LSP is set up
-        initializeAI(context);
+    // Fallback providers remain active until LSP reaches Running state
+    // (see onDidChangeState handler in startLspClient)
+    startLspClient(context).catch(() => {
+        outputChannel?.appendLine('Fallback semantic tokens and diagnostics providers active.');
     });
+
+    // Initialize AI features (independent of LSP)
+    initializeAI(context);
 
     // Initialize math block rendering features.
     // Pass LSP state callback so the math hover provider can defer to the
@@ -191,23 +216,24 @@ async function startLspClient(context: vscode.ExtensionContext) {
     };
 
     // Create LSP client
-    client = new LanguageClient(
-        'simple-lsp',
-        'Simple Language Server',
-        serverOptions,
-        clientOptions
-    );
-
-    // Setup status bar
-    setupStatusBar(context);
-
-    // Register commands
-    registerCommands(context);
+    try {
+        client = new LanguageClient(
+            'simple-lsp',
+            'Simple Language Server',
+            serverOptions,
+            clientOptions
+        );
+    } catch (error: any) {
+        outputChannel?.appendLine(`Failed to create LSP client: ${error.message}`);
+        updateStatusBar(State.Stopped);
+        return;
+    }
 
     // Start LSP client
     client.start().then(() => {
         updateStatusBar(State.Running);
         setMathLspRunning?.(true);
+        disableFallbackProviders();
         const mode = usingWasmLsp ? '(WASM)' : '(native)';
         outputChannel?.appendLine(`Simple LSP server started successfully ${mode}`);
     }).catch((error) => {
@@ -533,6 +559,19 @@ function activateTestFeatures(context: vscode.ExtensionContext) {
     );
 }
 
+function disableFallbackProviders(): void {
+    if (fallbackSemanticTokensRegistration) {
+        fallbackSemanticTokensRegistration.dispose();
+        fallbackSemanticTokensRegistration = undefined;
+        fallbackSemanticTokensProvider = undefined;
+    }
+    if (fallbackDiagnosticsProvider) {
+        fallbackDiagnosticsProvider.dispose();
+        fallbackDiagnosticsProvider = undefined;
+    }
+    outputChannel?.appendLine('Fallback providers disabled — LSP is active.');
+}
+
 export function deactivate(): Thenable<void> | undefined {
     if (!client) {
         return undefined;
@@ -589,8 +628,14 @@ function registerCommands(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('simple.lsp.restart', async () => {
             if (client) {
                 outputChannel?.appendLine('Restarting Simple LSP server...');
-                await client.restart();
-                vscode.window.showInformationMessage('Simple LSP server restarted');
+                try {
+                    await client.restart();
+                    vscode.window.showInformationMessage('Simple LSP server restarted');
+                } catch {
+                    vscode.window.showWarningMessage('LSP server could not be restarted. The server may not be available.');
+                }
+            } else {
+                vscode.window.showWarningMessage('No LSP client to restart.');
             }
         })
     );

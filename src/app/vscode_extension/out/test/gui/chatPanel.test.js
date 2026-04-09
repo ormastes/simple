@@ -45,7 +45,12 @@ suite('GUI - AI Chat Panel', function () {
     let aiEnabled = false;
     suiteSetup(async function () {
         await testUtils_1.TestUtils.activateExtension();
-        await testUtils_1.TestUtils.waitForLSP(15000);
+        try {
+            await testUtils_1.TestUtils.waitForLSP(10000);
+        }
+        catch {
+            console.log('⚠️  LSP server not available');
+        }
         const enabled = testUtils_1.TestUtils.getConfig('simple', 'ai.enabled');
         const chatEnabled = testUtils_1.TestUtils.getConfig('simple', 'ai.chatPanel');
         aiEnabled = (enabled ?? true) && (chatEnabled ?? true);

@@ -45,7 +45,12 @@ suite('Integration - Full Workflow', function () {
     let testDoc;
     suiteSetup(async function () {
         await testUtils_1.TestUtils.activateExtension();
-        await testUtils_1.TestUtils.waitForLSP(15000);
+        try {
+            await testUtils_1.TestUtils.waitForLSP(5000);
+        }
+        catch { /* ok */ }
+        // Wait for fallback providers
+        await testUtils_1.TestUtils.sleep(1000);
     });
     teardown(async () => {
         if (testDoc) {
@@ -56,7 +61,7 @@ suite('Integration - Full Workflow', function () {
         }
         await testUtils_1.TestUtils.closeAllEditors();
     });
-    test('Complete workflow: Create file → Edit → Get diagnostics → Get tokens', async () => {
+    test('Complete workflow: Create file → Edit → Get diagnostics → Get tokens', async function () {
         // 1. Create file
         testDoc = await testUtils_1.TestUtils.createTestFile('workflow-test.spl', 'fn incomplete(');
         // 2. Wait for LSP to process
@@ -77,7 +82,7 @@ suite('Integration - Full Workflow', function () {
         assert.ok(tokens, 'Should have semantic tokens');
         assert.ok(tokens.data.length > 0, 'Should have token data');
     });
-    test('Complete workflow: Write class → Use completion → Verify highlighting', async () => {
+    test('Complete workflow: Write class → Use completion → Verify highlighting', async function () {
         // 1. Create file with partial code
         testDoc = await testUtils_1.TestUtils.createTestFile('class-workflow.spl', `class Point:
     x: i32
@@ -132,7 +137,7 @@ fn main():
         // Just verify no crash
         assert.ok(true, 'Find references workflow completed');
     });
-    test('Complete workflow: Multiple files → Cross-file references', async () => {
+    test('Complete workflow: Multiple files → Cross-file references', async function () {
         // Create first file
         const file1 = await testUtils_1.TestUtils.createTestFile('module1.spl', `fn helper(x: i32): i32 = x + 1`);
         await testUtils_1.TestUtils.sleep(500);
@@ -178,7 +183,7 @@ fn main():
             console.log('⚠️  AI features not available, skipping AI steps');
         }
     });
-    test('Performance: Handle rapid edits without crashes', async () => {
+    test('Performance: Handle rapid edits without crashes', async function () {
         testDoc = await testUtils_1.TestUtils.createTestFile('rapid-edits.spl', 'fn test(): void');
         const editor = testUtils_1.TestUtils.getActiveEditor();
         // Make rapid edits
