@@ -15,7 +15,7 @@ This plugin is not a standalone portable bundle. It expects to run from a
 Simple repository root that contains:
 
 - `bin/simple_mcp_server`
-- `bin/release/simple` or `bin/release/linux-x86_64/simple`
+- `bin/simple` or a platform-specific `bin/release/<triple>/simple`
 - `src/app/mcp/main.spl`
 
 The plugin launches:
@@ -31,7 +31,7 @@ repository checkout instead:
 
 ```bash
 claude mcp add simple-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple_mcp_server \
   /absolute/path/to/simple/src/app/mcp/main.spl
 ```
 

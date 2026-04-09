@@ -229,33 +229,13 @@ pub(crate) fn mangle_mir(
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) { continue; }
-                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
-                            *func_name = mangled.clone();
-                        } else if let Some(resolved) = use_map.get(func_name.as_str()) {
-                            *func_name = resolved.clone();
-                        } else if let Some(resolved) = import_map.get(func_name.as_str()) {
-                            *func_name = resolved.clone();
-                        } else if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
-                            *func_name = resolved;
-                        } else if let Some(resolved) = resolve_by_suffix(func_name, &local_suffix_index)
-                            .or_else(|| resolve_by_suffix(func_name, suffix_index))
-                        {
+                        if let Some(resolved) = resolve_name(func_name, &local_mangled, use_map, import_map, &local_suffix_index, suffix_index) {
                             *func_name = resolved;
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
                         if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) { continue; }
-                        if let Some(mangled) = local_global_mangled.get(global_name.as_str()) {
-                            *global_name = mangled.clone();
-                        } else if let Some(resolved) = use_map.get(global_name.as_str()) {
-                            *global_name = resolved.clone();
-                        } else if let Some(resolved) = import_map.get(global_name.as_str()) {
-                            *global_name = resolved.clone();
-                        } else if let Some(resolved) = resolve_name_variants(global_name, use_map, import_map) {
-                            *global_name = resolved;
-                        } else if let Some(resolved) = resolve_by_suffix(global_name, &local_suffix_index)
-                            .or_else(|| resolve_by_suffix(global_name, suffix_index))
-                        {
+                        if let Some(resolved) = resolve_name(global_name, &local_global_mangled, use_map, import_map, &local_suffix_index, suffix_index) {
                             *global_name = resolved;
                         }
                     }
@@ -297,6 +277,32 @@ pub(crate) fn mangle_mir(
     }
 
     unresolved_count
+}
+
+/// Resolve a name by checking local_map → use_map → import_map → variant resolution → suffix resolution.
+///
+/// This is the common resolution chain used by InterpCall, GlobalLoad/GlobalStore, and other
+/// instruction types that need to resolve a raw name to its mangled/qualified form.
+fn resolve_name(
+    name: &str,
+    local_map: &std::collections::HashMap<String, String>,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    if let Some(mangled) = local_map.get(name) {
+        Some(mangled.clone())
+    } else if let Some(resolved) = use_map.get(name) {
+        Some(resolved.clone())
+    } else if let Some(resolved) = import_map.get(name) {
+        Some(resolved.clone())
+    } else if let Some(resolved) = resolve_name_variants(name, use_map, import_map) {
+        Some(resolved)
+    } else {
+        resolve_by_suffix(name, local_suffix_index)
+            .or_else(|| resolve_by_suffix(name, suffix_index))
+    }
 }
 
 /// Resolve a Call target that is still unresolved after local/use_map/import_map lookup.

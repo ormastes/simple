@@ -19,13 +19,13 @@ fn init() {
 // Local unit test modules for this crate
 mod compiler_tests;
 mod lexer_tests;
-mod lexer_tests2;
+mod lexer_operators_and_syntax_tests;
 mod loader_tests;
 mod mixin_tests;
 mod parser_tests;
-mod parser_tests2;
+mod parser_statements_and_definitions_tests;
 mod type_tests;
-mod type_tests2;
+mod type_inference_and_checking_tests;
 
 #[test]
 fn validate_config() {

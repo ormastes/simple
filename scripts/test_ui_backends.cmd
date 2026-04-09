@@ -5,11 +5,12 @@ REM  Usage: scripts\test_ui_backends.cmd
 REM =========================================================================
 
 setlocal enabledelayedexpansion
-set SIMPLE_BIN=%~dp0..\bin\release\simple.exe
 set DEMO_FILE=%~dp0..\examples\ui\demo_kitchen_sink.ui.sdn
 set PASS=0
 set FAIL=0
 set TOTAL=0
+
+call :ResolveSimpleBin SIMPLE_BIN
 
 echo =========================================================================
 echo  Simple UI Backend Test Suite
@@ -156,4 +157,40 @@ echo  Results:  %PASS% passed, %FAIL% failed, %TOTAL% total
 echo =========================================================================
 
 if %FAIL% gtr 0 exit /b 1
+exit /b 0
+
+:ResolveSimpleBin
+set "%~1="
+set "SCRIPT_ROOT=%~dp0.."
+if exist "%SCRIPT_ROOT%\bin\simple.exe" (
+    set "%~1=%SCRIPT_ROOT%\bin\simple.exe"
+    exit /b 0
+)
+if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
+    for %%P in (x86_64-pc-windows-msvc x86_64-pc-windows-gnu) do (
+        if exist "%SCRIPT_ROOT%\bin\release\%%P\simple.exe" (
+            set "%~1=%SCRIPT_ROOT%\bin\release\%%P\simple.exe"
+            exit /b 0
+        )
+    )
+)
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    if exist "%SCRIPT_ROOT%\bin\release\aarch64-pc-windows-msvc\simple.exe" (
+        set "%~1=%SCRIPT_ROOT%\bin\release\aarch64-pc-windows-msvc\simple.exe"
+        exit /b 0
+    )
+)
+if exist "%SCRIPT_ROOT%\bin\release\simple.exe" (
+    set "%~1=%SCRIPT_ROOT%\bin\release\simple.exe"
+    exit /b 0
+)
+if exist "%SCRIPT_ROOT%\src\compiler_rust\target\release\simple.exe" (
+    set "%~1=%SCRIPT_ROOT%\src\compiler_rust\target\release\simple.exe"
+    exit /b 0
+)
+if exist "%SCRIPT_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
+    set "%~1=%SCRIPT_ROOT%\src\compiler_rust\target\bootstrap\simple.exe"
+    exit /b 0
+)
+set "%~1=%SCRIPT_ROOT%\bin\release\simple.exe"
 exit /b 0

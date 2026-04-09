@@ -15,7 +15,7 @@ Enable the TRACE32 Remote API in PowerView with `RCL.Port 20000` or a matching `
 
 ```bash
 claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 ```
 

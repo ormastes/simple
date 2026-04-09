@@ -34,7 +34,7 @@ PS> .\test_all_backends.ps1 -DemoFile examples\ui\hello_simple.ui.sdn
 ═══════════════════════════════════════════════════════════════════════════
 
   Project Root: C:\dev\simple
-  Simple Binary: C:\dev\simple\bin\release\simple.exe
+  Simple Binary: C:\dev\simple\bin\simple.exe
   Demo File: C:\dev\simple\examples\ui\demo_kitchen_sink.ui.sdn
   Web Port: 8765
 
@@ -94,7 +94,7 @@ PS> .\test_tui.ps1 -DemoFile examples\ui\hello_simple.ui.sdn
 
 ### Prerequisites
 - Windows 10 / Windows Server 2016+ with PowerShell 5.0+
-- Simple binary at `bin\release\simple.exe` (run `scripts\setup.cmd` to configure)
+- Simple binary at `bin\simple.exe` or a platform-specific `bin\release\<triple>\simple.exe` (run `scripts\setup.cmd` to configure)
 
 ### Optional Dependencies
 - **Electron** (for desktop testing): `npm install -g electron`

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { execFileSync } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as assert from 'assert';
@@ -21,6 +22,28 @@ function makeFakeDecorationProvider() {
             },
         ],
     } as any;
+}
+
+function getExtensionRoot(): string {
+    return path.resolve(__dirname, '../../..');
+}
+
+function ensureMathCoreWasmArtifact(extensionRoot: string): boolean {
+    const artifactPath = path.join(extensionRoot, 'wasm', 'math-core.wasm');
+    if (fs.existsSync(artifactPath)) {
+        return true;
+    }
+
+    try {
+        execFileSync('npm', ['run', 'build:math-core-wasm'], {
+            cwd: extensionRoot,
+            stdio: 'pipe',
+        });
+    } catch {
+        return false;
+    }
+
+    return fs.existsSync(artifactPath);
 }
 
 suite('GUI - Math Rendering', function() {
@@ -89,6 +112,31 @@ suite('GUI - Math Rendering', function() {
         );
 
         assert.strictEqual(hover, null);
+    });
+
+    test('Rust math-core wasm bridge renders structured JSON when staged artifact is available', async function() {
+        const extensionRoot = getExtensionRoot();
+        if (!ensureMathCoreWasmArtifact(extensionRoot)) {
+            this.skip();
+            return;
+        }
+
+        const bridge = new MathCoreWasmBridge();
+        await bridge.initialize(vscode.Uri.file(extensionRoot));
+
+        assert.strictEqual(
+            bridge.isReady(),
+            true,
+            bridge.getUnavailableReason() ?? 'expected rust math-core wasm bridge to be ready'
+        );
+
+        const result = await bridge.render('frac(1, 2) + alpha^2');
+
+        assert.ok(result, 'expected structured JSON result from wasm bridge');
+        assert.strictEqual(result!.latex, '\\frac{1}{2} + \\alpha^{2}');
+        assert.strictEqual(result!.pretty, '1/2 + α²');
+        assert.strictEqual(result!.text, 'frac(1, 2) + alpha^2');
+        assert.ok(result!.debug?.includes('Add('), 'expected debug tree to be present');
     });
 
     test('Preview panel HTML stays offline-safe and contains rendered content', () => {

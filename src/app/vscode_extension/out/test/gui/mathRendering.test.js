@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 const fs = __importStar(require("fs"));
+const child_process_1 = require("child_process");
 const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const assert = __importStar(require("assert"));
@@ -55,6 +56,25 @@ function makeFakeDecorationProvider() {
             },
         ],
     };
+}
+function getExtensionRoot() {
+    return path.resolve(__dirname, '../../..');
+}
+function ensureMathCoreWasmArtifact(extensionRoot) {
+    const artifactPath = path.join(extensionRoot, 'wasm', 'math-core.wasm');
+    if (fs.existsSync(artifactPath)) {
+        return true;
+    }
+    try {
+        (0, child_process_1.execFileSync)('npm', ['run', 'build:math-core-wasm'], {
+            cwd: extensionRoot,
+            stdio: 'pipe',
+        });
+    }
+    catch {
+        return false;
+    }
+    return fs.existsSync(artifactPath);
 }
 (0, mocha_1.suite)('GUI - Math Rendering', function () {
     this.timeout(30000);
@@ -92,6 +112,22 @@ function makeFakeDecorationProvider() {
         provider.setLspRunning(true);
         const hover = provider.provideHover(document, new vscode.Position(1, 18), {});
         assert.strictEqual(hover, null);
+    });
+    (0, mocha_1.test)('Rust math-core wasm bridge renders structured JSON when staged artifact is available', async function () {
+        const extensionRoot = getExtensionRoot();
+        if (!ensureMathCoreWasmArtifact(extensionRoot)) {
+            this.skip();
+            return;
+        }
+        const bridge = new mathCoreWasm_1.MathCoreWasmBridge();
+        await bridge.initialize(vscode.Uri.file(extensionRoot));
+        assert.strictEqual(bridge.isReady(), true, bridge.getUnavailableReason() ?? 'expected rust math-core wasm bridge to be ready');
+        const result = await bridge.render('frac(1, 2) + alpha^2');
+        assert.ok(result, 'expected structured JSON result from wasm bridge');
+        assert.strictEqual(result.latex, '\\frac{1}{2} + \\alpha^{2}');
+        assert.strictEqual(result.pretty, '1/2 + α²');
+        assert.strictEqual(result.text, 'frac(1, 2) + alpha^2');
+        assert.ok(result.debug?.includes('Add('), 'expected debug tree to be present');
     });
     (0, mocha_1.test)('Preview panel HTML stays offline-safe and contains rendered content', () => {
         const html = (0, mathPreviewPanel_1.buildMathPreviewHtml)('x^{2} + 1', 'm{ x^2 + 1 }');

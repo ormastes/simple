@@ -38,8 +38,56 @@ $ProgressPreference = 'SilentlyContinue'
 # Resolve paths relative to script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
-$SimpleBin = Join-Path $ProjectRoot "bin\release\simple.exe"
 $DemoFullPath = Join-Path $ProjectRoot $DemoFile
+
+function Resolve-SimpleBinary {
+    param([string]$Root)
+
+    $processorArch = $env:PROCESSOR_ARCHITECTURE
+    if (-not $processorArch -and $env:PROCESSOR_ARCHITEW6432) {
+        $processorArch = $env:PROCESSOR_ARCHITEW6432
+    }
+
+    $candidates = @((Join-Path $Root "bin\simple.exe"))
+    switch ($processorArch) {
+        "AMD64" {
+            $candidates += @(
+                (Join-Path $Root "bin\release\x86_64-pc-windows-msvc\simple.exe"),
+                (Join-Path $Root "bin\release\x86_64-pc-windows-gnu\simple.exe"),
+                (Join-Path $Root "bin\release\simple.exe")
+            )
+        }
+        "ARM64" {
+            $candidates += @(
+                (Join-Path $Root "bin\release\aarch64-pc-windows-msvc\simple.exe"),
+                (Join-Path $Root "bin\release\simple.exe")
+            )
+        }
+        default {
+            $candidates += @(
+                (Join-Path $Root "bin\release\simple.exe"),
+                (Join-Path $Root "bin\release\x86_64-pc-windows-msvc\simple.exe"),
+                (Join-Path $Root "bin\release\x86_64-pc-windows-gnu\simple.exe"),
+                (Join-Path $Root "bin\release\aarch64-pc-windows-msvc\simple.exe")
+            )
+        }
+    }
+
+    $candidates += @(
+        (Join-Path $Root "src\compiler_rust\target\release\simple.exe"),
+        (Join-Path $Root "src\compiler_rust\target\bootstrap\simple.exe")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+$SimpleBin = Resolve-SimpleBinary $ProjectRoot
 
 # =========================================================================
 # Utility Functions

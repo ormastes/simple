@@ -104,6 +104,20 @@ export SIMPLE_VSCODE_WASM_BUILD_DIR=/abs/path/to/generated-wasm
 npm run compile
 ```
 
+If you have the optional Rust math core crate in `math_core_rs/`, you can ask
+the staging script to build it as WebAssembly and copy the result into
+`wasm/math-core.wasm`:
+
+```bash
+npm run build:math-core-wasm
+```
+
+This uses `cargo build --target wasm32-unknown-unknown --release` under
+`src/app/vscode_extension/math_core_rs/` and keeps the existing env-based
+staging behavior intact. If you already have a prebuilt `math-core.wasm`,
+the existing `SIMPLE_VSCODE_MATH_WASM_SOURCE` and `SIMPLE_VSCODE_WASM_BUILD_DIR`
+paths still work.
+
 If no WASM source paths are provided, the staging step is skipped and the
 extension still packages normally.
 

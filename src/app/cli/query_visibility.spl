@@ -3,16 +3,11 @@
 # Wraps the existing text-oriented query commands and enriches them with
 # lightweight visibility metadata derived from file/module boundaries.
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_dir_list(path: text) -> [text]
-
+use app.cli.query_rich_common.{query_file_read_rich, query_file_exists, query_process_run, query_cli_get_args}
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
 
 fn query_visibility_main() -> i64:
-    val all_args = rt_cli_get_args()
+    val all_args = query_cli_get_args()
     var args: [text] = []
     var start_idx = 0
     if all_args.len() >= 2 and all_args[1].ends_with(".spl"):
@@ -227,9 +222,9 @@ struct ScoredSymbol:
     score: i64
 
 fn parse_symbols_in_file(file_path: text) -> [ParsedSymbol]:
-    if not rt_file_exists(file_path):
+    if not query_file_exists(file_path):
         return []
-    val content = rt_file_read_text(file_path) ?? ""
+    val content = query_file_read_rich(file_path) ?? ""
     val lines = content.split("\n")
     var items: [ParsedSymbol] = []
     var line_num = 1
@@ -266,7 +261,7 @@ fn visibility_json(symbol: text, owner_file: text, requester_file: text) -> text
 
 fn grep_workspace_symbol_candidates(root: text, query: text) -> [ParsedSymbol]:
     val pattern = "^(pub\\(friend\\)|pub\\(package\\)|pub|pri)?[[:space:]]*(fn|me|class|struct|enum|trait|val|var)[[:space:]]+.*" + query
-    val (stdout, stderr, code) = rt_process_run("grep", ["-RInE", pattern, root, "--include=*.spl"])
+    val (stdout, stderr, code) = query_process_run("grep", ["-RInE", pattern, root, "--include=*.spl"])
     if stdout.trim() == "":
         return []
     var items: [ParsedSymbol] = []
@@ -405,9 +400,9 @@ fn declared_visibility(symbol: text, owner_file: text) -> text:
     "private"
 
 fn declaration_line(symbol: text, owner_file: text) -> text:
-    if not rt_file_exists(owner_file):
+    if not query_file_exists(owner_file):
         return ""
-    val content = rt_file_read_text(owner_file) ?? ""
+    val content = query_file_read_rich(owner_file) ?? ""
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
@@ -475,9 +470,9 @@ fn boundary_kind(owner_file: text) -> text:
     if dir == "":
         return "open"
     val manifest = dir + "/__init__.spl"
-    if not rt_file_exists(manifest):
+    if not query_file_exists(manifest):
         return "open"
-    val content = rt_file_read_text(manifest) ?? ""
+    val content = query_file_read_rich(manifest) ?? ""
     if content.contains("#[bypass]"):
         return "bypass"
     "boundary"
@@ -493,9 +488,9 @@ fn exported_by(symbol: text, owner_file: text) -> text:
     if dir == "":
         return ""
     val manifest = dir + "/__init__.spl"
-    if not rt_file_exists(manifest):
+    if not query_file_exists(manifest):
         return ""
-    val content = rt_file_read_text(manifest) ?? ""
+    val content = query_file_read_rich(manifest) ?? ""
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
@@ -508,9 +503,9 @@ fn friend_packages(owner_file: text) -> [text]:
     if dir == "":
         return []
     val manifest = dir + "/__init__.spl"
-    if not rt_file_exists(manifest):
+    if not query_file_exists(manifest):
         return []
-    val content = rt_file_read_text(manifest) ?? ""
+    val content = query_file_read_rich(manifest) ?? ""
     val lines = content.split("\n")
     var friends: [text] = []
     for line in lines:
@@ -523,7 +518,7 @@ fn nearest_boundary_dir(file_path: text) -> text:
     var current = parent_dir(file_path)
     while current != "":
         val manifest = current + "/__init__.spl"
-        if rt_file_exists(manifest):
+        if query_file_exists(manifest):
             return current
         val next = parent_dir(current)
         if next == current:
@@ -576,9 +571,9 @@ fn resolve_symbol_file(current_file: text, symbol: text) -> text:
     current_file
 
 fn parse_imported_modules(file_path: text) -> [text]:
-    if not rt_file_exists(file_path):
+    if not query_file_exists(file_path):
         return []
-    val content = rt_file_read_text(file_path) ?? ""
+    val content = query_file_read_rich(file_path) ?? ""
     val lines = content.split("\n")
     var modules: [text] = []
     for line in lines:
@@ -606,15 +601,15 @@ fn resolve_module_path(mod_path: text) -> text:
         path = "lib." + path
     val file_base = "src/" + path.split(".").join("/")
     val mod_file = file_base + "/mod.spl"
-    if rt_file_exists(mod_file):
+    if query_file_exists(mod_file):
         return mod_file
     val direct_file = file_base + ".spl"
-    if rt_file_exists(direct_file):
+    if query_file_exists(direct_file):
         return direct_file
     ""
 
 fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
-    val content = rt_file_read_text(file) ?? ""
+    val content = query_file_read_rich(file) ?? ""
     if content == "":
         return ""
     val lines = content.split("\n")
@@ -647,7 +642,7 @@ fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
     return ""
 
 fn token_name_at(file: text, line_num: i64, col: i64, length: i64) -> text:
-    val content = rt_file_read_text(file) ?? ""
+    val content = query_file_read_rich(file) ?? ""
     if content == "":
         return ""
     val lines = content.split("\n")
@@ -783,7 +778,7 @@ fn escape_json(value: text) -> text:
     out
 
 fn find_spl_files(root: text) -> [text]:
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "find " + root + " -type f -name '*.spl' | sort"])
+    val (stdout, stderr, code) = query_process_run("/bin/sh", ["-c", "find " + root + " -type f -name '*.spl' | sort"])
     if code != 0 or stdout.trim() == "":
         return []
     var result: [text] = []
@@ -804,9 +799,9 @@ fn matching_keywords(prefix: text) -> [text]:
     items
 
 fn scan_semantic_tokens(file_path: text, start_line: i64, end_line: i64) -> [text]:
-    if not rt_file_exists(file_path):
+    if not query_file_exists(file_path):
         return []
-    val content = rt_file_read_text(file_path) ?? ""
+    val content = query_file_read_rich(file_path) ?? ""
     val lines = content.split("\n")
     var fn_names: [text] = []
     var type_names: [text] = []

@@ -88,6 +88,14 @@ fn link_wasm_object(object_code: &[u8]) -> Result<Vec<u8>, CompileError> {
     fs::read(&wasm_path).map_err(|e| CompileError::Codegen(format!("Failed to read linked WASM: {}", e)))
 }
 
+fn wasm_target_fallback_error(reason: &str) -> CompileError {
+    CompileError::Semantic(format!(
+        "WebAssembly target cannot fall back to SMF/interpreter output: {}. \
+Make the entrypoint native-compilable for wasm, or remove imported module-scope script state such as top-level `var`/`let`/`const` declarations.",
+        reason
+    ))
+}
+
 impl CompilerPipeline {
     pub(super) fn evaluate_module_with_project(&self, items: &[Node]) -> Result<i32, CompileError> {
         let di_config = self.project.as_ref().and_then(|p| p.di_config.as_ref());
@@ -439,6 +447,11 @@ impl CompilerPipeline {
 
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
+            if target.is_wasm() {
+                return Err(wasm_target_fallback_error(
+                    "script-style top-level statements were detected in the entry module or its flattened imports",
+                ));
+            }
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
@@ -462,6 +475,11 @@ impl CompilerPipeline {
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function {
+            if target.is_wasm() {
+                return Err(wasm_target_fallback_error(
+                    "no native-compilable `fn main()` was found after lowering",
+                ));
+            }
             // Fallback: evaluate via interpreter and wrap result
             // Note: Interpreter result is architecture-neutral (just an i32)
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
