@@ -1,6 +1,6 @@
 # VS Code Math Block Inline SVG Rendering
 
-**Status:** In Progress (height fix pending)
+**Status:** Complete (height fix implemented)
 **Date:** 2026-04-09
 **Scope:** VS Code extension math block decoration system
 
@@ -78,7 +78,7 @@ Parallel path (Preview Panel):
 | Tests (50/50 passing) | `src/test/gui/mathRendering.test.ts` | Done |
 | Config: `simple.math.alignment` (center/bottom) | `package.json` | Done |
 
-### Broken: SVG Height / Vertical Positioning
+### Resolved: SVG Height / Vertical Positioning
 
 **Symptom:** Inline SVG math equations render at incorrect vertical positions. Tall equations (fractions, sums with limits) are misaligned relative to surrounding code text.
 
@@ -277,3 +277,33 @@ The `lineAlignDecorationType` was a hack to vertically center non-math text on S
 
 - `doc/03_plan/simple_math_implementation.md` — Language-level math/tensor system (separate)
 - `doc/03_plan/VSCODE_LSP_SEMANTIC_TOKENS_PLAN.md` — VS Code LSP integration
+
+---
+
+## Next Step: Shared Simple Core via WASM
+
+The height fix is complete in the TypeScript extension path, but the extension
+still carries a local mirror of math rendering logic in `mathConverter.ts`.
+The authoritative Simple-side implementation remains:
+
+- `src/lib/common/math_repr.spl` — parser + pretty/LaTeX rendering
+- `src/app/vscode_extension/main.spl` — VSCode build entrypoint
+- `src/compiler_rust/driver/src/cli/vscode.rs` — Rust-side VSCode WASM build wrapper
+
+### Intended boundary
+
+1. Keep SVG layout/rendering in the extension (`mathSvgRenderer.ts`).
+2. Move DSL-to-LaTeX / DSL-to-Unicode conversion behind a Simple-side core
+   module exported for WASM consumption.
+3. Compile that core to a dedicated VSCode-consumable WASM artifact rather than
+   duplicating conversion rules in TypeScript.
+
+### Follow-up implementation slices
+
+1. Define a narrow WASM-facing API around `math_repr.spl` conversion entrypoints.
+2. Add a dedicated build target for the math core artifact alongside the existing
+   VSCode/LSP WASM build path.
+3. Load that artifact in the extension and route `simpleToLatex()` /
+   `simpleToUnicode()` through it with the current TypeScript logic as fallback.
+4. Once the WASM path is stable, delete the duplicated converter rules from the
+   extension.

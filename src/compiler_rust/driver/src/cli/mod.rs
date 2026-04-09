@@ -32,4 +32,5 @@ pub mod test_runner;
 pub mod tui;
 pub mod verify;
 pub mod vscode;
+pub mod wasm_helpers;
 pub mod web;

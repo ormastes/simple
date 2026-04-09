@@ -184,64 +184,7 @@ pub fn electron_package(options: ElectronPackageOptions) -> i32 {
 
 // Helper functions
 
-fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize, String> {
-    use simple_common::target::{Target, TargetArch, WasmRuntime};
-
-    // Read source file
-    let source_code = fs::read_to_string(source).map_err(|e| format!("Failed to read source file: {}", e))?;
-
-    // Compile to WASM using existing compiler infrastructure
-    let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
-
-    let wasm_bytes = match compile_source_to_wasm(&source_code, target) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            // Fall back to minimal WASM module if compilation fails
-            tracing::warn!("WASM compilation failed, using stub: {}", e);
-            vec![
-                0x00, 0x61, 0x73, 0x6d, // \0asm
-                0x01, 0x00, 0x00, 0x00, // version 1
-            ]
-        }
-    };
-
-    if optimize {
-        // Run wasm-opt if available
-        let _ = run_wasm_opt(output);
-    }
-
-    let size = wasm_bytes.len();
-
-    fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;
-
-    Ok(size)
-}
-
-/// Compile source code to WASM bytes using the compiler pipeline
-fn compile_source_to_wasm(source: &str, target: simple_common::target::Target) -> Result<Vec<u8>, String> {
-    use simple_compiler::pipeline::CompilerPipeline;
-
-    let mut compiler = CompilerPipeline::new().map_err(|e| format!("{e:?}"))?;
-    compiler
-        .compile_source_to_memory_for_target(source, target)
-        .map_err(|e| format!("compile failed: {e}"))
-}
-
-fn run_wasm_opt(wasm_path: &Path) -> Result<(), String> {
-    let result = Command::new("wasm-opt")
-        .arg("-O3")
-        .arg("--strip-debug")
-        .arg("-o")
-        .arg(wasm_path)
-        .arg(wasm_path)
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(_) => Err("wasm-opt failed".to_string()),
-        Err(_) => Err("wasm-opt not found".to_string()),
-    }
-}
+use super::wasm_helpers::compile_to_wasm;
 
 fn generate_package_json(options: &ElectronBuildOptions) -> String {
     format!(

@@ -103,12 +103,6 @@ class MathDecorationProvider {
             opacity: '0',
             textDecoration: 'none; font-size: 0.001em; letter-spacing: -9999px',
         });
-        // Vertical alignment for non-math text on lines with SVG math (default: center)
-        const alignment = vscode.workspace.getConfiguration('simple').get('math.alignment', 'center');
-        const vertAlign = alignment === 'center' ? 'middle' : 'baseline';
-        this.lineAlignDecorationType = vscode.window.createTextEditorDecorationType({
-            textDecoration: `none; vertical-align: ${vertAlign}`,
-        });
         // Listen for text changes
         this.disposables.push(vscode.workspace.onDidChangeTextDocument((event) => {
             const editor = vscode.window.activeTextEditor;
@@ -132,36 +126,18 @@ class MathDecorationProvider {
                 event.affectsConfiguration('simple.math.alignment')) {
                 const config = vscode.workspace.getConfiguration('simple');
                 this.isEnabled = config.get('math.renderInline', true);
-                // Recreate alignment decoration type if alignment changed
-                if (event.affectsConfiguration('simple.math.alignment')) {
-                    this.lineAlignDecorationType.dispose();
-                    const align = config.get('math.alignment', 'center');
-                    const va = align === 'center' ? 'middle' : 'baseline';
-                    this.lineAlignDecorationType = vscode.window.createTextEditorDecorationType({
-                        textDecoration: `none; vertical-align: ${va}`,
-                    });
-                }
-                const editor = vscode.window.activeTextEditor;
-                if (editor) {
-                    this.updateDecorations(editor);
-                }
+                this.updateActiveEditor();
             }
         }));
         // Apply to current editor on activation
-        const editor = vscode.window.activeTextEditor;
-        if (editor) {
-            this.updateDecorations(editor);
-        }
+        this.updateActiveEditor();
     }
     /**
      * Toggle inline rendering on or off.
      */
     setEnabled(enabled) {
         this.isEnabled = enabled;
-        const editor = vscode.window.activeTextEditor;
-        if (editor) {
-            this.updateDecorations(editor);
-        }
+        this.updateActiveEditor();
     }
     /**
      * Get current enabled state.
@@ -175,6 +151,15 @@ class MathDecorationProvider {
      */
     setSvgCacheDir(dir) {
         this.svgCacheDir = dir;
+    }
+    /**
+     * Update decorations on the active text editor, if any.
+     */
+    updateActiveEditor() {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) {
+            this.updateDecorations(editor);
+        }
     }
     /**
      * Handle cursor/selection changes for cursor-aware reveal.
@@ -240,8 +225,8 @@ class MathDecorationProvider {
         const openDecorations = [];
         const closeDecorations = [];
         const svgDecorations = [];
-        const lineAlignDecorations = [];
         const fg = this.getForegroundColor();
+        const alignment = vscode.workspace.getConfiguration('simple').get('math.alignment', 'center');
         for (const block of mathBlocks) {
             // Check if cursor is on any line of this math block -- if so, skip
             // decorations so the user can see the raw source
@@ -259,31 +244,20 @@ class MathDecorationProvider {
                 svgResult = (0, mathSvgRenderer_1.renderToSvgFile)(latex, this.svgCacheDir, fg);
             }
             if (svgResult) {
-                // Dynamic margin: shift SVG up proportional to its height.
-                // Simple expressions (h~1.7ex) need minimal shift.
-                // Tall fractions (h~5ex) need more shift to center.
-                // Formula: shift up by (ascent - 1ex) * 0.4 to roughly center
-                const ascent = svgResult.heightEx - svgResult.descentEx;
-                const shiftEm = Math.max(0, (ascent - 1) * 0.35);
-                const marginBottom = shiftEm > 0 ? `-${shiftEm.toFixed(2)}em` : '0';
+                const verticalAlign = alignment === 'center'
+                    ? 'middle'
+                    : `-${svgResult.descentEm.toFixed(2)}em`;
                 svgDecorations.push({
                     range: block.fullRange,
                     hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}\n\n$$${(0, mathConverter_1.simpleToLatex)(block.content)}$$`),
                     renderOptions: {
                         before: {
                             contentIconPath: svgResult.uri,
-                            margin: `0 4px ${marginBottom} 0`,
-                            textDecoration: 'none; vertical-align: middle',
+                            margin: '0 4px 0 0',
+                            textDecoration: `none; vertical-align: ${verticalAlign}`,
                         },
                     },
                 });
-                // Apply vertical alignment to the non-math text before the block
-                const lineStart = new vscode.Position(block.fullRange.start.line, 0);
-                if (block.fullRange.start.character > 0) {
-                    lineAlignDecorations.push({
-                        range: new vscode.Range(lineStart, block.fullRange.start),
-                    });
-                }
             }
             else {
                 // Fallback: Unicode text mode (no SVG)
@@ -315,7 +289,6 @@ class MathDecorationProvider {
         editor.setDecorations(this.openDelimiterDecorationType, openDecorations);
         editor.setDecorations(this.closeDelimiterDecorationType, closeDecorations);
         editor.setDecorations(this.svgViewDecorationType, svgDecorations);
-        editor.setDecorations(this.lineAlignDecorationType, lineAlignDecorations);
     }
     /**
      * Detect all math-mode custom blocks (m{}, loss{}, nograd{}) in a document.
@@ -402,7 +375,6 @@ class MathDecorationProvider {
         this.openDelimiterDecorationType.dispose();
         this.closeDelimiterDecorationType.dispose();
         this.svgViewDecorationType.dispose();
-        this.lineAlignDecorationType.dispose();
         for (const disposable of this.disposables) {
             disposable.dispose();
         }

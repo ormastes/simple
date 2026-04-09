@@ -13,10 +13,12 @@ export declare function latexToSvg(latex: string): string | undefined;
 /** Result of SVG rendering: file URI + height info for dynamic margin */
 export interface SvgRenderResult {
     uri: vscode.Uri;
-    /** SVG height in ex units */
-    heightEx: number;
-    /** Descent below baseline in ex units */
-    descentEx: number;
+    /** SVG height in em units after normalization */
+    heightEm: number;
+    /** Descent below baseline in em units after normalization */
+    descentEm: number;
+    /** SVG width in em units after normalization */
+    widthEm: number;
 }
 /**
  * Render LaTeX to an SVG file on disk. Returns the file URI + height info.

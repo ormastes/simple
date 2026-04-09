@@ -56,6 +56,9 @@ const AllPackages_js_1 = require("mathjax-full/js/input/tex/AllPackages.js");
 let adaptor;
 let mjDocument;
 let initialized = false;
+const MATHJAX_EX_TO_EM = 0.45;
+const MAX_HEIGHT_EM = 3.0;
+const SVG_CACHE_VERSION = 'v2';
 function ensureInitialized() {
     if (initialized) {
         return;
@@ -88,29 +91,60 @@ function latexToSvg(latex) {
         return undefined;
     }
 }
+function exToEm(value) {
+    return value * MATHJAX_EX_TO_EM;
+}
+function parseSvgDimension(svg, attr) {
+    const match = svg.match(new RegExp(`${attr}="([\\d.]+)ex"`));
+    return match ? parseFloat(match[1]) : undefined;
+}
+function rewriteSvgDimensions(svg, heightEm, widthEm) {
+    return svg
+        .replace(/height="([\d.]+)ex"/, `height="${heightEm.toFixed(3)}em"`)
+        .replace(/width="([\d.]+)ex"/, `width="${widthEm.toFixed(3)}em"`);
+}
 /**
  * Render LaTeX to an SVG file on disk. Returns the file URI + height info.
  * Uses a content-hash cache to avoid regenerating identical expressions.
  */
 function renderToSvgFile(latex, cacheDir, foregroundColor = '#cccccc') {
-    const hash = crypto.createHash('md5').update(latex + foregroundColor).digest('hex').slice(0, 12);
+    const hash = crypto.createHash('md5')
+        .update(`${SVG_CACHE_VERSION}:${latex}:${foregroundColor}`)
+        .digest('hex')
+        .slice(0, 12);
     const filePath = path.join(cacheDir, `math-${hash}.svg`);
     const metaPath = filePath + '.meta';
     // Return cached file if it exists
     if (fs.existsSync(filePath) && fs.existsSync(metaPath)) {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        return { uri: vscode.Uri.file(filePath), heightEx: meta.h, descentEx: meta.d };
+        return {
+            uri: vscode.Uri.file(filePath),
+            heightEm: meta.heightEm,
+            descentEm: meta.descentEm,
+            widthEm: meta.widthEm,
+        };
     }
     let svg = latexToSvg(latex);
     if (!svg) {
         return undefined;
     }
     // Parse height and descent from the SVG
-    const hMatch = svg.match(/height="([\d.]+)ex"/);
     const vaMatch = svg.match(/vertical-align:\s*-([\d.]+)ex/);
-    const heightEx = hMatch ? parseFloat(hMatch[1]) : 1.5;
+    const heightEx = parseSvgDimension(svg, 'height') ?? 1.5;
+    const widthEx = parseSvgDimension(svg, 'width') ?? heightEx;
     const descentEx = vaMatch ? parseFloat(vaMatch[1]) : 0;
-    // Remove MathJax's vertical-align style (not useful for contentIconPath rendering)
+    let heightEm = exToEm(heightEx);
+    let widthEm = exToEm(widthEx);
+    let descentEm = exToEm(descentEx);
+    if (heightEm > MAX_HEIGHT_EM) {
+        const scale = MAX_HEIGHT_EM / heightEm;
+        heightEm = MAX_HEIGHT_EM;
+        widthEm = widthEm * scale;
+        descentEm = descentEm * scale;
+    }
+    // Normalize dimensions for VSCode's em-based editor metrics and remove
+    // MathJax's own baseline adjustment, which conflicts with decoration placement.
+    svg = rewriteSvgDimensions(svg, heightEm, widthEm);
     svg = svg.replace(/vertical-align:\s*-[\d.]+ex;?\s*/, '');
     // Inject foreground color so SVG matches editor theme
     const colored = svg.replace(/<svg /, `<svg color="${foregroundColor}" `);
@@ -119,8 +153,8 @@ function renderToSvgFile(latex, cacheDir, foregroundColor = '#cccccc') {
         fs.mkdirSync(cacheDir, { recursive: true });
     }
     fs.writeFileSync(filePath, colored, 'utf8');
-    fs.writeFileSync(metaPath, JSON.stringify({ h: heightEx, d: descentEx }), 'utf8');
-    return { uri: vscode.Uri.file(filePath), heightEx, descentEx };
+    fs.writeFileSync(metaPath, JSON.stringify({ heightEm, descentEm, widthEm }), 'utf8');
+    return { uri: vscode.Uri.file(filePath), heightEm, descentEm, widthEm };
 }
 /**
  * Clear the SVG cache directory.

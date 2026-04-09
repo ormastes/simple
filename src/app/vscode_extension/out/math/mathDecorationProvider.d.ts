@@ -45,8 +45,6 @@ export declare class MathDecorationProvider implements vscode.Disposable {
     private disposables;
     private debounceTimer;
     private isEnabled;
-    /** Decoration to vertically center non-math text on SVG lines */
-    private lineAlignDecorationType;
     /** SVG cache directory for rendered math images */
     private svgCacheDir;
     /** Line numbers that the cursor currently occupies (used for reveal) */
@@ -65,6 +63,10 @@ export declare class MathDecorationProvider implements vscode.Disposable {
      * When set, decorations use SVG rendering instead of Unicode text.
      */
     setSvgCacheDir(dir: string): void;
+    /**
+     * Update decorations on the active text editor, if any.
+     */
+    private updateActiveEditor;
     /**
      * Handle cursor/selection changes for cursor-aware reveal.
      * When the cursor is on a math block line, decorations are removed
