@@ -4051,7 +4051,16 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
                         raw_to_mangled.entry(s.name.clone()).or_default().push(mangled);
                     }
                     // Struct methods (needed for cross-module calls like Span.empty)
+                    // and struct field definitions (needed for global type sharing)
                     simple_parser::ast::Node::Struct(s) => {
+                        // Collect struct field definitions just like Node::Class
+                        if !s.fields.is_empty() {
+                            let fields: Vec<(String, String)> = s.fields.iter().map(|f| {
+                                let ty_name = format!("{:?}", f.ty);
+                                (f.name.clone(), ty_name)
+                            }).collect();
+                            struct_defs.entry(s.name.clone()).or_insert(fields);
+                        }
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", s.name, m.name);
@@ -4076,6 +4085,18 @@ fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf],
                             let raw = format!("{}.{}", e.name, v.name);
                             let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, v.name));
                             raw_to_mangled.entry(raw).or_default().push(mangled);
+                            // Collect named fields from enum variants (struct-like variants)
+                            if let Some(ref fields) = v.fields {
+                                let named: Vec<(String, String)> = fields.iter()
+                                    .filter_map(|f| f.name.as_ref().map(|n| {
+                                        let ty_name = format!("{:?}", f.ty);
+                                        (n.clone(), ty_name)
+                                    }))
+                                    .collect();
+                                if !named.is_empty() {
+                                    struct_defs.entry(v.name.clone()).or_insert(named);
+                                }
+                            }
                         }
                     }
                     // Trait default methods

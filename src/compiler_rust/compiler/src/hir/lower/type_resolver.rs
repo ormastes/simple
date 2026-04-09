@@ -301,18 +301,19 @@ impl Lowerer {
             }
             // Search global struct definitions from other compilation units
             if let Some(ref global_defs) = self.global_struct_defs {
-                let mut best_global: Option<(usize, usize)> = None;
-                for (_sname, fields) in global_defs.iter() {
+                let mut best_global: Option<(usize, usize, String)> = None;
+                for (sname, fields) in global_defs.iter() {
                     for (idx, (fname, _)) in fields.iter().enumerate() {
                         if fname == field {
                             let count = fields.len();
-                            if best_global.as_ref().is_none_or(|(_, c)| count > *c) {
-                                best_global = Some((idx, count));
+                            if best_global.as_ref().is_none_or(|(_, c, _)| count > *c) {
+                                best_global = Some((idx, count, sname.clone()));
                             }
                         }
                     }
                 }
-                if let Some((idx, _)) = best_global {
+                if let Some((idx, _count, sname)) = best_global {
+                    eprintln!("[FIELD-TRACE] ANY/{field} → global {sname}[{idx}]");
                     return Ok((idx, TypeId::ANY));
                 }
             }
@@ -409,22 +410,21 @@ impl Lowerer {
                         if let Some((idx, ty, _)) = best {
                             return Ok((idx, ty));
                         }
-                        // Second: search global struct definitions from other modules.
-                        // These provide field names and order for types not in the
-                        // per-file registry (e.g., StyleProps in dom.spl).
+                        // Search global struct definitions from other modules.
                         if let Some(ref global_defs) = self.global_struct_defs {
-                            let mut best_global: Option<(usize, usize)> = None;
-                            for (_sname, fields) in global_defs.iter() {
+                            let mut best_global: Option<(usize, usize, String)> = None;
+                            for (sname, fields) in global_defs.iter() {
                                 for (idx, (fname, _)) in fields.iter().enumerate() {
                                     if fname == field {
                                         let count = fields.len();
-                                        if best_global.as_ref().is_none_or(|(_, c)| count > *c) {
-                                            best_global = Some((idx, count));
+                                        if best_global.as_ref().is_none_or(|(_, c, _)| count > *c) {
+                                            best_global = Some((idx, count, sname.clone()));
                                         }
                                     }
                                 }
                             }
-                            if let Some((idx, _)) = best_global {
+                            if let Some((idx, _count, sname)) = best_global {
+                                eprintln!("[FIELD-TRACE] {:?}/{field} → global {sname}[{idx}]", hir_ty);
                                 return Ok((idx, TypeId::ANY));
                             }
                         }
