@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-04-09
 - [x] 6-refactor (Tech Lead) — 2026-04-09
 - [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-04-09
 
 ## Phase Outputs
 
@@ -554,13 +554,15 @@ No circular dependencies: verified
 - [x] No behavior changes — all refactors are structural only
 
 ### 7-verify
-<pending>
+All 7 ACs verified. 126 specs across 11 files. 100% AC coverage. No critical issues.
 
 ### 8-ship
-<pending>
+- Committed: `feat(compositor): pixel-level WM visual consistency pipeline — Electron vs QEMU cross-backend comparison with YIQ perceptual distance, tolerance profiles, and diff visualization`
+- Pushed to origin/main
+- Completion report: `doc/09_report/wm_pixel_consistency_complete_2026-04-09.md`
 
 ## Phase
-refactor-done
+done
 
 ## Log
 - intake: Created state file with 7 acceptance criteria
@@ -569,3 +571,5 @@ refactor-done
 - spec: Created 11 spec files with 126 total `it` blocks, 100% AC coverage (all 7 ACs). Key specs: perceptual_compare (17 tests for YIQ/AA/threshold), tolerance_profile (19 tests for presets/merge), wm_scene (15 tests for construction/rendering/HTML), golden test (19 end-to-end tests). All specs FAIL — no implementation exists. Only built-in SSpec matchers used.
 - implement: Created 10 new files + modified 2 existing files (~1,555 lines). Key implementations: YIQ perceptual compare (Kotsarenko/Ramos 2010, Vyshniauskas 2009 AA detection), composable tolerance profiles (5 presets + merge), PNG decoder (signature/IHDR/IDAT), programmatic WM scene builder (4 element types + HTML conversion), Electron capture (screenshot.js + PNG decode), QEMU capture (in-process + QMP screendump), diff export (PPM with channel diffs), consistency runner (full pipeline + markdown report with divergence analysis). No pass_todo stubs, no circular deps, backward compatible modifications.
 - refactor: 4 files modified (screenshot_compare, electron_capture, qemu_capture, qmp_client). Key changes: (1) `generate_diff_image` deduped to delegate to `generate_diff_image_threshold`, (2) `capture_error()` helper extracted and shared across electron/qemu capture, (3) `qmp_send()`/`qmp_send_check()` extracted to eliminate 6x socat pattern repetition, (4) removed unused imports (`shell_output` x2) and dead code (empty sections x3). Net reduction: ~65 lines. No behavior changes, all structural only.
+- verify: All 7 ACs verified. 126 specs across 11 files. 100% AC coverage.
+- ship: Committed and pushed to origin/main. Completion report at `doc/09_report/wm_pixel_consistency_complete_2026-04-09.md`. State marked done.
