@@ -6,7 +6,7 @@
 
 ## Summary
 
-Build a pixel-level visual consistency verification pipeline that renders the same WM/compositor scene in both the Electron-backed host renderer and the Simple browser engine running in QEMU, then compares the output at bit/color level to ensure rendering equivalence across backends.
+Build a pixel-level visual consistency verification pipeline that renders the same WM/compositor scene through the unified host and in-process QEMU capture paths, then compares the output at bit/color level to ensure rendering equivalence across the shared compositor backend. Electron remains a preview/display path only.
 
 ## Architecture
 

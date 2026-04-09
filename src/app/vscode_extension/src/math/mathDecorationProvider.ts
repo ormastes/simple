@@ -19,7 +19,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { simpleToLatex, simpleToUnicode } from './mathConverter';
-import { renderToSvgFile } from './mathSvgRenderer';
+import { renderToSvgFile, SvgRenderResult } from './mathSvgRenderer';
 
 /** Block type for math-mode custom blocks */
 type MathBlockType = 'math' | 'loss' | 'nograd';
@@ -293,16 +293,21 @@ export class MathDecorationProvider implements vscode.Disposable {
                           block.blockType === 'loss' ? 'Loss' : 'NoGrad';
 
             // Try SVG rendering if cache dir is available
-            let svgUri: vscode.Uri | undefined;
+            let svgResult: SvgRenderResult | undefined;
             if (this.svgCacheDir) {
                 const latex = simpleToLatex(block.content);
-                svgUri = renderToSvgFile(latex, this.svgCacheDir, fg);
+                svgResult = renderToSvgFile(latex, this.svgCacheDir, fg);
             }
 
-            if (svgUri) {
-                // SVG view mode: hide full block, show SVG icon before
-                // Prefix with block indicator if not empty (loss→L, nograd→∅, math→nothing)
-                const indicatorPrefix = indicator ? `${indicator} ` : '';
+            if (svgResult) {
+                // Dynamic margin: shift SVG up proportional to its height.
+                // Simple expressions (h~1.7ex) need minimal shift.
+                // Tall fractions (h~5ex) need more shift to center.
+                // Formula: shift up by (ascent - 1ex) * 0.4 to roughly center
+                const ascent = svgResult.heightEx - svgResult.descentEx;
+                const shiftEm = Math.max(0, (ascent - 1) * 0.35);
+                const marginBottom = shiftEm > 0 ? `-${shiftEm.toFixed(2)}em` : '0';
+
                 svgDecorations.push({
                     range: block.fullRange,
                     hoverMessage: new vscode.MarkdownString(
@@ -310,10 +315,8 @@ export class MathDecorationProvider implements vscode.Disposable {
                     ),
                     renderOptions: {
                         before: {
-                            contentIconPath: svgUri,
-                            // Pull the SVG upward so the fraction bar aligns with text center.
-                            // margin-bottom negative shifts the icon up relative to baseline.
-                            margin: '0 4px -0.6em 0',
+                            contentIconPath: svgResult.uri,
+                            margin: `0 4px ${marginBottom} 0`,
                             textDecoration: 'none; vertical-align: middle',
                         },
                     },

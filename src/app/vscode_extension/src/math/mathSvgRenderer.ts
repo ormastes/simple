@@ -56,82 +56,42 @@ export function latexToSvg(latex: string): string | undefined {
     }
 }
 
-/**
- * Modify an SVG to be vertically centered around the text baseline.
- *
- * MathJax SVGs have: height=Hex, vertical-align=-Dex, viewBox="x0 y0 w h"
- * - Ascent above baseline: A = H - D
- * - Descent below baseline: D
- * - SVG overflow is mostly upward, making surrounding text appear at the bottom.
- *
- * Fix: extend viewBox downward and increase SVG height so the visible content
- * is vertically centered. The SVG then overflows equally above and below.
- */
-function centerSvgVertically(svg: string): string {
-    const heightMatch = svg.match(/height="([\d.]+)ex"/);
-    const vaMatch = svg.match(/vertical-align:\s*-([\d.]+)ex/);
-    const vbMatch = svg.match(/viewBox="([\d.-]+)\s+([\d.-]+)\s+([\d.-]+)\s+([\d.-]+)"/);
-
-    if (!heightMatch || !vaMatch || !vbMatch) { return svg; }
-
-    const heightEx = parseFloat(heightMatch[1]);
-    const descentEx = parseFloat(vaMatch[1]);
-    const ascentEx = heightEx - descentEx;
-
-    // If already roughly centered or very small, skip
-    if (ascentEx - descentEx < 0.3) { return svg; }
-
-    // VS Code contentIconPath aligns the icon bottom to the text baseline.
-    // To center: add empty space at the TOP of the SVG (shift viewBox origin upward).
-    // This pushes the visible content down within the SVG, so the visual center
-    // aligns with the text instead of the bottom edge.
-    const topPaddingEx = ascentEx - descentEx;
-    const newHeightEx = heightEx + topPaddingEx;
-
-    // Scale viewBox: shift Y origin upward by the padding amount
-    const vbX = parseFloat(vbMatch[1]);
-    const vbY = parseFloat(vbMatch[2]);
-    const vbW = parseFloat(vbMatch[3]);
-    const vbH = parseFloat(vbMatch[4]);
-    const scale = vbH / heightEx;
-    const topPaddingVb = topPaddingEx * scale;
-    const newVbY = vbY - topPaddingVb;
-    const newVbH = vbH + topPaddingVb;
-
-    let result = svg;
-    result = result.replace(
-        /height="[\d.]+ex"/,
-        `height="${newHeightEx.toFixed(3)}ex"`
-    );
-    result = result.replace(
-        /viewBox="[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+[\d.-]+"/,
-        `viewBox="${vbX} ${newVbY.toFixed(1)} ${vbW} ${newVbH.toFixed(1)}"`
-    );
-    // Remove vertical-align
-    result = result.replace(/vertical-align:\s*-[\d.]+ex;?\s*/, '');
-
-    return result;
+/** Result of SVG rendering: file URI + height info for dynamic margin */
+export interface SvgRenderResult {
+    uri: vscode.Uri;
+    /** SVG height in ex units */
+    heightEx: number;
+    /** Descent below baseline in ex units */
+    descentEx: number;
 }
 
 /**
- * Render LaTeX to an SVG file on disk. Returns the file URI.
+ * Render LaTeX to an SVG file on disk. Returns the file URI + height info.
  * Uses a content-hash cache to avoid regenerating identical expressions.
  */
 export function renderToSvgFile(
     latex: string,
     cacheDir: string,
     foregroundColor: string = '#cccccc',
-): vscode.Uri | undefined {
+): SvgRenderResult | undefined {
     const hash = crypto.createHash('md5').update(latex + foregroundColor).digest('hex').slice(0, 12);
     const filePath = path.join(cacheDir, `math-${hash}.svg`);
+    const metaPath = filePath + '.meta';
 
     // Return cached file if it exists
-    if (fs.existsSync(filePath)) {
-        return vscode.Uri.file(filePath);
+    if (fs.existsSync(filePath) && fs.existsSync(metaPath)) {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        return { uri: vscode.Uri.file(filePath), heightEx: meta.h, descentEx: meta.d };
     }
 
     let svg = latexToSvg(latex);
     if (!svg) { return undefined; }
+
+    // Parse height and descent from the SVG
+    const hMatch = svg.match(/height="([\d.]+)ex"/);
+    const vaMatch = svg.match(/vertical-align:\s*-([\d.]+)ex/);
+    const heightEx = hMatch ? parseFloat(hMatch[1]) : 1.5;
+    const descentEx = vaMatch ? parseFloat(vaMatch[1]) : 0;
 
     // Remove MathJax's vertical-align style (not useful for contentIconPath rendering)
     svg = svg.replace(/vertical-align:\s*-[\d.]+ex;?\s*/, '');
@@ -145,7 +105,8 @@ export function renderToSvgFile(
     }
 
     fs.writeFileSync(filePath, colored, 'utf8');
-    return vscode.Uri.file(filePath);
+    fs.writeFileSync(metaPath, JSON.stringify({ h: heightEx, d: descentEx }), 'utf8');
+    return { uri: vscode.Uri.file(filePath), heightEx, descentEx };
 }
 
 /**

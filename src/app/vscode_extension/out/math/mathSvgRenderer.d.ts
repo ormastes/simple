@@ -10,11 +10,19 @@ import * as vscode from 'vscode';
  * Returns the raw SVG markup or undefined on error.
  */
 export declare function latexToSvg(latex: string): string | undefined;
+/** Result of SVG rendering: file URI + height info for dynamic margin */
+export interface SvgRenderResult {
+    uri: vscode.Uri;
+    /** SVG height in ex units */
+    heightEx: number;
+    /** Descent below baseline in ex units */
+    descentEx: number;
+}
 /**
- * Render LaTeX to an SVG file on disk. Returns the file URI.
+ * Render LaTeX to an SVG file on disk. Returns the file URI + height info.
  * Uses a content-hash cache to avoid regenerating identical expressions.
  */
-export declare function renderToSvgFile(latex: string, cacheDir: string, foregroundColor?: string): vscode.Uri | undefined;
+export declare function renderToSvgFile(latex: string, cacheDir: string, foregroundColor?: string): SvgRenderResult | undefined;
 /**
  * Clear the SVG cache directory.
  */
