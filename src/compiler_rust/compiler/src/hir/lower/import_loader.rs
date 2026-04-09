@@ -259,6 +259,108 @@ impl Lowerer {
             }
         }
 
+        // Intra-file Pass 2: Transitive type resolution
+        // After Pass 1 fully registers imported types, some of their fields may
+        // reference types that are still placeholders (0 fields). For example,
+        // if layout.spl imports {StyleProps} from css.spl, StyleProps gets fully
+        // registered with its fields, but StyleProps.border has type BorderProps
+        // which is still a placeholder. This pass finds those placeholder
+        // dependencies and fully registers them too.
+        // Repeat until no new types are registered (handles multi-level chains
+        // like StyleProps -> BorderProps -> BoxEdges). Bounded to 10 iterations.
+        let mut transitive_processed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _iteration in 0..10 {
+            // Collect names of types that need full registration:
+            // They are referenced by a field of a fully-registered struct,
+            // but are themselves still placeholders (0 fields).
+            let mut needs_registration: Vec<String> = Vec::new();
+
+            for (_tid, hir_ty) in self.module.types.iter() {
+                if let HirType::Struct { fields, .. } = hir_ty {
+                    if fields.is_empty() {
+                        continue; // This is itself a placeholder, skip
+                    }
+                    for (_field_name, field_type_id) in fields {
+                        if let Some(HirType::Struct { name: ref dep_name, fields: ref dep_fields, .. }) =
+                            self.module.types.get(*field_type_id)
+                        {
+                            if dep_fields.is_empty() && !transitive_processed.contains(dep_name) {
+                                needs_registration.push(dep_name.clone());
+                            }
+                        }
+                        // Also check enum placeholders (0 variants)
+                        if let Some(HirType::Enum { name: ref dep_name, variants: ref dep_variants, .. }) =
+                            self.module.types.get(*field_type_id)
+                        {
+                            if dep_variants.is_empty() && !transitive_processed.contains(dep_name) {
+                                needs_registration.push(dep_name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            needs_registration.sort();
+            needs_registration.dedup();
+
+            if needs_registration.is_empty() {
+                break; // All transitive dependencies resolved
+            }
+
+            let mut registered_any = false;
+            for name in &needs_registration {
+                transitive_processed.insert(name.clone());
+                // Find the matching definition in the imported items and fully register it
+                for item in items {
+                    match item {
+                        Node::Class(class_def) if class_def.name == *name => {
+                            if let Ok(type_id) = self.register_class(class_def) {
+                                self.globals.insert(class_def.name.clone(), type_id);
+                                registered_any = true;
+                            }
+                        }
+                        Node::Struct(struct_def) if struct_def.name == *name => {
+                            if let Ok(type_id) = self.register_struct(struct_def) {
+                                self.globals.insert(struct_def.name.clone(), type_id);
+                                registered_any = true;
+                            }
+                        }
+                        Node::Enum(enum_def) if enum_def.name == *name => {
+                            let variants = enum_def
+                                .variants
+                                .iter()
+                                .map(|v| {
+                                    let fields = v.fields.as_ref().map(|enum_fields| {
+                                        enum_fields
+                                            .iter()
+                                            .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
+                                            .collect()
+                                    });
+                                    (v.name.clone(), fields)
+                                })
+                                .collect();
+                            self.module.types.update_named(
+                                enum_def.name.clone(),
+                                HirType::Enum {
+                                    name: enum_def.name.clone(),
+                                    variants,
+                                    generic_params: enum_def.generic_params.clone(),
+                                    is_generic_template: enum_def.is_generic_template,
+                                    type_bindings: std::collections::HashMap::new(),
+                                },
+                            );
+                            registered_any = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if !registered_any {
+                break; // No progress — remaining placeholders aren't in this file
+            }
+        }
+
         Ok(imported_count)
     }
 
