@@ -288,6 +288,13 @@ Style: Layered glass surfaces with increasing translucency. Sidebar items have h
 9. All colors from `glass_tokens.spl` / `glass_numeric_tokens.spl`
 10. No license issues -- all CSS glassmorphism is open standard
 
+## Related Documentation
+
+- **Full design system reference:** [`doc/05_design/stitch_design_system.md`](doc/05_design/stitch_design_system.md) — all 3 design systems with complete token tables, Material Design 3 named colors, component specs, interaction states, and Stitch API configuration
+- **UI skill:** `.claude/skills/ui.md` — workflow for TUI/GUI mockup design, explains what Stitch is and how to use it
+- **Local glass tokens:** `src/lib/common/ui/glass_tokens.spl` (CSS), `glass_numeric_tokens.spl` (u64 baremetal)
+- **Theme sharing:** GUI lib uses CSS tokens, window manager uses numeric tokens, Stitch uses designMd — all must stay in sync
+
 ## Outputs
 
 | Artifact | Location |
@@ -296,3 +303,4 @@ Style: Layered glass surfaces with increasing translucency. Sidebar items have h
 | Design system | Cloud (asset ID in output) |
 | Screen designs | Stitch cloud (screen IDs in output) |
 | Screen code | `mcp__stitch__get_screen` to retrieve |
+| Design system doc | `doc/05_design/stitch_design_system.md` |
