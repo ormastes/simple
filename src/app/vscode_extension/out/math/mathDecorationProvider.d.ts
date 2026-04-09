@@ -40,9 +40,15 @@ export declare class MathDecorationProvider implements vscode.Disposable {
     private openDelimiterDecorationType;
     /** Decoration to hide the closing `}` delimiter */
     private closeDelimiterDecorationType;
+    /** Decoration to hide the full math block and show SVG inline */
+    private svgViewDecorationType;
     private disposables;
     private debounceTimer;
     private isEnabled;
+    /** Decoration to vertically center non-math text on SVG lines */
+    private lineAlignDecorationType;
+    /** SVG cache directory for rendered math images */
+    private svgCacheDir;
     /** Line numbers that the cursor currently occupies (used for reveal) */
     private cursorLines;
     constructor();
@@ -55,6 +61,11 @@ export declare class MathDecorationProvider implements vscode.Disposable {
      */
     getEnabled(): boolean;
     /**
+     * Set the SVG cache directory for rendered math images.
+     * When set, decorations use SVG rendering instead of Unicode text.
+     */
+    setSvgCacheDir(dir: string): void;
+    /**
      * Handle cursor/selection changes for cursor-aware reveal.
      * When the cursor is on a math block line, decorations are removed
      * so the user sees the raw source. When the cursor leaves, decorations
@@ -65,6 +76,10 @@ export declare class MathDecorationProvider implements vscode.Disposable {
      * Schedule a debounced decoration update (300ms).
      */
     private scheduleUpdate;
+    /**
+     * Try to get the editor foreground color for SVG rendering.
+     */
+    private getForegroundColor;
     /**
      * Update all decorations for the given editor.
      */

@@ -67,22 +67,114 @@ const KNOWN_FUNCTIONS = new Set([
  * - `frac(a,b)` → `\frac{a}{b}`
  * - Known functions → `\sin`, `\cos`, etc.
  */
+/**
+ * Find the matching closing parenthesis for an opening paren at `start`.
+ * Returns the index of the closing `)`, or -1 if not found.
+ */
+function findMatchingParen(s, start) {
+    let depth = 1;
+    for (let i = start + 1; i < s.length; i++) {
+        if (s[i] === '(') {
+            depth++;
+        }
+        else if (s[i] === ')') {
+            depth--;
+            if (depth === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+/**
+ * Replace `name(args)` with balanced parentheses using a callback.
+ * Handles nested parens correctly unlike regex `[^)]+`.
+ */
+function replaceBalancedCall(s, name, replacer) {
+    let result = '';
+    let i = 0;
+    while (i < s.length) {
+        const idx = s.indexOf(name + '(', i);
+        if (idx === -1) {
+            result += s.slice(i);
+            break;
+        }
+        // Check it's not preceded by \ (already converted)
+        if (idx > 0 && s[idx - 1] === '\\') {
+            result += s.slice(i, idx + name.length);
+            i = idx + name.length;
+            continue;
+        }
+        result += s.slice(i, idx);
+        const openParen = idx + name.length;
+        const closeParen = findMatchingParen(s, openParen);
+        if (closeParen === -1) {
+            result += s.slice(idx);
+            break;
+        }
+        const args = s.slice(openParen + 1, closeParen);
+        result += replacer(args);
+        i = closeParen + 1;
+    }
+    return result;
+}
 function simpleToLatex(source) {
     let result = source;
-    // frac(a, b) → \frac{a}{b}
-    result = result.replace(/frac\(([^,]+),\s*([^)]+)\)/g, '\\frac{$1}{$2}');
+    // frac(a, b) → \frac{a}{b} — find the comma that splits the two args
+    // (must be at depth 0, not inside nested parens)
+    result = replaceBalancedCall(result, 'frac', (args) => {
+        let depth = 0;
+        let splitIdx = -1;
+        for (let i = 0; i < args.length; i++) {
+            if (args[i] === '(') {
+                depth++;
+            }
+            else if (args[i] === ')') {
+                depth--;
+            }
+            else if (args[i] === ',' && depth === 0) {
+                splitIdx = i;
+                break;
+            }
+        }
+        if (splitIdx === -1) {
+            return `\\frac{${args}}{}`;
+        }
+        const a = args.slice(0, splitIdx).trim();
+        const b = args.slice(splitIdx + 1).trim();
+        return `\\frac{${simpleToLatex(a)}}{${simpleToLatex(b)}}`;
+    });
     // sqrt(...) → \sqrt{...}
-    result = result.replace(/sqrt\(([^)]+)\)/g, '\\sqrt{$1}');
-    // Known functions: sin(x) → \sin(x)
+    result = replaceBalancedCall(result, 'sqrt', (args) => {
+        return `\\sqrt{${simpleToLatex(args)}}`;
+    });
+    // sum(...) → \sum{...}
+    result = replaceBalancedCall(result, 'sum', (args) => {
+        return `\\sum{${simpleToLatex(args)}}`;
+    });
+    // exp(...) → \exp(...)
+    result = replaceBalancedCall(result, 'exp', (args) => {
+        return `\\exp(${simpleToLatex(args)})`;
+    });
+    // log(...) → \log(...)
+    result = replaceBalancedCall(result, 'log', (args) => {
+        return `\\log(${simpleToLatex(args)})`;
+    });
+    // Known functions (without parens): sin, cos, etc.
     for (const fn of KNOWN_FUNCTIONS) {
-        const regex = new RegExp(`\\b${fn}\\b`, 'g');
+        if (fn === 'log' || fn === 'exp') {
+            continue;
+        } // handled above
+        const regex = new RegExp(`(?<!\\\\)\\b${fn}\\b`, 'g');
         result = result.replace(regex, `\\${fn}`);
     }
-    // Greek letter names → LaTeX commands (whole words only)
+    // Greek letter names → LaTeX commands (only if not already preceded by \)
     for (const [name, cmd] of Object.entries(GREEK_TO_LATEX)) {
-        const regex = new RegExp(`\\b${name}\\b`, 'g');
+        const regex = new RegExp(`(?<!\\\\)\\b${name}\\b`, 'g');
         result = result.replace(regex, cmd);
     }
+    // partial → \partial (only if not already preceded by \)
+    result = result.replace(/(?<!\\)\bpartial\b/g, '\\partial');
     // x^N where N is multi-char → x^{N}
     result = result.replace(/\^(\w{2,})/g, '^{$1}');
     // x[i] subscript → x_{i}

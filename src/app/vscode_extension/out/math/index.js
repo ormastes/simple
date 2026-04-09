@@ -51,6 +51,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathPreviewPanel = exports.MathDecorationProvider = void 0;
 exports.activateMathFeatures = activateMathFeatures;
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
 const mathDecorationProvider_1 = require("./mathDecorationProvider");
 const mathPreviewPanel_1 = require("./mathPreviewPanel");
 const mathHoverProvider_1 = require("./mathHoverProvider");
@@ -82,6 +83,9 @@ function activateMathFeatures(context, onLspStateChanged) {
     // Create the shared decoration provider
     const decorationProvider = new mathDecorationProvider_1.MathDecorationProvider();
     context.subscriptions.push(decorationProvider);
+    // Set up SVG cache directory for inline math rendering
+    const svgCacheDir = path.join(context.globalStorageUri.fsPath, 'math-svg-cache');
+    decorationProvider.setSvgCacheDir(svgCacheDir);
     // Set initial inline rendering state from config
     const inlineEnabled = config.get('math.renderInline', true);
     decorationProvider.setEnabled(inlineEnabled);

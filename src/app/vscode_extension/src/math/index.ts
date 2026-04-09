@@ -15,6 +15,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { MathDecorationProvider } from './mathDecorationProvider';
 import { MathPreviewPanel } from './mathPreviewPanel';
 import { MathHoverProvider } from './mathHoverProvider';
@@ -48,6 +49,10 @@ export function activateMathFeatures(
     // Create the shared decoration provider
     const decorationProvider = new MathDecorationProvider();
     context.subscriptions.push(decorationProvider);
+
+    // Set up SVG cache directory for inline math rendering
+    const svgCacheDir = path.join(context.globalStorageUri.fsPath, 'math-svg-cache');
+    decorationProvider.setSvgCacheDir(svgCacheDir);
 
     // Set initial inline rendering state from config
     const inlineEnabled = config.get<boolean>('math.renderInline', true);

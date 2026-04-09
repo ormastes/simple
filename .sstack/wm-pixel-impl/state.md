@@ -29,7 +29,7 @@ feature
 - [x] 5-implement (Engineer) -- 2026-04-09
 - [x] 6-refactor (Tech Lead) -- 2026-04-09
 - [x] 7-verify (QA) -- 2026-04-09
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) -- 2026-04-09
 
 ## Phase Outputs
 
@@ -483,10 +483,10 @@ Electron's `toBitmap()` returns BGRA format (B=offset 0, G=offset 1, R=offset 2,
 - All public functions have docstring documentation
 
 ### 8-ship
-<pending>
+Committed and pushed to main. Completion report at `doc/09_report/wm_pixel_impl_complete_2026-04-09.md`.
 
 ## Phase
-verify-done
+done
 
 ## Log
 - intake: Created state file with 6 acceptance criteria, identified 3 critical blockers
@@ -496,3 +496,4 @@ verify-done
 - implement: Implemented 7 files (2 new, 5 modified). New: ppm_decode.spl (PPM P6 parser with comment support, RGB->ARGB conversion), deflate_inflate.spl (DEFLATE inflate: stored blocks, fixed Huffman + LZ77, adapted from browser example). Modified: png_decode.spl (real DEFLATE + filter reconstruction replacing stub), __init__.spl (PPM exports), electron_capture.spl (PPM path + positional args fix), screenshot.js (PPM P6 output mode with BGRA->RGB), qemu_capture.spl (PPM format + decoder). No pass_todo stubs. All implementations follow architecture plan.
 - refactor: Reviewed 7 files, all under 800 lines (max 311). No pass_todo stubs, no 3+ duplications, naming conventions correct. Fixed 3 non-behavioral issues: (1) removed unused BrowserCompositorBackend import from qemu_capture.spl, (2) fixed stale "PNG" docstring in electron_capture.spl to "PPM", (3) updated screenshot.js header comment to mention PPM support. No structural refactoring needed.
 - verify: All 6 ACs verified against actual code. 0 pass_todo stubs. All 9 files under 800 lines (max 310). All 16 import paths resolve to existing modules with matching function/struct signatures. PPM format consistency confirmed across screenshot.js write, ppm_decode.spl read, and diff_export.spl write. BGRA->RGB channel conversion in screenshot.js verified correct. No issues found. Phase 7 complete.
+- ship: Committed (0ed38c07) and pushed to main. Completion report written to doc/09_report/wm_pixel_impl_complete_2026-04-09.md. State file marked done. All 8 phases complete.

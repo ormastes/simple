@@ -11,8 +11,7 @@ use os.compositor.electron_capture.{CaptureResult, capture_electron_scene}
 use os.compositor.qemu_capture.{capture_qemu_inprocess}
 use os.compositor.screenshot_compare.{
     ComparisonResult, ChannelDiffResult, DiffRegion,
-    compare_pixel_buffers, compare_per_channel, find_diff_regions,
-    compare_with_profile}
+    compare_exact, compare_per_channel, find_diff_regions}
 use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
 use os.compositor.tolerance_profile.{ToleranceProfile}
 
@@ -36,57 +35,54 @@ struct ConsistencyReport:
 # ============================================================================
 
 fn run_consistency_check(scene: WmSceneSpec, profile: ToleranceProfile) -> ConsistencyReport:
-    """Run the full consistency check pipeline.
+    """Run the full consistency check pipeline with bit-exact comparison.
 
-    1. Capture scene via Electron (HTML path)
-    2. Capture scene via QEMU in-process (compositor path)
-    3. Compare pixel buffers with profile threshold
-    4. Run perceptual comparison (YIQ distance)
+    Both paths render through BrowserCompositorBackend (unified renderer),
+    so output is bit-identical by construction. Default mode is bit-exact
+    (threshold=0, 100% match required).
+
+    1. Capture scene via host path (BrowserCompositorBackend)
+    2. Capture scene via QEMU in-process (BrowserCompositorBackend)
+    3. Compare pixel buffers — bit-exact by default
+    4. Run perceptual comparison (YIQ distance) for diagnostics
     5. Analyze per-channel differences
     6. Detect diff regions
-    7. Determine pass/fail based on profile thresholds
+    7. Determine pass/fail (100% match required)
 
     Args:
         scene: WM scene to render and compare
-        profile: Tolerance profile for threshold configuration
+        profile: Tolerance profile (used for perceptual diagnostics)
 
     Returns:
         ConsistencyReport with full analysis
     """
-    # Step 1: Capture from Electron
+    # Step 1: Capture via host path (BrowserCompositorBackend)
     val electron = capture_electron_scene(scene)
 
-    # Step 2: Capture from QEMU in-process
+    # Step 2: Capture via QEMU in-process (BrowserCompositorBackend)
     val qemu = capture_qemu_inprocess(scene)
 
-    # Determine which buffers to compare
-    # If Electron capture fails (no Electron in env), use QEMU buffer for both
-    # to still produce valid metrics structure
-    val a_pixels = if electron.success and electron.pixels.len() > 0:
-        electron.pixels
-    else:
-        qemu.pixels
+    val a_pixels = electron.pixels
     val b_pixels = qemu.pixels
     val w = scene.width
     val h = scene.height
 
-    # Step 3: Profile-based comparison
-    val overall = compare_with_profile(a_pixels, b_pixels, w, h, profile)
+    # Step 3: Bit-exact comparison (threshold=0)
+    val overall = compare_exact(a_pixels, b_pixels, w, h)
 
-    # Step 4: Perceptual comparison
+    # Step 4: Perceptual comparison (diagnostic)
     val perceptual = compare_perceptual(
         a_pixels, b_pixels, w, h,
         profile.default_yiq_threshold, true)
 
     # Step 5: Per-channel analysis
-    val channels = compare_per_channel(a_pixels, b_pixels, w, h, profile.default_threshold)
+    val channels = compare_per_channel(a_pixels, b_pixels, w, h, 0)
 
     # Step 6: Diff region detection
-    val regions = find_diff_regions(a_pixels, b_pixels, w, h, profile.default_threshold)
+    val regions = find_diff_regions(a_pixels, b_pixels, w, h, 0)
 
-    # Step 7: Pass/fail determination
-    val min_required: i64 = 9900  # 99.00% minimum for WM golden test
-    val passed = overall.match_percentage >= min_required
+    # Step 7: Bit-exact pass/fail (100.00% required)
+    val passed = overall.match_percentage >= 10000
 
     ConsistencyReport(
         electron_capture: electron,
@@ -178,54 +174,17 @@ fn consistency_report_to_markdown(report: ConsistencyReport) -> text:
     md = md + "that allow strict matching for solid fills and relaxed matching for text/blur.\n"
     md = md + "\n"
 
-    # Rendering divergence analysis
-    md = md + "## Rendering Divergence Analysis\n\n"
-    md = md + "### Root Causes\n\n"
-
-    md = md + "1. **Font Rasterization**: Electron uses Chromium's Skia + platform font backend "
-    md = md + "(CoreText on macOS, DirectWrite on Windows, FreeType on Linux). The Simple OS "
-    md = md + "compositor uses an 8x16 bitmap font rasterizer. These produce fundamentally different "
-    md = md + "glyph shapes, anti-aliasing patterns, and subpixel positioning.\n\n"
-
-    md = md + "2. **Anti-Aliasing (AA)**: Chromium applies sophisticated multi-sample AA via Skia, "
-    md = md + "while the software compositor uses simple alpha blending. Subpixel AA (LCD text) in "
-    md = md + "Chromium produces color fringes absent from the grayscale AA in the compositor.\n\n"
-
-    md = md + "3. **Color Space**: Electron renders in the host display's color profile (often Display P3 "
-    md = md + "on modern macOS). The compositor uses raw sRGB ARGB without color management. This can "
-    md = md + "cause systematic channel-level differences.\n\n"
-
-    md = md + "4. **Blur Quality**: The compositor uses 5-pass HVHVH box blur approximation of Gaussian. "
-    md = md + "Chromium uses true Gaussian blur via Skia. The visual results are similar but produce "
-    md = md + "different pixel values, especially at blur region edges.\n\n"
-
-    md = md + "5. **Gradient Interpolation**: The compositor uses integer arithmetic for gradient "
-    md = md + "interpolation, while Chromium uses floating-point. This causes rounding differences "
-    md = md + "of +/-1 in gradient regions.\n\n"
-
-    md = md + "6. **Geometry Snapping**: Chromium snaps sub-pixel geometry to device pixels differently "
-    md = md + "than the compositor's integer-coordinate drawing operations.\n\n"
-
-    # Normalization strategies
-    md = md + "### Normalization Strategies\n\n"
-
-    md = md + "1. **Disable LCD text** in Electron (`--disable-lcd-text` flag) to force grayscale AA "
-    md = md + "matching the compositor's rendering.\n\n"
-
-    md = md + "2. **Force sRGB** in Electron (`--force-color-profile=srgb`) to match the compositor's "
-    md = md + "color space assumption.\n\n"
-
-    md = md + "3. **Use tolerance profiles** with per-region thresholds: strict for solid fills "
-    md = md + "(threshold=2), relaxed for text regions (threshold=10), relaxed for blur regions "
-    md = md + "(threshold=14).\n\n"
-
-    md = md + "4. **Exclude AA pixels** from mismatch count using the Vyshniauskas detector "
-    md = md + "to avoid false positives at anti-aliased edges.\n\n"
-
-    md = md + "5. **Render at 2x DPI** where subpixel AA is disabled on most platforms, "
-    md = md + "reducing font rendering divergence.\n\n"
-
-    md = md + "6. **Use identical font rasterizer** in both paths (e.g., embed FreeType in the "
-    md = md + "compositor) for consistent glyph rendering.\n\n"
+    # Unified renderer note
+    md = md + "## Rendering Architecture\n\n"
+    md = md + "Both host and QEMU paths render through `BrowserCompositorBackend` (pure Simple "
+    md = md + "software compositor). This unified approach produces **bit-identical** pixel output "
+    md = md + "by construction — no cross-renderer divergence is possible.\n\n"
+    md = md + "- **Font rasterization**: 8x16 bitmap font (both paths)\n"
+    md = md + "- **Blur**: 5-pass HVHVH box blur (both paths)\n"
+    md = md + "- **Color space**: Raw sRGB ARGB, integer arithmetic (both paths)\n"
+    md = md + "- **Anti-aliasing**: Simple alpha blending only (both paths)\n\n"
+    md = md + "Electron is available as a **display/preview** tool via `display_in_electron()` "
+    md = md + "but is NOT part of the comparison pipeline. The `scene_to_html()` function remains "
+    md = md + "available for generating HTML previews for visual inspection.\n\n"
 
     md

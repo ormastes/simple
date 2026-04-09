@@ -53,10 +53,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MathDecorationProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const mathConverter_1 = require("./mathConverter");
-/** Indicator symbols shown when block delimiters are concealed */
+const mathSvgRenderer_1 = require("./mathSvgRenderer");
+/** Indicator symbols shown when block delimiters are concealed.
+ *  m{} has no indicator — it's the default math block.
+ *  loss{} shows L, nograd{} shows ∅. */
 const BLOCK_INDICATORS = {
-    math: '\u2202', // ∂ partial derivative
-    loss: '\u2112', // ℒ Lagrangian/Loss
+    math: '', // no indicator for default math blocks
+    loss: 'L', // Loss function
     nograd: '\u2205', // ∅ no-gradient
 };
 /**
@@ -95,6 +98,17 @@ class MathDecorationProvider {
                 contentText: '',
             },
         });
+        // SVG view mode: hide entire math block, show rendered SVG via before icon
+        this.svgViewDecorationType = vscode.window.createTextEditorDecorationType({
+            opacity: '0',
+            textDecoration: 'none; font-size: 0.001em; letter-spacing: -9999px',
+        });
+        // Vertical alignment for non-math text on lines with SVG math (default: center)
+        const alignment = vscode.workspace.getConfiguration('simple').get('math.alignment', 'center');
+        const vertAlign = alignment === 'center' ? 'middle' : 'baseline';
+        this.lineAlignDecorationType = vscode.window.createTextEditorDecorationType({
+            textDecoration: `none; vertical-align: ${vertAlign}`,
+        });
         // Listen for text changes
         this.disposables.push(vscode.workspace.onDidChangeTextDocument((event) => {
             const editor = vscode.window.activeTextEditor;
@@ -114,9 +128,19 @@ class MathDecorationProvider {
         }));
         // Listen for configuration changes
         this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
-            if (event.affectsConfiguration('simple.math.renderInline')) {
+            if (event.affectsConfiguration('simple.math.renderInline') ||
+                event.affectsConfiguration('simple.math.alignment')) {
                 const config = vscode.workspace.getConfiguration('simple');
                 this.isEnabled = config.get('math.renderInline', true);
+                // Recreate alignment decoration type if alignment changed
+                if (event.affectsConfiguration('simple.math.alignment')) {
+                    this.lineAlignDecorationType.dispose();
+                    const align = config.get('math.alignment', 'center');
+                    const va = align === 'center' ? 'middle' : 'baseline';
+                    this.lineAlignDecorationType = vscode.window.createTextEditorDecorationType({
+                        textDecoration: `none; vertical-align: ${va}`,
+                    });
+                }
                 const editor = vscode.window.activeTextEditor;
                 if (editor) {
                     this.updateDecorations(editor);
@@ -144,6 +168,13 @@ class MathDecorationProvider {
      */
     getEnabled() {
         return this.isEnabled;
+    }
+    /**
+     * Set the SVG cache directory for rendered math images.
+     * When set, decorations use SVG rendering instead of Unicode text.
+     */
+    setSvgCacheDir(dir) {
+        this.svgCacheDir = dir;
     }
     /**
      * Handle cursor/selection changes for cursor-aware reveal.
@@ -181,6 +212,15 @@ class MathDecorationProvider {
         }, 300);
     }
     /**
+     * Try to get the editor foreground color for SVG rendering.
+     */
+    getForegroundColor() {
+        const kind = vscode.window.activeColorTheme.kind;
+        // Light themes use dark text, dark themes use light text
+        return kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight
+            ? '#333333' : '#cccccc';
+    }
+    /**
      * Update all decorations for the given editor.
      */
     updateDecorations(editor) {
@@ -192,12 +232,16 @@ class MathDecorationProvider {
             editor.setDecorations(this.contentDecorationType, []);
             editor.setDecorations(this.openDelimiterDecorationType, []);
             editor.setDecorations(this.closeDelimiterDecorationType, []);
+            editor.setDecorations(this.svgViewDecorationType, []);
             return;
         }
         const mathBlocks = this.detectMathBlocks(editor.document);
         const contentDecorations = [];
         const openDecorations = [];
         const closeDecorations = [];
+        const svgDecorations = [];
+        const lineAlignDecorations = [];
+        const fg = this.getForegroundColor();
         for (const block of mathBlocks) {
             // Check if cursor is on any line of this math block -- if so, skip
             // decorations so the user can see the raw source
@@ -208,31 +252,68 @@ class MathDecorationProvider {
             const indicator = BLOCK_INDICATORS[block.blockType];
             const label = block.blockType === 'math' ? 'Math' :
                 block.blockType === 'loss' ? 'Loss' : 'NoGrad';
-            // Content decoration with hover message showing rendered Unicode
-            contentDecorations.push({
-                range: block.contentRange,
-                hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}`),
-            });
-            // Hide opening delimiter and show indicator + rendered Unicode preview
-            openDecorations.push({
-                range: block.openRange,
-                renderOptions: {
-                    before: {
-                        contentText: `${indicator} ${rendered}`,
-                        color: new vscode.ThemeColor('editorLineNumber.foreground'),
-                        fontStyle: 'normal',
-                        margin: '0 2px 0 0',
+            // Try SVG rendering if cache dir is available
+            let svgUri;
+            if (this.svgCacheDir) {
+                const latex = (0, mathConverter_1.simpleToLatex)(block.content);
+                svgUri = (0, mathSvgRenderer_1.renderToSvgFile)(latex, this.svgCacheDir, fg);
+            }
+            if (svgUri) {
+                // SVG view mode: hide full block, show SVG icon before
+                // Prefix with block indicator if not empty (loss→L, nograd→∅, math→nothing)
+                const indicatorPrefix = indicator ? `${indicator} ` : '';
+                svgDecorations.push({
+                    range: block.fullRange,
+                    hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}\n\n$$${(0, mathConverter_1.simpleToLatex)(block.content)}$$`),
+                    renderOptions: {
+                        before: {
+                            contentIconPath: svgUri,
+                            // Pull the SVG upward so the fraction bar aligns with text center.
+                            // margin-bottom negative shifts the icon up relative to baseline.
+                            margin: '0 4px -0.6em 0',
+                            textDecoration: 'none; vertical-align: middle',
+                        },
                     },
-                },
-            });
-            // Hide closing delimiter
-            closeDecorations.push({
-                range: block.closeRange,
-            });
+                });
+                // Apply vertical alignment to the non-math text before the block
+                const lineStart = new vscode.Position(block.fullRange.start.line, 0);
+                if (block.fullRange.start.character > 0) {
+                    lineAlignDecorations.push({
+                        range: new vscode.Range(lineStart, block.fullRange.start),
+                    });
+                }
+            }
+            else {
+                // Fallback: Unicode text mode (no SVG)
+                // Build display text: indicator + rendered (no indicator for m{})
+                const displayText = indicator
+                    ? `${indicator} ${rendered}`
+                    : rendered;
+                contentDecorations.push({
+                    range: block.contentRange,
+                    hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}`),
+                });
+                openDecorations.push({
+                    range: block.openRange,
+                    renderOptions: {
+                        before: {
+                            contentText: displayText,
+                            color: new vscode.ThemeColor('editorLineNumber.foreground'),
+                            fontStyle: 'normal',
+                            margin: '0 2px 0 0',
+                        },
+                    },
+                });
+                closeDecorations.push({
+                    range: block.closeRange,
+                });
+            }
         }
         editor.setDecorations(this.contentDecorationType, contentDecorations);
         editor.setDecorations(this.openDelimiterDecorationType, openDecorations);
         editor.setDecorations(this.closeDelimiterDecorationType, closeDecorations);
+        editor.setDecorations(this.svgViewDecorationType, svgDecorations);
+        editor.setDecorations(this.lineAlignDecorationType, lineAlignDecorations);
     }
     /**
      * Detect all math-mode custom blocks (m{}, loss{}, nograd{}) in a document.
@@ -318,6 +399,8 @@ class MathDecorationProvider {
         this.contentDecorationType.dispose();
         this.openDelimiterDecorationType.dispose();
         this.closeDelimiterDecorationType.dispose();
+        this.svgViewDecorationType.dispose();
+        this.lineAlignDecorationType.dispose();
         for (const disposable of this.disposables) {
             disposable.dispose();
         }

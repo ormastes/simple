@@ -18,17 +18,6 @@
  *   src/lib/mathjax.spl      - MathJax SFFI wrapper (SVG/HTML rendering via Node.js bridge)
  *   src/app/lsp/handlers/hover.spl - LSP hover handler using render_latex_raw() + to_pretty()
  */
-/**
- * Convert Simple math expression to LaTeX string.
- *
- * Handles:
- * - `^N` → `^{N}` for multi-char exponents
- * - `_N` / `[N]` subscripts → `_{N}`
- * - Greek names → `\alpha`, `\beta`, etc.
- * - `sqrt(...)` → `\sqrt{...}`
- * - `frac(a,b)` → `\frac{a}{b}`
- * - Known functions → `\sin`, `\cos`, etc.
- */
 export declare function simpleToLatex(source: string): string;
 /**
  * Convert Simple math expression to Unicode pretty text.

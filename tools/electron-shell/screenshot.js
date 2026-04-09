@@ -15,16 +15,21 @@ const path = require('path');
 
 const args = process.argv.slice(2);
 
+// Check for --display-ppm mode: show a pre-rendered PPM in a visible window
+const displayPpmIdx = args.indexOf('--display-ppm');
+const displayPpmPath = displayPpmIdx >= 0 ? args[displayPpmIdx + 1] : null;
+
 // Filter out Electron's internal flags (like --inspect, --no-sandbox, etc.)
 const userArgs = args.filter(a => !a.startsWith('--') && !a.startsWith('-'));
 
-const htmlInput = userArgs[0];
+const htmlInput = displayPpmPath ? null : userArgs[0];
 const outputPath = userArgs[1] || 'screenshot.png';
 const width = parseInt(userArgs[2] || '800', 10);
 const height = parseInt(userArgs[3] || '600', 10);
 
-if (!htmlInput) {
+if (!htmlInput && !displayPpmPath) {
     console.error('Usage: npx electron screenshot.js <html_file> <output.png> [width] [height]');
+    console.error('       npx electron screenshot.js --display-ppm <ppm_file>');
     process.exit(1);
 }
 
@@ -32,6 +37,44 @@ if (!htmlInput) {
 app.disableHardwareAcceleration();
 
 app.whenReady().then(async () => {
+    // --display-ppm mode: show pre-rendered PPM in a visible window
+    if (displayPpmPath) {
+        const ppmBuf = fs.readFileSync(displayPpmPath);
+        // Parse PPM P6 header to get dimensions
+        let headerEnd = 0;
+        let lines = [];
+        for (let i = 0; i < ppmBuf.length && lines.length < 3; i++) {
+            if (ppmBuf[i] === 0x0A) { // newline
+                const line = ppmBuf.slice(headerEnd, i).toString('ascii').trim();
+                if (!line.startsWith('#')) lines.push(line);
+                headerEnd = i + 1;
+            }
+        }
+        const [ppmW, ppmH] = lines[1].split(/\s+/).map(Number);
+        // Convert RGB to data URL for display
+        const rgbStart = headerEnd;
+        const rgbData = ppmBuf.slice(rgbStart);
+        // Build BMP for simple display (or use canvas via data URL)
+        const html = `<html><body style="margin:0"><canvas id="c" width="${ppmW}" height="${ppmH}"></canvas>
+        <script>
+        const c=document.getElementById('c').getContext('2d');
+        const d=c.createImageData(${ppmW},${ppmH});
+        const rgb=[${Array.from(rgbData).join(',')}];
+        for(let i=0;i<${ppmW*ppmH};i++){d.data[i*4]=rgb[i*3];d.data[i*4+1]=rgb[i*3+1];d.data[i*4+2]=rgb[i*3+2];d.data[i*4+3]=255;}
+        c.putImageData(d,0,0);
+        </script></body></html>`;
+        const tmpPath = path.join(require('os').tmpdir(), 'display_ppm_' + Date.now() + '.html');
+        fs.writeFileSync(tmpPath, html, 'utf8');
+
+        const win = new BrowserWindow({
+            width: ppmW, height: ppmH, show: true,
+            webPreferences: { nodeIntegration: false, contextIsolation: true }
+        });
+        await win.loadURL('file://' + tmpPath);
+        console.log(`Displaying PPM: ${displayPpmPath} (${ppmW}x${ppmH})`);
+        return; // Keep window open for inspection
+    }
+
     const win = new BrowserWindow({
         width: width,
         height: height,

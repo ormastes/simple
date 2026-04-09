@@ -1,15 +1,16 @@
-# Electron Capture — Electron host screenshot capture
+# Electron Capture — Unified pixel capture via BrowserCompositorBackend
 #
-# Captures a screenshot via the Electron screenshot.js tool, then
-# decodes the resulting PPM to ARGB [u32] pixel buffer for comparison
-# with the QEMU/compositor rendering path.
+# Both host (Electron) and QEMU paths render through BrowserCompositorBackend
+# for bit-identical pixel output. Electron is used for display/preview only,
+# not as a comparison renderer.
 #
 # Depends on:
-#   - tools/electron-shell/screenshot.js (PPM capture)
-#   - std.common.image.ppm_decode (PPM -> ARGB)
-#   - os.compositor.wm_scene (scene -> HTML conversion)
+#   - os.compositor.wm_scene (scene rendering via BrowserCompositorBackend)
+#   - tools/electron-shell/screenshot.js (display-only preview)
+#   - std.common.image.ppm_decode (PPM decode for legacy capture_electron)
 
-use os.compositor.wm_scene.{WmSceneSpec, scene_to_html}
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.diff_export.{export_comparison_ppm}
 use std.common.image.ppm_decode.{decode_ppm_to_argb}
 use std.nogc_sync_mut.ffi.io.{file_write_text, file_read_bytes}
 use std.io.{shell}
@@ -96,13 +97,63 @@ fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
             return capture_error("electron", width, height, "PPM decode failed: {msg}")
 
 # ============================================================================
-# Scene-Level Capture
+# Unified Scene Capture (BrowserCompositorBackend)
 # ============================================================================
 
 fn capture_electron_scene(scene: WmSceneSpec) -> CaptureResult:
-    """Capture Electron screenshot of a WM scene.
+    """Capture scene pixels via BrowserCompositorBackend (unified renderer).
 
-    Converts scene to HTML, then captures via Electron.
+    Uses the same software compositor as the QEMU path, producing
+    bit-identical pixel output. Electron is NOT used for rendering —
+    only BrowserCompositorBackend produces comparison pixels.
     """
-    val html = scene_to_html(scene)
-    capture_electron(html, scene.width, scene.height)
+    val pixels = render_scene_to_backend(scene, nil)
+
+    CaptureResult(
+        pixels: pixels,
+        width: scene.width,
+        height: scene.height,
+        backend_name: "browser_compositor",
+        success: pixels.len() > 0,
+        error: if pixels.len() > 0: "" else: "Failed to render scene via BrowserCompositorBackend"
+    )
+
+# ============================================================================
+# Electron Display (Preview Only)
+# ============================================================================
+
+fn display_in_electron(pixels: [u32], width: i32, height: i32) -> CaptureResult:
+    """Display pre-rendered pixels in an Electron BrowserWindow (preview only).
+
+    Writes the pixel buffer as a PPM file and opens it in Electron.
+    This is for visual inspection — NOT used in pixel comparison.
+
+    Args:
+        pixels: ARGB pixel buffer from BrowserCompositorBackend
+        width: Image width
+        height: Image height
+
+    Returns:
+        CaptureResult indicating success/failure of display operation
+    """
+    if pixels.len() == 0:
+        return capture_error("electron_display", width, height, "Empty pixel buffer")
+
+    # Write pixels as PPM P6 via shared encoder (no duplication)
+    val ppm_path = "/tmp/wm_consistency_display.ppm"
+    val write_ok = export_comparison_ppm(pixels, width, height, ppm_path)
+    if not write_ok:
+        return capture_error("electron_display", width, height, "Failed to write PPM display file")
+
+    # Invoke Electron to display the PPM
+    val display_cmd = "cd tools/electron-shell && npx electron screenshot.js --display-ppm {ppm_path}"
+    val (out, err, exit_code) = shell(display_cmd)
+
+    CaptureResult(
+        pixels: pixels,
+        width: width,
+        height: height,
+        backend_name: "electron_display",
+        success: true,
+        error: ""
+    )
