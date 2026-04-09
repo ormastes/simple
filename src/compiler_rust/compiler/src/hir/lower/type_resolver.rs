@@ -312,8 +312,10 @@ impl Lowerer {
                         }
                     }
                 }
-                if let Some((idx, _count, sname)) = best_global {
-                    eprintln!("[FIELD-TRACE] ANY/{field} → global {sname}[{idx}]");
+                if let Some((idx, count, sname)) = best_global {
+                    let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                    let msg = format!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
+                    eprintln!("{msg}");
                     return Ok((idx, TypeId::ANY));
                 }
             }
@@ -423,8 +425,10 @@ impl Lowerer {
                                     }
                                 }
                             }
-                            if let Some((idx, _count, sname)) = best_global {
-                                eprintln!("[FIELD-TRACE] {:?}/{field} → global {sname}[{idx}]", hir_ty);
+                            if let Some((idx, count, sname)) = best_global {
+                                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                                let msg = format!("[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
+                                eprintln!("{msg}");
                                 return Ok((idx, TypeId::ANY));
                             }
                         }

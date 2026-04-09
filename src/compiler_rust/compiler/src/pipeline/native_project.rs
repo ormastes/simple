@@ -3643,7 +3643,8 @@ fn compile_file_to_object(
     // Pass global struct definitions to the lowerer for cross-module field resolution.
     // The type resolver uses these to look up field indices when the struct type
     // isn't in the per-file registry (e.g., StyleProps in dom.spl where it's defined in css.spl).
-    lowerer.set_global_struct_defs(imports.struct_defs.clone());
+    // Pass empty struct defs — the ambiguous field name search causes wrong byte offsets
+    lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
     let hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
