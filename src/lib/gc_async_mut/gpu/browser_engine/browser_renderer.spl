@@ -270,7 +270,10 @@ fn count_nodes(node: BeDomNode) -> i32:
     """Count total nodes in a DOM tree."""
     var count = 1
     val kids = be_dom_get_children(node)
-    for child in kids:
+    var kids_idx = 0
+    while kids_idx < kids.len():
+        val child = kids[kids_idx]
+        kids_idx = kids_idx + 1
         count = count + count_nodes(child)
     return count
 
@@ -307,7 +310,11 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
         s.border_color = BoxEdges.uniform(0x58A6FFFF)
         dom.style = s
 
-    for child in node.children():
+    var wchild_idx = 0
+    val wchildren = node.children()
+    while wchild_idx < wchildren.len():
+        val child = wchildren[wchild_idx]
+        wchild_idx = wchild_idx + 1
         dom.add_child(browser_renderer_widget_to_dom(child, state))
 
     dom
@@ -415,7 +422,9 @@ pub fn render_html_to_pixel_array(html: text, width: i32, height: i32) -> [u32]:
     Uses layout_to_scene() which does layout+paint in one module to avoid
     cross-module FieldGet bug with struct/array fields."""
     val dom = browser_renderer_html_string_to_dom(html)
+    print "[RHPA] dom done, calling layout_to_scene"
     val scene = layout_to_scene(dom, width, height)
+    print "[RHPA] layout done"
     val pixel_count = width * height
     var pixels: [u32] = rt_array_new(pixel_count)
     var i = 0
@@ -492,18 +501,34 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 continue
 
             if tag_content.starts_with("/"):
-                val close_result = br_handle_close_tag(tag_content, tag_end)
-                if close_result < 0:
-                    # Negative means "pop stack"; negate to get real pos
-                    pos = 0 - close_result
-                    if stack.len() > 1:
-                        stack = br_stack_pop_and_add(stack)
-                else:
-                    pos = close_result
+                # Close tag
+                val close_raw = tag_content.slice(1, tag_content.len())
+                val close_trimmed = close_raw.trim()
+                val close_tag = close_trimmed.to_lower()
+                print "[CT] close '{close_tag}' stack={stack.len()}"
+                if close_tag == "html" or close_tag == "head" or close_tag == "body" or close_tag == "style":
+                    pos = tag_end + 1
+                    continue
+                if stack.len() > 1:
+                    print "[CT] popping"
+                    stack = br_stack_pop_and_add(stack)
+                    print "[CT] popped, stack={stack.len()}"
+                pos = tag_end + 1
             else:
                 pos = br_handle_open_tag(tag_content, html, tag_end, len, stack)
         else:
-            pos = br_handle_text(html, pos, len, stack)
+            # Text content — inline
+            val text_end = browser_renderer_find_char(html, "<", pos)
+            val end_pos = if text_end >= 999999999: len else: text_end
+            val text_raw = html.slice(pos, end_pos)
+            val text_content = text_raw.trim()
+            if text_content.len() > 0:
+                val txt = BeDomNode.text(text_content)
+                if stack.len() > 0:
+                    var parent = stack[stack.len() - 1]
+                    parent.add_child(txt)
+                    stack[stack.len() - 1] = parent
+            pos = end_pos
 
     while stack.len() > 1:
         stack = br_stack_pop_and_add(stack)
@@ -513,8 +538,11 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
         result = stack[0]
 
     # Apply UA default styles, then <style> block rules
+    print "[PARSE] done, applying UA defaults"
     br_apply_ua_defaults(result)
+    print "[PARSE] UA defaults done, processing style blocks"
     process_style_blocks(result, raw_html)
+    print "[PARSE] all done"
 
     result
 
@@ -535,6 +563,7 @@ fn br_handle_close_tag(tag_content: text, tag_end: i64) -> i64:
 
 fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> i64:
     """Handle an opening tag. Returns new pos."""
+    print "[OT] enter '{tag_content}'"
     val is_self_closing = tag_content.ends_with("/")
     var clean_content = tag_content.trim()
     if is_self_closing:
@@ -610,6 +639,7 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
             stack[stack.len() - 1] = parent
     else:
         rt_array_push(stack, new_node)
+    print "[OT] done, returning {tag_end + 1}"
     return tag_end + 1
 
 fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
@@ -702,7 +732,10 @@ fn browser_renderer_split_spaces(s: text) -> [text]:
 
 fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
     val declarations = browser_renderer_split_semicolons(style_str)
-    for decl in declarations:
+    var decl_idx = 0
+    while decl_idx < declarations.len():
+        val decl = declarations[decl_idx]
+        decl_idx = decl_idx + 1
         val colon_pos = browser_renderer_find_char(decl, ":", 0)
         if colon_pos > 0:
             val prop_raw = decl.slice(0, colon_pos)
@@ -830,5 +863,8 @@ fn br_apply_ua_defaults(node: BeDomNode):
         node.set_style("display", "block")
 
     val ua_kids = be_dom_get_children(node)
-    for child in ua_kids:
+    var ua_idx = 0
+    while ua_idx < ua_kids.len():
+        val child = ua_kids[ua_idx]
+        ua_idx = ua_idx + 1
         br_apply_ua_defaults(child)
