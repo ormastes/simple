@@ -20,7 +20,7 @@ import { SvgRenderResult } from './mathSvgRenderer';
 /** Block type for math-mode custom blocks */
 type MathBlockType = 'math' | 'loss' | 'nograd';
 /** Represents a detected math-mode block range in the document */
-interface MathBlockRange {
+export interface MathBlockRange {
     /** Block type: math (m{}), loss (loss{}), or nograd (nograd{}) */
     blockType: MathBlockType;
     /** Full range covering the block including delimiters */
@@ -37,10 +37,13 @@ interface MathBlockRange {
 export interface SvgDecorationLayout {
     height: string;
     width: string;
+    spacerHeight: string;
     verticalAlign: string;
     boostApplied: boolean;
+    layoutScale: number;
     debugMessage: string;
 }
+export declare function formatSvgDecorationLayoutLog(content: string, layout: SvgDecorationLayout): string;
 export declare function buildSvgDecorationLayout(content: string, svgResult: SvgRenderResult, alignment: string): SvgDecorationLayout;
 export declare class MathDecorationProvider implements vscode.Disposable {
     /** Decoration for the math content itself */

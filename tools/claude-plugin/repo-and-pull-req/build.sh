@@ -22,7 +22,15 @@ for f in \
     skills/jira/jira_push.md \
     skills/jira/jira_wiki.md \
     skills/jira/jira_pull_req_review.md \
-    agents/review_loop.md; do
+    skills/bug/bug_setup.md \
+    skills/bug/bug_review.md \
+    skills/bug/bug_fix.md \
+    skills/mail/mail_setup.md \
+    skills/mail/mail_send.md \
+    skills/mail/mail_review.md \
+    skills/mail/mail_notify.md \
+    agents/review_loop.md \
+    agents/bug_triage.md; do
     if [ ! -f "${SCRIPT_DIR}/${f}" ]; then
         echo "ERROR: Referenced file ${f} not found"; exit 1
     fi

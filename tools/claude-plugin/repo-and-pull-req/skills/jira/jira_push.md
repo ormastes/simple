@@ -4,7 +4,7 @@ Create or update Jira issues to track work being pushed as a PR.
 
 ## Prerequisites
 
-- jira-cli configured (`jira me` succeeds; if not → run jira_setup)
+- Our jira-cli configured (`bin/jira auth status` succeeds; if not → run jira_setup)
 - PR already created (from gh_push) — need PR URL and number
 
 ## Procedure
@@ -35,12 +35,11 @@ case "$SUMMARY" in
 esac
 
 # Create issue
-jira issue create \
+bin/jira issue create \
   --type "${TYPE}" \
   --summary "${SUMMARY}" \
   --body "${BODY}\n\nPR: ${PR_URL}" \
-  --priority Medium \
-  --no-input
+  --priority Medium
 ```
 
 Record the issue key (e.g., `SIMPLE-42`).
@@ -50,11 +49,11 @@ Record the issue key (e.g., `SIMPLE-42`).
 ```bash
 # Add comment with push details
 DIFF_STAT=$(jj diff --stat -r @-)
-jira issue comment add "${ISSUE_KEY}" \
+bin/jira issue comment "${ISSUE_KEY}" \
   --body "Code pushed. PR: ${PR_URL}\n\nChanges:\n${DIFF_STAT}"
 
 # Transition to "In Review"
-jira issue move "${ISSUE_KEY}" "In Review" 2>/dev/null || true
+bin/jira issue move "${ISSUE_KEY}" "In Review" 2>/dev/null || true
 ```
 
 ### Step 4 — Cross-Link PR and Issue

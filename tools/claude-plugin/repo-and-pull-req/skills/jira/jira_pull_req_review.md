@@ -5,7 +5,7 @@ handling and status transitions.
 
 ## Prerequisites
 
-- jira-cli configured (`jira me` succeeds)
+- Our jira-cli configured (`bin/jira auth status` succeeds)
 - PR linked to a Jira issue (issue key in PR description)
 - `gh` CLI authenticated
 
@@ -28,7 +28,7 @@ fi
 
 ```bash
 # View issue with comments
-jira issue view "${ISSUE_KEY}" --comments 2>/dev/null
+bin/jira issue view "${ISSUE_KEY}" --comments 2>/dev/null
 
 # Get recent comments via API for structured processing
 JIRA_CONFIG="$HOME/.config/.jira/.config.yml"
@@ -50,7 +50,7 @@ For new comments (since last check):
 3. Process: fix code or generate reply
 4. Respond via jira-cli:
    ```bash
-   jira issue comment add "${ISSUE_KEY}" --body "<reply>"
+   bin/jira issue comment "${ISSUE_KEY}" --body "<reply>"
    ```
 
 ### Step 4 — Run GitHub PR Review
@@ -65,17 +65,17 @@ Based on PR review outcome:
 
 ```bash
 # If all comments addressed
-jira issue comment add "${ISSUE_KEY}" \
+bin/jira issue comment "${ISSUE_KEY}" \
   --body "Review cycle complete. All comments addressed."
 
 # If PR approved → transition
 if [ "$DECISION" = "APPROVED" ]; then
-  jira issue move "${ISSUE_KEY}" "Approved" 2>/dev/null || true
+  bin/jira issue move "${ISSUE_KEY}" "Approved" 2>/dev/null || true
 fi
 
 # If PR merged → transition to Done
 if [ "$STATE" = "MERGED" ]; then
-  jira issue move "${ISSUE_KEY}" "Done" 2>/dev/null || true
+  bin/jira issue move "${ISSUE_KEY}" "Done" 2>/dev/null || true
 fi
 ```
 

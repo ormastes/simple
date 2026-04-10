@@ -115,8 +115,15 @@ export class MathHoverProvider implements vscode.HoverProvider {
         const openPreviewCommand = vscode.Uri.parse(
             `command:simple.math.togglePreview`
         );
+        const openSyncPanelCommand = vscode.Uri.parse(
+            `command:simple.math.toggleSyncPanel`
+        );
         markdown.appendMarkdown(
             `[Open Math Preview Panel](${openPreviewCommand})`
+        );
+        markdown.appendMarkdown('\n\n');
+        markdown.appendMarkdown(
+            `[Open Synced Math Panel](${openSyncPanelCommand})`
         );
 
         return new vscode.Hover(markdown, range);

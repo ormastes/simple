@@ -18,7 +18,7 @@
 
 import * as vscode from 'vscode';
 import { simpleToLatex, simpleToUnicode } from './mathConverter';
-import { renderToSvgFile, SvgRenderResult } from './mathSvgRenderer';
+import { renderSpacerSvgFile, renderToSvgFile, SvgRenderResult, SvgSpacerRenderResult } from './mathSvgRenderer';
 
 /** Block type for math-mode custom blocks */
 type MathBlockType = 'math' | 'loss' | 'nograd';
@@ -33,7 +33,7 @@ const BLOCK_INDICATORS: Record<MathBlockType, string> = {
 };
 
 /** Represents a detected math-mode block range in the document */
-interface MathBlockRange {
+export interface MathBlockRange {
     /** Block type: math (m{}), loss (loss{}), or nograd (nograd{}) */
     blockType: MathBlockType;
     /** Full range covering the block including delimiters */
@@ -51,24 +51,44 @@ interface MathBlockRange {
 export interface SvgDecorationLayout {
     height: string;
     width: string;
+    spacerHeight: string;
     verticalAlign: string;
     boostApplied: boolean;
+    layoutScale: number;
     debugMessage: string;
 }
 
-function shouldBoostSvgLayout(content: string): boolean {
-    return /\b(frac|sqrt)\s*\(/.test(content);
+export function formatSvgDecorationLayoutLog(content: string, layout: SvgDecorationLayout): string {
+    return `[simple.math.layout] eq="${content}" height=${layout.height} width=${layout.width} spacer=${layout.spacerHeight} boost=${layout.boostApplied ? 'yes' : 'no'} scale=${layout.layoutScale.toFixed(2)} align=${layout.verticalAlign}`;
 }
+
+function countLayoutBoostTerms(content: string): { fracCount: number; sqrtCount: number } {
+    const fracTerms = content.match(/\bfrac\s*\(/g);
+    const sqrtTerms = content.match(/\bsqrt\s*\(/g);
+    return {
+        fracCount: fracTerms ? fracTerms.length : 0,
+        sqrtCount: sqrtTerms ? sqrtTerms.length : 0,
+    };
+}
+
+const FRACTION_SPACER_EXTRA_EM = 0.28;
+const ROOT_SPACER_EXTRA_EM = 0.44;
+const BASE_SPACER_MIN_EM = 1.28;
 
 export function buildSvgDecorationLayout(
     content: string,
     svgResult: SvgRenderResult,
     alignment: string,
 ): SvgDecorationLayout {
-    const boostApplied = shouldBoostSvgLayout(content);
-    const layoutScale = boostApplied ? 1.12 : 1.0;
+    const boostTerms = countLayoutBoostTerms(content);
+    const boostCount = boostTerms.fracCount + boostTerms.sqrtCount;
+    const boostApplied = boostCount > 0;
+    const layoutScale = 1.0 + (boostTerms.fracCount * 0.08) + (boostTerms.sqrtCount * 0.16);
     const heightEm = Math.max(svgResult.heightEm * layoutScale, 1.0);
     const widthEm = Math.max(svgResult.widthEm * layoutScale, 0.75);
+    const spacerHeightEm = boostApplied
+        ? Math.max(heightEm + 0.12 + (boostTerms.fracCount * FRACTION_SPACER_EXTRA_EM) + (boostTerms.sqrtCount * ROOT_SPACER_EXTRA_EM), BASE_SPACER_MIN_EM)
+        : heightEm;
     const verticalAlign = alignment === 'center'
         ? 'middle'
         : `-${svgResult.descentEm.toFixed(2)}em`;
@@ -76,14 +96,20 @@ export function buildSvgDecorationLayout(
     return {
         height: `${heightEm.toFixed(2)}em`,
         width: `${widthEm.toFixed(2)}em`,
+        spacerHeight: `${spacerHeightEm.toFixed(2)}em`,
         verticalAlign,
         boostApplied,
+        layoutScale,
         debugMessage: JSON.stringify({
             content,
+            boostCount,
+            fracCount: boostTerms.fracCount,
+            sqrtCount: boostTerms.sqrtCount,
             boostApplied,
             layoutScale,
             heightEm: Number(heightEm.toFixed(3)),
             widthEm: Number(widthEm.toFixed(3)),
+            spacerHeightEm: Number(spacerHeightEm.toFixed(3)),
             descentEm: Number(svgResult.descentEm.toFixed(3)),
             verticalAlign,
             alignment,
@@ -332,8 +358,12 @@ export class MathDecorationProvider implements vscode.Disposable {
 
             if (svgResult) {
                 const layout = buildSvgDecorationLayout(block.content, svgResult, alignment);
+                let spacerResult: SvgSpacerRenderResult | undefined;
+                if (layout.boostApplied && this.svgCacheDir) {
+                    spacerResult = renderSpacerSvgFile(this.svgCacheDir, Number.parseFloat(layout.spacerHeight));
+                }
                 if (this.debugLayout) {
-                    const message = `[simple.math.layout] ${layout.debugMessage}`;
+                    const message = formatSvgDecorationLayoutLog(block.content, layout);
                     console.log(message);
                     this.debugLogger?.(message);
                 }
@@ -351,6 +381,13 @@ export class MathDecorationProvider implements vscode.Disposable {
                             height: layout.height,
                             textDecoration: `none; vertical-align: ${layout.verticalAlign}`,
                         },
+                        after: spacerResult ? {
+                            contentIconPath: spacerResult.uri,
+                            margin: '0 0 0 0',
+                            width: '0.01em',
+                            height: layout.spacerHeight,
+                            textDecoration: 'none',
+                        } : undefined,
                     },
                 });
             } else {

@@ -1,0 +1,200 @@
+#!/bin/bash
+# mail-cli inbox/read/search commands
+# Depends on: config.shs, imap.shs, format.shs (sourced by main entry point)
+
+cmd_inbox() {
+  local folder="INBOX" limit=25 unread_only=0 output_mode="table"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      --folder)  folder="$2"; shift 2 ;;
+      --limit)   limit="$2"; shift 2 ;;
+      --unread)  unread_only=1; shift ;;
+      --json)    output_mode="json"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  mail_resolve_account || return 1
+
+  # Search for messages
+  local criteria="ALL"
+  [ "$unread_only" -eq 1 ] && criteria="UNSEEN"
+
+  local uids
+  uids=$(mail_imap_search "$folder" "$criteria")
+
+  if [ -z "$uids" ]; then
+    echo "No messages found."
+    return 0
+  fi
+
+  # Take only the last N UIDs (most recent)
+  local uid_array
+  uid_array=($(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac))
+
+  if [ "$output_mode" = "table" ]; then
+    printf "%-6s %-2s %-30s %-50s %s\n" "UID" "" "FROM" "SUBJECT" "DATE"
+    printf "%-6s %-2s %-30s %-50s %s\n" "---" "--" "----" "-------" "----"
+  fi
+
+  local json_array="[]"
+
+  for uid in "${uid_array[@]}"; do
+    local headers_raw
+    headers_raw=$(mail_imap_fetch_headers "$folder" "$uid")
+    if [ -z "$headers_raw" ]; then continue; fi
+
+    local headers_json
+    headers_json=$(mail_format_parse_headers "$headers_raw")
+
+    case "$output_mode" in
+      json)
+        headers_json=$(echo "$headers_json" | jq --arg uid "$uid" --arg folder "$folder" '. + {uid: $uid, folder: $folder}')
+        json_array=$(echo "$json_array" | jq --argjson item "$headers_json" '. + [$item]')
+        ;;
+      *)
+        mail_format_summary_line "$uid" "$headers_json" ""
+        ;;
+    esac
+  done
+
+  [ "$output_mode" = "json" ] && echo "$json_array" | jq '.'
+}
+
+cmd_read() {
+  local uid="${1:-}"
+  shift 2>/dev/null || true
+  local folder="INBOX" output_mode="text"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      --folder)  folder="$2"; shift 2 ;;
+      --json)    output_mode="json"; shift ;;
+      --raw)     output_mode="raw"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if [ -z "$uid" ]; then
+    echo "error: message UID required" >&2
+    echo "Usage: mail read <uid>" >&2
+    return 1
+  fi
+
+  mail_resolve_account || return 1
+
+  # Fetch full message
+  local raw_message
+  raw_message=$(mail_imap_fetch_body "$folder" "$uid")
+
+  if [ -z "$raw_message" ]; then
+    echo "error: could not fetch message ${uid}" >&2
+    return 1
+  fi
+
+  case "$output_mode" in
+    raw)
+      echo "$raw_message"
+      ;;
+    json)
+      local headers_json body
+      headers_json=$(mail_format_parse_headers "$raw_message")
+      body=$(mail_format_parse_body "$raw_message")
+      echo "$headers_json" | jq --arg body "$body" --arg uid "$uid" '. + {body: $body, uid: $uid}'
+      ;;
+    *)
+      local headers_json
+      headers_json=$(mail_format_parse_headers "$raw_message")
+
+      echo "$headers_json" | jq -r '
+        "From:    \(.from)",
+        "To:      \(.to)",
+        "Subject: \(.subject)",
+        "Date:    \(.date)",
+        ""'
+
+      mail_format_parse_body "$raw_message"
+      ;;
+  esac
+
+  # Mark as read
+  mail_imap_store_flags "$folder" "$uid" "\\Seen" >/dev/null 2>&1
+}
+
+cmd_search() {
+  local query="" folder="INBOX" from="" subject="" since="" before="" limit=25 output_mode="table"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --account) MAIL_ACCOUNT="$2"; shift 2 ;;
+      --folder)  folder="$2"; shift 2 ;;
+      --from)    from="$2"; shift 2 ;;
+      --subject) subject="$2"; shift 2 ;;
+      --since)   since="$2"; shift 2 ;;
+      --before)  before="$2"; shift 2 ;;
+      --limit)   limit="$2"; shift 2 ;;
+      --json)    output_mode="json"; shift ;;
+      -*)        shift ;;
+      *)         query="$1"; shift ;;
+    esac
+  done
+
+  mail_resolve_account || return 1
+
+  # Build IMAP SEARCH criteria
+  local criteria=""
+  [ -n "$query" ] && criteria="TEXT \"${query}\""
+  [ -n "$from" ] && criteria="${criteria} FROM \"${from}\""
+  [ -n "$subject" ] && criteria="${criteria} SUBJECT \"${subject}\""
+  [ -n "$since" ] && criteria="${criteria} SINCE ${since}"
+  [ -n "$before" ] && criteria="${criteria} BEFORE ${before}"
+  [ -z "$criteria" ] && criteria="ALL"
+  criteria=$(echo "$criteria" | sed 's/^[[:space:]]*//')
+
+  local uids
+  uids=$(mail_imap_search "$folder" "$criteria")
+
+  if [ -z "$uids" ]; then
+    echo "No messages found."
+    return 0
+  fi
+
+  # Take last N
+  local uid_array
+  uid_array=($(echo "$uids" | tr ' ' '\n' | tail -n "$limit" | tac))
+
+  if [ "$output_mode" = "table" ]; then
+    printf "%-6s %-30s %-50s %s\n" "UID" "FROM" "SUBJECT" "DATE"
+    printf "%-6s %-30s %-50s %s\n" "---" "----" "-------" "----"
+  fi
+
+  local json_array="[]"
+
+  for uid in "${uid_array[@]}"; do
+    local headers_raw
+    headers_raw=$(mail_imap_fetch_headers "$folder" "$uid")
+    [ -z "$headers_raw" ] && continue
+
+    local headers_json
+    headers_json=$(mail_format_parse_headers "$headers_raw")
+
+    case "$output_mode" in
+      json)
+        headers_json=$(echo "$headers_json" | jq --arg uid "$uid" '. + {uid: $uid}')
+        json_array=$(echo "$json_array" | jq --argjson item "$headers_json" '. + [$item]')
+        ;;
+      *)
+        local from_val subject_val date_val
+        from_val=$(echo "$headers_json" | jq -r '.from' | head -c 30)
+        subject_val=$(echo "$headers_json" | jq -r '.subject' | head -c 50)
+        date_val=$(echo "$headers_json" | jq -r '.date' | head -c 20)
+        printf "%-6s %-30s %-50s %s\n" "$uid" "$from_val" "$subject_val" "$date_val"
+        ;;
+    esac
+  done
+
+  [ "$output_mode" = "json" ] && echo "$json_array" | jq '.'
+}

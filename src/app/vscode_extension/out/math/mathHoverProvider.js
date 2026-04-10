@@ -126,7 +126,10 @@ class MathHoverProvider {
         markdown.appendMarkdown(`**Source:** \`${content}\`\n\n`);
         // Action link to open preview panel
         const openPreviewCommand = vscode.Uri.parse(`command:simple.math.togglePreview`);
+        const openSyncPanelCommand = vscode.Uri.parse(`command:simple.math.toggleSyncPanel`);
         markdown.appendMarkdown(`[Open Math Preview Panel](${openPreviewCommand})`);
+        markdown.appendMarkdown('\n\n');
+        markdown.appendMarkdown(`[Open Synced Math Panel](${openSyncPanelCommand})`);
         return new vscode.Hover(markdown, range);
     }
 }

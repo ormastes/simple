@@ -5,11 +5,12 @@ import * as path from 'path';
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { suite, teardown, test } from 'mocha';
-import { MathDecorationProvider, buildSvgDecorationLayout } from '../../math/mathDecorationProvider';
+import { MathDecorationProvider, buildSvgDecorationLayout, formatSvgDecorationLayoutLog } from '../../math/mathDecorationProvider';
 import { MathCoreWasmBridge } from '../../math/mathCoreWasm';
 import { MathHoverProvider } from '../../math/mathHoverProvider';
 import { buildMathPreviewHtml } from '../../math/mathPreviewPanel';
-import { renderToSvgFile } from '../../math/mathSvgRenderer';
+import { renderSpacerSvgFile, renderToSvgFile } from '../../math/mathSvgRenderer';
+import { buildMathSyncPanelHtml, findMathBlockAtPosition } from '../../math/mathSyncPanel';
 import { TestUtils } from '../helpers/testUtils';
 
 /** Shared fake decoration provider for hover tests */
@@ -215,7 +216,169 @@ suite('GUI - Math Rendering', function() {
         assert.strictEqual(layout.boostApplied, true);
         assert.ok(layout.height.endsWith('em'));
         assert.ok(layout.width.endsWith('em'));
+        assert.ok(layout.spacerHeight.endsWith('em'));
         assert.ok(Number.parseFloat(layout.height) > 1.25);
-        assert.ok(layout.debugMessage.includes('"boostApplied":true'));
+        assert.ok(Number.parseFloat(layout.spacerHeight) > Number.parseFloat(layout.height));
+        const logLine = formatSvgDecorationLayoutLog('frac(1, 2) + sqrt(x)', layout);
+        assert.ok(logLine.includes('eq="frac(1, 2) + sqrt(x)"'));
+        assert.ok(logLine.includes('height='));
+        assert.ok(logLine.includes('spacer='));
+        assert.ok(logLine.includes('boost=yes'));
+    });
+
+    test('SVG layout boosts nested fractions more aggressively', () => {
+        const layout = buildSvgDecorationLayout(
+            'frac(1, 2) + frac(3, 4) + sqrt(x)',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.18,
+                widthEm: 1.5,
+            },
+            'bottom'
+        );
+
+        assert.strictEqual(layout.boostApplied, true);
+        assert.ok(layout.layoutScale > 1.0);
+        assert.ok(layout.layoutScale >= 1.2);
+        assert.ok(Number.parseFloat(layout.spacerHeight) > Number.parseFloat(layout.height));
+        const logLine = formatSvgDecorationLayoutLog('frac(1, 2) + frac(3, 4) + sqrt(x)', layout);
+        assert.ok(logLine.includes('eq="frac(1, 2) + frac(3, 4) + sqrt(x)"'));
+        assert.ok(logLine.includes('scale='));
+        assert.ok(logLine.includes('align=-0.18em'));
+    });
+
+    test('SVG layout does not boost plain division arithmetic', () => {
+        const layout = buildSvgDecorationLayout(
+            'a / b + c / d',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.12,
+                widthEm: 1.6,
+            },
+            'center'
+        );
+
+        assert.strictEqual(layout.boostApplied, false);
+        assert.strictEqual(layout.layoutScale, 1.0);
+        assert.strictEqual(layout.spacerHeight, layout.height);
+        const logLine = formatSvgDecorationLayoutLog('a / b + c / d', layout);
+        assert.ok(logLine.includes('eq="a / b + c / d"'));
+        assert.ok(logLine.includes('boost=no'));
+    });
+
+    test('SVG layout height is larger for roots and fractions than plain division', () => {
+        const plain = buildSvgDecorationLayout(
+            'a / b',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.12,
+                widthEm: 1.4,
+            },
+            'center'
+        );
+        const boosted = buildSvgDecorationLayout(
+            'frac(1, 2) + sqrt(x)',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.12,
+                widthEm: 1.4,
+            },
+            'center'
+        );
+
+        assert.strictEqual(plain.layoutScale, 1.0);
+        assert.ok(Number.parseFloat(plain.height) <= 1.01);
+        assert.ok(boosted.layoutScale > plain.layoutScale);
+        assert.ok(Number.parseFloat(boosted.height) > Number.parseFloat(plain.height));
+        assert.ok(formatSvgDecorationLayoutLog('a / b', plain).includes('height='));
+        assert.ok(formatSvgDecorationLayoutLog('frac(1, 2) + sqrt(x)', boosted).includes('boost=yes'));
+    });
+
+    test('SVG spacer renderer creates a transparent em-sized box', () => {
+        const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-math-svg-'));
+        try {
+            const result = renderSpacerSvgFile(cacheDir, 1.5, 0.01);
+
+            assert.ok(result, 'expected spacer render result');
+            assert.ok(result!.heightEm >= 1.5);
+            assert.ok(result!.widthEm >= 0.01);
+
+            const svgPath = result!.uri.fsPath;
+            const svg = fs.readFileSync(svgPath, 'utf8');
+
+            assert.ok(svg.includes('fill="transparent"'));
+            assert.ok(/height="[\d.]+em"/.test(svg), 'expected spacer SVG height to use em units');
+            assert.ok(/width="[\d.]+em"/.test(svg), 'expected spacer SVG width to use em units');
+        } finally {
+            fs.rmSync(cacheDir, { recursive: true, force: true });
+        }
+    });
+
+    test('SVG layout gives roots a larger spacer than simple fractions', () => {
+        const fracOnly = buildSvgDecorationLayout(
+            'frac(1, 2)',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.12,
+                widthEm: 1.2,
+            },
+            'center'
+        );
+        const sqrtOnly = buildSvgDecorationLayout(
+            'sqrt(x)',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.0,
+                descentEm: 0.12,
+                widthEm: 1.2,
+            },
+            'center'
+        );
+
+        assert.ok(Number.parseFloat(sqrtOnly.spacerHeight) > Number.parseFloat(fracOnly.spacerHeight));
+        assert.ok(Number.parseFloat(sqrtOnly.height) > Number.parseFloat(fracOnly.height));
+        assert.ok(Number.parseFloat(fracOnly.spacerHeight) >= 1.28);
+        assert.ok(Number.parseFloat(sqrtOnly.spacerHeight) >= 1.28);
+    });
+
+    test('Math sync panel HTML contains editable source and sync hooks', () => {
+        const html = buildMathSyncPanelHtml({
+            documentUri: 'file:///tmp/demo.spl',
+            blockText: 'frac(1, 2) + sqrt(x)',
+            latex: '\\frac{1}{2} + \\sqrt{x}',
+            pretty: '(1)/(2) + √x',
+            renderedHtml: '<span>rendered</span>',
+            blockLabel: 'm{}',
+            selectionStart: 2,
+            selectionEnd: 5,
+            hasContent: true,
+        }, vscode.Uri.file('/tmp/katex.css').toString());
+
+        assert.ok(html.includes('Math Sync Panel'));
+        assert.ok(html.includes('math-source'));
+        assert.ok(html.includes('request-sync'));
+        assert.ok(html.includes('type: \'edit\''));
+        assert.ok(html.includes('rendered'));
+        assert.ok(html.includes('frac(1, 2) + sqrt(x)'));
+    });
+
+    test('Math sync panel block lookup finds the active math block', async () => {
+        const document = await TestUtils.createTestFile(
+            'test-math-sync-panel.spl',
+            'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n    val z = 42\n'
+        );
+
+        const provider = new MathDecorationProvider();
+        const block = findMathBlockAtPosition(provider, document, new vscode.Position(1, 18));
+
+        assert.ok(block, 'expected active math block');
+        assert.strictEqual(block!.content, 'frac(1, 2) + sqrt(x)');
+
+        provider.dispose();
     });
 });

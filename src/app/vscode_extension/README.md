@@ -289,6 +289,18 @@ Expected pretty output examples:
 - `int(x, 0..1) x^2` → `∫(x=0..1) x²`
 - `A' + B'` → `Aᵀ + Bᵀ`
 
+### Synced Math Panel
+
+The extension also provides a synced companion panel that mirrors the active
+math block and delegates edits back to the source document.
+
+Open it from the Command Palette with:
+
+- `Simple: Toggle Synced Math Panel`
+
+Use this when you want a rendered math surface alongside the source editor
+without leaving the `.spl` document as the source of truth.
+
 ### Viewing LSP Server Output
 
 1. Open Output panel: **View** → **Output**
@@ -498,6 +510,7 @@ val init = nograd{ sqrt(frac(6, fan_in + fan_out)) }
 
 **Commands:**
 - `Simple: Toggle Math Preview` — toggle math preview panel
+- `Simple: Toggle Synced Math Panel` — open the synced math companion panel
 - `Simple: Toggle Inline Render` — toggle inline rendering
 
 ## Test CodeLens (Gutter Arrows)

@@ -49,7 +49,7 @@ Read `tools/claude-plugin/repo-and-pull-req/skills/jira/jira_setup.md` and follo
 **`push`:**
 1. Pre-check: `gh auth status` — if fails, redirect to `setup gh`
 2. Read and follow `tools/claude-plugin/repo-and-pull-req/skills/git/gh_push.md`
-3. If Jira configured (`jira me` succeeds):
+3. If Jira configured (`bin/jira auth status` succeeds):
    Also read and follow `tools/claude-plugin/repo-and-pull-req/skills/jira/jira_push.md`
 
 **`wiki gh`:**
@@ -59,7 +59,7 @@ Read `tools/claude-plugin/repo-and-pull-req/skills/git/gh_wiki.md` and follow pr
 Read `tools/claude-plugin/repo-and-pull-req/skills/jira/jira_wiki.md` and follow procedure.
 
 **`wiki`** (no platform specified):
-Run `wiki gh`. If Jira configured (`jira me` succeeds), also run `wiki jira`.
+Run `wiki gh`. If Jira configured (`bin/jira auth status` succeeds), also run `wiki jira`.
 
 **`review <pr#>`:**
 1. Read and follow `tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`
@@ -78,7 +78,7 @@ Cancel the scheduled review for this PR number.
 
 Before any non-setup command:
 - For gh commands: `gh auth status` — redirect to `setup gh` if fails
-- For jira commands: `jira me` — redirect to `setup jira` if fails
+- For jira commands: `bin/jira auth status` — redirect to `setup jira` if fails
 - For push: verify committed changes exist (`jj st`)
 
 ## Integration

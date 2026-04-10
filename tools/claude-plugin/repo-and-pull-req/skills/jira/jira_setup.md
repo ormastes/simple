@@ -1,21 +1,26 @@
 # Jira CLI Setup Skill
 
-Interactive setup for Jira CLI (`ankitpokhrel/jira-cli`) integration.
+Interactive setup for our custom Jira CLI (`tools/jira-cli`) — a gh-like interface for Atlassian Cloud.
 
 ## Prerequisites Check
 
-1. Check if jira-cli installed: `which jira`
-2. Check if configured: `jira me`
-3. Check config: `~/.config/.jira/.config.yml`
+1. Check if jira-cli available: `bin/jira version`
+2. Check if configured: `bin/jira auth status`
+3. Check config: `~/.config/jira-cli/config.json`
 
 ## Procedure
 
-### Step 1 — Install jira-cli
+### Step 1 — Verify jira-cli
 
-If `jira` not found:
-- macOS: `brew install ankitpokhrel/jira-cli/jira-cli`
-- Go: `go install github.com/ankitpokhrel/jira-cli/cmd/jira@latest`
-- Verify: `jira version`
+The tool lives at `tools/jira-cli/bin/jira` with a symlink at `bin/jira`.
+```bash
+bin/jira version
+# Expected: jira-cli version 0.1.0 (Simple Language Project)
+```
+
+If symlink missing: `ln -sf ../tools/jira-cli/bin/jira bin/jira`
+
+Dependencies: `curl`, `jq` (install via `brew install curl jq` if missing).
 
 ### Step 2 — Create Atlassian Account (if needed)
 
@@ -34,33 +39,53 @@ If user has no Atlassian account:
 
 ### Step 4 — Configure jira-cli
 
-Ask user to run: `! jira init`
-- Installation type: Cloud
-- Server: `https://<workspace>.atlassian.net`
-- Login email: `ormastes@gmail.com`
-- API token: (paste from Step 3)
-- Default project: (user-specified)
-- Default board: (user-specified, or skip)
+Ask user to run interactively: `! bin/jira auth login`
 
-Config stored at: `~/.config/.jira/.config.yml`
+The login flow will prompt for:
+- Server URL: `https://<workspace>.atlassian.net`
+- Email: `ormastes@gmail.com`
+- API token: (paste from Step 3)
+- Default project key: (e.g., SIMPLE)
+- Default Confluence space key: (e.g., SIMPLE)
+
+Credentials are verified against `/rest/api/3/myself` during login.
+Config stored at: `~/.config/jira-cli/config.json` (mode 600).
 
 ### Step 5 — Verify Access
 
-1. `jira me` — shows user profile
-2. `jira project list` — lists accessible projects
-3. `jira sprint list --current` — shows current sprint (if Scrum)
-4. `jira issue list` — lists issues
+```bash
+bin/jira auth status     # Shows auth status + token health check
+bin/jira me              # Shows current user info
+bin/jira project list    # Lists accessible projects
+bin/jira issue list      # Lists issues in default project
+bin/jira wiki space list # Lists Confluence spaces
+```
 
 ## Verification Checklist
 
-- [ ] `jira version` succeeds
-- [ ] `jira me` shows authenticated user
-- [ ] `jira project list` returns projects
-- [ ] `~/.config/.jira/.config.yml` exists
+- [ ] `bin/jira version` succeeds
+- [ ] `bin/jira auth status` shows "Logged in" with valid token
+- [ ] `bin/jira me` shows user info
+- [ ] `bin/jira project list` returns projects
+- [ ] `~/.config/jira-cli/config.json` exists
+
+## Command Reference (mirrors gh)
+
+| gh command | jira equivalent |
+|------------|----------------|
+| `gh auth login` | `jira auth login` |
+| `gh auth status` | `jira auth status` |
+| `gh issue list` | `jira issue list` |
+| `gh issue create` | `jira issue create` |
+| `gh issue view #N` | `jira issue view PROJ-123` |
+| `gh issue comment #N` | `jira issue comment PROJ-123` |
+| `gh api <endpoint>` | `jira api <endpoint>` |
+| N/A | `jira wiki create` |
+| N/A | `jira wiki list` |
 
 ## Error Handling
 
-- If brew not available: suggest `go install` path
-- If auth fails: verify API token, re-run `! jira init`
-- If no project: guide user to create one in Atlassian web UI
-- If 401 error: token may have expired, regenerate at API tokens page
+- If `curl` or `jq` not found: `brew install curl jq`
+- If auth fails (HTTP 401): verify API token, re-run `! bin/jira auth login`
+- If no project: create one at `https://<workspace>.atlassian.net`
+- If token expired: regenerate at https://id.atlassian.com/manage-profile/security/api-tokens

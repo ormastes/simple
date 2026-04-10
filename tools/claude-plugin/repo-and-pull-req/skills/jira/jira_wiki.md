@@ -4,21 +4,21 @@ Create/update Confluence pages with knowledge sharing for PRs.
 
 ## Prerequisites
 
-- Atlassian API token configured (from jira_setup)
+- Our jira-cli configured (`bin/jira auth status` succeeds; if not → run jira_setup)
 - Confluence space exists (same Atlassian workspace)
-- Credentials from `~/.config/.jira/.config.yml`
+- Credentials from `~/.config/jira-cli/config.json`
 
 ## Procedure
 
 ### Step 1 — Read Credentials
 
 ```bash
-# Extract from jira-cli config
-JIRA_CONFIG="$HOME/.config/.jira/.config.yml"
-SERVER=$(grep 'server:' "$JIRA_CONFIG" | awk '{print $2}' | sed 's|/$||')
-EMAIL=$(grep 'login:' "$JIRA_CONFIG" | awk '{print $2}')
-# API token: prompt user or read from keyring
-# Ask user: "Enter your Atlassian API token (same as jira-cli):"
+# Extract from our jira-cli config
+JIRA_CONFIG="$HOME/.config/jira-cli/config.json"
+SERVER=$(jq -r '.server' "$JIRA_CONFIG")
+EMAIL=$(jq -r '.email' "$JIRA_CONFIG")
+TOKEN=$(jq -r '.token' "$JIRA_CONFIG")
+SPACE_KEY=$(jq -r '.default_space' "$JIRA_CONFIG")
 ```
 
 ### Step 2 — Gather Content
@@ -117,14 +117,15 @@ gh pr edit "${PR_NUMBER}" --body "${EXISTING_BODY}\n\nConfluence: ${PAGE_URL}"
 
 # Add to Jira issue (if linked)
 if [ -n "${ISSUE_KEY}" ]; then
-  jira issue comment add "${ISSUE_KEY}" --body "Confluence: ${PAGE_URL}"
+  bin/jira issue comment "${ISSUE_KEY}" --body "Confluence: ${PAGE_URL}"
 fi
 ```
 
 ## Configuration
 
 First-time use: ask user for Confluence space key and store it.
-The API token is the same one used for jira-cli.
+The API token is the same one used for our jira-cli (`~/.config/jira-cli/config.json`).
+Alternatively, use our CLI directly: `bin/jira wiki create -t "Title" -b "content" -s SPACE`
 
 ## Error Handling
 

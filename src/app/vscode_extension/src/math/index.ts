@@ -19,11 +19,13 @@ import * as path from 'path';
 import { MathDecorationProvider } from './mathDecorationProvider';
 import { MathCoreWasmBridge } from './mathCoreWasm';
 import { MathPreviewPanel } from './mathPreviewPanel';
+import { MathSyncPanel } from './mathSyncPanel';
 import { MathHoverProvider } from './mathHoverProvider';
 
 export { MathDecorationProvider } from './mathDecorationProvider';
 export { MathCoreWasmBridge } from './mathCoreWasm';
 export { MathPreviewPanel } from './mathPreviewPanel';
+export { MathSyncPanel } from './mathSyncPanel';
 export { MathHoverProvider } from './mathHoverProvider';
 export { simpleToLatex, simpleToUnicode } from './mathConverter';
 
@@ -98,6 +100,16 @@ export function activateMathFeatures(
                 MathPreviewPanel.close();
             } else {
                 MathPreviewPanel.show(decorationProvider, context.extensionUri);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.math.toggleSyncPanel', () => {
+            if (MathSyncPanel.isVisible()) {
+                MathSyncPanel.close();
+            } else {
+                MathSyncPanel.show(decorationProvider, context.extensionUri);
             }
         })
     );

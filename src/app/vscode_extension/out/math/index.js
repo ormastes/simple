@@ -48,13 +48,14 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathPreviewPanel = exports.MathCoreWasmBridge = exports.MathDecorationProvider = void 0;
+exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathSyncPanel = exports.MathPreviewPanel = exports.MathCoreWasmBridge = exports.MathDecorationProvider = void 0;
 exports.activateMathFeatures = activateMathFeatures;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const mathDecorationProvider_1 = require("./mathDecorationProvider");
 const mathCoreWasm_1 = require("./mathCoreWasm");
 const mathPreviewPanel_1 = require("./mathPreviewPanel");
+const mathSyncPanel_1 = require("./mathSyncPanel");
 const mathHoverProvider_1 = require("./mathHoverProvider");
 var mathDecorationProvider_2 = require("./mathDecorationProvider");
 Object.defineProperty(exports, "MathDecorationProvider", { enumerable: true, get: function () { return mathDecorationProvider_2.MathDecorationProvider; } });
@@ -62,6 +63,8 @@ var mathCoreWasm_2 = require("./mathCoreWasm");
 Object.defineProperty(exports, "MathCoreWasmBridge", { enumerable: true, get: function () { return mathCoreWasm_2.MathCoreWasmBridge; } });
 var mathPreviewPanel_2 = require("./mathPreviewPanel");
 Object.defineProperty(exports, "MathPreviewPanel", { enumerable: true, get: function () { return mathPreviewPanel_2.MathPreviewPanel; } });
+var mathSyncPanel_2 = require("./mathSyncPanel");
+Object.defineProperty(exports, "MathSyncPanel", { enumerable: true, get: function () { return mathSyncPanel_2.MathSyncPanel; } });
 var mathHoverProvider_2 = require("./mathHoverProvider");
 Object.defineProperty(exports, "MathHoverProvider", { enumerable: true, get: function () { return mathHoverProvider_2.MathHoverProvider; } });
 var mathConverter_1 = require("./mathConverter");
@@ -115,6 +118,14 @@ function activateMathFeatures(context, onLspStateChanged, debugLogger) {
         }
         else {
             mathPreviewPanel_1.MathPreviewPanel.show(decorationProvider, context.extensionUri);
+        }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('simple.math.toggleSyncPanel', () => {
+        if (mathSyncPanel_1.MathSyncPanel.isVisible()) {
+            mathSyncPanel_1.MathSyncPanel.close();
+        }
+        else {
+            mathSyncPanel_1.MathSyncPanel.show(decorationProvider, context.extensionUri);
         }
     }));
     // Register toggle inline rendering command

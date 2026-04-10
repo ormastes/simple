@@ -225,11 +225,15 @@ else
   fi
 
   # Stage 2: seed compiles bootstrap_main.spl
+  # Always use cranelift for stage 2: the seed interpreter intercepts
+  # --backend llvm-lib and dispatches to bootstrap_main.spl via the
+  # interpreter, where rt_native_build is a stub that fails.  With
+  # cranelift the seed uses its Rust handle_native_build directly.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   rm -rf .simple/native_cache/
   run_logged stage2-native-build env RUST_LOG="${RUST_LOG:-error}" "${seed_bin}" native-build \
-    --backend "${backend}" \
+    --backend cranelift \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --entry src/app/cli/bootstrap_main.spl \
@@ -286,6 +290,7 @@ if [ ! -x "${stage2}" ]; then
 fi
 
 # Decide which compiler to use for stage 4
+stage4_is_seed=0
 if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
   hash2=$(sha256sum "${stage2}" | awk '{print $1}')
   hash3=$(sha256sum "${stage3}" | awk '{print $1}')
@@ -302,6 +307,18 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
 else
   echo "Stage 3 unavailable — using seed for stage 4"
   stage_for_build="${seed_bin}"
+  stage4_is_seed=1
+fi
+
+# When stage 4 uses the Rust seed, --backend llvm-lib triggers the
+# interpreter dispatch path (native_build_should_use_simple returns true),
+# where rt_native_build is a stub that fails.  Use cranelift for the seed.
+# Compiled binaries (stage2/stage3) call rt_native_build from libsimple_native_all.a
+# and handle all backends correctly.
+if [ "${stage4_is_seed}" -eq 1 ]; then
+  stage4_backend="cranelift"
+else
+  stage4_backend="${backend}"
 fi
 
 # ===========================================================================
@@ -315,7 +332,7 @@ rm -rf .simple/native_cache/
 run_logged stage4-native-build env RUST_LOG="${RUST_LOG:-error}" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   "${stage_for_build}" native-build \
-  --backend "${backend}" \
+  --backend "${stage4_backend}" \
   --source src/compiler --source src/app --source src/lib \
   --entry-closure \
   --entry src/app/cli/main.spl \

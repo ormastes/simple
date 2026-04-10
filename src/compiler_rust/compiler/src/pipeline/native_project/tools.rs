@@ -194,6 +194,10 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
 }
 
 /// Strip LLVM static constructors from a static archive to prevent segfaults (LIM-010).
+///
+/// Uses `llvm-objcopy` directly on the archive file to remove constructor/destructor
+/// sections from every member, preserving duplicate-named members (e.g. multiple
+/// `Error.cpp.o`) that `ar x` would silently overwrite.
 pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<PathBuf, String> {
     let objcopy = find_objcopy_tool();
     let objcopy = match objcopy {
@@ -202,59 +206,21 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
     };
 
     let archive_path = safe_canonicalize(lib);
-
-    let extract_dir = temp_dir.join("_rt_ctor_strip");
-    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("mkdir: {e}"))?;
-
-    let status = std::process::Command::new("ar")
-        .arg("x").arg(&archive_path)
-        .current_dir(&extract_dir)
-        .status()
-        .map_err(|e| format!("ar x: {e}"))?;
-    if !status.success() {
-        return Ok(lib.to_path_buf());
-    }
-
-    if let Ok(entries) = std::fs::read_dir(&extract_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".cpp.o") {
-                let path = entry.path();
-                let _ = std::process::Command::new(&objcopy)
-                    .arg("--remove-section=.init_array")
-                    .arg("--remove-section=.ctors")
-                    .arg("--remove-section=.fini_array")
-                    .arg("--remove-section=.dtors")
-                    .arg(&path)
-                    .status();
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new(&objcopy)
-                        .arg("--remove-section=__DATA,__mod_init_func")
-                        .arg("--remove-section=__DATA,__mod_term_func")
-                        .arg(&path)
-                        .status();
-                }
-            }
-        }
-    }
-
     let filtered = temp_dir.join("libsimple_native_all_stripped.a");
-    let objects: Vec<PathBuf> = std::fs::read_dir(&extract_dir)
-        .map_err(|e| format!("readdir: {e}"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "o").unwrap_or(false))
-        .collect();
-    if objects.is_empty() {
-        return Ok(lib.to_path_buf());
+
+    let mut cmd = std::process::Command::new(&objcopy);
+    cmd.arg("--remove-section=.init_array")
+       .arg("--remove-section=.ctors")
+       .arg("--remove-section=.fini_array")
+       .arg("--remove-section=.dtors");
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("--remove-section=__DATA,__mod_init_func")
+           .arg("--remove-section=__DATA,__mod_term_func");
     }
-    let mut ar_cmd = std::process::Command::new("ar");
-    ar_cmd.arg("rcs").arg(&filtered);
-    for obj in &objects {
-        ar_cmd.arg(obj);
-    }
-    let status = ar_cmd.status().map_err(|e| format!("ar rcs: {e}"))?;
+    cmd.arg(&archive_path).arg(&filtered);
+
+    let status = cmd.status().map_err(|e| format!("llvm-objcopy on archive: {e}"))?;
     if !status.success() {
         return Ok(lib.to_path_buf());
     }
