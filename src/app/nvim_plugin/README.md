@@ -9,6 +9,8 @@ Neovim plugin for the [Simple programming language](https://github.com/nicholasg
 - **Tree-sitter support** with registration and query path management (`src/compiler/parser/treesitter/queries/`)
 - **Math block rendering** with conceal for `m{}`, `loss{}`, and `nograd{}` syntax, inline Unicode preview, and LSP hover (LaTeX + Unicode)
 - **Test lens** with "▶ Run" virtual text beside `describe`/`it`/`context`/`sdoctest` blocks
+- **Test workspace** with structured artifact browsing and rerun/open-source actions
+- **Editor markers** for breakpoints, bookmarks, and an execution pointer
 - **Brief view** for code overview (fold to signatures only)
 - **User commands** for testing, building, linting, and formatting
 - **Health checks** via `:checkhealth simple`
@@ -97,6 +99,13 @@ require("simple").setup({
 | `:SimpleBuild [args]` | Run build command with optional arguments |
 | `:SimpleLint` | Run the Simple linter |
 | `:SimpleFormat` | Run the Simple formatter |
+| `:SimpleTestWorkspace` | Open the structured test workspace |
+| `:SimpleBreakpointToggle` | Toggle a breakpoint marker |
+| `:SimpleBookmarkToggle` | Toggle a bookmark marker |
+| `:SimplePointerToggle` | Toggle the execution pointer marker |
+| `:SimplePointerClear` | Clear the execution pointer marker |
+| `:SimpleBookmarkNext` | Jump to the next bookmark |
+| `:SimpleBookmarkPrev` | Jump to the previous bookmark |
 | `:SimpleInfo` | Show plugin information |
 
 ## Default Keymaps
@@ -114,6 +123,12 @@ When `keymaps.enabled = true`, the following keymaps are set for Simple files
 | `<localleader>si` | Plugin info |
 | `<localleader>sl` | Lint |
 | `<localleader>sf` | Format |
+| `<localleader>sw` | Test workspace |
+| `<localleader>sx` | Toggle breakpoint |
+| `<localleader>sk` | Toggle bookmark |
+| `<localleader>sp` | Toggle execution pointer |
+| `<localleader>s]` | Next bookmark |
+| `<localleader>s[` | Previous bookmark |
 
 ## Math Block Rendering
 
@@ -163,6 +178,56 @@ When editing `.spl` files, virtual text "▶ Run" indicators appear beside test 
 - `""" sdoctest:`    → **▶ Run Doctest**
 
 Use `:SimpleMathToggle` to toggle math rendering, or call `require("simple.test_lens").toggle()` for test lens.
+
+## Test Workspace
+
+`SimpleTestWorkspace` opens a scratch buffer that lists the latest structured
+test-runner artifacts from `target/test-artifacts/` or `build/test-artifacts/`.
+
+Inside the workspace:
+
+- the header shows total / passed / failed / skipped counts
+- `r` refreshes the artifact list
+- `<CR>` opens the source file for the selected result
+- `R` reruns the selected test file
+- `o` opens the selected artifact directory in the OS file manager
+- `l` opens the latest result's source file
+
+This is a companion view, not a replacement editor. Source edits remain in the
+real `.spl` buffer.
+
+## Editor Markers
+
+`simple.nvim` can show editor-local markers for:
+
+- breakpoint toggles
+- bookmarks / anchors
+- a current execution pointer
+
+These markers are exposed through gutter signs and can be navigated with
+`SimpleBookmarkNext` / `SimpleBookmarkPrev`.
+
+## Diagnostics
+
+Simple files use stronger diagnostics presentation by default:
+
+- rounded floating windows for error details
+- visible gutter signs for errors, warnings, info, and hints
+- severity-sorted diagnostics
+- virtual-text markers with a visible bullet prefix
+
+Use `<leader>e` to open the diagnostic float and `<leader>q` to send issues to
+the location list.
+
+## Neovim Key Hints
+
+The default `<localleader>s` mappings include:
+
+- `<localleader>sw` for the test workspace
+- `<localleader>sx` for breakpoints
+- `<localleader>sk` for bookmarks
+- `<localleader>sp` for the execution pointer
+- `<localleader>s[` and `<localleader>s]` for bookmark navigation
 
 ## Tree-sitter Queries
 

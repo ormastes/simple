@@ -45,6 +45,8 @@ const environmentDetector_1 = require("./wasm/environmentDetector");
 const wasmLspBridge_1 = require("./wasm/wasmLspBridge");
 const math_1 = require("./math");
 const testCodeLensProvider_1 = require("./testing/testCodeLensProvider");
+const testWorkspacePanel_1 = require("./testing/testWorkspacePanel");
+const editorMarkers_1 = require("./testing/editorMarkers");
 const semanticTokensProvider_1 = require("./fallback/semanticTokensProvider");
 const diagnosticsProvider_1 = require("./fallback/diagnosticsProvider");
 /** Path to bundled WASM LSP binary (relative to extension root) */
@@ -64,6 +66,7 @@ let setMathLspRunning;
 let fallbackSemanticTokensProvider;
 let fallbackDiagnosticsProvider;
 let fallbackSemanticTokensRegistration;
+let editorMarkerManager;
 function activate(context) {
     console.log('Simple Language extension activating...');
     // Create output channel for LSP communication
@@ -99,6 +102,8 @@ function activate(context) {
     }, (message) => outputChannel?.appendLine(message));
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);
+    // Initialize editor markers (bookmarks / breakpoints / execution pointer)
+    activateEditorMarkers(context);
     console.log('Simple Language extension activated');
 }
 /**
@@ -464,6 +469,42 @@ function activateTestFeatures(context) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('simple.test.runAtCursor', () => {
         (0, testCodeLensProvider_1.runTestAtCursor)();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('simple.test.openWorkspace', () => {
+        testWorkspacePanel_1.TestWorkspacePanel.show(context.extensionUri);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('simple.test.refreshWorkspace', () => {
+        testWorkspacePanel_1.TestWorkspacePanel.currentPanel?.refresh();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('simple.test.openLatestArtifacts', () => {
+        if (testWorkspacePanel_1.TestWorkspacePanel.currentPanel) {
+            testWorkspacePanel_1.TestWorkspacePanel.currentPanel.openLatestArtifacts();
+        }
+        else {
+            testWorkspacePanel_1.TestWorkspacePanel.show(context.extensionUri).openLatestArtifacts();
+        }
+    }));
+}
+function activateEditorMarkers(context) {
+    editorMarkerManager = new editorMarkers_1.EditorMarkerManager();
+    context.subscriptions.push(editorMarkerManager);
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.toggleBreakpoint', (editor) => {
+        editorMarkerManager?.toggleBreakpoint(editor);
+    }));
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.toggleBookmark', (editor) => {
+        editorMarkerManager?.toggleBookmark(editor);
+    }));
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.togglePointer', (editor) => {
+        editorMarkerManager?.togglePointer(editor);
+    }));
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.clearPointer', (editor) => {
+        editorMarkerManager?.clearPointer(editor);
+    }));
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.nextBookmark', (editor) => {
+        editorMarkerManager?.jumpToNextBookmark(editor);
+    }));
+    context.subscriptions.push(vscode.commands.registerTextEditorCommand('simple.editor.prevBookmark', (editor) => {
+        editorMarkerManager?.jumpToPreviousBookmark(editor);
     }));
 }
 function disableFallbackProviders() {

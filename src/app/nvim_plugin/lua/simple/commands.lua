@@ -115,6 +115,48 @@ function M.setup(cfg)
     desc = "Show simple.nvim plugin information",
   })
 
+  vim.api.nvim_create_user_command("SimpleTestWorkspace", function()
+    require("simple.test_workspace").open()
+  end, {
+    desc = "Open the Simple test workspace",
+  })
+
+  vim.api.nvim_create_user_command("SimpleBreakpointToggle", function()
+    require("simple.markers").toggle_breakpoint()
+  end, {
+    desc = "Toggle a Simple breakpoint sign",
+  })
+
+  vim.api.nvim_create_user_command("SimpleBookmarkToggle", function()
+    require("simple.markers").toggle_bookmark()
+  end, {
+    desc = "Toggle a Simple bookmark sign",
+  })
+
+  vim.api.nvim_create_user_command("SimplePointerToggle", function()
+    require("simple.markers").toggle_pointer()
+  end, {
+    desc = "Toggle a Simple execution pointer sign",
+  })
+
+  vim.api.nvim_create_user_command("SimplePointerClear", function()
+    require("simple.markers").clear_pointer()
+  end, {
+    desc = "Clear the Simple execution pointer sign",
+  })
+
+  vim.api.nvim_create_user_command("SimpleBookmarkNext", function()
+    require("simple.markers").next_bookmark()
+  end, {
+    desc = "Jump to the next Simple bookmark",
+  })
+
+  vim.api.nvim_create_user_command("SimpleBookmarkPrev", function()
+    require("simple.markers").prev_bookmark()
+  end, {
+    desc = "Jump to the previous Simple bookmark",
+  })
+
   -- Setup keymaps if enabled
   if cfg.keymaps.enabled then
     M._setup_keymaps(cfg.keymaps)
@@ -302,6 +344,11 @@ function M.show_info()
     "  :SimpleBuild [args]     - Run build",
     "  :SimpleLint             - Run linter",
     "  :SimpleFormat           - Run formatter",
+    "  :SimpleTestWorkspace    - Open test result workspace",
+    "  :SimpleBreakpointToggle - Toggle breakpoint sign",
+    "  :SimpleBookmarkToggle   - Toggle bookmark sign",
+    "  :SimplePointerToggle    - Toggle execution pointer sign",
+    "  :SimplePointerClear     - Clear execution pointer sign",
     "  :SimpleInfo             - This info panel",
     "",
     "Health: Run :checkhealth simple",
@@ -373,6 +420,12 @@ function M._setup_keymaps(cfg)
       vim.keymap.set("n", p .. "i", "<cmd>SimpleInfo<cr>", vim.tbl_extend("force", opts, { desc = "Plugin info" }))
       vim.keymap.set("n", p .. "l", "<cmd>SimpleLint<cr>", vim.tbl_extend("force", opts, { desc = "Lint" }))
       vim.keymap.set("n", p .. "f", "<cmd>SimpleFormat<cr>", vim.tbl_extend("force", opts, { desc = "Format" }))
+      vim.keymap.set("n", p .. "w", "<cmd>SimpleTestWorkspace<cr>", vim.tbl_extend("force", opts, { desc = "Test workspace" }))
+      vim.keymap.set("n", p .. "x", "<cmd>SimpleBreakpointToggle<cr>", vim.tbl_extend("force", opts, { desc = "Toggle breakpoint" }))
+      vim.keymap.set("n", p .. "k", "<cmd>SimpleBookmarkToggle<cr>", vim.tbl_extend("force", opts, { desc = "Toggle bookmark" }))
+      vim.keymap.set("n", p .. "p", "<cmd>SimplePointerToggle<cr>", vim.tbl_extend("force", opts, { desc = "Toggle execution pointer" }))
+      vim.keymap.set("n", p .. "]", "<cmd>SimpleBookmarkNext<cr>", vim.tbl_extend("force", opts, { desc = "Next bookmark" }))
+      vim.keymap.set("n", p .. "[", "<cmd>SimpleBookmarkPrev<cr>", vim.tbl_extend("force", opts, { desc = "Previous bookmark" }))
     end,
   })
 end

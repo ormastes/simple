@@ -559,6 +559,41 @@ pub fn compile_call<M: Module>(
             }
         }
 
+        // Before cross-module import: check if this is a bare method name (no dot)
+        // that maps to a known runtime function. This handles the case where MIR
+        // emits `Call { target: "find" }` instead of `BuiltinMethod { method: "find" }`.
+        if !func_name.contains('.') {
+            let runtime_func: Option<&str> = match func_name {
+                "find" | "index_of" | "find_str" => Some("rt_string_index_of"),
+                "rfind" | "last_index_of" => Some("rt_string_rfind"),
+                "split" => Some("rt_string_split"),
+                "trim" => Some("rt_string_trim"),
+                "replace" => Some("rt_string_replace"),
+                "to_upper" | "upper" => Some("rt_string_to_upper"),
+                "to_lower" | "lower" => Some("rt_string_to_lower"),
+                "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "to_float" | "to_f64" | "parse_float" => Some("rt_string_to_float"),
+                "char_at" | "at" => Some("rt_string_char_at"),
+                "repeat" => Some("rt_string_repeat"),
+                _ => None,
+            };
+            if let Some(rt_name) = runtime_func {
+                if let Some(&func_id) = ctx.runtime_funcs.get(rt_name) {
+                    let runtime_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                    let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
+                    let arg_vals = adapt_args_to_signature(builder, runtime_ref, arg_vals);
+                    let call = adapted_call(builder, runtime_ref, &arg_vals);
+                    if let Some(d) = dest {
+                        let results = builder.inst_results(call);
+                        if !results.is_empty() {
+                            ctx.vreg_values.insert(*d, results[0]);
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Cross-module function: declare as import, resolve at link time.
         // Resolution order: 1) per-module use_map (from `use` statements),
         // 2) global import_map (unique names), 3) raw name fallback.

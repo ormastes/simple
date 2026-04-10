@@ -23,6 +23,8 @@ Tree-sitter-powered, accurate syntax highlighting that understands your code str
 - **Find References** - Find all references to a symbol (Shift+F12)
 - **Diagnostics** - Real-time parse error reporting with error recovery
 - **Incremental Parsing** - Fast, efficient updates as you type
+- **Test Workspace** - Browse structured test artifacts and rerun tests
+- **Editor Markers** - Toggle breakpoints, bookmarks, and an execution pointer
 
 ### 🤖 AI-Powered Features
 
@@ -44,6 +46,14 @@ Supercharge your Simple development with AI assistance (requires GitHub Copilot 
 - `Cmd/Ctrl+Shift+P` → "Simple AI: Open Chat Panel"
 - `Cmd/Ctrl+Shift+P` → "Simple AI: Generate Code from Description"
 - Right-click on selected code → "Explain Selected Code" / "Review Selected Code"
+
+**Editor / Test Commands:**
+- `Simple: Open Test Workspace` — open structured test artifacts
+- `Simple: Open Latest Test Artifacts` — jump straight to the most recent result
+- `Simple Editor: Toggle Simple Breakpoint` — add/remove a gutter breakpoint marker
+- `Simple Editor: Toggle Simple Bookmark` — add/remove a bookmark marker
+- `Simple Editor: Toggle Simple Execution Pointer` — add/remove an execution pointer marker
+- `Simple Editor: Next/Previous Simple Bookmark` — jump between bookmarks
 
 ## Installation
 
@@ -300,6 +310,30 @@ Open it from the Command Palette with:
 
 Use this when you want a rendered math surface alongside the source editor
 without leaving the `.spl` document as the source of truth.
+
+### Test Workspace
+
+Open the structured test workspace from the Command Palette with:
+
+The workspace panel shows:
+
+- a summary card row for total / passed / failed / latest result
+- each discovered result with source path, status, counts, and duration
+- `Open Source`, `Rerun`, and `Open Artifacts` actions
+- `Refresh` and `Open Latest Source` toolbar actions
+
+Command Palette shortcuts:
+
+- `Simple: Open Test Workspace`
+- `Simple: Open Latest Test Artifacts`
+
+It reads structured artifacts from:
+
+- `target/test-artifacts/`
+- `build/test-artifacts/`
+
+This is a companion view. Source edits and reruns still flow through the
+normal `.spl` file and the Simple test runner.
 
 ### Viewing LSP Server Output
 

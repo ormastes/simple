@@ -39,6 +39,7 @@ function M.setup(opts)
 
   -- Test lens: show ▶ Run buttons beside describe/it/sdoctest blocks
   require("simple.test_lens").setup(M.config)
+  require("simple.markers").setup()
 
   M._initialized = true
 end
@@ -61,6 +62,7 @@ function M._setup_highlights()
   hl(0, "SimpleTestPass", { fg = "#a6e3a1", default = true })
   hl(0, "SimpleTestFail", { fg = "#f38ba8", default = true })
   hl(0, "SimpleTestPending", { fg = "#f9e2af", default = true })
+  hl(0, "SimpleTestWorkspaceHeader", { link = "Title", default = true })
 
   -- Operator highlights
   hl(0, "SimplePipeOperator", { link = "Operator", default = true })

@@ -90,12 +90,20 @@ end
 local function default_on_attach(client, bufnr)
   local opts = { buffer = bufnr, silent = true }
 
+  -- Completion ergonomics
+  vim.bo[bufnr].omnifunc = "v:lua.vim.lsp.omnifunc"
+  vim.bo[bufnr].completeopt = "menu,menuone,noselect"
+  vim.keymap.set("i", "<C-Space>", function()
+    vim.lsp.buf.completion()
+  end, opts)
+
   -- Navigation (definition, references handled by src/app/lsp/handlers/)
   vim.keymap.set("n", "gd", vim.lsp.buf.definition, opts)
   vim.keymap.set("n", "gD", vim.lsp.buf.declaration, opts)
   vim.keymap.set("n", "gr", vim.lsp.buf.references, opts)
   vim.keymap.set("n", "gi", vim.lsp.buf.implementation, opts)
   vim.keymap.set("n", "gt", vim.lsp.buf.type_definition, opts)
+  vim.keymap.set("n", "<leader>ws", vim.lsp.buf.workspace_symbol, opts)
 
   -- Information (hover detects m{ } blocks and renders LaTeX + Unicode via math_repr.spl)
   vim.keymap.set("n", "K", vim.lsp.buf.hover, opts)

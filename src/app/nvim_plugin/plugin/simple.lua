@@ -27,6 +27,7 @@ vim.api.nvim_create_autocmd("FileType", {
     if vim.wo.conceallevel < 2 then
       vim.wo.conceallevel = 2
     end
+    vim.wo.signcolumn = "yes"
     -- Reveal conceal on cursor line in normal mode
     vim.wo.concealcursor = ""
   end,
@@ -40,11 +41,23 @@ vim.api.nvim_create_autocmd("FileType", {
   callback = function()
     -- Configure diagnostics display
     vim.diagnostic.config({
+      float = {
+        border = "rounded",
+        source = "if_many",
+        focusable = true,
+      },
       virtual_text = {
-        prefix = "#",
+        prefix = "●",
         spacing = 2,
       },
-      signs = true,
+      signs = {
+        text = {
+          [vim.diagnostic.severity.ERROR] = "✘",
+          [vim.diagnostic.severity.WARN] = "▲",
+          [vim.diagnostic.severity.INFO] = "i",
+          [vim.diagnostic.severity.HINT] = "↳",
+        },
+      },
       underline = true,
       update_in_insert = false,
       severity_sort = true,

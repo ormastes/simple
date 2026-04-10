@@ -16,6 +16,8 @@ import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDete
 import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
 import { activateMathFeatures } from './math';
 import { TestCodeLensProvider, runTestFile, runSdoctest, runTestAtCursor } from './testing/testCodeLensProvider';
+import { TestWorkspacePanel } from './testing/testWorkspacePanel';
+import { EditorMarkerManager } from './testing/editorMarkers';
 import { SimpleSemanticTokensProvider, TOKEN_LEGEND } from './fallback/semanticTokensProvider';
 import { SimpleDiagnosticsProvider } from './fallback/diagnosticsProvider';
 
@@ -37,6 +39,7 @@ let setMathLspRunning: ((running: boolean) => void) | undefined;
 let fallbackSemanticTokensProvider: SimpleSemanticTokensProvider | undefined;
 let fallbackDiagnosticsProvider: SimpleDiagnosticsProvider | undefined;
 let fallbackSemanticTokensRegistration: vscode.Disposable | undefined;
+let editorMarkerManager: EditorMarkerManager | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Simple Language extension activating...');
@@ -86,6 +89,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);
+
+    // Initialize editor markers (bookmarks / breakpoints / execution pointer)
+    activateEditorMarkers(context);
 
     console.log('Simple Language extension activated');
 }
@@ -555,6 +561,62 @@ function activateTestFeatures(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('simple.test.runAtCursor', () => {
             runTestAtCursor();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.openWorkspace', () => {
+            TestWorkspacePanel.show(context.extensionUri);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.refreshWorkspace', () => {
+            TestWorkspacePanel.currentPanel?.refresh();
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.test.openLatestArtifacts', () => {
+            if (TestWorkspacePanel.currentPanel) {
+                TestWorkspacePanel.currentPanel.openLatestArtifacts();
+            } else {
+                TestWorkspacePanel.show(context.extensionUri).openLatestArtifacts();
+            }
+        })
+    );
+}
+
+function activateEditorMarkers(context: vscode.ExtensionContext) {
+    editorMarkerManager = new EditorMarkerManager();
+    context.subscriptions.push(editorMarkerManager);
+
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.toggleBreakpoint', (editor) => {
+            editorMarkerManager?.toggleBreakpoint(editor);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.toggleBookmark', (editor) => {
+            editorMarkerManager?.toggleBookmark(editor);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.togglePointer', (editor) => {
+            editorMarkerManager?.togglePointer(editor);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.clearPointer', (editor) => {
+            editorMarkerManager?.clearPointer(editor);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.nextBookmark', (editor) => {
+            editorMarkerManager?.jumpToNextBookmark(editor);
+        })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerTextEditorCommand('simple.editor.prevBookmark', (editor) => {
+            editorMarkerManager?.jumpToPreviousBookmark(editor);
         })
     );
 }
