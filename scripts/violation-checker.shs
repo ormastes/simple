@@ -3,7 +3,7 @@
 #
 # Rule: bin/simple must resolve to a self-hosted or deployed release binary.
 #       bin/release/<triple>/ is the canonical deployed layout.
-#       bin/release/simple is legacy compatibility only.
+#       The flat release runtime path must not exist.
 #       Rust bootstrap goes to src/compiler_rust/target/bootstrap/simple only.
 #       Shell wrappers must resolve to deployed Simple binaries, not Rust-only links.
 
@@ -159,42 +159,16 @@ fi
 echo
 
 # ─────────────────────────────────────────────────────────
-# 2. Check bin/release/simple (optional legacy flat self-hosted binary)
+# 2. Check the flat release runtime path is absent
 # ─────────────────────────────────────────────────────────
-printf "${BOLD}--- 2. bin/release/simple (optional legacy flat binary) ---${NC}\n"
+printf "${BOLD}--- 2. Flat release runtime path (must be absent) ---${NC}\n"
 check
-BIN_RELEASE_SIMPLE="${REPO_ROOT}/bin/release/simple"
-if [ -L "$BIN_RELEASE_SIMPLE" ]; then
-  RAW_LINK="$(readlink "$BIN_RELEASE_SIMPLE")"
-  RESOLVED="$(resolve_symlink "$BIN_RELEASE_SIMPLE")"
-  if points_to_rust "$RESOLVED"; then
-    violation "bin/release/simple -> Rust binary" \
-      "Points to: $RAW_LINK — MUST be self-hosted Simple binary, NEVER Rust bootstrap"
-  else
-    warning "bin/release/simple is a symlink" \
-      "Points to: $RAW_LINK — should be the actual self-hosted binary, not a link"
-  fi
-elif [ -f "$BIN_RELEASE_SIMPLE" ]; then
-  if is_elf_binary "$BIN_RELEASE_SIMPLE"; then
-    ok "bin/release/simple exists as ELF binary (self-hosted)"
-  else
-    warning "bin/release/simple exists but is not an ELF binary" \
-      "$(file "$BIN_RELEASE_SIMPLE" 2>/dev/null)"
-  fi
+BIN_RELEASE_FLAT="${REPO_ROOT}/bin/release/"simple
+if [ -L "$BIN_RELEASE_FLAT" ] || [ -e "$BIN_RELEASE_FLAT" ]; then
+  violation "flat release runtime PRESENT" \
+    "Flat runtime path is no longer supported; remove ${BIN_RELEASE_FLAT#${REPO_ROOT}/}"
 else
-  PLATFORM_SIMPLE_FOUND=0
-  for PLATFORM_SIMPLE in "${REPO_ROOT}"/bin/release/*/simple; do
-    if [ -f "$PLATFORM_SIMPLE" ] || [ -L "$PLATFORM_SIMPLE" ]; then
-      PLATFORM_SIMPLE_FOUND=1
-      break
-    fi
-  done
-  if [ "$PLATFORM_SIMPLE_FOUND" = "1" ]; then
-    info "bin/release/simple missing (platform-specific layout in use)"
-  else
-    violation "bin/release/simple MISSING" \
-      "No flat or platform-specific deployed binary found under bin/release/"
-  fi
+  ok "flat release runtime absent"
 fi
 echo
 
@@ -255,7 +229,7 @@ do
       ok "$WPATH prefers platform binary before Rust fallback"
     elif [ ! -f "$BIN_RELEASE_SIMPLE" ] && [ ! -L "$BIN_RELEASE_SIMPLE" ]; then
       warning "$WPATH may fall back to Rust binary" \
-        "No colocated platform runtime or flat bin/release/simple detected"
+        "No colocated platform runtime detected"
     else
       ok "$WPATH has Rust fallback after deployed runtime"
     fi
@@ -417,7 +391,7 @@ echo
 if [ "$VIOLATIONS" -gt 0 ]; then
   printf "${RED}${BOLD}FAIL${NC} — %d violation(s) found.\n" "$VIOLATIONS"
   printf "Fix: deploy a self-hosted binary, then update symlinks:\n"
-  printf "  bin/simple -> bin/release/<triple>/simple (or legacy bin/release/simple)\n"
+  printf "  bin/simple -> bin/release/<triple>/simple\n"
   printf "  MCP wrappers should live in bin/release/<triple>/ and prefer colocated runtime\n"
   exit 1
 fi

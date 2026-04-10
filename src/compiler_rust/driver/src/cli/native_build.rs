@@ -5,7 +5,7 @@
 //!
 //! Options:
 //!   --source <dir>      Source directory (can be repeated; default: src/compiler, src/app, src/lib)
-//!   -o <path>           Output binary path (default: bin/release/simple_native)
+//!   -o <path>           Output binary path (default: bin/simple_native)
 //!   --entry <file>      Entry file whose main() becomes the program entry point
 //!                        (default: src/app/cli/main.spl if it exists)
 //!   --verbose           Verbose output
@@ -222,7 +222,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         source_dirs.push(project_root.join("src/app"));
         source_dirs.push(project_root.join("src/lib"));
     }
-    let output = output.unwrap_or_else(|| project_root.join("bin/release/simple_native"));
+    let output = output.unwrap_or_else(|| project_root.join("bin/simple_native"));
 
     // Auto-default entry file: if not specified and src/app/cli/main.spl exists, use it
     let entry_file = entry_file.or_else(|| {
@@ -384,7 +384,7 @@ fn print_help() {
     println!();
     println!("Options:");
     println!("  --source <dir>      Source directory to compile (repeatable)");
-    println!("  -o <path>           Output binary path (default: bin/release/simple_native)");
+    println!("  -o <path>           Output binary path (default: bin/simple_native)");
     println!("  --entry <file>      Entry file whose main() becomes the program entry point");
     println!("                       (default: src/app/cli/main.spl if it exists)");
     println!("  --verbose, -v       Verbose output");

@@ -658,7 +658,6 @@ fn simple_binary_candidates() -> Vec<PathBuf> {
     candidates.push(PathBuf::from("./bin/simple"));
 
     candidates.extend(platform_release_binary_candidates());
-    candidates.push(PathBuf::from("./bin/release/simple"));
     candidates.push(PathBuf::from("./bin/wrappers/simple"));
     candidates.extend(local_rust_binary_candidates());
     candidates.push(PathBuf::from("simple"));

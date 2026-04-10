@@ -51,6 +51,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MathDecorationProvider = void 0;
+exports.buildSvgDecorationLayout = buildSvgDecorationLayout;
 const vscode = __importStar(require("vscode"));
 const mathConverter_1 = require("./mathConverter");
 const mathSvgRenderer_1 = require("./mathSvgRenderer");
@@ -62,6 +63,34 @@ const BLOCK_INDICATORS = {
     loss: 'L', // Loss function
     nograd: '\u2205', // ∅ no-gradient
 };
+function shouldBoostSvgLayout(content) {
+    return /\b(frac|sqrt)\s*\(/.test(content);
+}
+function buildSvgDecorationLayout(content, svgResult, alignment) {
+    const boostApplied = shouldBoostSvgLayout(content);
+    const layoutScale = boostApplied ? 1.12 : 1.0;
+    const heightEm = Math.max(svgResult.heightEm * layoutScale, 1.0);
+    const widthEm = Math.max(svgResult.widthEm * layoutScale, 0.75);
+    const verticalAlign = alignment === 'center'
+        ? 'middle'
+        : `-${svgResult.descentEm.toFixed(2)}em`;
+    return {
+        height: `${heightEm.toFixed(2)}em`,
+        width: `${widthEm.toFixed(2)}em`,
+        verticalAlign,
+        boostApplied,
+        debugMessage: JSON.stringify({
+            content,
+            boostApplied,
+            layoutScale,
+            heightEm: Number(heightEm.toFixed(3)),
+            widthEm: Number(widthEm.toFixed(3)),
+            descentEm: Number(svgResult.descentEm.toFixed(3)),
+            verticalAlign,
+            alignment,
+        }),
+    };
+}
 /**
  * Regex for detecting math-mode custom blocks: m{}, loss{}, nograd{}.
  * Handles one level of nested braces (e.g., m{ x^{2} + y^{2} }).
@@ -70,11 +99,14 @@ const BLOCK_INDICATORS = {
  */
 const MATH_BLOCK_REGEX = /\b(?<prefix>m|loss|nograd)\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/gs;
 class MathDecorationProvider {
-    constructor() {
+    constructor(debugLogger) {
         this.disposables = [];
         this.isEnabled = true;
+        /** When enabled, logs math SVG layout metrics for debugging decoration sizing */
+        this.debugLayout = false;
         /** Line numbers that the cursor currently occupies (used for reveal) */
         this.cursorLines = new Set();
+        this.debugLogger = debugLogger;
         // Create decoration types once and reuse them
         this.contentDecorationType = vscode.window.createTextEditorDecorationType({
             backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
@@ -123,9 +155,11 @@ class MathDecorationProvider {
         // Listen for configuration changes
         this.disposables.push(vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('simple.math.renderInline') ||
-                event.affectsConfiguration('simple.math.alignment')) {
+                event.affectsConfiguration('simple.math.alignment') ||
+                event.affectsConfiguration('simple.math.debugLayout')) {
                 const config = vscode.workspace.getConfiguration('simple');
                 this.isEnabled = config.get('math.renderInline', true);
+                this.debugLayout = config.get('math.debugLayout', false);
                 this.updateActiveEditor();
             }
         }));
@@ -226,7 +260,9 @@ class MathDecorationProvider {
         const closeDecorations = [];
         const svgDecorations = [];
         const fg = this.getForegroundColor();
-        const alignment = vscode.workspace.getConfiguration('simple').get('math.alignment', 'center');
+        const config = vscode.workspace.getConfiguration('simple');
+        const alignment = config.get('math.alignment', 'center');
+        this.debugLayout = config.get('math.debugLayout', false);
         for (const block of mathBlocks) {
             // Check if cursor is on any line of this math block -- if so, skip
             // decorations so the user can see the raw source
@@ -244,9 +280,12 @@ class MathDecorationProvider {
                 svgResult = (0, mathSvgRenderer_1.renderToSvgFile)(latex, this.svgCacheDir, fg);
             }
             if (svgResult) {
-                const verticalAlign = alignment === 'center'
-                    ? 'middle'
-                    : `-${svgResult.descentEm.toFixed(2)}em`;
+                const layout = buildSvgDecorationLayout(block.content, svgResult, alignment);
+                if (this.debugLayout) {
+                    const message = `[simple.math.layout] ${layout.debugMessage}`;
+                    console.log(message);
+                    this.debugLogger?.(message);
+                }
                 svgDecorations.push({
                     range: block.fullRange,
                     hoverMessage: new vscode.MarkdownString(`**${label} Block**\n\n\`${block.content}\`\n\n_Rendered:_ ${rendered}\n\n$$${(0, mathConverter_1.simpleToLatex)(block.content)}$$`),
@@ -254,7 +293,9 @@ class MathDecorationProvider {
                         before: {
                             contentIconPath: svgResult.uri,
                             margin: '0 4px 0 0',
-                            textDecoration: `none; vertical-align: ${verticalAlign}`,
+                            width: layout.width,
+                            height: layout.height,
+                            textDecoration: `none; vertical-align: ${layout.verticalAlign}`,
                         },
                     },
                 });

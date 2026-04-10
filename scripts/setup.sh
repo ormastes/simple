@@ -125,8 +125,7 @@ fi
 
 # Resolve a self-hosted release binary.
 # Skips symlinks that resolve to Rust build artifacts (from previous fallback setups).
-# Target-specific paths are always valid. The flat bin/release/simple fallback is
-# only kept for legacy compatibility when the target runtime OS matches the host.
+# Target-specific paths are always valid.
 find_release_bin() {
   local plat="$1" fos="$2" farch="$3" fext="$4"
   if [ -f "${release_dir}/${plat}/simple${fext}" ] && ! is_rust_artifact "${release_dir}/${plat}/simple${fext}"; then
@@ -308,7 +307,7 @@ else
   fi
 fi
 
-# Clean up Rust-pointing symlinks at bin/release/simple(.exe), but preserve real self-hosted binaries
+# Clean up stale flat release symlinks.
 for _stale in "${release_dir}/simple" "${release_dir}/simple.exe"; do
   if [ -L "${_stale}" ] && is_rust_artifact "${_stale}"; then
     rm -f "${_stale}" 2>/dev/null || true
@@ -353,7 +352,6 @@ RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/release/simple"
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${SCRIPT_DIR}/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/simple"; fi
-if [ ! -x "\$RUNTIME" ]; then RUNTIME="\${REPO_ROOT}/bin/release/simple"; fi
 if [ ! -x "\$RUNTIME" ]; then echo "error: no runtime found for ${name}" >&2; exit 1; fi
 ENTRY="\${REPO_ROOT}/${entry}"
 STDERR_LOG="\${REPO_ROOT}/.simple/logs/${name}_stderr.log"
@@ -377,8 +375,7 @@ generate_mcp_launcher "simple_mcp_server" \
 echo "  simple_mcp_server"
 
 generate_mcp_launcher "simple_lsp_mcp_server" \
-  "src/app/simple_lsp_mcp/main.spl" \
-  'export SIMPLE_BINARY="$RUNTIME"' ""
+  "src/app/simple_lsp_mcp/main.spl" "" ""
 echo "  simple_lsp_mcp_server"
 
 cat > "${mcp_release_dir}/t32_mcp_server" <<'T32_MCP_EOF'
@@ -572,9 +569,6 @@ elif [ -z "$RUNTIME" ] && [ -x "${SCRIPT_DIR}/simple" ]; then
 elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/simple" ]; then
   RUNTIME="${REPO_ROOT}/bin/simple"
   RUNTIME_KIND="bin-simple"
-elif [ -z "$RUNTIME" ] && [ -x "${REPO_ROOT}/bin/release/simple" ]; then
-  RUNTIME="${REPO_ROOT}/bin/release/simple"
-  RUNTIME_KIND="bin-release-simple"
 fi
 
 T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
@@ -710,7 +704,6 @@ if [ -z "$RUNTIME" ]; then RUNTIME="${SIMPLE_RUNTIME:-${REPO_ROOT}/src/compiler_
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/src/compiler_rust/target/bootstrap/simple"; fi
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${SCRIPT_DIR}/simple"; fi
 if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/simple"; fi
-if [ ! -x "$RUNTIME" ]; then RUNTIME="${REPO_ROOT}/bin/release/simple"; fi
 ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
 TRACE32_ROOT="${REPO_ROOT}/examples/10_tooling/trace32_tools"
 cd "$REPO_ROOT"

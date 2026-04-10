@@ -40,6 +40,7 @@ export { simpleToLatex, simpleToUnicode } from './mathConverter';
 export function activateMathFeatures(
     context: vscode.ExtensionContext,
     onLspStateChanged?: (setLspRunning: (running: boolean) => void) => void,
+    debugLogger?: (message: string) => void,
 ): void {
     const config = vscode.workspace.getConfiguration('simple');
 
@@ -49,7 +50,7 @@ export function activateMathFeatures(
     }
 
     // Create the shared decoration provider
-    const decorationProvider = new MathDecorationProvider();
+    const decorationProvider = new MathDecorationProvider(debugLogger);
     context.subscriptions.push(decorationProvider);
 
     // Initialize optional math-core WASM bridge. Until the Simple-side ABI is

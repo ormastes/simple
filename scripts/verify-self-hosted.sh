@@ -107,11 +107,6 @@ for subdir in "${REPO_ROOT}/bin/release"/*/; do
   fi
 done
 
-# Check flat bin/release/simple (legacy compatibility path)
-if [ -e "${REPO_ROOT}/bin/release/simple" ] || [ -L "${REPO_ROOT}/bin/release/simple" ]; then
-  check_link "bin/release/simple" "${REPO_ROOT}/bin/release/simple"
-fi
-
 echo ""
 echo "=== Results: $PASS self-hosted, $FAIL Rust-linked ==="
 

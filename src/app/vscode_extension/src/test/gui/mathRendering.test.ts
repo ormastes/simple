@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { suite, teardown, test } from 'mocha';
-import { MathDecorationProvider } from '../../math/mathDecorationProvider';
+import { MathDecorationProvider, buildSvgDecorationLayout } from '../../math/mathDecorationProvider';
 import { MathCoreWasmBridge } from '../../math/mathCoreWasm';
 import { MathHoverProvider } from '../../math/mathHoverProvider';
 import { buildMathPreviewHtml } from '../../math/mathPreviewPanel';
@@ -198,5 +198,24 @@ suite('GUI - Math Rendering', function() {
         } finally {
             fs.rmSync(cacheDir, { recursive: true, force: true });
         }
+    });
+
+    test('SVG layout boosts fractions and roots for visibility', () => {
+        const layout = buildSvgDecorationLayout(
+            'frac(1, 2) + sqrt(x)',
+            {
+                uri: vscode.Uri.file('/tmp/math.svg'),
+                heightEm: 1.25,
+                descentEm: 0.18,
+                widthEm: 2.0,
+            },
+            'center'
+        );
+
+        assert.strictEqual(layout.boostApplied, true);
+        assert.ok(layout.height.endsWith('em'));
+        assert.ok(layout.width.endsWith('em'));
+        assert.ok(Number.parseFloat(layout.height) > 1.25);
+        assert.ok(layout.debugMessage.includes('"boostApplied":true'));
     });
 });

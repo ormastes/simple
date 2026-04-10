@@ -36,7 +36,7 @@ extern fn stderr_write(data: text) -> i64
 extern fn stderr_flush() -> i64
 
 use t32_mcp.json_helpers.{t32_extract_field, t32_extract_id, t32_extract_nested, t32_LB, t32_RB}
-use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list}
+use t32_mcp.protocol.{t32_read_stdin_message, t32_write_stdout_message, t32_make_json_result, t32_make_error, t32_make_init_response, t32_make_tools_list, t32_has_method, t32_extract_request_id}
 use t32_mcp.tool_router.{t32_dispatch_tool, t32_make_resources_list, t32_handle_resource_read}
 use t32_mcp.session_list_tools.{handle_t32_sessions_list}
 use t32_mcp.job_manager.{t32_job_list, t32_job_get, t32_job_cancel, t32_job_to_json}
@@ -557,48 +557,69 @@ fn t32_start_server():
             return
         else:
             T32_SEEN_FIRST_MESSAGE = true
-            var method = t32_extract_field(msg, "method")
-            var id = t32_extract_id(msg)
+            var id = t32_extract_request_id(msg)
             var response = ""
             var tool_name = ""
-            t32_debug_trace("parsed method=<" + method + "> id=<" + id + ">")
-            if method == "tools/call":
+            var method = ""
+            if t32_has_method(msg, "initialize"):
+                method = "initialize"
+                t32_startup_diag("initialize received; server version " + t32_server_version())
+                t32_debug_request(method, id, "", msg)
+                response = t32_make_init_response(id)
+            elif t32_has_method(msg, "initialized") or t32_has_method(msg, "notifications/initialized"):
+                method = "initialized"
+                t32_debug_request(method, id, "", msg)
+                response = ""
+            elif t32_has_method(msg, "shutdown"):
+                method = "shutdown"
+                t32_debug_request(method, id, "", msg)
+                response = t32_make_json_result(id, "null")
+            elif t32_has_method(msg, "tools/list"):
+                method = "tools/list"
+                t32_debug_request(method, id, "", msg)
+                response = t32_make_tools_list(id)
+            elif t32_has_method(msg, "tools/call"):
+                method = "tools/call"
                 tool_name = t32_extract_nested(msg, "name")
                 t32_debug_request(method, id, tool_name, msg)
-            else:
-                t32_debug_request(method, id, "", msg)
-            if method == "initialize":
-                t32_startup_diag("initialize received; server version " + t32_server_version())
-                response = t32_make_init_response(id)
-            elif method == "initialized" or method == "notifications/initialized":
-                response = ""
-            elif method == "shutdown":
-                response = t32_make_json_result(id, "null")
-            elif method == "tools/list":
-                response = t32_make_tools_list(id)
-            elif method == "tools/call":
                 response = t32_dispatch_tool(id, msg)
-            elif method == "resources/list":
+            elif t32_has_method(msg, "resources/list"):
+                method = "resources/list"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_resources_list(id)
-            elif method == "resources/templates/list":
+            elif t32_has_method(msg, "resources/templates/list"):
+                method = "resources/templates/list"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_resource_templates_list(id)
-            elif method == "resources/read":
+            elif t32_has_method(msg, "resources/read"):
+                method = "resources/read"
+                t32_debug_request(method, id, "", msg)
                 response = t32_handle_resource_read(id, msg)
-            elif method == "prompts/list":
+            elif t32_has_method(msg, "prompts/list"):
+                method = "prompts/list"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_json_result(id, "{\"prompts\":[]}")
-            elif method == "roots/list":
+            elif t32_has_method(msg, "roots/list"):
+                method = "roots/list"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_json_result(id, "{\"roots\":[]}")
-            elif method == "logging/setLevel" or method == "logging/setlevel":
+            elif t32_has_method(msg, "logging/setLevel") or t32_has_method(msg, "logging/setlevel"):
+                method = "logging/setLevel"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_json_result(id, "null")
-            elif method == "ping":
+            elif t32_has_method(msg, "ping"):
+                method = "ping"
+                t32_debug_request(method, id, "", msg)
                 response = t32_make_json_result(id, t32_LB() + t32_RB())
-            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+            elif t32_has_method(msg, "notifications/cancelled") or t32_has_method(msg, "notifications/roots/list_changed"):
+                method = "notifications"
+                t32_debug_request(method, id, "", msg)
                 response = ""
             else:
-                if method == "":
-                    t32_startup_diag("protocol error: request missing method field: " + msg)
+                t32_startup_diag("protocol error: request missing method field: " + msg)
+                t32_debug_request("unknown", id, "", msg)
                 if id != "" and id != "null":
-                    response = t32_make_error(id, -32601, "Method not found: " + method)
+                    response = t32_make_error(id, -32601, "Method not found")
             t32_debug_trace("response bytes=" + str(response.len()))
             if response != "":
                 t32_debug_trace("writing response")

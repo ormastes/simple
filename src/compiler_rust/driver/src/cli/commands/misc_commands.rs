@@ -448,7 +448,6 @@ fn resolve_preferred_simple_binary() -> Option<PathBuf> {
         PathBuf::from("bin/simple"),
     ];
     candidates.extend(platform_release_binary_candidates());
-    candidates.push(PathBuf::from("bin/release/simple"));
 
     for candidate in candidates {
         if candidate.exists() {
@@ -503,8 +502,6 @@ fn is_rust_driver_binary(compiler: &str) -> bool {
         || normalized.ends_with("/src/compiler_rust/target/bootstrap/simple")
         || normalized == "bin/simple"
         || normalized.ends_with("/bin/simple")
-        || normalized == "bin/release/simple"
-        || normalized.ends_with("/bin/release/simple")
         || normalized.contains("/bin/release/")
         || normalized.ends_with("/target/bootstrap/simple")
         || normalized.ends_with("/target/release/simple")

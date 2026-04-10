@@ -82,7 +82,7 @@ export function activate(context: vscode.ExtensionContext) {
     // LSP hover handler (src/app/lsp/handlers/hover.spl) when connected.
     activateMathFeatures(context, (setter) => {
         setMathLspRunning = setter;
-    });
+    }, (message) => outputChannel?.appendLine(message));
 
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);

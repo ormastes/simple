@@ -16,6 +16,7 @@
  *   runtime. See also src/lib/mathjax.spl for MathJax SVG/HTML rendering.
  */
 import * as vscode from 'vscode';
+import { SvgRenderResult } from './mathSvgRenderer';
 /** Block type for math-mode custom blocks */
 type MathBlockType = 'math' | 'loss' | 'nograd';
 /** Represents a detected math-mode block range in the document */
@@ -33,6 +34,14 @@ interface MathBlockRange {
     /** The raw math content string (trimmed) */
     content: string;
 }
+export interface SvgDecorationLayout {
+    height: string;
+    width: string;
+    verticalAlign: string;
+    boostApplied: boolean;
+    debugMessage: string;
+}
+export declare function buildSvgDecorationLayout(content: string, svgResult: SvgRenderResult, alignment: string): SvgDecorationLayout;
 export declare class MathDecorationProvider implements vscode.Disposable {
     /** Decoration for the math content itself */
     private contentDecorationType;
@@ -47,9 +56,12 @@ export declare class MathDecorationProvider implements vscode.Disposable {
     private isEnabled;
     /** SVG cache directory for rendered math images */
     private svgCacheDir;
+    /** When enabled, logs math SVG layout metrics for debugging decoration sizing */
+    private debugLayout;
+    private readonly debugLogger?;
     /** Line numbers that the cursor currently occupies (used for reveal) */
     private cursorLines;
-    constructor();
+    constructor(debugLogger?: (message: string) => void);
     /**
      * Toggle inline rendering on or off.
      */

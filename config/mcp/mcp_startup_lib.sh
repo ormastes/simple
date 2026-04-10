@@ -116,9 +116,6 @@ mcp_find_runtime() {
   elif [ -x "${REPO_ROOT}/bin/simple" ]; then
     MCP_RUNTIME="${REPO_ROOT}/bin/simple"
     MCP_RUNTIME_KIND="bin-simple"
-  elif [ -x "${REPO_ROOT}/bin/release/simple" ]; then
-    MCP_RUNTIME="${REPO_ROOT}/bin/release/simple"
-    MCP_RUNTIME_KIND="bin-release-simple"
   elif [ -x "${REPO_ROOT}/src/compiler_rust/target/release/simple" ]; then
     MCP_RUNTIME="${REPO_ROOT}/src/compiler_rust/target/release/simple"
     MCP_RUNTIME_KIND="source-release"

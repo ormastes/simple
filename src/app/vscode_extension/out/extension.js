@@ -96,7 +96,7 @@ function activate(context) {
     // LSP hover handler (src/app/lsp/handlers/hover.spl) when connected.
     (0, math_1.activateMathFeatures)(context, (setter) => {
         setMathLspRunning = setter;
-    });
+    }, (message) => outputChannel?.appendLine(message));
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);
     console.log('Simple Language extension activated');

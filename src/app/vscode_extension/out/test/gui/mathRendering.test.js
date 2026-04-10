@@ -176,5 +176,18 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
             fs.rmSync(cacheDir, { recursive: true, force: true });
         }
     });
+    (0, mocha_1.test)('SVG layout boosts fractions and roots for visibility', () => {
+        const layout = (0, mathDecorationProvider_1.buildSvgDecorationLayout)('frac(1, 2) + sqrt(x)', {
+            uri: vscode.Uri.file('/tmp/math.svg'),
+            heightEm: 1.25,
+            descentEm: 0.18,
+            widthEm: 2.0,
+        }, 'center');
+        assert.strictEqual(layout.boostApplied, true);
+        assert.ok(layout.height.endsWith('em'));
+        assert.ok(layout.width.endsWith('em'));
+        assert.ok(Number.parseFloat(layout.height) > 1.25);
+        assert.ok(layout.debugMessage.includes('"boostApplied":true'));
+    });
 });
 //# sourceMappingURL=mathRendering.test.js.map

@@ -77,14 +77,14 @@ Object.defineProperty(exports, "simpleToUnicode", { enumerable: true, get: funct
  *   the query/LSP hover path which provides
  *   full math rendering.
  */
-function activateMathFeatures(context, onLspStateChanged) {
+function activateMathFeatures(context, onLspStateChanged, debugLogger) {
     const config = vscode.workspace.getConfiguration('simple');
     // Check if math features are enabled
     if (!config.get('math.enabled', true)) {
         return;
     }
     // Create the shared decoration provider
-    const decorationProvider = new mathDecorationProvider_1.MathDecorationProvider();
+    const decorationProvider = new mathDecorationProvider_1.MathDecorationProvider(debugLogger);
     context.subscriptions.push(decorationProvider);
     // Initialize optional math-core WASM bridge. Until the Simple-side ABI is
     // exported, this stays in graceful fallback mode and hover uses the local

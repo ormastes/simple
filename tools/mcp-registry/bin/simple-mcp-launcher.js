@@ -99,7 +99,7 @@ function findRuntime() {
       if (fs.existsSync(binary)) {
         return { command: binary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
       }
-      // Fallback: src/compiler_rust/bin/release/simple (legacy SPK layout)
+      // Fallback: platform-specific deployed runtime under bin/release/<platform>/simple
       const legacyBinary = path.join(pkgDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`);
       if (fs.existsSync(legacyBinary)) {
         return { command: legacyBinary, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };

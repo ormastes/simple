@@ -2,7 +2,7 @@
 # T32 MCP Protocol — I/O, initialize, tools list, schemas
 # Protocol: MCP 2025-06-18 (Content-Length framing + JSON-Lines auto-detect)
 #
-# JSON helpers imported from t32_mcp/json_helpers.spl (inlined, zero cross-package imports).
+# JSON helpers from t32_mcp/json_helpers.spl (inlined, _jh_ prefixed internals).
 # Transport implemented here via stdin_read_char and direct fd-backed stdout sinks.
 # This avoids loading the entire src/lib/ module tree (8GB+ RSS).
 
@@ -93,17 +93,61 @@ fn t32_read_stdin_message() -> text:
 
 fn t32_write_stdout_message(body: text):
     t32_protocol_trace("write_stdout_message body_bytes=" + str(body.len()))
-    var payload = body
     if T32_USE_JSON_LINES:
         t32_protocol_trace("write_stdout_message mode=json-lines")
-        payload = body + t32_nl()
+        print_raw(body + t32_nl())
     else:
         val byte_count = t32_text_byte_len(body)
         val header = "Content-Length: " + str(byte_count) + "\r" + t32_nl() + "\r" + t32_nl()
         t32_protocol_trace("write_stdout_message mode=framed")
-        payload = header + body
-    stdout_write(payload)
-    rt_stdout_flush()
+        print_raw(header + body)
+
+# --- Method detection (string contains — avoids extract_field resolution issues) ---
+
+fn t32_has_method(msg: text, name: text) -> bool:
+    return msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+fn t32_extract_request_id(msg: text) -> text:
+    # Extract numeric JSON-RPC id using only .contains() (avoids broken substring ==)
+    val prefix = "\"id\":"
+    val prefix_sp = "\"id\": "
+    var pfx = prefix
+    if msg.contains(prefix_sp):
+        pfx = prefix_sp
+    elif not msg.contains(prefix):
+        return "null"
+    # Build id digit-by-digit using .contains() checks
+    var result = ""
+    var searching = true
+    while searching:
+        searching = false
+        var d = 0
+        while d <= 9:
+            val candidate = result + str(d)
+            val with_comma = pfx + candidate + ","
+            val with_close = pfx + candidate + "}"
+            val with_space = pfx + candidate + " "
+            if msg.contains(with_comma) or msg.contains(with_close) or msg.contains(with_space):
+                return candidate
+            # Check if candidate is a prefix of a longer number
+            var has_more = false
+            var e = 0
+            while e <= 9:
+                if msg.contains(pfx + candidate + str(e)):
+                    has_more = true
+                    break
+                e = e + 1
+            if has_more:
+                result = candidate
+                searching = true
+                break
+            d = d + 1
+    if result != "":
+        return result
+    # Check for "null" id
+    if msg.contains(pfx + "null"):
+        return "null"
+    return "null"
 
 # --- JSON-RPC helpers (inlined) ---
 
@@ -619,10 +663,10 @@ fn t32_make_tool_schema(name: text, description: text) -> text:
     annotations = annotations + "," + jp("openWorldHint", "false")
     annotations = annotations + RB()
 
-    var tool_obj = jo3(
+    var tool_obj = jo4(
         jp("name", js(name)),
         jp("description", js(description)),
-        jp("inputSchema", schema)
+        jp("inputSchema", schema),
+        jp("annotations", annotations)
     )
-    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
     tool_obj

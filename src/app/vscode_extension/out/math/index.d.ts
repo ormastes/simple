@@ -29,4 +29,4 @@ export { simpleToLatex, simpleToUnicode } from './mathConverter';
  *   the query/LSP hover path which provides
  *   full math rendering.
  */
-export declare function activateMathFeatures(context: vscode.ExtensionContext, onLspStateChanged?: (setLspRunning: (running: boolean) => void) => void): void;
+export declare function activateMathFeatures(context: vscode.ExtensionContext, onLspStateChanged?: (setLspRunning: (running: boolean) => void) => void, debugLogger?: (message: string) => void): void;
