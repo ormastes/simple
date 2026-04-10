@@ -1,0 +1,136 @@
+@allow(primitive_api)
+# SSH over Serial Transport
+#
+# Two transport paths:
+#   socat path   — requires socat on host; delegates to OS ssh binary
+#   native path  — uses serial_proxy.spl relay; no socat dependency
+#
+# Both paths are one-shot: connect + exec + disconnect per call.
+# The remote target must be running sshd (e.g. Dropbear on embedded Linux).
+
+use std.nogc_sync_mut.mcp_sdk.core.shell.{find_simple_binary}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct SshSerialSession:
+    """Parameter bundle for SSH-over-serial connections.
+
+    is_valid is false only when the device or user is empty.
+    Use ssh_serial_exec to run commands via this session.
+    """
+    device: text
+    baud: i64
+    user: text
+    is_valid: bool
+
+struct SshSerialExecResult:
+    """Result of a one-shot SSH command over serial."""
+    exit_code: i64
+    stdout: text
+    stderr: text
+
+# ============================================================================
+# socat path (ProxyCommand = socat)
+# ============================================================================
+
+fn ssh_serial_connect(device: text, baud: i64, user: text) -> SshSerialSession:
+    """Create a session for SSH over serial via socat.
+
+    socat must be installed on the host. sshd must be running on the target.
+
+    Args:
+        device: Serial device, e.g. "/dev/ttyUSB0" or "/dev/cu.usbserial"
+        baud:   Baud rate (9600 / 115200 / …)
+        user:   SSH username on the remote target
+
+    Returns: SshSerialSession (always is_valid=true if device/user are non-empty)
+
+    Example:
+        val sess = ssh_serial_connect("/dev/ttyUSB0", 115200, "root")
+        val res  = ssh_serial_exec(sess, "uname -a")
+        print(res.stdout)
+    """
+    val valid = device.len() > 0 and user.len() > 0
+    SshSerialSession(device: device, baud: baud, user: user, is_valid: valid)
+
+fn ssh_serial_exec(session: SshSerialSession, cmd: text) -> SshSerialExecResult:
+    """Run a command on the remote device over serial (socat path).
+
+    Spawns: ssh -o StrictHostKeyChecking=no -o BatchMode=yes
+                -o ProxyCommand="socat - DEVICE,bBAUD,raw,echo=0"
+                -l USER localhost -- CMD
+    """
+    if not session.is_valid:
+        return SshSerialExecResult(exit_code: -1, stdout: "", stderr: "Invalid session")
+
+    val proxy = "socat - " + session.device + ",b" + str(session.baud) + ",raw,echo=0"
+    val result = rt_process_run("ssh", [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ProxyCommand=" + proxy,
+        "-l", session.user,
+        "localhost",
+        "--",
+        cmd
+    ])
+    SshSerialExecResult(exit_code: result.2, stdout: result.0, stderr: result.1)
+
+fn ssh_serial_run(device: text, baud: i64, user: text, cmd: text) -> SshSerialExecResult:
+    """One-shot SSH exec over serial (socat path). Convenience wrapper."""
+    val sess = ssh_serial_connect(device, baud, user)
+    ssh_serial_exec(sess, cmd)
+
+# ============================================================================
+# native path (ProxyCommand = serial_proxy.spl)
+# ============================================================================
+
+fn ssh_serial_connect_native(device: text, baud: i64, user: text) -> SshSerialSession:
+    """Create a session for SSH over serial via the built-in serial_proxy.
+
+    No socat required. Uses bin/simple + serial_proxy.spl as ProxyCommand.
+    sshd must be running on the target.
+
+    Args:
+        device: Serial device path
+        baud:   Baud rate
+        user:   SSH username
+
+    Returns: SshSerialSession
+
+    Example:
+        val sess = ssh_serial_connect_native("/dev/ttyUSB0", 115200, "root")
+        val res  = ssh_serial_exec_native(sess, "cat /proc/version")
+    """
+    val valid = device.len() > 0 and user.len() > 0
+    SshSerialSession(device: device, baud: baud, user: user, is_valid: valid)
+
+fn ssh_serial_exec_native(session: SshSerialSession, cmd: text) -> SshSerialExecResult:
+    """Run a command on the remote device over serial (native path).
+
+    Spawns: ssh -o ProxyCommand="BIN serial-proxy DEVICE BAUD" -l USER localhost -- CMD
+    """
+    if not session.is_valid:
+        return SshSerialExecResult(exit_code: -1, stdout: "", stderr: "Invalid session")
+
+    val simple_bin = find_simple_binary()
+    val proxy = simple_bin + " serial-proxy " + session.device + " " + str(session.baud)
+    val result = rt_process_run("ssh", [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ProxyCommand=" + proxy,
+        "-l", session.user,
+        "localhost",
+        "--",
+        cmd
+    ])
+    SshSerialExecResult(exit_code: result.2, stdout: result.0, stderr: result.1)
+
+fn ssh_serial_run_native(device: text, baud: i64, user: text, cmd: text) -> SshSerialExecResult:
+    """One-shot SSH exec over serial (native path). Convenience wrapper."""
+    val sess = ssh_serial_connect_native(device, baud, user)
+    ssh_serial_exec_native(sess, cmd)

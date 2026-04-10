@@ -13,6 +13,7 @@
 | **CLAUDE.md** | Development guide | Start here for development |
 | **README.md** | Project overview | Learn what Simple is |
 | **AGENTS.md** | Agent definitions | Using Task tool subagents |
+| **.sstack/** | Session state tracking | Local workflow state and phase handoff notes |
 | **bin/** | Executables & CLI | Running Simple commands |
 | **src/** | Source code | Core implementation |
 | **test/** | Test suites | Testing & verification |
@@ -47,6 +48,17 @@
 Points to: `CLAUDE.md`
 
 Convenience link for agent-based workflows. Same content as CLAUDE.md.
+
+---
+
+### .sstack/ (Session State Tracking)
+**Audience:** Local development workflows
+
+Stores per-task state handoff files used by the repo's stacked workflow.
+
+- Contains `TASKS.md` plus per-feature `state.md` files
+- Intended to stay in the project root as workflow metadata
+- Not user-facing documentation or source code
 
 ---
 

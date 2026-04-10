@@ -1,0 +1,143 @@
+@allow(unnamed_duplicate_typed_args)
+# Serial MCP Tool Handlers
+
+use app.simple_lsp_mcp.json_helpers.{Q, LB, RB, jp, js, jo1, jo2, jo3, escape_json, extract_field, make_tool_result, make_tool_error, jsonrpc_error}
+use std.nogc_sync_mut.io.ssh_serial.{SshSerialExecResult, ssh_serial_run, ssh_serial_run_native}
+use std.nogc_sync_mut.io.serial_ffi.{SerialPort, serial_open, serial_close, serial_write, serial_read}
+
+fn handle_tool_call(id: text, body: text) -> text:
+    val tool_name = detect_tool_name(body)
+    if tool_name == "ssh_serial_connect":
+        return handle_ssh_serial_connect(id, body)
+    if tool_name == "ssh_serial_exec":
+        return handle_ssh_serial_exec(id, body)
+    if tool_name == "serial_open":
+        return handle_serial_open(id, body)
+    if tool_name == "serial_write":
+        return handle_serial_write(id, body)
+    if tool_name == "serial_read":
+        return handle_serial_read(id, body)
+    jsonrpc_error(id, -32602, "Unknown tool: " + tool_name)
+
+fn detect_tool_name(body: text) -> text:
+    val params = extract_field(body, "params")
+    extract_field(params, "name")
+
+fn get_arg(body: text, key: text) -> text:
+    val params = extract_field(body, "params")
+    val arguments = extract_field(params, "arguments")
+    extract_field(arguments, key)
+
+fn get_arg_int(body: text, key: text, default_val: i64) -> i64:
+    val s = get_arg(body, key)
+    if s == "":
+        return default_val
+    val n = s.to_int()
+    if n == 0 and s != "0":
+        return default_val
+    n
+
+fn handle_ssh_serial_connect(id: text, body: text) -> text:
+    val device = get_arg(body, "device")
+    val baud   = get_arg_int(body, "baud", 115200)
+    val user   = get_arg(body, "user")
+
+    if device == "":
+        return make_tool_error(id, "Missing required argument: device")
+    if user == "":
+        return make_tool_error(id, "Missing required argument: user")
+
+    var result = LB()
+    result = result + jp("device", js(escape_json(device)))
+    result = result + "," + jp("baud", str(baud))
+    result = result + "," + jp("user", js(escape_json(user)))
+    result = result + "," + jp("is_valid", "true")
+    result = result + "," + jp("note", js("Session ready. Call ssh_serial_exec to run commands."))
+    result = result + RB()
+    make_tool_result(id, result)
+
+fn handle_ssh_serial_exec(id: text, body: text) -> text:
+    val device = get_arg(body, "device")
+    val baud   = get_arg_int(body, "baud", 115200)
+    val user   = get_arg(body, "user")
+    val cmd    = get_arg(body, "cmd")
+    val path   = get_arg(body, "path")
+
+    if device == "":
+        return make_tool_error(id, "Missing required argument: device")
+    if user == "":
+        return make_tool_error(id, "Missing required argument: user")
+    if cmd == "":
+        return make_tool_error(id, "Missing required argument: cmd")
+
+    val use_native = path == "native"
+    var exec_result = SshSerialExecResult(exit_code: 0, stdout: "", stderr: "")
+    if use_native:
+        exec_result = ssh_serial_run_native(device, baud, user, cmd)
+    else:
+        exec_result = ssh_serial_run(device, baud, user, cmd)
+
+    var result = LB()
+    result = result + jp("exit_code", str(exec_result.exit_code))
+    result = result + "," + jp("stdout", js(escape_json(exec_result.stdout)))
+    result = result + "," + jp("stderr", js(escape_json(exec_result.stderr)))
+    result = result + RB()
+    make_tool_result(id, result)
+
+fn handle_serial_open(id: text, body: text) -> text:
+    val device = get_arg(body, "device")
+    val baud   = get_arg_int(body, "baud", 115200)
+
+    if device == "":
+        return make_tool_error(id, "Missing required argument: device")
+
+    val port = serial_open(device, baud)
+    if not port.is_valid:
+        return make_tool_error(id, "Failed to open serial port: " + device + " at " + str(baud) + " baud")
+
+    var result = LB()
+    result = result + jp("handle", str(port.handle))
+    result = result + "," + jp("device", js(escape_json(port.device)))
+    result = result + "," + jp("baud", str(port.baud))
+    result = result + "," + jp("is_valid", "true")
+    result = result + RB()
+    make_tool_result(id, result)
+
+fn handle_serial_write(id: text, body: text) -> text:
+    val handle = get_arg_int(body, "handle", 0)
+    val data   = get_arg(body, "data")
+
+    if handle == 0:
+        return make_tool_error(id, "Missing or invalid argument: handle")
+    if data == "":
+        return make_tool_error(id, "Missing required argument: data")
+
+    # Build a minimal SerialPort from the handle for the write call
+    val port = serial_open_from_handle(handle)
+    val bytes_written = serial_write(port, data)
+
+    var result = LB()
+    result = result + jp("bytes_written", str(bytes_written))
+    result = result + RB()
+    make_tool_result(id, result)
+
+fn handle_serial_read(id: text, body: text) -> text:
+    val handle    = get_arg_int(body, "handle", 0)
+    val max_bytes = get_arg_int(body, "max_bytes", 1024)
+
+    if handle == 0:
+        return make_tool_error(id, "Missing or invalid argument: handle")
+
+    val port = serial_open_from_handle(handle)
+    val data = serial_read(port, max_bytes)
+
+    var result = LB()
+    result = result + jp("data", js(escape_json(data)))
+    result = result + "," + jp("bytes_read", str(data.len()))
+    result = result + RB()
+    make_tool_result(id, result)
+
+# Build a minimal SerialPort wrapper from a raw handle (fd).
+# Used by serial_write/serial_read tools when the port is already open.
+fn serial_open_from_handle(handle: i64) -> SerialPort:
+    SerialPort(handle: handle, device: "", baud: 0, is_valid: handle > 0)

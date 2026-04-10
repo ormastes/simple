@@ -604,10 +604,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "reverse" => "rt_array_reverse",
         "first" => "rt_array_first",
         "last" => "rt_array_last",
-        // "find" on string: substring search returning Option<i64>; on arrays rt_array_find
-        // doesn't exist yet — fall back to rt_string_index_of which works for the
-        // dominant use-case (text.find("substring") ?? -1).
-        "find" => "rt_string_index_of",
+        "find" => "rt_string_find",
         "any" => "rt_array_any",
         "all" => "rt_array_all",
         // String extra methods
@@ -618,7 +615,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
-        "index_of" | "find_str" => "rt_string_index_of",
+        "index_of" | "find_str" => "rt_string_find",
         "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "str" => "rt_to_string",
         // Dict/collection methods

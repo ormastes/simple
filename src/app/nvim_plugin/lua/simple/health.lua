@@ -204,16 +204,25 @@ function M._check_math()
     vim.health.info("Math float on hover: disabled")
   end
 
-  if vim.fn.exists(":SimpleTestWorkspace") == 2 then
-    vim.health.ok("Test workspace command available")
-  else
-    vim.health.warn("Test workspace command missing")
+  local workspace_cmds = {
+    ":SimpleTestWorkspace",
+    ":SimpleBreakpointToggle",
+    ":SimpleBookmarkToggle",
+    ":SimplePointerToggle",
+    ":SimplePointerClear",
+    ":SimpleBookmarkNext",
+    ":SimpleBookmarkPrev",
+  }
+  local missing = {}
+  for _, cmd in ipairs(workspace_cmds) do
+    if vim.fn.exists(cmd) ~= 2 then
+      table.insert(missing, cmd)
+    end
   end
-
-  if vim.fn.exists(":SimpleBreakpointToggle") == 2 and vim.fn.exists(":SimpleBookmarkToggle") == 2 then
-    vim.health.ok("Editor marker commands available")
+  if #missing == 0 then
+    vim.health.ok("Test workspace + editor marker commands available")
   else
-    vim.health.warn("Editor marker commands missing")
+    vim.health.warn("Missing commands: " .. table.concat(missing, ", "))
   end
 
   vim.health.info(string.format("Math update delay: %d ms", cfg.math.update_delay))

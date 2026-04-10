@@ -54,6 +54,7 @@ pub mod net;
 mod objects;
 mod process;
 mod pty;
+pub mod serial;
 // Always compile ratatui_tui module (it has stubs when feature is disabled)
 pub mod ratatui_tui;
 pub mod screenshot_ffi;

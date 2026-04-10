@@ -392,6 +392,8 @@ impl Lowerer {
                 "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
                 "concat" => Some(TypeId::STRING),
                 "slice" => Some(TypeId::STRING),
+                // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
+                "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 _ => None,
             };
 
