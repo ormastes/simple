@@ -513,6 +513,11 @@ val init = nograd{ sqrt(frac(6, fan_in + fan_out)) }
 - `Simple: Toggle Synced Math Panel` — open the synced math companion panel
 - `Simple: Toggle Inline Render` — toggle inline rendering
 
+**Settings:**
+- `simple.math.previewOnHover` — show math hover previews
+- `simple.math.syncPanel.autoOpen` — automatically open the synced math panel when the caret enters a math block
+- `simple.math.renderInline` — enable inline math decorations
+
 ## Test CodeLens (Gutter Arrows)
 
 The extension shows "▶ Run" CodeLens buttons above test blocks in `.spl` files:

@@ -114,6 +114,35 @@ export function activateMathFeatures(
         })
     );
 
+    const maybeAutoOpenSyncPanel = (editor?: vscode.TextEditor): void => {
+        if (!vscode.workspace.getConfiguration('simple').get<boolean>('math.syncPanel.autoOpen', false)) {
+            return;
+        }
+        if (!editor || editor.document.languageId !== 'simple') {
+            return;
+        }
+        if (MathSyncPanel.isVisible()) {
+            return;
+        }
+
+        const blocks = decorationProvider.detectMathBlocks(editor.document);
+        const activeBlock = blocks.find(block => block.fullRange.contains(editor.selection.active));
+        if (activeBlock) {
+            MathSyncPanel.show(decorationProvider, context.extensionUri);
+        }
+    };
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor((editor) => {
+            maybeAutoOpenSyncPanel(editor ?? undefined);
+        })
+    );
+    context.subscriptions.push(
+        vscode.window.onDidChangeTextEditorSelection((event) => {
+            maybeAutoOpenSyncPanel(event.textEditor);
+        })
+    );
+
     // Register toggle inline rendering command
     context.subscriptions.push(
         vscode.commands.registerCommand('simple.math.toggleInlineRender', () => {

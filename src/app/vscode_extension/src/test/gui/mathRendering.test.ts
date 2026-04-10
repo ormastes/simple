@@ -10,7 +10,7 @@ import { MathCoreWasmBridge } from '../../math/mathCoreWasm';
 import { MathHoverProvider } from '../../math/mathHoverProvider';
 import { buildMathPreviewHtml } from '../../math/mathPreviewPanel';
 import { renderSpacerSvgFile, renderToSvgFile } from '../../math/mathSvgRenderer';
-import { buildMathSyncPanelHtml, findMathBlockAtPosition } from '../../math/mathSyncPanel';
+import { buildMathSyncPanelHtml, findMathBlockAtPosition, MathSyncPanel } from '../../math/mathSyncPanel';
 import { TestUtils } from '../helpers/testUtils';
 
 /** Shared fake decoration provider for hover tests */
@@ -53,6 +53,8 @@ suite('GUI - Math Rendering', function() {
     teardown(async () => {
         await TestUtils.closeAllEditors();
         TestUtils.deleteTestFile('test-math-rendering.spl');
+        TestUtils.deleteTestFile('test-math-sync-panel.spl');
+        TestUtils.deleteTestFile('test-math-sync-panel-auto-open.spl');
     });
 
     test('Decoration provider detects math-mode blocks', async () => {
@@ -360,11 +362,34 @@ suite('GUI - Math Rendering', function() {
         }, vscode.Uri.file('/tmp/katex.css').toString());
 
         assert.ok(html.includes('Math Sync Panel'));
+        assert.ok(html.includes('panel-root'));
+        assert.ok(html.includes('active-strip'));
+        assert.ok(html.includes('sync-pending'));
         assert.ok(html.includes('math-source'));
+        assert.ok(html.includes('selection-highlight'));
         assert.ok(html.includes('request-sync'));
         assert.ok(html.includes('type: \'edit\''));
+        assert.ok(html.includes('setSelectionRange'));
         assert.ok(html.includes('rendered'));
         assert.ok(html.includes('frac(1, 2) + sqrt(x)'));
+    });
+
+    test('Math sync panel HTML renders empty state when no block is active', () => {
+        const html = buildMathSyncPanelHtml({
+            documentUri: 'file:///tmp/demo.spl',
+            blockText: '',
+            latex: '',
+            pretty: '',
+            renderedHtml: '',
+            blockLabel: 'none',
+            selectionStart: 0,
+            selectionEnd: 0,
+            hasContent: false,
+        });
+
+        assert.ok(html.includes('Move the cursor onto a math block in the source editor.'));
+        assert.ok(html.includes('panel-root'));
+        assert.ok(html.includes('math-source'));
     });
 
     test('Math sync panel block lookup finds the active math block', async () => {
@@ -380,5 +405,34 @@ suite('GUI - Math Rendering', function() {
         assert.strictEqual(block!.content, 'frac(1, 2) + sqrt(x)');
 
         provider.dispose();
+    });
+
+    test('Math sync panel auto-opens when the caret enters a math block', async () => {
+        await vscode.workspace.getConfiguration('simple').update(
+            'math.syncPanel.autoOpen',
+            true,
+            vscode.ConfigurationTarget.Global
+        );
+
+        const document = await TestUtils.createTestFile(
+            'test-math-sync-panel-auto-open.spl',
+            'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n    val z = 42\n'
+        );
+
+        const editor = vscode.window.activeTextEditor;
+        assert.ok(editor, 'expected active editor');
+        MathSyncPanel.close();
+        await TestUtils.setCursorPosition(editor!, 1, 18);
+
+        await TestUtils.waitFor(() => MathSyncPanel.isVisible(), 5000, 50);
+        assert.strictEqual(MathSyncPanel.isVisible(), true);
+
+        await vscode.workspace.getConfiguration('simple').update(
+            'math.syncPanel.autoOpen',
+            false,
+            vscode.ConfigurationTarget.Global
+        );
+        MathSyncPanel.close();
+        void document;
     });
 });
