@@ -82,6 +82,8 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
     (0, mocha_1.teardown)(async () => {
         await testUtils_1.TestUtils.closeAllEditors();
         testUtils_1.TestUtils.deleteTestFile('test-math-rendering.spl');
+        testUtils_1.TestUtils.deleteTestFile('test-math-sync-panel.spl');
+        testUtils_1.TestUtils.deleteTestFile('test-math-sync-panel-auto-open.spl');
     });
     (0, mocha_1.test)('Decoration provider detects math-mode blocks', async () => {
         const document = await testUtils_1.TestUtils.createTestFile('test-math-rendering.spl', 'let a = m{ alpha + beta }\nlet b = loss{ sqrt(x) }\nlet c = nograd{ sin(theta) }');
@@ -294,11 +296,32 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
             hasContent: true,
         }, vscode.Uri.file('/tmp/katex.css').toString());
         assert.ok(html.includes('Math Sync Panel'));
+        assert.ok(html.includes('panel-root'));
+        assert.ok(html.includes('active-strip'));
+        assert.ok(html.includes('sync-pending'));
         assert.ok(html.includes('math-source'));
+        assert.ok(html.includes('selection-highlight'));
         assert.ok(html.includes('request-sync'));
         assert.ok(html.includes('type: \'edit\''));
+        assert.ok(html.includes('setSelectionRange'));
         assert.ok(html.includes('rendered'));
         assert.ok(html.includes('frac(1, 2) + sqrt(x)'));
+    });
+    (0, mocha_1.test)('Math sync panel HTML renders empty state when no block is active', () => {
+        const html = (0, mathSyncPanel_1.buildMathSyncPanelHtml)({
+            documentUri: 'file:///tmp/demo.spl',
+            blockText: '',
+            latex: '',
+            pretty: '',
+            renderedHtml: '',
+            blockLabel: 'none',
+            selectionStart: 0,
+            selectionEnd: 0,
+            hasContent: false,
+        });
+        assert.ok(html.includes('Move the cursor onto a math block in the source editor.'));
+        assert.ok(html.includes('panel-root'));
+        assert.ok(html.includes('math-source'));
     });
     (0, mocha_1.test)('Math sync panel block lookup finds the active math block', async () => {
         const document = await testUtils_1.TestUtils.createTestFile('test-math-sync-panel.spl', 'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n    val z = 42\n');
@@ -307,6 +330,19 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
         assert.ok(block, 'expected active math block');
         assert.strictEqual(block.content, 'frac(1, 2) + sqrt(x)');
         provider.dispose();
+    });
+    (0, mocha_1.test)('Math sync panel auto-opens when the caret enters a math block', async () => {
+        await vscode.workspace.getConfiguration('simple').update('math.syncPanel.autoOpen', true, vscode.ConfigurationTarget.Global);
+        const document = await testUtils_1.TestUtils.createTestFile('test-math-sync-panel-auto-open.spl', 'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n    val z = 42\n');
+        const editor = vscode.window.activeTextEditor;
+        assert.ok(editor, 'expected active editor');
+        mathSyncPanel_1.MathSyncPanel.close();
+        await testUtils_1.TestUtils.setCursorPosition(editor, 1, 18);
+        await testUtils_1.TestUtils.waitFor(() => mathSyncPanel_1.MathSyncPanel.isVisible(), 5000, 50);
+        assert.strictEqual(mathSyncPanel_1.MathSyncPanel.isVisible(), true);
+        await vscode.workspace.getConfiguration('simple').update('math.syncPanel.autoOpen', false, vscode.ConfigurationTarget.Global);
+        mathSyncPanel_1.MathSyncPanel.close();
+        void document;
     });
 });
 //# sourceMappingURL=mathRendering.test.js.map

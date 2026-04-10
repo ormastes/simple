@@ -89,7 +89,10 @@ class AgentNode:
     files_written: [text]
     urls_fetched: [text]
     tools_used: [text]
-    token_count: i64
+    input_tokens: i64
+    output_tokens: i64
+    cache_read_tokens: i64
+    cache_create_tokens: i64
     start_time: i64
     last_active: i64
 
@@ -105,10 +108,24 @@ class AgentNode:
             files_written: [],
             urls_fetched: [],
             tools_used: [],
-            token_count: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
             start_time: 0,
             last_active: 0
         )
+
+fn total_tokens(node: AgentNode) -> i64:
+    """Total tokens used by this agent (input + output + cache)."""
+    node.input_tokens + node.output_tokens + node.cache_read_tokens + node.cache_create_tokens
+
+fn cache_efficiency_pct(node: AgentNode) -> i64:
+    """Cache read efficiency as integer percentage 0-100."""
+    val total_input = node.input_tokens + node.cache_read_tokens + node.cache_create_tokens
+    if total_input <= 0:
+        return 0
+    return (node.cache_read_tokens * 100) / total_input
 
 # =========================================================================
 # LLM Status
@@ -119,6 +136,8 @@ class LLMStatus:
     connected: bool
     model: text
     tokens_used: i64
+    cache_read_tokens: i64
+    cache_create_tokens: i64
     estimated_cost_cents: i64
     active_agents: i64
     last_heartbeat: i64
@@ -129,6 +148,8 @@ class LLMStatus:
             connected: false,
             model: "",
             tokens_used: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
             estimated_cost_cents: 0,
             active_agents: 0,
             last_heartbeat: 0
@@ -308,3 +329,126 @@ fn format_tokens(count: i64) -> text:
         val k = count / 100
         return "{k / 10}.{k % 10}K"
     return "{count}"
+
+# =========================================================================
+# Agent Messages
+# =========================================================================
+
+class AgentMessage:
+    parent_id: text
+    child_id: text
+    direction: text
+    content: text
+    timestamp: i64
+
+    static fn new(parent_id: text, child_id: text, direction: text, content: text, timestamp: i64) -> AgentMessage:
+        return AgentMessage(
+            parent_id: parent_id,
+            child_id: child_id,
+            direction: direction,
+            content: content,
+            timestamp: timestamp
+        )
+
+# =========================================================================
+# MCP Stats
+# =========================================================================
+
+class McpStats:
+    server_name: text
+    call_count: i64
+    total_latency_ms: i64
+    estimated_tokens: i64
+    last_tool: text
+    last_call_time: i64
+
+    static fn new(server_name: text) -> McpStats:
+        return McpStats(
+            server_name: server_name,
+            call_count: 0,
+            total_latency_ms: 0,
+            estimated_tokens: 0,
+            last_tool: "",
+            last_call_time: 0
+        )
+
+fn mcp_avg_latency(stats: McpStats) -> i64:
+    if stats.call_count > 0:
+        return stats.total_latency_ms / stats.call_count
+    return 0
+
+fn mcp_server_name(tool_name: text) -> text:
+    """Extract server name from mcp__<server>__<tool> format."""
+    if not tool_name.starts_with("mcp__"):
+        return ""
+    val after_prefix = tool_name.slice(5)
+    val sep_idx = after_prefix.index_of("__")
+    if sep_idx < 0:
+        return after_prefix
+    return after_prefix.slice(0, sep_idx)
+
+# =========================================================================
+# Managed Tasks (Schedule/Loop/Remote/Daemon)
+# =========================================================================
+
+enum TaskKind:
+    Loop
+    Schedule
+    RemoteControl
+    Daemon
+
+enum TaskState:
+    Active
+    Paused
+    Completed
+    Failed
+    Cancelled
+
+class ManagedTask:
+    id: text
+    kind: TaskKind
+    name: text
+    command: text
+    interval_seconds: i64
+    cron_expr: text
+    state: TaskState
+    last_run_time: i64
+    next_run_time: i64
+    run_count: i64
+    total_tokens: i64
+    last_result: text
+    created_at: i64
+    agent_id: text
+
+    static fn new(id: text, kind: TaskKind, name: text, command: text) -> ManagedTask:
+        return ManagedTask(
+            id: id,
+            kind: kind,
+            name: name,
+            command: command,
+            interval_seconds: 0,
+            cron_expr: "",
+            state: TaskState.Active,
+            last_run_time: 0,
+            next_run_time: 0,
+            run_count: 0,
+            total_tokens: 0,
+            last_result: "",
+            created_at: 0,
+            agent_id: ""
+        )
+
+fn task_kind_name(kind: TaskKind) -> text:
+    match kind:
+        TaskKind.Loop: "loop"
+        TaskKind.Schedule: "schedule"
+        TaskKind.RemoteControl: "remote"
+        TaskKind.Daemon: "daemon"
+
+fn task_state_name(state: TaskState) -> text:
+    match state:
+        TaskState.Active: "active"
+        TaskState.Paused: "paused"
+        TaskState.Completed: "done"
+        TaskState.Failed: "failed"
+        TaskState.Cancelled: "cancelled"

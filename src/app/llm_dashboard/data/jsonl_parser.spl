@@ -6,7 +6,7 @@
 
 use app.llm_dashboard.data.types.{
     AgentActivity, LLMProvider, RoomKind, FileActivity, URLActivity, ActivityEntry,
-    tool_to_room, provider_from_text
+    tool_to_room, provider_from_text, truncate_text
 }
 
 # =========================================================================
@@ -15,8 +15,9 @@ use app.llm_dashboard.data.types.{
 
 enum DashboardEvent:
     ToolCall(agent_id: text, tool_name: text, args: [text], timestamp: i64)
-    AgentSpawn(parent_id: text, child_id: text, description: text, timestamp: i64)
-    AssistantMessage(agent_id: text, token_count: i64, timestamp: i64)
+    AgentSpawn(parent_id: text, child_id: text, description: text, prompt: text, timestamp: i64)
+    ToolResponse(agent_id: text, tool_name: text, response_preview: text, timestamp: i64)
+    AssistantMessage(agent_id: text, input_tokens: i64, output_tokens: i64, cache_read: i64, cache_create: i64, timestamp: i64)
     UserMessage(agent_id: text, timestamp: i64)
     SessionStart(session_id: text, model: text, provider: text, timestamp: i64)
     SessionEnd(session_id: text, timestamp: i64)
@@ -63,7 +64,7 @@ fn classify_event(agent_id: text, json: text) -> DashboardEvent:
 
     match msg_type:
         "tool_use" => classify_tool_use(agent_id, json, timestamp)
-        "tool_result" => DashboardEvent.Unknown
+        "tool_result" => classify_tool_result(agent_id, json, timestamp)
         "assistant" => classify_assistant(agent_id, json, timestamp)
         "human" => DashboardEvent.UserMessage(agent_id: agent_id, timestamp: timestamp)
         "user" => DashboardEvent.UserMessage(agent_id: agent_id, timestamp: timestamp)
@@ -109,10 +110,13 @@ fn classify_tool_use(agent_id: text, json: text, timestamp: i64) -> DashboardEve
                 args.push(cmd)
         "Agent" =>
             val desc = json_str(input_obj, "description")
+            val prompt_raw = json_str(input_obj, "prompt")
+            val prompt = truncate_text(prompt_raw, 500)
             return DashboardEvent.AgentSpawn(
                 parent_id: agent_id,
                 child_id: "{agent_id}#{desc}",
                 description: desc,
+                prompt: prompt,
                 timestamp: timestamp
             )
         "Skill" =>
@@ -129,13 +133,17 @@ fn classify_tool_use(agent_id: text, json: text, timestamp: i64) -> DashboardEve
     )
 
 fn classify_assistant(agent_id: text, json: text, timestamp: i64) -> DashboardEvent:
-    """Classify an assistant message — extract token usage."""
+    """Classify an assistant message — extract full token usage breakdown."""
     val usage = json_obj(json, "usage")
-    var tokens: i64 = 0
+    var input_tokens: i64 = 0
+    var output_tokens: i64 = 0
+    var cache_read: i64 = 0
+    var cache_create: i64 = 0
     if usage != "":
-        val output_tokens = json_int(usage, "output_tokens")
-        val input_tokens = json_int(usage, "input_tokens")
-        tokens = output_tokens + input_tokens
+        input_tokens = json_int(usage, "input_tokens")
+        output_tokens = json_int(usage, "output_tokens")
+        cache_read = json_int(usage, "cache_read_input_tokens")
+        cache_create = json_int(usage, "cache_creation_input_tokens")
 
     val model = json_str(json, "model")
     if model != "":
@@ -148,7 +156,24 @@ fn classify_assistant(agent_id: text, json: text, timestamp: i64) -> DashboardEv
 
     return DashboardEvent.AssistantMessage(
         agent_id: agent_id,
-        token_count: tokens,
+        input_tokens: input_tokens,
+        output_tokens: output_tokens,
+        cache_read: cache_read,
+        cache_create: cache_create,
+        timestamp: timestamp
+    )
+
+fn classify_tool_result(agent_id: text, json: text, timestamp: i64) -> DashboardEvent:
+    """Classify a tool_result message — capture response preview."""
+    val tool_name = json_str(json, "name")
+    val content = json_str(json, "content")
+    val preview = truncate_text(content, 200)
+    if preview == "" and tool_name == "":
+        return DashboardEvent.Unknown
+    return DashboardEvent.ToolResponse(
+        agent_id: agent_id,
+        tool_name: tool_name,
+        response_preview: preview,
         timestamp: timestamp
     )
 
@@ -295,9 +320,9 @@ fn event_to_activity(event: DashboardEvent) -> AgentActivity:
                     val query = if args.len() > 0: args[0] else: ""
                     AgentActivity.Searching(query: query)
                 _ => AgentActivity.ToolUse(tool: tool_name)
-        DashboardEvent.AgentSpawn(_, child_id, _, _):
+        DashboardEvent.AgentSpawn(_, child_id, _, _, _):
             AgentActivity.SubAgentSpawn(child_id: child_id)
-        DashboardEvent.AssistantMessage(_, _, _):
+        DashboardEvent.AssistantMessage(_, _, _, _, _, _):
             AgentActivity.Thinking
         DashboardEvent.Error(_, msg, _):
             AgentActivity.Error(msg: msg)
@@ -319,12 +344,13 @@ fn event_to_activity_entry(event: DashboardEvent) -> ActivityEntry?:
                 summary: summary,
                 timestamp: timestamp
             )
-        DashboardEvent.AgentSpawn(parent_id, child_id, description, timestamp):
+        DashboardEvent.AgentSpawn(parent_id, child_id, description, prompt, timestamp):
+            val preview = if prompt != "": " \"{truncate_text(prompt, 40)}\"" else: ""
             return ActivityEntry.new(
                 agent_id: parent_id,
                 room: RoomKind.Chat,
                 tool_name: "Agent",
-                summary: "spawn -> {description}",
+                summary: "spawn -> {description}{preview}",
                 timestamp: timestamp
             )
         DashboardEvent.Error(agent_id, message, timestamp):

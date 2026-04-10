@@ -60,6 +60,17 @@ function escapeForHtml(text) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
 }
+function buildHighlightedSourcePreview(text, selectionStart, selectionEnd) {
+    const start = Math.max(0, Math.min(text.length, selectionStart));
+    const end = Math.max(start, Math.min(text.length, selectionEnd));
+    const before = escapeForHtml(text.slice(0, start));
+    const selected = escapeForHtml(text.slice(start, end));
+    const after = escapeForHtml(text.slice(end));
+    const selectedHtml = selected.length > 0
+        ? `<span class="selection-highlight">${selected}</span>`
+        : '<span class="selection-caret">|</span>';
+    return `${before}${selectedHtml}${after}`;
+}
 function renderKatex(latex) {
     try {
         return katex_1.default.renderToString(latex, {
@@ -163,6 +174,38 @@ function buildMathSyncPanelHtml(state, katexCssUri) {
             padding: 12px;
             background: var(--vscode-sideBar-background);
         }
+        .panel-state.active .section {
+            border-color: var(--vscode-focusBorder);
+            box-shadow: 0 0 0 1px var(--vscode-focusBorder) inset;
+        }
+        .panel-state.sync-pending .section {
+            border-color: var(--vscode-progressBar-background);
+            box-shadow: 0 0 0 1px var(--vscode-progressBar-background) inset;
+        }
+        .panel-state.active .section-label {
+            color: var(--vscode-focusBorder);
+        }
+        .panel-state.sync-pending .section-label {
+            color: var(--vscode-progressBar-background);
+        }
+        .active-strip {
+            display: none;
+            margin-bottom: 12px;
+            padding: 8px 10px;
+            border-radius: 4px;
+            background: color-mix(in srgb, var(--vscode-focusBorder) 16%, transparent);
+            border: 1px solid var(--vscode-focusBorder);
+            color: var(--vscode-foreground);
+            font-size: 11px;
+        }
+        .panel-state.active .active-strip {
+            display: block;
+        }
+        .panel-state.sync-pending .active-strip {
+            display: block;
+            border-style: dashed;
+            background: color-mix(in srgb, var(--vscode-progressBar-background) 18%, transparent);
+        }
         .section-label {
             font-size: 11px;
             font-weight: 600;
@@ -229,39 +272,56 @@ function buildMathSyncPanelHtml(state, katexCssUri) {
             word-break: break-word;
             margin-top: 8px;
         }
+        .selection-highlight {
+            background: color-mix(in srgb, var(--vscode-focusBorder) 28%, transparent);
+            color: var(--vscode-foreground);
+            border-radius: 3px;
+            padding: 0 2px;
+            border: 1px solid var(--vscode-focusBorder);
+        }
+        .selection-caret {
+            color: var(--vscode-focusBorder);
+            font-weight: 700;
+        }
     </style>
 </head>
 <body>
-    <h2>Math Sync Panel</h2>
-    <div class="meta">
-        <div>Document: <span id="doc-uri">${escapeForHtml(state.documentUri)}</span></div>
-        <div>Selection: <span id="selection">${state.selectionStart}-${state.selectionEnd}</span></div>
-        <div>Block: <span id="block-label">${escapeForHtml(state.blockLabel)}</span></div>
-    </div>
-
-    <div class="grid">
-        <div class="section">
-            <div class="preview-row">
-                <div class="section-label">Rendered</div>
-                <div class="button-row">
-                    <button id="refresh-button" type="button">Refresh from Source</button>
-                </div>
-            </div>
-            <div id="math-rendered">
-                ${state.hasContent ? state.renderedHtml : `<div class="empty-state">Move the cursor onto a math block in the source editor.</div>`}
-            </div>
-            <div class="source-preview" id="pretty">${state.hasContent ? `Pretty: ${prettyValue}` : ''}</div>
+    <div id="panel-root" class="panel-state${state.hasContent ? ' active' : ''}">
+        <h2>Math Sync Panel</h2>
+        <div class="meta">
+            <div>Document: <span id="doc-uri">${escapeForHtml(state.documentUri)}</span></div>
+            <div>Selection: <span id="selection">${state.selectionStart}-${state.selectionEnd}</span></div>
+            <div>Block: <span id="block-label">${escapeForHtml(state.blockLabel)}</span></div>
         </div>
 
-        <div class="section">
-            <div class="section-label">Editable Source</div>
-            <textarea id="math-source" spellcheck="false" placeholder="Math block source...">${sourceValue}</textarea>
-            <div class="source-preview" id="source-preview">${state.hasContent ? `Source mirror: ${sourceValue}` : ''}</div>
+        <div class="grid">
+            <div class="active-strip" id="active-strip">Active math block is mirrored from the source editor</div>
+
+            <div class="section">
+                <div class="preview-row">
+                    <div class="section-label">Rendered</div>
+                    <div class="button-row">
+                        <button id="refresh-button" type="button">Refresh from Source</button>
+                    </div>
+                </div>
+                <div id="math-rendered">
+                    ${state.hasContent ? state.renderedHtml : `<div class="empty-state">Move the cursor onto a math block in the source editor.</div>`}
+                </div>
+                <div class="source-preview" id="pretty">${state.hasContent ? `Pretty: ${prettyValue}` : ''}</div>
+            </div>
+
+            <div class="section">
+                <div class="section-label">Editable Source</div>
+                <textarea id="math-source" spellcheck="false" placeholder="Math block source...">${sourceValue}</textarea>
+                <div class="source-preview" id="source-preview">${state.hasContent ? `Source mirror: ${buildHighlightedSourcePreview(state.blockText, state.selectionStart, state.selectionEnd)}` : ''}</div>
+            </div>
         </div>
     </div>
 
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
+        const root = document.getElementById('panel-root');
+        const activeStrip = document.getElementById('active-strip');
         const source = document.getElementById('math-source');
         const rendered = document.getElementById('math-rendered');
         const pretty = document.getElementById('pretty');
@@ -272,8 +332,41 @@ function buildMathSyncPanelHtml(state, katexCssUri) {
         const refreshButton = document.getElementById('refresh-button');
 
         let timer = null;
+        let syncPending = false;
+
+        function setPending(pending) {
+            syncPending = pending;
+            root.classList.toggle('sync-pending', pending);
+            if (pending) {
+                activeStrip.textContent = 'Syncing math block changes...';
+            } else {
+                activeStrip.textContent = 'Active math block is mirrored from the source editor';
+            }
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function renderSourcePreview(text, start, end) {
+            const clippedStart = Math.max(0, Math.min(text.length, start));
+            const clippedEnd = Math.max(clippedStart, Math.min(text.length, end));
+            const before = escapeHtml(text.slice(0, clippedStart));
+            const selected = escapeHtml(text.slice(clippedStart, clippedEnd));
+            const after = escapeHtml(text.slice(clippedEnd));
+            const selectedHtml = selected.length > 0
+                ? '<span class="selection-highlight">' + selected + '</span>'
+                : '<span class="selection-caret">|</span>';
+            return 'Source mirror: ' + before + selectedHtml + after;
+        }
 
         function sendEdit() {
+            setPending(true);
             vscode.postMessage({ type: 'edit', source: source.value });
         }
 
@@ -292,13 +385,21 @@ function buildMathSyncPanelHtml(state, katexCssUri) {
             const msg = event.data;
             if (msg.type === 'sync') {
                 const state = msg.state;
+                setPending(false);
+                root.classList.toggle('active', state.hasContent);
+                activeStrip.style.display = state.hasContent ? 'block' : 'none';
                 docUri.textContent = state.documentUri;
                 selection.textContent = state.selectionStart + '-' + state.selectionEnd;
                 blockLabel.textContent = state.blockLabel;
                 pretty.textContent = state.hasContent ? 'Pretty: ' + state.pretty : '';
-                sourcePreview.textContent = state.hasContent ? 'Source mirror: ' + state.blockText : '';
+                sourcePreview.innerHTML = state.hasContent
+                    ? renderSourcePreview(state.blockText, state.selectionStart, state.selectionEnd)
+                    : '';
                 if (source.value !== state.blockText) {
                     source.value = state.blockText;
+                }
+                if (typeof source.setSelectionRange === 'function') {
+                    source.setSelectionRange(state.selectionStart, state.selectionEnd);
                 }
                 if (state.hasContent) {
                     rendered.innerHTML = state.renderedHtml;
@@ -306,11 +407,13 @@ function buildMathSyncPanelHtml(state, katexCssUri) {
                     rendered.innerHTML = '<div class="empty-state">Move the cursor onto a math block in the source editor.</div>';
                 }
             } else if (msg.type === 'empty') {
+                setPending(false);
                 rendered.innerHTML = '<div class="empty-state">' + msg.message + '</div>';
                 pretty.textContent = '';
-                sourcePreview.textContent = '';
+                sourcePreview.innerHTML = '';
                 source.value = '';
             } else if (msg.type === 'error') {
+                setPending(false);
                 rendered.innerHTML = '<div class="empty-state">' + msg.message + '</div>';
             }
         });
@@ -435,7 +538,7 @@ class MathSyncPanel {
         if (!this.currentDocumentUri || event.textEditor.document.uri.toString() !== this.currentDocumentUri.toString()) {
             return;
         }
-        this.syncFromEditor(event.textEditor);
+        this.scheduleSyncFromEditor(event.textEditor);
     }
     handleDocumentChange(event) {
         if (!this.currentDocumentUri || event.document.uri.toString() !== this.currentDocumentUri.toString()) {
@@ -443,8 +546,17 @@ class MathSyncPanel {
         }
         const editor = this.getEditorForCurrentDocument();
         if (editor) {
-            this.syncFromEditor(editor);
+            this.scheduleSyncFromEditor(editor);
         }
+    }
+    scheduleSyncFromEditor(editor) {
+        if (this.syncTimer) {
+            clearTimeout(this.syncTimer);
+        }
+        this.syncTimer = setTimeout(() => {
+            this.syncTimer = undefined;
+            this.syncFromEditor(editor);
+        }, 50);
     }
     getEditorForCurrentDocument() {
         if (!this.currentDocumentUri) {
@@ -490,6 +602,10 @@ class MathSyncPanel {
     }
     dispose() {
         MathSyncPanel.currentPanel = undefined;
+        if (this.syncTimer) {
+            clearTimeout(this.syncTimer);
+            this.syncTimer = undefined;
+        }
         this.panel.dispose();
         for (const disposable of this.disposables) {
             disposable.dispose();

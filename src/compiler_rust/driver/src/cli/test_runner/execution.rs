@@ -180,6 +180,19 @@ fn strip_ansi_codes(s: &str) -> String {
 }
 
 pub(crate) fn artifact_dir_for_test(path: &Path) -> PathBuf {
+    // Strip absolute prefix (relative to CWD) so that PathBuf::join doesn't
+    // discard "target/test-artifacts/" when given an absolute path.
+    let path = if path.is_absolute() {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(&cwd).ok().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    // Note: .replace("test/", "") is greedy — it also strips "test/" from
+    // substrings (e.g. "contest/" → "con"). Pre-existing behavior, not changed.
     let relative = path
         .to_string_lossy()
         .replace("simple/std_lib/test/", "")
@@ -187,7 +200,7 @@ pub(crate) fn artifact_dir_for_test(path: &Path) -> PathBuf {
         .replace("_spec.spl", "")
         .replace("_test.spl", "")
         .replace(".spl", "");
-    PathBuf::from("target/test-artifacts").join(relative)
+    PathBuf::from("build/test-artifacts").join(relative)
 }
 
 pub(crate) fn write_artifact_bundle(

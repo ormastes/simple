@@ -31,6 +31,7 @@ export declare class MathSyncPanel implements vscode.Disposable {
     private disposables;
     private currentDocumentUri;
     private lastStateKey;
+    private syncTimer;
     private constructor();
     static show(decorationProvider: MathDecorationProvider, extensionUri: vscode.Uri): void;
     static isVisible(): boolean;
@@ -38,6 +39,7 @@ export declare class MathSyncPanel implements vscode.Disposable {
     private handleMessage;
     private handleSelectionChange;
     private handleDocumentChange;
+    private scheduleSyncFromEditor;
     private getEditorForCurrentDocument;
     private getCurrentBlock;
     private syncFromEditor;

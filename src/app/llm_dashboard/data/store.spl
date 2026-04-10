@@ -5,7 +5,8 @@
 
 use app.llm_dashboard.data.types.{
     AgentNode, LLMStatus, LLMProvider, RoomKind, FileActivity, URLActivity,
-    ActivityEntry, provider_name, room_name, format_tokens
+    ActivityEntry, AgentMessage, McpStats, ManagedTask, TaskKind, TaskState,
+    provider_name, room_name, format_tokens, total_tokens, mcp_server_name
 }
 use app.llm_dashboard.data.jsonl_watcher.{JsonlWatcher}
 use app.llm_dashboard.data.agent_tree.{AgentTree}
@@ -22,6 +23,12 @@ class AgentDashboardStore:
     file_activities: [FileActivity]
     url_activities: [URLActivity]
     llm_statuses: [LLMStatus]
+    agent_messages: [AgentMessage]
+    mcp_stats: [McpStats]
+    managed_tasks: [ManagedTask]
+    total_cache_reads: i64
+    total_cache_creates: i64
+    cache_history: [i64]
     max_feed_size: i32
     last_update: i64
     total_events: i64
@@ -40,6 +47,12 @@ class AgentDashboardStore:
             file_activities: [],
             url_activities: [],
             llm_statuses: statuses,
+            agent_messages: [],
+            mcp_stats: [],
+            managed_tasks: [],
+            total_cache_reads: 0,
+            total_cache_creates: 0,
+            cache_history: [],
             max_feed_size: 200,
             last_update: 0,
             total_events: 0
@@ -58,6 +71,12 @@ class AgentDashboardStore:
             file_activities: [],
             url_activities: [],
             llm_statuses: statuses,
+            agent_messages: [],
+            mcp_stats: [],
+            managed_tasks: [],
+            total_cache_reads: 0,
+            total_cache_creates: 0,
+            cache_history: [],
             max_feed_size: 200,
             last_update: 0,
             total_events: 0
@@ -116,16 +135,47 @@ impl AgentDashboardStore:
                     self.url_activities.push(
                         URLActivity.new(agent_id, args[0], timestamp)
                     )
+                elif tool_name.starts_with("mcp__"):
+                    self._track_mcp_call(tool_name, timestamp)
                 else:
                     pass_dn
+            _: pass_dn
+
+        # Track agent messages on spawn
+        match event:
+            DashboardEvent.AgentSpawn(parent_id, child_id, description, prompt, timestamp):
+                if prompt != "":
+                    self.agent_messages.push(
+                        AgentMessage.new(parent_id, child_id, "send", prompt, timestamp)
+                    )
+                    if self.agent_messages.len() > 200:
+                        self.agent_messages = self.agent_messages.slice(
+                            self.agent_messages.len() - 200
+                        )
+            DashboardEvent.ToolResponse(agent_id, tool_name, response_preview, timestamp):
+                if tool_name == "Agent" and response_preview != "":
+                    self.agent_messages.push(
+                        AgentMessage.new(agent_id, "", "receive", response_preview, timestamp)
+                    )
+                    if self.agent_messages.len() > 200:
+                        self.agent_messages = self.agent_messages.slice(
+                            self.agent_messages.len() - 200
+                        )
             _: pass_dn
 
         # Update LLM status from session events
         match event:
             DashboardEvent.SessionStart(session_id, model, provider_str, timestamp):
                 self._update_llm_status_connected(provider_str, model, timestamp)
-            DashboardEvent.AssistantMessage(agent_id, token_count, timestamp):
-                self._add_llm_tokens(agent_id, token_count)
+            DashboardEvent.AssistantMessage(agent_id, input_tokens, output_tokens, cache_read, cache_create, timestamp):
+                self._add_llm_tokens(agent_id, input_tokens, output_tokens, cache_read, cache_create)
+                self.total_cache_reads = self.total_cache_reads + cache_read
+                self.total_cache_creates = self.total_cache_creates + cache_create
+                self.cache_history.push(cache_read)
+                if self.cache_history.len() > 50:
+                    self.cache_history = self.cache_history.slice(
+                        self.cache_history.len() - 50
+                    )
             _: pass_dn
 
     # -- LLM Status Updates -----------------------------------------------
@@ -149,22 +199,49 @@ impl AgentDashboardStore:
             self.llm_statuses[0].model = model
             self.llm_statuses[0].last_heartbeat = timestamp
 
-    me _add_llm_tokens(agent_id: text, token_count: i64):
-        """Add tokens to the appropriate provider's counter."""
+    me _add_llm_tokens(agent_id: text, input: i64, output: i64, cache_read: i64, cache_create: i64):
+        """Add token breakdown to the appropriate provider's counter."""
+        val total = input + output + cache_read + cache_create
         # Find which provider this agent belongs to
         val agent = self.tree.get_agent(agent_id)
         if agent == nil:
             # Default to Claude
             if self.llm_statuses.len() > 0:
-                self.llm_statuses[0].tokens_used = self.llm_statuses[0].tokens_used + token_count
+                self.llm_statuses[0].tokens_used = self.llm_statuses[0].tokens_used + total
+                self.llm_statuses[0].cache_read_tokens = self.llm_statuses[0].cache_read_tokens + cache_read
+                self.llm_statuses[0].cache_create_tokens = self.llm_statuses[0].cache_create_tokens + cache_create
             return
         val pname = provider_name(agent.provider).to_lower()
         var i = 0
         while i < self.llm_statuses.len():
             if provider_name(self.llm_statuses[i].provider).to_lower() == pname:
-                self.llm_statuses[i].tokens_used = self.llm_statuses[i].tokens_used + token_count
+                self.llm_statuses[i].tokens_used = self.llm_statuses[i].tokens_used + total
+                self.llm_statuses[i].cache_read_tokens = self.llm_statuses[i].cache_read_tokens + cache_read
+                self.llm_statuses[i].cache_create_tokens = self.llm_statuses[i].cache_create_tokens + cache_create
                 return
             i = i + 1
+
+    # -- MCP Tracking ----------------------------------------------------
+
+    me _track_mcp_call(tool_name: text, timestamp: i64):
+        """Track a call to an MCP server."""
+        val server = mcp_server_name(tool_name)
+        if server == "":
+            return
+        var i = 0
+        while i < self.mcp_stats.len():
+            if self.mcp_stats[i].server_name == server:
+                self.mcp_stats[i].call_count = self.mcp_stats[i].call_count + 1
+                self.mcp_stats[i].last_tool = tool_name
+                self.mcp_stats[i].last_call_time = timestamp
+                return
+            i = i + 1
+        # New server
+        var stats = McpStats.new(server)
+        stats.call_count = 1
+        stats.last_tool = tool_name
+        stats.last_call_time = timestamp
+        self.mcp_stats.push(stats)
 
     # -- Queries ----------------------------------------------------------
 
@@ -241,6 +318,47 @@ impl AgentDashboardStore:
     fn is_available() -> bool:
         """Check if JSONL watching is available."""
         return self.watcher.is_available()
+
+    fn get_agent_messages(limit: i32) -> [AgentMessage]:
+        """Get recent agent messages."""
+        if limit >= self.agent_messages.len():
+            return self.agent_messages
+        return self.agent_messages.slice(self.agent_messages.len() - limit)
+
+    fn get_mcp_stats() -> [McpStats]:
+        return self.mcp_stats
+
+    fn get_managed_tasks() -> [ManagedTask]:
+        return self.managed_tasks
+
+    fn session_cache_efficiency_pct() -> i64:
+        """Session-wide cache efficiency as integer percentage."""
+        val total_input = self.total_cache_reads + self.total_cache_creates
+        var uncached: i64 = 0
+        for status in self.llm_statuses:
+            uncached = uncached + status.tokens_used - status.cache_read_tokens - status.cache_create_tokens
+        val total = total_input + uncached
+        if total <= 0:
+            return 0
+        return (self.total_cache_reads * 100) / total
+
+    me add_managed_task(task: ManagedTask):
+        """Add or replace a managed task by ID."""
+        var i = 0
+        while i < self.managed_tasks.len():
+            if self.managed_tasks[i].id == task.id:
+                self.managed_tasks[i] = task
+                return
+            i = i + 1
+        self.managed_tasks.push(task)
+
+    me remove_managed_task(task_id: text):
+        """Remove a managed task by ID."""
+        var kept: [ManagedTask] = []
+        for t in self.managed_tasks:
+            if t.id != task_id:
+                kept.push(t)
+        self.managed_tasks = kept
 
     fn summary_line() -> text:
         """One-line summary for status bar."""
