@@ -441,7 +441,7 @@ We use **Option 2** because it's simpler and doesn't require creating new types.
 3. ✅ **Integration test:**
    ```bash
    # Use desugared lexer in parser
-   simple src/main.spl --use-core-lexer
+   simple run src/main.spl --use-core-lexer
    ```
 
 4. ✅ **Bootstrap test:**

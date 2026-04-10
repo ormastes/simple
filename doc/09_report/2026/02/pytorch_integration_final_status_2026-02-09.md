@@ -310,7 +310,7 @@ test_torch_sffi.spl         # Will work after runtime fix
 ### What Works Now ✅
 ```bash
 # 1. Generator produces correct code
-bin/simple src/app/wrapper_gen/mod.spl examples/torch.wrapper_spec
+bin/simple run src/app/wrapper_gen/mod.spl examples/torch.wrapper_spec
 # Output: All 3 tiers generated ✅
 
 # 2. FFI library builds in stub mode

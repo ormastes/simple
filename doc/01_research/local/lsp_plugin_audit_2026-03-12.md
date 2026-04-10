@@ -38,14 +38,14 @@ The checked-in CMM plugin bundle exists at:
 But `.lsp.json` launches:
 
 ```json
-["bin/release/simple", "examples/10_tooling/trace32_tools/cmm_lsp/mod.spl", "--lsp"]
+["bin/simple", "examples/10_tooling/trace32_tools/cmm_lsp/mod.spl", "--lsp"]
 ```
 
 This is valid inside a source checkout.
 
 It is not a standalone released plugin package, because the release tarball
 does not contain:
-- `bin/release/simple`
+- `bin/simple`
 - `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl`
 
 Conclusion:
@@ -55,12 +55,12 @@ Conclusion:
 ### 3. `simple lsp` is not currently a stable packaged entrypoint
 
 In this checkout:
-- `bin/release/simple src/lib/nogc_sync_mut/lsp/main.spl --help` works
-- `bin/release/simple lsp --help` fails with `lsp app not found`
+- `bin/simple run src/lib/nogc_sync_mut/lsp/main.spl --help` works
+- `bin/simple lsp --help` fails with `lsp app not found`
 
 Conclusion:
 - The planned plugin command from the earlier research note,
-  `["bin/release/simple", "lsp"]`, is not currently reliable in this repo
+  `["bin/simple", "lsp"]`, is not currently reliable in this repo
 - Any future Simple plugin should target a verified entrypoint, not the planned
   one
 
@@ -86,7 +86,7 @@ Those need different commands.
 
 Keep a repo-local plugin bundle for development:
 - command may point at workspace-relative sources
-- example: `bin/release/simple .../mod.spl --lsp`
+- example: `bin/simple run .../mod.spl --lsp`
 
 This is acceptable for contributors working in this checkout.
 

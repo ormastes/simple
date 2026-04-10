@@ -345,11 +345,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_interp_call(&mut self, dest: &Option<VReg>, func_name: &str, args: &[VReg]) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
+        let i8_type = self.backend.context.i8_type();
         let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
+        let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
         let interp_call = self.module.get_function("rt_interp_call").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(
-                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
+                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
                 false,
             );
             self.module.add_function("rt_interp_call", fn_type, None)
@@ -361,11 +363,76 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         name_global.set_initializer(&name_const);
         name_global.set_constant(true);
         let name_ptr = name_global.as_pointer_value();
+        let name_ptr_i64 = self
+            .builder
+            .build_ptr_to_int(name_ptr, i64_type, "func_name_ptr")
+            .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?;
         let name_len = i64_type.const_int(name_bytes.len() as u64, false);
         let argc = i64_type.const_int(args.len() as u64, false);
-        let argv = i8_ptr_type.const_null();
+        let argv = if args.is_empty() {
+            i64_type.const_int(0, false)
+        } else {
+            let alloc_fn = self.module.get_function("rt_alloc").unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                self.module.add_function("rt_alloc", fn_type, None)
+            });
+            let total_bytes = i64_type.const_int(args.len() as u64 * slot_bytes, false);
+            let alloc_call = self
+                .builder
+                .build_call(alloc_fn, &[total_bytes.into()], "interp_argv_alloc")
+                .map_err(|e| format!("LLVM rt_alloc call failed: {}", e))?;
+            let argv_raw = alloc_call
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| "LLVM rt_alloc missing return value".to_string())?
+                .into_int_value();
+            let argv_ptr = self
+                .builder
+                .build_int_to_ptr(argv_raw, i8_ptr_type, "interp_argv_ptr")
+                .map_err(|e| format!("LLVM int_to_ptr failed: {}", e))?;
 
-        let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
+            for (index, arg) in args.iter().enumerate() {
+                let value = self.get(*arg)?;
+                let int_value = match value {
+                    BasicValueEnum::IntValue(int_value) => int_value,
+                    BasicValueEnum::PointerValue(pointer_value) => self
+                        .builder
+                        .build_ptr_to_int(pointer_value, i64_type, "interp_arg_ptr")
+                        .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?,
+                    _ => {
+                        return Err(format!(
+                            "LLVM emitter: unsupported interp arg value kind for {:?}",
+                            arg
+                        ));
+                    }
+                };
+                let offset = self
+                    .backend
+                    .context
+                    .i32_type()
+                    .const_int((index as u64) * slot_bytes, false);
+                let slot_ptr = unsafe {
+                    self.builder
+                        .build_gep(i8_type, argv_ptr, &[offset], "interp_argv_slot")
+                        .map_err(|e| format!("LLVM gep failed: {}", e))?
+                };
+                let typed_ptr = self
+                    .builder
+                    .build_pointer_cast(
+                        slot_ptr,
+                        self.backend.context.ptr_type(inkwell::AddressSpace::default()),
+                        "interp_argv_typed_ptr",
+                    )
+                    .map_err(|e| format!("LLVM pointer cast failed: {}", e))?;
+                self.builder
+                    .build_store(typed_ptr, int_value)
+                    .map_err(|e| format!("LLVM store failed: {}", e))?;
+            }
+
+            argv_raw
+        };
+
+        let call_args = [name_ptr_i64.into(), name_len.into(), argc.into(), argv.into()];
         let call_site = self
             .builder
             .build_call(interp_call, &call_args, "interp_call")

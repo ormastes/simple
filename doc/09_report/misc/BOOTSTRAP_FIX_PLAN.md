@@ -105,13 +105,13 @@ The `src/compiler/` directory has most of the pieces, but they need to be wired 
 
 ```bash
 # Stage 1: Use pre-built binary
-cp bin/release/simple build/bootstrap/simple_new1
+cp bin/simple build/bootstrap/simple_new1
 
 # Stage 2: Compile with simple_new1 (using Pure Simple compiler)
 build/bootstrap/simple_new1 compile src/app/cli/main.spl -o build/bootstrap/simple_new2.smf
 
 # Stage 3: Use simple_new2.smf to compile (through runtime)
-bin/release/simple build/bootstrap/simple_new2.smf compile src/app/cli/main.spl -o build/bootstrap/simple_new3.smf
+bin/simple build/bootstrap/simple_new2.smf compile src/app/cli/main.spl -o build/bootstrap/simple_new3.smf
 
 # Verify: Stage 2 and Stage 3 should be identical
 sha256sum build/bootstrap/simple_new{2,3}.smf

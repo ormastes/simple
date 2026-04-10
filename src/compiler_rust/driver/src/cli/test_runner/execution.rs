@@ -640,15 +640,9 @@ fn find_simple_binary() -> PathBuf {
         }
     }
 
-    // Fallback: try common locations
-    let candidates = vec![
-        PathBuf::from("./bin/release/simple"),      // Release binary
-        PathBuf::from("./bin/wrappers/simple"),     // Wrapper script
-        PathBuf::from("./target/bootstrap/simple"), // Bootstrap build
-        PathBuf::from("./target/release/simple"),   // Cargo release
-        PathBuf::from("./target/debug/simple"),     // Cargo debug
-        PathBuf::from("simple"),                    // In PATH
-    ];
+    // Fallback: try common locations, preferring local bin/simple and
+    // platform-specific release layouts before the flat legacy path.
+    let candidates = simple_binary_candidates();
 
     for candidate in candidates {
         if candidate.exists() {
@@ -657,6 +651,84 @@ fn find_simple_binary() -> PathBuf {
     }
 
     PathBuf::from("./target/debug/simple")
+}
+
+fn simple_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = repo_rust_binary_candidates();
+    candidates.push(PathBuf::from("./bin/simple"));
+
+    candidates.extend(platform_release_binary_candidates());
+    candidates.push(PathBuf::from("./bin/release/simple"));
+    candidates.push(PathBuf::from("./bin/wrappers/simple"));
+    candidates.extend(local_rust_binary_candidates());
+    candidates.push(PathBuf::from("simple"));
+    candidates
+}
+
+fn repo_rust_binary_candidates() -> Vec<PathBuf> {
+    if cfg!(target_os = "windows") {
+        vec![
+            PathBuf::from("./src/compiler_rust/target/release/simple.exe"),
+            PathBuf::from("./src/compiler_rust/target/bootstrap/simple.exe"),
+        ]
+    } else {
+        vec![
+            PathBuf::from("./src/compiler_rust/target/release/simple"),
+            PathBuf::from("./src/compiler_rust/target/bootstrap/simple"),
+        ]
+    }
+}
+
+fn local_rust_binary_candidates() -> Vec<PathBuf> {
+    if cfg!(target_os = "windows") {
+        vec![
+            PathBuf::from("./target/bootstrap/simple.exe"),
+            PathBuf::from("./target/release/simple.exe"),
+            PathBuf::from("./target/debug/simple.exe"),
+        ]
+    } else {
+        vec![
+            PathBuf::from("./target/bootstrap/simple"),
+            PathBuf::from("./target/release/simple"),
+            PathBuf::from("./target/debug/simple"),
+        ]
+    }
+}
+
+fn platform_release_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("./bin/release/x86_64-pc-windows-msvc/simple.exe"));
+            candidates.push(PathBuf::from("./bin/release/x86_64-pc-windows-gnu/simple.exe"));
+        }
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("./bin/release/aarch64-pc-windows-msvc/simple.exe"));
+            candidates.push(PathBuf::from("./bin/release/aarch64-pc-windows-gnu/simple.exe"));
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("./bin/release/aarch64-apple-darwin-macho/simple"));
+            candidates.push(PathBuf::from("./bin/release/macos-arm64/simple"));
+            candidates.push(PathBuf::from("./bin/release/darwin-aarch64/simple"));
+        }
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("./bin/release/macos-x86_64/simple"));
+            candidates.push(PathBuf::from("./bin/release/darwin-x86_64/simple"));
+        }
+    } else if cfg!(target_os = "linux") {
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("./bin/release/linux-x86_64/simple"));
+            candidates.push(PathBuf::from("./bin/release/x86_64-unknown-linux-gnu/simple"));
+        }
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("./bin/release/linux-aarch64/simple"));
+            candidates.push(PathBuf::from("./bin/release/aarch64-unknown-linux-gnu/simple"));
+        }
+    }
+
+    candidates
 }
 
 /// Wait for a process with timeout

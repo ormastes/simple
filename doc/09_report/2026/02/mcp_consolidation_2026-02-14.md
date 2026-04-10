@@ -35,7 +35,7 @@ All wrappers now point to unified location:
 ```
 bin/simple_mcp_server_optimized (wrapper script)
   ↓
-bin/release/simple (runtime)
+bin/simple (runtime)
   ↓
 src/app/mcp/main.spl (273 lines - optimized)
 ```

@@ -142,7 +142,7 @@ fn main() -> i32:
 ### Option B: Use Working Compiler (Low Effort) ⭐ RECOMMENDED
 
 **Pros:**
-- `bin/release/simple` (33MB) already works perfectly
+- `bin/simple` (33MB) already works perfectly
 - 604/604 tests passing
 - Can compile full compiler immediately
 - Focus on language features, not bootstrap
@@ -152,7 +152,7 @@ fn main() -> i32:
 - But pre-built binary WAS compiled from Simple sources!
 
 **The Reality:**
-The pre-built `bin/release/simple` WAS bootstrapped from Simple sources at some point. Using it is effectively continuing the bootstrap chain, just not from scratch every time.
+The pre-built `bin/simple` WAS bootstrapped from Simple sources at some point. Using it is effectively continuing the bootstrap chain, just not from scratch every time.
 
 ### Option C: Minimal Core Compiler (Medium Effort)
 
@@ -193,7 +193,7 @@ The pre-built `bin/release/simple` WAS bootstrapped from Simple sources at some 
 
 **Recommended path forward:**
 
-1. **Short term:** Use `bin/release/simple` for development (it works perfectly)
+1. **Short term:** Use `bin/simple` for development (it works perfectly)
 2. **Long term:** Either:
    - Fix seed_cpp bugs to handle complex files
    - Design minimal core compiler as intermediate step

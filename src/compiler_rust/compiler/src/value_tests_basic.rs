@@ -205,8 +205,8 @@
     fn test_value_truthy_dict() {
         let mut d = HashMap::new();
         d.insert("key".to_string(), Value::Int(1));
-        assert!(Value::Dict(d).truthy());
-        assert!(!Value::Dict(HashMap::new()).truthy());
+        assert!(Value::Dict(d.into()).truthy());
+        assert!(!Value::Dict(HashMap::new().into()).truthy());
     }
 
     #[test]
@@ -289,7 +289,7 @@
         assert_eq!(Value::Symbol("".into()).type_name(), "symbol");
         assert_eq!(Value::array(vec![]).type_name(), "array");
         assert_eq!(Value::Tuple(vec![]).type_name(), "tuple");
-        assert_eq!(Value::Dict(HashMap::new()).type_name(), "dict");
+        assert_eq!(Value::Dict(HashMap::new().into()).type_name(), "dict");
         assert_eq!(Value::Nil.type_name(), "nil");
         assert_eq!(Value::Object {
             class: "Test".into(),
@@ -360,8 +360,8 @@
 
     #[test]
     fn test_value_matches_type_dict() {
-        assert!(Value::Dict(HashMap::new()).matches_type("dict"));
-        assert!(Value::Dict(HashMap::new()).matches_type("Dict"));
+        assert!(Value::Dict(HashMap::new().into()).matches_type("dict"));
+        assert!(Value::Dict(HashMap::new().into()).matches_type("Dict"));
     }
 
     #[test]
@@ -443,7 +443,7 @@
     fn test_value_clone_dict() {
         let mut d = HashMap::new();
         d.insert("key".to_string(), Value::Int(42));
-        let v = Value::Dict(d);
+        let v = Value::Dict(d.into());
         assert_eq!(v.clone(), v);
     }
 

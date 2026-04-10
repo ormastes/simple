@@ -203,7 +203,7 @@ bin/simple examples/torch_demo_fallback.spl
 Implement dlopen() in runtime to load libsimple_torch_ffi.so
 
 # Option B: Static linking (rebuild)
-Link FFI library into bin/release/simple
+Link FFI library into bin/simple
 
 # Option C: Preload (quick test)
 LD_PRELOAD=.build/rust/ffi_torch/target/release/libsimple_torch_ffi.so bin/simple ...

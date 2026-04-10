@@ -141,7 +141,7 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
             println!("  --output=<dir>     Output directory (default: bootstrap)");
-            println!("  --seed=<path>      Seed compiler binary (default: bin/release/simple)");
+            println!("  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)");
             0
         }
         _ => {
@@ -206,7 +206,10 @@ fn handle_build_check() -> i32 {
     let fmt = handle_build_fmt(&["--check"]);
 
     println!("\n=== Running Tests ===");
-    let test = std::process::Command::new("bin/simple")
+    let test_binary = resolve_preferred_simple_binary()
+        .or_else(|| std::env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from("bin/simple"));
+    let test = std::process::Command::new(&test_binary)
         .arg("test")
         .status()
         .map(|s| s.code().unwrap_or(1))
@@ -239,7 +242,7 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
         println!("OPTIONS:");
         println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
         println!("  --output=<dir>     Output directory (default: bootstrap)");
-        println!("  --seed=<path>      Seed compiler binary (default: bin/release/simple)");
+        println!("  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)");
         println!();
         println!("The seed compiler must be a self-hosted Simple binary capable of");
         println!("running src/app/compile/native.spl to compile the compiler source.");
@@ -277,12 +280,10 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
             return 1;
         }
         seed
-    } else if PathBuf::from("bin/release/simple").exists() {
-        "bin/release/simple".to_string()
-    } else if PathBuf::from("bin/simple").exists() {
-        "bin/simple".to_string()
+    } else if let Some(path) = resolve_preferred_simple_binary() {
+        path.to_string_lossy().to_string()
     } else {
-        eprintln!("Error: No compiler binary found at bin/release/simple or bin/simple");
+        eprintln!("Error: No compiler binary found at bin/simple or bin/release/<platform>/simple");
         eprintln!("  Use --seed=<path> to specify a self-hosted compiler binary");
         return 1;
     };
@@ -357,10 +358,7 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     //   compiler compile src/app/cli/main.spl --native -o <output>
     // Falls back to self-hosted Simple format:
     //   compiler src/app/compile/native.spl src/app/cli/main.spl <output>
-    let is_rust_driver = compiler.ends_with("bin/release/simple")
-        || compiler.ends_with("bin/simple")
-        || compiler == "bin/release/simple"
-        || compiler == "bin/simple";
+    let is_rust_driver = is_rust_driver_binary(compiler);
 
     let mut cmd = Command::new(compiler);
     if is_rust_driver {
@@ -441,6 +439,77 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             }
         }
     }
+}
+
+fn resolve_preferred_simple_binary() -> Option<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("src/compiler_rust/target/release/simple"),
+        PathBuf::from("src/compiler_rust/target/bootstrap/simple"),
+        PathBuf::from("bin/simple"),
+    ];
+    candidates.extend(platform_release_binary_candidates());
+    candidates.push(PathBuf::from("bin/release/simple"));
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn platform_release_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("bin/release/x86_64-pc-windows-msvc/simple.exe"));
+            candidates.push(PathBuf::from("bin/release/x86_64-pc-windows-gnu/simple.exe"));
+        }
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("bin/release/aarch64-pc-windows-msvc/simple.exe"));
+            candidates.push(PathBuf::from("bin/release/aarch64-pc-windows-gnu/simple.exe"));
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("bin/release/aarch64-apple-darwin-macho/simple"));
+            candidates.push(PathBuf::from("bin/release/macos-arm64/simple"));
+            candidates.push(PathBuf::from("bin/release/darwin-aarch64/simple"));
+        }
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("bin/release/macos-x86_64/simple"));
+            candidates.push(PathBuf::from("bin/release/darwin-x86_64/simple"));
+        }
+    } else if cfg!(target_os = "linux") {
+        if cfg!(target_arch = "x86_64") {
+            candidates.push(PathBuf::from("bin/release/linux-x86_64/simple"));
+            candidates.push(PathBuf::from("bin/release/x86_64-unknown-linux-gnu/simple"));
+        }
+        if cfg!(target_arch = "aarch64") {
+            candidates.push(PathBuf::from("bin/release/linux-aarch64/simple"));
+            candidates.push(PathBuf::from("bin/release/aarch64-unknown-linux-gnu/simple"));
+        }
+    }
+
+    candidates
+}
+
+fn is_rust_driver_binary(compiler: &str) -> bool {
+    let normalized = compiler.replace('\\', "/");
+    normalized == "src/compiler_rust/target/release/simple"
+        || normalized.ends_with("/src/compiler_rust/target/release/simple")
+        || normalized == "src/compiler_rust/target/bootstrap/simple"
+        || normalized.ends_with("/src/compiler_rust/target/bootstrap/simple")
+        || normalized == "bin/simple"
+        || normalized.ends_with("/bin/simple")
+        || normalized == "bin/release/simple"
+        || normalized.ends_with("/bin/release/simple")
+        || normalized.contains("/bin/release/")
+        || normalized.ends_with("/target/bootstrap/simple")
+        || normalized.ends_with("/target/release/simple")
+        || normalized.ends_with("/target/debug/simple")
+        || normalized == "simple"
 }
 
 /// Handle 'brief' command - LLM-friendly code overview

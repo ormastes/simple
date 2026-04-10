@@ -218,10 +218,10 @@ The duplicate detection system has been optimized through two completed phases, 
 bin/simple test test/app/duplicate_check/
 
 # Test incremental mode
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.test_cache.sdn --verbose
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.test_cache.sdn --verbose
 
 # Test parallel mode (infrastructure only, execution pending)
-bin/simple src/app/duplicate_check/main.spl src/ --parallel --jobs=4 --verbose
+bin/simple run src/app/duplicate_check/main.spl src/ --parallel --jobs=4 --verbose
 
 # Clean incremental cache
 rm -f .duplicate_cache.sdn .test_cache.sdn

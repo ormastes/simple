@@ -11,7 +11,7 @@ When running `bin/simple mcp` or any MCP server, excessive debug output from the
 ...
 ```
 
-This made the MCP server appear broken when it was actually functioning correctly. The debug output was coming from the compiled Rust runtime (`bin/release/simple`), specifically from the interpreter module's `register_definitions` function.
+This made the MCP server appear broken when it was actually functioning correctly. The debug output was coming from the compiled Rust runtime (`bin/simple`), specifically from the interpreter module's `register_definitions` function.
 
 ## Root Cause
 
@@ -52,7 +52,7 @@ exec "$@" 2>/dev/null
 Before:
 ```json
 {
-  "command": "bin/release/simple",
+  "command": "bin/simple",
   "args": ["src/app/mcp/main.spl"]
 }
 ```
@@ -61,7 +61,7 @@ After:
 ```json
 {
   "command": "bin/mcp_quiet.sh",
-  "args": ["bin/release/simple", "src/app/mcp/main.spl"]
+  "args": ["bin/simple", "src/app/mcp/main.spl"]
 }
 ```
 
@@ -72,12 +72,12 @@ All MCP servers now work correctly with clean output:
 ```bash
 # Test simple-mcp
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | \
-  bin/mcp_quiet.sh bin/release/simple src/app/mcp/main.spl
+  bin/mcp_quiet.sh bin/simple run src/app/mcp/main.spl
 # Output: Clean JSON response with 33 tools
 
 # Test simple-mcp-jj
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}' | \
-  bin/mcp_quiet.sh bin/release/simple src/app/mcp_jj/main_lite.spl
+  bin/mcp_quiet.sh bin/simple run src/app/mcp_jj/main_lite.spl
 # Output: Clean JSON response with 10 jj tools
 ```
 

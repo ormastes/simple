@@ -197,7 +197,7 @@ val handle_id = spl_thread_create_by_name("worker_loop_entry", pool_id)
 
 ### Current Test Results
 Cannot run tests because:
-1. Runtime binary (`bin/release/simple`) built before threading support
+1. Runtime binary (`bin/simple`) built before threading support
 2. Extern functions (`spl_thread_*`) not linked in binary
 
 ```bash

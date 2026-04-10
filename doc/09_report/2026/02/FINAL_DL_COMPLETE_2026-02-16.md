@@ -477,7 +477,7 @@ Output: models/phase0/lora_0
 
 2. **Link PyTorch FFI into Runtime** (Enables 5 examples)
    - Modify build script to link libsimple_torch_ffi.so
-   - Rebuild bin/release/simple
+   - Rebuild bin/simple
    - Impact: All PyTorch examples work immediately
 
 ### **Priority 2: Medium Impact (Polish)**

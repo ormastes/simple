@@ -8,7 +8,7 @@ Interactive Read-Eval-Print-Loop for exploring Simple language. Implemented in p
 
 ```bash
 # Start the REPL
-bin/release/simple src/app/repl/main.spl
+bin/simple run src/app/repl/main.spl
 
 # Via CLI dispatch
 bin/simple repl
@@ -114,15 +114,15 @@ still alive
 ## Implementation Notes
 
 - **Source:** `src/app/repl/main.spl` (249 lines)
-- **No compiler imports:** Uses `bin/release/simple` subprocess for fast startup
+- **No compiler imports:** Uses `bin/simple` or `bin/release/<platform>/simple` subprocess for fast startup
 - **Module-level state:** `var` declarations at module level (avoids closure mutation bug)
 - **Text accumulation:** Uses `text` concatenation (avoids `.len()`/`.push()` array path call bug)
 - **Temp file:** `/tmp/simple_repl_{pid}.spl`
-- **Subprocess:** `rt_process_run("bash", ["-c", "bin/release/simple path </dev/null 2>&1"])`
+- **Subprocess:** `rt_process_run("bash", ["-c", "bin/simple run path </dev/null 2>&1"])`
 
 ## Dependencies
 
-- `bin/release/simple` binary
+- `bin/simple` or `bin/release/<platform>/simple` binary
 - Runtime extern functions: `input()`, `stdout_write()`, `stdout_flush()`, `rt_file_write_text()`, `rt_file_delete()`, `rt_file_exists()`, `rt_getpid()`, `rt_process_run()`, `rt_file_read_text()`
 
 ## Test Files

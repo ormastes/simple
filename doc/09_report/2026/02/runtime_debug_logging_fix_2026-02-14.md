@@ -11,7 +11,7 @@ MCP server fails to start because runtime outputs massive debug spam:
 ## Root Cause
 
 1. **Hardcoded debug output:** Runtime uses `println!`/`eprintln!` instead of `log` crate
-2. **Debug builds in production:** `bin/release/simple` has `with debug_info, not stripped`
+2. **Debug builds in production:** `bin/simple` has `with debug_info, not stripped`
 3. **No conditional compilation:** Debug output always enabled, can't be disabled
 
 ## Requirements for Next Release
@@ -46,10 +46,10 @@ strip target/release/simple
 Verify fix works:
 ```bash
 # Should produce NO debug output
-RUST_LOG=error bin/release/simple src/app/mcp/main.spl server
+RUST_LOG=error bin/simple run src/app/mcp/main.spl server
 
 # Should produce debug output when requested
-RUST_LOG=debug bin/release/simple src/app/mcp/main.spl server
+RUST_LOG=debug bin/simple run src/app/mcp/main.spl server
 ```
 
 ## Current Workarounds

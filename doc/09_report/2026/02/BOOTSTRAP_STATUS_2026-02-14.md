@@ -57,7 +57,7 @@ error: expected '(' after 'if'
 - No generic support
 
 **Attempt 2: Pre-Built Bootstrap Binary**
-- Binary: bin/release/simple (27 MB, v0.4.0-alpha.1)
+- Binary: bin/simple (27 MB, v0.4.0-alpha.1)
 - Command: `simple compile src/compiler_core_legacy/main.spl`
 - Result: ❌ FAILED (parse error)
 
@@ -136,7 +136,7 @@ Unexpected token: expected -> or => or :, found Comma
    - Works for ~30 file projects
 
 2. **Pre-Built Binary**
-   - bin/release/simple (27 MB)
+   - bin/simple (27 MB)
    - Version: v0.4.0-alpha.1
    - Fully functional for running programs
    - 2,709/4,761 stdlib tests passing (56.9%)
@@ -188,7 +188,7 @@ Unexpected token: expected -> or => or :, found Comma
 ### Short Term (Immediate)
 
 1. ✅ **Use pre-built binary for development**
-   - bin/release/simple works for most tasks
+   - bin/simple works for most tasks
    - 56.9% test coverage is acceptable
    - Stable and production-ready
 
@@ -287,4 +287,4 @@ All requirements met for Step 1:
 - Requires code fixes before proceeding
 
 **Recommended Action:**
-Continue development with pre-built `bin/release/simple` binary until source code compatibility issues are resolved.
+Continue development with pre-built `bin/simple` binary until source code compatibility issues are resolved.

@@ -303,7 +303,7 @@ Edit `src/app/mcp/bootstrap/main_optimized.spl`:
 ### Step 3: Generate Full Schemas
 Run schema generator (to be created):
 ```bash
-bin/simple src/app/mcp/codegen/generate_schemas.spl
+bin/simple run src/app/mcp/codegen/generate_schemas.spl
 # Generates: src/lib/mcp/schema_generated.spl (all 61 tools)
 ```
 

@@ -141,7 +141,7 @@ This avoids the circular dependency issue entirely.
 ### Option C: Change Bootstrap Strategy (Simplest)
 Instead of trying to make SMF/Pure Simple work, just build native executables:
 
-1. Stage 1: Copy `bin/release/simple` → `simple_new1`
+1. Stage 1: Copy `bin/simple` → `simple_new1`
 2. Stage 2: `simple_new1` compiles CLI to **native executable** → `simple_new2`
 3. Stage 3: `simple_new2` compiles CLI to native executable → `simple_new3`
 4. Verify: `simple_new2 == simple_new3`

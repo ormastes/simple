@@ -104,22 +104,33 @@ export SIMPLE_VSCODE_WASM_BUILD_DIR=/abs/path/to/generated-wasm
 npm run compile
 ```
 
-If you have the optional Rust math core crate in `math_core_rs/`, you can ask
-the staging script to build it as WebAssembly and copy the result into
-`wasm/math-core.wasm`:
+The default math-core build now comes from the pure-Simple entrypoint in
+`src/app/vscode_extension/math_core/main.spl` and stages the resulting artifact
+into `wasm/math-core.wasm`:
 
 ```bash
 npm run build:math-core-wasm
 ```
 
-This uses `cargo build --target wasm32-unknown-unknown --release` under
-`src/app/vscode_extension/math_core_rs/` and keeps the existing env-based
-staging behavior intact. If you already have a prebuilt `math-core.wasm`,
-the existing `SIMPLE_VSCODE_MATH_WASM_SOURCE` and `SIMPLE_VSCODE_WASM_BUILD_DIR`
-paths still work.
+This uses `simple compile src/app/vscode_extension/math_core/main.spl --target=wasm32-wasi`
+from the repo root. The script looks for `simple` in this order:
 
-If no WASM source paths are provided, the staging step is skipped and the
-extension still packages normally.
+- `SIMPLE_VSCODE_SIMPLE_BIN`
+- `src/compiler_rust/target/debug/simple`
+- `src/compiler_rust/target/release/simple`
+- `simple` from your `PATH`
+
+If you still need the temporary Rust fallback artifact, it remains available via:
+
+```bash
+npm run build:math-core-wasm:rust
+```
+
+`npm run compile` now rebuilds the pure-Simple `math-core.wasm` first, then
+stages any explicit wasm overrides (`SIMPLE_VSCODE_*`) afterward.
+
+The existing `SIMPLE_VSCODE_MATH_WASM_SOURCE` and `SIMPLE_VSCODE_WASM_BUILD_DIR`
+paths still work for overriding the staged artifact after the default build.
 
 ### Building WASM On macOS
 

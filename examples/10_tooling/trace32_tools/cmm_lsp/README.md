@@ -16,7 +16,7 @@ CMM (TRACE32 PRACTICE) language server for Claude Code, providing code intellige
 ## Installation
 
 ### Prerequisites
-The Simple compiler binary (`bin/release/simple`) must be built first:
+The Simple compiler binary (`bin/simple`) must be built first:
 
 ```bash
 cd /path/to/simple
@@ -46,11 +46,11 @@ cmm-lsp-claude-plugin-0.9.5.tar.gz
 Current limitation:
 - the release tarball is not self-contained
 - as of March 12, 2026, the latest published T32 release does not include the plugin tarball yet
-- the checked-in `.lsp.json` still expects a repo checkout containing `bin/release/simple` and this `cmm_lsp/` source tree
+- the checked-in `.lsp.json` still expects a repo checkout containing `bin/simple` and this `cmm_lsp/` source tree
 
 The bundled `.lsp.json` already points at the checked-in CMM LSP entrypoint via
 the workspace-relative path `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`.
-The actual executable/runtime remains `bin/release/simple`.
+The actual executable/runtime remains `bin/simple`.
 
 ### Verify
 Restart Claude Code and open a `.cmm` file. Hover and completion should work automatically.

@@ -2,12 +2,14 @@
 #
 # Tests all compilation paths and reports what works for self-hosting.
 # Usage: bin/simple bootstrap-check
-#   Or:  SIMPLE_LIB=src bin/release/simple src/app/cli/bootstrap_check.spl
+#   Or:  SIMPLE_LIB=src bin/simple run src/app/cli/bootstrap_check.spl
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_env_get(name: text) -> text
+extern fn rt_platform_name() -> text
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.io.rt_compile_stub.{rt_compile_to_llvm_ir}
@@ -29,19 +31,55 @@ fn get_multi_fn_program() -> text:
     val close_brace = "}"
     "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    val result = add(20, 22)\n    print \"Sum: {open_brace}result{close_brace}\"\n"
 
+fn find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = rt_platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if rt_file_exists("src/compiler_rust/target/release/simple{ext}"):
+        return "src/compiler_rust/target/release/simple{ext}"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        return "src/compiler_rust/target/bootstrap/simple{ext}"
+    if rt_file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if not is_win:
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if rt_file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
+    else:
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+
+    if rt_file_exists("bin/release/simple{ext}"):
+        return "bin/release/simple{ext}"
+    "bin/simple{ext}"
+
 # ============================================================================
 # Check 1: Bootstrap Binary
 # ============================================================================
 
 fn check_bootstrap_binary() -> bool:
     print "--- Check 1: Bootstrap Binary ---"
-    if rt_file_exists("bin/release/simple"):
-        val size = file_size("bin/release/simple")
-        print "  PASS: bin/release/simple exists ({size} bytes)"
-        val (out, err, code) = shell("bin/release/simple --version 2>&1")
+    val simple_bin = find_simple_binary()
+    if rt_file_exists(simple_bin):
+        val size = file_size(simple_bin)
+        print "  PASS: Simple runtime found at {simple_bin} ({size} bytes)"
+        val (out, err, code) = shell("{simple_bin} --version 2>&1")
         print "  Version: {out.trim()}"
         return true
-    print "  FAIL: bin/release/simple not found"
+    print "  FAIL: no runtime found in canonical locations"
     false
 
 # ============================================================================
@@ -80,7 +118,8 @@ fn check_native_compile() -> bool:
 
     # Test 1: Hello world
     file_write(test_src, get_hello_program())
-    val (out1, err1, code1) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    val simple_bin = find_simple_binary()
+    val (out1, err1, code1) = shell("{simple_bin} compile --native -o {test_bin} {test_src} 2>&1")
     if code1 != 0:
         print "  FAIL: Native compile failed: {err1}"
         file_delete(test_src)
@@ -97,7 +136,7 @@ fn check_native_compile() -> bool:
 
     # Test 2: Math program
     file_write(test_src, get_math_program())
-    val (out2, err2, code2) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    val (out2, err2, code2) = shell("{simple_bin} compile --native -o {test_bin} {test_src} 2>&1")
     if code2 == 0:
         val (math_out, math_err, math_code) = shell("{test_bin} 2>&1")
         if math_out.trim() == "Result: 42":
@@ -109,7 +148,7 @@ fn check_native_compile() -> bool:
 
     # Test 3: Multi-function program
     file_write(test_src, get_multi_fn_program())
-    val (out3, err3, code3) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    val (out3, err3, code3) = shell("{simple_bin} compile --native -o {test_bin} {test_src} 2>&1")
     if code3 == 0:
         print "  PASS: Multi-function program compiled"
     else:
@@ -131,7 +170,8 @@ fn check_smf_compile() -> bool:
     val test_smf = "/tmp/bootstrap_check_smf.smf"
 
     file_write(test_src, get_hello_program())
-    val (out1, err1, code1) = shell("SIMPLE_COMPILE_RUST=1 bin/release/simple compile {test_src} -o {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
+    val simple_bin = find_simple_binary()
+    val (out1, err1, code1) = shell("SIMPLE_COMPILE_RUST=1 {simple_bin} compile {test_src} -o {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
 
     if code1 != 0:
         print "  FAIL: SMF compile returned exit code {code1}"
@@ -170,7 +210,7 @@ fn check_smf_compile() -> bool:
         print "  FAIL: Invalid SMF header"
 
     # Try running the SMF
-    val (run_out, run_err, run_code) = shell("bin/release/simple {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
+    val (run_out, run_err, run_code) = shell("{simple_bin} {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
     if run_out.trim() == "Hello from bootstrap!":
         print "  PASS: SMF executes correctly!"
     else:
@@ -219,7 +259,8 @@ fn check_compiler_imports() -> bool:
     print "--- Check 6: Compiler Module Imports ---"
 
     # Test importing backend_api (fixed - no generics)
-    val (out1, err1, code1) = shell("SIMPLE_LIB=src bin/release/simple src/app/cli/test_compile_import.spl 2>&1 | grep -v '\\[DEBUG\\]'")
+    val simple_bin = find_simple_binary()
+    val (out1, err1, code1) = shell("SIMPLE_LIB=src {simple_bin} run src/app/cli/test_compile_import.spl 2>&1 | grep -v '\\[DEBUG\\]'")
     if out1.contains("ALL IMPORTS OK"):
         print "  PASS: backend_api + llvm_tools import successfully"
         if out1.contains("llc available: true"):
@@ -243,7 +284,7 @@ fn check_compiler_imports() -> bool:
     # Test if full CompilerDriver can be imported (expected to fail)
     val test_driver = "/tmp/bootstrap_check_driver.spl"
     file_write(test_driver, "use compiler.driver (CompilerDriver)\nprint \"driver imported!\"\n")
-    val (out2, err2, code2) = shell("SIMPLE_LIB=src bin/release/simple {test_driver} 2>&1 | grep -v '\\[DEBUG\\]' | head -5")
+    val (out2, err2, code2) = shell("SIMPLE_LIB=src {simple_bin} run {test_driver} 2>&1 | grep -v '\\[DEBUG\\]' | head -5")
     file_delete(test_driver)
 
     if code2 == 0 and out2.contains("driver imported"):
@@ -276,7 +317,8 @@ fn check_bootstrap_pipeline() -> bool:
 
     # Try native path
     val native_bin = "/tmp/bootstrap_check_complex_native"
-    val (nat_out, nat_err, nat_code) = shell("bin/simple compile --native -o {native_bin} {complex_src} 2>&1")
+    val simple_bin = find_simple_binary()
+    val (nat_out, nat_err, nat_code) = shell("{simple_bin} compile --native -o {native_bin} {complex_src} 2>&1")
     if nat_code == 0:
         val (run_out, run_err, run_code) = shell("{native_bin} 2>&1")
         print "  Native compile: PASS (output: {run_out.trim()})"
@@ -285,7 +327,7 @@ fn check_bootstrap_pipeline() -> bool:
 
     # Try SMF path for the compiler itself (timeout quickly - just check if it starts)
     print "  SMF self-compile: Testing..."
-    val (smf_out, smf_err, smf_code) = shell("timeout 5 bash -c 'SIMPLE_COMPILE_RUST=1 bin/release/simple compile src/app/cli/main.spl -o /tmp/bootstrap_stage2.smf 2>&1 | grep -v \"\\[DEBUG\\]\" | tail -5'")
+    val (smf_out, smf_err, smf_code) = shell("timeout 5 bash -c 'SIMPLE_COMPILE_RUST=1 {simple_bin} compile src/app/cli/main.spl -o /tmp/bootstrap_stage2.smf 2>&1 | grep -v \"\\[DEBUG\\]\" | tail -5'")
     if smf_code == 0:
         val stage2_size = file_size("/tmp/bootstrap_stage2.smf")
         if stage2_size > 300:

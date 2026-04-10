@@ -50,7 +50,7 @@ The Rust bootstrap interpreter and self-hosted Simple binary have **near-identic
 | Binary | Path | Description |
 |--------|------|-------------|
 | Rust bootstrap | `src/compiler_rust/target/bootstrap/simple` | Rust-written interpreter (14 MB) |
-| Self-hosted | `bin/release/simple` | Simple-written interpreter, compiled to native (14 MB) |
+| Self-hosted | `bin/simple` | Simple-written interpreter, compiled to native (14 MB) |
 
 ---
 

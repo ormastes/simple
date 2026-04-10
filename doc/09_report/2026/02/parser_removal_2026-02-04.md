@@ -250,7 +250,7 @@ Estimated savings:
 ### 1. Build Simple Parser
 ```bash
 # Test Simple parser independently
-simple src/compiler/parser/treesitter.spl
+simple run src/compiler/parser/treesitter.spl
 simple test test/system/parser/
 ```
 

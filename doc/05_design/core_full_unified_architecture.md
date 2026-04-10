@@ -64,7 +64,7 @@ Bootstrap workflow:
 5. `mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple`
 6. `bin/bootstrap/cpp/simple build` → self-host verification
 
-**Self-sufficiency (2026-02-28):** The compiled binary is fully self-sufficient. All compilation backends (C via `aot_c_file()`, VHDL via `aot_vhdl_file()`), native compilation (`compile_native()`), interpretation (`interpret_file()`), and test running happen **in-process** — no subprocess calls to `bin/simple` or `bin/release/simple`. Only external system tools are invoked: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`.
+**Self-sufficiency (2026-02-28):** The compiled binary is fully self-sufficient. All compilation backends (C via `aot_c_file()`, VHDL via `aot_vhdl_file()`), native compilation (`compile_native()`), interpretation (`interpret_file()`), and test running happen **in-process** — no subprocess calls to `bin/simple` or `bin/release/<platform>/simple`. Only external system tools are invoked: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`.
 
 Build generated C++ (single-file):
 ```bash

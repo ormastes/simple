@@ -181,7 +181,7 @@ duplicate-check:
 
 **Run detection:**
 ```bash
-./bin/bootstrap/simple src/app/duplicate_check/main.spl src/ --min-tokens=30
+./bin/bootstrap/simple run src/app/duplicate_check/main.spl src/ --min-tokens=30
 ```
 
 **Expected output:**

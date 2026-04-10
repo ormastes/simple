@@ -315,7 +315,7 @@ docker inspect simple-test | jq '.[0].HostConfig.Memory'
 | Volume mount (Windows) | PowerShell: `${PWD}`, CMD: `%cd%` |
 | Tests pass locally, fail CI | Run exact CI command: `scripts/ci-test.sh test/unit/` |
 | Docker not running | `sudo systemctl start docker` or start Docker Desktop |
-| Build fails "no such file" | Verify you are in project root and `bin/release/simple` exists |
+| Build fails "no such file" | Verify you are in project root and `bin/simple` or `bin/release/<platform>/simple` exists |
 
 ### Interactive Debugging
 

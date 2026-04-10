@@ -73,7 +73,7 @@ target_link_libraries(spl_runtime PUBLIC pthread)
 - `seed/CMakeLists.txt` - runtime_thread.c added
 - `build/seed/libspl_runtime.a` - rebuilt ✅
 
-**Status:** Library rebuilt, but bin/release/simple not yet rebuilt
+**Status:** Library rebuilt, but bin/simple not yet rebuilt
 
 ### 5. Test Symlinks Created ✅
 **Problem:** Import paths not resolving (no symlinks in test/lib/)
@@ -92,7 +92,7 @@ test/lib/std/async_host/thread_safe_queue.spl -> ../../../../src/lib/async_host/
 ## What's NOT Done
 
 ### Priority 1: Runtime Rebuild (BLOCKING)
-**Problem:** `bin/release/simple` built on Feb 12, before threading support added
+**Problem:** `bin/simple` built on Feb 12, before threading support added
 
 **Impact:** All `extern fn spl_thread_*` calls fail with "unknown extern function"
 
@@ -207,7 +207,7 @@ error: semantic: unknown extern function: spl_thread_cpu_count
 ### Phase 1: Runtime Rebuild ✅ Library | ❌ Binary
 - [✅] runtime_thread.c compiled into libspl_runtime.a
 - [✅] pthread linked
-- [❌] bin/release/simple rebuilt with new library
+- [❌] bin/simple rebuilt with new library
 - [❌] ldd shows pthread linked
 - [❌] spl_thread_cpu_count() callable
 

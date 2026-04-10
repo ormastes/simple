@@ -38,17 +38,23 @@ impl LlvmBackend {
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "struct_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
-        let struct_ptr = alloc_call
-            .try_as_basic_value()
-            .left()
-            .and_then(|v| v.into_pointer_value().try_into().ok())
-            .unwrap_or_else(|| {
-                // Fallback: if rt_alloc returns i64, convert to pointer
-                let ret_i64 = alloc_call.try_as_basic_value().left().unwrap();
-                builder
-                    .build_int_to_ptr(ret_i64.into_int_value(), i8_ptr_type, "alloc_ptr")
-                    .unwrap()
-            });
+        let alloc_value = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+            crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value")
+        })?;
+        let struct_ptr = match alloc_value {
+            inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                .build_pointer_cast(ptr, i8_ptr_type, "alloc_ptr")
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast alloc ptr", &e))?,
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_int_to_ptr(iv, i8_ptr_type, "alloc_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
+            _ => {
+                return Err(crate::error::factory::llvm_build_failed(
+                    "rt_alloc result",
+                    &"unsupported return value kind",
+                ))
+            }
+        };
 
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;

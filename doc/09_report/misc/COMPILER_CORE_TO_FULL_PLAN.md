@@ -72,7 +72,7 @@ fn parse(text: text) -> ParseResult:
 
 **Effort**: 1-2 weeks (669 Err() usages in src/compiler/)
 
-**Alternative**: Use the existing Simple compiler (bin/release/simple) to build compiler_core_legacy with full Result support
+**Alternative**: Use the existing Simple compiler (bin/simple) to build compiler_core_legacy with full Result support
 
 ---
 
@@ -91,7 +91,7 @@ clang++ bootstrap.cpp -o simple_compiler
 **Option B: Existing Compiler Path (Immediate)**
 ```bash
 # Use the working Simple compiler to build compiler_core_legacy:
-bin/release/simple compile src/compiler_core_legacy/main.spl -o build/core_compiler
+bin/simple compile src/compiler_core_legacy/main.spl -o build/core_compiler
 
 # This works if compiler_core_legacy/main.spl has a proper CLI interface
 ```
@@ -99,7 +99,7 @@ bin/release/simple compile src/compiler_core_legacy/main.spl -o build/core_compi
 **Option C: Hybrid Path (Best)**
 ```bash
 # 1. Use existing Simple to compile a minimal working subset
-bin/release/simple compile src/compiler_core_legacy/minimal_cli.spl -o build/stage1
+bin/simple compile src/compiler_core_legacy/minimal_cli.spl -o build/stage1
 
 # 2. Use stage1 to compile more of compiler_core_legacy
 ./build/stage1 compile src/compiler_core_legacy/main.spl -o build/stage2
@@ -136,7 +136,7 @@ fn main():
 
 2. **Build with existing compiler**:
 ```bash
-bin/release/simple compile src/compiler_core_legacy/cli_main.spl -o build/core_compiler
+bin/simple compile src/compiler_core_legacy/cli_main.spl -o build/core_compiler
 ```
 
 3. **Test the compiler**:
@@ -156,7 +156,7 @@ diff build/core_compiler build/core_compiler_v2
 ## Success Criteria
 
 ✅ **Immediate Success** (Option B):
-- compiler_core_legacy compiles with bin/release/simple
+- compiler_core_legacy compiles with bin/simple
 - Produces working binary
 - Can compile Simple programs
 - Self-hosting validated
@@ -164,7 +164,7 @@ diff build/core_compiler build/core_compiler_v2
 ✅ **Complete Success** (Option A or C):
 - seed_cpp bugs fixed OR multi-stage bootstrap works
 - compiler_core_legacy fully self-hosting
-- No dependency on bin/release/simple
+- No dependency on bin/simple
 - All 375 files compile cleanly
 
 ---
@@ -178,7 +178,7 @@ diff build/core_compiler build/core_compiler_v2
 ls -la src/compiler_core_legacy/*main*.spl
 
 # 2. Try compiling it
-bin/release/simple compile src/compiler_core_legacy/bootstrap_main.spl -o build/test_core
+bin/simple compile src/compiler_core_legacy/bootstrap_main.spl -o build/test_core
 
 # 3. If successful, create proper CLI wrapper
 # 4. Build and validate

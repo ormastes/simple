@@ -79,7 +79,7 @@ This means seed_cpp can create **libraries** but not **executables**.
 
 ### Option B: Use pre-built compiler for bootstrap
 **Effort:** Immediate
-**Approach:** Use `bin/release/simple` (33MB pre-built) to compile compiler_core_legacy
+**Approach:** Use `bin/simple` (33MB pre-built) to compile compiler_core_legacy
 **Status:** This already works - it's how the project normally builds
 
 ### Option C: Document seed_cpp as library-only transpiler
@@ -91,11 +91,11 @@ This means seed_cpp can create **libraries** but not **executables**.
 
 ## Recommendation
 
-**Option B** - The project already has a working bootstrap path via `bin/release/simple`. The seed_cpp path was an experiment to build from minimal C++ sources, but it's blocked by this architectural limitation.
+**Option B** - The project already has a working bootstrap path via `bin/simple`. The seed_cpp path was an experiment to build from minimal C++ sources, but it's blocked by this architectural limitation.
 
 The practical bootstrap chain that works today:
 ```bash
-bin/release/simple build              # Uses pre-built runtime
+bin/simple build              # Uses pre-built runtime
 bin/simple test                        # 604/604 tests pass
 ```
 

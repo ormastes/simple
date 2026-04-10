@@ -434,7 +434,7 @@ RUN addgroup -g 1000 testuser && \
     adduser -D -u 1000 -G testuser testuser
 
 # Copy Simple runtime
-COPY bin/release/simple /usr/local/bin/simple
+COPY bin/simple /usr/local/bin/simple
 RUN chmod +x /usr/local/bin/simple
 
 # Create workspace
@@ -461,8 +461,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 # Ensure runtime exists
-if [ ! -f "bin/release/simple" ]; then
-    echo "ERROR: bin/release/simple not found. Run: bin/simple build --release"
+if [ ! -f "bin/simple" ]; then
+    echo "ERROR: bin/simple not found. Run: bin/simple build --release"
     exit 1
 fi
 

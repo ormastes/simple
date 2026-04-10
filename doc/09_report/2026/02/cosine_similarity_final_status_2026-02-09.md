@@ -408,13 +408,13 @@ duplicate-check:
 
 ```bash
 # Normal mode (hash-only)
-bin/simple src/app/duplicate_check/main.spl src/
+bin/simple run src/app/duplicate_check/main.spl src/
 
 # With cosine similarity (via config)
-bin/simple src/app/duplicate_check/main.spl src/
+bin/simple run src/app/duplicate_check/main.spl src/
 
 # Debug mode
-SIMPLE_DUP_DEBUG=1 bin/simple src/app/duplicate_check/main.spl src/
+SIMPLE_DUP_DEBUG=1 bin/simple run src/app/duplicate_check/main.spl src/
 ```
 
 ### Expected Output

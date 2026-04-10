@@ -141,16 +141,16 @@ file:/tmp/other.spl|b2e4f3a0|1707494100|1
 **Verification:**
 ```bash
 # First run - build cache
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
 # Output: "Incremental: 100 changed, 0 cached (0% hit rate)"
 
 # Second run - use cache (no changes)
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
 # Output: "Incremental: 0 changed, 100 cached (100% hit rate)"
 
 # Change 5 files, rerun
 touch src/app/duplicate_check/{main,config,detector,cache,parallel}.spl
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
 # Output: "Incremental: 5 changed, 95 cached (95% hit rate)"
 ```
 
@@ -177,19 +177,19 @@ bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.s
 **Examples:**
 ```bash
 # Enable parallel processing with auto-detected CPU count
-bin/simple src/app/duplicate_check/main.spl src/ --parallel
+bin/simple run src/app/duplicate_check/main.spl src/ --parallel
 
 # Use 4 workers
-bin/simple src/app/duplicate_check/main.spl src/ --jobs=4
+bin/simple run src/app/duplicate_check/main.spl src/ --jobs=4
 
 # Enable incremental analysis
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
 
 # Force full analysis (no cache)
-bin/simple src/app/duplicate_check/main.spl src/ --no-cache
+bin/simple run src/app/duplicate_check/main.spl src/ --no-cache
 
 # Combine optimizations
-bin/simple src/app/duplicate_check/main.spl src/ --parallel --jobs=8 --cache-path=.cache.sdn --verbose
+bin/simple run src/app/duplicate_check/main.spl src/ --parallel --jobs=8 --cache-path=.cache.sdn --verbose
 ```
 
 **Files Modified:**

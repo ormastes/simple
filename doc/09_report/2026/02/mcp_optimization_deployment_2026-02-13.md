@@ -226,13 +226,13 @@ Update `claude_desktop_config.json`:
 ### Server Won't Start
 
 **Check:**
-1. Runtime exists: `ls -lh bin/release/simple`
+1. Runtime exists: `ls -lh bin/simple`
 2. Bootstrap exists: `ls -lh src/app/mcp/bootstrap/main_optimized.spl`
 3. Stdlib path: `echo $SIMPLE_LIB` (should be `/path/to/simple/src`)
 
 **Test bootstrap directly:**
 ```bash
-bin/simple src/app/mcp/bootstrap/main_optimized.spl server <<< ""
+bin/simple run src/app/mcp/bootstrap/main_optimized.spl server <<< ""
 # Should start and wait for input (Ctrl+C to exit)
 ```
 
@@ -241,12 +241,12 @@ bin/simple src/app/mcp/bootstrap/main_optimized.spl server <<< ""
 **Common causes:**
 1. Handler import errors → Check `src/app/mcp/diag_*_tools.spl` imports
 2. Missing dependencies → Verify `src/mcp_lib/` exists
-3. Runtime compatibility → Ensure using `bin/release/simple` (not debug build)
+3. Runtime compatibility → Ensure using `bin/simple` (not debug build)
 
 **Debug:**
 ```bash
 # Enable full logging
-RUST_LOG=debug bin/simple src/app/mcp/bootstrap/main_optimized.spl server 2>debug.log
+RUST_LOG=debug bin/simple run src/app/mcp/bootstrap/main_optimized.spl server 2>debug.log
 # Check debug.log for import/parsing errors
 ```
 

@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-The `simple` interpreter (Rust binary at `bin/release/simple`) has a **fixed whitelist of 129 extern functions** compiled into it. Unknown `extern fn` calls produce:
+The `simple` interpreter (Rust binary at `bin/simple`) has a **fixed whitelist of 129 extern functions** compiled into it. Unknown `extern fn` calls produce:
 
 ```
 error: semantic: unknown extern function: rt_torch_available
@@ -26,7 +26,7 @@ error: semantic: unknown extern function: rt_torch_available
 
 ```
 bin/simple <file.spl>
-    └─ bin/release/simple (self-hosted binary, 33 MB, fully self-sufficient)
+    └─ bin/simple (self-hosted binary, 33 MB, fully self-sufficient)
            ├─ Interpreter mode (default, in-process via interpret_file())
            │    └─ match extern_name in whitelist of 129 names
            │         _ => error("unknown extern function: {name}")
@@ -41,7 +41,7 @@ bin/simple compile --backend=c && cmake && ninja
            └─ Calls spl_dlopen / spl_wffi_call_i64 from runtime.c (WORKS)
 ```
 
-**Note (2026-02-28):** The "soft exec_manager" subprocess pattern has been eliminated. The self-hosted binary no longer shells out to `bin/simple` or `bin/release/simple` for any compilation, interpretation, or test running. All operations are in-process.
+**Note (2026-02-28):** The "soft exec_manager" subprocess pattern has been eliminated. The self-hosted binary no longer shells out to `bin/simple` or `bin/simple` for any compilation, interpretation, or test running. All operations are in-process.
 
 ### 2.2 JIT Mode
 

@@ -140,7 +140,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 
 **Evidence:**
 ```bash
-$ timeout 30 bin/release/simple run test_minimal.spl
+$ timeout 30 bin/simple run test_minimal.spl
 # (times out even with just: print "hello")
 ```
 

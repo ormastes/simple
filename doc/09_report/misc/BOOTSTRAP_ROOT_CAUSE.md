@@ -8,7 +8,7 @@ The bootstrap process cannot work with the current codebase because the Rust sou
 
 ### 1. No Rust Source Available
 - `rust/` directory does not exist
-- `bin/release/simple` is a pre-built 27MB ELF binary (last modified Feb 12)
+- `bin/simple` is a pre-built 27MB ELF binary (last modified Feb 12)
 - CLAUDE.md states "100% Pure Simple - No Rust source"
 - Cannot rebuild the binary to test source code fixes
 
@@ -16,10 +16,10 @@ The bootstrap process cannot work with the current codebase because the Rust sou
 Tested all compilation methods - all produce identical 219-byte SMF files:
 ```bash
 # All of these produce 219-byte stubs:
-bin/release/simple compile hello.spl --format=smf
-bin/release/simple compile hello.spl --format=native
-bin/release/simple compile hello.spl --format=self-contained
-SIMPLE_COMPILE_RUST=1 bin/release/simple compile hello.spl --format=native
+bin/simple compile hello.spl --format=smf
+bin/simple compile hello.spl --format=native
+bin/simple compile hello.spl --format=self-contained
+SIMPLE_COMPILE_RUST=1 bin/simple compile hello.spl --format=native
 ```
 
 SMF file structure (hexdump):
@@ -98,7 +98,7 @@ Current state:
 └─────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────┐
-│ bin/release/simple (pre-built Rust binary)  │
+│ bin/simple (pre-built Rust binary)  │
 │   ↓ (interpret Simple source)               │
 │ Full compiler (src/compiler/)               │
 │   ✗ Only produces 219-byte SMF stubs        │

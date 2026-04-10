@@ -246,7 +246,7 @@ Target Complete: ██████████ (~18 files, all 800-999 acceptab
 ### Commands
 ```bash
 # Check current status
-find simple src/lib/std/src src/app -name "*.spl" -type f 2>/dev/null |
+find ./simple ./src/lib/std/src ./src/app -name "*.spl" -type f 2>/dev/null |
   grep -v "\.disabled" | xargs wc -l 2>/dev/null |
   awk '$1 >= 800 {print $1, $2}' | sort -rn
 

@@ -92,15 +92,15 @@ The two-pass design enables this:
 ## Next Steps (Phase 4-5)
 
 ### Phase 4: Rebuild Compiler
-1. Use `bin/release/simple` to compile full source tree
+1. Use `bin/simple` to compile full source tree
 2. Generate new compiler binary at `bin/bootstrap/full1/simple`
 3. Self-compile: Use `full1` to compile itself → `bin/bootstrap/full2/simple`
 4. Verify byte-for-byte reproducibility
 
 ### Phase 5: Replace Release Binary
 1. Run full test suite on new binary (expect 3,916/3,916 passing)
-2. Backup current: `cp bin/release/simple bin/release/simple.backup-20260214`
-3. Replace: `cp bin/bootstrap/full2/simple bin/release/simple`
+2. Backup current: `cp bin/simple bin/simple.backup-20260214`
+3. Replace: `cp bin/bootstrap/full2/simple bin/simple`
 4. Update VERSION to v0.5.0
 5. Verify all tests pass
 

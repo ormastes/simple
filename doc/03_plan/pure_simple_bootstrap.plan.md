@@ -4,10 +4,10 @@
 
 ### The Core Problem
 
-The bootstrap binary (`bin/release/simple`, 33MB ELF) has a **broken `compile` command**:
+The bootstrap binary (`bin/simple` or `bin/release/<platform>/simple`, 33MB ELF) has a **broken `compile` command**:
 
 ```
-SIMPLE_COMPILE_RUST=1 bin/release/simple compile src/app/cli/main.spl -o output.smf
+SIMPLE_COMPILE_RUST=1 bin/simple compile src/app/cli/main.spl -o output.smf
 → error: rt_cli_handle_compile is not supported in interpreter mode
 → Produces 219-byte stub SMF (contains only: SMF header + "code" section + "main" symbol + `ret` instruction)
 ```
@@ -52,7 +52,7 @@ SIMPLE_COMPILE_RUST=1 bin/release/simple compile src/app/cli/main.spl -o output.
 ### Bootstrap Process (current, broken)
 
 ```
-Stage 1: Copy bin/release/simple → build/bootstrap/simple_new1
+Stage 1: Copy bin/simple → build/bootstrap/simple_new1
 Stage 2: SIMPLE_COMPILE_RUST=1 simple_new1 compile main.spl → simple_new2.smf (219 bytes!)
 Stage 3: SIMPLE_COMPILE_RUST=1 bootstrap simple_new2.smf compile main.spl → simple_new3.smf (fails!)
 ```
@@ -132,7 +132,7 @@ The mini-compiler would:
 ### Phase 3: Self-Hosting Bootstrap Pipeline
 
 ```
-Step 1: bin/release/simple (interpreter) runs native.spl
+Step 1: bin/simple (interpreter) runs native.spl
         to compile bootstrap_compiler.spl → bootstrap_compiler (native ELF)
 
 Step 2: ./bootstrap_compiler compiles src/app/cli/main.spl → simple_stage2 (native ELF)

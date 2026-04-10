@@ -19,7 +19,7 @@ It provides:
 ## Run
 
 ```bash
-bin/simple src/app/mcpgdb/main.spl
+bin/simple run src/app/mcpgdb/main.spl
 ```
 
 Optional environment variables:

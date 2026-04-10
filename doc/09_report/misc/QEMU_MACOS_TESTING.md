@@ -158,7 +158,7 @@ bin/simple build --bootstrap
 SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 
 # Method C: Direct invocation
-bin/bootstrap/simple src/app/build/main.spl --bootstrap
+bin/bootstrap/simple run src/app/build/main.spl --bootstrap
 ```
 
 ### 4. Output

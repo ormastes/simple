@@ -95,7 +95,7 @@ bin/bootstrap/simple hello.spl
 bin/simple compile --native -o hello.native hello.spl
 
 # Native compilation (LLVM route)
-bin/bootstrap/simple src/app/compile/llvm_direct.spl hello.spl hello.llvm -O2
+bin/bootstrap/simple run src/app/compile/llvm_direct.spl hello.spl hello.llvm -O2
 ```
 
 ## Platform Compatibility Matrix

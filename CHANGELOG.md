@@ -28,7 +28,7 @@ All notable changes to Simple Language will be documented in this file.
 ### Fixed
 - **~200 broken tests** — dict indexing, Slice.len(), interpreter chaining bugs
 - **codegen_parity** Future/Await/Generator/Actor hang in interpreter (skip_it)
-- **bin/simple_mcp_server** updated to use bin/release/simple
+- **bin/simple_mcp_server** updated to use bin/simple or platform-specific release binaries
 - **bin/simple symlink** fixed via setup.sh for aarch64-apple-darwin-macho
 
 ### Changed
@@ -296,5 +296,4 @@ _Merged into 0.8.0 — see above._
 - 100% Pure Simple (Rust source removed)
 - Self-hosting parser
 - Pre-built runtime
-
 

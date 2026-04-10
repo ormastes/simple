@@ -44,7 +44,7 @@ Run a source file. This is the default command when a `.spl` file is given.
 
 ```bash
 simple run src/main.spl
-simple src/main.spl             # Equivalent (run is default)
+simple run src/main.spl             # Equivalent (run is default)
 ```
 
 ### `test`

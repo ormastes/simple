@@ -119,6 +119,13 @@ mod tests {
         sections
     }
 
+    fn repo_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+    }
+
     #[test]
     fn test_elf_extraction_from_codegen() {
         // Compile a simple function through Cranelift
@@ -242,6 +249,40 @@ mod tests {
         let result = pipeline.compile_source_to_memory_for_target(source, target);
 
         assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_pipeline_pure_simple_math_core_emits_real_wasm() {
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let target = Target::new_wasm(TargetArch::Wasm32, simple_common::target::WasmRuntime::Wasi);
+        let entry = repo_root().join("src/app/vscode_extension/math_core/main.spl");
+
+        let bytes = pipeline
+            .compile_file_to_memory_for_target(&entry, target)
+            .expect("pure-Simple math core should compile to wasm");
+
+        assert!(
+            bytes.starts_with(b"\0asm"),
+            "expected real wasm magic, got first bytes: {:02x?}",
+            &bytes[..bytes.len().min(4)]
+        );
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_pipeline_wasm_target_rejects_script_fallback() {
+        let source = "val x = 1\nfn main() -> i64:\n    return x\n";
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let target = Target::new_wasm(TargetArch::Wasm32, simple_common::target::WasmRuntime::Wasi);
+        let result = pipeline.compile_source_to_memory_for_target(source, target);
+
+        match result {
+            Err(CompileError::Semantic(message)) => {
+                assert!(message.contains("WebAssembly target cannot fall back to SMF/interpreter output"));
+            }
+            other => panic!("Expected explicit wasm fallback failure, got {other:?}"),
+        }
     }
 
     // ============== Lint Integration Tests ==============

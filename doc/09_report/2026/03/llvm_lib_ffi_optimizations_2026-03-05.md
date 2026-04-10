@@ -107,7 +107,7 @@ Added across the full stack:
 
 1. **Stage1 binary array arg bug:** The natively compiled stage1 binary (`simple native-build`) produces a binary where array element access returns nil in the compile command handler. This prevents testing `compile --native --backend=llvm-lib`.
 
-2. **No self-hosted binary:** `bin/release/simple` IS the Rust bootstrap binary. A working self-hosted binary (compiled by Simple itself) does not currently exist because the stage1 binary is broken.
+2. **No self-hosted binary:** `bin/simple` was the Rust bootstrap binary in the referenced period. A working self-hosted binary (compiled by Simple itself) did not currently exist because the stage1 binary was broken.
 
 3. **Interpreter can't handle compile pipeline:** The Rust binary's interpreter cannot resolve the full transitive dependency chain needed for `compile --native --backend=llvm-lib` (fails with `function 'get_effective_backend_name' not found`).
 

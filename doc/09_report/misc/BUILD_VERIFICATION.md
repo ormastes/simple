@@ -47,7 +47,7 @@ bin/simple compile --native -o hello.bin hello.spl
 
 ### 4. Native Compilation (LLVM Pipeline)
 ```bash
-bin/bootstrap/simple src/app/compile/llvm_direct.spl hello.spl hello.llvm -O2
+bin/bootstrap/simple run src/app/compile/llvm_direct.spl hello.spl hello.llvm -O2
 ```
 - **Pipeline:** Simple → C → LLVM IR → optimized native
 - **Format:** ELF 64-bit LSB pie executable

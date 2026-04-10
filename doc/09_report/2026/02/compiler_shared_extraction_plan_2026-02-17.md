@@ -113,7 +113,7 @@ export all_exported_symbols
    b. Copy to `src/compiler_shared/<same-relative-path>.spl`
    c. Replace `src/compiler/<path>.spl` with import+re-export delegation
    d. Replace `src/compiler_core_legacy/<path>.spl` with import+re-export delegation
-4. Run `bin/release/simple test` — verify all tests pass
+4. Run `bin/simple test` — verify all tests pass
 
 ---
 
@@ -179,7 +179,7 @@ export mirjson_serialize, mirjson_serialize_block, ...
    d. Move to `src/compiler_shared/<path>.spl`
    e. Create compiler/ wrapper with `impl` delegation (where applicable)
    f. Create compiler_core_legacy/ wrapper as re-export
-2. Run `bin/release/simple test` after each sub-batch (4 files at a time)
+2. Run `bin/simple test` after each sub-batch (4 files at a time)
 
 ---
 
@@ -325,12 +325,12 @@ Execute with multiple agents concurrently:
 
 After each batch:
 ```bash
-bin/release/simple test                    # Full suite (4067+ tests)
+bin/simple test                    # Full suite (4067+ tests)
 ```
 
 After each sub-batch (4-8 files):
 ```bash
-bin/release/simple test test/unit/compiler/   # Compiler-specific tests
+bin/simple test test/unit/compiler/   # Compiler-specific tests
 ```
 
 ### Rollback Strategy

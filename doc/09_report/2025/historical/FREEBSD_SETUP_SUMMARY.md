@@ -57,7 +57,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 
 **Usage:**
 ```bash
-bin/release/simple scripts/verify_freebsd_workspace.spl
+bin/simple run scripts/verify_freebsd_workspace.spl
 ```
 
 ---
@@ -83,14 +83,14 @@ These files were already in the project:
 ### Step 1: Verify Setup
 
 ```bash
-bin/release/simple scripts/verify_freebsd_workspace.spl
+bin/simple run scripts/verify_freebsd_workspace.spl
 ```
 
 ### Step 2: Setup FreeBSD VM
 
 ```bash
 # Download and configure FreeBSD VM image
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 ```
 
 **This will:**
@@ -137,7 +137,7 @@ pkg install linux-c7
 
 ```bash
 # From Linux host
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 **This will:**
@@ -212,9 +212,9 @@ simple/
 
 | Tool | Purpose | Usage |
 |------|---------|-------|
-| **verify_freebsd_workspace.spl** | Check setup | `bin/release/simple scripts/verify_freebsd_workspace.spl` |
-| **setup_freebsd_vm.spl** | Setup VM | `bin/release/simple scripts/setup_freebsd_vm.spl` |
-| **test_freebsd_qemu.spl** | Test FreeBSD | `bin/release/simple scripts/test_freebsd_qemu.spl` |
+| **verify_freebsd_workspace.spl** | Check setup | `bin/simple run scripts/verify_freebsd_workspace.spl` |
+| **setup_freebsd_vm.spl** | Setup VM | `bin/simple run scripts/setup_freebsd_vm.spl` |
+| **test_freebsd_qemu.spl** | Test FreeBSD | `bin/simple run scripts/test_freebsd_qemu.spl` |
 | **bootstrap-from-scratch.sh --target=freebsd-x86_64** | Native build | `./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` |
 | **start-freebsd-daemon.sh** | Start VM | `~/vms/freebsd/start-freebsd-daemon.sh` |
 
@@ -262,7 +262,7 @@ simple/
 ### 1. Verify All Components
 
 ```bash
-bin/release/simple scripts/verify_freebsd_workspace.spl
+bin/simple run scripts/verify_freebsd_workspace.spl
 ```
 
 **Expected output:**
@@ -290,13 +290,13 @@ FreeBSD Workspace Verification
 
 ```bash
 # Setup
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 
 # Start VM
 ~/vms/freebsd/start-freebsd-daemon.sh
 
 # Test compilation
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 **Expected test output:**
@@ -465,10 +465,10 @@ You have successfully set up the FreeBSD workspace when:
 - **Quick Reference:** `doc/07_guide/quick_reference/freebsd_quick_reference.md`
 
 ### Verification
-- **Check Setup:** `bin/release/simple scripts/verify_freebsd_workspace.spl`
+- **Check Setup:** `bin/simple run scripts/verify_freebsd_workspace.spl`
 
 ### Testing
-- **Test FreeBSD:** `bin/release/simple scripts/test_freebsd_qemu.spl`
+- **Test FreeBSD:** `bin/simple run scripts/test_freebsd_qemu.spl`
 
 ---
 
@@ -484,13 +484,13 @@ You have successfully set up the FreeBSD workspace when:
 **Quick commands:**
 ```bash
 # Verify setup
-bin/release/simple scripts/verify_freebsd_workspace.spl
+bin/simple run scripts/verify_freebsd_workspace.spl
 
 # Setup VM
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 
 # Test FreeBSD
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 
 # Read main guide
 cat FREEBSD_WORKSPACE.md

@@ -92,7 +92,7 @@ bin/simple compile --native -o /tmp/test /tmp/hello.spl
 ✅ Output: "Hello from deduplicated native compilation! Result: 42"
 
 # LLVM direct compilation
-bin/bootstrap/simple src/app/compile/llvm_direct.spl /tmp/hello.spl /tmp/test_llvm
+bin/bootstrap/simple run src/app/compile/llvm_direct.spl /tmp/hello.spl /tmp/test_llvm
 ✅ Compiled: /tmp/test_llvm (8744 bytes) [LLVM -O2]
 ✅ Output: "Hello from deduplicated native compilation! Result: 42"
 
@@ -277,7 +277,7 @@ bin/simple compile --native -o /tmp/test examples/hello_native.spl
 /tmp/test
 
 # Test LLVM compilation
-SIMPLE_LIB=src bin/bootstrap/simple src/app/compile/llvm_direct.spl \
+SIMPLE_LIB=src bin/bootstrap/simple run src/app/compile/llvm_direct.spl \
   examples/hello_native.spl /tmp/test_llvm
 /tmp/test_llvm
 

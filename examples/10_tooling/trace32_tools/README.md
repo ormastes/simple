@@ -29,7 +29,7 @@ As of March 13, 2026:
 - release binaries should be verified with the smoke tests and a local MCP handshake after publish
 
 Use the published binaries for experimentation, but prefer the source-backed
-`bin/release/simple .../main.spl` commands below until `t32-v0.1.2` is
+`bin/simple run .../main.spl` commands below until `t32-v0.1.2` is
 published and re-verified.
 
 ### Manual download
@@ -52,7 +52,7 @@ tar -xzf "cmm-lsp-claude-plugin-${VERSION}.tar.gz"
 
 The plugin tarball is config/package data, not a standalone runtime. It still
 assumes a source checkout with:
-- `bin/release/simple`
+- `bin/simple`
 - `examples/10_tooling/trace32_tools/cmm_lsp/mod.spl`
 
 As of March 13, 2026:
@@ -68,7 +68,7 @@ Requires the [Simple](https://github.com/ormastes/simple) compiler:
 git clone https://github.com/ormastes/simple.git
 cd simple
 # Build the compiler first (see main README)
-bin/release/simple native-build \
+bin/simple native-build \
   --entry-closure \
   --source examples/10_tooling/trace32_tools \
   --source src/lib \
@@ -87,11 +87,11 @@ Recommended local install from a repo checkout:
 
 ```bash
 claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 
 claude mcp add t32-lsp-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
 ```
 
@@ -151,13 +151,13 @@ Add to `~/.config/Claude/claude_desktop_config.json`:
 # Check the server responds to MCP initialize
 msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
 printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 
 # List available tools
 msg='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 ```
 
@@ -291,12 +291,12 @@ cd /path/to/simple
 
 # 1. T32 MCP — live debug session control (23 tools)
 claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 
 # 2. T32 LSP MCP — CMM analysis (6 tools)
 claude mcp add t32-lsp-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
 
 # 3. CMM LSP plugin — IDE features for .cmm files
@@ -305,9 +305,9 @@ claude plugin install cmm-lsp@simple-local
 ```
 
 **Binary full paths:**
-- T32 MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_mcp/main.spl`
-- T32 LSP MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
-- CMM LSP: `bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
+- T32 MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_mcp/main.spl`
+- T32 LSP MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
+- CMM LSP: `bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
 
 ---
 

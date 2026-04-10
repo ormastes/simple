@@ -140,7 +140,7 @@ Direct commands behind the wrapper:
 
 ```bash
 src/compiler_rust/target/bootstrap/simple --version
-bin/release/simple build bootstrap
+bin/simple build bootstrap
 sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
 ```
 
@@ -1038,7 +1038,7 @@ The Simple MCP server exposes repo-native tools for code diagnostics, VCS, build
 ```bash
 # From a repo checkout — register with Claude Code
 claude mcp add simple-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/src/app/mcp/main.spl
 
 # Or use the project .mcp.json (auto-detected by Claude Code)
@@ -1067,7 +1067,7 @@ claude plugin marketplace add tools/claude-plugin/marketplace
 claude plugin install simple-lsp@simple-local
 ```
 
-**Binary full path:** `bin/release/simple run src/app/lsp/main.spl`
+**Binary full path:** `bin/simple run src/app/lsp/main.spl`
 
 ### Install Both (Quick Setup)
 
@@ -1202,18 +1202,18 @@ cd /path/to/simple
 
 # T32 MCP — controls live TRACE32 debug sessions (23 tools)
 claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
 
 # T32 LSP MCP — CMM script analysis, no hardware needed (6 tools)
 claude mcp add t32-lsp-mcp -- \
-  /absolute/path/to/simple/bin/release/simple \
+  /absolute/path/to/simple/bin/simple \
   /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
 ```
 
 **Binary full paths:**
-- T32 MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_mcp/main.spl`
-- T32 LSP MCP: `bin/release/simple examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
+- T32 MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_mcp/main.spl`
+- T32 LSP MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
 
 ### Install CMM LSP Plugin
 
@@ -1222,7 +1222,7 @@ claude plugin marketplace add tools/claude-plugin/marketplace
 claude plugin install cmm-lsp@simple-local
 ```
 
-**Binary full path:** `bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
+**Binary full path:** `bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
 
 ### T32 Prompt Examples
 

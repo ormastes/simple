@@ -4,8 +4,45 @@
 # Builds a lightweight container image for isolated test execution.
 # Supports both Docker and Podman.
 
-use app.io.mod.{shell, shell_bool, shell_output, file_exists, exit, cwd}
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, exit, cwd, env_get}
 use std.text.{trim}
+extern fn rt_platform_name() -> text
+
+fn find_simple_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = rt_platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if file_exists("src/compiler_rust/target/release/simple{ext}"):
+        return "src/compiler_rust/target/release/simple{ext}"
+    if file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        return "src/compiler_rust/target/bootstrap/simple{ext}"
+    if file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if not is_win:
+        if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+        if file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+        if file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+        if file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
+    else:
+        if file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+        if file_exists("bin/release/simple.exe"):
+            return "bin/release/simple.exe"
+    if file_exists("bin/release/simple{ext}"):
+        return "bin/release/simple{ext}"
+    "bin/simple{ext}"
 
 fn detect_runtime() -> text:
     if shell_bool("command -v docker"):
@@ -23,8 +60,9 @@ fn main():
     val runtime = detect_runtime()
 
     # Check if runtime binary exists
-    if not file_exists("bin/release/simple"):
-        print "ERROR: bin/release/simple not found."
+    val simple_bin = find_simple_binary()
+    if not file_exists(simple_bin):
+        print "ERROR: no runtime binary found in canonical locations."
         print "Build the release binary first:"
         print "  bin/simple build --release"
         exit(1)

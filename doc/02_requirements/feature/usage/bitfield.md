@@ -8,7 +8,7 @@ Current implementation status in this repository:
 - Parser/token support is implemented in `compiler.core`.
 - Native C codegen accepts `bitfield Name(uN):` and reserved `_` fields.
 - Executable regression: `test/unit/compiler/native/bitfield_codegen_spec.spl`.
-- Legacy interpreter runtime (`bin/release/simple`) remains on an older parser and can still reject direct bitfield declarations.
+- Legacy interpreter runtime remains on an older parser and can still reject direct bitfield declarations.
 
 
 
@@ -195,4 +195,3 @@ Features:
 **Example:** models TCP flags
     Given var flags = TcpFlags(0)
     Then  expect(flags.raw()).to_equal(0x12)  # SYN + ACK
-

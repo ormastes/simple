@@ -152,7 +152,7 @@
 
 ### Task 4.5: Migration (4 hours)
 - [ ] Create `instructions.irdsl` with 10 sample instructions
-- [ ] Generate code: `./bin/wrappers/simple src/compiler/irdsl/main.spl`
+- [ ] Generate code: `./bin/wrappers/simple run src/compiler/irdsl/main.spl`
 - [ ] Verify generated code matches handwritten
 - [ ] Document migration process
 - [ ] Plan incremental migration
@@ -199,7 +199,7 @@ cargo clippy --all-features
 ./bin/wrappers/simple scripts/generate_backend_docs.spl all
 
 # Phase 4
-./bin/wrappers/simple src/compiler/irdsl/main.spl
+./bin/wrappers/simple run src/compiler/irdsl/main.spl
 
 # Full pipeline
 make backend-completeness-full

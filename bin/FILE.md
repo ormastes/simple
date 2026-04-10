@@ -439,8 +439,8 @@ Release binaries are pre-built. To update:
 
 ```bash
 # Download latest release
-curl -L https://github.com/simple-lang/simple/releases/latest/download/simple-linux-x86_64 -o bin/release/simple
-chmod +x bin/release/simple
+curl -L https://github.com/simple-lang/simple/releases/latest/download/simple-linux-x86_64 -o bin/release/linux-x86_64/simple
+chmod +x bin/release/linux-x86_64/simple
 
 # Verify
 bin/simple --version
@@ -468,8 +468,8 @@ curl -L .../simple-macos-arm64 -o bin/release/macos-arm64/simple
 uname -s && uname -m
 
 # Download for your platform
-curl -L https://github.com/simple-lang/simple/releases/latest/download/simple-{os}-{arch} -o bin/release/simple
-chmod +x bin/release/simple
+curl -L https://github.com/simple-lang/simple/releases/latest/download/simple-{os}-{arch} -o bin/release/{os}-{arch}/simple
+chmod +x bin/release/{os}-{arch}/simple
 ```
 
 ### MCP server not responding

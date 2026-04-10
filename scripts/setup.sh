@@ -23,7 +23,7 @@ Post-clone / post-bootstrap setup for Simple Language.
 
 Creates symlink-only runtime entry points:
   bin/simple
-  bin/release/simple
+  bin/release/<platform>/simple
   bin/release/<arch>-<vendor>-<os>-<abi>/simple(.exe)
 
 Options:
@@ -126,7 +126,7 @@ fi
 # Resolve a self-hosted release binary.
 # Skips symlinks that resolve to Rust build artifacts (from previous fallback setups).
 # Target-specific paths are always valid. The flat bin/release/simple fallback is
-# only valid when the target runtime OS matches the current host runtime OS.
+# only kept for legacy compatibility when the target runtime OS matches the host.
 find_release_bin() {
   local plat="$1" fos="$2" farch="$3" fext="$4"
   if [ -f "${release_dir}/${plat}/simple${fext}" ] && ! is_rust_artifact "${release_dir}/${plat}/simple${fext}"; then
@@ -272,12 +272,12 @@ if [ "${dry_run}" -eq 1 ]; then
   else
     if [ -n "${preferred_runtime}" ]; then
       echo "  bin/simple → ${preferred_runtime}"
-      echo "  bin/release/simple → ${preferred_runtime}"
+      echo "  bin/release/<platform>/simple → ${preferred_runtime}"
       echo "  bin/release/${PLATFORM}/simple → ${preferred_runtime}"
       echo "  bin/release/${os}-${arch}/simple → ${preferred_runtime}"
     else
       echo "  bin/simple → release/${release_bin}"
-      echo "  bin/release/simple → ${release_bin}"
+      echo "  bin/release/<platform>/simple → ${release_bin}"
     fi
   fi
   exit 0

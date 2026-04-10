@@ -83,7 +83,7 @@ Wrapper behavior:
 
 - builds the Rust seed compiler if needed
 - detects platform triple from `uname -s` and `uname -m`
-- runs `bin/release/simple build bootstrap`
+- runs `bin/simple build bootstrap`
 - verifies Stage 2 and Stage 3 hashes
 - optionally deploys the verified Stage 3 binary with `--deploy`
 
@@ -218,7 +218,7 @@ scripts\setup.cmd
 The setup script:
 
 1. Auto-detects the platform triple (`<arch>-<vendor>-<os>-<abi>`)
-2. Locates the release binary in `bin/release/<triple>/simple(.exe)` (falls back to legacy `bin/release/<os>-<arch>/` or flat `bin/release/simple`)
+2. Locates the release binary in `bin/release/<triple>/simple(.exe)` (falls back to legacy `bin/release/<os>-<arch>/` or the old flat layout)
 3. Creates `bin/simple(.exe)` as a symlink (or hardlink/copy on Windows without developer mode)
 
 Options:

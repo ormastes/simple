@@ -22,7 +22,7 @@ This audit categorizes all known unfixable or structurally limited test failures
 
 ## Category A: Missing Runtime Extern Functions
 
-These tests declare `extern fn` bindings that call C functions not present in the current `bin/release/simple` runtime binary. The Simple wrapper code in `src/app/io/` and `src/lib/` is correct but the underlying C symbol is absent from the linked binary. Interpreter mode cannot stub these because the tests call through to actual extern resolution.
+These tests declare `extern fn` bindings that call C functions not present in the current `bin/simple` or `bin/release/<platform>/simple` runtime binary. The Simple wrapper code in `src/app/io/` and `src/lib/` is correct but the underlying C symbol is absent from the linked binary. Interpreter mode cannot stub these because the tests call through to actual extern resolution.
 
 **Resolution:** Each requires adding the corresponding C implementation to `src/runtime/runtime.c` and rebuilding the binary. Alternatively, a Simple-level stub module (like `debug_stubs.spl`) can shadow the extern with a pure-Simple fallback.
 

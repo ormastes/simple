@@ -24,7 +24,7 @@
 #     -semihosting-config enable=on,target=native,chardev=sh -nographic
 #
 # Decode:
-#   bin/release/simple src/app/semihost/reader.spl \
+#   bin/simple run src/app/semihost/reader.spl \
 #     --file=/tmp/semihost_out.bin --smt-file=hello_riscv32_interned.smt
 
 .section .text

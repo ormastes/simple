@@ -13,7 +13,7 @@ Architecture:
     kernel_wrapper.py (this file)
         |
         v  (stdin/stdout JSON-lines)
-    Simple Kernel (bin/simple src/app/jupyter_kernel/main.spl)
+    Simple Kernel (bin/simple run src/app/jupyter_kernel/main.spl)
 """
 
 import argparse

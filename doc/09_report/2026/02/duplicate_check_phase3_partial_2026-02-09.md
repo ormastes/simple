@@ -72,16 +72,16 @@ Total: 6 tests, 6 passing, 0 failures
 **Usage:**
 ```bash
 # Run benchmark on duplicate_check modules (3 iterations)
-bin/simple src/app/duplicate_check/run_benchmark.spl src/app/duplicate_check/ --iterations=3
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/app/duplicate_check/ --iterations=3
 
 # Save baseline results
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --iterations=5 --save=baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --iterations=5 --save=baseline.txt
 
 # Compare with previous run
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --iterations=5 --compare=baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --iterations=5 --compare=baseline.txt
 
 # Verbose output
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --verbose
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --verbose
 ```
 
 **Impact:**

@@ -30,7 +30,7 @@ Current limitation:
 The checked-in plugin launches:
 
 ```bash
-bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp
+bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp
 ```
 
 from the workspace root.

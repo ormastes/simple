@@ -127,14 +127,14 @@ tools/claude-plugin/simple-lsp/
     {
       "fileExtensions": [".spl", ".shs"],
       "languageId": "simple",
-      "command": ["bin/release/simple", "lsp"],
+      "command": ["bin/simple", "lsp"],
       "initializationOptions": {}
     }
   ]
 }
 ```
 
-The LSP server command is `bin/release/simple lsp` (or `bin/simple lsp` for the wrapper). This launches the Simple binary in LSP mode, reading JSON-RPC messages from stdin and writing responses to stdout per the LSP specification.
+The LSP server command is `bin/simple lsp` (or `bin/simple lsp` for the wrapper). This launches the Simple binary in LSP mode, reading JSON-RPC messages from stdin and writing responses to stdout per the LSP specification.
 
 ### Phase 2: Remove Duplicated MCP Tools
 
@@ -209,7 +209,7 @@ Claude Code
     |
     +---> LSP Plugin (.lsp.json)
     |         |
-    |         +---> bin/release/simple lsp    [<100ms, native LSP protocol]
+    |         +---> bin/simple lsp    [<100ms, native LSP protocol]
     |                   |
     |                   +---> hover, definition, references, completions
     |                   +---> diagnostics (automatic on file edit)
@@ -230,7 +230,7 @@ Claude Code
 ```
 1. User edits file.spl in Claude Code
 2. Claude Code detects .spl extension, routes to simple-lsp plugin
-3. Plugin sends textDocument/didChange to bin/release/simple lsp (stdin)
+3. Plugin sends textDocument/didChange to bin/simple lsp (stdin)
 4. Simple LSP server:
    a. Updates in-memory tree-sitter parse tree (incremental)
    b. Runs diagnostics on changed regions
@@ -301,7 +301,7 @@ The Claude Code LSP plugin system requires `ENABLE_LSP_TOOL=1` (currently experi
 
 ### 6.4 Binary Path Resolution
 
-The `.lsp.json` command `["bin/release/simple", "lsp"]` uses a relative path. The plugin system must resolve this relative to the workspace root.
+The `.lsp.json` command `["bin/simple", "lsp"]` uses a relative path. The plugin system must resolve this relative to the workspace root.
 
 **Mitigation:** Test with both relative and absolute paths. Consider using a wrapper script if path resolution is unreliable.
 
@@ -355,7 +355,7 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 ### Known Limitations
 
 1. **Query startup latency:** Each `simple query` subprocess takes ~5-30s due to module loading. Not an issue for Claude Code (async tool calls) but noticeable for interactive use.
-2. **Binary rebuild needed:** `bin/release/simple lsp` requires binary rebuild to use `cli_run_file` dispatch. Currently uses `bin/release/simple run src/lib/nogc_sync_mut/lsp/main.spl`.
+2. **Binary rebuild needed:** `bin/simple lsp` requires binary rebuild to use `cli_run_file` dispatch. Currently uses `bin/simple run src/lib/nogc_sync_mut/lsp/main.spl`.
 3. **DEBUG output on stderr:** Interpreter prints module registration debug info to stderr (harmless for LSP, but noisy).
 
 ---
@@ -371,7 +371,7 @@ Removing 19 MCP tools at once could break workflows that depend on them.
 | **code** | Extract query engine functions as importable module | `src/app/cli/query_engine.spl` → `src/lib/common/pure/query.spl` |
 | **code** | Wire LSP handlers to call query engine directly (no subprocess) | `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` |
 | **test** | Write LSP protocol integration tests | `test/integration/lsp/lsp_protocol_spec.spl` |
-| **build** | Rebuild binary with LSP dispatch | `src/app/io/cli_commands.spl` → `bin/release/simple` |
+| **build** | Rebuild binary with LSP dispatch | `src/app/io/cli_commands.spl` → `bin/simple` |
 | **infra** | Update MCP server to mark LSP-duplicate tools as deprecated | `src/app/mcp/main_lazy_query_tools.spl` |
 
 ### Phase 3: Remove MCP Duplicates

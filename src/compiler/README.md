@@ -22,7 +22,7 @@ src/compiler_rust/target/bootstrap/simple native-build \
 
 # Stage 3: Self-host recompile (verification)
 build/bootstrap/simple_stage2 native-build \
-  --entry src/app/cli/main.spl -o bin/release/simple
+  --entry src/app/cli/main.spl -o bin/simple
 ```
 
 ## Layer Structure

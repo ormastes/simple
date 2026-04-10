@@ -12,7 +12,7 @@ The PyTorch FFI integration for Simple is **architecturally complete** with all 
 - ✅ **Examples Written:** 5 example programs covering basics and training
 - ✅ **Test Suite:** 55 tests verifying API completeness and stub mode
 - ✅ **Documentation:** Complete integration guide
-- ❌ **Runtime Integration:** Not yet linked into `bin/release/simple`
+- ❌ **Runtime Integration:** Not yet linked into `bin/simple`
 
 ## Current State
 
@@ -77,7 +77,7 @@ The PyTorch FFI integration for Simple is **architecturally complete** with all 
 ### What Doesn't Work
 
 1. **Runtime Linkage**
-   - The `bin/release/simple` runtime is pre-built
+   - The `bin/simple` runtime is pre-built
    - PyTorch FFI symbols are not included
    - `extern fn rt_torch_*` declarations fail at runtime
    - Error: `unknown extern function: rt_torch_available`
@@ -96,7 +96,7 @@ The PyTorch FFI integration for Simple is **architecturally complete** with all 
 
 ### Option 1: Rebuild Runtime (Recommended)
 
-Rebuild `bin/release/simple` with PyTorch FFI statically linked:
+Rebuild `bin/simple` with PyTorch FFI statically linked:
 
 ```bash
 # 1. Add linker flags to seed build
@@ -107,7 +107,7 @@ Rebuild `bin/release/simple` with PyTorch FFI statically linked:
 scripts/install.sh  # or equivalent
 
 # 3. Verify symbols
-nm bin/release/simple | grep rt_torch_tensor_zeros
+nm bin/simple | grep rt_torch_tensor_zeros
 # Expected: T rt_torch_tensor_zeros
 ```
 
@@ -168,7 +168,7 @@ else:
 ## Test Results
 
 ```bash
-$ bin/release/simple test/system/dl_examples_system_spec.spl
+$ bin/simple run test/system/dl_examples_system_spec.spl
 
 Deep Learning PyTorch Examples
   Module imports and structure
@@ -271,7 +271,7 @@ Deep Learning PyTorch Examples
 - `.build/rust/ffi_torch/target/release/libsimple_torch.a` - 21MB (static)
 
 ### Runtime
-- `bin/release/simple` - 27MB (pre-built, no PyTorch FFI)
+- `bin/simple` - 27MB (pre-built, no PyTorch FFI)
 
 **Total Lines of Code:**
 - Source: 1,203 lines (390 + 803 + 10)
@@ -310,7 +310,7 @@ To enable full PyTorch integration:
 
 3. **Verify symbols**
    ```bash
-   nm bin/release/simple | grep rt_torch_tensor_zeros
+   nm bin/simple | grep rt_torch_tensor_zeros
    # Expected: 0000000000xxxxxx T rt_torch_tensor_zeros
    ```
 

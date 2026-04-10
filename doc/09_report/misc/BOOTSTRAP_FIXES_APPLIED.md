@@ -128,7 +128,7 @@ The root cause is that seed.cpp is outdated. Regenerating it from current compil
 ### Option C: Use Pre-built Binary Path
 The original user request was "update full simple buildable by core simple."
 - Current state: compiler_core_legacy has enum mismatches preventing seed.cpp bootstrap
-- Alternative: Use pre-built `bin/release/simple` to compile full compiler
+- Alternative: Use pre-built `bin/simple` to compile full compiler
 - Issue: Binary only produces SMF stubs, not full executables
 
 ## Success Criteria Met

@@ -30,7 +30,7 @@ The feature is not fully complete yet because runtime cleanup and broader end-to
 
 ### Live runtime verified
 
-The following flows were verified successfully through `bin/simple src/app/mcpgdb/main.spl`:
+The following flows were verified successfully through `bin/simple run src/app/mcpgdb/main.spl`:
 
 - `initialize`
 - `debug_session_create`

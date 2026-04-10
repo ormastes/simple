@@ -246,46 +246,46 @@ bin/simple test test/app/duplicate_check/
 ### Basic Usage (Unchanged)
 ```bash
 # Run duplicate detection
-bin/simple src/app/duplicate_check/main.spl src/
+bin/simple run src/app/duplicate_check/main.spl src/
 
 # With custom config
-bin/simple src/app/duplicate_check/main.spl src/ --min-tokens=50 --min-lines=10
+bin/simple run src/app/duplicate_check/main.spl src/ --min-tokens=50 --min-lines=10
 ```
 
 ### Phase 1 Optimizations
 ```bash
 # Verbose mode (shows caching, feature extraction stats)
-bin/simple src/app/duplicate_check/main.spl src/ --verbose
+bin/simple run src/app/duplicate_check/main.spl src/ --verbose
 
 # Quiet mode (suppress all output except results)
-bin/simple src/app/duplicate_check/main.spl src/ --quiet
+bin/simple run src/app/duplicate_check/main.spl src/ --quiet
 ```
 
 ### Phase 2 Optimizations
 ```bash
 # Enable incremental analysis (10-100x speedup on repeats)
-bin/simple src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
+bin/simple run src/app/duplicate_check/main.spl src/ --cache-path=.duplicate_cache.sdn
 
 # Disable incremental cache (force full analysis)
-bin/simple src/app/duplicate_check/main.spl src/ --no-cache
+bin/simple run src/app/duplicate_check/main.spl src/ --no-cache
 
 # Parallel mode (infrastructure only, execution pending)
-bin/simple src/app/duplicate_check/main.spl src/ --parallel --jobs=8
+bin/simple run src/app/duplicate_check/main.spl src/ --parallel --jobs=8
 ```
 
 ### Phase 3 Benchmarking
 ```bash
 # Run benchmark (3 iterations)
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --iterations=3
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --iterations=3
 
 # Save baseline results
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --save=baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --save=baseline.txt
 
 # Compare with previous run
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --compare=baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --compare=baseline.txt
 
 # Verbose benchmark output
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --verbose
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --verbose
 ```
 
 ---
@@ -333,7 +333,7 @@ bin/simple src/app/duplicate_check/run_benchmark.spl src/ --verbose
 
 ✅ **Use interpreter mode with incremental caching**
 ```bash
-bin/simple src/app/duplicate_check/main.spl src/ \
+bin/simple run src/app/duplicate_check/main.spl src/ \
     --cache-path=.duplicate_cache.sdn \
     --verbose
 ```
@@ -348,16 +348,16 @@ bin/simple src/app/duplicate_check/main.spl src/ \
 1. **Add to CI/CD pipeline:**
 ```yaml
 - name: Check for duplicates
-  run: bin/simple src/app/duplicate_check/main.spl src/ --quiet --max-allowed=5
+  run: bin/simple run src/app/duplicate_check/main.spl src/ --quiet --max-allowed=5
 ```
 
 2. **Track performance:**
 ```bash
 # Save baseline
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --save=.benchmark_baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --save=.benchmark_baseline.txt
 
 # Compare on each run
-bin/simple src/app/duplicate_check/run_benchmark.spl src/ --compare=.benchmark_baseline.txt
+bin/simple run src/app/duplicate_check/run_benchmark.spl src/ --compare=.benchmark_baseline.txt
 ```
 
 3. **Git ignore cache:**
@@ -486,7 +486,7 @@ The duplicate detection system has been successfully optimized through comprehen
 
 **Deployment Command:**
 ```bash
-bin/simple src/app/duplicate_check/main.spl src/ \
+bin/simple run src/app/duplicate_check/main.spl src/ \
     --cache-path=.duplicate_cache.sdn \
     --verbose \
     --min-impact=50

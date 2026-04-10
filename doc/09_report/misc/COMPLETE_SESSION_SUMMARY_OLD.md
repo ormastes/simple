@@ -278,7 +278,7 @@ The Simple language compiler has **complete infrastructure** across all major ar
 - Workarounds exist for all runtime limitations
 
 ### 3. Two-Layer Architecture
-- Rust runtime (bin/release/simple) - Pre-built binary
+- Rust runtime (bin/simple) - Pre-built binary
 - Simple source code (src/) - Language implementation
 - C seed compiler (seed/) - Bootstrap capability
 

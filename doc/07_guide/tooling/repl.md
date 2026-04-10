@@ -8,7 +8,7 @@ Interactive Read-Eval-Print Loop for the Simple language.
 
 ```bash
 # Start the REPL
-bin/simple src/app/repl/main.spl
+bin/simple run src/app/repl/main.spl
 
 # Or via CLI dispatch (if wired)
 bin/simple repl
@@ -131,7 +131,7 @@ REPL Main Loop (src/app/repl/main.spl)
 Write temp file (/tmp/simple_repl_{pid}.spl)
     |
     v
-rt_process_run("bin/simple", temp_file)
+rt_process_run("bin/simple", ["run", temp_file])
     |
     +-- Success --> Print output, keep in accumulated
     +-- Failure --> Print error, rollback

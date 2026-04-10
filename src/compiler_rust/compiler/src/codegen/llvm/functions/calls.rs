@@ -613,12 +613,14 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         // Call interpreter bridge function rt_interp_call
         let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
         // Declare rt_interp_call if not exists
         let interp_call = module.get_function("rt_interp_call").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(
-                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
+                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
                 false,
             );
             module.add_function("rt_interp_call", fn_type, None)
@@ -632,13 +634,50 @@ impl LlvmBackend {
         name_global.set_constant(true);
         name_global.set_linkage(inkwell::module::Linkage::Private);
         let name_ptr = name_global.as_pointer_value();
+        let name_ptr_i64 = builder
+            .build_ptr_to_int(name_ptr, i64_type, "func_name_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
         let name_len = i64_type.const_int(name_bytes.len() as u64, false);
 
-        // For now, pass null for args array (simplified)
         let argc = i64_type.const_int(args.len() as u64, false);
-        let argv = i8_ptr_type.const_null();
+        let argv = if args.is_empty() {
+            i64_type.const_int(0, false)
+        } else {
+            let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            let alloc_fn = module
+                .get_function("rt_alloc")
+                .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
+            let total_bytes = i64_type.const_int(args.len() as u64 * slot_bytes, false);
+            let alloc_call = builder
+                .build_call(alloc_fn, &[total_bytes.into()], "interp_argv_alloc")
+                .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
+            let argv_raw = alloc_call
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?
+                .into_int_value();
+            let argv_ptr = builder
+                .build_int_to_ptr(argv_raw, i8_ptr_type, "interp_argv_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
 
-        let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
+            for (index, arg) in args.iter().enumerate() {
+                let value = self.get_vreg(arg, vreg_map)?;
+                let casted = self.coerce_value_to_type(value, Some(i64_type.into()), builder)?;
+                let offset = self.context.i32_type().const_int((index as u64) * slot_bytes, false);
+                let slot_ptr = unsafe { builder.build_gep(i8_type, argv_ptr, &[offset], "interp_argv_slot") }
+                    .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
+                let typed_ptr = builder
+                    .build_pointer_cast(slot_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "interp_argv_typed_ptr")
+                    .map_err(|e| crate::error::factory::llvm_cast_failed("cast argv ptr", &e))?;
+                builder
+                    .build_store(typed_ptr, casted)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
+            }
+
+            argv_raw
+        };
+
+        let call_args = [name_ptr_i64.into(), name_len.into(), argc.into(), argv.into()];
 
         let call_site = builder
             .build_call(interp_call, &call_args, "interp_call")

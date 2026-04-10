@@ -107,7 +107,7 @@ fn cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64:
         run_args.push(arg)
 
     # Execute test runner with NO timeout - module loading takes ~35s
-    val result = _cli_process_run("bin/release/simple", run_args)
+    val result = _cli_process_run("bin/simple", run_args)
     # ... output handling ...
 ```
 

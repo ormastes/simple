@@ -16,7 +16,7 @@ Implemented a full interactive REPL and Jupyter notebook kernel for the Simple l
 
 ### 1. Simple REPL (`src/app/repl/main.spl` — 249 lines)
 
-**Architecture:** Module-level `var` state + subprocess evaluation via `bin/release/simple`.
+**Architecture:** Module-level `var` state + subprocess evaluation via `bin/simple` or `bin/release/<platform>/simple`.
 
 **Features:**
 - Interactive prompt with banner (`Simple Language REPL v0.2.0`)
@@ -121,9 +121,9 @@ Ubuntu 24.04 + Python venv + Jupyter packages. Copies Simple binary, kernel sour
 
 2. **Output accumulation** — kernel re-runs entire accumulated program, so output included all previous cells' output. Fixed by tracking `SESSION_PREV_OUTPUT_LEN` and returning only the delta.
 
-3. **Working directory** — `kernel_wrapper.py` spawned Simple process without `cwd`, so `bin/release/simple` (relative path in kernel) failed when Jupyter ran from a different directory. Fixed by setting `cwd=project_root`.
+3. **Working directory** — `kernel_wrapper.py` spawned Simple process without `cwd`, so `bin/simple` (relative path in kernel) failed when Jupyter ran from a different directory. Fixed by setting `cwd=project_root`.
 
-4. **Subprocess stdin inheritance** — when kernel reads JSON-lines from stdin, child `bin/release/simple` inherited the same stdin and consumed JSON data as code. Fixed by running via `bash -c "bin/release/simple path </dev/null 2>&1"`.
+4. **Subprocess stdin inheritance** — when kernel reads JSON-lines from stdin, child `bin/simple` inherited the same stdin and consumed JSON data as code. Fixed by running via `bash -c "bin/simple run path </dev/null 2>&1"`.
 
 5. **Compiler import startup** — initial REPL imported `interpret_file()` from compiler, causing 40s+ startup. Fixed by removing all compiler imports, using subprocess-only evaluation.
 

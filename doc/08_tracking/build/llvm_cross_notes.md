@@ -49,7 +49,7 @@ clang --target=x86_64-unknown-freebsd13 \
   /opt/sysroots/freebsd/usr/lib/crtn.o
 
 # Build Simple with LLVM backend
-bin/release/simple build --release --backend=llvm
+bin/simple build --release --backend=llvm
 ```
 
 ## Notes

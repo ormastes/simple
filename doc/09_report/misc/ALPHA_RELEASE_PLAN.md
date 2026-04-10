@@ -129,7 +129,7 @@ bin/simple compile --native -o test_alpha test_alpha.spl
 # Expected: Same output as interpreter
 
 # 4. LLVM compilation
-bin/bootstrap/simple src/app/compile/llvm_direct.spl test_alpha.spl test_alpha_llvm -O2
+bin/bootstrap/simple run src/app/compile/llvm_direct.spl test_alpha.spl test_alpha_llvm -O2
 ./test_alpha_llvm
 # Expected: Same output, optimized binary
 ```

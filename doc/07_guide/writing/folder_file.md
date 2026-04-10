@@ -190,7 +190,7 @@ bin/
 ```
 
 - `bin/simple` - Run Simple commands
-- `bin/release/simple` - Stable pre-built version (fully self-sufficient)
+- `bin/release/<platform>/simple` - Stable pre-built version (fully self-sufficient)
 
 ---
 

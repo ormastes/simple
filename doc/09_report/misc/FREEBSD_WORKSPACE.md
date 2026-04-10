@@ -10,13 +10,13 @@ Complete FreeBSD development and testing environment for the Simple compiler.
 
 ```bash
 # 1. Setup FreeBSD VM
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 
 # 2. Start VM
 ~/vms/freebsd/start-freebsd-daemon.sh
 
 # 3. Test FreeBSD compilation
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 ### Native FreeBSD
@@ -63,7 +63,7 @@ bin/simple test
 
 ```bash
 # Setup
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 
 # Start
 ~/vms/freebsd/start-freebsd-daemon.sh
@@ -105,7 +105,7 @@ kill $(cat /tmp/freebsd-qemu.pid)
 
 ```bash
 # Test FreeBSD multi-file compilation
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 ---
@@ -157,7 +157,7 @@ nano ~/vms/freebsd/start-freebsd-daemon.sh
 
 ```bash
 # From Linux host
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 **What it does:**
@@ -391,10 +391,10 @@ jobs:
         run: sudo apt-get install -y qemu-system-x86
 
       - name: Setup FreeBSD VM
-        run: bin/release/simple scripts/setup_freebsd_vm.spl
+        run: bin/simple run scripts/setup_freebsd_vm.spl
 
       - name: Test FreeBSD
-        run: bin/release/simple scripts/test_freebsd_qemu.spl
+        run: bin/simple run scripts/test_freebsd_qemu.spl
         timeout-minutes: 10
 ```
 
@@ -407,13 +407,13 @@ jobs:
 bin/simple test
 
 # FreeBSD (QEMU)
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 
 # macOS (QEMU)
-bin/release/simple scripts/test_macos_qemu.spl
+bin/simple run scripts/test_macos_qemu.spl
 
 # Windows (QEMU)
-bin/release/simple scripts/test_windows_vm.spl
+bin/simple run scripts/test_windows_vm.spl
 ```
 
 ---
@@ -561,8 +561,8 @@ pkg install linux-c7
 **Get started now:**
 
 ```bash
-bin/release/simple scripts/setup_freebsd_vm.spl
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/setup_freebsd_vm.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 Happy FreeBSD development! 🐡

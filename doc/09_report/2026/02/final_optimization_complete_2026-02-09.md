@@ -311,7 +311,7 @@ var all_blocks = flatten(batches)  # Final merge
 
 ✅ **Use interpreter mode with hash-only**
 ```bash
-simple src/app/duplicate_check/main.spl src/my_module --min-tokens=30 --min-lines=5
+simple run src/app/duplicate_check/main.spl src/my_module --min-tokens=30 --min-lines=5
 ```
 
 **Expected:** < 5 minutes

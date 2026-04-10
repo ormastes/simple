@@ -42,7 +42,7 @@ Add to `.mcp.json`:
 }
 ```
 
-Test: `echo '{"jsonrpc":"2.0","id":"1","method":"tools/list"}' | bin/simple src/app/mcp_t32/main.spl`
+Test: `echo '{"jsonrpc":"2.0","id":"1","method":"tools/list"}' | bin/simple run src/app/mcp_t32/main.spl`
 
 ---
 

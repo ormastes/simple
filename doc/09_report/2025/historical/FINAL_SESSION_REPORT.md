@@ -105,7 +105,7 @@ Successfully continued from async/await implementation, completed all 21 phases,
 ### Distribution Type
 
 This is a **release distribution** containing:
-- ✅ Pre-built Rust runtime binary (bin/release/simple)
+- ✅ Pre-built Rust runtime binary (bin/simple)
 - ✅ Complete Simple source code (src/)
 - ✅ Seed C compiler (seed/*.c)
 - ✅ Build scripts and tools
@@ -139,7 +139,7 @@ Like async/await, found two parser implementations:
 
 ### 2. Bootstrap Architecture
 - bin/simple = Shell wrapper
-- bin/release/simple = Rust ELF binary
+- bin/simple = Rust ELF binary
 - Rust binary contains built-in interpreter
 - Simple source code provides language implementation
 

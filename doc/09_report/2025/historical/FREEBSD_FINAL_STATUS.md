@@ -125,7 +125,7 @@ kldload linux64
 pkg install linux-c7
 
 # Copy Linux Simple binary
-scp -P 2222 bin/release/simple root@localhost:/tmp/simple-linux
+scp -P 2222 bin/simple root@localhost:/tmp/simple-linux
 
 # Run it!
 /tmp/simple-linux --version
@@ -206,7 +206,7 @@ cat FREEBSD_WORKSPACE.md
 
 ```bash
 # Run verification
-bin/release/simple scripts/verify_freebsd_workspace.spl
+bin/simple run scripts/verify_freebsd_workspace.spl
 ```
 
 ### 4. Test Seed Transpiler (Linux)

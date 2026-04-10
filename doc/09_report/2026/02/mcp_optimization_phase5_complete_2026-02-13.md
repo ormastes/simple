@@ -200,7 +200,7 @@ use app.mcp.helpers.{escape_json}  # Only app-specific functions
 **1. Smoke Test**
 ```bash
 # Test optimized bootstrap loads
-bin/simple src/app/mcp/bootstrap/main_optimized.spl server --help
+bin/simple run src/app/mcp/bootstrap/main_optimized.spl server --help
 ```
 
 **2. Integration Test**

@@ -62,7 +62,7 @@ file hello_native
 
 #### 8. ✅ Test LLVM Compilation (optional)
 ```bash
-bin/bootstrap/simple src/app/compile/llvm_direct.spl \
+bin/bootstrap/simple run src/app/compile/llvm_direct.spl \
     hello_macos_test.spl hello_llvm -O2
 
 ./hello_llvm
@@ -76,7 +76,7 @@ SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 
 # This would:
 #   1. Use existing bootstrap binary
-#   2. Run: bin/bootstrap/simple src/app/build/main.spl --bootstrap
+#   2. Run: bin/bootstrap/simple run src/app/build/main.spl --bootstrap
 #   3. Build optimized runtime
 #   4. Create: simple-bootstrap-{version}-darwin-{arch}.spk
 ```
@@ -215,7 +215,7 @@ Self-hosting build command:
 
 This would:
   1. Use existing bootstrap binary
-  2. Run: bin/bootstrap/simple src/app/build/main.spl --bootstrap
+  2. Run: bin/bootstrap/simple run src/app/build/main.spl --bootstrap
   3. Build new runtime with optimization
   4. Package as: simple-bootstrap-{version}-darwin-x86_64.spk
 

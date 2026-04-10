@@ -398,7 +398,7 @@ Goal: Pre-built binaries for all tier-1 platforms
 1. **Self-compilation not complete** — Stages 2-3 still invoke Cargo (Rust)
 2. **Generics block CompilerDriver in interpreter** — Runtime parser limitation
 3. **LLVM backend needs `llc` binary** — Not self-contained
-4. **Pre-built runtime is Rust binary** — `bin/release/simple` is 33 MB Rust
+4. **Pre-built runtime is Rust binary** — `bin/simple` is 33 MB Rust
 
 ---
 

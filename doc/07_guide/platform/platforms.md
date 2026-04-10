@@ -201,7 +201,7 @@ text_file_write("output.txt", "line1\nline2\n", win_cfg)  # Forces CRLF
 sudo apt install qemu-system-x86 qemu-utils rsync openssh-client wget xz-utils
 
 # 2. Set up FreeBSD VM
-bin/release/simple scripts/setup_freebsd_vm.spl
+bin/simple run scripts/setup_freebsd_vm.spl
 
 # 3. Start VM
 ~/vms/freebsd/start-freebsd-daemon.sh
@@ -243,7 +243,7 @@ cmake ../seed -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freeb
 ### FreeBSD Testing from Linux
 
 ```bash
-bin/release/simple scripts/test_freebsd_qemu.spl
+bin/simple run scripts/test_freebsd_qemu.spl
 ```
 
 This starts the VM, copies bootstrap binary and test sources, runs native compilation inside the VM, and verifies output.

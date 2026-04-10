@@ -114,7 +114,7 @@ suite('GUI - Math Rendering', function() {
         assert.strictEqual(hover, null);
     });
 
-    test('Rust math-core wasm bridge renders structured JSON when staged artifact is available', async function() {
+    test('Pure-Simple math-core wasm bridge renders structured JSON when staged artifact is available', async function() {
         const extensionRoot = getExtensionRoot();
         if (!ensureMathCoreWasmArtifact(extensionRoot)) {
             this.skip();
@@ -127,16 +127,17 @@ suite('GUI - Math Rendering', function() {
         assert.strictEqual(
             bridge.isReady(),
             true,
-            bridge.getUnavailableReason() ?? 'expected rust math-core wasm bridge to be ready'
+            bridge.getUnavailableReason() ?? 'expected pure-Simple math-core wasm bridge to be ready'
         );
 
         const result = await bridge.render('frac(1, 2) + alpha^2');
 
         assert.ok(result, 'expected structured JSON result from wasm bridge');
-        assert.strictEqual(result!.latex, '\\frac{1}{2} + \\alpha^{2}');
-        assert.strictEqual(result!.pretty, '1/2 + α²');
-        assert.strictEqual(result!.text, 'frac(1, 2) + alpha^2');
-        assert.ok(result!.debug?.includes('Add('), 'expected debug tree to be present');
+        assert.strictEqual(result!.latex, '\\frac{1}{2} + \\alpha^2');
+        assert.strictEqual(result!.text, '1 / 2 + alpha^2');
+        assert.ok(result!.pretty?.includes('α²'), 'expected pretty output to include greek power');
+        assert.ok(result!.pretty?.includes('─'), 'expected pretty output to include fraction bar');
+        assert.ok(result!.debug?.includes('Add(Frac('), 'expected debug tree to be present');
     });
 
     test('Preview panel HTML stays offline-safe and contains rendered content', () => {

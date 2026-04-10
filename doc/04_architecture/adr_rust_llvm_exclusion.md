@@ -10,8 +10,8 @@ The Simple compiler has three LLVM integration paths:
 
 | Path | Binary | Purpose |
 |------|--------|---------|
-| `llvm-lib` | `bin/release/simple` | In-process libLLVM C API — production |
-| `llvm` (CLI) | `bin/release/simple` | External llc/opt/clang — production |
+| `llvm-lib` | `bin/simple` or `bin/release/<platform>/simple` | In-process libLLVM C API — production |
+| `llvm` (CLI) | `bin/simple` or `bin/release/<platform>/simple` | External llc/opt/clang — production |
 | `rust-llvm` | `src/compiler_rust/` | Rust seed bootstrap — development only |
 
 The LLVM full-family completion program requires every public backend row to be resolved to `stable` or `unsupported`. The question is whether `rust-llvm` should be included in this matrix.

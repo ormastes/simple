@@ -13,7 +13,7 @@ Enable PyTorch examples by loading `libsimple_torch_ffi.so` dynamically.
 
 ### Investigation Results
 
-**Finding:** The Simple runtime (`bin/release/simple`) uses `extern fn` declarations which expect functions to be **statically linked** at compile time. The runtime does NOT support dynamic loading of `.so` files at runtime.
+**Finding:** The Simple runtime (`bin/simple`) uses `extern fn` declarations which expect functions to be **statically linked** at compile time. The runtime does NOT support dynamic loading of `.so` files at runtime.
 
 **Evidence:**
 1. Runtime has `dlopen`/`dlsym` symbols (for internal use)
@@ -35,7 +35,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FFI_LIB_PATH="$PROJECT_ROOT/.build/rust/ffi_torch/target/release"
 export LD_LIBRARY_PATH="$FFI_LIB_PATH:${LD_LIBRARY_PATH}"
-exec "$PROJECT_ROOT/bin/release/simple" "$@"
+exec "$PROJECT_ROOT/bin/simple" "$@"
 ```
 
 **Status:** ✅ Created and tested
@@ -202,7 +202,7 @@ Created `test/system/dl_examples_system_spec.spl` with **55 tests** covering:
 ### Test Results
 
 ```bash
-$ bin/release/simple test/system/dl_examples_system_spec.spl
+$ bin/simple run test/system/dl_examples_system_spec.spl
 
 Deep Learning PyTorch Examples
   Module imports and structure (6 tests)
@@ -281,7 +281,7 @@ PyTorch FFI Integration
 
 ### Known Limitations
 
-1. **Runtime not integrated** - FFI symbols not in `bin/release/simple`
+1. **Runtime not integrated** - FFI symbols not in `bin/simple`
    - **Cause:** Pre-built runtime without PyTorch linkage
    - **Fix:** Rebuild with `-lsimple_torch_ffi` linker flag
    - **Effort:** 1-2 hours
@@ -322,7 +322,7 @@ To complete integration (1-2 hours):
 
 3. **Verify symbols:**
    ```bash
-   nm bin/release/simple | grep rt_torch_tensor_zeros
+   nm bin/simple | grep rt_torch_tensor_zeros
    # Expected: T rt_torch_tensor_zeros
    ```
 

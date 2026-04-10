@@ -3,7 +3,7 @@
 # Tests against the official spec categories from Test262
 # Run: bash test/js/compat_test.sh
 
-BIN="bin/simple src/app/js/main.spl -e"
+BIN="bin/simple run src/app/js/main.spl -e"
 PASS=0
 FAIL=0
 TOTAL=0

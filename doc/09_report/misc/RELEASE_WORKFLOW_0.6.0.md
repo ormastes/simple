@@ -13,7 +13,7 @@ The release workflow for v0.6.0 has been updated to implement **true self-hostin
 ### 1. Bootstrap Download (New)
 
 **Before (v0.5.x):**
-- Used pre-built binary from repository (`bin/release/simple`)
+- Used pre-built binary from repository (`bin/simple`)
 - Required binary to be checked into git
 - No verification of bootstrap provenance
 
@@ -88,7 +88,7 @@ The release workflow for v0.6.0 has been updated to implement **true self-hostin
 
 ```yaml
 - Attempts: simple build --release
-- Verifies: bin/release/simple --version
+- Verifies: bin/simple --version
 - Sets: NEW_RUNTIME_BUILT=true/false
 - Falls back to bootstrap if build fails
 ```
@@ -278,7 +278,7 @@ bin/simple test test/unit/
 ```bash
 # Using the downloaded runtime, build itself
 bin/simple build --release
-# Should succeed and produce bin/release/simple
+# Should succeed and produce bin/simple
 ```
 
 ## Troubleshooting

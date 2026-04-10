@@ -99,7 +99,7 @@ drop_fn: "rt_torch_torchtensor_free"
 
 ### Command Used
 ```bash
-bin/simple src/app/wrapper_gen/mod.spl examples/torch.wrapper_spec
+bin/simple run src/app/wrapper_gen/mod.spl examples/torch.wrapper_spec
 ```
 
 ### Output

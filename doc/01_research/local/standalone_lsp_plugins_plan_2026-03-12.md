@@ -29,8 +29,8 @@ What does not exist in this repo:
 - standalone release packaging for a Simple Claude plugin
 
 Important mismatch:
-- `bin/release/simple lsp --help` is not currently a reliable packaged entrypoint
-- `bin/release/simple src/lib/nogc_sync_mut/lsp/main.spl --help` does work
+- `bin/simple lsp --help` is not currently a reliable packaged entrypoint
+- `bin/simple run src/lib/nogc_sync_mut/lsp/main.spl --help` does work
 
 ### T32 / CMM
 
@@ -41,7 +41,7 @@ What exists:
 
 Current problem:
 - the packaged `.lsp.json` still points at repo-relative source paths:
-  `bin/release/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
+  `bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`
 - that makes the released tarball non-standalone
 
 ## Target Packaging Model
@@ -152,10 +152,10 @@ Dev bundle command:
 - may temporarily use a verified repo-local command
 
 Preferred if available:
-- `["bin/release/simple-lsp"]`
+- `["bin/simple-lsp"]`
 
 Fallback only if necessary:
-- `["bin/release/simple", "src/lib/nogc_sync_mut/lsp/main.spl"]`
+- `["bin/simple", "src/lib/nogc_sync_mut/lsp/main.spl"]`
 
 #### CMM
 

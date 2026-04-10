@@ -5,7 +5,7 @@
 
 ## Overview
 
-Intensive system tests that exercise LSP query, DAP debug, and lint operations against the full Simple codebase (~2,943 .spl files). Each test runs real subprocess calls (`bin/release/simple`) against every relevant source file to catch crashes, hangs, and regressions.
+Intensive system tests that exercise LSP query, DAP debug, and lint operations against the full Simple codebase (~2,943 .spl files). Each test runs real subprocess calls (`bin/simple` or `bin/release/<platform>/simple`) against every relevant source file to catch crashes, hangs, and regressions.
 
 **Goal:** No LSP query, DAP operation, or lint run should crash (exit code > 1) on any source file.
 
@@ -63,7 +63,7 @@ Each LSP spec tests 8 subcommands on every file in its group:
 | `document-highlight` | Yes | Same-file occurrences |
 | `type-definition` | Yes | Type navigation |
 
-LSP queries run via: `bin/release/simple src/app/cli/query.spl <subcmd> <file> <line> [col]`
+LSP queries run via: `bin/simple run src/app/cli/query.spl <subcmd> <file> <line> [col]`
 
 ## Running the Tests
 
@@ -94,7 +94,7 @@ All tests use `rt_process_run()` to spawn real subprocesses:
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn run_lsp(subcmd: text, file: text, line: i64, col: i64) -> i64:
-    val (stdout, stderr, code) = rt_process_run("bin/release/simple",
+    val (stdout, stderr, code) = rt_process_run("bin/simple",
         ["src/app/cli/query.spl", subcmd, file, "{line}", "{col}"])
     code
 ```
@@ -138,7 +138,7 @@ For position-based LSP queries, `find_first_code_line()` finds the first non-com
 
 2. **No `tag:` on describe blocks**: The `tag: ["slow", "system"]` parameter on `describe` causes `it` blocks to be skipped by the test runner regardless of flags. Tags are documented in header comments only.
 
-3. **DAP uses lint, not execution**: Running arbitrary .spl files via subprocess can hang on files with blocking main loops (REPL, servers). DAP specs verify module parsing via `bin/release/simple lint` instead.
+3. **DAP uses lint, not execution**: Running arbitrary .spl files via subprocess can hang on files with blocking main loops (REPL, servers). DAP specs verify module parsing via `bin/simple lint` instead.
 
 4. **While loops in module-level functions**: All batch operations use `while` loops inside module-level functions (not inside `it` block closures) to avoid the closure mutation limitation.
 

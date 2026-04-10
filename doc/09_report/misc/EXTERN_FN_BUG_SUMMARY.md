@@ -86,7 +86,7 @@ Same pattern as regular functions (DECL_FN) which already works.
 
 **JIT:** rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute
 
-All compiled into `bin/release/simple`, just not callable from Simple code.
+All compiled into `bin/simple`, just not callable from Simple code.
 
 ---
 

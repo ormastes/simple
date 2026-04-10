@@ -332,7 +332,7 @@ class TorchTensorWrapper:
 **Future Wrappers Will Benefit:**
 All future SFFI wrappers generated with:
 ```bash
-bin/simple src/app/wrapper_gen/mod.spl <spec-file>
+bin/simple run src/app/wrapper_gen/mod.spl <spec-file>
 ```
 Will automatically:
 - Use i64 for handles (runtime compatible)

@@ -24,7 +24,7 @@ execution. Zero tests have run against real T32 hardware. Zero backend interface
 - T32 PowerView running with RCL enabled: `RCL=NETTCP PORT=20000`
 - Python 3 + `pip install lauterbach.trace32.rcl` (for Python backend)
 - `t32api64.so` at `T32_PATH/bin/pc_linux64/t32api64.so` (for C API backend)
-- Simple compiler built: `bin/release/simple` available
+- Simple compiler built: `bin/simple` or `bin/release/<platform>/simple` available
 
 ### Environment Variables
 ```bash

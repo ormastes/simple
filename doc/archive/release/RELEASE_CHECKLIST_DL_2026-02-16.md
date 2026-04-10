@@ -107,7 +107,7 @@
 ### 7. Dependencies ✅
 
 **Required**:
-- [x] Simple runtime (bin/release/simple, 33MB) - Included
+- [x] Simple runtime (bin/simple or platform-specific bin/release/<platform>/simple, 33MB) - Included
 
 **Optional**:
 - [x] CUDA toolkit (for GPU examples) - User installs

@@ -135,7 +135,7 @@ PHASE 0 COMPLETE
 
 **What's Needed:**
 1. Dynamic library loader in runtime (dlopen)
-2. Or: Link `libsimple_torch_ffi.so` into `bin/release/simple`
+2. Or: Link `libsimple_torch_ffi.so` into `bin/simple`
 3. Or: Set `LD_LIBRARY_PATH` and preload mechanism
 
 **Note in Example:**

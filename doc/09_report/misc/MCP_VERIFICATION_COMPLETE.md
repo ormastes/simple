@@ -159,7 +159,7 @@ MCP Stdio Protocol
     ↓
 simple_mcp_server_optimized (wrapper script)
     ↓
-bin/release/simple (runtime)
+bin/simple (runtime)
     ↓
 src/app/mcp/bootstrap/main_optimized.spl (MCP server)
     ↓

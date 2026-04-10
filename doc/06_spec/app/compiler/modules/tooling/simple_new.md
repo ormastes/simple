@@ -201,5 +201,5 @@ Initialized jj repository.
 
 Done! To get started:
   cd myapp
-  simple src/main.spl
+  simple run src/main.spl
 ```

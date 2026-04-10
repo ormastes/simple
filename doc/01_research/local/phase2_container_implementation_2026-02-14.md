@@ -45,7 +45,7 @@ Successfully implemented Phase 2 of the robust test runner plan: Docker-based te
 ```dockerfile
 FROM alpine:3.18
 RUN adduser -D -u 1001 -G testuser testuser
-COPY bin/release/simple /usr/local/bin/simple
+COPY bin/simple /usr/local/bin/simple
 USER testuser
 ENTRYPOINT ["/usr/local/bin/simple"]
 CMD ["test"]
@@ -122,7 +122,7 @@ ENTRYPOINT ["/usr/local/bin/simple"]
 10. Large source trees (`seed/llvm-project/`, `docker/`)
 
 **Included (required):**
-- `bin/release/simple` (runtime binary)
+- `bin/simple` (runtime binary)
 - `src/` (source files for mounting)
 - `test/` (test files for mounting)
 - `scripts/` (helper scripts)
@@ -524,7 +524,7 @@ With Phase 2 complete, the foundation is ready for Phase 3:
 - 2GB RAM minimum for test execution
 
 ### Build Requirements
-- Simple release binary (`bin/release/simple`)
+- Simple release binary (`bin/simple`)
 - Project source code (`src/`, `test/`)
 
 ### Optional Requirements
@@ -539,7 +539,7 @@ With Phase 2 complete, the foundation is ready for Phase 3:
 ### Image Updates
 
 **Rebuild images when:**
-- Simple runtime binary changes (`bin/release/simple`)
+- Simple runtime binary changes (`bin/simple`)
 - Alpine/Ubuntu security updates
 - Dependency changes (new tools needed)
 

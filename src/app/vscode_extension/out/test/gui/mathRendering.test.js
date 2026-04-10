@@ -113,7 +113,7 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
         const hover = provider.provideHover(document, new vscode.Position(1, 18), {});
         assert.strictEqual(hover, null);
     });
-    (0, mocha_1.test)('Rust math-core wasm bridge renders structured JSON when staged artifact is available', async function () {
+    (0, mocha_1.test)('Pure-Simple math-core wasm bridge renders structured JSON when staged artifact is available', async function () {
         const extensionRoot = getExtensionRoot();
         if (!ensureMathCoreWasmArtifact(extensionRoot)) {
             this.skip();
@@ -121,13 +121,14 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
         }
         const bridge = new mathCoreWasm_1.MathCoreWasmBridge();
         await bridge.initialize(vscode.Uri.file(extensionRoot));
-        assert.strictEqual(bridge.isReady(), true, bridge.getUnavailableReason() ?? 'expected rust math-core wasm bridge to be ready');
+        assert.strictEqual(bridge.isReady(), true, bridge.getUnavailableReason() ?? 'expected pure-Simple math-core wasm bridge to be ready');
         const result = await bridge.render('frac(1, 2) + alpha^2');
         assert.ok(result, 'expected structured JSON result from wasm bridge');
-        assert.strictEqual(result.latex, '\\frac{1}{2} + \\alpha^{2}');
-        assert.strictEqual(result.pretty, '1/2 + α²');
+        assert.strictEqual(result.latex, '\\frac{1}{2} + \\alpha^2');
         assert.strictEqual(result.text, 'frac(1, 2) + alpha^2');
-        assert.ok(result.debug?.includes('Add('), 'expected debug tree to be present');
+        assert.ok(result.pretty?.includes('α²'), 'expected pretty output to include greek power');
+        assert.ok(result.pretty?.includes('─'), 'expected pretty output to include fraction bar');
+        assert.ok(result.debug?.includes('Add(Frac('), 'expected debug tree to be present');
     });
     (0, mocha_1.test)('Preview panel HTML stays offline-safe and contains rendered content', () => {
         const html = (0, mathPreviewPanel_1.buildMathPreviewHtml)('x^{2} + 1', 'm{ x^2 + 1 }');

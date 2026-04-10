@@ -199,7 +199,7 @@ if stdout.len() > 0:
         # ... multiple prints
 print ""
 print "  Hint: FFI generation is required before building"
-print "  Try running: ./bin/simple src/app/ffi_gen/main.spl --gen-workspace"
+print "  Try running: ./bin/simple run src/app/ffi_gen/main.spl --gen-workspace"
 ```
 
 **After:**
@@ -210,7 +210,7 @@ var error_lines = [
 ]
 # ... build error_lines list ...
 error_lines.push("  Hint: FFI generation is required before building")
-error_lines.push("  Try running: ./bin/simple src/app/ffi_gen/main.spl --gen-workspace")
+error_lines.push("  Try running: ./bin/simple run src/app/ffi_gen/main.spl --gen-workspace")
 
 print error_lines.join("\n")  # ✅ Single I/O call
 ```

@@ -71,7 +71,7 @@ enum CodegenTarget:
 
 **Error**: `error: compile failed: parse: in "src/compiler/lexer.spl": Unexpected token: expected expression, found Indent`
 
-This prevents using `bin/release/simple` to compile `src/compiler/main.spl`.
+This prevents using `bin/simple` to compile `src/compiler/main.spl`.
 
 ## Architecture Analysis
 
@@ -126,8 +126,8 @@ The two compilers have:
 
 ## Current Working Status
 
-- ✅ bin/release/simple - Works for basic code
-- ❌ bin/release/simple src/compiler/main.spl - Parse error
-- ✅ bin/release/simple -c "print('test')" - Works
+- ✅ bin/simple - Works for basic code
+- ❌ bin/simple run src/compiler/main.spl - Parse error
+- ✅ bin/simple -c "print('test')" - Works
 - ✅ compiler_core_legacy transpilation - Works (seed_cpp bugs only)
 - ❌ compiler compilation - Blocked by parse error

@@ -1168,7 +1168,7 @@ describe "IR DSL Code Generator":
 # Phase 1: Manual verification
 check-exhaustiveness:
 	@echo "Checking for catch-all patterns..."
-	@./bin/wrappers/simple src/compiler/backend/exhaustiveness_validator.spl
+	@./bin/wrappers/simple run src/compiler/backend/exhaustiveness_validator.spl
 
 # Phase 2: Run all backend tests
 test-backends:
@@ -1183,7 +1183,7 @@ docs-backends:
 # Phase 4: Regenerate code from DSL
 codegen-from-dsl:
 	@echo "Generating Rust code from IR DSL..."
-	@./bin/wrappers/simple src/compiler/irdsl/main.spl
+	@./bin/wrappers/simple run src/compiler/irdsl/main.spl
 
 # Full pipeline
 backend-completeness-full: check-exhaustiveness test-backends docs-backends

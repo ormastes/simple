@@ -26,7 +26,7 @@ The Simple compiler has **9 backends** spanning production compilation, GPU comp
 └──────────────────────────┬────────────────────────────┘
                            │
               ┌────────────┴────────────┐
-              │  Rust Bootstrap Binary   │  (bin/release/simple)
+              │  Rust Bootstrap Binary   │  (bin/simple or bin/release/<platform>/simple)
               │  Parse → HIR → MIR      │
               └────────────┬────────────┘
                            │
