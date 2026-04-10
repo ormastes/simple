@@ -135,8 +135,7 @@ suite('GUI - Math Rendering', function() {
         assert.ok(result, 'expected structured JSON result from wasm bridge');
         assert.strictEqual(result!.latex, '\\frac{1}{2} + \\alpha^2');
         assert.strictEqual(result!.text, '1 / 2 + alpha^2');
-        assert.ok(result!.pretty?.includes('α²'), 'expected pretty output to include greek power');
-        assert.ok(result!.pretty?.includes('─'), 'expected pretty output to include fraction bar');
+        assert.strictEqual(result!.pretty, '(1)/(2) + α²');
         assert.ok(result!.debug?.includes('Add(Frac('), 'expected debug tree to be present');
     });
 

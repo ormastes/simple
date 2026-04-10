@@ -120,12 +120,6 @@ from the repo root. The script looks for `simple` in this order:
 - `src/compiler_rust/target/release/simple`
 - `simple` from your `PATH`
 
-If you still need the temporary Rust fallback artifact, it remains available via:
-
-```bash
-npm run build:math-core-wasm:rust
-```
-
 `npm run compile` now rebuilds the pure-Simple `math-core.wasm` first, then
 stages any explicit wasm overrides (`SIMPLE_VSCODE_*`) afterward.
 
@@ -266,6 +260,34 @@ Enable/disable AI chat panel.
 ```
 
 ## Usage
+
+### Math Demo Workspace
+
+Use the files under `src/app/vscode_extension/test-workspace/` to verify the
+local math rendering path in VSCode.
+
+For arithmetic-focused coverage, open:
+
+`src/app/vscode_extension/test-workspace/math_arithmetic_demo.spl`
+
+This file exercises:
+
+- addition: `2 + 3`
+- subtraction: `10 - 3`
+- multiplication: `4 * 5`
+- division: `15 / 3`
+- fractions and powers: `frac(1, 2) + alpha^2`
+- roots: `sqrt(x^2 + y^2)`
+- sums: `sum(i, 0..10) i^2`
+- integrals: `int(x, 0..1) x^2`
+- transpose: `A' + B'`
+
+Expected pretty output examples:
+
+- `frac(1, 2) + alpha^2` → `(1)/(2) + α²`
+- `sum(i, 0..10) i^2` → `∑(i=0..10) i²`
+- `int(x, 0..1) x^2` → `∫(x=0..1) x²`
+- `A' + B'` → `Aᵀ + Bᵀ`
 
 ### Viewing LSP Server Output
 

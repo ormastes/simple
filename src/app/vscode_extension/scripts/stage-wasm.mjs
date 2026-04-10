@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
@@ -9,11 +9,8 @@ const extensionRoot = path.resolve(scriptDir, '..');
 const repoRoot = path.resolve(extensionRoot, '..', '..', '..');
 const wasmDir = path.join(extensionRoot, 'wasm');
 const wasmBuildDir = path.join(extensionRoot, '.wasm-build');
-const mathCoreCrateDir = path.join(extensionRoot, 'math_core_rs');
-const mathCoreCargoToml = path.join(mathCoreCrateDir, 'Cargo.toml');
 const simpleMathCoreEntry = path.join(extensionRoot, 'math_core', 'main.spl');
 const buildMathCoreSimple = process.argv.includes('--build-math-core-simple');
-const buildMathCoreRs = process.argv.includes('--build-math-core-rs');
 
 mkdirSync(wasmDir, { recursive: true });
 mkdirSync(wasmBuildDir, { recursive: true });
@@ -31,7 +28,6 @@ const artifacts = [
         buildName: 'math-core.wasm',
         targetName: 'math-core.wasm',
         buildFromSimple: true,
-        buildFromRust: true,
     },
 ];
 
@@ -46,17 +42,10 @@ for (const artifact of artifacts) {
         sourcePath = buildSimpleMathCoreWasmArtifact();
     }
 
-    if (!sourcePath && artifact.buildFromRust && buildMathCoreRs) {
-        sourcePath = buildRustMathCoreWasmArtifact();
-    }
-
     if (!sourcePath) {
         const notes = [];
         if (artifact.buildFromSimple) {
             notes.push('--build-math-core-simple');
-        }
-        if (artifact.buildFromRust) {
-            notes.push('--build-math-core-rs');
         }
         const fallbackNote = notes.length > 0
             ? `no ${artifact.envKey}, SIMPLE_VSCODE_WASM_BUILD_DIR, or ${notes.join('/')}`
@@ -147,64 +136,4 @@ function resolveSimpleBinary() {
         '[stage:wasm] could not find a working `simple` compiler. ' +
         'Set SIMPLE_VSCODE_SIMPLE_BIN or build src/compiler_rust/target/debug/simple first.'
     );
-}
-
-function buildRustMathCoreWasmArtifact() {
-    if (!existsSync(mathCoreCargoToml)) {
-        throw new Error(`[stage:wasm] math-core crate not found at ${mathCoreCargoToml}`);
-    }
-
-    const cargo = spawnSync(
-        'cargo',
-        [
-            'build',
-            '--manifest-path',
-            mathCoreCargoToml,
-            '--target',
-            'wasm32-unknown-unknown',
-            '--release',
-            '--target-dir',
-            path.join(mathCoreCrateDir, 'target'),
-        ],
-        {
-            cwd: extensionRoot,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-        }
-    );
-
-    if (cargo.status !== 0) {
-        const details = [cargo.stdout, cargo.stderr].filter(Boolean).join('\n').trim();
-        throw new Error(
-            `[stage:wasm] failed to build Rust math-core wasm crate.\n${details || 'cargo build returned a non-zero exit code.'}`
-        );
-    }
-
-    const packageName = readCargoPackageName(mathCoreCargoToml);
-    const artifactStem = packageName.replace(/-/g, '_');
-    const builtArtifact = path.join(
-        mathCoreCrateDir,
-        'target',
-        'wasm32-unknown-unknown',
-        'release',
-        `${artifactStem}.wasm`
-    );
-
-    if (!existsSync(builtArtifact)) {
-        throw new Error(
-            `[stage:wasm] cargo build succeeded, but expected artifact was not found at ${builtArtifact}`
-        );
-    }
-
-    console.log(`[stage:wasm] built Rust math-core.wasm <- ${builtArtifact}`);
-    return builtArtifact;
-}
-
-function readCargoPackageName(cargoTomlPath) {
-    const cargoToml = readFileSync(cargoTomlPath, 'utf8');
-    const match = cargoToml.match(/^\s*name\s*=\s*"([^"]+)"/m);
-    if (!match) {
-        throw new Error(`[stage:wasm] could not determine package name from ${cargoTomlPath}`);
-    }
-    return match[1];
 }
