@@ -16,6 +16,7 @@ const os = require('os');
 let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
+const childWindows = {};  // windowId → BrowserWindow
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
 const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
 const projectRoot = path.resolve(__dirname, '..', '..');
@@ -74,6 +75,9 @@ function resolveEntryArgs() {
         if (args[i].startsWith('--remote-debugging-port')) {
             continue;
         }
+        if (args[i] === '--') {
+            continue;
+        }
         result.push(args[i]);
     }
     return result;
@@ -116,6 +120,54 @@ function handleSimpleMessage(line) {
                         title: msg.title || '',
                         message: msg.message || ''
                     });
+                }
+                break;
+
+            case 'openWindow':
+                if (mainWindow) {
+                    const winId = msg.windowId || `win_${Date.now()}`;
+                    const child = new BrowserWindow({
+                        width: msg.width || 400,
+                        height: msg.height || 300,
+                        x: msg.x,
+                        y: msg.y,
+                        parent: mainWindow,
+                        backgroundColor: '#0A0A0F',
+                        show: true,
+                        webPreferences: {
+                            nodeIntegration: false,
+                            contextIsolation: true,
+                            preload: path.join(__dirname, 'preload.js')
+                        },
+                        title: msg.title || 'Simple Window'
+                    });
+                    child.loadFile(path.join(__dirname, 'index.html'));
+                    child.webContents.on('did-finish-load', () => {
+                        if (msg.html) {
+                            child.webContents.send('render', msg.html);
+                        }
+                    });
+                    child.on('closed', () => {
+                        delete childWindows[winId];
+                        sendToSimple({ type: 'windowClosed', windowId: winId });
+                    });
+                    childWindows[winId] = child;
+                    debugLog(`opened child window id=${winId}`);
+                    sendToSimple({ type: 'windowOpened', windowId: winId });
+                }
+                break;
+
+            case 'closeWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].close();
+                    delete childWindows[msg.windowId];
+                    debugLog(`closed child window id=${msg.windowId}`);
+                }
+                break;
+
+            case 'renderWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].webContents.send('render', msg.html || '');
                 }
                 break;
 

@@ -26,7 +26,7 @@ export interface MathCustomEditorState {
 export declare function detectMathBlocksInSource(text: string): MathBlockSnapshot[];
 export declare function findMathBlockAtOffset(text: string, offset: number): MathBlockSnapshot | undefined;
 export declare function buildMathCustomEditorState(documentUri: string, sourceText: string, selectionStart: number, selectionEnd: number): MathCustomEditorState;
-export declare function buildMathCustomEditorHtml(katexCssUri: string, webviewJsUri: string, cspSource: string, nonce: string): string;
+export declare function buildMathCustomEditorHtml(katexCssUri: string, _webviewJsUri: string, cspSource: string, nonce: string): string;
 export declare class MathCustomEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly extensionUri;
     static readonly viewType = "simple.mathSourceEditor";

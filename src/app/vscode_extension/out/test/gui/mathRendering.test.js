@@ -156,21 +156,19 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
     });
     (0, mocha_1.test)('Custom editor HTML uses webview CSP source and contains the source shell', () => {
         const cssUri = 'vscode-webview-resource://test/katex.min.css';
-        const webviewJsUri = 'vscode-webview-resource://test/mathEditor.js';
         const cspSource = 'vscode-webview://test-source';
         const nonce = 'dGVzdG5vbmNl';
-        const html = (0, mathCustomEditor_1.buildMathCustomEditorHtml)(cssUri, webviewJsUri, cspSource, nonce);
+        const html = (0, mathCustomEditor_1.buildMathCustomEditorHtml)(cssUri, '', cspSource, nonce);
         assert.ok(html.includes('Simple Math Source Editor'));
-        assert.ok(html.includes('editor-container'));
+        assert.ok(html.includes('<textarea id="source"'), 'should have source textarea');
+        assert.ok(html.includes('math-strip'), 'should have math rendering strip');
         assert.ok(html.includes('Math Preview'));
-        assert.ok(html.includes('Status'));
         assert.ok(html.includes(`<link rel="stylesheet" href="${cssUri}">`));
-        assert.ok(html.includes(`src="${webviewJsUri}"`));
         assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
         assert.ok(html.includes(`font-src ${cspSource}`));
         assert.ok(!html.includes(`style-src ${cssUri}`));
-        assert.ok(html.includes(`script-src ${cspSource}`), 'CSP script-src must include cspSource for external webview JS');
-        assert.ok(html.includes('MathEditorWebview.boot()'));
+        assert.ok(html.includes('acquireVsCodeApi'), 'should have vscode API call');
+        assert.ok(html.includes(`nonce-${nonce}`), 'should have nonce in CSP');
     });
     (0, mocha_1.test)('Custom editor state reports info status when no math block is active', () => {
         const state = (0, mathCustomEditor_1.buildMathCustomEditorState)('file:///tmp/demo.spl', 'fn main():\n    val y = 42\n', 0, 0);

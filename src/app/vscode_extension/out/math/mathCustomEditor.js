@@ -172,7 +172,7 @@ function makeState(document, selectionStart, selectionEnd) {
     return buildMathCustomEditorState(document.uri.toString(), document.getText(), selectionStart, selectionEnd);
 }
 // ── HTML builder ─────────────────────────────────────────────────────
-function buildMathCustomEditorHtml(katexCssUri, webviewJsUri, cspSource, nonce) {
+function buildMathCustomEditorHtml(katexCssUri, _webviewJsUri, cspSource, nonce) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -182,17 +182,15 @@ function buildMathCustomEditorHtml(katexCssUri, webviewJsUri, cspSource, nonce) 
           content="default-src 'none';
                    style-src ${cspSource} 'unsafe-inline';
                    font-src ${cspSource};
-                   script-src ${cspSource} 'nonce-${nonce}';">
+                   script-src 'nonce-${nonce}';">
     <title>Simple Math Source Editor</title>
     <link rel="stylesheet" href="${katexCssUri}">
     <style nonce="${nonce}">
         * { box-sizing: border-box; }
         body {
-            margin: 0;
-            padding: 0;
+            margin: 0; padding: 0;
             display: grid;
-            grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.85fr);
-            gap: 0;
+            grid-template-columns: 1fr minmax(260px, 0.55fr);
             height: 100vh;
             background: var(--vscode-editor-background);
             color: var(--vscode-foreground);
@@ -200,154 +198,74 @@ function buildMathCustomEditorHtml(katexCssUri, webviewJsUri, cspSource, nonce) 
             font-size: var(--vscode-font-size);
             overflow: hidden;
         }
-
-        /* ── Left panel: CodeMirror editor ── */
-        #editor-panel {
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-            border-right: 1px solid var(--vscode-panel-border);
+        #editor-panel { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--vscode-panel-border); }
+        #source {
+            flex: 1; min-height: 0; resize: none; border: none; padding: 8px 12px;
+            background: var(--vscode-editor-background);
+            color: var(--vscode-editor-foreground);
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+            line-height: 1.5; tab-size: 4; outline: none;
         }
-        #editor-container {
-            flex: 1;
-            min-height: 0;
-            overflow: hidden;
+        #math-strip {
+            overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px;
+            border-top: 1px solid var(--vscode-panel-border);
+            max-height: 45vh; min-height: 50px;
         }
-        #editor-container .cm-editor {
-            height: 100%;
+        .math-block {
+            padding: 6px 10px; border-radius: 4px;
+            background: color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent);
+            border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent);
+            cursor: pointer;
         }
-        #editor-container .cm-scroller {
-            overflow: auto;
+        .math-block:hover { background: color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent); }
+        .math-block .katex-display { margin: 0; }
+        .math-label {
+            font-size: 10px; color: var(--vscode-descriptionForeground);
+            margin-bottom: 2px; font-family: var(--vscode-editor-font-family);
         }
-
-        /* ── Right panel: Math preview ── */
-        #preview-panel {
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-            overflow: hidden;
-        }
+        #preview-panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
         .panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 12px;
-            border-bottom: 1px solid var(--vscode-panel-border);
-            font-size: 12px;
-            font-weight: 600;
-            flex-shrink: 0;
-        }
-        .meta {
-            color: var(--vscode-descriptionForeground);
-            font-weight: 400;
-            font-size: 11px;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 12px; border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 12px; font-weight: 600; flex-shrink: 0;
         }
         .preview-body {
-            padding: 12px;
-            overflow: auto;
-            flex: 1;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
+            padding: 12px; overflow: auto; flex: 1; min-height: 0;
+            display: flex; flex-direction: column; gap: 12px;
         }
         .preview-block {
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 4px;
-            padding: 10px;
-            background: var(--vscode-editor-inactiveSelectionBackground);
+            border: 1px solid var(--vscode-panel-border); border-radius: 4px;
+            padding: 10px; background: var(--vscode-editor-inactiveSelectionBackground);
         }
         .preview-label {
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.4px;
-            color: var(--vscode-descriptionForeground);
-            margin-bottom: 6px;
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+            color: var(--vscode-descriptionForeground); margin-bottom: 6px;
         }
-        .preview-text {
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-
-        /* ── Rendered math in preview — natural height ── */
-        .preview-block .katex-display {
-            margin: 0;
-            padding: 0;
-        }
-        .preview-block .katex {
-            font-size: 1.2em;
-        }
-
-        /* ── Status ── */
-        .status {
-            border-radius: 4px;
-            padding: 8px 10px;
-            font-size: 12px;
-            line-height: 1.4;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-        .status-info {
-            background: var(--vscode-editor-inactiveSelectionBackground);
-            color: var(--vscode-descriptionForeground);
-        }
-        .status-ok {
-            background: color-mix(in srgb, var(--vscode-testing-iconPassed, #388a34) 18%, transparent);
-            color: var(--vscode-testing-iconPassed, #388a34);
-        }
-        .status-error {
-            background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 18%, transparent);
-            color: var(--vscode-errorForeground, #f14c4c);
-        }
-        .empty-state {
-            color: var(--vscode-descriptionForeground);
-            font-style: italic;
-        }
-        .katex-error {
-            color: var(--vscode-errorForeground);
-            font-family: var(--vscode-editor-font-family);
-        }
-        .render-fallback {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        button {
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: 1px solid var(--vscode-button-border, transparent);
-            padding: 6px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 11px;
-        }
-        button:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
+        .preview-text { white-space: pre-wrap; word-break: break-word; }
+        .preview-block .katex-display { margin: 0; }
+        .preview-block .katex { font-size: 1.2em; }
+        .status { border-radius: 4px; padding: 8px 10px; font-size: 12px; line-height: 1.4; }
+        .status-info { background: var(--vscode-editor-inactiveSelectionBackground); color: var(--vscode-descriptionForeground); }
+        .status-ok { background: color-mix(in srgb, var(--vscode-testing-iconPassed, #388a34) 18%, transparent); color: var(--vscode-testing-iconPassed, #388a34); }
+        .status-error { background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 18%, transparent); color: var(--vscode-errorForeground, #f14c4c); }
+        .empty-state { color: var(--vscode-descriptionForeground); font-style: italic; }
     </style>
 </head>
 <body>
     <section id="editor-panel">
-        <div id="editor-container"></div>
+        <textarea id="source" spellcheck="false"></textarea>
+        <div id="math-strip"></div>
     </section>
-
     <aside id="preview-panel">
         <div class="panel-header">
             <span>Math Preview</span>
-            <div style="display: flex; gap: 6px; align-items: center;">
-                <span class="meta" id="selection">0-0</span>
-                <button type="button" id="refresh">Refresh</button>
-            </div>
+            <span style="font-weight:400;font-size:11px;color:var(--vscode-descriptionForeground)" id="selection">0-0</span>
         </div>
         <div class="preview-body">
             <div class="preview-block">
                 <div class="preview-label">Status</div>
-                <div id="render-status" class="status status-info">Move the caret into a math block to render it.</div>
-            </div>
-            <div class="preview-block">
-                <div class="preview-label">Active Block</div>
-                <div class="preview-text" id="block-label">none</div>
+                <div id="render-status" class="status status-info">Move the caret into a math block.</div>
             </div>
             <div class="preview-block">
                 <div class="preview-label">Rendered</div>
@@ -363,30 +281,86 @@ function buildMathCustomEditorHtml(katexCssUri, webviewJsUri, cspSource, nonce) 
             </div>
         </div>
     </aside>
+    <script nonce="${nonce}">
+    (function() {
+        var vscode = acquireVsCodeApi();
+        var source = document.getElementById('source');
+        var mathStrip = document.getElementById('math-strip');
+        var renderedEl = document.getElementById('rendered');
+        var blockSourceEl = document.getElementById('block-source');
+        var blockPrettyEl = document.getElementById('block-pretty');
+        var renderStatusEl = document.getElementById('render-status');
+        var selectionEl = document.getElementById('selection');
+        var isSync = false;
+        var editTimer = null;
 
-    <script nonce="${nonce}">
-        // acquireVsCodeApi() can only be called ONCE — store it globally
-        var __vscodeApi = acquireVsCodeApi();
-        document.getElementById('refresh').addEventListener('click', function() {
-            __vscodeApi.postMessage({ type: 'requestSync' });
+        source.addEventListener('input', function() {
+            if (isSync) return;
+            if (editTimer) clearTimeout(editTimer);
+            editTimer = setTimeout(function() {
+                vscode.postMessage({ type: 'editAll', source: source.value,
+                    selectionStart: source.selectionStart, selectionEnd: source.selectionEnd });
+            }, 120);
         });
-    </script>
-    <script nonce="${nonce}" src="${webviewJsUri}"></script>
-    <script nonce="${nonce}">
-        (function() {
-            var container = document.getElementById('editor-container');
-            try {
-                if (typeof MathEditorWebview !== 'undefined') {
-                    MathEditorWebview.boot(__vscodeApi);
-                } else {
-                    container.textContent = 'Error: webview bundle not loaded. Open Developer Tools for details.';
-                    console.error('[math-editor] MathEditorWebview undefined after script load');
+        source.addEventListener('keyup', onSel);
+        source.addEventListener('mouseup', onSel);
+        function onSel() {
+            vscode.postMessage({ type: 'selectionChanged',
+                selectionStart: source.selectionStart, selectionEnd: source.selectionEnd });
+            selectionEl.textContent = source.selectionStart + '-' + source.selectionEnd;
+        }
+
+        window.addEventListener('message', function(ev) {
+            var msg = ev.data;
+            if (msg.type === 'sync') {
+                isSync = true;
+                if (source.value !== msg.sourceText) {
+                    var ss = source.selectionStart, se = source.selectionEnd;
+                    source.value = msg.sourceText;
+                    source.selectionStart = ss;
+                    source.selectionEnd = se;
                 }
-            } catch (e) {
-                container.textContent = 'Boot error: ' + e.message;
-                console.error('[math-editor] boot error:', e);
+                mathStrip.innerHTML = '';
+                if (msg.mathBlocks && msg.mathBlocks.length > 0) {
+                    msg.mathBlocks.forEach(function(b) {
+                        var div = document.createElement('div');
+                        div.className = 'math-block';
+                        var lbl = document.createElement('div');
+                        lbl.className = 'math-label';
+                        lbl.textContent = b.prefix + '{ ' + b.content + ' }';
+                        div.appendChild(lbl);
+                        var rd = document.createElement('div');
+                        rd.innerHTML = b.renderedHtml;
+                        div.appendChild(rd);
+                        div.onclick = function() {
+                            source.focus();
+                            source.selectionStart = b.fullStart;
+                            source.selectionEnd = b.fullEnd;
+                            onSel();
+                        };
+                        mathStrip.appendChild(div);
+                    });
+                }
+                isSync = false;
             }
-        })();
+            if (msg.type === 'focusedBlock') {
+                if (renderStatusEl) {
+                    renderStatusEl.className = 'status status-' + msg.statusKind;
+                    renderStatusEl.textContent = msg.statusMessage;
+                }
+                if (msg.hasContent) {
+                    if (renderedEl) renderedEl.innerHTML = msg.html;
+                    if (blockSourceEl) blockSourceEl.textContent = msg.source;
+                    if (blockPrettyEl) blockPrettyEl.textContent = msg.pretty;
+                } else {
+                    if (renderedEl) renderedEl.innerHTML = '<div class="empty-state">Move the caret into a math block.</div>';
+                    if (blockSourceEl) blockSourceEl.innerHTML = '<span class="empty-state">No active math block</span>';
+                    if (blockPrettyEl) blockPrettyEl.innerHTML = '<span class="empty-state">No active math block</span>';
+                }
+            }
+        });
+        vscode.postMessage({ type: 'ready' });
+    })();
     </script>
 </body>
 </html>`;
@@ -405,18 +379,12 @@ class MathCustomEditorProvider {
     }
     async resolveCustomTextEditor(document, webviewPanel, _token) {
         const katexDistUri = vscode.Uri.joinPath(this.extensionUri, 'node_modules', 'katex', 'dist');
-        const webviewOutUri = vscode.Uri.joinPath(this.extensionUri, 'out', 'webview');
         webviewPanel.webview.options = {
             enableScripts: true,
-            localResourceRoots: [katexDistUri, webviewOutUri],
+            localResourceRoots: [katexDistUri],
         };
         const katexCssUri = webviewPanel.webview.asWebviewUri(vscode.Uri.joinPath(katexDistUri, 'katex.min.css')).toString();
-        const webviewJsUri = webviewPanel.webview.asWebviewUri(vscode.Uri.joinPath(webviewOutUri, 'mathEditor.js')).toString();
-        const nonce = crypto.randomBytes(16).toString('base64');
-        console.log('[math-editor] katexCssUri:', katexCssUri);
-        console.log('[math-editor] webviewJsUri:', webviewJsUri);
-        console.log('[math-editor] cspSource:', webviewPanel.webview.cspSource);
-        console.log('[math-editor] localResourceRoots:', [katexDistUri.fsPath, webviewOutUri.fsPath]);
+        const nonce = crypto.randomBytes(16).toString('base64url');
         let selectionStart = 0;
         let selectionEnd = 0;
         let isApplyingEdit = false;
@@ -444,8 +412,7 @@ class MathCustomEditorProvider {
                 hasContent: state.hasActiveBlock,
             });
         };
-        // Set initial HTML
-        webviewPanel.webview.html = buildMathCustomEditorHtml(katexCssUri, webviewJsUri, webviewPanel.webview.cspSource, nonce);
+        webviewPanel.webview.html = buildMathCustomEditorHtml(katexCssUri, '', webviewPanel.webview.cspSource, nonce);
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(event => {
             if (event.document.uri.toString() !== document.uri.toString() || isApplyingEdit) {
                 return;
