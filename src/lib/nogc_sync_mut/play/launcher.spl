@@ -48,20 +48,16 @@ fn launcher_artifacts_dir(session_id: text) -> text:
 val DEVTOOLS_MARKER = "DevTools listening on ws://"
 
 fn extract_ws_url_from_text(log: text) -> text:
-    val idx = log.index_of(DEVTOOLS_MARKER)
-    if idx < 0: return ""
-    val start = idx + "DevTools listening on ".length()
-    var i = start
-    val n = log.length()
-    var parts: [text] = []
-    while i < n:
-        val c = log.char_at(i)
-        if c == "\n" or c == "\r" or c == " " or c == "\t":
-            i = n
-        else:
-            parts.push(c)
-            i = i + 1
-    parts.join("")
+    if not log.contains(DEVTOOLS_MARKER): return ""
+    val after_marker = log.split("DevTools listening on ")
+    if after_marker.length() < 2: return ""
+    val rest = after_marker[1]
+    # URL ends at first whitespace
+    val no_newline = rest.split("\n")[0]
+    val no_cr = no_newline.split("\r")[0]
+    val no_space = no_cr.split(" ")[0]
+    val no_tab = no_space.split("\t")[0]
+    no_tab
 
 fn poll_for_ws_url(stderr_path: text, timeout_ms: i64) -> text:
     val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
@@ -206,47 +202,30 @@ fn _shell_quote(s: text) -> text:
     s
 
 fn _sq_escape(s: text) -> text:
-    var out: [text] = []
-    val n = s.length()
-    var i = 0
-    while i < n:
-        val c = s.char_at(i)
-        if c == "'":
-            out.push("'\\''")
-        else:
-            out.push(c)
-        i = i + 1
-    out.join("")
+    s.replace("'", "'\\''")
+
 
 fn probe_browser_ws(ws_url: text) -> text:
     """Query /json/version to find the browser-level webSocketDebuggerUrl."""
     # Extract host:port from ws://host:port/path
     if not ws_url.starts_with("ws://"):
         return ""
-    val rest = ws_url.substring(5)
-    val slash = rest.index_of("/")
-    val host_port = if slash >= 0: rest.substring(0, slash) else: rest
+    val after_ws = ws_url.split("ws://")
+    if after_ws.length() < 2: return ""
+    val rest = after_ws[1]
+    val host_port = rest.split("/")[0]
     val url = "http://" + host_port + "/json/version"
     val result = rt_process_run("curl", ["-s", "--max-time", "5", url])
     if result.2 != 0: return ""
     val body = result.0
-    val key = "\"webSocketDebuggerUrl\":"
-    val idx = body.index_of(key)
-    if idx < 0: return ""
-    var i = idx + key.length()
-    val n = body.length()
-    while i < n and body.char_at(i) == " ":
-        i = i + 1
-    if i >= n or body.char_at(i) != "\"":
-        return ""
-    i = i + 1
-    var parts: [text] = []
-    while i < n:
-        val c = body.char_at(i)
-        if c == "\"": return parts.join("")
-        parts.push(c)
-        i = i + 1
-    ""
+    val key = "\"webSocketDebuggerUrl\""
+    if not body.contains(key): return ""
+    val after_key = body.split(key)
+    if after_key.length() < 2: return ""
+    val after_colon = after_key[1].split("\"")
+    # after_colon[0] is `: ` or `:`, after_colon[1] is the URL value
+    if after_colon.length() < 2: return ""
+    after_colon[1]
 
 fn launcher_kill(session: PlaySession) -> bool:
     if session.pid > 0 and rt_process_is_running(session.pid):

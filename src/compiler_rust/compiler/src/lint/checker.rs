@@ -232,8 +232,15 @@ impl LintChecker {
             {
                 break;
             }
-            // Parse #[allow(...)], #[deny(...)], #[warn(...)]
-            if let Some(rest) = trimmed.strip_prefix("#[allow(") {
+            // Parse #[allow(...)], #![allow(...)], #[deny(...)], #[warn(...)]
+            // Both #[allow(...)] and #![allow(...)] are supported; the latter is
+            // preferred as it is valid Simple parser syntax (inner module attribute).
+            let allow_rest = trimmed
+                .strip_prefix("#![allow(")
+                .or_else(|| trimmed.strip_prefix("#[allow("));
+            let deny_rest = trimmed.strip_prefix("#[deny(");
+            let warn_rest = trimmed.strip_prefix("#[warn(");
+            if let Some(rest) = allow_rest {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();
@@ -242,7 +249,7 @@ impl LintChecker {
                         }
                     }
                 }
-            } else if let Some(rest) = trimmed.strip_prefix("#[deny(") {
+            } else if let Some(rest) = deny_rest {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();
@@ -251,7 +258,7 @@ impl LintChecker {
                         }
                     }
                 }
-            } else if let Some(rest) = trimmed.strip_prefix("#[warn(") {
+            } else if let Some(rest) = warn_rest {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
                         let lint_name = lint_name.trim();

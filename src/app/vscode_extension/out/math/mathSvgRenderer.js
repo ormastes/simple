@@ -57,6 +57,9 @@ let adaptor;
 let mjDocument;
 let initialized = false;
 const MATHJAX_EX_TO_EM = 0.45;
+// HEIGHT FIT PATH:
+// This is a renderer-side clamp for raw MathJax output before it reaches the
+// decoration provider. The provider may scale further for inline fitting.
 const MAX_HEIGHT_EM = 3.0;
 const SVG_CACHE_VERSION = 'v2';
 function ensureInitialized() {
@@ -136,6 +139,8 @@ function renderToSvgFile(latex, cacheDir, foregroundColor = '#cccccc') {
     let heightEm = exToEm(heightEx);
     let widthEm = exToEm(widthEx);
     let descentEm = exToEm(descentEx);
+    // HEIGHT FIT PATH:
+    // Normalize oversized MathJax SVGs before the editor decoration path sees them.
     if (heightEm > MAX_HEIGHT_EM) {
         const scale = MAX_HEIGHT_EM / heightEm;
         heightEm = MAX_HEIGHT_EM;

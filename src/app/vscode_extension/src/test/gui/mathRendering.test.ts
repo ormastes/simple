@@ -158,6 +158,17 @@ suite('GUI - Math Rendering', function() {
         assert.ok(!html.includes('<script src='));
     });
 
+    test('Preview panel HTML uses webview CSP source for KaTeX assets', () => {
+        const cssUri = 'vscode-webview-resource://test/katex.min.css';
+        const cspSource = 'vscode-webview://test-source';
+        const html = buildMathPreviewHtml('x^{2} + 1', 'm{ x^2 + 1 }', cssUri, cspSource);
+
+        assert.ok(html.includes(`<link rel="stylesheet" href="${cssUri}">`));
+        assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
+        assert.ok(html.includes(`font-src ${cspSource}`));
+        assert.ok(!html.includes(`style-src ${cssUri}`), 'CSP should use webview.cspSource, not a concrete CSS URI');
+    });
+
     test('SVG renderer normalizes MathJax dimensions to em units', () => {
         const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-math-svg-'));
         try {
@@ -307,6 +318,27 @@ suite('GUI - Math Rendering', function() {
         assert.ok(html.includes('setSelectionRange'));
         assert.ok(html.includes('rendered'));
         assert.ok(html.includes('frac(1, 2) + sqrt(x)'));
+    });
+
+    test('Math sync panel HTML uses webview CSP source for KaTeX assets', () => {
+        const cssUri = 'vscode-webview-resource://test/katex.min.css';
+        const cspSource = 'vscode-webview://test-source';
+        const html = buildMathSyncPanelHtml({
+            documentUri: 'file:///tmp/demo.spl',
+            blockText: 'frac(1, 2)',
+            latex: '\\frac{1}{2}',
+            pretty: '(1)/(2)',
+            renderedHtml: '<span>rendered</span>',
+            blockLabel: 'm{}',
+            selectionStart: 0,
+            selectionEnd: 4,
+            hasContent: true,
+        }, cssUri, cspSource);
+
+        assert.ok(html.includes(`<link rel="stylesheet" href="${cssUri}">`));
+        assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
+        assert.ok(html.includes(`font-src ${cspSource}`));
+        assert.ok(!html.includes(`style-src ${cssUri}`), 'CSP should use webview.cspSource, not a concrete CSS URI');
     });
 
     test('Math sync panel HTML renders empty state when no block is active', () => {

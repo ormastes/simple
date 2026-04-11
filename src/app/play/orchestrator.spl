@@ -1,3 +1,4 @@
+#![allow(unnamed_duplicate_typed_args)]
 @allow(primitive_api)
 # app.play.orchestrator — Phase 1 subprocess wrapper
 #
@@ -25,29 +26,12 @@ extern fn rt_time_now_unix_micros() -> i64
 val ARTIFACTS_ROOT = "doc/08_tracking/test/play"
 
 fn _json_escape_for_summary(s: text) -> text:
-    var out: [text] = []
-    val n = s.length()
-    var i = 0
-    while i < n:
-        val c = s.char_at(i)
-        if c == "\"":
-            out.push("\\\"")
-        else:
-            if c == "\\":
-                out.push("\\\\")
-            else:
-                if c == "\n":
-                    out.push("\\n")
-                else:
-                    if c == "\r":
-                        out.push("\\r")
-                    else:
-                        if c == "\t":
-                            out.push("\\t")
-                        else:
-                            out.push(c)
-        i = i + 1
-    out.join("")
+    var r = s.replace("\\", "\\\\")
+    r = r.replace("\"", "\\\"")
+    r = r.replace("\n", "\\n")
+    r = r.replace("\r", "\\r")
+    r = r.replace("\t", "\\t")
+    r
 
 # ----------------------------------------------------------------------------
 # Detection
@@ -72,44 +56,31 @@ fn _detect_target(target_dir: text) -> DetectedTarget:
 # ----------------------------------------------------------------------------
 
 fn _count_matches(haystack: text, needle: text) -> i64:
-    var count: i64 = 0
-    var from: i64 = 0
-    val n = haystack.length()
-    val m = needle.length()
-    if m == 0: return 0
-    while from + m <= n:
-        val rest = haystack.substring(from)
-        val idx = rest.index_of(needle)
-        if idx < 0:
-            return count
-        count = count + 1
-        from = from + idx + m
-    count
+    if needle == "": return 0
+    val parts = haystack.split(needle)
+    parts.length() - 1
 
 fn _extract_number_before(haystack: text, needle: text) -> i64:
-    """Scan for `<digits> <needle>` pattern (e.g. "5 passing")."""
-    val idx = haystack.index_of(needle)
-    if idx < 0: return -1
-    var i = idx - 1
-    while i >= 0 and haystack.char_at(i) == " ":
-        i = i - 1
-    var end = i
-    while i >= 0:
-        val c = haystack.char_at(i)
-        if c >= "0" and c <= "9":
-            i = i - 1
-        else:
-            i = i + 1
-            break
-    if i < 0: i = 0
-    if end < i: return -1
-    var j = i
-    var value: i64 = 0
-    while j <= end:
-        val c = haystack.char_at(j)
-        value = value * 10 + (c.code_point_at(0) - 48)
-        j = j + 1
-    value
+    """Scan for `<digits> <needle>` pattern (e.g. "5 passing").
+    Uses .split() to find the needle, then extracts the trailing number
+    from the preceding segment."""
+    if not haystack.contains(needle): return -1
+    val parts = haystack.split(needle)
+    if parts.length() < 2: return -1
+    val before = parts[0].trim()
+    # Extract trailing digits: split on spaces, take last token
+    val words = before.split(" ")
+    if words.length() == 0: return -1
+    val last_word = words[words.length() - 1].trim()
+    if last_word == "": return -1
+    # Also handle newline-separated: split on newline and take last
+    val lines = last_word.split("\n")
+    val candidate = lines[lines.length() - 1].trim()
+    if candidate == "": return -1
+    # Verify it looks like a number (contains only digits)
+    val cleaned = candidate.replace("0", "").replace("1", "").replace("2", "").replace("3", "").replace("4", "").replace("5", "").replace("6", "").replace("7", "").replace("8", "").replace("9", "")
+    if cleaned != "": return -1
+    int(candidate)
 
 fn _guess_pass_fail(stdout: text, stderr: text, exit_code: i64) -> (i64, i64):
     val combined = stdout + "\n" + stderr

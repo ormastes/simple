@@ -45,55 +45,18 @@ fn _session_path(session_id: text) -> text:
     "{SESSION_STORE_ROOT}/{session_id}.session"
 
 fn _encode(s: text) -> text:
-    var out: [text] = []
-    val n = s.length()
-    var i = 0
-    while i < n:
-        val c = s.char_at(i)
-        if c == "%":
-            out.push("%25")
-        else:
-            if c == "\n":
-                out.push("%0A")
-            else:
-                if c == "\r":
-                    out.push("%0D")
-                else:
-                    if c == "=":
-                        out.push("%3D")
-                    else:
-                        out.push(c)
-        i = i + 1
-    out.join("")
+    var r = s.replace("%", "%25")
+    r = r.replace("\n", "%0A")
+    r = r.replace("\r", "%0D")
+    r = r.replace("=", "%3D")
+    r
 
 fn _decode(s: text) -> text:
-    var out: [text] = []
-    val n = s.length()
-    var i = 0
-    while i < n:
-        val c = s.char_at(i)
-        if c == "%" and i + 2 < n:
-            val a = s.char_at(i + 1)
-            val b = s.char_at(i + 2)
-            if a == "2" and b == "5":
-                out.push("%")
-                i = i + 3
-            elif a == "0" and b == "A":
-                out.push("\n")
-                i = i + 3
-            elif a == "0" and b == "D":
-                out.push("\r")
-                i = i + 3
-            elif a == "3" and b == "D":
-                out.push("=")
-                i = i + 3
-            else:
-                out.push(c)
-                i = i + 1
-        else:
-            out.push(c)
-            i = i + 1
-    out.join("")
+    var r = s.replace("%3D", "=")
+    r = r.replace("%0D", "\r")
+    r = r.replace("%0A", "\n")
+    r = r.replace("%25", "%")
+    r
 
 fn _join_args(args: [text]) -> text:
     var parts: [text] = []
@@ -104,18 +67,9 @@ fn _join_args(args: [text]) -> text:
 fn _split_args(encoded: text) -> [text]:
     if encoded == "": return []
     var out: [text] = []
-    var cur: [text] = []
-    val n = encoded.length()
-    var i = 0
-    while i < n:
-        val c = encoded.char_at(i)
-        if c == "|":
-            out.push(_decode(cur.join("")))
-            cur = []
-        else:
-            cur.push(c)
-        i = i + 1
-    out.push(_decode(cur.join("")))
+    val parts = encoded.split("|")
+    for p in parts:
+        out.push(_decode(p))
     out
 
 fn _serialize(sess: PlaySession) -> text:
@@ -140,47 +94,29 @@ fn _serialize(sess: PlaySession) -> text:
     lines.join("\n") + "\n"
 
 fn _split_lines(s: text) -> [text]:
+    val cleaned = s.replace("\r", "")
+    val parts = cleaned.split("\n")
     var out: [text] = []
-    var cur: [text] = []
-    val n = s.length()
-    var i = 0
-    while i < n:
-        val c = s.char_at(i)
-        if c == "\n":
-            out.push(cur.join(""))
-            cur = []
-        else:
-            if c != "\r":
-                cur.push(c)
-        i = i + 1
-    if cur.length() > 0:
-        out.push(cur.join(""))
+    for p in parts:
+        if p != "":
+            out.push(p)
     out
 
 fn _split_kv(line: text) -> (text, text):
-    val idx = line.index_of("=")
-    if idx < 0: return (line, "")
-    val k = line.substring(0, idx)
-    val v = line.substring(idx + 1)
-    (k, v)
+    val parts = line.split("=")
+    if parts.length() < 2: return (line, "")
+    val k = parts[0]
+    var rest: [text] = []
+    var i = 1
+    while i < parts.length():
+        rest.push(parts[i])
+        i = i + 1
+    (k, rest.join("="))
 
 fn _parse_int(s: text, fallback: i64) -> i64:
-    if s == "": return fallback
-    var result: i64 = 0
-    var sign: i64 = 1
-    val n = s.length()
-    var i = 0
-    if n > 0 and s.char_at(0) == "-":
-        sign = -1
-        i = 1
-    while i < n:
-        val c = s.char_at(i)
-        if c >= "0" and c <= "9":
-            result = result * 10 + (c.code_point_at(0) - 48)
-        else:
-            return fallback
-        i = i + 1
-    result * sign
+    val trimmed = s.trim()
+    if trimmed == "": return fallback
+    int(trimmed)
 
 fn _deserialize(body: text) -> PlaySession:
     var sess = empty_play_session()

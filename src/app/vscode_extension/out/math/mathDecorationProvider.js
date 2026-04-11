@@ -67,14 +67,23 @@ const BLOCK_INDICATORS = {
 function formatSvgDecorationLayoutLog(content, layout) {
     return `[simple.math.layout] eq="${content}" height=${layout.height} width=${layout.width} fit=${layout.fitApplied ? 'yes' : 'no'} scale=${layout.inlineScale.toFixed(2)} align=${layout.verticalAlign}`;
 }
+// HEIGHT FIT PATH:
+// These constants control the inline SVG box that VS Code decorations render.
+// They do NOT change editor row height. They only size the math image itself.
 const MAX_INLINE_HEIGHT_EM = 1.30;
 const MIN_INLINE_HEIGHT_EM = 0.92;
 const MIN_INLINE_WIDTH_EM = 0.75;
 function buildSvgDecorationLayout(content, svgResult, alignment) {
+    // HEIGHT FIT PATH:
+    // This is the only place where inline math height is decided.
+    // Tall equations are scaled down to fit inside a normal editor line box.
     const inlineScale = Math.min(1.0, MAX_INLINE_HEIGHT_EM / Math.max(svgResult.heightEm, 0.01));
     const fitApplied = inlineScale < 0.999;
     const heightEm = Math.max(svgResult.heightEm * inlineScale, MIN_INLINE_HEIGHT_EM);
     const widthEm = Math.max(svgResult.widthEm * inlineScale, MIN_INLINE_WIDTH_EM);
+    // HEIGHT FIT PATH:
+    // Alignment only adjusts where the fitted SVG sits in the line.
+    // It does not request a larger line height from VS Code.
     const verticalAlign = alignment === 'center'
         ? 'middle'
         : `-${(svgResult.descentEm * inlineScale).toFixed(2)}em`;
@@ -300,6 +309,9 @@ class MathDecorationProvider {
                         before: {
                             contentIconPath: svgResult.uri,
                             margin: '0 4px 0 0',
+                            // HEIGHT FIT PATH:
+                            // These width/height values size the rendered math SVG.
+                            // They are the runtime values to inspect when debugging sizing.
                             width: layout.width,
                             height: layout.height,
                             textDecoration: `none; vertical-align: ${layout.verticalAlign}`,

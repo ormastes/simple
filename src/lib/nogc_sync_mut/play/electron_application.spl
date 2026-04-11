@@ -100,47 +100,23 @@ fn _extract_first_page_target_id(body: text) -> text:
     if ids.length() > 0: ids[0] else: ""
 
 fn _extract_all_page_target_ids(body: text) -> [text]:
-    """Scan for `"type":"page"` blocks and return their targetId values."""
+    """Scan for `"type":"page"` blocks and return their targetId values.
+    Uses .split()-based extraction to avoid char_at."""
     var out: [text] = []
-    var i: i64 = 0
-    val n = body.length()
-    while i < n:
-        val ti = body.index_of_from("\"type\":\"page\"", i)
-        if ti < 0:
-            i = n
-        else:
-            # Look backwards for the enclosing targetId of this targetInfo.
-            # In the CDP response, targetInfo objects are flat, so the nearest
-            # "targetId":"..." is the one we want. Search from the start of
-            # the current object (the nearest unbalanced "{" to the left).
-            var scan = ti
-            var depth = 0
-            while scan > 0 and depth >= 0:
-                val c = body.char_at(scan)
-                if c == "}": depth = depth + 1
-                if c == "{":
-                    if depth == 0:
-                        scan = 0 - scan - 1  # sentinel: stop
-                    else:
-                        depth = depth - 1
-                if scan > 0: scan = scan - 1
-            val obj_start = if scan < 0: (0 - scan - 1) else: 0
-            val tid_key = body.index_of_from("\"targetId\":", obj_start)
-            if tid_key >= 0 and tid_key < ti + 200:
-                var p = tid_key + "\"targetId\":".length()
-                while p < n and body.char_at(p) == " ":
-                    p = p + 1
-                if p < n and body.char_at(p) == "\"":
-                    p = p + 1
-                    var parts: [text] = []
-                    var done = false
-                    while p < n and not done:
-                        val c = body.char_at(p)
-                        if c == "\"":
-                            done = true
-                        else:
-                            parts.push(c)
-                            p = p + 1
-                    out.push(parts.join(""))
-            i = ti + 1
+    if not body.contains("\"type\":\"page\""): return out
+    # Split on the type marker; each segment after [0] had "type":"page" before it
+    val segments = body.split("\"type\":\"page\"")
+    var i = 0
+    while i < segments.length() - 1:
+        val before = segments[i]
+        # Find "targetId":"<value>" in the preceding text
+        if before.contains("\"targetId\":"):
+            val tid_parts = before.split("\"targetId\":\"")
+            if tid_parts.length() >= 2:
+                # Take the last occurrence (closest to the type marker)
+                val last_part = tid_parts[tid_parts.length() - 1]
+                val id_value = last_part.split("\"")[0]
+                if id_value != "":
+                    out.push(id_value)
+        i = i + 1
     out
