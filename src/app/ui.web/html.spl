@@ -35,6 +35,59 @@ fn generate_html_page(state: UIState, ws_port: i32) -> text:
     html = "{html}</html>"
     return html
 
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+fn generate_wm_html_page(theme: text, title: text, ws_port: i32) -> text:
+    """Generate a WM desktop HTML page with wm.js embedded inline.
+    Windows are created dynamically via WebSocket openWindow messages."""
+    val css = generate_css(theme)
+    val boot_js = generate_wm_js(ws_port)
+    # Embed wm.js inline to avoid extra HTTP request
+    var wm_js = ""
+    if rt_file_exists("src/app/ui.web/wm.js"):
+        wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+
+    var html = "<!DOCTYPE html>\n"
+    html = html + "<html lang=\"en\">\n"
+    html = html + "<head>\n"
+    html = html + "  <meta charset=\"UTF-8\">\n"
+    html = html + "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+    html = html + "  <title>" + title + "</title>\n"
+    html = html + "  <style>" + css + "</style>\n"
+    html = html + "</head>\n"
+    html = html + "<body>\n"
+    html = html + "  <div id=\"wm-desktop\"></div>\n"
+    html = html + "  <div id=\"wm-taskbar\"></div>\n"
+    html = html + "  <script>" + wm_js + "</script>\n"
+    html = html + "  <script>" + boot_js + "</script>\n"
+    html = html + "</body>\n"
+    html = html + "</html>"
+    return html
+
+fn generate_wm_js(ws_port: i32) -> text:
+    """Generate the WM boot script that connects WebSocket to SimpleWindowManager."""
+    val lb = "\u{007b}"
+    val rb = "\u{007d}"
+    var js = "let ws = null;\n"
+    js = js + "function sendEvent(msg) " + lb + " if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); " + rb + "\n"
+    js = js + "function connectWS() " + lb + "\n"
+    js = js + "  ws = new WebSocket('ws://localhost:' + " + str(ws_port) + " + '/ws');\n"
+    js = js + "  ws.onopen = function() " + lb + " console.log('WM WebSocket connected'); " + rb + ";\n"
+    js = js + "  ws.onmessage = function(e) " + lb + "\n"
+    js = js + "    try " + lb + "\n"
+    js = js + "      var data = JSON.parse(e.data);\n"
+    js = js + "      if (simpleWM) simpleWM.handleMessage(data);\n"
+    js = js + "    " + rb + " catch(err) " + lb + " console.error('WM parse error', err); " + rb + "\n"
+    js = js + "  " + rb + ";\n"
+    js = js + "  ws.onclose = function() " + lb + " setTimeout(connectWS, 2000); " + rb + ";\n"
+    js = js + rb + "\n"
+    js = js + "document.addEventListener('DOMContentLoaded', function() " + lb + "\n"
+    js = js + "  simpleWM = new SimpleWindowManager();\n"
+    js = js + "  connectWS();\n"
+    js = js + rb + ");\n"
+    return js
+
 # =========================================================================
 # CSS Styles
 # =========================================================================
@@ -299,6 +352,41 @@ fn generate_css(theme: text) -> text:
 
     # ── Readonly input ──
     parts = parts.push(".widget-input[readonly] { background: {surface_bg}; color: {dim_fg}; }\n")
+
+    # ── Window Manager ──
+    parts = parts.push("\n/* Window Manager */\n")
+    parts = parts.push("#wm-desktop { position: fixed; inset: 0; overflow: hidden; }\n")
+    parts = parts.push(".wm-window { position: absolute; border: 1px solid {border_color}; border-radius: 12px; background: {panel_bg}; backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); box-shadow: 0 10px 40px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.05); display: flex; flex-direction: column; overflow: hidden; min-width: 200px; min-height: 120px; transition: box-shadow 0.15s ease; }\n")
+    parts = parts.push(".wm-window.focused { box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px {accent}; }\n")
+    parts = parts.push(".wm-window.minimized { display: none; }\n")
+    parts = parts.push(".wm-window.maximized { left: 0 !important; top: 0 !important; width: 100vw !important; height: calc(100vh - 58px) !important; border-radius: 0; }\n")
+    parts = parts.push(".wm-titlebar { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; background: linear-gradient(180deg, rgba(255,255,255,0.09), rgba(255,255,255,0.03)); border-bottom: 1px solid {border_color}; cursor: grab; user-select: none; flex-shrink: 0; }\n")
+    parts = parts.push(".wm-titlebar:active { cursor: grabbing; }\n")
+    parts = parts.push(".wm-title-text { flex: 1; text-align: center; font-size: 12px; font-weight: 600; color: {fg}; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n")
+    parts = parts.push(".wm-traffic-lights { display: flex; gap: 6px; }\n")
+    parts = parts.push(".wm-traffic-lights button { width: 12px; height: 12px; border-radius: 50%; border: none; cursor: pointer; padding: 0; }\n")
+    parts = parts.push(".wm-btn-close { background: #FF5F57; }\n")
+    parts = parts.push(".wm-btn-minimize { background: #FFBD2E; }\n")
+    parts = parts.push(".wm-btn-maximize { background: #28CA41; }\n")
+    parts = parts.push(".wm-btn-close:hover { background: #FF3B30; }\n")
+    parts = parts.push(".wm-btn-minimize:hover { background: #FF9500; }\n")
+    parts = parts.push(".wm-btn-maximize:hover { background: #30D158; }\n")
+    parts = parts.push(".wm-content { flex: 1; overflow: auto; position: relative; padding: 0; }\n")
+    parts = parts.push(".wm-content #app { min-height: auto; padding: 16px 18px; }\n")
+    parts = parts.push(".wm-resize-handle { position: absolute; }\n")
+    parts = parts.push(".wm-resize-se { right: 0; bottom: 0; width: 12px; height: 12px; cursor: se-resize; }\n")
+    parts = parts.push(".wm-resize-e { right: 0; top: 32px; width: 4px; bottom: 0; cursor: e-resize; }\n")
+    parts = parts.push(".wm-resize-s { left: 0; bottom: 0; right: 0; height: 4px; cursor: s-resize; }\n")
+    parts = parts.push(".wm-resize-sw { left: 0; bottom: 0; width: 12px; height: 12px; cursor: sw-resize; }\n")
+    parts = parts.push(".wm-resize-w { left: 0; top: 32px; width: 4px; bottom: 0; cursor: w-resize; }\n")
+    parts = parts.push(".wm-resize-n { left: 0; top: 0; right: 0; height: 4px; cursor: n-resize; }\n")
+    parts = parts.push(".wm-resize-nw { left: 0; top: 0; width: 12px; height: 12px; cursor: nw-resize; }\n")
+    parts = parts.push(".wm-resize-ne { right: 0; top: 0; width: 12px; height: 12px; cursor: ne-resize; }\n")
+    parts = parts.push("#wm-taskbar { position: fixed; bottom: 6px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 6px 12px; background: {panel_bg}; border: 1px solid {border_color}; border-radius: 16px; backdrop-filter: blur(28px) saturate(175%); -webkit-backdrop-filter: blur(28px) saturate(175%); box-shadow: 0 -4px 24px rgba(0,0,0,0.15); z-index: 10000; }\n")
+    parts = parts.push(".wm-taskbar-item { padding: 4px 12px; border-radius: 8px; cursor: pointer; font-size: 11px; font-weight: 500; color: {dim_fg}; white-space: nowrap; }\n")
+    parts = parts.push(".wm-taskbar-item:hover { background: {hover_bg}; }\n")
+    parts = parts.push(".wm-taskbar-item.active { background: rgba(10,132,255,0.15); color: {accent}; font-weight: 600; }\n")
+    parts = parts.push(".wm-taskbar-item.minimized { opacity: 0.5; }\n")
 
     var result = parts.join("")
 

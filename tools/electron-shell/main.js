@@ -17,6 +17,7 @@ let mainWindow = null;
 let simpleProcess = null;
 let lineBuffer = '';
 const childWindows = {};  // windowId → BrowserWindow
+const webContentsToWindowId = new Map();  // webContents.id → windowId
 const debugLogPath = '/tmp/simple-ui-captures/electron-shell-debug.log';
 const dumpHtmlPath = process.env.SIMPLE_UI_DUMP_HTML_PATH || '';
 const projectRoot = path.resolve(__dirname, '..', '..');
@@ -148,10 +149,30 @@ function handleSimpleMessage(line) {
                         }
                     });
                     child.on('closed', () => {
+                        webContentsToWindowId.delete(child.webContents.id);
                         delete childWindows[winId];
                         sendToSimple({ type: 'windowClosed', windowId: winId });
                     });
+                    child.on('move', () => {
+                        if (!child.isDestroyed()) {
+                            const [cx, cy] = child.getPosition();
+                            sendToSimple({ type: 'windowMoved', windowId: winId, x: cx, y: cy });
+                        }
+                    });
+                    child.on('resize', () => {
+                        if (!child.isDestroyed()) {
+                            const [cw, ch] = child.getContentSize();
+                            sendToSimple({ type: 'windowResized', windowId: winId, width: cw, height: ch });
+                        }
+                    });
+                    child.on('focus', () => {
+                        sendToSimple({ type: 'windowFocused', windowId: winId });
+                    });
+                    child.on('blur', () => {
+                        sendToSimple({ type: 'windowBlurred', windowId: winId });
+                    });
                     childWindows[winId] = child;
+                    webContentsToWindowId.set(child.webContents.id, winId);
                     debugLog(`opened child window id=${winId}`);
                     sendToSimple({ type: 'windowOpened', windowId: winId });
                 }
@@ -168,6 +189,30 @@ function handleSimpleMessage(line) {
             case 'renderWindow':
                 if (msg.windowId && childWindows[msg.windowId]) {
                     childWindows[msg.windowId].webContents.send('render', msg.html || '');
+                }
+                break;
+
+            case 'moveWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].setPosition(msg.x || 0, msg.y || 0);
+                }
+                break;
+
+            case 'resizeWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].setSize(msg.width || 400, msg.height || 300);
+                }
+                break;
+
+            case 'focusWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].focus();
+                }
+                break;
+
+            case 'minimizeWindow':
+                if (msg.windowId && childWindows[msg.windowId]) {
+                    childWindows[msg.windowId].minimize();
                 }
                 break;
 
@@ -337,6 +382,7 @@ app.whenReady().then(() => {
 
     mainWindow.webContents.on('did-finish-load', () => {
         debugLog('window did-finish-load');
+        webContentsToWindowId.set(mainWindow.webContents.id, 'main');
     });
     mainWindow.webContents.on('render-process-gone', (event, details) => {
         debugLog(`render-process-gone reason=${details.reason}`);
@@ -360,14 +406,16 @@ app.whenReady().then(() => {
     spawnSimpleProcess();
 });
 
-// IPC from renderer: keypress
+// IPC from renderer: keypress (tagged with windowId)
 ipcMain.on('keypress', (event, key) => {
-    sendToSimple({ type: 'keypress', key });
+    const windowId = webContentsToWindowId.get(event.sender.id) || 'main';
+    sendToSimple({ type: 'keypress', key, windowId });
 });
 
-// IPC from renderer: action
+// IPC from renderer: action (tagged with windowId)
 ipcMain.on('action', (event, name) => {
-    sendToSimple({ type: 'action', name });
+    const windowId = webContentsToWindowId.get(event.sender.id) || 'main';
+    sendToSimple({ type: 'action', name, windowId });
 });
 
 // IPC from renderer: quit

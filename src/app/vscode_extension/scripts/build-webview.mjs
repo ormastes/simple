@@ -24,3 +24,19 @@ await esbuild.build({
 });
 
 console.log('[build-webview] out/webview/mathEditor.js built');
+
+// Rich editor webview bundle
+await esbuild.build({
+    entryPoints: [path.join(root, '..', 'vscode_rich_editor', 'src', 'webview', 'richEditorWebview.ts')],
+    bundle: true,
+    format: 'iife',
+    globalName: 'RichEditorWebview',
+    outfile: path.join(root, 'out', 'webview', 'richEditor.js'),
+    platform: 'browser',
+    target: 'es2020',
+    sourcemap: true,
+    minify: false,
+    external: [],
+});
+
+console.log('[build-webview] out/webview/richEditor.js built');

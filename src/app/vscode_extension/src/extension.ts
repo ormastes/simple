@@ -15,6 +15,7 @@ import { AIInlineCompletionProvider } from './ai/inlineCompletionProvider';
 import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDetector';
 import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
 import { activateMathFeatures } from './math';
+import { activateRichEditorFeatures } from './rich';
 import { TestCodeLensProvider, runTestFile, runSdoctest, runTestAtCursor } from './testing/testCodeLensProvider';
 import { TestWorkspacePanel } from './testing/testWorkspacePanel';
 import { EditorMarkerManager } from './testing/editorMarkers';
@@ -86,6 +87,9 @@ export function activate(context: vscode.ExtensionContext) {
     activateMathFeatures(context, (setter) => {
         setMathLspRunning = setter;
     }, (message) => outputChannel?.appendLine(message));
+
+    // Initialize rich editor features (variable-height custom editor)
+    activateRichEditorFeatures(context);
 
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);
