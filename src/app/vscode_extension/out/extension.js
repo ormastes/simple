@@ -100,6 +100,16 @@ function activate(context) {
     (0, math_1.activateMathFeatures)(context, (setter) => {
         setMathLspRunning = setter;
     }, (message) => outputChannel?.appendLine(message));
+    // Initialize rich editor features (variable-height custom editor)
+    // Loaded from sibling project compiled to out/rich/
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const richModule = require('./rich/index');
+        richModule.activateRichEditorFeatures(context);
+    }
+    catch (e) {
+        outputChannel?.appendLine(`Rich editor not available: ${e}`);
+    }
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);
     // Initialize editor markers (bookmarks / breakpoints / execution pointer)

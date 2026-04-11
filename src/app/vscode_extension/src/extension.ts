@@ -15,7 +15,6 @@ import { AIInlineCompletionProvider } from './ai/inlineCompletionProvider';
 import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDetector';
 import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
 import { activateMathFeatures } from './math';
-import { activateRichEditorFeatures } from './rich';
 import { TestCodeLensProvider, runTestFile, runSdoctest, runTestAtCursor } from './testing/testCodeLensProvider';
 import { TestWorkspacePanel } from './testing/testWorkspacePanel';
 import { EditorMarkerManager } from './testing/editorMarkers';
@@ -89,7 +88,14 @@ export function activate(context: vscode.ExtensionContext) {
     }, (message) => outputChannel?.appendLine(message));
 
     // Initialize rich editor features (variable-height custom editor)
-    activateRichEditorFeatures(context);
+    // Loaded from sibling project compiled to out/rich/
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const richModule = require('./rich/index') as { activateRichEditorFeatures: (ctx: vscode.ExtensionContext) => void };
+        richModule.activateRichEditorFeatures(context);
+    } catch (e) {
+        outputChannel?.appendLine(`Rich editor not available: ${e}`);
+    }
 
     // Initialize test CodeLens (Run Test buttons above describe/it/sdoctest)
     activateTestFeatures(context);

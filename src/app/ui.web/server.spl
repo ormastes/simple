@@ -9,7 +9,7 @@ use common.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{init_state, update_state, update_tree}
 use common.ui.event.{process_event}
 use app.ui.web.html.{generate_html_page, generate_wm_html_page}
-use app.ui.web.ws_handler.{handle_ws_upgrade, is_ws_upgrade_request}
+use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -36,8 +36,9 @@ class WebServer:
     port: i32
     state: UIState
     last_file_content: text
+    wm_mode: bool
 
-    static fn new(file_path: text, port: i32) -> Result<WebServer, text>:
+    static fn new(file_path: text, port: i32, wm_mode: bool) -> Result<WebServer, text>:
         val tree_result = parse_ui_to_tree(file_path)
         match tree_result:
             Err(e):
@@ -52,7 +53,8 @@ class WebServer:
                     file_path: file_path,
                     port: port,
                     state: state,
-                    last_file_content: content
+                    last_file_content: content,
+                    wm_mode: wm_mode
                 ))
 
     fn start():
@@ -108,7 +110,10 @@ class WebServer:
                             break
 
                 if is_ws:
-                    handle_ws_upgrade(stream, headers, self.state)
+                    if self.wm_mode:
+                        handle_ws_wm_upgrade(stream, headers, self.state)
+                    else:
+                        handle_ws_upgrade(stream, headers, self.state)
                     return
 
                 match path:
@@ -126,7 +131,10 @@ class WebServer:
                             Ok(()):
                                 pass_dn
                     "/":
-                        val payload = generate_html_page(self.state, self.port)
+                        val payload = if self.wm_mode:
+                            generate_wm_html_page(self.state.tree.theme_name(), self.state.tree.title_text(), self.port)
+                        else:
+                            generate_html_page(self.state, self.port)
                         val payload_text = "{payload}"
                         var headers = "HTTP/1.1 200 OK\r\n"
                         headers = "{headers}Content-Type: text/html\r\n"
@@ -250,10 +258,26 @@ fn run_web(file_path: text, port: i32) -> i64:
         print "Error: File not found: {file_path}"
         return 1
 
-    val server_result = WebServer.new(file_path, port)
+    val server_result = WebServer.new(file_path, port, false)
     match server_result:
         Err(e):
             print "Error: {e}"
+            return 1
+        Ok(server):
+            server.start()
+            return 0
+
+fn run_web_wm(file_path: text, port: i32) -> i64:
+    """Start web server in window manager mode.
+    Serves a WM desktop with floating, draggable windows."""
+    if not rt_file_exists(file_path):
+        print "Error: File not found: " + file_path
+        return 1
+
+    val server_result = WebServer.new(file_path, port, true)
+    match server_result:
+        Err(e):
+            print "Error: " + str(e)
             return 1
         Ok(server):
             server.start()

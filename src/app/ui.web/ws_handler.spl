@@ -7,6 +7,7 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use common.ui.widget.{UIState, UIEvent}
 use common.string_core.{char_from_code}
 use app.ui.render.widgets.{render_html_tree}
+use app.ui.ipc.protocol.{build_ipc_open_window}
 # Use runtime SHA-1/base64 directly to avoid as_bytes() interpreter limitation
 extern fn rt_sha1_new() -> i64
 extern fn rt_sha1_write(handle: i64, data: text) -> i64
@@ -113,3 +114,44 @@ fn escape_json_string(s: text) -> text:
 fn chr(code: i32) -> text:
     """Convert integer byte code to single character for WebSocket framing."""
     return char_from_code(code as i64)
+
+# =========================================================================
+# Window Manager WebSocket Handler
+# =========================================================================
+
+fn _build_wm_app_html(title: text, content: text) -> text:
+    """Build styled HTML for a WM app window (inline styles, no CSS needed)."""
+    var h = "<div style=\"display:flex;flex-direction:column;height:100%;padding:0;margin:0;\">"
+    h = h + "<div style=\"padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:#0A84FF;font-weight:650;border-bottom:1px solid rgba(255,255,255,0.08);background:linear-gradient(180deg,rgba(255,255,255,0.10),rgba(255,255,255,0.03));\">"
+    h = h + title + "</div>"
+    h = h + "<div style=\"flex:1;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code',monospace;font-size:13px;line-height:1.6;color:#F5F5F7;\">"
+    h = h + content + "</div></div>"
+    return h
+
+fn handle_ws_wm_upgrade(stream: TcpStream, headers: text, state: UIState):
+    """Handle WebSocket upgrade and send multiple openWindow messages for the WM desktop."""
+    val key = extract_ws_key(headers)
+    if key == "":
+        return
+
+    val accept = compute_ws_accept(key)
+
+    var response = "HTTP/1.1 101 Switching Protocols\r\n"
+    response = response + "Upgrade: websocket\r\n"
+    response = response + "Connection: Upgrade\r\n"
+    response = response + "Sec-WebSocket-Accept: " + accept + "\r\n"
+    response = response + "\r\n"
+    stream.write_text(response)
+
+    # Send openWindow messages for each app window
+    val t1 = _build_wm_app_html("TERMINAL", "$ simple --version\nSimple Language v0.9.5\n\n$ _")
+    send_ws_text(stream, build_ipc_open_window("terminal", "Terminal", t1, 50, 60, 600, 400))
+
+    val t2 = _build_wm_app_html("EDITOR", "# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0")
+    send_ws_text(stream, build_ipc_open_window("editor", "Editor", t2, 300, 120, 700, 500))
+
+    val t3 = _build_wm_app_html("BROWSER", "Simple Language Documentation\n\nA modern systems programming language\nwith a focus on simplicity and safety.")
+    send_ws_text(stream, build_ipc_open_window("browser", "Browser", t3, 500, 80, 650, 450))
+
+    val t4 = _build_wm_app_html("FILE MANAGER", "src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/")
+    send_ws_text(stream, build_ipc_open_window("files", "File Manager", t4, 150, 200, 550, 350))
