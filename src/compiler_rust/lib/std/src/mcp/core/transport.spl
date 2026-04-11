@@ -1,4 +1,4 @@
-#![allow(bare_bool)]
+#![allow(bare_bool, primitive_api)]
 
 # MCP Transport Layer
 # Abstracts communication channel (stdio, TCP, WebSocket, etc.)
@@ -12,6 +12,10 @@ use std.nogc_async_mut.mcp.core.protocol.*
 use std.nogc_async_mut.mcp.core.logger.*
 use std.nogc_async_mut.mcp.core.error_handler.*
 
+type MessageId = i64
+type ErrorCode = i64
+type Count = i64
+
 # Transport interface
 pub trait Transport:
     # Read a JSON-RPC message
@@ -21,7 +25,7 @@ pub trait Transport:
     me write_response(response: JsonRpcResponse)
 
     # Write an error response
-    me write_error(id: i64, code: i64, message: text)
+    me write_error(id: MessageId, code: ErrorCode, message: text)
 
     # Check if transport is still alive
     fn is_alive() -> bool
@@ -31,12 +35,13 @@ pub trait Transport:
 #   Content-Length: <length>\r\n
 #   \r\n
 #   <JSON body>
+@allow(primitive_api)
 pub class StdioTransport:
     pub alive: bool
     pub buffer: text
     pub debug_mode: bool
     pub validator: InputValidator
-    pub error_count: i64
+    pub error_count: Count
 
     static fn new() -> StdioTransport:
         return StdioTransport(alive: true, buffer: "", debug_mode: false, validator: InputValidator.default(), error_count: 0)
@@ -250,7 +255,7 @@ impl Transport for StdioTransport:
         val header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
         self.write_stdout(header + body)
 
-    me write_error(id: i64, code: i64, message: text):
+    me write_error(id: MessageId, code: ErrorCode, message: text):
         val body = self.serialize_error(id, code, message)
         self.log_debug("Sending error: " + body)
 
@@ -267,11 +272,12 @@ extern fn monoio_tcp_write(handle: i64, data: text) -> i64
 extern fn monoio_tcp_close(handle: i64)
 
 # TCP transport for MCP over network
+@allow(primitive_api)
 pub class TcpTransport:
     pub host: text
-    pub port: i64
+    pub port: Count
     pub alive: bool
-    pub stream_handle: i64
+    pub stream_handle: Count
     pub buffer: text
     pub debug_mode: bool
 
@@ -411,7 +417,7 @@ impl Transport for TcpTransport:
         if written < 0:
             self.alive = false
 
-    me write_error(id: i64, code: i64, message: text):
+    me write_error(id: MessageId, code: ErrorCode, message: text):
         """Write MCP-framed error response to TCP stream."""
         if not self.alive:
             return
@@ -470,7 +476,7 @@ pub class MockTransport:
     pub requests: List<JsonRpcRequest>
     pub responses: List<JsonRpcResponse>
     pub errors: List<Dict<text, Any>>
-    pub current_index: i64
+    pub current_index: Count
 
     static fn new(requests: List<JsonRpcRequest>) -> MockTransport:
         return MockTransport(requests: requests, responses: [], errors: [], current_index: 0)
@@ -528,7 +534,7 @@ impl Transport for MockTransport:
     me write_response(response: JsonRpcResponse):
         self.responses.append(response)
 
-    me write_error(id: i64, code: i64, message: text):
+    me write_error(id: MessageId, code: ErrorCode, message: text):
         self.errors.append({
             "id": id,
             "code": code,

@@ -48,15 +48,18 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathSyncPanel = exports.MathPreviewPanel = exports.MathCoreWasmBridge = exports.MathDecorationProvider = void 0;
+exports.simpleToUnicode = exports.simpleToLatex = exports.MathHoverProvider = exports.MathSyncPanel = exports.MathPreviewPanel = exports.MathCoreWasmBridge = exports.MathDecorationProvider = exports.MathCustomEditorProvider = void 0;
 exports.activateMathFeatures = activateMathFeatures;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
+const mathCustomEditor_1 = require("./mathCustomEditor");
 const mathDecorationProvider_1 = require("./mathDecorationProvider");
 const mathCoreWasm_1 = require("./mathCoreWasm");
 const mathPreviewPanel_1 = require("./mathPreviewPanel");
 const mathSyncPanel_1 = require("./mathSyncPanel");
 const mathHoverProvider_1 = require("./mathHoverProvider");
+var mathCustomEditor_2 = require("./mathCustomEditor");
+Object.defineProperty(exports, "MathCustomEditorProvider", { enumerable: true, get: function () { return mathCustomEditor_2.MathCustomEditorProvider; } });
 var mathDecorationProvider_2 = require("./mathDecorationProvider");
 Object.defineProperty(exports, "MathDecorationProvider", { enumerable: true, get: function () { return mathDecorationProvider_2.MathDecorationProvider; } });
 var mathCoreWasm_2 = require("./mathCoreWasm");
@@ -89,6 +92,12 @@ function activateMathFeatures(context, onLspStateChanged, debugLogger) {
     // Create the shared decoration provider
     const decorationProvider = new mathDecorationProvider_1.MathDecorationProvider(debugLogger);
     context.subscriptions.push(decorationProvider);
+    context.subscriptions.push(vscode.window.registerCustomEditorProvider(mathCustomEditor_1.MathCustomEditorProvider.viewType, new mathCustomEditor_1.MathCustomEditorProvider(context.extensionUri), {
+        webviewOptions: {
+            retainContextWhenHidden: true,
+        },
+        supportsMultipleEditorsPerDocument: false,
+    }));
     // Initialize optional math-core WASM bridge. Until the Simple-side ABI is
     // exported, this stays in graceful fallback mode and hover uses the local
     // TypeScript converter.
@@ -127,6 +136,13 @@ function activateMathFeatures(context, onLspStateChanged, debugLogger) {
         else {
             mathSyncPanel_1.MathSyncPanel.show(decorationProvider, context.extensionUri);
         }
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('simple.math.openCustomEditor', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== 'simple') {
+            return;
+        }
+        await vscode.commands.executeCommand('vscode.openWith', editor.document.uri, mathCustomEditor_1.MathCustomEditorProvider.viewType);
     }));
     const maybeAutoOpenSyncPanel = (editor) => {
         if (!vscode.workspace.getConfiguration('simple').get('math.syncPanel.autoOpen', false)) {

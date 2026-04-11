@@ -14,6 +14,7 @@
  * quick inline preview and fallback hover when the LSP is not connected.
  */
 import * as vscode from 'vscode';
+export { MathCustomEditorProvider } from './mathCustomEditor';
 export { MathDecorationProvider } from './mathDecorationProvider';
 export { MathCoreWasmBridge } from './mathCoreWasm';
 export { MathPreviewPanel } from './mathPreviewPanel';

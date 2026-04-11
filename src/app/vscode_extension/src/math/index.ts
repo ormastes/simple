@@ -16,12 +16,14 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { MathCustomEditorProvider } from './mathCustomEditor';
 import { MathDecorationProvider } from './mathDecorationProvider';
 import { MathCoreWasmBridge } from './mathCoreWasm';
 import { MathPreviewPanel } from './mathPreviewPanel';
 import { MathSyncPanel } from './mathSyncPanel';
 import { MathHoverProvider } from './mathHoverProvider';
 
+export { MathCustomEditorProvider } from './mathCustomEditor';
 export { MathDecorationProvider } from './mathDecorationProvider';
 export { MathCoreWasmBridge } from './mathCoreWasm';
 export { MathPreviewPanel } from './mathPreviewPanel';
@@ -54,6 +56,18 @@ export function activateMathFeatures(
     // Create the shared decoration provider
     const decorationProvider = new MathDecorationProvider(debugLogger);
     context.subscriptions.push(decorationProvider);
+    context.subscriptions.push(
+        vscode.window.registerCustomEditorProvider(
+            MathCustomEditorProvider.viewType,
+            new MathCustomEditorProvider(context.extensionUri),
+            {
+                webviewOptions: {
+                    retainContextWhenHidden: true,
+                },
+                supportsMultipleEditorsPerDocument: false,
+            },
+        ),
+    );
 
     // Initialize optional math-core WASM bridge. Until the Simple-side ABI is
     // exported, this stays in graceful fallback mode and hover uses the local
@@ -112,6 +126,20 @@ export function activateMathFeatures(
                 MathSyncPanel.show(decorationProvider, context.extensionUri);
             }
         })
+    );
+    context.subscriptions.push(
+        vscode.commands.registerCommand('simple.math.openCustomEditor', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.languageId !== 'simple') {
+                return;
+            }
+
+            await vscode.commands.executeCommand(
+                'vscode.openWith',
+                editor.document.uri,
+                MathCustomEditorProvider.viewType,
+            );
+        }),
     );
 
     const maybeAutoOpenSyncPanel = (editor?: vscode.TextEditor): void => {

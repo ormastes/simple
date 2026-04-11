@@ -5,6 +5,12 @@ import * as path from 'path';
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { suite, teardown, test } from 'mocha';
+import {
+    buildMathCustomEditorHtml,
+    buildMathCustomEditorState,
+    detectMathBlocksInSource,
+    findMathBlockAtOffset,
+} from '../../math/mathCustomEditor';
 import { MathDecorationProvider, buildSvgDecorationLayout, formatSvgDecorationLayoutLog } from '../../math/mathDecorationProvider';
 import { MathCoreWasmBridge } from '../../math/mathCoreWasm';
 import { MathHoverProvider } from '../../math/mathHoverProvider';
@@ -53,6 +59,7 @@ suite('GUI - Math Rendering', function() {
     teardown(async () => {
         await TestUtils.closeAllEditors();
         TestUtils.deleteTestFile('test-math-rendering.spl');
+        TestUtils.deleteTestFile('test-math-custom-editor.spl');
         TestUtils.deleteTestFile('test-math-sync-panel.spl');
         TestUtils.deleteTestFile('test-math-sync-panel-auto-open.spl');
     });
@@ -167,6 +174,92 @@ suite('GUI - Math Rendering', function() {
         assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
         assert.ok(html.includes(`font-src ${cspSource}`));
         assert.ok(!html.includes(`style-src ${cssUri}`), 'CSP should use webview.cspSource, not a concrete CSS URI');
+    });
+
+    test('Custom editor HTML uses webview CSP source and contains the source shell', () => {
+        const cssUri = 'vscode-webview-resource://test/katex.min.css';
+        const cspSource = 'vscode-webview://test-source';
+        const html = buildMathCustomEditorHtml({
+            documentUri: 'file:///tmp/demo.spl',
+            sourceText: 'let eq = m{ frac(1, 2) }',
+            selectionStart: 11,
+            selectionEnd: 11,
+            hasActiveBlock: true,
+            activeBlockLabel: 'm{}',
+            activeBlockSource: 'frac(1, 2)',
+            activeBlockPretty: '(1)/(2)',
+            activeBlockRenderedHtml: '<span class="katex">demo</span>',
+            activeBlockStatusKind: 'ok',
+            activeBlockStatusMessage: 'Rendered active math block.',
+        }, cssUri, cspSource);
+
+        assert.ok(html.includes('Simple Math Source Editor'));
+        assert.ok(html.includes('<textarea id="source"'));
+        assert.ok(html.includes('Math Preview'));
+        assert.ok(html.includes('Status'));
+        assert.ok(html.includes('Rendered active math block.'));
+        assert.ok(html.includes(`<link rel="stylesheet" href="${cssUri}">`));
+        assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
+        assert.ok(html.includes(`font-src ${cspSource}`));
+        assert.ok(!html.includes(`style-src ${cssUri}`));
+    });
+
+    test('Custom editor state reports info status when no math block is active', () => {
+        const state = buildMathCustomEditorState(
+            'file:///tmp/demo.spl',
+            'fn main():\n    val y = 42\n',
+            0,
+            0,
+        );
+
+        assert.strictEqual(state.hasActiveBlock, false);
+        assert.strictEqual(state.activeBlockStatusKind, 'info');
+        assert.ok(state.activeBlockStatusMessage.includes('Move the caret into a math block'));
+    });
+
+    test('Custom editor state reports success for renderable math', () => {
+        const source = 'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n';
+        const state = buildMathCustomEditorState(
+            'file:///tmp/demo.spl',
+            source,
+            source.indexOf('frac'),
+            source.indexOf('frac'),
+        );
+
+        assert.strictEqual(state.hasActiveBlock, true);
+        assert.strictEqual(state.activeBlockStatusKind, 'ok');
+        assert.strictEqual(state.activeBlockStatusMessage, 'Rendered active math block.');
+        assert.ok(state.activeBlockRenderedHtml.includes('katex'));
+    });
+
+    test('Custom editor state reports an error fallback for malformed math', () => {
+        const source = 'fn main():\n    val y = m{ alpha ^ }\n';
+        const state = buildMathCustomEditorState(
+            'file:///tmp/demo.spl',
+            source,
+            source.indexOf('alpha'),
+            source.indexOf('alpha'),
+        );
+
+        assert.strictEqual(state.hasActiveBlock, true);
+        assert.strictEqual(state.activeBlockStatusKind, 'error');
+        assert.ok(state.activeBlockStatusMessage.includes('KaTeX parse error'));
+        assert.ok(state.activeBlockRenderedHtml.includes('Could not render the active math block.'));
+        assert.ok(state.activeBlockRenderedHtml.includes('\\alpha ^'));
+    });
+
+    test('Custom editor math scanner resolves the block under the caret offset', () => {
+        const source = 'let a = m{ alpha + beta }\\nlet b = loss{ sqrt(x) }';
+        const blocks = detectMathBlocksInSource(source);
+
+        assert.strictEqual(blocks.length, 2);
+        assert.strictEqual(blocks[0].blockType, 'math');
+        assert.strictEqual(blocks[1].blockType, 'loss');
+
+        const active = findMathBlockAtOffset(source, source.indexOf('sqrt'));
+        assert.ok(active, 'expected active math block');
+        assert.strictEqual(active?.blockType, 'loss');
+        assert.strictEqual(active?.content, 'sqrt(x)');
     });
 
     test('SVG renderer normalizes MathJax dimensions to em units', () => {
@@ -401,5 +494,24 @@ suite('GUI - Math Rendering', function() {
         );
         MathSyncPanel.close();
         void document;
+    });
+
+    test('Custom editor opens a .spl document with the custom view type', async () => {
+        const document = await TestUtils.createTestFile(
+            'test-math-custom-editor.spl',
+            'fn main():\n    val y = m{ frac(1, 2) + sqrt(x) }\n'
+        );
+
+        await vscode.commands.executeCommand('vscode.openWith', document.uri, 'simple.mathSourceEditor');
+
+        await TestUtils.waitFor(() => {
+            const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+            const input = tab?.input as { viewType?: string } | undefined;
+            return input?.viewType === 'simple.mathSourceEditor';
+        }, 5000, 50);
+
+        const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+        const input = tab?.input as { viewType?: string } | undefined;
+        assert.strictEqual(input?.viewType, 'simple.mathSourceEditor');
     });
 });
