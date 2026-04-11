@@ -42,6 +42,7 @@ use std.play.trace.{trace_init, trace_read_cdp}
 use std.play.wm.mod.{
     wm_screenshot, wm_list_windows, wm_click, wm_type_text, wm_press, wm_platform
 }
+use std.play.sdl2_backend.{Sdl2Client}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
@@ -77,6 +78,12 @@ fn print_help():
     print "  simple play wm-list                    List native OS windows"
     print "  simple play wm-click <x> <y>           Native desktop click"
     print "  simple play wm-type <text>             Native keyboard type"
+    print "  simple play sdl2-connect <url>          Connect to SDL2 test API"
+    print "  simple play sdl2-click <sid> <id>       Click widget in SDL2 app"
+    print "  simple play sdl2-fill <sid> <id> <val>  Fill widget in SDL2 app"
+    print "  simple play sdl2-screenshot <sid> [-o]  Screenshot SDL2 app"
+    print "  simple play sdl2-elements <sid>         List SDL2 widgets"
+    print "  simple play sdl2-state <sid>            Get SDL2 app state"
     print "  simple play last-trace <sid>           Dump CDP trace log"
     print ""
     print "All subcommands write single-line JSON results to stdout."
@@ -389,6 +396,138 @@ fn handle_wm_type(rest: [text]) -> i64:
             err_json(e.code, e.message)
             1
 
+# ============================================================================
+# SDL2 backend subcommands
+# ============================================================================
+
+fn handle_sdl2_connect(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "sdl2-connect <base_url>")
+        return 1
+    val base_url = rest[0]
+    val client_res = Sdl2Client.connect(base_url)
+    match client_res:
+        case Ok(client):
+            session_store_init()
+            session_store_save(client.session)
+            val sid = client.session.id
+            ok_json("\"session_id\":\"{sid}\",\"base_url\":\"{_json_escape(base_url)}\"")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn _sdl2_client(session_id: text) -> Result<Sdl2Client, PlayError>:
+    val sess_opt = session_store_load(session_id)
+    match sess_opt:
+        case Some(sess):
+            if sess.backend != "sdl2":
+                return Err(play_error("WRONG_BACKEND", "session is not SDL2: " + sess.backend))
+            Sdl2Client.connect(sess.http_url)
+        case nil:
+            Err(play_error("NOT_FOUND", "session not found: " + session_id))
+
+fn handle_sdl2_click(rest: [text]) -> i64:
+    if rest.length() < 2:
+        err_json("INVALID_ARGUMENT", "sdl2-click <session_id> <widget_id>")
+        return 1
+    val sid = rest[0]
+    val widget_id = rest[1]
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.click(widget_id):
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_sdl2_fill(rest: [text]) -> i64:
+    if rest.length() < 3:
+        err_json("INVALID_ARGUMENT", "sdl2-fill <session_id> <widget_id> <value>")
+        return 1
+    val sid = rest[0]
+    val widget_id = rest[1]
+    val value = rest[2]
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.fill(widget_id, value):
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_sdl2_screenshot(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "sdl2-screenshot <session_id> [-o path]")
+        return 1
+    val sid = rest[0]
+    var path = ""
+    var i = 1
+    while i < rest.length():
+        if rest[i] == "-o" and i + 1 < rest.length():
+            path = rest[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.screenshot(path):
+                case Ok(final_path):
+                    ok_json("\"session_id\":\"{sid}\",\"path\":\"{_json_escape(final_path)}\"")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_sdl2_elements(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "sdl2-elements <session_id>")
+        return 1
+    val sid = rest[0]
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.elements():
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"elements\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_sdl2_state(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "sdl2-state <session_id>")
+        return 1
+    val sid = rest[0]
+    match _sdl2_client(sid):
+        case Ok(client):
+            match client.state():
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"state\":{body}")
+                    0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    1
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
 fn handle_wm_press(rest: [text]) -> i64:
     if rest.length() == 0:
         err_json("INVALID_ARGUMENT", "wm-press <key>")
@@ -447,6 +586,18 @@ fn main() -> i64:
             handle_wm_type(rest)
         case "wm-press":
             handle_wm_press(rest)
+        case "sdl2-connect":
+            handle_sdl2_connect(rest)
+        case "sdl2-click":
+            handle_sdl2_click(rest)
+        case "sdl2-fill":
+            handle_sdl2_fill(rest)
+        case "sdl2-screenshot":
+            handle_sdl2_screenshot(rest)
+        case "sdl2-elements":
+            handle_sdl2_elements(rest)
+        case "sdl2-state":
+            handle_sdl2_state(rest)
         case "-h" | "--help" | "help":
             print_help()
             0

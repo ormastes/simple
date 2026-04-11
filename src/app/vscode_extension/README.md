@@ -675,7 +675,7 @@ Contributions welcome! Please see [CONTRIBUTING.md](../CONTRIBUTING.md)
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE)
+Apache License 2.0 - see [LICENSE](../LICENSE)
 
 ## Links
 

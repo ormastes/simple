@@ -442,5 +442,5 @@ simple lib optimize libstd.lsm -o libstd_opt.lsm
 ---
 
 **Authors:** Simple Language Team
-**License:** MIT
+**License:** Apache-2.0
 **Last Updated:** 2026-02-09

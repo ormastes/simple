@@ -1119,5 +1119,5 @@ Loaders SHOULD validate:
 ---
 
 **Authors**: Simple Language Team
-**License**: MIT
+**License**: Apache-2.0
 **Last Updated**: 2026-01-28

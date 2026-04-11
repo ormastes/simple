@@ -422,15 +422,13 @@ class CdpClient:
 
         # Simple's json_parse returns `any`. We use quick text scan as a
         # fallback that doesn't require typed dict access.
-        val id_idx = msg.index_of("\"id\":")
-        if id_idx >= 0:
-            val id_val = _extract_int_after(msg, id_idx + 5)
+        val has_id = msg.contains("\"id\":")
+        if has_id:
+            val id_val = _extract_json_int(msg, "id")
             var is_error = msg.contains("\"error\":")
             var err_msg = ""
             if is_error:
-                val e_idx = msg.index_of("\"message\":")
-                if e_idx >= 0:
-                    err_msg = _extract_string_after(msg, e_idx + 10)
+                err_msg = _extract_json_string(msg, "message")
             var updated = false
             var new_pending: [CdpPending] = []
             for p in self.pending:
@@ -449,13 +447,11 @@ class CdpClient:
             return updated
 
         # Event path
-        val m_idx = msg.index_of("\"method\":")
-        if m_idx >= 0:
-            val method = _extract_string_after(msg, m_idx + 9)
+        if msg.contains("\"method\":"):
+            val method = _extract_json_string(msg, "method")
             var sid = ""
-            val s_idx = msg.index_of("\"sessionId\":")
-            if s_idx >= 0:
-                sid = _extract_string_after(msg, s_idx + 12)
+            if msg.contains("\"sessionId\":"):
+                sid = _extract_json_string(msg, "sessionId")
             self.events.push(CdpEvent(method: method, params_json: msg, session_id: sid))
             return true
 
@@ -574,48 +570,32 @@ class CdpClient:
 # Tiny JSON field extractors (text-mode, avoids typed dict access)
 # ============================================================================
 
-fn _extract_int_after(s: text, from: i64) -> i64:
-    var i = from
-    val n = s.length()
-    while i < n and s.char_at(i) == " ":
-        i = i + 1
-    var negative = false
-    if i < n and s.char_at(i) == "-":
-        negative = true
-        i = i + 1
-    var val_acc: i64 = 0
-    var seen = false
-    while i < n:
-        val c = s.char_at(i)
-        val b = c.byte_at(0)
-        if b >= 48 and b <= 57:
-            val_acc = val_acc * 10 + (b - 48)
-            seen = true
-            i = i + 1
-        else:
-            i = n
-    if not seen: 0 else: if negative: (0 - val_acc) else: val_acc
+fn _extract_json_int(s: text, key: text) -> i64:
+    """Extract integer value for a JSON key. E.g. key="id" from {"id":42}."""
+    val marker = "\"" + key + "\":"
+    if not s.contains(marker): return 0
+    val parts = s.split(marker)
+    if parts.length() < 2: return 0
+    val rest = parts[1].trim()
+    # Take until first non-numeric separator
+    val num_str = rest.split(",")[0].split("}")[0].split("]")[0].split(" ")[0].trim()
+    if num_str == "": return 0
+    int(num_str)
 
-fn _extract_string_after(s: text, from: i64) -> text:
-    var i = from
-    val n = s.length()
-    while i < n and s.char_at(i) != "\"":
-        i = i + 1
-    if i >= n: return ""
-    i = i + 1
-    var parts: [text] = []
-    while i < n:
-        val c = s.char_at(i)
-        if c == "\"":
-            return parts.join("")
-        if c == "\\" and i + 1 < n:
-            val nxt = s.char_at(i + 1)
-            parts.push(nxt)
-            i = i + 2
-        else:
-            parts.push(c)
-            i = i + 1
-    parts.join("")
+fn _extract_json_string(s: text, key: text) -> text:
+    """Extract string value for a JSON key. E.g. key="method" from {"method":"Page.enable"}."""
+    val marker = "\"" + key + "\":\""
+    if not s.contains(marker): return ""
+    val parts = s.split(marker)
+    if parts.length() < 2: return ""
+    val rest = parts[1]
+    # Find closing quote (handling simple escapes)
+    val unescaped = rest.split("\\\"")
+    # First segment before any escaped quote
+    val first = unescaped[0]
+    val end = first.split("\"")[0]
+    # Re-insert escaped quotes from original
+    end.replace("\\\\", "\\")
 
 # Re-export tcp functions that CdpClient depends on (so this file doesn't
 # need std.net.ffi directly). They're already available via std.net.tcp.

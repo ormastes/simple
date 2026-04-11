@@ -3,7 +3,7 @@
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
 [![LLVM Cross](https://github.com/simple-lang/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 Simple is a self-hosted language and toolchain that combines a readable Python-like surface with compiler-integrated testing, documentation, architecture rules, and baremetal-oriented execution paths.
 
@@ -1261,7 +1261,7 @@ See [CLAUDE.md](CLAUDE.md) for development guidelines and [AGENTS.md](AGENTS.md)
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
 
 Bundled third-party runtime components and redistribution notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

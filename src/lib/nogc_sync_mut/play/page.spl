@@ -145,26 +145,9 @@ class Page:
 
     me screenshot(path: text) -> Result<text, PlayError>:
         val body = cdp_page_capture_screenshot(self.session.client, self.session.session_id, "png", 90, false)?
-        val data_key = "\"data\":"
-        val idx = body.index_of(data_key)
-        if idx < 0:
+        val b64 = _extract_data_field(body)
+        if b64 == "":
             return Err(play_error(ERR_CDP_PROTOCOL, "captureScreenshot: no data field"))
-        var i = idx + data_key.length()
-        val n = body.length()
-        while i < n and body.char_at(i) == " ":
-            i = i + 1
-        if i >= n or body.char_at(i) != "\"":
-            return Err(play_error(ERR_CDP_PROTOCOL, "captureScreenshot: bad data encoding"))
-        i = i + 1
-        var parts: [text] = []
-        while i < n:
-            val c = body.char_at(i)
-            if c == "\"":
-                i = n
-            else:
-                parts.push(c)
-                i = i + 1
-        val b64 = parts.join("")
 
         val final_path = if path == "":
             val ts = rt_time_now_unix_micros()
@@ -177,26 +160,9 @@ class Page:
 
     me screenshot_with(options: ScreenshotOptions) -> Result<text, PlayError>:
         val body = cdp_page_capture_screenshot(self.session.client, self.session.session_id, options.image_type, options.quality, options.full_page)?
-        val data_key = "\"data\":"
-        val idx = body.index_of(data_key)
-        if idx < 0:
+        val b64 = _extract_data_field(body)
+        if b64 == "":
             return Err(play_error(ERR_CDP_PROTOCOL, "captureScreenshot: no data field"))
-        var i = idx + data_key.length()
-        val n = body.length()
-        while i < n and body.char_at(i) == " ":
-            i = i + 1
-        if i >= n or body.char_at(i) != "\"":
-            return Err(play_error(ERR_CDP_PROTOCOL, "captureScreenshot: bad data encoding"))
-        i = i + 1
-        var parts: [text] = []
-        while i < n:
-            val c = body.char_at(i)
-            if c == "\"":
-                i = n
-            else:
-                parts.push(c)
-                i = i + 1
-        val b64 = parts.join("")
         val final_path = if options.path == "":
             val ts = rt_time_now_unix_micros()
             self.artifacts_dir + "/screenshot-{ts}." + options.image_type
@@ -216,3 +182,12 @@ class Page:
     me evaluate_handle(expression: text) -> Result<text, PlayError>:
         self.session.client.send_on_session(self.session.session_id, "Runtime.evaluate",
             "{\"expression\": \"" + expression + "\", \"returnByValue\": false}", 30000)
+
+fn _extract_data_field(body: text) -> text:
+    """Extract the base64 data from a CDP screenshot response using .split()."""
+    val marker = "\"data\":\""
+    if not body.contains(marker): return ""
+    val parts = body.split(marker)
+    if parts.length() < 2: return ""
+    val rest = parts[1]
+    rest.split("\"")[0]

@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This repository is primarily distributed under the MIT license in
+This repository is primarily distributed under the Apache License 2.0 in
 [LICENSE](LICENSE).
 
 Some shipped source files vendor third-party code. Those files keep their
