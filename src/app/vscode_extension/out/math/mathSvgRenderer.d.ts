@@ -10,7 +10,7 @@ import * as vscode from 'vscode';
  * Returns the raw SVG markup or undefined on error.
  */
 export declare function latexToSvg(latex: string): string | undefined;
-/** Result of SVG rendering: file URI + height info for dynamic margin */
+/** Result of SVG rendering: file URI + normalized em metrics for inline fitting. */
 export interface SvgRenderResult {
     uri: vscode.Uri;
     /** SVG height in em units after normalization */
@@ -20,25 +20,11 @@ export interface SvgRenderResult {
     /** SVG width in em units after normalization */
     widthEm: number;
 }
-/** Result of rendering a transparent spacer SVG used to influence line height. */
-export interface SvgSpacerRenderResult {
-    uri: vscode.Uri;
-    heightEm: number;
-    widthEm: number;
-}
 /**
  * Render LaTeX to an SVG file on disk. Returns the file URI + height info.
  * Uses a content-hash cache to avoid regenerating identical expressions.
  */
 export declare function renderToSvgFile(latex: string, cacheDir: string, foregroundColor?: string): SvgRenderResult | undefined;
-/**
- * Render a transparent spacer SVG to disk.
- *
- * This is used as a hidden attachment so the editor line box has a real image
- * with the desired height, which works better than relying on decoration
- * attachment height alone.
- */
-export declare function renderSpacerSvgFile(cacheDir: string, heightEm: number, widthEm?: number): SvgSpacerRenderResult;
 /**
  * Clear the SVG cache directory.
  */

@@ -53,7 +53,12 @@ function renderKatex(latex: string): string {
  * The `katexCssUri` parameter is a webview URI pointing to the bundled katex.min.css.
  * When called without a URI (e.g. in tests), falls back to inline Unicode preview.
  */
-export function buildMathPreviewHtml(latex: string, source: string, katexCssUri?: string): string {
+export function buildMathPreviewHtml(
+    latex: string,
+    source: string,
+    katexCssUri?: string,
+    cspSource?: string,
+): string {
     const hasContent = Boolean(latex || source);
     const escapedSource = escapeForHtml(source);
     const katexHtml = latex ? renderKatex(latex) : '';
@@ -64,8 +69,9 @@ export function buildMathPreviewHtml(latex: string, source: string, katexCssUri?
         ? `<link rel="stylesheet" href="${katexCssUri}">`
         : '';
     // CSP: allow KaTeX styles from extension resources, inline styles, and KaTeX fonts
-    const fontSrc = katexCssUri ? `${katexCssUri.replace(/\/[^/]*$/, '/')}*` : "'none'";
-    const styleSrc = katexCssUri ? `${katexCssUri} 'unsafe-inline'` : "'unsafe-inline'";
+    const resourceSource = cspSource ?? "'none'";
+    const fontSrc = katexCssUri ? resourceSource : "'none'";
+    const styleSrc = katexCssUri ? `${resourceSource} 'unsafe-inline'` : "'unsafe-inline'";
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -354,7 +360,7 @@ export class MathPreviewPanel implements vscode.Disposable {
      * Uses bundled KaTeX for high-quality math rendering (offline-safe).
      */
     private getHtmlContent(latex: string, source: string): string {
-        return buildMathPreviewHtml(latex, source, this.getKatexCssUri());
+        return buildMathPreviewHtml(latex, source, this.getKatexCssUri(), this.panel.webview.cspSource);
     }
 
     /**

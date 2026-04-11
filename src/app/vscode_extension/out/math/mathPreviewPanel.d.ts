@@ -20,7 +20,7 @@ import { MathDecorationProvider } from './mathDecorationProvider';
  * The `katexCssUri` parameter is a webview URI pointing to the bundled katex.min.css.
  * When called without a URI (e.g. in tests), falls back to inline Unicode preview.
  */
-export declare function buildMathPreviewHtml(latex: string, source: string, katexCssUri?: string): string;
+export declare function buildMathPreviewHtml(latex: string, source: string, katexCssUri?: string, cspSource?: string): string;
 export declare class MathPreviewPanel implements vscode.Disposable {
     static currentPanel: MathPreviewPanel | undefined;
     private readonly panel;

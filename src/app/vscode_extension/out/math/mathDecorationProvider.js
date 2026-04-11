@@ -65,50 +65,34 @@ const BLOCK_INDICATORS = {
     nograd: '\u2205', // ∅ no-gradient
 };
 function formatSvgDecorationLayoutLog(content, layout) {
-    return `[simple.math.layout] eq="${content}" height=${layout.height} width=${layout.width} spacer=${layout.spacerHeight} boost=${layout.boostApplied ? 'yes' : 'no'} scale=${layout.layoutScale.toFixed(2)} align=${layout.verticalAlign}`;
+    return `[simple.math.layout] eq="${content}" height=${layout.height} width=${layout.width} fit=${layout.fitApplied ? 'yes' : 'no'} scale=${layout.inlineScale.toFixed(2)} align=${layout.verticalAlign}`;
 }
-function countLayoutBoostTerms(content) {
-    const fracTerms = content.match(/\bfrac\s*\(/g);
-    const sqrtTerms = content.match(/\bsqrt\s*\(/g);
-    return {
-        fracCount: fracTerms ? fracTerms.length : 0,
-        sqrtCount: sqrtTerms ? sqrtTerms.length : 0,
-    };
-}
-const FRACTION_SPACER_EXTRA_EM = 0.28;
-const ROOT_SPACER_EXTRA_EM = 0.44;
-const BASE_SPACER_MIN_EM = 1.28;
+const MAX_INLINE_HEIGHT_EM = 1.30;
+const MIN_INLINE_HEIGHT_EM = 0.92;
+const MIN_INLINE_WIDTH_EM = 0.75;
 function buildSvgDecorationLayout(content, svgResult, alignment) {
-    const boostTerms = countLayoutBoostTerms(content);
-    const boostCount = boostTerms.fracCount + boostTerms.sqrtCount;
-    const boostApplied = boostCount > 0;
-    const layoutScale = 1.0 + (boostTerms.fracCount * 0.08) + (boostTerms.sqrtCount * 0.16);
-    const heightEm = Math.max(svgResult.heightEm * layoutScale, 1.0);
-    const widthEm = Math.max(svgResult.widthEm * layoutScale, 0.75);
-    const spacerHeightEm = boostApplied
-        ? Math.max(heightEm + 0.12 + (boostTerms.fracCount * FRACTION_SPACER_EXTRA_EM) + (boostTerms.sqrtCount * ROOT_SPACER_EXTRA_EM), BASE_SPACER_MIN_EM)
-        : heightEm;
+    const inlineScale = Math.min(1.0, MAX_INLINE_HEIGHT_EM / Math.max(svgResult.heightEm, 0.01));
+    const fitApplied = inlineScale < 0.999;
+    const heightEm = Math.max(svgResult.heightEm * inlineScale, MIN_INLINE_HEIGHT_EM);
+    const widthEm = Math.max(svgResult.widthEm * inlineScale, MIN_INLINE_WIDTH_EM);
     const verticalAlign = alignment === 'center'
         ? 'middle'
-        : `-${svgResult.descentEm.toFixed(2)}em`;
+        : `-${(svgResult.descentEm * inlineScale).toFixed(2)}em`;
     return {
         height: `${heightEm.toFixed(2)}em`,
         width: `${widthEm.toFixed(2)}em`,
-        spacerHeight: `${spacerHeightEm.toFixed(2)}em`,
         verticalAlign,
-        boostApplied,
-        layoutScale,
+        fitApplied,
+        inlineScale,
         debugMessage: JSON.stringify({
             content,
-            boostCount,
-            fracCount: boostTerms.fracCount,
-            sqrtCount: boostTerms.sqrtCount,
-            boostApplied,
-            layoutScale,
+            fitApplied,
+            inlineScale,
+            sourceHeightEm: Number(svgResult.heightEm.toFixed(3)),
+            sourceWidthEm: Number(svgResult.widthEm.toFixed(3)),
             heightEm: Number(heightEm.toFixed(3)),
             widthEm: Number(widthEm.toFixed(3)),
-            spacerHeightEm: Number(spacerHeightEm.toFixed(3)),
-            descentEm: Number(svgResult.descentEm.toFixed(3)),
+            descentEm: Number((svgResult.descentEm * inlineScale).toFixed(3)),
             verticalAlign,
             alignment,
         }),
@@ -304,10 +288,6 @@ class MathDecorationProvider {
             }
             if (svgResult) {
                 const layout = buildSvgDecorationLayout(block.content, svgResult, alignment);
-                let spacerResult;
-                if (layout.boostApplied && this.svgCacheDir) {
-                    spacerResult = (0, mathSvgRenderer_1.renderSpacerSvgFile)(this.svgCacheDir, Number.parseFloat(layout.spacerHeight));
-                }
                 if (this.debugLayout) {
                     const message = formatSvgDecorationLayoutLog(block.content, layout);
                     console.log(message);
@@ -324,13 +304,6 @@ class MathDecorationProvider {
                             height: layout.height,
                             textDecoration: `none; vertical-align: ${layout.verticalAlign}`,
                         },
-                        after: spacerResult ? {
-                            contentIconPath: spacerResult.uri,
-                            margin: '0 0 0 0',
-                            width: '0.01em',
-                            height: layout.spacerHeight,
-                            textDecoration: 'none',
-                        } : undefined,
                     },
                 });
             }

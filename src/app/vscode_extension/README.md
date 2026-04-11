@@ -551,6 +551,7 @@ val init = nograd{ sqrt(frac(6, fan_in + fan_out)) }
 - `simple.math.previewOnHover` — show math hover previews
 - `simple.math.syncPanel.autoOpen` — automatically open the synced math panel when the caret enters a math block
 - `simple.math.renderInline` — enable inline math decorations
+- `simple.math.alignment` — align inline math to the center or baseline of the surrounding code line
 
 ## Test CodeLens (Gutter Arrows)
 

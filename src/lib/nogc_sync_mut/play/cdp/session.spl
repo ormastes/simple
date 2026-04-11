@@ -1,0 +1,277 @@
+@allow(primitive_api)
+# std.play.cdp.session — Per-target CDP session
+#
+# Wraps a (CdpClient, session_id) pair with Page/Runtime/DOM/Input state
+# caching. Think of this as the CDP equivalent of a Playwright Page: one
+# session per BrowserWindow.
+#
+# All methods return Result so callers can propagate errors with `?`.
+
+use std.play.cdp.client.{CdpClient}
+use std.play.cdp.domains.*
+use std.play.types.{PlayError, play_error, ERR_CDP_PROTOCOL}
+
+class CdpSession:
+    client: CdpClient
+    session_id: text
+    target_id: text
+    title: text
+    url: text
+    root_node_id: i64
+    enabled: bool
+
+    static fn attach(client: CdpClient, target_id: text) -> Result<CdpSession, PlayError>:
+        val body = cdp_target_attach(client, target_id)?
+        # Response payload shape: {"id":N,"result":{"sessionId":"..."}}
+        val idx = body.index_of("\"sessionId\":")
+        if idx < 0:
+            return Err(play_error(ERR_CDP_PROTOCOL, "attachToTarget: no sessionId in response"))
+        val sid = _session_string_after(body, idx + 12)
+        val s = CdpSession(
+            client: client,
+            session_id: sid,
+            target_id: target_id,
+            title: "",
+            url: "",
+            root_node_id: 0,
+            enabled: false
+        )
+        Ok(s)
+
+    me enable() -> Result<(), PlayError>:
+        cdp_page_enable(self.client, self.session_id)?
+        cdp_runtime_enable(self.client, self.session_id)?
+        self.enabled = true
+        Ok(())
+
+    me navigate(url: text) -> Result<(), PlayError>:
+        cdp_page_navigate(self.client, self.session_id, url)?
+        Ok(())
+
+    me evaluate(expression: text) -> Result<text, PlayError>:
+        cdp_runtime_evaluate(self.client, self.session_id, expression, true, true)
+
+    me screenshot(format: text, quality: i64, full_page: bool) -> Result<text, PlayError>:
+        cdp_page_capture_screenshot(self.client, self.session_id, format, quality, full_page)
+
+    me query_selector(selector: text) -> Result<i64, PlayError>:
+        if self.root_node_id == 0:
+            val doc = cdp_dom_get_document(self.client, self.session_id)?
+            self.root_node_id = _session_int_after_key(doc, "\"nodeId\":", 0)
+        val body = cdp_dom_query_selector(self.client, self.session_id, self.root_node_id, selector)?
+        val nid = _session_int_after_key(body, "\"nodeId\":", 0)
+        Ok(nid)
+
+    me click_at(x: f64, y: f64, button: text, click_count: i64, modifiers: i64) -> Result<(), PlayError>:
+        cdp_input_dispatch_mouse(self.client, self.session_id, "mousePressed", x, y, button, click_count, modifiers)?
+        cdp_input_dispatch_mouse(self.client, self.session_id, "mouseReleased", x, y, button, click_count, modifiers)?
+        Ok(())
+
+    me click_selector(selector: text, button: text, click_count: i64, modifiers: i64) -> Result<(), PlayError>:
+        # Use Runtime.evaluate for click — the cleanest way to get bounding box.
+        val js = "(() => { const el = document.querySelector('" + _js_escape(selector) + "'); if (!el) return {ok:false}; const r = el.getBoundingClientRect(); el.scrollIntoView({block:'center'}); return {ok:true, x: r.x + r.width/2, y: r.y + r.height/2}; })()"
+        val body = cdp_runtime_evaluate(self.client, self.session_id, js, true, false)?
+        if body.contains("\"ok\":false"):
+            return Err(play_error(ERR_CDP_PROTOCOL, "element not found: " + selector))
+        val x_val = _session_float_after_key(body, "\"x\":", 0.0)
+        val y_val = _session_float_after_key(body, "\"y\":", 0.0)
+        self.click_at(x_val, y_val, button, click_count, modifiers)?
+        Ok(())
+
+    me fill_selector(selector: text, value: text) -> Result<(), PlayError>:
+        val js = "(() => { const el = document.querySelector('" + _js_escape(selector) + "'); if (!el) return false; el.focus(); if ('value' in el) { el.value = " + _js_string_literal(value) + "; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); } else { el.textContent = " + _js_string_literal(value) + "; } return true; })()"
+        val body = cdp_runtime_evaluate(self.client, self.session_id, js, true, false)?
+        if body.contains("\"value\":false"):
+            return Err(play_error(ERR_CDP_PROTOCOL, "fill failed — element not found: " + selector))
+        Ok(())
+
+    me type_selector(selector: text, value: text, delay_ms: i64) -> Result<(), PlayError>:
+        self.focus_selector(selector)?
+        if delay_ms <= 0:
+            cdp_input_type_text(self.client, self.session_id, value)?
+        else:
+            val n = value.length()
+            var i = 0
+            while i < n:
+                val ch = value.char_at(i)
+                cdp_input_type_text(self.client, self.session_id, ch)?
+                i = i + 1
+        Ok(())
+
+    me press_selector(selector: text, key: text, modifiers: i64) -> Result<(), PlayError>:
+        self.focus_selector(selector)?
+        cdp_input_dispatch_key(self.client, self.session_id, "keyDown", key, "", key, modifiers)?
+        cdp_input_dispatch_key(self.client, self.session_id, "keyUp", key, "", key, modifiers)?
+        Ok(())
+
+    me focus_selector(selector: text) -> Result<(), PlayError>:
+        val js = "(() => { const el = document.querySelector('" + _js_escape(selector) + "'); if (!el) return false; el.focus(); return true; })()"
+        val body = cdp_runtime_evaluate(self.client, self.session_id, js, true, false)?
+        if body.contains("\"value\":false"):
+            return Err(play_error(ERR_CDP_PROTOCOL, "focus: element not found: " + selector))
+        Ok(())
+
+    me text_content(selector: text) -> Result<text, PlayError>:
+        val js = "(() => { const el = document.querySelector('" + _js_escape(selector) + "'); return el ? (el.textContent || '') : null; })()"
+        val body = cdp_runtime_evaluate(self.client, self.session_id, js, true, false)?
+        val val_idx = body.index_of("\"value\":")
+        if val_idx < 0:
+            return Err(play_error(ERR_CDP_PROTOCOL, "runtime.evaluate missing value field"))
+        val extracted = _session_string_after(body, val_idx + 8)
+        Ok(extracted)
+
+    me get_title() -> Result<text, PlayError>:
+        val body = cdp_runtime_evaluate(self.client, self.session_id, "document.title", true, false)?
+        val val_idx = body.index_of("\"value\":")
+        if val_idx < 0:
+            return Ok("")
+        Ok(_session_string_after(body, val_idx + 8))
+
+    me get_url() -> Result<text, PlayError>:
+        val body = cdp_runtime_evaluate(self.client, self.session_id, "location.href", true, false)?
+        val val_idx = body.index_of("\"value\":")
+        if val_idx < 0:
+            return Ok("")
+        Ok(_session_string_after(body, val_idx + 8))
+
+    me wait_for_selector(selector: text, timeout_ms: i64) -> Result<(), PlayError>:
+        val js = "(() => { return document.querySelector('" + _js_escape(selector) + "') !== null; })()"
+        val poll_ms = 100
+        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+        while rt_time_now_unix_micros() < deadline:
+            val body = cdp_runtime_evaluate(self.client, self.session_id, js, true, false)?
+            if body.contains("\"value\":true"):
+                return Ok(())
+        Err(play_error("TIMEOUT", "wait_for_selector timed out: " + selector))
+
+# ============================================================================
+# JSON field extractors (duplicated intentionally to keep session.spl
+# independent of client.spl's private helpers)
+# ============================================================================
+
+fn _session_string_after(s: text, from: i64) -> text:
+    var i = from
+    val n = s.length()
+    while i < n and s.char_at(i) == " ":
+        i = i + 1
+    if i >= n or s.char_at(i) != "\"":
+        return ""
+    i = i + 1
+    var parts: [text] = []
+    while i < n:
+        val c = s.char_at(i)
+        if c == "\"":
+            return parts.join("")
+        if c == "\\" and i + 1 < n:
+            val nxt = s.char_at(i + 1)
+            if nxt == "n":
+                parts.push("\n")
+            else:
+                if nxt == "t":
+                    parts.push("\t")
+                else:
+                    if nxt == "r":
+                        parts.push("\r")
+                    else:
+                        parts.push(nxt)
+            i = i + 2
+        else:
+            parts.push(c)
+            i = i + 1
+    parts.join("")
+
+fn _session_int_after_key(s: text, key: text, default_val: i64) -> i64:
+    val idx = s.index_of(key)
+    if idx < 0:
+        return default_val
+    var i = idx + key.length()
+    val n = s.length()
+    while i < n and s.char_at(i) == " ":
+        i = i + 1
+    var negative = false
+    if i < n and s.char_at(i) == "-":
+        negative = true
+        i = i + 1
+    var acc: i64 = 0
+    var seen = false
+    while i < n:
+        val b = s.char_at(i).byte_at(0)
+        if b >= 48 and b <= 57:
+            acc = acc * 10 + (b - 48)
+            seen = true
+            i = i + 1
+        else:
+            i = n
+    if not seen: default_val else: if negative: (0 - acc) else: acc
+
+fn _session_float_after_key(s: text, key: text, default_val: f64) -> f64:
+    val idx = s.index_of(key)
+    if idx < 0:
+        return default_val
+    var i = idx + key.length()
+    val n = s.length()
+    while i < n and s.char_at(i) == " ":
+        i = i + 1
+    var start = i
+    var seen_digit = false
+    var seen_dot = false
+    if i < n and s.char_at(i) == "-":
+        i = i + 1
+    while i < n:
+        val c = s.char_at(i)
+        val b = c.byte_at(0)
+        if b >= 48 and b <= 57:
+            seen_digit = true
+            i = i + 1
+        else:
+            if c == "." and not seen_dot:
+                seen_dot = true
+                i = i + 1
+            else:
+                i = n
+    if not seen_digit:
+        return default_val
+    val slice = s.substring(start, i)
+    float(slice)
+
+fn _js_escape(selector: text) -> text:
+    var out: [text] = []
+    val n = selector.length()
+    var i = 0
+    while i < n:
+        val c = selector.char_at(i)
+        if c == "'":
+            out.push("\\'")
+        else:
+            if c == "\\":
+                out.push("\\\\")
+            else:
+                out.push(c)
+        i = i + 1
+    out.join("")
+
+fn _js_string_literal(value: text) -> text:
+    var out: [text] = []
+    out.push("'")
+    val n = value.length()
+    var i = 0
+    while i < n:
+        val c = value.char_at(i)
+        if c == "'":
+            out.push("\\'")
+        else:
+            if c == "\\":
+                out.push("\\\\")
+            else:
+                if c == "\n":
+                    out.push("\\n")
+                else:
+                    if c == "\r":
+                        out.push("\\r")
+                    else:
+                        out.push(c)
+        i = i + 1
+    out.push("'")
+    out.join("")
+
+extern fn rt_time_now_unix_micros() -> i64

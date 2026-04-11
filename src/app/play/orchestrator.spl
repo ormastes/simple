@@ -1,0 +1,204 @@
+@allow(primitive_api)
+# app.play.orchestrator — Phase 1 subprocess wrapper
+#
+# `simple play run <dir>` detects the kind of project and shells out to the
+# right existing toolchain (npm test / npx playwright test / vscode-test),
+# auto-wrapping in xvfb-run on Linux when DISPLAY is unset. It captures
+# stdout/stderr to artifact files and returns a JSON summary for Claude.
+#
+# Detection order (highest priority first):
+#   1. <dir>/.vscode-test.mjs            → vscode extension tests
+#   2. <dir>/playwright.config.{js,ts}   → playwright tests
+#   3. <dir>/package.json                → `npm test`
+#
+# All runs go through std.play.xvfb.wrap_cmd on Linux.
+
+use std.play.types.*
+use std.play.xvfb.{wrap_cmd}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+val ARTIFACTS_ROOT = "doc/08_tracking/test/play"
+
+fn _json_escape_for_summary(s: text) -> text:
+    var out: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "\"":
+            out.push("\\\"")
+        else:
+            if c == "\\":
+                out.push("\\\\")
+            else:
+                if c == "\n":
+                    out.push("\\n")
+                else:
+                    if c == "\r":
+                        out.push("\\r")
+                    else:
+                        if c == "\t":
+                            out.push("\\t")
+                        else:
+                            out.push(c)
+        i = i + 1
+    out.join("")
+
+# ----------------------------------------------------------------------------
+# Detection
+# ----------------------------------------------------------------------------
+
+struct DetectedTarget:
+    kind: text         # "vscode", "playwright", "npm", "unknown"
+    command: text
+    args: [text]
+
+fn _detect_target(target_dir: text) -> DetectedTarget:
+    if rt_file_exists("{target_dir}/.vscode-test.mjs"):
+        return DetectedTarget(kind: "vscode", command: "npx", args: ["vscode-test"])
+    if rt_file_exists("{target_dir}/playwright.config.js") or rt_file_exists("{target_dir}/playwright.config.ts") or rt_file_exists("{target_dir}/playwright.config.mjs"):
+        return DetectedTarget(kind: "playwright", command: "npx", args: ["playwright", "test"])
+    if rt_file_exists("{target_dir}/package.json"):
+        return DetectedTarget(kind: "npm", command: "npm", args: ["test"])
+    DetectedTarget(kind: "unknown", command: "", args: [])
+
+# ----------------------------------------------------------------------------
+# Output parsing (best-effort, lives in stdout/stderr)
+# ----------------------------------------------------------------------------
+
+fn _count_matches(haystack: text, needle: text) -> i64:
+    var count: i64 = 0
+    var from: i64 = 0
+    val n = haystack.length()
+    val m = needle.length()
+    if m == 0: return 0
+    while from + m <= n:
+        val rest = haystack.substring(from)
+        val idx = rest.index_of(needle)
+        if idx < 0:
+            return count
+        count = count + 1
+        from = from + idx + m
+    count
+
+fn _extract_number_before(haystack: text, needle: text) -> i64:
+    """Scan for `<digits> <needle>` pattern (e.g. "5 passing")."""
+    val idx = haystack.index_of(needle)
+    if idx < 0: return -1
+    var i = idx - 1
+    while i >= 0 and haystack.char_at(i) == " ":
+        i = i - 1
+    var end = i
+    while i >= 0:
+        val c = haystack.char_at(i)
+        if c >= "0" and c <= "9":
+            i = i - 1
+        else:
+            i = i + 1
+            break
+    if i < 0: i = 0
+    if end < i: return -1
+    var j = i
+    var value: i64 = 0
+    while j <= end:
+        val c = haystack.char_at(j)
+        value = value * 10 + (c.code_point_at(0) - 48)
+        j = j + 1
+    value
+
+fn _guess_pass_fail(stdout: text, stderr: text, exit_code: i64) -> (i64, i64):
+    val combined = stdout + "\n" + stderr
+    var passed = _extract_number_before(combined, "passing")
+    var failed = _extract_number_before(combined, "failing")
+    if passed < 0:
+        passed = _extract_number_before(combined, "passed")
+    if failed < 0:
+        failed = _extract_number_before(combined, "failed")
+    if passed < 0: passed = 0
+    if failed < 0:
+        failed = if exit_code == 0: 0 else: 1
+    (passed, failed)
+
+# ----------------------------------------------------------------------------
+# Main entry point
+# ----------------------------------------------------------------------------
+
+fn _make_artifacts_dir() -> text:
+    val ts = rt_time_now_unix_micros()
+    val dir = "{ARTIFACTS_ROOT}/orch-{ts}"
+    rt_mkdir_p(dir)
+    dir
+
+fn _write_summary(dir: text, target_dir: text, kind: text, cmd: text, args: [text], stdout: text, stderr: text, exit_code: i64, passed: i64, failed: i64, duration_ms: i64):
+    rt_file_write_text("{dir}/stdout.log", stdout)
+    rt_file_write_text("{dir}/stderr.log", stderr)
+    var arg_parts: [text] = []
+    for a in args:
+        arg_parts.push("\"{a}\"")
+    val arg_list = arg_parts.join(" ")
+    val body =
+        "# orchestrator run summary (SDN format)\n" +
+        "target_dir: \"{target_dir}\"\n" +
+        "kind: \"{kind}\"\n" +
+        "command: \"{cmd}\"\n" +
+        "args: [{arg_list}]\n" +
+        "exit_code: {exit_code}\n" +
+        "passed: {passed}\n" +
+        "failed: {failed}\n" +
+        "duration_ms: {duration_ms}\n"
+    rt_file_write_text("{dir}/summary.sdn", body)
+
+fn orchestrator_run(target_dir: text, _rest: [text]) -> Result<text, PlayError>:
+    if not rt_file_exists(target_dir):
+        return Err(play_error_with_detail(ERR_NOT_FOUND, "target directory not found", target_dir))
+
+    val detected = _detect_target(target_dir)
+    if detected.kind == "unknown":
+        return Err(play_error_with_detail(
+            ERR_INVALID_ARGUMENT,
+            "could not detect test runner; need .vscode-test.mjs, playwright.config.*, or package.json",
+            target_dir))
+
+    val art_dir = _make_artifacts_dir()
+
+    # Build full command: cd into target dir, then run detected command.
+    # Because rt_process_run does not set cwd we use `sh -c 'cd <dir> && <cmd>'`.
+    var inner_parts: [text] = [detected.command]
+    for a in detected.args:
+        inner_parts.push(a)
+    val inner_cmd = inner_parts.join(" ")
+    val shell_line = "cd " + target_dir + " && " + inner_cmd
+
+    # Xvfb-wrap on Linux without DISPLAY.
+    val (cmd, wrapped_args) = wrap_cmd("sh", ["-c", shell_line])
+
+    val start = rt_time_now_unix_micros()
+    val result = rt_process_run(cmd, wrapped_args)
+    val end = rt_time_now_unix_micros()
+    val duration_ms = (end - start) / 1000
+
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
+
+    val (passed, failed) = _guess_pass_fail(stdout, stderr, exit_code)
+
+    _write_summary(art_dir, target_dir, detected.kind, detected.command, detected.args,
+                   stdout, stderr, exit_code, passed, failed, duration_ms)
+
+    val summary =
+        "\"target_dir\":\"{_json_escape_for_summary(target_dir)}\"" +
+        ",\"kind\":\"{detected.kind}\"" +
+        ",\"exit_code\":{exit_code}" +
+        ",\"passed\":{passed}" +
+        ",\"failed\":{failed}" +
+        ",\"duration_ms\":{duration_ms}" +
+        ",\"artifacts_dir\":\"{_json_escape_for_summary(art_dir)}\"" +
+        ",\"stdout_path\":\"{_json_escape_for_summary(art_dir)}/stdout.log\"" +
+        ",\"stderr_path\":\"{_json_escape_for_summary(art_dir)}/stderr.log\""
+    Ok("{{\"ok\":true,{summary}}}")

@@ -21,7 +21,7 @@ export interface MathSyncPanelState {
 }
 export declare function findMathBlockAtPosition(provider: MathDecorationProvider, document: vscode.TextDocument, position: vscode.Position): MathBlockRange | undefined;
 export declare function replaceRangeInText(text: string, range: vscode.Range, replacement: string): string;
-export declare function buildMathSyncPanelHtml(state: MathSyncPanelState, katexCssUri?: string): string;
+export declare function buildMathSyncPanelHtml(state: MathSyncPanelState, katexCssUri?: string, cspSource?: string): string;
 export declare class MathSyncPanel implements vscode.Disposable {
     static currentPanel: MathSyncPanel | undefined;
     private readonly panel;

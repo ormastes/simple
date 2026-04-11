@@ -1,0 +1,245 @@
+@allow(primitive_api)
+# app.play.session_store — File-backed CLI session registry
+#
+# CLI processes are short-lived, so a `simple play click <sid>` invocation
+# must be able to look up a PlaySession that was created by an earlier
+# `simple play launch` call. This module persists each session as a
+# simple line-based record at /tmp/simple-play/<sid>.session.
+#
+# Format (one key=value per line, URL-decoded on read):
+#   id=play-1712345
+#   backend=cdp
+#   state=ready
+#   pid=12345
+#   ws_url=ws://127.0.0.1:9222/devtools/browser/abcd
+#   artifacts_dir=doc/08_tracking/test/play/play-1712345
+#   first_window_id=
+#   stdout_path=...
+#   stderr_path=...
+#   console_log_path=...
+#   cdp_trace_path=...
+#   cwd=...
+#   executable_path=...
+#   created_at_us=1712345000000
+#   last_activity_us=1712345000000
+#
+# Values are %-escaped to keep newlines and `=` safe. No locking: race
+# windows are negligible because only one `simple play launch` writes a
+# given <sid>, and reads are idempotent.
+
+use std.play.types.*
+
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+val SESSION_STORE_ROOT = "/tmp/simple-play"
+
+fn session_store_init() -> bool:
+    rt_mkdir_p(SESSION_STORE_ROOT)
+
+fn _session_path(session_id: text) -> text:
+    "{SESSION_STORE_ROOT}/{session_id}.session"
+
+fn _encode(s: text) -> text:
+    var out: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "%":
+            out.push("%25")
+        else:
+            if c == "\n":
+                out.push("%0A")
+            else:
+                if c == "\r":
+                    out.push("%0D")
+                else:
+                    if c == "=":
+                        out.push("%3D")
+                    else:
+                        out.push(c)
+        i = i + 1
+    out.join("")
+
+fn _decode(s: text) -> text:
+    var out: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "%" and i + 2 < n:
+            val a = s.char_at(i + 1)
+            val b = s.char_at(i + 2)
+            if a == "2" and b == "5":
+                out.push("%")
+                i = i + 3
+            elif a == "0" and b == "A":
+                out.push("\n")
+                i = i + 3
+            elif a == "0" and b == "D":
+                out.push("\r")
+                i = i + 3
+            elif a == "3" and b == "D":
+                out.push("=")
+                i = i + 3
+            else:
+                out.push(c)
+                i = i + 1
+        else:
+            out.push(c)
+            i = i + 1
+    out.join("")
+
+fn _join_args(args: [text]) -> text:
+    var parts: [text] = []
+    for a in args:
+        parts.push(_encode(a))
+    parts.join("|")
+
+fn _split_args(encoded: text) -> [text]:
+    if encoded == "": return []
+    var out: [text] = []
+    var cur: [text] = []
+    val n = encoded.length()
+    var i = 0
+    while i < n:
+        val c = encoded.char_at(i)
+        if c == "|":
+            out.push(_decode(cur.join("")))
+            cur = []
+        else:
+            cur.push(c)
+        i = i + 1
+    out.push(_decode(cur.join("")))
+    out
+
+fn _serialize(sess: PlaySession) -> text:
+    var lines: [text] = []
+    lines.push("id=" + _encode(sess.id))
+    lines.push("backend=" + _encode(sess.backend))
+    lines.push("state=" + _encode(sess.state))
+    lines.push("pid={sess.pid}")
+    lines.push("cwd=" + _encode(sess.cwd))
+    lines.push("executable_path=" + _encode(sess.executable_path))
+    lines.push("args=" + _join_args(sess.args))
+    lines.push("ws_url=" + _encode(sess.ws_url))
+    lines.push("http_url=" + _encode(sess.http_url))
+    lines.push("artifacts_dir=" + _encode(sess.artifacts_dir))
+    lines.push("first_window_id=" + _encode(sess.first_window_id))
+    lines.push("created_at_us={sess.created_at_us}")
+    lines.push("last_activity_us={sess.last_activity_us}")
+    lines.push("stdout_path=" + _encode(sess.stdout_path))
+    lines.push("stderr_path=" + _encode(sess.stderr_path))
+    lines.push("console_log_path=" + _encode(sess.console_log_path))
+    lines.push("cdp_trace_path=" + _encode(sess.cdp_trace_path))
+    lines.join("\n") + "\n"
+
+fn _split_lines(s: text) -> [text]:
+    var out: [text] = []
+    var cur: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "\n":
+            out.push(cur.join(""))
+            cur = []
+        else:
+            if c != "\r":
+                cur.push(c)
+        i = i + 1
+    if cur.length() > 0:
+        out.push(cur.join(""))
+    out
+
+fn _split_kv(line: text) -> (text, text):
+    val idx = line.index_of("=")
+    if idx < 0: return (line, "")
+    val k = line.substring(0, idx)
+    val v = line.substring(idx + 1)
+    (k, v)
+
+fn _parse_int(s: text, fallback: i64) -> i64:
+    if s == "": return fallback
+    var result: i64 = 0
+    var sign: i64 = 1
+    val n = s.length()
+    var i = 0
+    if n > 0 and s.char_at(0) == "-":
+        sign = -1
+        i = 1
+    while i < n:
+        val c = s.char_at(i)
+        if c >= "0" and c <= "9":
+            result = result * 10 + (c.code_point_at(0) - 48)
+        else:
+            return fallback
+        i = i + 1
+    result * sign
+
+fn _deserialize(body: text) -> PlaySession:
+    var sess = empty_play_session()
+    val lines = _split_lines(body)
+    for line in lines:
+        if line == "": pass_do_nothing
+        else:
+            val (k, v_raw) = _split_kv(line)
+            match k:
+                case "id": sess.id = _decode(v_raw)
+                case "backend": sess.backend = _decode(v_raw)
+                case "state": sess.state = _decode(v_raw)
+                case "pid": sess.pid = _parse_int(v_raw, -1)
+                case "cwd": sess.cwd = _decode(v_raw)
+                case "executable_path": sess.executable_path = _decode(v_raw)
+                case "args": sess.args = _split_args(v_raw)
+                case "ws_url": sess.ws_url = _decode(v_raw)
+                case "http_url": sess.http_url = _decode(v_raw)
+                case "artifacts_dir": sess.artifacts_dir = _decode(v_raw)
+                case "first_window_id": sess.first_window_id = _decode(v_raw)
+                case "created_at_us": sess.created_at_us = _parse_int(v_raw, 0)
+                case "last_activity_us": sess.last_activity_us = _parse_int(v_raw, 0)
+                case "stdout_path": sess.stdout_path = _decode(v_raw)
+                case "stderr_path": sess.stderr_path = _decode(v_raw)
+                case "console_log_path": sess.console_log_path = _decode(v_raw)
+                case "cdp_trace_path": sess.cdp_trace_path = _decode(v_raw)
+                case _: pass_do_nothing
+    sess
+
+fn session_store_save(sess: PlaySession) -> bool:
+    session_store_init()
+    val path = _session_path(sess.id)
+    rt_file_write_text(path, _serialize(sess))
+
+fn session_store_load(session_id: text) -> PlaySession?:
+    val path = _session_path(session_id)
+    if not rt_file_exists(path):
+        return nil
+    val body = rt_file_read_text(path)
+    if body == "":
+        return nil
+    _deserialize(body)
+
+fn session_store_delete(session_id: text) -> bool:
+    val path = _session_path(session_id)
+    if rt_file_exists(path):
+        return rt_file_delete(path)
+    true
+
+fn session_store_list() -> [PlaySession]:
+    var out: [PlaySession] = []
+    if not rt_file_exists(SESSION_STORE_ROOT):
+        return out
+    val entries = rt_dir_list(SESSION_STORE_ROOT)
+    for name in entries:
+        if name.ends_with(".session"):
+            val path = "{SESSION_STORE_ROOT}/{name}"
+            if rt_file_exists(path):
+                val body = rt_file_read_text(path)
+                if body != "":
+                    out.push(_deserialize(body))
+    out

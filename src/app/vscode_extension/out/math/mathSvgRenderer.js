@@ -41,7 +41,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.latexToSvg = latexToSvg;
 exports.renderToSvgFile = renderToSvgFile;
-exports.renderSpacerSvgFile = renderSpacerSvgFile;
 exports.clearSvgCache = clearSvgCache;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
@@ -60,7 +59,6 @@ let initialized = false;
 const MATHJAX_EX_TO_EM = 0.45;
 const MAX_HEIGHT_EM = 3.0;
 const SVG_CACHE_VERSION = 'v2';
-const SVG_SPACER_CACHE_VERSION = 'v1';
 function ensureInitialized() {
     if (initialized) {
         return;
@@ -157,52 +155,6 @@ function renderToSvgFile(latex, cacheDir, foregroundColor = '#cccccc') {
     fs.writeFileSync(filePath, colored, 'utf8');
     fs.writeFileSync(metaPath, JSON.stringify({ heightEm, descentEm, widthEm }), 'utf8');
     return { uri: vscode.Uri.file(filePath), heightEm, descentEm, widthEm };
-}
-/**
- * Render a transparent spacer SVG to disk.
- *
- * This is used as a hidden attachment so the editor line box has a real image
- * with the desired height, which works better than relying on decoration
- * attachment height alone.
- */
-function renderSpacerSvgFile(cacheDir, heightEm, widthEm = 0.01) {
-    const normalizedHeight = Math.max(heightEm, 0.25);
-    const normalizedWidth = Math.max(widthEm, 0.01);
-    const hash = crypto.createHash('md5')
-        .update(`${SVG_SPACER_CACHE_VERSION}:${normalizedHeight.toFixed(3)}:${normalizedWidth.toFixed(3)}`)
-        .digest('hex')
-        .slice(0, 12);
-    const filePath = path.join(cacheDir, `spacer-${hash}.svg`);
-    const metaPath = filePath + '.meta';
-    if (fs.existsSync(filePath) && fs.existsSync(metaPath)) {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        return {
-            uri: vscode.Uri.file(filePath),
-            heightEm: meta.heightEm,
-            widthEm: meta.widthEm,
-        };
-    }
-    const spacerSvg = [
-        '<svg xmlns="http://www.w3.org/2000/svg"',
-        ` width="${normalizedWidth.toFixed(3)}em"`,
-        ` height="${normalizedHeight.toFixed(3)}em"`,
-        ' viewBox="0 0 1 1"',
-        ' preserveAspectRatio="none"',
-        ' focusable="false"',
-        ' aria-hidden="true">',
-        '<rect width="100%" height="100%" fill="transparent"/>',
-        '</svg>',
-    ].join('');
-    if (!fs.existsSync(cacheDir)) {
-        fs.mkdirSync(cacheDir, { recursive: true });
-    }
-    fs.writeFileSync(filePath, spacerSvg, 'utf8');
-    fs.writeFileSync(metaPath, JSON.stringify({ heightEm: normalizedHeight, widthEm: normalizedWidth }), 'utf8');
-    return {
-        uri: vscode.Uri.file(filePath),
-        heightEm: normalizedHeight,
-        widthEm: normalizedWidth,
-    };
 }
 /**
  * Clear the SVG cache directory.

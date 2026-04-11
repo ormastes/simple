@@ -7,7 +7,6 @@
 #   L:deprecated_if_let          — Replace `if let` with `if val`
 
 use std.common.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
-use std.common.tooling.easy_fix.rules_helpers.{for_each_line, get_cached_lines, get_cached_source}
 
 # ============================================================================
 # Rule 6: non_exhaustive_match
@@ -17,11 +16,7 @@ use std.common.tooling.easy_fix.rules_helpers.{for_each_line, get_cached_lines, 
 
 fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    var lines: [text] = []
-    if source == get_cached_source() and get_cached_lines().len() > 0:
-        lines = get_cached_lines()
-    else:
-        lines = source.split("\n")
+    var lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
     var in_match = false
@@ -98,19 +93,21 @@ fn _create_non_exhaustive_fix(file: String, after_line: Int, after_offset: Int, 
 # ============================================================================
 
 fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
+    var fixes: [EasyFix] = []
+    var lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
 
-        # Detect common misuses:
-        # "skip fn" should be "fn" with skip tag
-        # "async static fn" should be "static async fn"
-        # "pub fn" at wrong indent
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
 
-        if ctx.trimmed.starts_with("async static fn "):
-            val start = ctx.byte_offset + ctx.indent
-            val end = start + 16  # len("async static fn ")
+        if trimmed.starts_with("async static fn "):
+            val start = byte_offset + indent
+            val end = start + 16
             var fix = EasyFix.create(
-                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                id: "E:parser_contextual_keyword:{line_num}",
                 description: "reorder keywords: `static async fn`",
                 confidence: FixConfidence.Safe
             )
@@ -118,17 +115,17 @@ fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
                 file: file,
                 start: start,
                 end: end,
-                line: ctx.line_num,
-                column: ctx.indent + 1,
+                line: line_num,
+                column: indent + 1,
                 new_text: "static async fn "
             ))
-            line_fixes.push(fix)
+            fixes.push(fix)
 
-        if ctx.trimmed.starts_with("static pub fn "):
-            val start = ctx.byte_offset + ctx.indent
-            val end = start + 14  # len("static pub fn ")
+        if trimmed.starts_with("static pub fn "):
+            val start = byte_offset + indent
+            val end = start + 14
             var fix = EasyFix.create(
-                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                id: "E:parser_contextual_keyword:{line_num}",
                 description: "reorder keywords: `pub static fn`",
                 confidence: FixConfidence.Safe
             )
@@ -136,17 +133,17 @@ fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
                 file: file,
                 start: start,
                 end: end,
-                line: ctx.line_num,
-                column: ctx.indent + 1,
+                line: line_num,
+                column: indent + 1,
                 new_text: "pub static fn "
             ))
-            line_fixes.push(fix)
+            fixes.push(fix)
 
-        if ctx.trimmed.starts_with("pub async static fn "):
-            val start = ctx.byte_offset + ctx.indent
-            val end = start + 20  # len("pub async static fn ")
+        if trimmed.starts_with("pub async static fn "):
+            val start = byte_offset + indent
+            val end = start + 20
             var fix = EasyFix.create(
-                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                id: "E:parser_contextual_keyword:{line_num}",
                 description: "reorder keywords: `pub static async fn`",
                 confidence: FixConfidence.Safe
             )
@@ -154,14 +151,15 @@ fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
                 file: file,
                 start: start,
                 end: end,
-                line: ctx.line_num,
-                column: ctx.indent + 1,
+                line: line_num,
+                column: indent + 1,
                 new_text: "pub static async fn "
             ))
-            line_fixes.push(fix)
+            fixes.push(fix)
 
-        line_fixes
-    )
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
 
 # ============================================================================
 # Rule 10: deprecated_if_let
@@ -170,33 +168,77 @@ fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 
 fn check_deprecated_if_let(source: String, file: String) -> [EasyFix]:
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
+    var fixes: [EasyFix] = []
+    var lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
 
-        for keyword in ["if let ", "while let ", "elif let "]:
-            val idx = ctx.trimmed.find(keyword)
-            if idx.? :
-                val pos = idx.unwrap()
-                # Calculate byte position of "let" within the keyword match
-                val keyword_prefix_len = keyword.len() - 4  # length before "let "
-                val let_start = ctx.byte_offset + ctx.indent + pos + keyword_prefix_len
-                val let_end = let_start + 3  # "let" is 3 chars
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
 
-                var fix = EasyFix.create(
-                    id: "L:deprecated_if_let:{ctx.line_num}",
-                    description: "replace deprecated `let` with `val` in pattern binding",
-                    confidence: FixConfidence.Safe
-                )
-                fix.add_replacement(Replacement.create(
-                    file: file,
-                    start: let_start,
-                    end: let_end,
-                    line: ctx.line_num,
-                    column: ctx.indent + pos + keyword_prefix_len + 1,
-                    new_text: "val"
-                ))
-                line_fixes.push(fix)
+        val idx_if = trimmed.find("if let ")
+        if idx_if >= 0:
+            val keyword_prefix_len = 3  # "if " is 3 chars
+            val let_start = byte_offset + indent + idx_if + keyword_prefix_len
+            val let_end = let_start + 3
+            var fix = EasyFix.create(
+                id: "L:deprecated_if_let:{line_num}",
+                description: "replace deprecated `let` with `val` in pattern binding",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: let_start,
+                end: let_end,
+                line: line_num,
+                column: indent + idx_if + keyword_prefix_len + 1,
+                new_text: "val"
+            ))
+            fixes.push(fix)
 
-        line_fixes
-    )
+        val idx_while = trimmed.find("while let ")
+        if idx_while >= 0:
+            val keyword_prefix_len = 6  # "while " is 6 chars
+            val let_start = byte_offset + indent + idx_while + keyword_prefix_len
+            val let_end = let_start + 3
+            var fix = EasyFix.create(
+                id: "L:deprecated_if_let:{line_num}",
+                description: "replace deprecated `let` with `val` in pattern binding",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: let_start,
+                end: let_end,
+                line: line_num,
+                column: indent + idx_while + keyword_prefix_len + 1,
+                new_text: "val"
+            ))
+            fixes.push(fix)
+
+        val idx_elif = trimmed.find("elif let ")
+        if idx_elif >= 0:
+            val keyword_prefix_len = 5  # "elif " is 5 chars
+            val let_start = byte_offset + indent + idx_elif + keyword_prefix_len
+            val let_end = let_start + 3
+            var fix = EasyFix.create(
+                id: "L:deprecated_if_let:{line_num}",
+                description: "replace deprecated `let` with `val` in pattern binding",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: let_start,
+                end: let_end,
+                line: line_num,
+                column: indent + idx_elif + keyword_prefix_len + 1,
+                new_text: "val"
+            ))
+            fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
 

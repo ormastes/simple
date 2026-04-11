@@ -1,0 +1,470 @@
+@allow(primitive_api)
+# simple play — CLI entry point
+#
+# Subcommands:
+#   simple play run <target>          Phase 1 orchestrator: shell out to
+#                                     npm/playwright/vscode-test, writes
+#                                     structured results under
+#                                     doc/08_tracking/test/play/<ts>/.
+#   simple play launch <app>          Phase 2: spawn Electron with CDP,
+#                                     print session id to stdout.
+#   simple play click <sid> <sel>     Phase 2 session action.
+#   simple play fill <sid> <sel> <v>
+#   simple play type <sid> <sel> <v>
+#   simple play press <sid> <sel> <k>
+#   simple play screenshot <sid> [-o path]
+#   simple play evaluate <sid> <js>
+#   simple play close <sid>
+#   simple play wm-screenshot <path>  Native WM shell-out backend.
+#   simple play wm-click <x> <y>
+#   simple play wm-type <text>
+#   simple play wm-list               List native OS windows.
+#   simple play last-trace [sid]      Dump the last cdp.log entry.
+#
+# All subcommands return JSON on stdout (single line) so Claude can parse
+# results without having to understand human-formatted output.
+
+use app.io.cli_ops.{cli_get_args}
+use std.log.{error}
+use app.play.orchestrator.{orchestrator_run}
+use app.play.session_store.{
+    session_store_init, session_store_save, session_store_load,
+    session_store_delete, session_store_list
+}
+use std.play.types.*
+use std.play.launcher.{launcher_launch}
+use std.play.cdp.client.{CdpClient}
+use std.play.cdp.session.{CdpSession}
+use std.play.electron_application.{ElectronApplication}
+use std.play.page.{Page}
+use std.play.trace.{trace_init, trace_read_cdp}
+use std.play.wm.mod.{
+    wm_screenshot, wm_list_windows, wm_click, wm_type_text, wm_press, wm_platform
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+fn get_cli_args() -> [text]:
+    val all_args = cli_get_args()
+    var args = []
+    var start_idx = 1
+    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
+        start_idx = 2
+    elif all_args.len() > 1 and all_args[1] == "play":
+        start_idx = 2
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+fn print_help():
+    print "simple play — Playwright-compatible UI automation"
+    print ""
+    print "Usage:"
+    print "  simple play run <dir>                  Orchestrate npm/playwright tests under Xvfb"
+    print "  simple play launch <dir>               Launch an Electron app, print session id"
+    print "  simple play click <sid> <selector>     Click an element in a session"
+    print "  simple play fill <sid> <sel> <value>   Fill a form field"
+    print "  simple play type <sid> <sel> <text>    Type text into a field"
+    print "  simple play press <sid> <sel> <key>    Press a key in a field"
+    print "  simple play screenshot <sid> [-o path] Take a screenshot"
+    print "  simple play evaluate <sid> <js>        Evaluate JS in the page"
+    print "  simple play close <sid>                Close the session"
+    print "  simple play wm-screenshot <path>       Native desktop screenshot"
+    print "  simple play wm-list                    List native OS windows"
+    print "  simple play wm-click <x> <y>           Native desktop click"
+    print "  simple play wm-type <text>             Native keyboard type"
+    print "  simple play last-trace <sid>           Dump CDP trace log"
+    print ""
+    print "All subcommands write single-line JSON results to stdout."
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn emit_json(payload: text):
+    print payload
+
+fn ok_json(body: text):
+    print "{{\"ok\":true,{body}}}"
+
+fn err_json(code: text, message: text):
+    print "{{\"ok\":false,\"code\":\"{code}\",\"message\":\"{_json_escape(message)}\"}}"
+
+fn _json_escape(s: text) -> text:
+    var out: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "\"":
+            out.push("\\\"")
+        else:
+            if c == "\\":
+                out.push("\\\\")
+            else:
+                if c == "\n":
+                    out.push("\\n")
+                else:
+                    if c == "\r":
+                        out.push("\\r")
+                    else:
+                        out.push(c)
+        i = i + 1
+    out.join("")
+
+# ============================================================================
+# Subcommand handlers
+# ============================================================================
+
+fn handle_run(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "simple play run requires a target directory")
+        return 1
+    val target = rest[0]
+    val result = orchestrator_run(target, rest)
+    match result:
+        case Ok(summary):
+            emit_json(summary)
+            return 0
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_launch(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "simple play launch requires an app path")
+        return 1
+    var opts = default_launch_options()
+    opts.args = rest
+    val app_res = ElectronApplication.launch(opts)
+    match app_res:
+        case Ok(app):
+            # First window attach
+            val win_res = app.first_window()
+            val window_id = match win_res:
+                case Ok(p): p.window_id
+                case Err(_): ""
+            session_store_init()
+            session_store_save(app.session)
+            val sid = app.session.id
+            val art = app.session.artifacts_dir
+            val ws = app.session.ws_url
+            ok_json("\"session_id\":\"{sid}\",\"artifacts_dir\":\"{art}\",\"ws_url\":\"{ws}\",\"first_window_id\":\"{window_id}\"")
+            return 0
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn _reattach(session_id: text) -> Result<(CdpClient, Page, PlaySession), PlayError>:
+    val sess_opt = session_store_load(session_id)
+    match sess_opt:
+        case Some(sess):
+            val client = CdpClient.connect(sess.ws_url, 10000)?
+            val cdp_sess_res = CdpSession.attach(client, sess.first_window_id)
+            val cdp_sess = match cdp_sess_res:
+                case Ok(s): s
+                case Err(e): return Err(e)
+            cdp_sess.enable()?
+            val page = Page.from_cdp(cdp_sess, sess.first_window_id, sess.artifacts_dir)
+            return Ok((client, page, sess))
+        case nil:
+            return Err(play_error("NOT_FOUND", "session not found: " + session_id))
+
+fn handle_click(rest: [text]) -> i64:
+    if rest.length() < 2:
+        err_json("INVALID_ARGUMENT", "click <session_id> <selector>")
+        return 1
+    val sid = rest[0]
+    val selector = rest[1]
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.click(selector)
+            client.close()
+            match action:
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_fill(rest: [text]) -> i64:
+    if rest.length() < 3:
+        err_json("INVALID_ARGUMENT", "fill <session_id> <selector> <value>")
+        return 1
+    val sid = rest[0]
+    val selector = rest[1]
+    val value = rest[2]
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.fill(selector, value)
+            client.close()
+            match action:
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_type(rest: [text]) -> i64:
+    if rest.length() < 3:
+        err_json("INVALID_ARGUMENT", "type <session_id> <selector> <text>")
+        return 1
+    val sid = rest[0]
+    val selector = rest[1]
+    val value = rest[2]
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.type_text(selector, value)
+            client.close()
+            match action:
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_press(rest: [text]) -> i64:
+    if rest.length() < 3:
+        err_json("INVALID_ARGUMENT", "press <session_id> <selector> <key>")
+        return 1
+    val sid = rest[0]
+    val selector = rest[1]
+    val key = rest[2]
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.press(selector, key)
+            client.close()
+            match action:
+                case Ok(_):
+                    ok_json("\"session_id\":\"{sid}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_screenshot(rest: [text]) -> i64:
+    if rest.length() < 1:
+        err_json("INVALID_ARGUMENT", "screenshot <session_id> [-o path]")
+        return 1
+    val sid = rest[0]
+    var path = ""
+    var i = 1
+    while i < rest.length():
+        if rest[i] == "-o" and i + 1 < rest.length():
+            path = rest[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.screenshot(path)
+            client.close()
+            match action:
+                case Ok(final_path):
+                    ok_json("\"session_id\":\"{sid}\",\"path\":\"{_json_escape(final_path)}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_evaluate(rest: [text]) -> i64:
+    if rest.length() < 2:
+        err_json("INVALID_ARGUMENT", "evaluate <session_id> <js>")
+        return 1
+    val sid = rest[0]
+    val js = rest[1]
+    val r = _reattach(sid)
+    match r:
+        case Ok(t):
+            val (client, page, sess) = t
+            val action = page.evaluate(js)
+            client.close()
+            match action:
+                case Ok(body):
+                    ok_json("\"session_id\":\"{sid}\",\"result\":\"{_json_escape(body)}\"")
+                    return 0
+                case Err(e):
+                    err_json(e.code, e.message)
+                    return 1
+        case Err(e):
+            err_json(e.code, e.message)
+            return 1
+
+fn handle_close(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "close <session_id>")
+        return 1
+    val sid = rest[0]
+    val sess_opt = session_store_load(sid)
+    match sess_opt:
+        case Some(sess):
+            session_store_delete(sid)
+            ok_json("\"session_id\":\"{sid}\"")
+            0
+        case nil:
+            err_json("NOT_FOUND", "session not found: " + sid)
+            1
+
+fn handle_last_trace(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "last-trace <session_id>")
+        return 1
+    val sid = rest[0]
+    val log = trace_read_cdp(sid)
+    ok_json("\"session_id\":\"{sid}\",\"log\":\"{_json_escape(log)}\"")
+    0
+
+# ============================================================================
+# Native WM subcommands
+# ============================================================================
+
+fn handle_wm_screenshot(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "wm-screenshot <path>")
+        return 1
+    val path = rest[0]
+    match wm_screenshot(path):
+        case Ok(p):
+            ok_json("\"path\":\"{_json_escape(p)}\",\"platform\":\"{wm_platform()}\"")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_wm_list(rest: [text]) -> i64:
+    match wm_list_windows():
+        case Ok(wins):
+            var parts: [text] = []
+            for w in wins:
+                parts.push("{{\"id\":\"{w.window_id}\",\"title\":\"{_json_escape(w.title)}\"}}")
+            val arr = "[" + parts.join(",") + "]"
+            ok_json("\"platform\":\"{wm_platform()}\",\"windows\":{arr}")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_wm_click(rest: [text]) -> i64:
+    if rest.length() < 2:
+        err_json("INVALID_ARGUMENT", "wm-click <x> <y>")
+        return 1
+    val x = int(rest[0])
+    val y = int(rest[1])
+    match wm_click(x, y):
+        case Ok(_):
+            ok_json("\"x\":{x},\"y\":{y}")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_wm_type(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "wm-type <text>")
+        return 1
+    val text_value = rest[0]
+    match wm_type_text(text_value):
+        case Ok(_):
+            ok_json("\"length\":{text_value.length()}")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+fn handle_wm_press(rest: [text]) -> i64:
+    if rest.length() == 0:
+        err_json("INVALID_ARGUMENT", "wm-press <key>")
+        return 1
+    val key = rest[0]
+    match wm_press(key):
+        case Ok(_):
+            ok_json("\"key\":\"{key}\"")
+            0
+        case Err(e):
+            err_json(e.code, e.message)
+            1
+
+# ============================================================================
+# Main dispatcher
+# ============================================================================
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    if args.len() == 0:
+        print_help()
+        return 0
+
+    val subcommand = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+
+    match subcommand:
+        case "run":
+            handle_run(rest)
+        case "launch":
+            handle_launch(rest)
+        case "click":
+            handle_click(rest)
+        case "fill":
+            handle_fill(rest)
+        case "type":
+            handle_type(rest)
+        case "press":
+            handle_press(rest)
+        case "screenshot":
+            handle_screenshot(rest)
+        case "evaluate" | "eval":
+            handle_evaluate(rest)
+        case "close":
+            handle_close(rest)
+        case "last-trace":
+            handle_last_trace(rest)
+        case "wm-screenshot":
+            handle_wm_screenshot(rest)
+        case "wm-list":
+            handle_wm_list(rest)
+        case "wm-click":
+            handle_wm_click(rest)
+        case "wm-type":
+            handle_wm_type(rest)
+        case "wm-press":
+            handle_wm_press(rest)
+        case "-h" | "--help" | "help":
+            print_help()
+            0
+        case _:
+            error("play", "unknown subcommand '{subcommand}'")
+            print ""
+            print_help()
+            1

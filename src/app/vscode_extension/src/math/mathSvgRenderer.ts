@@ -23,9 +23,11 @@ let mjDocument: any;
 let initialized = false;
 
 const MATHJAX_EX_TO_EM = 0.45;
+// HEIGHT FIT PATH:
+// This is a renderer-side clamp for raw MathJax output before it reaches the
+// decoration provider. The provider may scale further for inline fitting.
 const MAX_HEIGHT_EM = 3.0;
 const SVG_CACHE_VERSION = 'v2';
-const SVG_SPACER_CACHE_VERSION = 'v1';
 
 function ensureInitialized(): void {
     if (initialized) { return; }
@@ -61,7 +63,7 @@ export function latexToSvg(latex: string): string | undefined {
     }
 }
 
-/** Result of SVG rendering: file URI + height info for dynamic margin */
+/** Result of SVG rendering: file URI + normalized em metrics for inline fitting. */
 export interface SvgRenderResult {
     uri: vscode.Uri;
     /** SVG height in em units after normalization */
@@ -69,13 +71,6 @@ export interface SvgRenderResult {
     /** Descent below baseline in em units after normalization */
     descentEm: number;
     /** SVG width in em units after normalization */
-    widthEm: number;
-}
-
-/** Result of rendering a transparent spacer SVG used to influence line height. */
-export interface SvgSpacerRenderResult {
-    uri: vscode.Uri;
-    heightEm: number;
     widthEm: number;
 }
 
@@ -133,6 +128,8 @@ export function renderToSvgFile(
     let widthEm = exToEm(widthEx);
     let descentEm = exToEm(descentEx);
 
+    // HEIGHT FIT PATH:
+    // Normalize oversized MathJax SVGs before the editor decoration path sees them.
     if (heightEm > MAX_HEIGHT_EM) {
         const scale = MAX_HEIGHT_EM / heightEm;
         heightEm = MAX_HEIGHT_EM;
@@ -156,61 +153,6 @@ export function renderToSvgFile(
     fs.writeFileSync(filePath, colored, 'utf8');
     fs.writeFileSync(metaPath, JSON.stringify({ heightEm, descentEm, widthEm }), 'utf8');
     return { uri: vscode.Uri.file(filePath), heightEm, descentEm, widthEm };
-}
-
-/**
- * Render a transparent spacer SVG to disk.
- *
- * This is used as a hidden attachment so the editor line box has a real image
- * with the desired height, which works better than relying on decoration
- * attachment height alone.
- */
-export function renderSpacerSvgFile(
-    cacheDir: string,
-    heightEm: number,
-    widthEm: number = 0.01,
-): SvgSpacerRenderResult {
-    const normalizedHeight = Math.max(heightEm, 0.25);
-    const normalizedWidth = Math.max(widthEm, 0.01);
-    const hash = crypto.createHash('md5')
-        .update(`${SVG_SPACER_CACHE_VERSION}:${normalizedHeight.toFixed(3)}:${normalizedWidth.toFixed(3)}`)
-        .digest('hex')
-        .slice(0, 12);
-    const filePath = path.join(cacheDir, `spacer-${hash}.svg`);
-    const metaPath = filePath + '.meta';
-
-    if (fs.existsSync(filePath) && fs.existsSync(metaPath)) {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        return {
-            uri: vscode.Uri.file(filePath),
-            heightEm: meta.heightEm,
-            widthEm: meta.widthEm,
-        };
-    }
-
-    const spacerSvg = [
-        '<svg xmlns="http://www.w3.org/2000/svg"',
-        ` width="${normalizedWidth.toFixed(3)}em"`,
-        ` height="${normalizedHeight.toFixed(3)}em"`,
-        ' viewBox="0 0 1 1"',
-        ' preserveAspectRatio="none"',
-        ' focusable="false"',
-        ' aria-hidden="true">',
-        '<rect width="100%" height="100%" fill="transparent"/>',
-        '</svg>',
-    ].join('');
-
-    if (!fs.existsSync(cacheDir)) {
-        fs.mkdirSync(cacheDir, { recursive: true });
-    }
-
-    fs.writeFileSync(filePath, spacerSvg, 'utf8');
-    fs.writeFileSync(metaPath, JSON.stringify({ heightEm: normalizedHeight, widthEm: normalizedWidth }), 'utf8');
-    return {
-        uri: vscode.Uri.file(filePath),
-        heightEm: normalizedHeight,
-        widthEm: normalizedWidth,
-    };
 }
 
 /**

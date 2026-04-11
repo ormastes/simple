@@ -118,13 +118,14 @@ function replaceRangeInText(text, range, replacement) {
     const end = Math.max(start, Math.min(text.length, offsetAtText(text, range.end)));
     return `${text.slice(0, start)}${replacement}${text.slice(end)}`;
 }
-function buildMathSyncPanelHtml(state, katexCssUri) {
+function buildMathSyncPanelHtml(state, katexCssUri, cspSource) {
     const nonce = crypto.randomBytes(16).toString('base64');
     const sourceValue = escapeForHtml(state.blockText);
     const prettyValue = escapeForHtml(state.pretty);
     const katexStyleLink = katexCssUri ? `<link rel="stylesheet" href="${katexCssUri}">` : '';
-    const fontSrc = katexCssUri ? `${katexCssUri.replace(/\/[^/]*$/, '/')}*` : "'none'";
-    const styleSrc = katexCssUri ? `${katexCssUri} 'unsafe-inline'` : "'unsafe-inline'";
+    const resourceSource = cspSource ?? "'none'";
+    const fontSrc = katexCssUri ? resourceSource : "'none'";
+    const styleSrc = katexCssUri ? `${resourceSource} 'unsafe-inline'` : "'unsafe-inline'";
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -458,7 +459,7 @@ class MathSyncPanel {
             selectionStart: 0,
             selectionEnd: 0,
             hasContent: false,
-        }, this.katexCssUri);
+        }, this.katexCssUri, this.panel.webview.cspSource);
         this.disposables.push(this.panel.webview.onDidReceiveMessage((message) => {
             void this.handleMessage(message);
         }));

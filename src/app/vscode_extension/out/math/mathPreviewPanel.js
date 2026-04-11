@@ -89,7 +89,7 @@ function renderKatex(latex) {
  * The `katexCssUri` parameter is a webview URI pointing to the bundled katex.min.css.
  * When called without a URI (e.g. in tests), falls back to inline Unicode preview.
  */
-function buildMathPreviewHtml(latex, source, katexCssUri) {
+function buildMathPreviewHtml(latex, source, katexCssUri, cspSource) {
     const hasContent = Boolean(latex || source);
     const escapedSource = escapeForHtml(source);
     const katexHtml = latex ? renderKatex(latex) : '';
@@ -99,8 +99,9 @@ function buildMathPreviewHtml(latex, source, katexCssUri) {
         ? `<link rel="stylesheet" href="${katexCssUri}">`
         : '';
     // CSP: allow KaTeX styles from extension resources, inline styles, and KaTeX fonts
-    const fontSrc = katexCssUri ? `${katexCssUri.replace(/\/[^/]*$/, '/')}*` : "'none'";
-    const styleSrc = katexCssUri ? `${katexCssUri} 'unsafe-inline'` : "'unsafe-inline'";
+    const resourceSource = cspSource ?? "'none'";
+    const fontSrc = katexCssUri ? resourceSource : "'none'";
+    const styleSrc = katexCssUri ? `${resourceSource} 'unsafe-inline'` : "'unsafe-inline'";
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -344,7 +345,7 @@ class MathPreviewPanel {
      * Uses bundled KaTeX for high-quality math rendering (offline-safe).
      */
     getHtmlContent(latex, source) {
-        return buildMathPreviewHtml(latex, source, this.getKatexCssUri());
+        return buildMathPreviewHtml(latex, source, this.getKatexCssUri(), this.panel.webview.cspSource);
     }
     /**
      * Dispose of all resources.

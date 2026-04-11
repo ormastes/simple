@@ -1,0 +1,254 @@
+@allow(primitive_api)
+# std.play.launcher — Electron / Chromium launcher
+#
+# Spawns the target binary with --remote-debugging-port=0 and watches the
+# stderr output for the `DevTools listening on ws://...` line the browser
+# prints once the CDP server is ready. Once the URL is captured we hand
+# control to CdpClient.
+#
+# Flow:
+#   1. Resolve executable (option's executable_path, or first positional arg
+#      as an Electron app path → `npx electron <path>`).
+#   2. Optionally wrap in xvfb-run on Linux when DISPLAY is unset.
+#   3. Spawn async, recording stdout/stderr to artifact files.
+#   4. Tail the stderr file until we see `DevTools listening on ws://...`
+#      or until the launch timeout expires.
+#   5. Parse the ws URL; probe http://.../json/version to confirm; optionally
+#      switch to the browser-level endpoint from /json/version.
+#   6. Return a PlaySession with backend=cdp and ws_url populated.
+
+use std.play.types.*
+use std.play.xvfb.{wrap_cmd}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_get(key: text) -> text
+
+# Where artifacts land. Everything under doc/08_tracking/test/play/ is
+# generated output; do not commit it.
+val PLAY_ARTIFACTS_ROOT = "doc/08_tracking/test/play"
+
+fn launcher_artifacts_dir(session_id: text) -> text:
+    val ts = rt_time_now_unix_micros()
+    val path = "{PLAY_ARTIFACTS_ROOT}/{session_id}"
+    rt_mkdir_p(path)
+    path
+
+# ============================================================================
+# Stderr scrape for "DevTools listening on" line
+# ============================================================================
+
+val DEVTOOLS_MARKER = "DevTools listening on ws://"
+
+fn extract_ws_url_from_text(log: text) -> text:
+    val idx = log.index_of(DEVTOOLS_MARKER)
+    if idx < 0: return ""
+    val start = idx + "DevTools listening on ".length()
+    var i = start
+    val n = log.length()
+    var parts: [text] = []
+    while i < n:
+        val c = log.char_at(i)
+        if c == "\n" or c == "\r" or c == " " or c == "\t":
+            i = n
+        else:
+            parts.push(c)
+            i = i + 1
+    parts.join("")
+
+fn poll_for_ws_url(stderr_path: text, timeout_ms: i64) -> text:
+    val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+    while rt_time_now_unix_micros() < deadline:
+        if rt_file_exists(stderr_path):
+            val contents = rt_file_read_text(stderr_path)
+            val url = extract_ws_url_from_text(contents)
+            if url != "": return url
+    ""
+
+# ============================================================================
+# Launcher entry point
+# ============================================================================
+
+fn launcher_next_session_id() -> text:
+    val t = rt_time_now_unix_micros()
+    "play-" + str(t)
+
+fn launcher_resolve_executable(opts: LaunchOptions) -> (text, [text]):
+    """Figure out the binary + args to spawn.
+
+    Order:
+      1. opts.executable_path if set — use directly, append opts.args.
+      2. First arg is a directory containing package.json → `npx electron <dir>`.
+      3. First arg looks like a binary → run it as-is.
+      4. Otherwise fall back to `npx electron .`
+    """
+    if opts.executable_path != "":
+        var args = opts.args
+        return (opts.executable_path, args)
+
+    if opts.args.length() == 0:
+        return ("npx", ["electron", "."])
+
+    val first = opts.args[0]
+    if rt_file_exists(first + "/package.json"):
+        var args: [text] = ["electron"]
+        for a in opts.args:
+            args.push(a)
+        return ("npx", args)
+
+    (first, _slice_from(opts.args, 1))
+
+fn _slice_from(xs: [text], start: i64) -> [text]:
+    var out: [text] = []
+    var i = start
+    while i < xs.length():
+        out.push(xs[i])
+        i = i + 1
+    out
+
+fn launcher_build_args(base_args: [text], debug_port: i64) -> [text]:
+    """Append --remote-debugging-port=<n> if not already present."""
+    var has_flag = false
+    for a in base_args:
+        if a.contains("--remote-debugging-port"):
+            has_flag = true
+    var out: [text] = []
+    for a in base_args:
+        out.push(a)
+    if not has_flag:
+        out.push("--remote-debugging-port={debug_port}")
+    out
+
+fn launcher_launch(opts: LaunchOptions) -> Result<PlaySession, PlayError>:
+    val sid = launcher_next_session_id()
+    val art_dir = launcher_artifacts_dir(sid)
+
+    val (raw_cmd, raw_args) = launcher_resolve_executable(opts)
+    val port = if opts.remote_debugging_port > 0: opts.remote_debugging_port else: 0
+    val with_debug = launcher_build_args(raw_args, port)
+
+    # Xvfb wrap on Linux
+    val (cmd, wrapped_args) = if opts.xvfb:
+        wrap_cmd(raw_cmd, with_debug)
+    else:
+        (raw_cmd, with_debug)
+
+    val stdout_path = "{art_dir}/stdout.log"
+    val stderr_path = "{art_dir}/stderr.log"
+    val cdp_trace_path = "{art_dir}/cdp.log"
+    val console_path = "{art_dir}/console.log"
+
+    # The native runtime's rt_process_spawn_async does not redirect stdio
+    # to files; we work around by using a shell invocation that redirects.
+    var shell_cmd = cmd
+    var shell_args: [text] = []
+    for a in wrapped_args:
+        shell_args.push(a)
+    shell_args.push("1>" + stdout_path)
+    shell_args.push("2>" + stderr_path)
+
+    val pid = rt_process_spawn_async("sh", ["-c", _join_shell(shell_cmd, shell_args)])
+    if pid <= 0:
+        return Err(play_error(ERR_LAUNCH_FAILED, "failed to spawn: " + shell_cmd))
+
+    # Wait for DevTools URL
+    val timeout_ms = if opts.timeout_ms > 0: opts.timeout_ms else: DEFAULT_LAUNCH_TIMEOUT_MS
+    val ws_url = poll_for_ws_url(stderr_path, timeout_ms)
+    if ws_url == "":
+        rt_process_kill(pid)
+        return Err(play_error_with_detail(ERR_LAUNCH_FAILED, "timed out waiting for DevTools URL", stderr_path))
+
+    # Probe /json/version for the browser-level endpoint (optional)
+    val browser_ws = probe_browser_ws(ws_url)
+    val final_ws = if browser_ws != "": browser_ws else: ws_url
+
+    val now = rt_time_now_unix_micros()
+    val sess = PlaySession(
+        id: sid,
+        backend: BACKEND_CDP,
+        state: STATE_READY,
+        pid: pid,
+        cwd: opts.cwd,
+        executable_path: cmd,
+        args: wrapped_args,
+        ws_url: final_ws,
+        http_url: "",
+        artifacts_dir: art_dir,
+        first_window_id: "",
+        windows: [],
+        created_at_us: now,
+        last_activity_us: now,
+        stdout_path: stdout_path,
+        stderr_path: stderr_path,
+        console_log_path: console_path,
+        cdp_trace_path: cdp_trace_path
+    )
+    Ok(sess)
+
+fn _join_shell(cmd: text, args: [text]) -> text:
+    var parts: [text] = [_shell_quote(cmd)]
+    for a in args:
+        parts.push(_shell_quote(a))
+    parts.join(" ")
+
+fn _shell_quote(s: text) -> text:
+    if s.starts_with("1>") or s.starts_with("2>") or s.starts_with(">"):
+        return s
+    if s.contains(" ") or s.contains("\"") or s.contains("'"):
+        return "'" + _sq_escape(s) + "'"
+    s
+
+fn _sq_escape(s: text) -> text:
+    var out: [text] = []
+    val n = s.length()
+    var i = 0
+    while i < n:
+        val c = s.char_at(i)
+        if c == "'":
+            out.push("'\\''")
+        else:
+            out.push(c)
+        i = i + 1
+    out.join("")
+
+fn probe_browser_ws(ws_url: text) -> text:
+    """Query /json/version to find the browser-level webSocketDebuggerUrl."""
+    # Extract host:port from ws://host:port/path
+    if not ws_url.starts_with("ws://"):
+        return ""
+    val rest = ws_url.substring(5)
+    val slash = rest.index_of("/")
+    val host_port = if slash >= 0: rest.substring(0, slash) else: rest
+    val url = "http://" + host_port + "/json/version"
+    val result = rt_process_run("curl", ["-s", "--max-time", "5", url])
+    if result.2 != 0: return ""
+    val body = result.0
+    val key = "\"webSocketDebuggerUrl\":"
+    val idx = body.index_of(key)
+    if idx < 0: return ""
+    var i = idx + key.length()
+    val n = body.length()
+    while i < n and body.char_at(i) == " ":
+        i = i + 1
+    if i >= n or body.char_at(i) != "\"":
+        return ""
+    i = i + 1
+    var parts: [text] = []
+    while i < n:
+        val c = body.char_at(i)
+        if c == "\"": return parts.join("")
+        parts.push(c)
+        i = i + 1
+    ""
+
+fn launcher_kill(session: PlaySession) -> bool:
+    if session.pid > 0 and rt_process_is_running(session.pid):
+        rt_process_kill(session.pid)
+    true

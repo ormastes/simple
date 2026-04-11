@@ -111,13 +111,18 @@ export function replaceRangeInText(text: string, range: vscode.Range, replacemen
     return `${text.slice(0, start)}${replacement}${text.slice(end)}`;
 }
 
-export function buildMathSyncPanelHtml(state: MathSyncPanelState, katexCssUri?: string): string {
+export function buildMathSyncPanelHtml(
+    state: MathSyncPanelState,
+    katexCssUri?: string,
+    cspSource?: string,
+): string {
     const nonce = crypto.randomBytes(16).toString('base64');
     const sourceValue = escapeForHtml(state.blockText);
     const prettyValue = escapeForHtml(state.pretty);
     const katexStyleLink = katexCssUri ? `<link rel="stylesheet" href="${katexCssUri}">` : '';
-    const fontSrc = katexCssUri ? `${katexCssUri.replace(/\/[^/]*$/, '/')}*` : "'none'";
-    const styleSrc = katexCssUri ? `${katexCssUri} 'unsafe-inline'` : "'unsafe-inline'";
+    const resourceSource = cspSource ?? "'none'";
+    const fontSrc = katexCssUri ? resourceSource : "'none'";
+    const styleSrc = katexCssUri ? `${resourceSource} 'unsafe-inline'` : "'unsafe-inline'";
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -482,7 +487,7 @@ export class MathSyncPanel implements vscode.Disposable {
             selectionStart: 0,
             selectionEnd: 0,
             hasContent: false,
-        }, this.katexCssUri);
+        }, this.katexCssUri, this.panel.webview.cspSource);
 
         this.disposables.push(
             this.panel.webview.onDidReceiveMessage((message: MathSyncPanelMessage) => {

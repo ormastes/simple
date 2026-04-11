@@ -37,10 +37,9 @@ export interface MathBlockRange {
 export interface SvgDecorationLayout {
     height: string;
     width: string;
-    spacerHeight: string;
     verticalAlign: string;
-    boostApplied: boolean;
-    layoutScale: number;
+    fitApplied: boolean;
+    inlineScale: number;
     debugMessage: string;
 }
 export declare function formatSvgDecorationLayoutLog(content: string, layout: SvgDecorationLayout): string;

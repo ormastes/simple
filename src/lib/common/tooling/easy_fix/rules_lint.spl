@@ -66,10 +66,7 @@ fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 
 fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]:
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
-        line_fixes
-    )
+    []
 
 # ============================================================================
 # Rule 3: resource_leak
@@ -78,29 +75,33 @@ fn check_unnamed_duplicate_typed_args(source: String, file: String) -> [EasyFix]
 # ============================================================================
 
 fn check_resource_leak(source: String, file: String) -> [EasyFix]:
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
+    var fixes: [EasyFix] = []
+    var lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+        val indent = line.len() - trimmed.len()
 
         # Detect val x = open(...) or val x = connect(...) not inside with
-        val is_resource_open = ctx.trimmed.contains("= open(") or ctx.trimmed.contains("= connect(") or ctx.trimmed.contains("= File.open(")
-        if is_resource_open and ctx.trimmed.starts_with("val ") and not ctx.trimmed.starts_with("with"):
-            # Check previous lines for `with` block context (simple heuristic)
-
-            # Extract variable name and expression
-            val eq_pos = ctx.trimmed.find("=") ?? -1
+        val is_resource_open = trimmed.contains("= open(") or trimmed.contains("= connect(") or trimmed.contains("= File.open(")
+        if is_resource_open and trimmed.starts_with("val ") and not trimmed.starts_with("with"):
+            val eq_pos = trimmed.find("=")
             if eq_pos > 4:
-                val var_name = ctx.trimmed.slice(4, eq_pos).trim()
-                val expr = ctx.trimmed.slice(eq_pos + 1).trim()
+                val var_name = trimmed.slice(4, eq_pos).trim()
+                val expr = trimmed.slice(eq_pos + 1).trim()
 
-                val start = ctx.byte_offset + ctx.indent
-                val end = ctx.byte_offset + ctx.line.len()
+                val start = byte_offset + indent
+                val end = byte_offset + line.len()
 
-                val spaces = " ".repeat(ctx.indent)
-                val inner_spaces = " ".repeat(ctx.indent + 4)
+                val spaces = " ".repeat(indent)
+                val inner_spaces = " ".repeat(indent + 4)
                 val new_text = "{spaces}with {var_name} = {expr}:\n{inner_spaces}# TODO: use {var_name} here"
 
                 var fix = EasyFix.create(
-                    id: "L:resource_leak:{ctx.line_num}",
+                    id: "L:resource_leak:{line_num}",
                     description: "wrap resource in `with` block to ensure cleanup",
                     confidence: FixConfidence.Uncertain
                 )
@@ -108,14 +109,15 @@ fn check_resource_leak(source: String, file: String) -> [EasyFix]:
                     file: file,
                     start: start,
                     end: end,
-                    line: ctx.line_num,
-                    column: ctx.indent + 1,
+                    line: line_num,
+                    column: indent + 1,
                     new_text: new_text
                 ))
-                line_fixes.push(fix)
+                fixes.push(fix)
 
-        line_fixes
-    )
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
 
 # ============================================================================
 # Rule 4: sspec_missing_docstrings
@@ -246,10 +248,11 @@ fn check_sspec_manual_assertions(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 
 # Trivial return values — text patterns for single-line bodies
-val _TRIVIAL_BODIES = ["0", "\"\"", "false", "nil", "[]", "()", "true",
-                       "return 0", "return \"\"", "return false", "return nil",
-                       "return []", "return ()", "return true",
-                       "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
+fn _trivial_bodies() -> [text]:
+    ["0", "\"\"", "false", "nil", "[]", "()", "true",
+     "return 0", "return \"\"", "return false", "return nil",
+     "return []", "return ()", "return true",
+     "Ok(nil)", "Ok(0)", "return Ok(nil)", "return Ok(0)"]
 
 fn check_stub_impl_text(source: text, file: text) -> [EasyFix]:
     var fixes: [EasyFix] = []
@@ -352,7 +355,7 @@ fn _extract_inline_body(trimmed: text) -> text:
 fn _is_trivial(body: text) -> bool:
     if body.starts_with("pass_todo") or body.starts_with("pass_do_nothing") or body.starts_with("pass_dn"):
         return false
-    for p in _TRIVIAL_BODIES:
+    for p in _trivial_bodies():
         if body == p:
             return true
     if body == "pass":
