@@ -134,7 +134,10 @@ pub(crate) fn build_suffix_index(
 }
 
 /// Resolve an unresolved call name by suffix matching against the suffix index.
-pub(crate) fn resolve_by_suffix(name: &str, suffix_index: &std::collections::HashMap<String, Vec<String>>) -> Option<String> {
+pub(crate) fn resolve_by_suffix(
+    name: &str,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
     if let Some(candidates) = suffix_index.get(name) {
         if candidates.len() == 1 {
             return Some(candidates[0].clone());
@@ -170,7 +173,11 @@ pub(crate) fn resolve_by_suffix(name: &str, suffix_index: &std::collections::Has
 }
 
 /// Build an import map for cross-module function resolution.
-pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: &[PathBuf], fallback_root: &Path) -> ImportMapResult {
+pub(crate) fn build_import_map(
+    file_sources: &[(PathBuf, String)],
+    source_dirs: &[PathBuf],
+    fallback_root: &Path,
+) -> ImportMapResult {
     use std::collections::{HashMap, HashSet};
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
@@ -199,10 +206,14 @@ pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: 
                     }
                     simple_parser::ast::Node::Class(c) => {
                         if !c.fields.is_empty() {
-                            let fields: Vec<(String, String)> = c.fields.iter().map(|f| {
-                                let ty_name = format!("{:?}", f.ty);
-                                (f.name.clone(), ty_name)
-                            }).collect();
+                            let fields: Vec<(String, String)> = c
+                                .fields
+                                .iter()
+                                .map(|f| {
+                                    let ty_name = format!("{:?}", f.ty);
+                                    (f.name.clone(), ty_name)
+                                })
+                                .collect();
                             struct_defs.entry(c.name.clone()).or_insert(fields);
                         }
                         for m in &c.methods {
@@ -242,10 +253,14 @@ pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: 
                     }
                     simple_parser::ast::Node::Struct(s) => {
                         if !s.fields.is_empty() {
-                            let fields: Vec<(String, String)> = s.fields.iter().map(|f| {
-                                let ty_name = format!("{:?}", f.ty);
-                                (f.name.clone(), ty_name)
-                            }).collect();
+                            let fields: Vec<(String, String)> = s
+                                .fields
+                                .iter()
+                                .map(|f| {
+                                    let ty_name = format!("{:?}", f.ty);
+                                    (f.name.clone(), ty_name)
+                                })
+                                .collect();
                             struct_defs.entry(s.name.clone()).or_insert(fields);
                         }
                         for m in &s.methods {
@@ -271,11 +286,14 @@ pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: 
                             let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, v.name));
                             raw_to_mangled.entry(raw).or_default().push(mangled);
                             if let Some(ref fields) = v.fields {
-                                let named: Vec<(String, String)> = fields.iter()
-                                    .filter_map(|f| f.name.as_ref().map(|n| {
-                                        let ty_name = format!("{:?}", f.ty);
-                                        (n.clone(), ty_name)
-                                    }))
+                                let named: Vec<(String, String)> = fields
+                                    .iter()
+                                    .filter_map(|f| {
+                                        f.name.as_ref().map(|n| {
+                                            let ty_name = format!("{:?}", f.ty);
+                                            (n.clone(), ty_name)
+                                        })
+                                    })
                                     .collect();
                                 if !named.is_empty() {
                                     struct_defs.entry(v.name.clone()).or_insert(named);
@@ -338,7 +356,8 @@ pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: 
     }
 
     // Build re-export index
-    let mut re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
+    let mut re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        std::collections::HashMap::new();
     let mut seen_canonical_reexport = std::collections::HashSet::new();
     for (path, source) in file_sources {
         let canonical_path = safe_canonicalize(path);
@@ -389,26 +408,33 @@ pub(crate) fn build_import_map(file_sources: &[(PathBuf, String)], source_dirs: 
 
     // Hardcode critical logging symbols
     let logger_debug = sanitize_mangled("compiler__common__config__Logger.debug".to_string());
-    map.entry("Logger.debug".to_string()).or_insert_with(|| logger_debug.clone());
+    map.entry("Logger.debug".to_string())
+        .or_insert_with(|| logger_debug.clone());
     map.entry("debug".to_string()).or_insert_with(|| logger_debug.clone());
 
     let logger_trace = sanitize_mangled("compiler__common__config__Logger.trace".to_string());
-    map.entry("Logger.trace".to_string()).or_insert_with(|| logger_trace.clone());
+    map.entry("Logger.trace".to_string())
+        .or_insert_with(|| logger_trace.clone());
     map.entry("trace".to_string()).or_insert_with(|| logger_trace.clone());
 
     let boot_debug = sanitize_mangled("compiler__driver__driver_types__BootLogger.debug".to_string());
-    map.entry("BootLogger.debug".to_string()).or_insert_with(|| boot_debug.clone());
+    map.entry("BootLogger.debug".to_string())
+        .or_insert_with(|| boot_debug.clone());
 
     let boot_trace = sanitize_mangled("compiler__driver__driver_types__BootLogger.trace".to_string());
-    map.entry("BootLogger.trace".to_string()).or_insert_with(|| boot_trace.clone());
+    map.entry("BootLogger.trace".to_string())
+        .or_insert_with(|| boot_trace.clone());
 
     let driver_compile = sanitize_mangled("compiler__driver__driver__CompilerDriver.compile".to_string());
-    map.entry("CompilerDriver.compile".to_string()).or_insert_with(|| driver_compile.clone());
+    map.entry("CompilerDriver.compile".to_string())
+        .or_insert_with(|| driver_compile.clone());
 
     let compile_result_get_errors =
         sanitize_mangled("compiler__driver__driver_types__CompileResult.get_errors".to_string());
-    map.entry("CompileResult.get_errors".to_string()).or_insert_with(|| compile_result_get_errors.clone());
-    map.entry("get_errors".to_string()).or_insert_with(|| compile_result_get_errors.clone());
+    map.entry("CompileResult.get_errors".to_string())
+        .or_insert_with(|| compile_result_get_errors.clone());
+    map.entry("get_errors".to_string())
+        .or_insert_with(|| compile_result_get_errors.clone());
 
     ImportMapResult {
         map,

@@ -497,7 +497,10 @@ impl<'a> Lexer<'a> {
                         let mut has_close_tick = false;
                         for i in 0..500 {
                             match self.peek_ahead(i) {
-                                Some('\'') => { has_close_tick = true; break; }
+                                Some('\'') => {
+                                    has_close_tick = true;
+                                    break;
+                                }
                                 Some('\n') | None => break,
                                 _ => {}
                             }

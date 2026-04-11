@@ -478,9 +478,7 @@ pub(super) fn eval_builtin(
             })?;
             let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
-                body,
-                env: captured,
-                ..
+                body, env: captured, ..
             } = val
             {
                 let mut captured_clone = Env::clone(&captured);

@@ -130,10 +130,23 @@ impl PlatformLinkConfig {
     fn windows() -> Self {
         Self {
             libraries: vec![
-                "kernel32", "ws2_32", "bcrypt", "userenv", "ntdll",
-                "advapi32", "dbghelp", "ole32", "oleaut32", "shell32",
-                "crypt32", "secur32", "ncrypt", "iphlpapi",
-                "ucrt", "msvcrt", "vcruntime",
+                "kernel32",
+                "ws2_32",
+                "bcrypt",
+                "userenv",
+                "ntdll",
+                "advapi32",
+                "dbghelp",
+                "ole32",
+                "oleaut32",
+                "shell32",
+                "crypt32",
+                "secur32",
+                "ncrypt",
+                "iphlpapi",
+                "ucrt",
+                "msvcrt",
+                "vcruntime",
             ],
             library_search_paths: vec![],
             system_scan_libs: vec![],
@@ -186,7 +199,11 @@ impl PlatformLinkConfig {
             nm_flags: vec![],
             stub_strategy: StubStrategy::Weak,
             asm_label_extra_chars: vec!['.', '$'],
-            unresolved_symbol_flags: vec!["-Wl,--allow-multiple-definition", "-Wl,--warn-unresolved-symbols", "-Wl,--no-fatal-warnings"],
+            unresolved_symbol_flags: vec![
+                "-Wl,--allow-multiple-definition",
+                "-Wl,--warn-unresolved-symbols",
+                "-Wl,--no-fatal-warnings",
+            ],
             disable_pie: false,
         }
     }

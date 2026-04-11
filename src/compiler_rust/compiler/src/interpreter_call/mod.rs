@@ -568,7 +568,9 @@ pub(crate) fn evaluate_call(
                 );
                 // Special builtin types
                 match type_name.as_str() {
-                    "HashMap" | "BTreeMap" => return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new()))),
+                    "HashMap" | "BTreeMap" => {
+                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                    }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
                     "Device" => {
                         return Ok(Value::Enum {

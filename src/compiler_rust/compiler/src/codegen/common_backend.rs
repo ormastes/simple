@@ -509,7 +509,9 @@ impl<M: Module> CodegenBackend<M> {
             // DATA import that the linker can't match to the FUNCTION symbol in
             // the defining module — leaving the data slot as NULL (0x1) on macOS.
             if !local_globals.contains(name) {
-                if let Some(resolved) = self.use_map.get(name.as_str())
+                if let Some(resolved) = self
+                    .use_map
+                    .get(name.as_str())
                     .or_else(|| self.import_map.get(name.as_str()))
                 {
                     let sanitized = self.sanitize_symbol(resolved);
@@ -517,11 +519,10 @@ impl<M: Module> CodegenBackend<M> {
                     let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                     sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                     sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                    if let Ok(fid) = self.module.declare_function(
-                        &sanitized,
-                        cranelift_module::Linkage::Import,
-                        &sig,
-                    ) {
+                    if let Ok(fid) = self
+                        .module
+                        .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
+                    {
                         self.func_ids.entry(name.clone()).or_insert(fid);
                         continue;
                     }
@@ -628,7 +629,10 @@ impl<M: Module> CodegenBackend<M> {
 
         // Verify the function before defining - log errors but try to compile anyway
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            eprintln!("[CODEGEN VERIFY] Function '{}' has verifier errors: {}", func.name, errors);
+            eprintln!(
+                "[CODEGEN VERIFY] Function '{}' has verifier errors: {}",
+                func.name, errors
+            );
         }
 
         // Define the function (may fail if verifier errors are critical)

@@ -201,13 +201,10 @@ impl I18nExtractor {
                 let scope = self.scope_string();
                 let template_vars: Vec<String> = parts
                     .iter()
-                    .filter_map(|p| {
-                        match p {
-                            FStringPart::Expr(Expr::Identifier(id)) | FStringPart::ExprWithFormat(Expr::Identifier(id), _) => {
-                                Some(id.clone())
-                            }
-                            _ => None,
-                        }
+                    .filter_map(|p| match p {
+                        FStringPart::Expr(Expr::Identifier(id))
+                        | FStringPart::ExprWithFormat(Expr::Identifier(id), _) => Some(id.clone()),
+                        _ => None,
                     })
                     .collect();
 

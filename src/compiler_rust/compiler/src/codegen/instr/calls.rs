@@ -572,8 +572,8 @@ pub fn compile_call<M: Module>(
         // Prefer qualified/type-specific spellings before the bare method name;
         // otherwise common factory names like `create` can incorrectly bind to an
         // unrelated imported symbol from another type/module.
-        let mut type_prefixed_storage = String::new();
-        let mut dunder_storage = String::new();
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
         if resolved_name.is_none() {
             if let Some(dot_pos) = func_name.rfind('.') {
                 let type_name = &func_name[..dot_pos];
@@ -635,7 +635,9 @@ pub fn compile_call<M: Module>(
         };
 
         let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
-        let func_id: Result<cranelift_module::FuncId, cranelift_module::ModuleError> = if let Some(&existing) = ctx.func_ids.get(resolved_name.as_ref()) {
+        let func_id: Result<cranelift_module::FuncId, cranelift_module::ModuleError> = if let Some(&existing) =
+            ctx.func_ids.get(resolved_name.as_ref())
+        {
             Ok(existing)
         } else {
             let call_conv = crate::codegen::shared::platform_call_conv();
@@ -644,7 +646,10 @@ pub fn compile_call<M: Module>(
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
             }
             sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-            match ctx.module.declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig) {
+            match ctx
+                .module
+                .declare_function(&resolved_name, cranelift_module::Linkage::Import, &sig)
+            {
                 Ok(id) => {
                     ctx.func_ids.insert(resolved_name.to_string(), id);
                     Ok(id)

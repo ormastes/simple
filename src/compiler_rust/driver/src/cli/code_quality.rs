@@ -13,14 +13,7 @@ use super::commands::arg_parsing::FixFlags;
 use crate::cli::interactive_fix;
 
 const QUALITY_CODES: &[&str] = &[
-    "STUB001",
-    "STUB003",
-    "SSPEC001",
-    "SSPEC002",
-    "SSPEC003",
-    "SSPEC004",
-    "SSPEC005",
-    "SSPEC006",
+    "STUB001", "STUB003", "SSPEC001", "SSPEC002", "SSPEC003", "SSPEC004", "SSPEC005", "SSPEC006",
 ];
 
 fn is_test_like_path(path: &Path) -> bool {
@@ -219,7 +212,10 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
         });
         let has_skip = statements.iter().any(|stmt| {
             let normalized = compact(stmt);
-            normalized == "skip:" || normalized.starts_with("skip:") || normalized.contains("return\"skip:") || normalized.contains("return'skip:")
+            normalized == "skip:"
+                || normalized.starts_with("skip:")
+                || normalized.contains("return\"skip:")
+                || normalized.contains("return'skip:")
         });
 
         if statements.is_empty() && !allow_empty {
@@ -246,7 +242,7 @@ fn collect_sspec_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
     diagnostics
 }
 
-fn single_trivial_expr<'a>(func: &'a FunctionDef) -> Option<&'a Expr> {
+fn single_trivial_expr(func: &FunctionDef) -> Option<&Expr> {
     if func.body.statements.len() != 1 {
         return None;
     }
@@ -262,7 +258,11 @@ fn is_trivial_expr(expr: &Expr) -> bool {
         Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => true,
         Expr::Array(items) | Expr::Tuple(items) => items.is_empty(),
         Expr::Dict(entries) => entries.is_empty(),
-        Expr::Call { callee, args } => matches!(&**callee, Expr::Identifier(name) if name == "Ok") && args.len() == 1 && matches!(args[0].value, Expr::Nil),
+        Expr::Call { callee, args } => {
+            matches!(&**callee, Expr::Identifier(name) if name == "Ok")
+                && args.len() == 1
+                && matches!(args[0].value, Expr::Nil)
+        }
         _ => false,
     }
 }
@@ -279,27 +279,47 @@ fn expr_references_param(expr: &Expr, params: &[String]) -> bool {
             expr_references_param(receiver, params) || args.iter().any(|arg| expr_references_param(&arg.value, params))
         }
         Expr::FieldAccess { receiver, .. } => expr_references_param(receiver, params),
-        Expr::Index { receiver, index } => expr_references_param(receiver, params) || expr_references_param(index, params),
+        Expr::Index { receiver, index } => {
+            expr_references_param(receiver, params) || expr_references_param(index, params)
+        }
         Expr::TupleIndex { receiver, .. } => expr_references_param(receiver, params),
         Expr::Lambda { body, .. } => expr_references_param(body, params),
-        Expr::If { condition, then_branch, else_branch, .. } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             expr_references_param(condition, params)
                 || expr_references_param(then_branch, params)
-                || else_branch.as_ref().is_some_and(|expr| expr_references_param(expr, params))
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_param(expr, params))
         }
         Expr::Match { subject, arms } => {
             expr_references_param(subject, params)
-                || arms.iter().any(|arm| arm.body.statements.iter().any(|stmt| stmt_references_param(stmt, params)))
+                || arms.iter().any(|arm| {
+                    arm.body
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_references_param(stmt, params))
+                })
         }
-        Expr::Tuple(items) | Expr::Array(items) | Expr::VecLiteral(items) => items.iter().any(|item| expr_references_param(item, params)),
-        Expr::Dict(entries) => entries.iter().any(|(k, v)| expr_references_param(k, params) || expr_references_param(v, params)),
+        Expr::Tuple(items) | Expr::Array(items) | Expr::VecLiteral(items) => {
+            items.iter().any(|item| expr_references_param(item, params))
+        }
+        Expr::Dict(entries) => entries
+            .iter()
+            .any(|(k, v)| expr_references_param(k, params) || expr_references_param(v, params)),
         Expr::StructInit { fields, spread, .. } => {
             fields.iter().any(|(_, expr)| expr_references_param(expr, params))
                 || spread.as_ref().is_some_and(|expr| expr_references_param(expr, params))
         }
-        Expr::Cast { expr, .. } | Expr::Spawn(expr) | Expr::Await(expr) | Expr::Spread(expr) | Expr::DictSpread(expr) => {
-            expr_references_param(expr, params)
-        }
+        Expr::Cast { expr, .. }
+        | Expr::Spawn(expr)
+        | Expr::Await(expr)
+        | Expr::Spread(expr)
+        | Expr::DictSpread(expr) => expr_references_param(expr, params),
         Expr::DoBlock(statements) => statements.iter().any(|stmt| stmt_references_param(stmt, params)),
         _ => false,
     }
@@ -308,24 +328,63 @@ fn expr_references_param(expr: &Expr, params: &[String]) -> bool {
 fn stmt_references_param(stmt: &Node, params: &[String]) -> bool {
     match stmt {
         Node::Expression(expr) => expr_references_param(expr, params),
-        Node::Return(ret) => ret.value.as_ref().is_some_and(|expr| expr_references_param(expr, params)),
-        Node::Let(let_stmt) => let_stmt.value.as_ref().is_some_and(|expr| expr_references_param(expr, params)),
-        Node::Assignment(assign) => expr_references_param(&assign.target, params) || expr_references_param(&assign.value, params),
+        Node::Return(ret) => ret
+            .value
+            .as_ref()
+            .is_some_and(|expr| expr_references_param(expr, params)),
+        Node::Let(let_stmt) => let_stmt
+            .value
+            .as_ref()
+            .is_some_and(|expr| expr_references_param(expr, params)),
+        Node::Assignment(assign) => {
+            expr_references_param(&assign.target, params) || expr_references_param(&assign.value, params)
+        }
         Node::If(if_stmt) => {
             expr_references_param(&if_stmt.condition, params)
-                || if_stmt.then_block.statements.iter().any(|stmt| stmt_references_param(stmt, params))
+                || if_stmt
+                    .then_block
+                    .statements
+                    .iter()
+                    .any(|stmt| stmt_references_param(stmt, params))
                 || if_stmt.elif_branches.iter().any(|(_, expr, block)| {
-                    expr_references_param(expr, params) || block.statements.iter().any(|stmt| stmt_references_param(stmt, params))
+                    expr_references_param(expr, params)
+                        || block.statements.iter().any(|stmt| stmt_references_param(stmt, params))
                 })
-                || if_stmt.else_block.as_ref().is_some_and(|block| block.statements.iter().any(|stmt| stmt_references_param(stmt, params)))
+                || if_stmt
+                    .else_block
+                    .as_ref()
+                    .is_some_and(|block| block.statements.iter().any(|stmt| stmt_references_param(stmt, params)))
         }
         Node::Match(match_stmt) => {
             expr_references_param(&match_stmt.subject, params)
-                || match_stmt.arms.iter().any(|arm| arm.body.statements.iter().any(|stmt| stmt_references_param(stmt, params)))
+                || match_stmt.arms.iter().any(|arm| {
+                    arm.body
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_references_param(stmt, params))
+                })
         }
-        Node::For(for_stmt) => expr_references_param(&for_stmt.iterable, params) || for_stmt.body.statements.iter().any(|stmt| stmt_references_param(stmt, params)),
-        Node::While(while_stmt) => expr_references_param(&while_stmt.condition, params) || while_stmt.body.statements.iter().any(|stmt| stmt_references_param(stmt, params)),
-        Node::Loop(loop_stmt) => loop_stmt.body.statements.iter().any(|stmt| stmt_references_param(stmt, params)),
+        Node::For(for_stmt) => {
+            expr_references_param(&for_stmt.iterable, params)
+                || for_stmt
+                    .body
+                    .statements
+                    .iter()
+                    .any(|stmt| stmt_references_param(stmt, params))
+        }
+        Node::While(while_stmt) => {
+            expr_references_param(&while_stmt.condition, params)
+                || while_stmt
+                    .body
+                    .statements
+                    .iter()
+                    .any(|stmt| stmt_references_param(stmt, params))
+        }
+        Node::Loop(loop_stmt) => loop_stmt
+            .body
+            .statements
+            .iter()
+            .any(|stmt| stmt_references_param(stmt, params)),
         _ => false,
     }
 }
@@ -358,7 +417,11 @@ fn collect_stub_diagnostics_for_function(path: &Path, func: &FunctionDef) -> Vec
     if let Some(expr) = single_trivial_expr(func) {
         if is_trivial_expr(expr) {
             let param_names: Vec<String> = func.params.iter().map(|p| p.name.clone()).collect();
-            let references_param = func.body.statements.iter().any(|stmt| stmt_references_param(stmt, &param_names));
+            let references_param = func
+                .body
+                .statements
+                .iter()
+                .any(|stmt| stmt_references_param(stmt, &param_names));
             if !references_param {
                 diagnostics.push(
                     Diagnostic::error("Trivial return with unused parameters — possible stub")
@@ -411,9 +474,7 @@ fn collect_extra_quality_diagnostics(path: &Path, source: &str, items: &[Node]) 
 }
 
 fn is_quality_diagnostic(diag: &Diagnostic) -> bool {
-    diag.code
-        .as_deref()
-        .is_some_and(|code| QUALITY_CODES.contains(&code))
+    diag.code.as_deref().is_some_and(|code| QUALITY_CODES.contains(&code))
 }
 
 pub fn run_verify_quality(args: &[String]) -> i32 {
@@ -486,7 +547,10 @@ pub fn run_verify_quality(args: &[String]) -> i32 {
         println!("Verify quality passed: {} file(s) clean", total);
         0
     } else {
-        println!("Verify quality failed: {} file(s) with anti-dummy / anti-stub findings", failures);
+        println!(
+            "Verify quality failed: {} file(s) with anti-dummy / anti-stub findings",
+            failures
+        );
         1
     }
 }
@@ -689,7 +753,11 @@ pub fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<L
                     .first()
                     .map(|label| (label.span.line, label.span.column))
                     .unwrap_or((1, 1));
-                let level_str = if matches!(diagnostic.severity, Severity::Error) { "error" } else { "warning" };
+                let level_str = if matches!(diagnostic.severity, Severity::Error) {
+                    "error"
+                } else {
+                    "warning"
+                };
                 let code = diagnostic.code.clone().unwrap_or_else(|| "lint".to_string());
                 println!(
                     "{}:{}:{}: {}: {} [{}]",
@@ -712,8 +780,14 @@ pub fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<L
 
     Some((
         common_diags.iter().any(|d| matches!(d.severity, Severity::Error)),
-        common_diags.iter().filter(|d| matches!(d.severity, Severity::Error)).count(),
-        common_diags.iter().filter(|d| !matches!(d.severity, Severity::Error)).count(),
+        common_diags
+            .iter()
+            .filter(|d| matches!(d.severity, Severity::Error))
+            .count(),
+        common_diags
+            .iter()
+            .filter(|d| !matches!(d.severity, Severity::Error))
+            .count(),
         common_diags,
         easy_fixes,
         Some(source),

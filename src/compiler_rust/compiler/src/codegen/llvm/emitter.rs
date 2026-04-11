@@ -400,10 +400,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                         .build_ptr_to_int(pointer_value, i64_type, "interp_arg_ptr")
                         .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?,
                     _ => {
-                        return Err(format!(
-                            "LLVM emitter: unsupported interp arg value kind for {:?}",
-                            arg
-                        ));
+                        return Err(format!("LLVM emitter: unsupported interp arg value kind for {:?}", arg));
                     }
                 };
                 let offset = self

@@ -70,7 +70,7 @@ function formatSvgDecorationLayoutLog(content, layout) {
 // HEIGHT FIT PATH:
 // These constants control the inline SVG box that VS Code decorations render.
 // They do NOT change editor row height. They only size the math image itself.
-const MAX_INLINE_HEIGHT_EM = 1.30;
+const MAX_INLINE_HEIGHT_EM = 3.0;
 const MIN_INLINE_HEIGHT_EM = 0.92;
 const MIN_INLINE_WIDTH_EM = 0.75;
 function buildSvgDecorationLayout(content, svgResult, alignment) {

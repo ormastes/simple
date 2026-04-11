@@ -326,7 +326,7 @@ fn is_stdlib_import(parts: &[String]) -> bool {
     !parts.is_empty() && matches!(parts[0].as_str(), "std" | "lib" | "std_lib" | "verification")
 }
 
-fn stdlib_relative_parts<'a>(parts: &'a [String]) -> &'a [String] {
+fn stdlib_relative_parts(parts: &[String]) -> &[String] {
     if parts.first().map(|p| p.as_str()) == Some("verification") {
         parts
     } else if is_stdlib_import(parts) {

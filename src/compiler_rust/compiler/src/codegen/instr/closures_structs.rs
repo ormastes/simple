@@ -41,7 +41,7 @@ pub(crate) fn compile_closure_create<M: Module>(
             .map(|s| s.as_str());
 
         // Try: TypeName__method → typename_method (factory/constructor convention)
-        let mut dunder_storage = String::new();
+        let mut dunder_storage;
         if resolved_name.is_none() {
             if let Some((type_part, method_part)) = func_name.split_once("__") {
                 if type_part.chars().next().map_or(false, |c| c.is_uppercase()) {
@@ -208,7 +208,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
     // 1. Exact match (func_name or sanitized variant with _dot_)
     // 2. Type-qualified name (ClassName.method) - search for functions ending with ".func_name"
     let sanitized_name = lookup_name.replace('.', "_dot_");
-    let func_id = ctx.func_ids.get(lookup_name).copied()
+    let func_id = ctx
+        .func_ids
+        .get(lookup_name)
+        .copied()
         .or_else(|| ctx.func_ids.get(&sanitized_name).copied())
         .or_else(|| {
             // Search for a function ending with ".func_name" or "_dot_func_name"
@@ -225,7 +228,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 None
             };
 
-            let candidates: Vec<_> = ctx.func_ids
+            let candidates: Vec<_> = ctx
+                .func_ids
                 .iter()
                 .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
                 .collect();
@@ -234,7 +238,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 // Prefer candidate whose name contains the type qualifier
                 let tq_dot = format!("{}_dot_", tq);
                 let tq_dunder = format!("__{}", tq);
-                if let Some((_, &v)) = candidates.iter()
+                if let Some((_, &v)) = candidates
+                    .iter()
                     .find(|(k, _)| k.contains(&tq_dot) || k.contains(&tq_dunder) || k.contains(tq))
                 {
                     return Some(v);
@@ -269,9 +274,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
 
             // Fallback: pick shortest name (most specific)
-            candidates.iter()
-                .min_by_key(|(k, _)| k.len())
-                .map(|(_, v)| **v)
+            candidates.iter().min_by_key(|(k, _)| k.len()).map(|(_, v)| **v)
         });
 
     if let Some(func_id) = func_id {
@@ -295,10 +298,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // Cross-module method: resolve via use_map → import_map
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
-        let mut resolved_name = ctx
-            .use_map
-            .get(func_name)
-            .map(|s| s.as_str());
+        let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
         if resolved_name.is_none() {
             let method_suffix = format!(".{}", func_name);
@@ -329,8 +329,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
 
         // If not found and func_name contains '.', try additional name variants.
         // Prefer qualified/type-specific spellings before the bare method name.
-        let mut type_prefixed_storage = String::new();
-        let mut dunder_storage = String::new();
+        let mut type_prefixed_storage;
+        let mut dunder_storage;
         if resolved_name.is_none() {
             if let Some(dot_pos) = lookup_name.rfind('.') {
                 let type_name = &lookup_name[..dot_pos];
@@ -352,9 +352,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .get(&dot_storage)
                         .or_else(|| ctx.import_map.get(&dot_storage))
                         .map(|s| s.as_str());
-                    if resolved_name.is_some() {
-                        dunder_storage = dot_storage;
-                    }
+                    // dot_storage is consumed by the resolved_name reference above
                 }
 
                 // Try: lowercase_type_method (Simple convention)
@@ -408,7 +406,8 @@ pub(crate) fn compile_method_call_static<M: Module>(
                     sig.params.push(AbiParam::new(types::I64));
                 }
                 sig.returns.push(AbiParam::new(types::I64));
-                let id = ctx.module
+                let id = ctx
+                    .module
                     .declare_function(&resolved, Linkage::Import, &sig)
                     .or_else(|_| {
                         let mut sig2 = Signature::new(call_conv);
@@ -664,10 +663,7 @@ fn try_compile_builtin_method_call<M: Module>(
     // Methods that mutate in-place (clear, reverse, sort) return the receiver.
     // push is special: rt_array_push may return a NEW pointer when the array
     // grows, so we must use the actual return value from the call.
-    let in_place_mutating_no_push = matches!(
-        runtime_func,
-        "rt_array_clear" | "rt_array_reverse" | "rt_array_sort"
-    );
+    let in_place_mutating_no_push = matches!(runtime_func, "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
 
     if runtime_func == "rt_array_push" {
         // rt_array_push returns bool (success/failure), NOT a new array pointer.

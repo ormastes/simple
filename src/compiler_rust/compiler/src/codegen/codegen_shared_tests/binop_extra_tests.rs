@@ -501,4 +501,3 @@ mod shared_declare_functions_branches {
 // =============================================================================
 // Interpreter branch coverage: BinOp error paths & edge cases
 // =============================================================================
-

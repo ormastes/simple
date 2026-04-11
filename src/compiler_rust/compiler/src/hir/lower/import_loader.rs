@@ -281,16 +281,22 @@ impl Lowerer {
                         continue; // This is itself a placeholder, skip
                     }
                     for (_field_name, field_type_id) in fields {
-                        if let Some(HirType::Struct { name: ref dep_name, fields: ref dep_fields, .. }) =
-                            self.module.types.get(*field_type_id)
+                        if let Some(HirType::Struct {
+                            name: ref dep_name,
+                            fields: ref dep_fields,
+                            ..
+                        }) = self.module.types.get(*field_type_id)
                         {
                             if dep_fields.is_empty() && !transitive_processed.contains(dep_name) {
                                 needs_registration.push(dep_name.clone());
                             }
                         }
                         // Also check enum placeholders (0 variants)
-                        if let Some(HirType::Enum { name: ref dep_name, variants: ref dep_variants, .. }) =
-                            self.module.types.get(*field_type_id)
+                        if let Some(HirType::Enum {
+                            name: ref dep_name,
+                            variants: ref dep_variants,
+                            ..
+                        }) = self.module.types.get(*field_type_id)
                         {
                             if dep_variants.is_empty() && !transitive_processed.contains(dep_name) {
                                 needs_registration.push(dep_name.clone());
@@ -432,7 +438,11 @@ impl Lowerer {
     /// Example: dom.spl defines `BeDomNode { style: StyleProps }` where
     /// `StyleProps` is in css.spl. Pre-registering ensures StyleProps exists
     /// as a placeholder when BeDomNode's fields are resolved.
-    pub(super) fn preregister_imported_type_names(&mut self, module_path: &ModulePath, target: &ImportTarget) -> LowerResult<()> {
+    pub(super) fn preregister_imported_type_names(
+        &mut self,
+        module_path: &ModulePath,
+        target: &ImportTarget,
+    ) -> LowerResult<()> {
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
@@ -442,7 +452,7 @@ impl Lowerer {
         // Resolve module path to filesystem location
         let resolved = match resolver.resolve(module_path, current_file) {
             Ok(r) => r,
-            Err(_) => return Ok(()),  // Silently skip unresolvable modules
+            Err(_) => return Ok(()), // Silently skip unresolvable modules
         };
 
         // Read and parse the module file
@@ -540,7 +550,9 @@ impl Lowerer {
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|path| {
                     path.extension().is_some_and(|ext| ext == "spl")
-                        && path.file_name().is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name != "__init__.spl" && name != "mod_stub.spl")
                         && path.is_file()
                 })
                 .collect(),

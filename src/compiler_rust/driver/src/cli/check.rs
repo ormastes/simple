@@ -92,11 +92,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
                 }
             }
             CheckStatus::Error => {
-                if result
-                    .errors
-                    .iter()
-                    .any(|error| error.severity == ErrorSeverity::Error)
-                {
+                if result.errors.iter().any(|error| error.severity == ErrorSeverity::Error) {
                     has_errors = true;
                 }
                 if !options.json {
@@ -118,12 +114,7 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
         if has_errors {
             let error_count: usize = all_results
                 .iter()
-                .map(|r| {
-                    r.errors
-                        .iter()
-                        .filter(|e| e.severity == ErrorSeverity::Error)
-                        .count()
-                })
+                .map(|r| r.errors.iter().filter(|e| e.severity == ErrorSeverity::Error).count())
                 .sum();
             println!(
                 "\x1b[31m✗ {} error(s) found in {} file(s)\x1b[0m",

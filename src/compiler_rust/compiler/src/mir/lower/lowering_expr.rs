@@ -1389,7 +1389,7 @@ impl<'a> MirLowerer<'a> {
                         // The array is mutated in-place; the pointer stays valid.
 
                         Ok(dest)
-                    },
+                    }
                 }
             }
 

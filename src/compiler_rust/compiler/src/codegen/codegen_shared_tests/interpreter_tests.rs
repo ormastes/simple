@@ -166,7 +166,6 @@ mod interpreter_value_checks {
     }
 }
 
-
 #[cfg(test)]
 mod interpreter_branch_coverage {
     use super::*;
@@ -797,4 +796,3 @@ mod interpreter_branch_coverage {
         .unwrap();
     }
 }
-

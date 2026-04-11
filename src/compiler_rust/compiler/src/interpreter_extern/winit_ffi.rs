@@ -469,18 +469,15 @@ fn macos_pump(event_loop_id: i64) {
                 let _ = ps.proxy.send_event(UserEvent::Command(cmd));
             }
             #[allow(deprecated)]
-            let _ = ps.event_loop.pump_events(
-                Some(std::time::Duration::from_millis(1)),
-                |event, target| match event {
+            let _ = ps
+                .event_loop
+                .pump_events(Some(std::time::Duration::from_millis(1)), |event, target| match event {
                     Event::UserEvent(UserEvent::Command(command)) => {
                         handle_command(command, ps.event_loop_id, &mut ps.state, target)
                     }
-                    Event::WindowEvent { window_id, event } => {
-                        handle_window_event(window_id, event, &ps.state)
-                    }
+                    Event::WindowEvent { window_id, event } => handle_window_event(window_id, event, &ps.state),
                     _ => {}
-                },
-            );
+                });
         }
     });
 }
@@ -535,8 +532,7 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
                 let event_loop = match builder.build() {
                     Ok(loop_handle) => loop_handle,
                     Err(err) => {
-                        let _ =
-                            ready_tx.send(Err(format!("failed to create event loop: {err:?}")));
+                        let _ = ready_tx.send(Err(format!("failed to create event loop: {err:?}")));
                         return;
                     }
                 };
@@ -556,9 +552,7 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
                     Event::UserEvent(UserEvent::Command(command)) => {
                         handle_command(command, event_loop_id, &mut state, target)
                     }
-                    Event::WindowEvent { window_id, event } => {
-                        handle_window_event(window_id, event, &state)
-                    }
+                    Event::WindowEvent { window_id, event } => handle_window_event(window_id, event, &state),
                     Event::AboutToWait => {}
                     _ => {}
                 });
@@ -568,9 +562,7 @@ fn start_event_loop_thread(event_loop_id: i64) -> Result<EventLoopHandle, Compil
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(EventLoopHandle { command_tx, event_rx }),
             Ok(Err(err)) => Err(runtime_error(err)),
-            Err(err) => Err(runtime_error(format!(
-                "failed to initialize event loop: {err}"
-            ))),
+            Err(err) => Err(runtime_error(format!("failed to initialize event loop: {err}"))),
         }
     }
 }
@@ -961,7 +953,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 if let Ok(result) = response_rx.try_recv() {
                     return match result {
                         Ok(window_id) => Ok(int_value(window_id)),
-                        Err(err) => { set_last_error(err); Ok(int_value(0)) }
+                        Err(err) => {
+                            set_last_error(err);
+                            Ok(int_value(0))
+                        }
                     };
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1064,7 +1059,10 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     if let Ok(result) = response_rx.try_recv() {
                         return match result {
                             Ok(()) => Ok(bool_value(true)),
-                            Err(err) => { set_last_error(err); Ok(bool_value(false)) }
+                            Err(err) => {
+                                set_last_error(err);
+                                Ok(bool_value(false))
+                            }
                         };
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1357,10 +1355,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 let sh = buf.height as i64;
                 for row in 0..h {
                     let py = y + row;
-                    if py < 0 || py >= sh { continue; }
+                    if py < 0 || py >= sh {
+                        continue;
+                    }
                     for col in 0..w {
                         let px = x + col;
-                        if px < 0 || px >= sw { continue; }
+                        if px < 0 || px >= sw {
+                            continue;
+                        }
                         buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
                     }
                 }
@@ -1406,14 +1408,20 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     if let Ok(result) = response_rx.try_recv() {
                         return match result {
                             Ok(()) => Ok(bool_value(true)),
-                            Err(err) => { set_last_error(err); Ok(bool_value(false)) }
+                            Err(err) => {
+                                set_last_error(err);
+                                Ok(bool_value(false))
+                            }
                         };
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 return match response_rx.recv_timeout(std::time::Duration::from_secs(2)) {
                     Ok(Ok(())) => Ok(bool_value(true)),
-                    Ok(Err(err)) => { set_last_error(err); Ok(bool_value(false)) }
+                    Ok(Err(err)) => {
+                        set_last_error(err);
+                        Ok(bool_value(false))
+                    }
                     Err(err) => Err(runtime_error(format!("present response timeout: {err}"))),
                 };
             }
@@ -1459,12 +1467,17 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                         data.push(((argb >> 8) & 0xFF) as u8);
                         data.push(((argb >> 16) & 0xFF) as u8);
                     }
-                    for _ in 0..pad_bytes { data.push(0); }
+                    for _ in 0..pad_bytes {
+                        data.push(0);
+                    }
                 }
 
                 match std::fs::write(&path, &data) {
                     Ok(()) => Ok(bool_value(true)),
-                    Err(err) => { set_last_error(format!("BMP write failed: {err}")); Ok(bool_value(false)) }
+                    Err(err) => {
+                        set_last_error(format!("BMP write failed: {err}"));
+                        Ok(bool_value(false))
+                    }
                 }
             } else {
                 set_last_error(format!("invalid buffer handle: {buf_id}"));
@@ -1510,10 +1523,14 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 let inv_alpha = 255 - alpha;
                 for row in 0..h {
                     let py = y + row;
-                    if py < 0 || py >= sh { continue; }
+                    if py < 0 || py >= sh {
+                        continue;
+                    }
                     for col in 0..w {
                         let px = x + col;
-                        if px < 0 || px >= sw { continue; }
+                        if px < 0 || px >= sw {
+                            continue;
+                        }
                         let idx = (py as usize) * (sw as usize) + (px as usize);
                         let dst = buf.pixels[idx];
                         let dr = (dst >> 16) & 0xFF;
@@ -1573,7 +1590,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                                 b_sum += (px & 0xFF) as u64;
                                 count += 1;
                             }
-                            if count == 0 { count = 1; }
+                            if count == 0 {
+                                count = 1;
+                            }
                             let r = (r_sum / count) as u32;
                             let g = (g_sum / count) as u32;
                             let b = (b_sum / count) as u32;
@@ -1602,7 +1621,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                                 b_sum += (px & 0xFF) as u64;
                                 count += 1;
                             }
-                            if count == 0 { count = 1; }
+                            if count == 0 {
+                                count = 1;
+                            }
                             let r = (r_sum / count) as u32;
                             let g = (g_sum / count) as u32;
                             let b = (b_sum / count) as u32;
@@ -1643,7 +1664,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 let b2 = (c2 & 0xFF) as i64;
                 for row in 0..gh {
                     let py = gy + row;
-                    if py < 0 || py >= sh { continue; }
+                    if py < 0 || py >= sh {
+                        continue;
+                    }
                     let t = if gh > 1 { row as f64 / (gh - 1) as f64 } else { 0.0 };
                     let r = (r1 as f64 + (r2 - r1) as f64 * t) as u32;
                     let g = (g1 as f64 + (g2 - g1) as f64 * t) as u32;
@@ -1651,7 +1674,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     let color = 0xFF000000 | (r << 16) | (g << 8) | b;
                     for col in 0..gw {
                         let px = gx + col;
-                        if px < 0 || px >= sw { continue; }
+                        if px < 0 || px >= sw {
+                            continue;
+                        }
                         buf.pixels[(py as usize) * (sw as usize) + (px as usize)] = color;
                     }
                 }

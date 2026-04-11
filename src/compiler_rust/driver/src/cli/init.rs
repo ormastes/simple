@@ -116,16 +116,14 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
 fn write_crash_log(timestamp: &str, pid: u32, message: &str, location: &str, backtrace: &str) {
     use std::io::Write;
 
-    let crash_dir = std::env::var("SIMPLE_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let local = PathBuf::from(".simple/logs");
-            if local.exists() || fs::create_dir_all(&local).is_ok() {
-                local
-            } else {
-                std::env::temp_dir().join("simple_logs")
-            }
-        });
+    let crash_dir = std::env::var("SIMPLE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|_| {
+        let local = PathBuf::from(".simple/logs");
+        if local.exists() || fs::create_dir_all(&local).is_ok() {
+            local
+        } else {
+            std::env::temp_dir().join("simple_logs")
+        }
+    });
     let _ = fs::create_dir_all(&crash_dir);
 
     let crash_file = crash_dir.join(format!("crash_{}.log", pid));

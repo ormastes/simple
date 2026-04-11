@@ -494,9 +494,8 @@ impl<'a> super::Lexer<'a> {
         // Type codes: b c d e E f F g G n o s x X %
         // Space (for sign)
         let valid_chars: &[char] = &[
-            '<', '>', '^', '=', '+', '-', ' ', '#', '0', ',', '_', '.',
-            'b', 'c', 'd', 'e', 'E', 'f', 'F', 'g', 'G', 'n', 'o', 's', 'x', 'X', '%',
-            '1', '2', '3', '4', '5', '6', '7', '8', '9',
+            '<', '>', '^', '=', '+', '-', ' ', '#', '0', ',', '_', '.', 'b', 'c', 'd', 'e', 'E', 'f', 'F', 'g', 'G',
+            'n', 'o', 's', 'x', 'X', '%', '1', '2', '3', '4', '5', '6', '7', '8', '9',
         ];
 
         // First character can be a fill character (any char) if second is an alignment char

@@ -313,7 +313,12 @@ impl Lowerer {
                     }
                 }
                 if let Some((idx, count, sname)) = best_global {
-                    let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                    let fpath = self
+                        .current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
                     let msg = format!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
                     eprintln!("{msg}");
                     return Ok((idx, TypeId::ANY));
@@ -383,9 +388,7 @@ impl Lowerer {
                         Err(LowerError::CannotInferFieldType {
                             struct_name: "Tuple".to_string(),
                             field: field.to_string(),
-                            available_fields: (0..element_types.len())
-                                .map(|i| i.to_string())
-                                .collect(),
+                            available_fields: (0..element_types.len()).map(|i| i.to_string()).collect(),
                         })
                     }
                 }
@@ -426,7 +429,12 @@ impl Lowerer {
                                 }
                             }
                             if let Some((idx, count, sname)) = best_global {
-                                let fpath = self.current_file.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("unknown");
+                                let fpath = self
+                                    .current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
                                 let msg = format!("[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
                                 eprintln!("{msg}");
                                 return Ok((idx, TypeId::ANY));

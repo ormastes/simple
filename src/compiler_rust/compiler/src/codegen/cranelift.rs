@@ -222,13 +222,20 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
     use object::read::macho::{MachOFile64, MachHeader as _};
     use object::read::{Object, ObjectSection, ObjectSymbol};
     use object::write;
-    use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope, RelocationTarget, RelocationFlags};
+    use object::{
+        Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind, SymbolScope, RelocationTarget,
+        RelocationFlags,
+    };
 
     let file = MachOFile64::<object::endian::LittleEndian>::parse(malformed).map_err(|e| format!("parse: {}", e))?;
 
     // Derive architecture and endianness from the input file
     let arch = file.architecture();
-    let endian = if file.is_little_endian() { Endianness::Little } else { Endianness::Big };
+    let endian = if file.is_little_endian() {
+        Endianness::Little
+    } else {
+        Endianness::Big
+    };
     let mut out = write::Object::new(BinaryFormat::MachO, arch, endian);
 
     // Copy sections
@@ -302,12 +309,15 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
                 }
                 _ => continue,
             };
-            if let Err(e) = out.add_relocation(out_section, write::Relocation {
-                offset,
-                symbol: target_sym,
-                addend: reloc.addend(),
-                flags: reloc.flags(),
-            }) {
+            if let Err(e) = out.add_relocation(
+                out_section,
+                write::Relocation {
+                    offset,
+                    symbol: target_sym,
+                    addend: reloc.addend(),
+                    flags: reloc.flags(),
+                },
+            ) {
                 eprintln!("[MACHO-FIX] relocation copy warning: {}", e);
             }
         }

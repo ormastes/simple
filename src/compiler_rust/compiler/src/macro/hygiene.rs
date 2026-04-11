@@ -280,7 +280,9 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .map(|part| match part {
                     FStringPart::Literal(text) => FStringPart::Literal(text.clone()),
                     FStringPart::Expr(expr) => FStringPart::Expr(apply_macro_hygiene_expr(expr, ctx)),
-                    FStringPart::ExprWithFormat(expr, spec) => FStringPart::ExprWithFormat(apply_macro_hygiene_expr(expr, ctx), spec.clone()),
+                    FStringPart::ExprWithFormat(expr, spec) => {
+                        FStringPart::ExprWithFormat(apply_macro_hygiene_expr(expr, ctx), spec.clone())
+                    }
                 })
                 .collect(),
             type_meta: type_meta.clone(),

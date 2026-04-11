@@ -710,7 +710,8 @@ pub(super) fn exec_block_closure(
                             }
                         }
 
-                        let combined_methods_arc: Vec<Arc<FunctionDef>> = combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
+                        let combined_methods_arc: Vec<Arc<FunctionDef>> =
+                            combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
@@ -725,8 +726,10 @@ pub(super) fn exec_block_closure(
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect());
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect(),
+                            );
                         });
 
                         // Merge impl methods into ClassDef
@@ -1180,7 +1183,8 @@ fn exec_block_closure_mut(
                             }
                         }
 
-                        let combined_methods_arc: Vec<Arc<FunctionDef>> = combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
+                        let combined_methods_arc: Vec<Arc<FunctionDef>> =
+                            combined_methods_bare.iter().map(|m| Arc::new(m.clone())).collect();
 
                         // Register in TRAIT_IMPLS with combined methods
                         TRAIT_IMPLS.with(|cell| {
@@ -1195,8 +1199,10 @@ fn exec_block_closure_mut(
                     } else {
                         // Trait not found - just register the impl methods
                         TRAIT_IMPLS.with(|cell| {
-                            cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect());
+                            cell.borrow_mut().insert(
+                                (trait_name.clone(), type_name.clone()),
+                                impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect(),
+                            );
                         });
 
                         // Merge impl methods into ClassDef

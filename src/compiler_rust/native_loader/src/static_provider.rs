@@ -41,27 +41,28 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
         let normalized = name.strip_prefix('_').unwrap_or(name);
         use simple_runtime::value::{
             rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_cli_get_args, rt_cli_print_help,
-            rt_cli_print_version, rt_cli_version, rt_condition_probe, rt_contains,
-            rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd,
-            rt_env_exists, rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
-            rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
-            rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_is_some, rt_method_not_found,
+            rt_cli_print_version, rt_cli_version, rt_condition_probe, rt_contains, rt_decision_probe, rt_dict_clear,
+            rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get,
+            rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str, rt_eprint_value,
+            rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env, rt_interp_call,
+            rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_is_some, rt_method_not_found,
             rt_len, rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str, rt_println_value,
             rt_string_char_at, rt_string_ends_with, rt_string_eq, rt_string_find, rt_string_index_of, rt_string_join,
             rt_string_replace, rt_string_rfind, rt_string_split, rt_string_starts_with, rt_string_to_int,
             rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_term_enable_ansi, rt_term_get_size,
             rt_process_execute, rt_process_is_running, rt_process_kill, rt_process_run, rt_process_spawn,
-            rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env,
-            rt_set_macro_trace, rt_to_string, rt_unwrap_or_self, rt_value_compare, rt_value_eq, rt_value_to_string,
+            rt_process_spawn_async, rt_process_wait, rt_set_debug_mode, rt_set_env, rt_set_macro_trace, rt_to_string,
+            rt_unwrap_or_self, rt_value_compare, rt_value_eq, rt_value_to_string,
         };
         // File I/O operations
         use simple_runtime::value::{
-            rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv, rt_file_write_text,
-            rt_file_copy, rt_file_remove, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
-            rt_bytes_from_raw, rt_file_write_bytes, rt_file_move, rt_dir_create, rt_dir_list, rt_dir_remove,
-            rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk, rt_current_dir, rt_set_current_dir,
-            rt_dir_remove_all, rt_file_open, rt_file_get_size, rt_file_close, rt_path_basename, rt_path_dirname,
-            rt_path_ext, rt_path_absolute, rt_path_separator, rt_path_stem, rt_path_relative, rt_path_join,
+            rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_read_text_rv,
+            rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename, rt_file_read_lines, rt_file_append_text,
+            rt_file_read_bytes, rt_bytes_from_raw, rt_file_write_bytes, rt_file_move, rt_dir_create, rt_dir_list,
+            rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk, rt_current_dir,
+            rt_set_current_dir, rt_dir_remove_all, rt_file_open, rt_file_get_size, rt_file_close, rt_path_basename,
+            rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator, rt_path_stem, rt_path_relative,
+            rt_path_join,
         };
         // Regex operations
         use simple_runtime::value::{

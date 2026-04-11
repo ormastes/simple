@@ -167,9 +167,13 @@ pub fn compile_function_body<M: Module>(
             builder.ins().ireduce(expected_ty, val)
         } else if expected_ty == types::F32 {
             let as_i32 = builder.ins().ireduce(types::I32, val);
-            builder.ins().bitcast(types::F32, cranelift_codegen::ir::MemFlags::new(), as_i32)
+            builder
+                .ins()
+                .bitcast(types::F32, cranelift_codegen::ir::MemFlags::new(), as_i32)
         } else if expected_ty == types::F64 {
-            builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), val)
+            builder
+                .ins()
+                .bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), val)
         } else {
             val
         };

@@ -184,7 +184,11 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
             return Some(path);
         }
     }
-    if std::process::Command::new("llvm-objcopy").arg("--version").output().is_ok() {
+    if std::process::Command::new("llvm-objcopy")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
         return Some("llvm-objcopy".to_string());
     }
     if std::process::Command::new("objcopy").arg("--version").output().is_ok() {
@@ -210,13 +214,13 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
 
     let mut cmd = std::process::Command::new(&objcopy);
     cmd.arg("--remove-section=.init_array")
-       .arg("--remove-section=.ctors")
-       .arg("--remove-section=.fini_array")
-       .arg("--remove-section=.dtors");
+        .arg("--remove-section=.ctors")
+        .arg("--remove-section=.fini_array")
+        .arg("--remove-section=.dtors");
     #[cfg(target_os = "macos")]
     {
         cmd.arg("--remove-section=__DATA,__mod_init_func")
-           .arg("--remove-section=__DATA,__mod_term_func");
+            .arg("--remove-section=__DATA,__mod_term_func");
     }
     cmd.arg(&archive_path).arg(&filtered);
 
@@ -228,7 +232,12 @@ pub(crate) fn strip_llvm_constructors(lib: &Path, temp_dir: &Path) -> Result<Pat
 }
 
 /// Check if a mangled symbol name refers to a C standard library / system function.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "linux",
+    target_os = "windows"
+))]
 pub(crate) fn is_system_symbol(sym: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -253,32 +262,102 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
 fn is_windows_system_name(name: &str) -> bool {
     matches!(
         name,
-        "malloc" | "calloc" | "realloc" | "free" | "aligned_alloc" |
-        "memcpy" | "memmove" | "memset" | "memcmp" | "memchr" |
-        "strlen" | "strcmp" | "strncmp" | "strcpy" | "strncpy" | "strcat" | "strdup" |
-        "strerror" | "strstr" | "strchr" | "strrchr" | "strtol" | "strtoul" | "strtod" |
-        "printf" | "fprintf" | "sprintf" | "snprintf" | "puts" | "fputs" | "fputc" |
-        "fwrite" | "fread" | "fopen" | "fclose" | "fflush" | "fseek" | "ftell" |
-        "exit" | "_exit" | "abort" | "atexit" | "getenv" | "system" |
-        "sqrt" | "sqrtf" | "sin" | "cos" | "tan" | "exp" | "log" | "pow" |
-        "fabs" | "ceil" | "floor" | "round" | "fmod" |
-        "qsort" | "bsearch" | "abs" | "labs" | "rand" | "srand" |
-        "isdigit" | "isalpha" | "isspace" | "tolower" | "toupper" |
-        "setlocale" | "time" | "clock" |
-        "__security_cookie" | "__security_check_cookie" | "__GSHandlerCheck" |
-        "__acrt_iob_func" | "__stdio_common_vfprintf" | "__stdio_common_vsprintf"
+        "malloc"
+            | "calloc"
+            | "realloc"
+            | "free"
+            | "aligned_alloc"
+            | "memcpy"
+            | "memmove"
+            | "memset"
+            | "memcmp"
+            | "memchr"
+            | "strlen"
+            | "strcmp"
+            | "strncmp"
+            | "strcpy"
+            | "strncpy"
+            | "strcat"
+            | "strdup"
+            | "strerror"
+            | "strstr"
+            | "strchr"
+            | "strrchr"
+            | "strtol"
+            | "strtoul"
+            | "strtod"
+            | "printf"
+            | "fprintf"
+            | "sprintf"
+            | "snprintf"
+            | "puts"
+            | "fputs"
+            | "fputc"
+            | "fwrite"
+            | "fread"
+            | "fopen"
+            | "fclose"
+            | "fflush"
+            | "fseek"
+            | "ftell"
+            | "exit"
+            | "_exit"
+            | "abort"
+            | "atexit"
+            | "getenv"
+            | "system"
+            | "sqrt"
+            | "sqrtf"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "exp"
+            | "log"
+            | "pow"
+            | "fabs"
+            | "ceil"
+            | "floor"
+            | "round"
+            | "fmod"
+            | "qsort"
+            | "bsearch"
+            | "abs"
+            | "labs"
+            | "rand"
+            | "srand"
+            | "isdigit"
+            | "isalpha"
+            | "isspace"
+            | "tolower"
+            | "toupper"
+            | "setlocale"
+            | "time"
+            | "clock"
+            | "__security_cookie"
+            | "__security_check_cookie"
+            | "__GSHandlerCheck"
+            | "__acrt_iob_func"
+            | "__stdio_common_vfprintf"
+            | "__stdio_common_vsprintf"
     )
 }
 
 fn is_macos_system_symbol(sym: &str) -> bool {
     let name = sym.strip_prefix('_').unwrap_or(sym);
 
-    if matches!(name, "__stderrp" | "__stdinp" | "__stdoutp" | "_stderrp" | "_stdinp" | "_stdoutp") {
+    if matches!(
+        name,
+        "__stderrp" | "__stdinp" | "__stdoutp" | "_stderrp" | "_stdinp" | "_stdoutp"
+    ) {
         return true;
     }
 
-    if name.starts_with("_ZN") || name.starts_with("_ZT") || name.starts_with("_ZS") ||
-       name.starts_with("__cxa_") || name.starts_with("__cxx") {
+    if name.starts_with("_ZN")
+        || name.starts_with("_ZT")
+        || name.starts_with("_ZS")
+        || name.starts_with("__cxa_")
+        || name.starts_with("__cxx")
+    {
         return true;
     }
 
@@ -286,35 +365,75 @@ fn is_macos_system_symbol(sym: &str) -> bool {
         return true;
     }
 
-    if name.starts_with("CF") || name.starts_with("kCF") ||
-       name.starts_with("CC") ||
-       name.starts_with("Sec") || name.starts_with("kSec") ||
-       name.starts_with("IORegistr") || name.starts_with("IOService") || name.starts_with("IOObject") ||
-       name.starts_with("SCDynamic") || name.starts_with("SCNetwork") || name.starts_with("kSC") ||
-       name.starts_with("NSApp") || name.starts_with("NSView") || name.starts_with("NSWindow") ||
-       name.starts_with("NSFile") || name.starts_with("NSKey") || name.starts_with("NSConcrete") ||
-       name.starts_with("_NSGet") || name.starts_with("_NSConcrete") ||
-       name.starts_with("dispatch_") || name.starts_with("_dispatch_") ||
-       name.starts_with("xpc_") ||
-       name.starts_with("notify_") ||
-       name.starts_with("os_log") ||
-       name.starts_with("Block_") || name.starts_with("_Block_") {
+    if name.starts_with("CF")
+        || name.starts_with("kCF")
+        || name.starts_with("CC")
+        || name.starts_with("Sec")
+        || name.starts_with("kSec")
+        || name.starts_with("IORegistr")
+        || name.starts_with("IOService")
+        || name.starts_with("IOObject")
+        || name.starts_with("SCDynamic")
+        || name.starts_with("SCNetwork")
+        || name.starts_with("kSC")
+        || name.starts_with("NSApp")
+        || name.starts_with("NSView")
+        || name.starts_with("NSWindow")
+        || name.starts_with("NSFile")
+        || name.starts_with("NSKey")
+        || name.starts_with("NSConcrete")
+        || name.starts_with("_NSGet")
+        || name.starts_with("_NSConcrete")
+        || name.starts_with("dispatch_")
+        || name.starts_with("_dispatch_")
+        || name.starts_with("xpc_")
+        || name.starts_with("notify_")
+        || name.starts_with("os_log")
+        || name.starts_with("Block_")
+        || name.starts_with("_Block_")
+    {
         return true;
     }
 
-    if matches!(name,
-        "arc4random" | "arc4random_buf" | "arc4random_uniform" |
-        "__error" | "__maskrune" | "__tolower" | "__toupper" |
-        "_NSGetExecutablePath" | "_NSGetEnviron" | "_NSGetArgc" | "_NSGetArgv" |
-        "__NSConcreteStackBlock" | "__NSConcreteGlobalBlock" |
-        "os_unfair_lock_lock" | "os_unfair_lock_unlock" |
-        "mach_absolute_time" | "mach_timebase_info" | "mach_task_self_" |
-        "vm_allocate" | "vm_deallocate" |
-        "kevent" | "kqueue" | "pipe2" |
-        "flock" | "ftruncate" | "pread" | "pwrite" | "writev" | "readv" |
-        "getifaddrs" | "freeifaddrs" | "if_nametoindex" |
-        "sysctl" | "sysctlbyname" | "proc_pidpath" |
-        "issetugid" | "sandbox_check"
+    if matches!(
+        name,
+        "arc4random"
+            | "arc4random_buf"
+            | "arc4random_uniform"
+            | "__error"
+            | "__maskrune"
+            | "__tolower"
+            | "__toupper"
+            | "_NSGetExecutablePath"
+            | "_NSGetEnviron"
+            | "_NSGetArgc"
+            | "_NSGetArgv"
+            | "__NSConcreteStackBlock"
+            | "__NSConcreteGlobalBlock"
+            | "os_unfair_lock_lock"
+            | "os_unfair_lock_unlock"
+            | "mach_absolute_time"
+            | "mach_timebase_info"
+            | "mach_task_self_"
+            | "vm_allocate"
+            | "vm_deallocate"
+            | "kevent"
+            | "kqueue"
+            | "pipe2"
+            | "flock"
+            | "ftruncate"
+            | "pread"
+            | "pwrite"
+            | "writev"
+            | "readv"
+            | "getifaddrs"
+            | "freeifaddrs"
+            | "if_nametoindex"
+            | "sysctl"
+            | "sysctlbyname"
+            | "proc_pidpath"
+            | "issetugid"
+            | "sandbox_check"
     ) {
         return true;
     }
@@ -332,53 +451,247 @@ fn is_known_system_name(name: &str) -> bool {
     }
     matches!(
         name,
-        "malloc" | "calloc" | "realloc" | "free" | "posix_memalign" | "aligned_alloc" |
-        "memcpy" | "memmove" | "memset" | "memcmp" | "memchr" |
-        "strlen" | "strcmp" | "strncmp" | "strcpy" | "strncpy" | "strcat" | "strdup" |
-        "strerror" | "strstr" | "strchr" | "strrchr" | "strtol" | "strtoul" | "strtod" |
-        "strtoll" | "strtoull" |
-        "printf" | "fprintf" | "sprintf" | "snprintf" | "puts" | "fputs" | "fputc" |
-        "fwrite" | "fread" | "fopen" | "fclose" | "fflush" | "fseek" | "ftell" |
-        "feof" | "ferror" | "fileno" | "fdopen" | "freopen" | "getline" | "getdelim" |
-        "stdin" | "stdout" | "stderr" |
-        "sqrt" | "sqrtf" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" |
-        "exp" | "expf" | "log" | "logf" | "log2" | "log10" | "pow" | "powf" |
-        "fabs" | "fabsf" | "ceil" | "ceilf" | "floor" | "floorf" | "round" | "roundf" |
-        "fmod" | "fmodf" | "fmin" | "fmax" | "copysign" | "nan" | "isnan" | "isinf" |
-        "trunc" | "truncf" |
-        "exit" | "_exit" | "abort" | "atexit" | "getenv" | "setenv" | "unsetenv" | "system" |
-        "fork" | "execve" | "execvp" | "waitpid" | "kill" | "getpid" | "getppid" |
-        "signal" | "sigaction" | "sigemptyset" | "sigfillset" | "sigaddset" |
-        "pthread_create" | "pthread_join" | "pthread_detach" | "pthread_self" |
-        "pthread_mutex_init" | "pthread_mutex_lock" | "pthread_mutex_unlock" |
-        "pthread_mutex_destroy" | "pthread_rwlock_init" | "pthread_rwlock_destroy" |
-        "pthread_rwlock_rdlock" | "pthread_rwlock_wrlock" | "pthread_rwlock_unlock" |
-        "pthread_cond_init" | "pthread_cond_wait" | "pthread_cond_signal" |
-        "pthread_cond_broadcast" | "pthread_cond_destroy" |
-        "dlopen" | "dlclose" | "dlsym" | "dlerror" |
-        "open" | "close" | "read" | "write" | "lseek" | "stat" | "fstat" | "lstat" |
-        "mkdir" | "rmdir" | "unlink" | "rename" | "getcwd" | "chdir" | "access" |
-        "realpath" | "readlink" | "symlink" | "opendir" | "readdir" | "readdir_r" |
-        "closedir" | "dirfd" | "fdopendir" | "scandir" | "getdirentries64" |
-        "socket" | "bind" | "listen" | "accept" | "connect" | "send" | "recv" |
-        "sendto" | "recvfrom" | "setsockopt" | "getsockopt" | "getaddrinfo" |
-        "freeaddrinfo" | "inet_ntop" | "inet_pton" | "htons" | "ntohs" | "htonl" |
-        "time" | "clock" | "clock_gettime" | "gettimeofday" | "nanosleep" | "usleep" | "sleep" |
-        "qsort" | "bsearch" | "abs" | "labs" | "rand" | "srand" | "isdigit" | "isalpha" |
-        "isspace" | "tolower" | "toupper" | "mmap" | "munmap" | "mprotect" | "sysconf" |
-        "pipe" | "dup" | "dup2" | "fcntl" | "ioctl" | "select" | "poll" |
-        "gnu_get_libc_version" | "confstr" | "getauxval" | "dl_iterate_phdr" |
-        "__libc_start_main" | "__cxa_atexit" | "__cxa_finalize" | "__cxa_thread_atexit_impl" |
-        "__errno_location" | "__stack_chk_fail" | "__stack_chk_guard" |
-        "posix_spawn" | "posix_spawnattr_init" | "posix_spawnattr_setflags" |
-        "posix_spawnattr_setsigdefault" | "posix_spawnattr_setsigmask" |
-        "posix_spawnattr_setpgroup" | "posix_spawnattr_destroy" |
-        "posix_spawn_file_actions_init" | "posix_spawn_file_actions_adddup2" |
-        "posix_spawn_file_actions_addopen" | "posix_spawn_file_actions_addclose" |
-        "posix_spawn_file_actions_destroy" | "posix_spawnp" |
-        "setlocale" | "nl_langinfo" | "getpwuid_r" | "getuid" | "geteuid" |
-        "prctl" | "sched_getaffinity" | "getrandom" | "syscall" |
-        "epoll_create1" | "epoll_ctl" | "epoll_wait" | "eventfd" |
-        "futex" | "madvise" | "mremap" | "mincore"
+        "malloc"
+            | "calloc"
+            | "realloc"
+            | "free"
+            | "posix_memalign"
+            | "aligned_alloc"
+            | "memcpy"
+            | "memmove"
+            | "memset"
+            | "memcmp"
+            | "memchr"
+            | "strlen"
+            | "strcmp"
+            | "strncmp"
+            | "strcpy"
+            | "strncpy"
+            | "strcat"
+            | "strdup"
+            | "strerror"
+            | "strstr"
+            | "strchr"
+            | "strrchr"
+            | "strtol"
+            | "strtoul"
+            | "strtod"
+            | "strtoll"
+            | "strtoull"
+            | "printf"
+            | "fprintf"
+            | "sprintf"
+            | "snprintf"
+            | "puts"
+            | "fputs"
+            | "fputc"
+            | "fwrite"
+            | "fread"
+            | "fopen"
+            | "fclose"
+            | "fflush"
+            | "fseek"
+            | "ftell"
+            | "feof"
+            | "ferror"
+            | "fileno"
+            | "fdopen"
+            | "freopen"
+            | "getline"
+            | "getdelim"
+            | "stdin"
+            | "stdout"
+            | "stderr"
+            | "sqrt"
+            | "sqrtf"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "exp"
+            | "expf"
+            | "log"
+            | "logf"
+            | "log2"
+            | "log10"
+            | "pow"
+            | "powf"
+            | "fabs"
+            | "fabsf"
+            | "ceil"
+            | "ceilf"
+            | "floor"
+            | "floorf"
+            | "round"
+            | "roundf"
+            | "fmod"
+            | "fmodf"
+            | "fmin"
+            | "fmax"
+            | "copysign"
+            | "nan"
+            | "isnan"
+            | "isinf"
+            | "trunc"
+            | "truncf"
+            | "exit"
+            | "_exit"
+            | "abort"
+            | "atexit"
+            | "getenv"
+            | "setenv"
+            | "unsetenv"
+            | "system"
+            | "fork"
+            | "execve"
+            | "execvp"
+            | "waitpid"
+            | "kill"
+            | "getpid"
+            | "getppid"
+            | "signal"
+            | "sigaction"
+            | "sigemptyset"
+            | "sigfillset"
+            | "sigaddset"
+            | "pthread_create"
+            | "pthread_join"
+            | "pthread_detach"
+            | "pthread_self"
+            | "pthread_mutex_init"
+            | "pthread_mutex_lock"
+            | "pthread_mutex_unlock"
+            | "pthread_mutex_destroy"
+            | "pthread_rwlock_init"
+            | "pthread_rwlock_destroy"
+            | "pthread_rwlock_rdlock"
+            | "pthread_rwlock_wrlock"
+            | "pthread_rwlock_unlock"
+            | "pthread_cond_init"
+            | "pthread_cond_wait"
+            | "pthread_cond_signal"
+            | "pthread_cond_broadcast"
+            | "pthread_cond_destroy"
+            | "dlopen"
+            | "dlclose"
+            | "dlsym"
+            | "dlerror"
+            | "open"
+            | "close"
+            | "read"
+            | "write"
+            | "lseek"
+            | "stat"
+            | "fstat"
+            | "lstat"
+            | "mkdir"
+            | "rmdir"
+            | "unlink"
+            | "rename"
+            | "getcwd"
+            | "chdir"
+            | "access"
+            | "realpath"
+            | "readlink"
+            | "symlink"
+            | "opendir"
+            | "readdir"
+            | "readdir_r"
+            | "closedir"
+            | "dirfd"
+            | "fdopendir"
+            | "scandir"
+            | "getdirentries64"
+            | "socket"
+            | "bind"
+            | "listen"
+            | "accept"
+            | "connect"
+            | "send"
+            | "recv"
+            | "sendto"
+            | "recvfrom"
+            | "setsockopt"
+            | "getsockopt"
+            | "getaddrinfo"
+            | "freeaddrinfo"
+            | "inet_ntop"
+            | "inet_pton"
+            | "htons"
+            | "ntohs"
+            | "htonl"
+            | "time"
+            | "clock"
+            | "clock_gettime"
+            | "gettimeofday"
+            | "nanosleep"
+            | "usleep"
+            | "sleep"
+            | "qsort"
+            | "bsearch"
+            | "abs"
+            | "labs"
+            | "rand"
+            | "srand"
+            | "isdigit"
+            | "isalpha"
+            | "isspace"
+            | "tolower"
+            | "toupper"
+            | "mmap"
+            | "munmap"
+            | "mprotect"
+            | "sysconf"
+            | "pipe"
+            | "dup"
+            | "dup2"
+            | "fcntl"
+            | "ioctl"
+            | "select"
+            | "poll"
+            | "gnu_get_libc_version"
+            | "confstr"
+            | "getauxval"
+            | "dl_iterate_phdr"
+            | "__libc_start_main"
+            | "__cxa_atexit"
+            | "__cxa_finalize"
+            | "__cxa_thread_atexit_impl"
+            | "__errno_location"
+            | "__stack_chk_fail"
+            | "__stack_chk_guard"
+            | "posix_spawn"
+            | "posix_spawnattr_init"
+            | "posix_spawnattr_setflags"
+            | "posix_spawnattr_setsigdefault"
+            | "posix_spawnattr_setsigmask"
+            | "posix_spawnattr_setpgroup"
+            | "posix_spawnattr_destroy"
+            | "posix_spawn_file_actions_init"
+            | "posix_spawn_file_actions_adddup2"
+            | "posix_spawn_file_actions_addopen"
+            | "posix_spawn_file_actions_addclose"
+            | "posix_spawn_file_actions_destroy"
+            | "posix_spawnp"
+            | "setlocale"
+            | "nl_langinfo"
+            | "getpwuid_r"
+            | "getuid"
+            | "geteuid"
+            | "prctl"
+            | "sched_getaffinity"
+            | "getrandom"
+            | "syscall"
+            | "epoll_create1"
+            | "epoll_ctl"
+            | "epoll_wait"
+            | "eventfd"
+            | "futex"
+            | "madvise"
+            | "mremap"
+            | "mincore"
     )
 }

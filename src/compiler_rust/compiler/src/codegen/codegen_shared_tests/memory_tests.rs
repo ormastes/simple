@@ -510,4 +510,3 @@ mod shared_try_unwrap {
         interpreter_ok(&insts);
     }
 }
-

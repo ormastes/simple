@@ -120,10 +120,7 @@ mod tests {
     }
 
     fn repo_root() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..")
     }
 
     #[test]

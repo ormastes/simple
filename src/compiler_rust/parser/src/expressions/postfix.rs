@@ -51,26 +51,23 @@ impl<'a> Parser<'a> {
 
     fn validate_bracket_operand(&self, expr: &Expr, context: &str) -> Result<(), ParseError> {
         match expr {
-            Expr::Binary { op, .. }
-                if matches!(
-                    op,
+            Expr::Binary {
+                op:
                     BinOp::Eq
-                        | BinOp::NotEq
-                        | BinOp::Lt
-                        | BinOp::Gt
-                        | BinOp::LtEq
-                        | BinOp::GtEq
-                        | BinOp::And
-                        | BinOp::Or
-                        | BinOp::AndSuspend
-                        | BinOp::OrSuspend
-                ) =>
-            {
-                Err(ParseError::syntax_error_with_span(
-                    format!("{context} cannot be a comparison or logical expression inside []"),
-                    self.previous.span,
-                ))
-            }
+                    | BinOp::NotEq
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::LtEq
+                    | BinOp::GtEq
+                    | BinOp::And
+                    | BinOp::Or
+                    | BinOp::AndSuspend
+                    | BinOp::OrSuspend,
+                ..
+            } => Err(ParseError::syntax_error_with_span(
+                format!("{context} cannot be a comparison or logical expression inside []"),
+                self.previous.span,
+            )),
             Expr::Unary { op: UnaryOp::Not, .. } => Err(ParseError::syntax_error_with_span(
                 format!("{context} cannot use `not` inside []"),
                 self.previous.span,

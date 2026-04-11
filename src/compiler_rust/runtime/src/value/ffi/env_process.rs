@@ -968,9 +968,17 @@ fn get_terminal_size_native() -> (i32, i32) {
             fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfoNative) -> i32;
         }
         #[repr(C)]
-        struct CoordNative { x: i16, y: i16 }
+        struct CoordNative {
+            x: i16,
+            y: i16,
+        }
         #[repr(C)]
-        struct SmallRectNative { left: i16, top: i16, right: i16, bottom: i16 }
+        struct SmallRectNative {
+            left: i16,
+            top: i16,
+            right: i16,
+            bottom: i16,
+        }
         #[repr(C)]
         struct ConsoleScreenBufferInfoNative {
             size: CoordNative,

@@ -282,7 +282,9 @@ fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroCont
                     // Replace stub with real function, using original key as the public name
                     let mut real_func = (**def).clone();
                     real_func.name = original_key.clone();
-                    contract_result.introduced_functions.insert(original_key, Arc::new(real_func));
+                    contract_result
+                        .introduced_functions
+                        .insert(original_key, Arc::new(real_func));
                 }
             }
         }

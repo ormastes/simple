@@ -3,13 +3,15 @@
 use std::path::PathBuf;
 
 use super::{effective_target, ModuleImports};
-use super::tools::{
-    find_native_all_library, find_runtime_library,
-    is_system_symbol,
-};
+use super::tools::{find_native_all_library, find_runtime_library, is_system_symbol};
 
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "linux",
+    target_os = "windows"
+))]
 pub(crate) fn generate_stub_object(
     temp_dir: &std::path::Path,
     object_paths: &[PathBuf],
@@ -109,10 +111,7 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !defined.contains(s))
         .filter(|s| !s.starts_with("_dyld_") && *s != "_main" && *s != "main")
         .filter(|s| {
-            !s.starts_with("_ZSt")
-                && !s.starts_with("_ZNSt")
-                && !s.starts_with("ZSt")
-                && !s.starts_with("ZNSt")
+            !s.starts_with("_ZSt") && !s.starts_with("_ZNSt") && !s.starts_with("ZSt") && !s.starts_with("ZNSt")
         })
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
@@ -175,7 +174,9 @@ pub(crate) fn generate_stub_object(
         c_code.push_str("/* Auto-generated stubs for bootstrap linking (Windows) */\n");
         c_code.push_str("#include <stdint.h>\n\n");
         for sym in &needs_stub {
-            if !plat_config.is_valid_asm_label(sym) { continue; }
+            if !plat_config.is_valid_asm_label(sym) {
+                continue;
+            }
             c_code.push_str(&format!(
                 "int64_t __stub_{id}(void) __asm__(\"{sym}\");\n\
                  int64_t __stub_{id}(void) {{ return 3; }}\n\n",
@@ -217,7 +218,9 @@ pub(crate) fn generate_stub_object(
         let jmp_prefix = simple_common::platform::asm_helpers::asm_jmp_instruction(&host_target);
 
         for sym in &needs_stub {
-            if !plat_config.is_valid_asm_label(sym) { continue; }
+            if !plat_config.is_valid_asm_label(sym) {
+                continue;
+            }
 
             if cfg!(target_os = "macos") && sym.starts_with("___builtin_") {
                 let real_fn = format!("_{}", &sym["___builtin_".len()..]);
@@ -227,15 +230,36 @@ pub(crate) fn generate_stub_object(
 
             let bare = if sym.starts_with('_') { &sym[1..] } else { sym.as_str() };
             let rt_sym = format!("_rt_{}", bare);
-            if matches!(bare,
-                "array_len" | "array_new" | "array_get" | "array_set" | "array_append"
-                | "array_push" | "array_pop" | "array_slice" | "array_contains"
-                | "string_new" | "string_len" | "string_concat" | "string_eq"
-                | "string_slice" | "string_char_at" | "string_data"
-                | "string_split" | "string_replace" | "string_find" | "string_rfind"
-                | "alloc" | "free" | "print_str" | "println_str"
-                | "print_value" | "println_value"
-            ) && defined.contains(&rt_sym) {
+            if matches!(
+                bare,
+                "array_len"
+                    | "array_new"
+                    | "array_get"
+                    | "array_set"
+                    | "array_append"
+                    | "array_push"
+                    | "array_pop"
+                    | "array_slice"
+                    | "array_contains"
+                    | "string_new"
+                    | "string_len"
+                    | "string_concat"
+                    | "string_eq"
+                    | "string_slice"
+                    | "string_char_at"
+                    | "string_data"
+                    | "string_split"
+                    | "string_replace"
+                    | "string_find"
+                    | "string_rfind"
+                    | "alloc"
+                    | "free"
+                    | "print_str"
+                    | "println_str"
+                    | "print_value"
+                    | "println_value"
+            ) && defined.contains(&rt_sym)
+            {
                 asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &rt_sym));
                 continue;
             }

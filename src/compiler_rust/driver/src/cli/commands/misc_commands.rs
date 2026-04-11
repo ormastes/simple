@@ -141,7 +141,9 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
             println!("  --output=<dir>     Output directory (default: bootstrap)");
-            println!("  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)");
+            println!(
+                "  --seed=<path>      Seed compiler binary (default: bin/simple or bin/release/<platform>/simple)"
+            );
             0
         }
         _ => {

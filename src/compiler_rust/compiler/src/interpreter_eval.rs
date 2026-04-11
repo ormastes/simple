@@ -601,7 +601,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             }
 
                             // Build combined methods: impl methods + default trait methods
-                            let mut combined_methods: Vec<Arc<FunctionDef>> = impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect();
+                            let mut combined_methods: Vec<Arc<FunctionDef>> =
+                                impl_block.methods.iter().map(|m| Arc::new(m.clone())).collect();
                             for trait_method in &trait_def.methods {
                                 // Add default implementations that weren't overridden
                                 if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {

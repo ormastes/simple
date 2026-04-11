@@ -34,7 +34,10 @@
 use crate::value::core::RuntimeValue;
 use crate::value::heap::{HeapHeader, HeapObjectType};
 use crate::value::collections::RuntimeString;
-use super::io_capture::{append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal, rt_read_stdin_char};
+use super::io_capture::{
+    append_stdout, append_stderr, is_stdout_capturing, is_stderr_capturing, read_stdin_line_internal,
+    rt_read_stdin_char,
+};
 use std::io::Write;
 
 // ============================================================================
@@ -978,7 +981,7 @@ mod tests {
         let v = RuntimeValue::from_float(1234.5);
         let result = format_value_with_spec(v, ".2e");
         assert_eq!(result, "1.23e3"); // Rust's formatting
-        // Note: Rust uses "1.23e3" style, not "1.23e+03" — this is acceptable
+                                      // Note: Rust uses "1.23e3" style, not "1.23e+03" — this is acceptable
     }
 
     #[test]

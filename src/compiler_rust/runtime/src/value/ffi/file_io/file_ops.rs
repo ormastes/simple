@@ -45,7 +45,9 @@ pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64
         let mut out = std::path::PathBuf::new();
         for comp in abs.components() {
             match comp {
-                std::path::Component::ParentDir => { out.pop(); }
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
                 std::path::Component::CurDir => {}
                 c => out.push(c),
             }

@@ -475,7 +475,9 @@ impl Target {
 
         let os = if os_parts.is_empty() {
             TargetOS::host()
-        } else if os_joined.contains("simpleos") || os_joined.contains("simple-os") || os_joined.contains("simple_os")
+        } else if os_joined.contains("simpleos")
+            || os_joined.contains("simple-os")
+            || os_joined.contains("simple_os")
             || (os_parts.first().map(|s| s.to_lowercase()) == Some("simple".to_string()))
         {
             TargetOS::SimpleOS
@@ -489,7 +491,11 @@ impl Target {
                 "unknown" | "pc" => {
                     // Standard triple: arch-vendor-os or arch-vendor-os-env
                     // Check remaining parts for OS identification
-                    let rest = os_parts[1..].iter().map(|p| p.to_lowercase()).collect::<Vec<_>>().join("-");
+                    let rest = os_parts[1..]
+                        .iter()
+                        .map(|p| p.to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join("-");
                     match rest.as_str() {
                         s if s.starts_with("linux") => TargetOS::Linux,
                         s if s.starts_with("windows") => TargetOS::Windows,

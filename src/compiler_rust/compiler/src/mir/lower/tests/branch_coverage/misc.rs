@@ -501,4 +501,3 @@ fn extract_effects_already_has_async() {
     let effects = lowerer.extract_function_effects(&func);
     assert_eq!(effects.iter().filter(|a| *a == "async").count(), 1);
 }
-

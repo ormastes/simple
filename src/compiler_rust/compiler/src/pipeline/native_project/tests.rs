@@ -209,7 +209,9 @@ fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
     let mut builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
             .config(config);
-    builder.entry_file = Some(PathBuf::from("/project/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl"));
+    builder.entry_file = Some(PathBuf::from(
+        "/project/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl",
+    ));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
     assert_eq!(selected, runtime);
@@ -227,9 +229,8 @@ fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
     let mut config = NativeBuildConfig::default();
     config.runtime_path = Some(temp.path().to_path_buf());
 
-    let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
-            .config(config);
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
+        .config(config);
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
@@ -246,9 +247,11 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
     let mut config = NativeBuildConfig::default();
     config.runtime_path = Some(temp.path().to_path_buf());
 
-    let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"))
-            .config(config);
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
+    )
+    .config(config);
     builder.entry_file = Some(PathBuf::from(
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
@@ -271,15 +274,15 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     config.runtime_path = Some(temp.path().to_path_buf());
     config.runtime_bundle = "all".to_string();
 
-    let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"))
-            .config(config);
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
+    )
+    .config(config);
     builder.entry_file = Some(PathBuf::from(
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
 
     let selected_runtime = builder.selected_runtime_library(temp.path());
-    builder
-        .reject_unexpected_native_all(selected_runtime.as_ref())
-        .unwrap();
+    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }

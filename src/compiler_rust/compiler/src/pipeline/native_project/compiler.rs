@@ -11,10 +11,7 @@ use crate::hir::Lowerer;
 use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
-use super::{
-    effective_target, is_entry_file, safe_canonicalize, source_root_for_file,
-    ModuleImports, NativeProjectBuilder,
-};
+use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
 
@@ -215,8 +212,8 @@ pub(crate) fn compile_file_to_object(
                 }
             }
 
-            let mut llvm = LlvmBackend::new(effective_target())
-                .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
+            let mut llvm =
+                LlvmBackend::new(effective_target()).map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
             llvm.set_use_map(use_map.clone());
             let obj = llvm
@@ -241,7 +238,8 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Cranelift backend (default)
-    let mut codegen = Codegen::for_target(effective_target()).map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
+    let mut codegen =
+        Codegen::for_target(effective_target()).map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
     codegen.set_import_map(imports.import_map.clone());
     codegen.set_ambiguous_names(imports.ambiguous_names.clone());
@@ -586,4 +584,3 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
 
     s
 }
-

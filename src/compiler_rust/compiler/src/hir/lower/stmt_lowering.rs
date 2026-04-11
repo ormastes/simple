@@ -239,10 +239,15 @@ impl Lowerer {
 
                     // 4. Extract + register bindings
                     let bindings = self.extract_pattern_bindings(pattern, subject_ty);
-                    let is_mut = if_stmt.let_pattern.as_ref().map_or(false, |p| {
-                        matches!(p, Pattern::MutIdentifier(_))
-                    });
-                    let mutability = if is_mut { Mutability::Mutable } else { Mutability::Immutable };
+                    let is_mut = if_stmt
+                        .let_pattern
+                        .as_ref()
+                        .map_or(false, |p| matches!(p, Pattern::MutIdentifier(_)));
+                    let mutability = if is_mut {
+                        Mutability::Mutable
+                    } else {
+                        Mutability::Immutable
+                    };
                     for (name, ty) in &bindings {
                         ctx.add_local(name.clone(), *ty, mutability);
                     }
@@ -261,8 +266,7 @@ impl Lowerer {
                             if let Pattern::Identifier(name) | Pattern::MutIdentifier(name) = p {
                                 if let Some(local_idx) = ctx.local_map.get(name) {
                                     let local_idx = *local_idx;
-                                    let binding_ty =
-                                        binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
+                                    let binding_ty = binding_type_map.get(name).copied().unwrap_or(TypeId::ANY);
 
                                     let payload_expr = HirExpr {
                                         kind: HirExprKind::BuiltinCall {

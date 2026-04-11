@@ -468,4 +468,3 @@ shared_test!(shared_path_probe, |f: &mut MirFunction| {
     block.instructions.push(MirInst::ConstInt { dest: ret, value: 42 });
     ret
 });
-

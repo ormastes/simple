@@ -198,7 +198,13 @@ pub fn clear_compiled_functions() {
 /// This eliminates the deeply nested `.with()` calls throughout the module.
 fn with_interp_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut Env, &mut HashMap<String, Arc<FunctionDef>>, &mut HashMap<String, Arc<ClassDef>>, &Enums, &ImplMethods) -> R,
+    F: FnOnce(
+        &mut Env,
+        &mut HashMap<String, Arc<FunctionDef>>,
+        &mut HashMap<String, Arc<ClassDef>>,
+        &Enums,
+        &ImplMethods,
+    ) -> R,
 {
     INTERP_ENV.with(|env| {
         let mut env = env.borrow_mut();

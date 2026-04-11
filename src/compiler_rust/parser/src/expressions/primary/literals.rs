@@ -93,11 +93,13 @@ impl<'a> Parser<'a> {
                                         result_parts.push(FStringPart::ExprWithFormat(expr, format_spec));
                                     } else {
                                         // Expression didn't consume all input, treat as literal
-                                        result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                                        result_parts
+                                            .push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
                                     }
                                 }
                                 Err(_) => {
-                                    result_parts.push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
+                                    result_parts
+                                        .push(FStringPart::Literal(format!("{{{}:{}}}", expr_str, format_spec)));
                                 }
                             }
                         }

@@ -667,7 +667,11 @@ impl LlvmBackend {
                 let slot_ptr = unsafe { builder.build_gep(i8_type, argv_ptr, &[offset], "interp_argv_slot") }
                     .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
                 let typed_ptr = builder
-                    .build_pointer_cast(slot_ptr, self.context.ptr_type(inkwell::AddressSpace::default()), "interp_argv_typed_ptr")
+                    .build_pointer_cast(
+                        slot_ptr,
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "interp_argv_typed_ptr",
+                    )
                     .map_err(|e| crate::error::factory::llvm_cast_failed("cast argv ptr", &e))?;
                 builder
                     .build_store(typed_ptr, casted)

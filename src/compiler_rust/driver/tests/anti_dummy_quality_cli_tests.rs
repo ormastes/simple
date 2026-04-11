@@ -47,17 +47,10 @@ fn lint_flags_explicit_placeholder_impl() {
 fn verify_quality_fails_on_placeholder_test() {
     let dir = tempdir().expect("tempdir");
     let spec = dir.path().join("placeholder_spec.spl");
-    fs::write(
-        &spec,
-        "describe \"x\":\n    it \"y\":\n        pass_todo\n",
-    )
-    .expect("write fixture");
+    fs::write(&spec, "describe \"x\":\n    it \"y\":\n        pass_todo\n").expect("write fixture");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
-    cmd.current_dir(project_root())
-        .arg("verify")
-        .arg("quality")
-        .arg(&spec);
+    cmd.current_dir(project_root()).arg("verify").arg("quality").arg(&spec);
 
     cmd.assert().failure().stdout(contains("SSPEC002"));
 }
@@ -73,10 +66,7 @@ fn verify_quality_passes_clean_fixture() {
     .expect("write fixture");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
-    cmd.current_dir(project_root())
-        .arg("verify")
-        .arg("quality")
-        .arg(&spec);
+    cmd.current_dir(project_root()).arg("verify").arg("quality").arg(&spec);
 
     cmd.assert().success().stdout(contains("Verify quality passed"));
 }

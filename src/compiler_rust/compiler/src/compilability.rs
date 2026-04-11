@@ -451,7 +451,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::FString { parts, .. } => {
             for part in parts {
                 match part {
-                    simple_parser::ast::FStringPart::Expr(e) | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                    simple_parser::ast::FStringPart::Expr(e)
+                    | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
                         analyze_expr(e, reasons);
                     }
                     _ => {}
@@ -468,7 +469,8 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::I18nTemplate { parts, args, .. } => {
             for part in parts {
                 match part {
-                    simple_parser::ast::FStringPart::Expr(e) | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
+                    simple_parser::ast::FStringPart::Expr(e)
+                    | simple_parser::ast::FStringPart::ExprWithFormat(e, _) => {
                         analyze_expr(e, reasons);
                     }
                     _ => {}

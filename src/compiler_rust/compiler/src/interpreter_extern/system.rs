@@ -648,10 +648,7 @@ fn get_terminal_size_impl() -> (i32, i32) {
     {
         unsafe {
             let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
-                && ws.ws_col > 0
-                && ws.ws_row > 0
-            {
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
                 return (ws.ws_col as i32, ws.ws_row as i32);
             }
         }
@@ -663,9 +660,17 @@ fn get_terminal_size_impl() -> (i32, i32) {
             fn GetConsoleScreenBufferInfo(handle: isize, info: *mut ConsoleScreenBufferInfo) -> i32;
         }
         #[repr(C)]
-        struct Coord { x: i16, y: i16 }
+        struct Coord {
+            x: i16,
+            y: i16,
+        }
         #[repr(C)]
-        struct SmallRect { left: i16, top: i16, right: i16, bottom: i16 }
+        struct SmallRect {
+            left: i16,
+            top: i16,
+            right: i16,
+            bottom: i16,
+        }
         #[repr(C)]
         struct ConsoleScreenBufferInfo {
             size: Coord,

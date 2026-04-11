@@ -219,7 +219,9 @@ fn process_intro_decl(
                         .intro_function_labels
                         .insert(intro_label.to_string(), func_def.name.clone());
 
-                    result.introduced_functions.insert(func_def.name.clone(), Arc::new(func_def));
+                    result
+                        .introduced_functions
+                        .insert(func_def.name.clone(), Arc::new(func_def));
                 }
                 MacroDeclStub::Field(field_stub) => {
                     let field = create_field_from_stub(field_stub, const_bindings)?;

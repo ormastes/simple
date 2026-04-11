@@ -215,11 +215,10 @@ pub fn compile_instruction<M: Module>(
                 let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                if let Ok(fid) = ctx.module.declare_function(
-                    &symbol,
-                    cranelift_module::Linkage::Import,
-                    &sig,
-                ) {
+                if let Ok(fid) = ctx
+                    .module
+                    .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+                {
                     ctx.func_ids.entry(global_name.clone()).or_insert(fid);
                     let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
                     let val = builder.ins().func_addr(types::I64, func_ref);

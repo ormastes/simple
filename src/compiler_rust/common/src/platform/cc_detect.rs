@@ -191,8 +191,7 @@ pub fn is_msvc_target(cc: &str) -> bool {
 /// When true, compiler detection should prefer MSVC-compatible tools
 /// (`clang-cl`, `lld-link`) over MinGW tools (`gcc`, `g++`, `ld`).
 pub fn is_msvc_linker_flavor() -> bool {
-    std::env::var("SIMPLE_LINKER_FLAVOR")
-        .map_or(false, |v| v.eq_ignore_ascii_case("msvc"))
+    std::env::var("SIMPLE_LINKER_FLAVOR").map_or(false, |v| v.eq_ignore_ascii_case("msvc"))
 }
 
 /// Check if a command exists and works by running `--version`.

@@ -8,8 +8,7 @@
 
 #[cfg(unix)]
 use nix::sys::termios::{
-    cfsetispeed, cfsetospeed, tcsetattr, BaudRate, SetArg,
-    InputFlags, LocalFlags, OutputFlags, ControlFlags,
+    cfsetispeed, cfsetospeed, tcsetattr, BaudRate, SetArg, InputFlags, LocalFlags, OutputFlags, ControlFlags,
 };
 #[cfg(unix)]
 use std::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd};
@@ -31,12 +30,7 @@ pub extern "C" fn rt_serial_open(device: RuntimeValue, baud: i64) -> i64 {
             Err(_) => return 0,
         };
 
-        let fd = unsafe {
-            libc::open(
-                dev_c.as_ptr(),
-                libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
-            )
-        };
+        let fd = unsafe { libc::open(dev_c.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
 
         if fd < 0 {
             let err = std::io::Error::last_os_error();
@@ -105,15 +99,13 @@ pub extern "C" fn rt_serial_read(fd: i64, max_bytes: i64) -> RuntimeValue {
         use std::time::{Duration, Instant};
 
         let fd_raw = fd as libc::c_int;
-        let cap = (max_bytes.max(1).min(65536)) as usize;
+        let cap = max_bytes.clamp(1, 65536) as usize;
         let mut buf = vec![0u8; cap];
         let timeout = Duration::from_secs(5); // default 5s read timeout
         let start = Instant::now();
 
         loop {
-            let n = unsafe {
-                libc::read(fd_raw, buf.as_mut_ptr() as *mut libc::c_void, cap)
-            };
+            let n = unsafe { libc::read(fd_raw, buf.as_mut_ptr() as *mut libc::c_void, cap) };
 
             if n > 0 {
                 let text = String::from_utf8_lossy(&buf[..n as usize]);
@@ -152,13 +144,7 @@ pub extern "C" fn rt_serial_write(fd: i64, data: RuntimeValue) -> i64 {
             None => return 0,
         };
 
-        let n = unsafe {
-            libc::write(
-                fd as libc::c_int,
-                text.as_ptr() as *const libc::c_void,
-                text.len(),
-            )
-        };
+        let n = unsafe { libc::write(fd as libc::c_int, text.as_ptr() as *const libc::c_void, text.len()) };
 
         if n < 0 {
             eprintln!("rt_serial_write: {}", std::io::Error::last_os_error());
@@ -192,7 +178,7 @@ pub extern "C" fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> RuntimeValu
                     tios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 0;
                     tios.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = 0;
                 } else {
-                    let vtime = ((timeout_ms / 100).max(1).min(255)) as u8;
+                    let vtime = (timeout_ms / 100).clamp(1, 255) as u8;
                     tios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 0;
                     tios.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = vtime;
                 }
@@ -246,8 +232,16 @@ pub extern "C" fn rt_serial_relay(serial_fd: i64) -> RuntimeValue {
         loop {
             // poll both stdin and serial fd for readability
             let mut fds = [
-                libc::pollfd { fd: stdin_fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: sfd,      events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: stdin_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: sfd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
 
             let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
@@ -262,16 +256,18 @@ pub extern "C" fn rt_serial_relay(serial_fd: i64) -> RuntimeValue {
 
             // stdin → serial
             if fds[0].revents & libc::POLLIN != 0 {
-                let n = unsafe {
-                    libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n <= 0 {
                     break; // EOF on stdin → done
                 }
                 let mut written = 0usize;
                 while written < n as usize {
                     let w = unsafe {
-                        libc::write(sfd, buf[written..].as_ptr() as *const libc::c_void, n as usize - written)
+                        libc::write(
+                            sfd,
+                            buf[written..].as_ptr() as *const libc::c_void,
+                            n as usize - written,
+                        )
                     };
                     if w <= 0 {
                         eprintln!("rt_serial_relay: write to serial failed");
@@ -285,16 +281,18 @@ pub extern "C" fn rt_serial_relay(serial_fd: i64) -> RuntimeValue {
 
             // serial → stdout
             if fds[1].revents & libc::POLLIN != 0 {
-                let n = unsafe {
-                    libc::read(sfd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let n = unsafe { libc::read(sfd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n <= 0 {
                     break; // EOF on serial → done
                 }
                 let mut written = 0usize;
                 while written < n as usize {
                     let w = unsafe {
-                        libc::write(stdout_fd, buf[written..].as_ptr() as *const libc::c_void, n as usize - written)
+                        libc::write(
+                            stdout_fd,
+                            buf[written..].as_ptr() as *const libc::c_void,
+                            n as usize - written,
+                        )
                     };
                     if w <= 0 {
                         eprintln!("rt_serial_relay: write to stdout failed");
@@ -376,24 +374,17 @@ fn configure_serial(fd: &OwnedFd, baud: BaudRate) -> nix::Result<()> {
     let mut tios = tcgetattr(fd)?;
 
     // Raw mode: no echo, no line editing, no special char processing
-    tios.input_flags &= !(
-        InputFlags::IGNBRK
+    tios.input_flags &= !(InputFlags::IGNBRK
         | InputFlags::BRKINT
         | InputFlags::PARMRK
         | InputFlags::ISTRIP
         | InputFlags::INLCR
         | InputFlags::IGNCR
         | InputFlags::ICRNL
-        | InputFlags::IXON
-    );
+        | InputFlags::IXON);
     tios.output_flags &= !OutputFlags::OPOST;
-    tios.local_flags &= !(
-        LocalFlags::ECHO
-        | LocalFlags::ECHONL
-        | LocalFlags::ICANON
-        | LocalFlags::ISIG
-        | LocalFlags::IEXTEN
-    );
+    tios.local_flags &=
+        !(LocalFlags::ECHO | LocalFlags::ECHONL | LocalFlags::ICANON | LocalFlags::ISIG | LocalFlags::IEXTEN);
     tios.control_flags &= !(ControlFlags::CSIZE | ControlFlags::PARENB);
     tios.control_flags |= ControlFlags::CS8 | ControlFlags::CREAD | ControlFlags::CLOCAL;
 

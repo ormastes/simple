@@ -222,8 +222,10 @@ impl<'a> Parser<'a> {
             // Slice mode
             let slices = self.parse_tensor_slices()?;
             TensorMode::Slice(slices)
-        } else if self.check(&TokenKind::Default) || self.check_ident("default")
-            || self.check(&TokenKind::Flat) || self.check_ident("flat")
+        } else if self.check(&TokenKind::Default)
+            || self.check_ident("default")
+            || self.check(&TokenKind::Flat)
+            || self.check_ident("flat")
         {
             // Flat mode
             let default_val = if self.check(&TokenKind::Default) || self.check_ident("default") {

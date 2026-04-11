@@ -158,7 +158,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("pi".to_string(), ".2f".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("pi".to_string(), ".2f".to_string())
+                );
             }
             other => panic!("Expected FString with format spec, got: {:?}", other),
         }
@@ -173,7 +176,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("count".to_string(), "05d".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("count".to_string(), "05d".to_string())
+                );
             }
             other => panic!("Expected FString with format spec, got: {:?}", other),
         }
@@ -188,7 +194,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("name".to_string(), ">20".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("name".to_string(), ">20".to_string())
+                );
             }
             other => panic!("Expected FString with format spec, got: {:?}", other),
         }
@@ -203,7 +212,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("ratio".to_string(), ".1%".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("ratio".to_string(), ".1%".to_string())
+                );
             }
             other => panic!("Expected FString with format spec, got: {:?}", other),
         }
@@ -219,7 +231,10 @@ mod tests {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 3);
                 assert_eq!(parts[0], FStringToken::Literal("value: ".to_string()));
-                assert_eq!(parts[1], FStringToken::ExprWithFormat("x".to_string(), ".3f".to_string()));
+                assert_eq!(
+                    parts[1],
+                    FStringToken::ExprWithFormat("x".to_string(), ".3f".to_string())
+                );
                 assert_eq!(parts[2], FStringToken::Literal(" end".to_string()));
             }
             other => panic!("Expected FString with format spec and literals, got: {:?}", other),
@@ -235,7 +250,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("val".to_string(), "x".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("val".to_string(), "x".to_string())
+                );
             }
             other => panic!("Expected FString with hex format spec, got: {:?}", other),
         }
@@ -250,7 +268,10 @@ mod tests {
         match &tokens[0] {
             TokenKind::FString(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], FStringToken::ExprWithFormat("text".to_string(), "*^20".to_string()));
+                assert_eq!(
+                    parts[0],
+                    FStringToken::ExprWithFormat("text".to_string(), "*^20".to_string())
+                );
             }
             other => panic!("Expected FString with center-aligned format spec, got: {:?}", other),
         }

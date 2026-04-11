@@ -2,9 +2,7 @@
 
 use super::super::common::*;
 use crate::hir::{self, GpuIntrinsicKind, HirExpr, HirExprKind};
-use crate::mir::lower::{
-    lower_to_mir_with_coverage, MirLowerResult, MirLowerer,
-};
+use crate::mir::lower::{lower_to_mir_with_coverage, MirLowerResult, MirLowerer};
 use crate::mir::function::{MirFunction, MirModule};
 use crate::mir::{CallTarget, MirInst};
 use simple_parser::Parser;
@@ -65,10 +63,7 @@ pub(super) fn gpu_lowerer_setup() -> MirLowerer<'static> {
     lowerer
 }
 
-pub(super) fn gpu_result_is_materialized_nil(
-    func: &MirFunction,
-    result: crate::mir::instructions::VReg,
-) -> bool {
+pub(super) fn gpu_result_is_materialized_nil(func: &MirFunction, result: crate::mir::instructions::VReg) -> bool {
     func.blocks
         .iter()
         .flat_map(|b| &b.instructions)

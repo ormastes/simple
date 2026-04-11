@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 use super::{effective_target, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::generate_stub_object;
 use super::tools::{
-    find_archive_tool, find_c_compiler, find_cxx_compiler,
-    find_native_all_library, find_runtime_library, strip_llvm_constructors,
-    is_system_symbol,
+    find_archive_tool, find_c_compiler, find_cxx_compiler, find_native_all_library, find_runtime_library,
+    strip_llvm_constructors, is_system_symbol,
 };
 
 impl NativeProjectBuilder {
@@ -88,7 +87,11 @@ int main(int argc, char** argv) {
     }
 
     /// Generate a constructor function that calls all __module_init_* functions.
-    pub(crate) fn generate_init_caller(&self, temp_dir: &Path, object_paths: &[PathBuf]) -> Result<Option<PathBuf>, String> {
+    pub(crate) fn generate_init_caller(
+        &self,
+        temp_dir: &Path,
+        object_paths: &[PathBuf],
+    ) -> Result<Option<PathBuf>, String> {
         let mut init_names = Vec::new();
         for obj in object_paths {
             let output = std::process::Command::new("nm")
@@ -204,7 +207,9 @@ int main(int argc, char** argv) {
 
         let selected_runtime = self.selected_runtime_library(temp_dir);
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
-        let has_native_all = selected_runtime.as_ref().map_or(false, |(_, is_native_all)| *is_native_all);
+        let has_native_all = selected_runtime
+            .as_ref()
+            .map_or(false, |(_, is_native_all)| *is_native_all);
         let cc = if has_native_all {
             find_cxx_compiler()
         } else {
@@ -229,18 +234,38 @@ int main(int argc, char** argv) {
         let cross_target = effective_target();
         if !cross_target.is_host() {
             let triple = match (cross_target.arch, cross_target.os) {
-                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => "riscv32-unknown-elf",
-                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::None) => "riscv64-unknown-elf",
-                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::None) => "aarch64-none-elf",
+                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => {
+                    "riscv32-unknown-elf"
+                }
+                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::None) => {
+                    "riscv64-unknown-elf"
+                }
+                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::None) => {
+                    "aarch64-none-elf"
+                }
                 (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::None) => "armv7-none-eabihf",
                 (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::None) => "i686-unknown-elf",
-                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => "x86_64-unknown-elf",
-                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::SimpleOS) => "x86_64-unknown-elf",
-                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::SimpleOS) => "aarch64-none-elf",
-                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::SimpleOS) => "riscv64-unknown-elf",
-                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::SimpleOS) => "riscv32-unknown-elf",
-                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::SimpleOS) => "i686-unknown-elf",
-                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::SimpleOS) => "armv7-none-eabihf",
+                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::None) => {
+                    "x86_64-unknown-elf"
+                }
+                (simple_common::target::TargetArch::X86_64, simple_common::target::TargetOS::SimpleOS) => {
+                    "x86_64-unknown-elf"
+                }
+                (simple_common::target::TargetArch::Aarch64, simple_common::target::TargetOS::SimpleOS) => {
+                    "aarch64-none-elf"
+                }
+                (simple_common::target::TargetArch::Riscv64, simple_common::target::TargetOS::SimpleOS) => {
+                    "riscv64-unknown-elf"
+                }
+                (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::SimpleOS) => {
+                    "riscv32-unknown-elf"
+                }
+                (simple_common::target::TargetArch::X86, simple_common::target::TargetOS::SimpleOS) => {
+                    "i686-unknown-elf"
+                }
+                (simple_common::target::TargetArch::Arm, simple_common::target::TargetOS::SimpleOS) => {
+                    "armv7-none-eabihf"
+                }
                 _ => "",
             };
             if !triple.is_empty() {
@@ -423,12 +448,24 @@ int main(int argc, char** argv) {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, selected_runtime.as_ref().map(|(p, _)| p.as_path()), &imports)?;
+            let stubs_o = generate_stub_object(
+                temp_dir,
+                object_paths,
+                &main_o,
+                selected_runtime.as_ref().map(|(p, _)| p.as_path()),
+                &imports,
+            )?;
             cmd.arg(&stubs_o);
         }
         #[cfg(target_os = "windows")]
         if !is_msvc && !is_clang_cl {
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, selected_runtime.as_ref().map(|(p, _)| p.as_path()), &imports)?;
+            let stubs_o = generate_stub_object(
+                temp_dir,
+                object_paths,
+                &main_o,
+                selected_runtime.as_ref().map(|(p, _)| p.as_path()),
+                &imports,
+            )?;
             cmd.arg(&stubs_o);
         }
         for flag in &link_config.unresolved_symbol_flags {
@@ -511,7 +548,11 @@ int main(int argc, char** argv) {
                 let asm_compilers: Vec<String> = {
                     let mut v = vec![cc.clone()];
                     #[cfg(target_os = "macos")]
-                    for p in ["/opt/homebrew/opt/llvm@18/bin/clang", "/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"] {
+                    for p in [
+                        "/opt/homebrew/opt/llvm@18/bin/clang",
+                        "/opt/homebrew/opt/llvm/bin/clang",
+                        "/usr/local/opt/llvm/bin/clang",
+                    ] {
                         if std::path::Path::new(p).exists() && !v.contains(&p.to_string()) {
                             v.push(p.to_string());
                         }
@@ -528,10 +569,17 @@ int main(int argc, char** argv) {
                                 let mut assembled = false;
                                 for asm_cc in &asm_compilers {
                                     let mut asm_cmd = std::process::Command::new(asm_cc);
-                                    asm_cmd.args(["-c", "-o"]).arg(&out).arg(&path)
+                                    asm_cmd
+                                        .args(["-c", "-o"])
+                                        .arg(&out)
+                                        .arg(&path)
                                         .arg(format!("--target={}", triple));
-                                    if !march.is_empty() { asm_cmd.arg(march); }
-                                    if !mabi.is_empty() { asm_cmd.arg(mabi); }
+                                    if !march.is_empty() {
+                                        asm_cmd.arg(march);
+                                    }
+                                    if !mabi.is_empty() {
+                                        asm_cmd.arg(mabi);
+                                    }
                                     if let Ok(r) = asm_cmd.output() {
                                         if r.status.success() {
                                             boot_objects.push(out.clone());
@@ -554,13 +602,21 @@ int main(int argc, char** argv) {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                             let out = temp_dir.join(format!("_boot_{}.o", stem));
                             let mut c_cmd = std::process::Command::new(&cc);
-                            c_cmd.args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
-                                .arg(&out).arg(&path)
+                            c_cmd
+                                .args(["-c", "-ffreestanding", "-nostdlib", "-fno-pie", "-o"])
+                                .arg(&out)
+                                .arg(&path)
                                 .arg(format!("--target={}", triple));
-                            if triple.contains("x86_64") { c_cmd.arg("-mno-red-zone"); }
-                            if !march.is_empty() { c_cmd.args([march, mabi, "-mcmodel=medany"]); }
+                            if triple.contains("x86_64") {
+                                c_cmd.arg("-mno-red-zone");
+                            }
+                            if !march.is_empty() {
+                                c_cmd.args([march, mabi, "-mcmodel=medany"]);
+                            }
                             if let Ok(r) = c_cmd.output() {
-                                if r.status.success() { boot_objects.push(out); }
+                                if r.status.success() {
+                                    boot_objects.push(out);
+                                }
                             }
                         }
                     }
@@ -608,8 +664,10 @@ int main(int argc, char** argv) {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     if stdout.lines().any(|l| {
                         let parts: Vec<&str> = l.split_whitespace().collect();
-                        parts.len() >= 3 && (parts[2].ends_with("___start") || parts[2].ends_with("__spl_start"))
-                            && parts[2] != "_start" && parts[2] != "spl_start"
+                        parts.len() >= 3
+                            && (parts[2].ends_with("___start") || parts[2].ends_with("__spl_start"))
+                            && parts[2] != "_start"
+                            && parts[2] != "spl_start"
                             && !parts[2].contains("_starts_with")
                             && arch_filters.iter().any(|f| parts[2].contains(f))
                             && !arch_neg_filters.iter().any(|f| parts[2].contains(f))
@@ -623,7 +681,9 @@ int main(int argc, char** argv) {
             if let Some(idx) = start_obj_idx {
                 ordered.push(&object_paths[idx]);
                 for (i, obj) in object_paths.iter().enumerate() {
-                    if i != idx { ordered.push(obj); }
+                    if i != idx {
+                        ordered.push(obj);
+                    }
                 }
             } else {
                 ordered.extend(object_paths.iter());
@@ -637,8 +697,12 @@ int main(int argc, char** argv) {
                 c.arg(format!("-T{}", ls.display()));
             }
             c.arg("-o").arg(&self.output);
-            for boot_obj in &boot_objects { c.arg(boot_obj); }
-            for obj in &ordered_objects { c.arg(obj.as_os_str()); }
+            for boot_obj in &boot_objects {
+                c.arg(boot_obj);
+            }
+            for obj in &ordered_objects {
+                c.arg(obj.as_os_str());
+            }
             c
         } else {
             let mut c = std::process::Command::new(&cc);
@@ -653,18 +717,30 @@ int main(int argc, char** argv) {
                 c.arg(format!("-T{}", ls.display()));
             }
             c.arg("-o").arg(&self.output);
-            for boot_obj in &boot_objects { c.arg(boot_obj); }
-            for obj in &ordered_objects { c.arg(obj.as_os_str()); }
+            for boot_obj in &boot_objects {
+                c.arg(boot_obj);
+            }
+            for obj in &ordered_objects {
+                c.arg(obj.as_os_str());
+            }
             c
         };
 
         if !boot_objects.is_empty() {
             let has_entry32 = boot_objects.iter().any(|obj| {
-                std::process::Command::new("nm").arg("-g").arg(obj).output().ok()
+                std::process::Command::new("nm")
+                    .arg("-g")
+                    .arg(obj)
+                    .output()
+                    .ok()
                     .map_or(false, |out| String::from_utf8_lossy(&out.stdout).contains(" _entry32"))
             });
             if has_entry32 {
-                let entry_flag = if use_direct_lld.is_some() { "--entry=_entry32" } else { "-Wl,--entry=_entry32" };
+                let entry_flag = if use_direct_lld.is_some() {
+                    "--entry=_entry32"
+                } else {
+                    "-Wl,--entry=_entry32"
+                };
                 cmd.arg(entry_flag);
             }
         }
@@ -705,9 +781,14 @@ int main(int argc, char** argv) {
                             let parts: Vec<&str> = line.split_whitespace().collect();
                             if parts.len() >= 3 {
                                 let sym = parts[2];
-                                if (sym.ends_with("___start") || sym.ends_with("__spl_start")) && sym != "_start" && sym != "spl_start" {
+                                if (sym.ends_with("___start") || sym.ends_with("__spl_start"))
+                                    && sym != "_start"
+                                    && sym != "spl_start"
+                                {
                                     let neg_match = arch_neg_filters.iter().any(|f| sym.contains(f));
-                                    if neg_match { continue; }
+                                    if neg_match {
+                                        continue;
+                                    }
                                     let pos_match = arch_filters.iter().any(|f| sym.contains(f));
                                     if pos_match {
                                         best_start = Some(sym.to_string());
@@ -733,11 +814,15 @@ int main(int argc, char** argv) {
         if use_direct_lld.is_some() {
             cmd.arg("-z").arg("muldefs");
             cmd.arg("--unresolved-symbols=ignore-all");
-            if self.config.strip { cmd.arg("-s"); }
+            if self.config.strip {
+                cmd.arg("-s");
+            }
         } else {
             cmd.arg("-Wl,-z,muldefs");
             cmd.arg("-Wl,--unresolved-symbols=ignore-all");
-            if self.config.strip { cmd.arg("-Wl,-s"); }
+            if self.config.strip {
+                cmd.arg("-Wl,-s");
+            }
         }
 
         if self.config.verbose {
@@ -747,22 +832,27 @@ int main(int argc, char** argv) {
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
-            if (triple.contains("x86_64") || triple.contains("i686"))
-                && !boot_objects.is_empty()
-            {
+            if (triple.contains("x86_64") || triple.contains("i686")) && !boot_objects.is_empty() {
                 let elf64 = self.output.with_extension("elf64");
                 let _ = std::fs::rename(&self.output, &elf64);
                 let objcopy_bin = ["llvm-objcopy", "gobjcopy", "objcopy"]
                     .iter()
-                    .find(|bin| std::process::Command::new(bin).arg("--version").output()
-                        .map_or(false, |o| o.status.success()))
+                    .find(|bin| {
+                        std::process::Command::new(bin)
+                            .arg("--version")
+                            .output()
+                            .map_or(false, |o| o.status.success())
+                    })
                     .unwrap_or(&"objcopy");
                 let objcopy = std::process::Command::new(objcopy_bin)
                     .args(["-O", "elf32-i386"])
-                    .arg(&elf64).arg(&self.output)
+                    .arg(&elf64)
+                    .arg(&self.output)
                     .output();
                 match objcopy {
-                    Ok(r) if r.status.success() => { let _ = std::fs::remove_file(&elf64); }
+                    Ok(r) if r.status.success() => {
+                        let _ = std::fs::remove_file(&elf64);
+                    }
                     _ => {
                         let _ = std::fs::rename(&elf64, &self.output);
                         eprintln!("WARNING: objcopy elf32 failed, keeping 64-bit ELF");
@@ -784,4 +874,3 @@ int main(int argc, char** argv) {
         }
     }
 }
-

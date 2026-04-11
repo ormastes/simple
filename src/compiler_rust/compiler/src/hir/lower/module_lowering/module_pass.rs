@@ -390,7 +390,10 @@ impl Lowerer {
                 // Log import loading failures -- silent failures cause cross-module
                 // FieldGet bugs (wrong byte_offset when type falls back to ANY).
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
-                    eprintln!("[WARN] Failed to load imported types from {:?}: {}", use_stmt.path.segments, e);
+                    eprintln!(
+                        "[WARN] Failed to load imported types from {:?}: {}",
+                        use_stmt.path.segments, e
+                    );
                 }
             }
         }
@@ -719,7 +722,10 @@ impl Lowerer {
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
                 if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
-                    eprintln!("[WARN] Failed to load imported types from {:?}: {}", use_stmt.path.segments, e);
+                    eprintln!(
+                        "[WARN] Failed to load imported types from {:?}: {}",
+                        use_stmt.path.segments, e
+                    );
                 }
             }
         }

@@ -1306,7 +1306,8 @@ impl LlvmBackend {
                         }
                         FStringPart::ExprWithFormat(vreg, format_spec) => {
                             let value_format_fn = module.get_function("rt_value_format_string").unwrap_or_else(|| {
-                                let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                                let fn_type =
+                                    i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
                                 module.add_function("rt_value_format_string", fn_type, None)
                             });
                             let val = self.get_vreg(vreg, vreg_map)?;
@@ -1323,7 +1324,11 @@ impl LlvmBackend {
                                 .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
                             let spec_len = i64_type.const_int(format_spec.len() as u64, false);
                             let call = builder
-                                .build_call(value_format_fn, &[coerced.into(), spec_ptr_int.into(), spec_len.into()], "fmt_str")
+                                .build_call(
+                                    value_format_fn,
+                                    &[coerced.into(), spec_ptr_int.into(), spec_len.into()],
+                                    "fmt_str",
+                                )
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_format_string", &e))?;
                             call.try_as_basic_value()
                                 .left()
@@ -1450,7 +1455,9 @@ impl LlvmBackend {
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
                     "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
-                    "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
+                    "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
+                        Some("rt_string_to_float")
+                    }
                     "to_string" | "str" => Some("rt_to_string"),
                     // Index methods
                     "get" => Some("rt_index_get"),
@@ -1501,7 +1508,11 @@ impl LlvmBackend {
                             .get_function("rt_slice")
                             .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
                         let call_site = builder
-                            .build_call(slice_fn, &[coll_i64.into(), start_val.into(), end_val.into(), step_val.into()], "rtslice")
+                            .build_call(
+                                slice_fn,
+                                &[coll_i64.into(), start_val.into(), end_val.into(), step_val.into()],
+                                "rtslice",
+                            )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice call", &e))?;
                         if let Some(d) = dest {
                             if let Some(ret_val) = call_site.try_as_basic_value().left() {
@@ -1729,7 +1740,11 @@ impl LlvmBackend {
                             .get_function("rt_slice")
                             .unwrap_or_else(|| module.add_function("rt_slice", slice_fn_type, None));
                         let call_site = builder
-                            .build_call(slice_fn, &[receiver_i64.into(), start_val.into(), end_val.into(), step_val.into()], "bslice")
+                            .build_call(
+                                slice_fn,
+                                &[receiver_i64.into(), start_val.into(), end_val.into(), step_val.into()],
+                                "bslice",
+                            )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice builtin call", &e))?;
                         if let Some(d) = dest {
                             if let Some(ret_val) = call_site.try_as_basic_value().left() {

@@ -107,7 +107,11 @@ fn sibling_might_define_requested_names(path: &Path, requested_names: &[String])
             || source.contains(&let_pat)
     });
 
-    if matches { Some(source) } else { None }
+    if matches {
+        Some(source)
+    } else {
+        None
+    }
 }
 
 fn locally_defined_names(items: &[Node]) -> Vec<String> {
@@ -555,15 +559,13 @@ pub fn load_and_merge_module(
                             .filter_map(|p| {
                                 match requested_names.as_ref() {
                                     None => Some((p, None)), // no filter — source read deferred
-                                    Some(names) => {
-                                        match sibling_might_define_requested_names(&p, names) {
-                                            Some(source) => Some((p, Some(source))),
-                                            None => {
-                                                loader_trace!("sibling-skip", "{} (no matching names)", p.display());
-                                                None
-                                            }
+                                    Some(names) => match sibling_might_define_requested_names(&p, names) {
+                                        Some(source) => Some((p, Some(source))),
+                                        None => {
+                                            loader_trace!("sibling-skip", "{} (no matching names)", p.display());
+                                            None
                                         }
-                                    }
+                                    },
                                 }
                             })
                             .collect();

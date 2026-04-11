@@ -200,10 +200,8 @@ impl ModuleLoadGuard {
         if stats_enabled() {
             GUARD_STATS.with(|stats| {
                 let mut s = stats.borrow_mut();
-                s.rss_deltas
-                    .insert(self.path.clone(), delta);
-                s.eval_times
-                    .insert(self.path.clone(), elapsed_us);
+                s.rss_deltas.insert(self.path.clone(), delta);
+                s.eval_times.insert(self.path.clone(), elapsed_us);
                 s.total_modules += 1;
             });
         }
@@ -304,12 +302,7 @@ pub fn print_diagnostics() {
             eprintln!("\nTop RSS consumers:");
             for (path, delta) in deltas.iter().take(10) {
                 let time = s.eval_times.get(*path).copied().unwrap_or(0);
-                eprintln!(
-                    "  {:+6}KB  {:>6}us  {}",
-                    *delta / 1024,
-                    time,
-                    path.display()
-                );
+                eprintln!("  {:+6}KB  {:>6}us  {}", *delta / 1024, time, path.display());
             }
         }
     });
@@ -337,10 +330,7 @@ pub fn assert_rss_under_mb(limit_mb: u64) -> Result<u64, String> {
     let current = read_rss_bytes();
     let current_mb = current / 1024 / 1024;
     if current_mb > limit_mb {
-        Err(format!(
-            "RSS {}MB exceeds limit {}MB",
-            current_mb, limit_mb
-        ))
+        Err(format!("RSS {}MB exceeds limit {}MB", current_mb, limit_mb))
     } else {
         Ok(current_mb)
     }
@@ -348,14 +338,7 @@ pub fn assert_rss_under_mb(limit_mb: u64) -> Result<u64, String> {
 
 /// Assert that a module load did not exceed the given RSS delta (in MB).
 pub fn assert_module_delta_under_mb(path: &Path, limit_mb: i64) -> Result<i64, String> {
-    let delta_kb = GUARD_STATS.with(|stats| {
-        stats
-            .borrow()
-            .rss_deltas
-            .get(path)
-            .copied()
-            .unwrap_or(0)
-    });
+    let delta_kb = GUARD_STATS.with(|stats| stats.borrow().rss_deltas.get(path).copied().unwrap_or(0));
     let delta_mb = delta_kb / 1024 / 1024;
     if delta_mb > limit_mb {
         Err(format!(

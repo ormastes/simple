@@ -251,7 +251,9 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                         FStringPart::Literal(substitute_template_string(text, const_bindings))
                     }
                     FStringPart::Expr(expr_text) => FStringPart::Expr(expr_text.clone()),
-                    FStringPart::ExprWithFormat(expr_text, spec) => FStringPart::ExprWithFormat(expr_text.clone(), spec.clone()),
+                    FStringPart::ExprWithFormat(expr_text, spec) => {
+                        FStringPart::ExprWithFormat(expr_text.clone(), spec.clone())
+                    }
                 })
                 .collect(),
             type_meta: type_meta.clone(),

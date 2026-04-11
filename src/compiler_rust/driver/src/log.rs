@@ -75,7 +75,10 @@ pub fn resolve_log_dir(log_dir: Option<&Path>) -> std::io::Result<PathBuf> {
     }
 
     Err(last_error.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no writable log directory available")
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "no writable log directory available",
+        )
     }))
 }
 

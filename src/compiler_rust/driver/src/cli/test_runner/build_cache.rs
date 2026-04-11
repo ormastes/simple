@@ -121,12 +121,10 @@ impl BuildCache {
         let source_content = {
             let cache = self.content_cache.borrow();
             if let Some(bytes) = cache.get(source) {
-                String::from_utf8(bytes.clone())
-                    .map_err(|e| format!("Invalid UTF-8 in {}: {}", source.display(), e))?
+                String::from_utf8(bytes.clone()).map_err(|e| format!("Invalid UTF-8 in {}: {}", source.display(), e))?
             } else {
                 drop(cache);
-                fs::read_to_string(source)
-                    .map_err(|e| format!("Failed to read {}: {}", source.display(), e))?
+                fs::read_to_string(source).map_err(|e| format!("Failed to read {}: {}", source.display(), e))?
             }
         };
 

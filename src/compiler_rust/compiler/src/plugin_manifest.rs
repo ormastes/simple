@@ -125,7 +125,10 @@ fn finalize_plugin_entry(
         return Err(format!("plugin '{}' missing non-empty 'library'", name.trim()));
     }
     if functions.is_empty() && classes.is_empty() {
-        return Err(format!("plugin '{}' must declare at least one function or class", name.trim()));
+        return Err(format!(
+            "plugin '{}' must declare at least one function or class",
+            name.trim()
+        ));
     }
 
     plugins.push(PluginEntry {
@@ -239,7 +242,13 @@ pub fn parse_plugin_manifest(path: &Path) -> Result<PluginManifest, String> {
         }
 
         // Inside methods block — a new method name (indented under methods:)
-        if in_methods_block && indent >= 16 && line.ends_with(':') && !line.starts_with("symbol:") && !line.starts_with("params:") && !line.starts_with("return:") {
+        if in_methods_block
+            && indent >= 16
+            && line.ends_with(':')
+            && !line.starts_with("symbol:")
+            && !line.starts_with("params:")
+            && !line.starts_with("return:")
+        {
             // Flush previous method if any
             if !method_name.is_empty() {
                 class_methods.push(PluginMethodEntry {
@@ -273,7 +282,13 @@ pub fn parse_plugin_manifest(path: &Path) -> Result<PluginManifest, String> {
         }
 
         // Inside classes block — a new class name
-        if in_classes_block && indent >= 8 && line.ends_with(':') && !line.starts_with("constructor:") && !line.starts_with("destructor:") && !line.starts_with("methods:") {
+        if in_classes_block
+            && indent >= 8
+            && line.ends_with(':')
+            && !line.starts_with("constructor:")
+            && !line.starts_with("destructor:")
+            && !line.starts_with("methods:")
+        {
             // Flush previous method if any
             if !method_name.is_empty() {
                 class_methods.push(PluginMethodEntry {

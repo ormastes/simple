@@ -93,9 +93,7 @@ pub fn compile_store<M: Module>(
         let expected_cl_ty = if local_index < ctx.func.params.len() {
             super::super::types_util::type_id_to_cranelift(ctx.func.params[local_index].ty)
         } else if local_index - ctx.func.params.len() < ctx.func.locals.len() {
-            super::super::types_util::type_id_to_cranelift(
-                ctx.func.locals[local_index - ctx.func.params.len()].ty,
-            )
+            super::super::types_util::type_id_to_cranelift(ctx.func.locals[local_index - ctx.func.params.len()].ty)
         } else {
             types::I64 // default for dynamically-created locals
         };

@@ -275,7 +275,11 @@ fn gpu_simd_sum() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSum, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSum { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSum { .. })));
 }
 
 #[test]
@@ -284,7 +288,11 @@ fn gpu_simd_product() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdProduct, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecProduct { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecProduct { .. })));
 }
 
 #[test]
@@ -293,7 +301,11 @@ fn gpu_simd_min() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMin, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMin { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMin { .. })));
 }
 
 #[test]
@@ -302,7 +314,11 @@ fn gpu_simd_max() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMax, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMax { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMax { .. })));
 }
 
 #[test]
@@ -311,7 +327,11 @@ fn gpu_simd_all() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAll, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAll { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAll { .. })));
 }
 
 #[test]
@@ -320,7 +340,11 @@ fn gpu_simd_any() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAny, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAny { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAny { .. })));
 }
 
 #[test]
@@ -329,7 +353,11 @@ fn gpu_simd_extract() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdExtract, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecExtract { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecExtract { .. })));
 }
 
 #[test]
@@ -341,7 +369,11 @@ fn gpu_simd_with() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecWith { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecWith { .. })));
 }
 
 #[test]
@@ -350,7 +382,11 @@ fn gpu_simd_sqrt() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSqrt, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSqrt { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSqrt { .. })));
 }
 
 #[test]
@@ -359,7 +395,11 @@ fn gpu_simd_abs() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdAbs, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecAbs { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecAbs { .. })));
 }
 
 #[test]
@@ -368,7 +408,11 @@ fn gpu_simd_floor() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFloor, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecFloor { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecFloor { .. })));
 }
 
 #[test]
@@ -377,7 +421,11 @@ fn gpu_simd_ceil() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdCeil, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecCeil { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecCeil { .. })));
 }
 
 #[test]
@@ -386,7 +434,11 @@ fn gpu_simd_round() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdRound, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecRound { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecRound { .. })));
 }
 
 #[test]
@@ -395,7 +447,11 @@ fn gpu_simd_shuffle() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdShuffle, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecShuffle { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecShuffle { .. })));
 }
 
 #[test]
@@ -407,7 +463,11 @@ fn gpu_simd_blend() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecBlend { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecBlend { .. })));
 }
 
 #[test]
@@ -419,7 +479,11 @@ fn gpu_simd_select() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecSelect { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecSelect { .. })));
 }
 
 #[test]
@@ -428,7 +492,11 @@ fn gpu_simd_load() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdLoad, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecLoad { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecLoad { .. })));
 }
 
 #[test]
@@ -441,7 +509,11 @@ fn gpu_simd_store() {
     assert!(result.is_ok());
     let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecStore { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecStore { .. })));
     assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
@@ -451,7 +523,11 @@ fn gpu_simd_gather() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdGather, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecGather { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecGather { .. })));
 }
 
 #[test]
@@ -464,7 +540,11 @@ fn gpu_simd_scatter() {
     assert!(result.is_ok());
     let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecScatter { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecScatter { .. })));
     assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
@@ -482,7 +562,11 @@ fn gpu_store_f64_materializes_nil_result() {
     assert!(result.is_ok());
     let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuStoreF64 { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuStoreF64 { .. })));
     assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
@@ -496,7 +580,11 @@ fn gpu_store_i64_materializes_nil_result() {
     assert!(result.is_ok());
     let result = result.unwrap();
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuStoreI64 { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuStoreI64 { .. })));
     assert!(gpu_result_is_materialized_nil(&func, result));
 }
 
@@ -509,7 +597,11 @@ fn gpu_simd_fma() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecFma { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecFma { .. })));
 }
 
 #[test]
@@ -518,7 +610,11 @@ fn gpu_simd_recip() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdRecip, &[gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecRecip { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecRecip { .. })));
 }
 
 #[test]
@@ -560,7 +656,11 @@ fn gpu_simd_masked_load() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaskedLoad { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaskedLoad { .. })));
 }
 
 #[test]
@@ -572,7 +672,11 @@ fn gpu_simd_masked_store() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaskedStore { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaskedStore { .. })));
 }
 
 #[test]
@@ -581,7 +685,11 @@ fn gpu_simd_min_vec() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMinVec, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMinVec { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMinVec { .. })));
 }
 
 #[test]
@@ -590,7 +698,11 @@ fn gpu_simd_max_vec() {
     let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaxVec, &[gpu_dummy_expr(), gpu_dummy_expr()]);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecMaxVec { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecMaxVec { .. })));
 }
 
 #[test]
@@ -602,7 +714,11 @@ fn gpu_simd_clamp() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::VecClamp { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::VecClamp { .. })));
 }
 
 #[test]
@@ -612,7 +728,11 @@ fn gpu_atomic_add() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Add, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Add,
+            ..
+        }
     )));
 }
 
@@ -623,7 +743,11 @@ fn gpu_atomic_sub() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Sub, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Sub,
+            ..
+        }
     )));
 }
 
@@ -634,7 +758,11 @@ fn gpu_atomic_min() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Min, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Min,
+            ..
+        }
     )));
 }
 
@@ -645,7 +773,11 @@ fn gpu_atomic_max() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Max, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Max,
+            ..
+        }
     )));
 }
 
@@ -656,7 +788,11 @@ fn gpu_atomic_and() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::And, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::And,
+            ..
+        }
     )));
 }
 
@@ -667,7 +803,11 @@ fn gpu_atomic_or() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Or, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Or,
+            ..
+        }
     )));
 }
 
@@ -678,7 +818,11 @@ fn gpu_atomic_xor() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Xor, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Xor,
+            ..
+        }
     )));
 }
 
@@ -692,7 +836,11 @@ fn gpu_atomic_exchange() {
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(
-        i, MirInst::GpuAtomic { op: crate::mir::instructions::GpuAtomicOp::Xchg, .. }
+        i,
+        MirInst::GpuAtomic {
+            op: crate::mir::instructions::GpuAtomicOp::Xchg,
+            ..
+        }
     )));
 }
 
@@ -705,7 +853,11 @@ fn gpu_atomic_compare_exchange() {
     );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GpuAtomicCmpXchg { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GpuAtomicCmpXchg { .. })));
 }
 
 // =============================================================================

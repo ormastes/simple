@@ -23,9 +23,7 @@ pub(crate) fn mangle_mir(
     let extern_fns = mir.extern_fn_names.clone();
 
     // Names that should never be mangled (runtime functions, builtins).
-    let is_runtime_or_builtin = |name: &str| -> bool {
-        is_runtime_or_builtin_name(name, &extern_fns)
-    };
+    let is_runtime_or_builtin = |name: &str| -> bool { is_runtime_or_builtin_name(name, &extern_fns) };
 
     // Build set of locally-defined function names.
     let local_fn_names: std::collections::HashSet<String> = mir
@@ -183,8 +181,12 @@ pub(crate) fn mangle_mir(
                 match inst {
                     MirInst::Call { target, .. } => {
                         let name = target.name().to_string();
-                        if is_runtime_or_builtin(&name) { continue; }
-                        if known_mangled.contains(name.as_str()) { continue; }
+                        if is_runtime_or_builtin(&name) {
+                            continue;
+                        }
+                        if known_mangled.contains(name.as_str()) {
+                            continue;
+                        }
                         if name.contains("_dot_") {
                             let converted = name.replace("_dot_", ".");
                             if known_mangled.contains(converted.as_str()) {
@@ -224,28 +226,65 @@ pub(crate) fn mangle_mir(
                         }
                         let name = target.name().to_string();
                         if !known_mangled.contains(name.as_str()) && !is_runtime_or_builtin(&name) {
-                            resolve_call_target(target, &name, use_map, import_map, &local_suffix_index, suffix_index, &func.name, prefix, &mut unresolved_count);
+                            resolve_call_target(
+                                target,
+                                &name,
+                                use_map,
+                                import_map,
+                                &local_suffix_index,
+                                suffix_index,
+                                &func.name,
+                                prefix,
+                                &mut unresolved_count,
+                            );
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
-                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) { continue; }
-                        if let Some(resolved) = resolve_name(func_name, &local_mangled, use_map, import_map, &local_suffix_index, suffix_index) {
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = resolve_name(
+                            func_name,
+                            &local_mangled,
+                            use_map,
+                            import_map,
+                            &local_suffix_index,
+                            suffix_index,
+                        ) {
                             *func_name = resolved;
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
-                        if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) { continue; }
-                        if let Some(resolved) = resolve_name(global_name, &local_global_mangled, use_map, import_map, &local_suffix_index, suffix_index) {
+                        if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = resolve_name(
+                            global_name,
+                            &local_global_mangled,
+                            use_map,
+                            import_map,
+                            &local_suffix_index,
+                            suffix_index,
+                        ) {
                             *global_name = resolved;
                         }
                     }
                     MirInst::MethodCallStatic { func_name, .. } => {
-                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) { continue; }
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
+                            continue;
+                        }
                         if func_name.contains("_dot_") {
                             let converted = func_name.replace("_dot_", ".");
-                            if known_mangled.contains(converted.as_str()) { *func_name = converted; continue; }
-                            if let Some(resolved) = use_map.get(converted.as_str()).or_else(|| import_map.get(converted.as_str())) {
-                                *func_name = resolved.clone(); continue;
+                            if known_mangled.contains(converted.as_str()) {
+                                *func_name = converted;
+                                continue;
+                            }
+                            if let Some(resolved) = use_map
+                                .get(converted.as_str())
+                                .or_else(|| import_map.get(converted.as_str()))
+                            {
+                                *func_name = resolved.clone();
+                                continue;
                             }
                         }
                         if let Some(mangled) = local_mangled.get(func_name.as_str()) {
@@ -257,7 +296,8 @@ pub(crate) fn mangle_mir(
                             let mut use_resolved = None;
                             for (raw, mangled) in use_map.iter() {
                                 if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
-                                    use_resolved = Some(mangled.clone()); break;
+                                    use_resolved = Some(mangled.clone());
+                                    break;
                                 }
                             }
                             if let Some(resolved) = use_resolved {
@@ -267,7 +307,13 @@ pub(crate) fn mangle_mir(
                             }
                         }
                         if !known_mangled.contains(func_name.as_str()) && !is_runtime_or_builtin(func_name) {
-                            resolve_method_call_static(func_name, use_map, import_map, &local_suffix_index, suffix_index);
+                            resolve_method_call_static(
+                                func_name,
+                                use_map,
+                                import_map,
+                                &local_suffix_index,
+                                suffix_index,
+                            );
                         }
                     }
                     _ => {}
@@ -300,8 +346,7 @@ fn resolve_name(
     } else if let Some(resolved) = resolve_name_variants(name, use_map, import_map) {
         Some(resolved)
     } else {
-        resolve_by_suffix(name, local_suffix_index)
-            .or_else(|| resolve_by_suffix(name, suffix_index))
+        resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
     }
 }
 
@@ -322,39 +367,56 @@ fn resolve_call_target(
     } else if name.contains('.') {
         let method = name.rsplit('.').next().unwrap_or(name);
         let type_part = name.split('.').next().unwrap_or("");
-        let candidates = local_suffix_index.get(name)
+        let candidates = local_suffix_index
+            .get(name)
             .or_else(|| suffix_index.get(name))
             .or_else(|| local_suffix_index.get(method))
             .or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
-            let best = candidates.iter()
+            let best = candidates
+                .iter()
                 .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
-                .or_else(|| if candidates.len() == 1 { candidates.first() } else { None });
+                .or_else(|| {
+                    if candidates.len() == 1 {
+                        candidates.first()
+                    } else {
+                        None
+                    }
+                });
             if let Some(b) = best {
                 *target = target.with_name(b.clone());
-            } else if let Some(resolved) = resolve_by_suffix(name, local_suffix_index)
-                .or_else(|| resolve_by_suffix(name, suffix_index))
+            } else if let Some(resolved) =
+                resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
             {
                 *target = target.with_name(resolved);
             } else {
                 *unresolved_count += 1;
-                eprintln!("warning: unresolved call `{}` in function `{}` (module: {})", name, func_name, prefix);
+                eprintln!(
+                    "warning: unresolved call `{}` in function `{}` (module: {})",
+                    name, func_name, prefix
+                );
             }
-        } else if let Some(resolved) = resolve_by_suffix(name, local_suffix_index)
-            .or_else(|| resolve_by_suffix(name, suffix_index))
+        } else if let Some(resolved) =
+            resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
         {
             *target = target.with_name(resolved);
         } else {
             *unresolved_count += 1;
-            eprintln!("warning: unresolved call `{}` in function `{}` (module: {})", name, func_name, prefix);
+            eprintln!(
+                "warning: unresolved call `{}` in function `{}` (module: {})",
+                name, func_name, prefix
+            );
         }
-    } else if let Some(resolved) = resolve_by_suffix(name, local_suffix_index)
-        .or_else(|| resolve_by_suffix(name, suffix_index))
+    } else if let Some(resolved) =
+        resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
     {
         *target = target.with_name(resolved);
     } else {
         *unresolved_count += 1;
-        eprintln!("warning: unresolved call `{}` in function `{}` (module: {})", name, func_name, prefix);
+        eprintln!(
+            "warning: unresolved call `{}` in function `{}` (module: {})",
+            name, func_name, prefix
+        );
     }
 }
 
@@ -382,7 +444,8 @@ fn resolve_method_call_static(
                 for (raw, mangled) in use_map.iter() {
                     if raw.ends_with(&format!(".{}", method)) {
                         if let Some(c) = candidates.iter().find(|c| *c == mangled) {
-                            use_match = Some(c); break;
+                            use_match = Some(c);
+                            break;
                         }
                     }
                 }
@@ -392,7 +455,8 @@ fn resolve_method_call_static(
                             if let Some(c) = candidates.iter().find(|c| *c == mangled) {
                                 let raw_type = raw.split('.').next().unwrap_or("");
                                 if use_map.contains_key(raw_type) {
-                                    use_match = Some(c); break;
+                                    use_match = Some(c);
+                                    break;
                                 }
                             }
                         }
@@ -400,12 +464,18 @@ fn resolve_method_call_static(
                 }
                 use_match
             };
-            let best = best.or_else(|| if candidates.len() == 1 { candidates.first() } else { None });
+            let best = best.or_else(|| {
+                if candidates.len() == 1 {
+                    candidates.first()
+                } else {
+                    None
+                }
+            });
             if let Some(b) = best {
                 *func_name = b.clone();
             }
-        } else if let Some(resolved) = resolve_by_suffix(func_name, local_suffix_index)
-            .or_else(|| resolve_by_suffix(func_name, suffix_index))
+        } else if let Some(resolved) =
+            resolve_by_suffix(func_name, local_suffix_index).or_else(|| resolve_by_suffix(func_name, suffix_index))
         {
             *func_name = resolved;
         }
@@ -427,68 +497,178 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
         || name.starts_with("arc_box_")
         || (name.contains('.') && {
             let prefix = name.split('.').next().unwrap_or("");
-            !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
         })
         || name.ends_with("_contains_key")
         || matches!(
             name,
-            "print" | "println" | "eprint" | "eprintln"
-                | "print_raw" | "eprint_raw" | "dprint"
-                | "Ok" | "Err" | "Some" | "None"
-                | "len" | "push" | "pop" | "get" | "clear"
-                | "contains" | "starts_with" | "ends_with"
-                | "concat" | "char_at" | "at" | "join" | "trim"
-                | "split" | "replace" | "to_upper" | "upper"
-                | "to_lower" | "lower" | "to_int" | "to_i64" | "parse_int"
-                | "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe"
-                | "to_string" | "str" | "slice" | "substring"
-                | "keys" | "values" | "filter" | "sort" | "reverse"
-                | "first" | "last" | "find" | "any" | "all"
-                | "map" | "each" | "reduce" | "fold"
-                | "asm" | "unsafe" | "assert" | "Dict"
-                | "traverse" | "func" | "line_trim"
-                | "malloc" | "free" | "calloc" | "realloc"
-                | "memset" | "memcpy" | "memmove" | "madvise"
-                | "mmap" | "mmap_file" | "munmap"
-                | "readln" | "input" | "input_line" | "input_chars"
-                | "env_var" | "env_args" | "env_clone" | "temp_dir"
-                | "file_mtime" | "file_size_for_mmap"
-                | "fs_read_text" | "fs_write_text" | "fs_has_file" | "fs_has_file_or_dir"
+            "print"
+                | "println"
+                | "eprint"
+                | "eprintln"
+                | "print_raw"
+                | "eprint_raw"
+                | "dprint"
+                | "Ok"
+                | "Err"
+                | "Some"
+                | "None"
+                | "len"
+                | "push"
+                | "pop"
+                | "get"
+                | "clear"
+                | "contains"
+                | "starts_with"
+                | "ends_with"
+                | "concat"
+                | "char_at"
+                | "at"
+                | "join"
+                | "trim"
+                | "split"
+                | "replace"
+                | "to_upper"
+                | "upper"
+                | "to_lower"
+                | "lower"
+                | "to_int"
+                | "to_i64"
+                | "parse_int"
+                | "to_float"
+                | "to_f64"
+                | "parse_float"
+                | "parse_f64"
+                | "parse_f64_safe"
+                | "to_string"
+                | "str"
+                | "slice"
+                | "substring"
+                | "keys"
+                | "values"
+                | "filter"
+                | "sort"
+                | "reverse"
+                | "first"
+                | "last"
+                | "find"
+                | "any"
+                | "all"
+                | "map"
+                | "each"
+                | "reduce"
+                | "fold"
+                | "asm"
+                | "unsafe"
+                | "assert"
+                | "Dict"
+                | "traverse"
+                | "func"
+                | "line_trim"
+                | "malloc"
+                | "free"
+                | "calloc"
+                | "realloc"
+                | "memset"
+                | "memcpy"
+                | "memmove"
+                | "madvise"
+                | "mmap"
+                | "mmap_file"
+                | "munmap"
+                | "readln"
+                | "input"
+                | "input_line"
+                | "input_chars"
+                | "env_var"
+                | "env_args"
+                | "env_clone"
+                | "temp_dir"
+                | "file_mtime"
+                | "file_size_for_mmap"
+                | "fs_read_text"
+                | "fs_write_text"
+                | "fs_has_file"
+                | "fs_has_file_or_dir"
                 | "dir_list_recursive"
-                | "__traits" | "Error" | "VReg" | "Generic"
-                | "trim_end" | "trim_start" | "string_from_byte" | "string_from_char_code"
+                | "__traits"
+                | "Error"
+                | "VReg"
+                | "Generic"
+                | "trim_end"
+                | "trim_start"
+                | "string_from_byte"
+                | "string_from_char_code"
                 | "from_char_code"
-                | "i64_max" | "text_index_of"
+                | "i64_max"
+                | "text_index_of"
                 | "current_rss_kb_main"
-                | "array_length" | "array_new"
-                | "mmap_read_string" | "mmap_read_bytes"
-                | "interpret_ast" | "execute_compiled"
-                | "handler" | "highlighter" | "completer" | "validator"
-                | "AtomicI64" | "CircuitBreakerConfig" | "RateLimitConfig"
-                | "ResourceLimits" | "TimeoutConfig"
-                | "run_benchmarks" | "run_arch_check"
-                | "validate_databases" | "test_user_service"
+                | "array_length"
+                | "array_new"
+                | "mmap_read_string"
+                | "mmap_read_bytes"
+                | "interpret_ast"
+                | "execute_compiled"
+                | "handler"
+                | "highlighter"
+                | "completer"
+                | "validator"
+                | "AtomicI64"
+                | "CircuitBreakerConfig"
+                | "RateLimitConfig"
+                | "ResourceLimits"
+                | "TimeoutConfig"
+                | "run_benchmarks"
+                | "run_arch_check"
+                | "validate_databases"
+                | "test_user_service"
                 | "register_builtin_blocks"
                 | "sql_keywords"
                 | "path_pop"
-                | "new_text_lines" | "old_text_lines"
-                | "new_to_clone" | "parent_clone" | "cycle_path_clone"
-                | "upx_ensure_available" | "upx_get_path"
-                | "self_extract_create" | "self_extract_is_compressed"
-                | "JsonBlockDef" | "MathBlockDef" | "ShellBlockDef" | "SqlBlockDef"
-                | "RegexBlockDef" | "MarkdownBlockDef" | "NogradBlockDef" | "LossBlockDef"
-                | "make_cuda_port" | "make_vulkan_port"
+                | "new_text_lines"
+                | "old_text_lines"
+                | "new_to_clone"
+                | "parent_clone"
+                | "cycle_path_clone"
+                | "upx_ensure_available"
+                | "upx_get_path"
+                | "self_extract_create"
+                | "self_extract_is_compressed"
+                | "JsonBlockDef"
+                | "MathBlockDef"
+                | "ShellBlockDef"
+                | "SqlBlockDef"
+                | "RegexBlockDef"
+                | "MarkdownBlockDef"
+                | "NogradBlockDef"
+                | "LossBlockDef"
+                | "make_cuda_port"
+                | "make_vulkan_port"
                 | "lexer_create_internal"
-                | "mlr_lower_module" | "hir_expr_type" | "hir_pool_get"
+                | "mlr_lower_module"
+                | "hir_expr_type"
+                | "hir_pool_get"
                 | "json_to_const"
                 | "linkercompilationcontext_from_objects"
-                | "search_recursive" | "find_decreases" | "find_scope_ancestor"
-                | "calls_itself" | "hover_fn"
-                | "daemon_send_request" | "parse_shell_commands"
-                | "count_leading_chars" | "count_trailing_chars"
-                | "line_trim_start" | "trimmed_is_empty" | "transcriber_is_empty"
-                | "trait__is_none" | "type__size_bytes"
+                | "search_recursive"
+                | "find_decreases"
+                | "find_scope_ancestor"
+                | "calls_itself"
+                | "hover_fn"
+                | "daemon_send_request"
+                | "parse_shell_commands"
+                | "count_leading_chars"
+                | "count_trailing_chars"
+                | "line_trim_start"
+                | "trimmed_is_empty"
+                | "transcriber_is_empty"
+                | "trait__is_none"
+                | "type__size_bytes"
                 | "next_lexeme_value_chars"
-                | "matching_sort_by" | "mp_segments"
+                | "matching_sort_by"
+                | "mp_segments"
         )
 }

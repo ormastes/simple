@@ -38,7 +38,8 @@ pub(super) fn eval_control_expr(
             } else {
                 // Selective capture: only copy variables referenced in the lambda body
                 let used = collect_free_vars(body);
-                let filtered: HashMap<String, Value> = env.iter()
+                let filtered: HashMap<String, Value> = env
+                    .iter()
                     .filter(|(k, _)| used.contains(k.as_str()))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
@@ -135,10 +136,7 @@ pub(super) fn eval_control_expr(
                 let analysis = crate::pattern_analysis::analyze_match(arms);
                 if !analysis.is_exhaustive && !analysis.missing_patterns.is_empty() {
                     let missing_str = analysis.missing_patterns.join(", ");
-                    tracing::warn!(
-                        "Non-exhaustive pattern match on boolean: missing {}",
-                        missing_str
-                    );
+                    tracing::warn!("Non-exhaustive pattern match on boolean: missing {}", missing_str);
                 }
             }
 

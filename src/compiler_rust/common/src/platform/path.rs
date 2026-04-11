@@ -19,7 +19,9 @@ pub fn absolute(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let mut out = PathBuf::new();
     for comp in abs.components() {
         match comp {
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             std::path::Component::CurDir => {}
             c => out.push(c),
         }

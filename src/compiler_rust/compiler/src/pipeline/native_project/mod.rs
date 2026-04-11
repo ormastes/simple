@@ -46,7 +46,9 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in abs.components() {
         match comp {
-            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
             std::path::Component::CurDir => {}
             c => out.push(c),
         }
@@ -270,7 +272,8 @@ impl NativeProjectBuilder {
     /// Includes target triple in the path to prevent cross-target contamination
     /// (e.g., host Mach-O objects being served for a riscv64-elf build).
     pub(crate) fn cache_dir(&self) -> PathBuf {
-        let base = self.config
+        let base = self
+            .config
             .cache_dir
             .clone()
             .unwrap_or_else(|| self.project_root.join(".simple/native_cache"));
@@ -365,8 +368,7 @@ impl NativeProjectBuilder {
 
         if use_incremental {
             // Canonicalize entry early so we can force-recompile the entry file
-            let canon_entry_for_cache: Option<PathBuf> =
-                self.entry_file.as_ref().map(|p| safe_canonicalize(p));
+            let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
             for (i, (path, source)) in file_sources.iter().enumerate() {
                 // Skip symlink aliases -- only compile each physical file once
                 if !compile_indices.contains(&i) {
@@ -493,7 +495,9 @@ impl NativeProjectBuilder {
                 .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
-                    if non_critical.iter().any(|s| p.contains(s)) { return false; }
+                    if non_critical.iter().any(|s| p.contains(s)) {
+                        return false;
+                    }
                     p.contains("/src/compiler/")
                         || p.contains("\\src\\compiler\\")
                         || p.contains("/src/app/")
@@ -537,7 +541,9 @@ impl NativeProjectBuilder {
                 .iter()
                 .filter(|(path, _)| {
                     let p = path.display().to_string();
-                    if non_critical.iter().any(|s| p.contains(s)) { return false; }
+                    if non_critical.iter().any(|s| p.contains(s)) {
+                        return false;
+                    }
                     p.contains("/src/compiler/")
                         || p.contains("\\src\\compiler\\")
                         || p.contains("/src/app/")
@@ -621,7 +627,6 @@ impl NativeProjectBuilder {
             failures,
         })
     }
-
 }
 
 /// Check if a file path matches the canonical entry file path.
@@ -637,7 +642,7 @@ pub(crate) fn is_entry_file(file_path: &Path, canonical_entry: &Option<PathBuf>)
                 eprintln!("[entry-debug] no match: {} vs {}", p.display(), entry.display());
             }
             false
-        },
+        }
         None => false,
     }
 }

@@ -165,10 +165,10 @@ pub enum TokenKind {
     Loop,
     Break,
     Continue,
-    Pass,  // pass (no-op statement, like Python's pass)
+    Pass,     // pass (no-op statement, like Python's pass)
     Defer,    // defer (deferred execution at scope exit)
     Errdefer, // errdefer (deferred execution only on error exit)
-    Skip,  // skip (test skipping, like @Ignore in JUnit)
+    Skip,     // skip (test skipping, like @Ignore in JUnit)
     Return,
     Match,
     Case,
@@ -230,17 +230,17 @@ pub enum TokenKind {
     Onto,  // onto (call-site label for target placement)
     Ghost, // ghost (verification-only code, erased at runtime)
     Macro,
-    Bang,    // ! (for macro invocations)
-    Vec,     // vec (for SIMD vector types)
-    Shared,  // shared (for GPU shared memory)
-    Gpu,     // gpu (for GPU intrinsics namespace)
-    Bounds,  // bounds (for @simd kernel bounds: clause)
-    Kernel,  // kernel (GPU kernel function declaration)
-    Gen,     // gen (generator function declaration)
-    Dyn,     // dyn (for dynamic trait objects)
-    Repr,    // repr (for unit representation constraints)
-    Literal, // literal (for literal fn definitions)
-    Alias,   // alias (for type/class aliasing: alias NewName = OldName)
+    Bang,          // ! (for macro invocations)
+    Vec,           // vec (for SIMD vector types)
+    Shared,        // shared (for GPU shared memory)
+    Gpu,           // gpu (for GPU intrinsics namespace)
+    Bounds,        // bounds (for @simd kernel bounds: clause)
+    Kernel,        // kernel (GPU kernel function declaration)
+    Gen,           // gen (generator function declaration)
+    Dyn,           // dyn (for dynamic trait objects)
+    Repr,          // repr (for unit representation constraints)
+    Literal,       // literal (for literal fn definitions)
+    Alias,         // alias (for type/class aliasing: alias NewName = OldName)
     Label(String), // 'label (tick-prefixed identifier for labeled break/continue)
     // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
     // or "lean import" statement to avoid breaking existing module paths

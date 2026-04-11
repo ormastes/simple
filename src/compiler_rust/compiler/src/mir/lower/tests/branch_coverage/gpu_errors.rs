@@ -24,7 +24,11 @@ fn lvalue_local() {
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::LocalAddr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::LocalAddr { .. })));
 }
 
 #[test]
@@ -44,7 +48,11 @@ fn lvalue_field_access() {
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GetElementPtr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GetElementPtr { .. })));
 }
 
 #[test]
@@ -65,7 +73,11 @@ fn lvalue_index() {
     let result = lowerer.lower_lvalue(&expr);
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
-    assert!(func.blocks.iter().flat_map(|b| &b.instructions).any(|i| matches!(i, MirInst::GetElementPtr { .. })));
+    assert!(func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i, MirInst::GetElementPtr { .. })));
 }
 
 #[test]
@@ -339,7 +351,10 @@ fn gpu_simd_shuffle_second_arg_err() {
 #[test]
 fn gpu_simd_blend_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -347,7 +362,10 @@ fn gpu_simd_blend_first_arg_err() {
 #[test]
 fn gpu_simd_blend_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -355,7 +373,10 @@ fn gpu_simd_blend_second_arg_err() {
 #[test]
 fn gpu_simd_blend_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdBlend, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdBlend,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -363,7 +384,10 @@ fn gpu_simd_blend_third_arg_err() {
 #[test]
 fn gpu_simd_select_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -371,7 +395,10 @@ fn gpu_simd_select_first_arg_err() {
 #[test]
 fn gpu_simd_select_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -379,7 +406,10 @@ fn gpu_simd_select_second_arg_err() {
 #[test]
 fn gpu_simd_select_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdSelect, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdSelect,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -403,7 +433,10 @@ fn gpu_simd_load_second_arg_err() {
 #[test]
 fn gpu_simd_store_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -411,7 +444,10 @@ fn gpu_simd_store_first_arg_err() {
 #[test]
 fn gpu_simd_store_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -419,7 +455,10 @@ fn gpu_simd_store_second_arg_err() {
 #[test]
 fn gpu_simd_store_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdStore, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -443,7 +482,10 @@ fn gpu_simd_gather_second_arg_err() {
 #[test]
 fn gpu_simd_scatter_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -451,7 +493,10 @@ fn gpu_simd_scatter_first_arg_err() {
 #[test]
 fn gpu_simd_scatter_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -459,7 +504,10 @@ fn gpu_simd_scatter_second_arg_err() {
 #[test]
 fn gpu_simd_scatter_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdScatter, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdScatter,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -467,7 +515,10 @@ fn gpu_simd_scatter_third_arg_err() {
 #[test]
 fn gpu_simd_fma_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -475,7 +526,10 @@ fn gpu_simd_fma_first_arg_err() {
 #[test]
 fn gpu_simd_fma_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -483,7 +537,10 @@ fn gpu_simd_fma_second_arg_err() {
 #[test]
 fn gpu_simd_fma_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdFma, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdFma,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -507,7 +564,10 @@ fn gpu_neighbor_right_arg_err() {
 #[test]
 fn gpu_simd_masked_load_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -515,7 +575,10 @@ fn gpu_simd_masked_load_first_arg_err() {
 #[test]
 fn gpu_simd_masked_load_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -523,7 +586,10 @@ fn gpu_simd_masked_load_second_arg_err() {
 #[test]
 fn gpu_simd_masked_load_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -531,7 +597,10 @@ fn gpu_simd_masked_load_third_arg_err() {
 #[test]
 fn gpu_simd_masked_load_fourth_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedLoad, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -539,7 +608,10 @@ fn gpu_simd_masked_load_fourth_arg_err() {
 #[test]
 fn gpu_simd_masked_store_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -547,7 +619,10 @@ fn gpu_simd_masked_store_first_arg_err() {
 #[test]
 fn gpu_simd_masked_store_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -555,7 +630,10 @@ fn gpu_simd_masked_store_second_arg_err() {
 #[test]
 fn gpu_simd_masked_store_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -563,7 +641,10 @@ fn gpu_simd_masked_store_third_arg_err() {
 #[test]
 fn gpu_simd_masked_store_fourth_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdMaskedStore, &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdMaskedStore,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -571,7 +652,10 @@ fn gpu_simd_masked_store_fourth_arg_err() {
 #[test]
 fn gpu_simd_clamp_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -579,7 +663,10 @@ fn gpu_simd_clamp_first_arg_err() {
 #[test]
 fn gpu_simd_clamp_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -587,7 +674,10 @@ fn gpu_simd_clamp_second_arg_err() {
 #[test]
 fn gpu_simd_clamp_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdClamp, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::SimdClamp,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -611,7 +701,10 @@ fn gpu_atomic_second_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_first_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange, &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[failing_expr(), gpu_dummy_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -619,7 +712,10 @@ fn gpu_atomic_cmpxchg_first_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_second_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange, &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[gpu_dummy_expr(), failing_expr(), gpu_dummy_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }
@@ -627,7 +723,10 @@ fn gpu_atomic_cmpxchg_second_arg_err() {
 #[test]
 fn gpu_atomic_cmpxchg_third_arg_err() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::GpuAtomicCompareExchange, &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()]);
+    let result = lowerer.lower_gpu_intrinsic(
+        GpuIntrinsicKind::GpuAtomicCompareExchange,
+        &[gpu_dummy_expr(), gpu_dummy_expr(), failing_expr()],
+    );
     assert!(result.is_err());
     lowerer.end_function().unwrap();
 }

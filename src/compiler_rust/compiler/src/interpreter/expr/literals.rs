@@ -452,7 +452,11 @@ fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
                 _ => v.to_display_string().parse::<i64>().unwrap_or(0),
             };
             let result = format!("{:o}", i);
-            if alt_form { format!("0o{}", result) } else { result }
+            if alt_form {
+                format!("0o{}", result)
+            } else {
+                result
+            }
         }
         'b' => {
             let i = match v {
@@ -460,7 +464,11 @@ fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
                 _ => v.to_display_string().parse::<i64>().unwrap_or(0),
             };
             let result = format!("{:b}", i);
-            if alt_form { format!("0b{}", result) } else { result }
+            if alt_form {
+                format!("0b{}", result)
+            } else {
+                result
+            }
         }
         '%' => {
             let f = match v {
@@ -475,7 +483,11 @@ fn format_value_with_spec_interp(v: &Value, spec: &str) -> String {
             // Default: string representation, with precision as max length
             let s = v.to_display_string();
             if let Some(prec) = precision {
-                if s.len() > prec { s[..prec].to_string() } else { s }
+                if s.len() > prec {
+                    s[..prec].to_string()
+                } else {
+                    s
+                }
             } else {
                 s
             }

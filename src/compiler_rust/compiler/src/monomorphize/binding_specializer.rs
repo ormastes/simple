@@ -230,7 +230,7 @@ impl BindingSpecializer {
             Expr::Lambda { params, body, .. } => {
                 let mut new_lambda = expr.clone();
                 if let Expr::Lambda { body: b, .. } = &mut new_lambda {
-                    *b = Box::new(self.specialize_expr(body));
+                    **b = self.specialize_expr(body);
                 }
                 new_lambda
             }

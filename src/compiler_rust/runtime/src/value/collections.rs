@@ -238,10 +238,9 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
             // we grow into the SAME allocation by using excess capacity only.
             // If truly at capacity with no room, we must reallocate.
             let new_cap = ((*arr).capacity * 2).max(4);
-            let old_size = std::mem::size_of::<RuntimeArray>()
-                + (*arr).capacity as usize * std::mem::size_of::<RuntimeValue>();
-            let new_size = std::mem::size_of::<RuntimeArray>()
-                + new_cap as usize * std::mem::size_of::<RuntimeValue>();
+            let old_size =
+                std::mem::size_of::<RuntimeArray>() + (*arr).capacity as usize * std::mem::size_of::<RuntimeValue>();
+            let new_size = std::mem::size_of::<RuntimeArray>() + new_cap as usize * std::mem::size_of::<RuntimeValue>();
             let old_layout = std::alloc::Layout::from_size_align(old_size, 8).unwrap();
             let new_ptr = std::alloc::realloc(arr as *mut u8, old_layout, new_size);
             if new_ptr.is_null() {
@@ -257,8 +256,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
             }
             let arr = new_ptr as *mut RuntimeArray;
             (*arr).capacity = new_cap;
-            (*arr).header = HeapHeader::new(
-                HeapObjectType::Array, new_size as u32);
+            (*arr).header = HeapHeader::new(HeapObjectType::Array, new_size as u32);
             let data_ptr = (arr.add(1)) as *mut RuntimeValue;
             *data_ptr.add((*arr).len as usize) = value;
             (*arr).len += 1;

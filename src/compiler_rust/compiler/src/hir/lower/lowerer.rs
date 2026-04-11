@@ -213,7 +213,10 @@ impl Lowerer {
     /// Set global struct definitions for cross-module field resolution.
     /// The type resolver uses these to look up field indices when the struct type
     /// isn't in the per-file registry.
-    pub fn set_global_struct_defs(&mut self, defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>) {
+    pub fn set_global_struct_defs(
+        &mut self,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    ) {
         self.global_struct_defs = Some(defs);
     }
 

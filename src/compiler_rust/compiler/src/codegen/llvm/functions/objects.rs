@@ -38,9 +38,10 @@ impl LlvmBackend {
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "struct_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
-        let alloc_value = alloc_call.try_as_basic_value().left().ok_or_else(|| {
-            crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value")
-        })?;
+        let alloc_value = alloc_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let struct_ptr = match alloc_value {
             inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
                 .build_pointer_cast(ptr, i8_ptr_type, "alloc_ptr")

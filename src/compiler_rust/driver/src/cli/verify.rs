@@ -95,7 +95,7 @@ fn cmd_regenerate() -> i32 {
 }
 
 fn cmd_check() -> i32 {
-    run_gen_lean(&vec!["gen-lean".to_string(), "verify".to_string()])
+    run_gen_lean(&["gen-lean".to_string(), "verify".to_string()])
 }
 
 fn cmd_list() -> i32 {

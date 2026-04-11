@@ -1474,7 +1474,10 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
     if options.watch {
         match simple_driver::cli::test_runner::watch_tests(options) {
             Ok(()) => 0,
-            Err(e) => { eprintln!("error: {}", e); 1 }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
         }
     } else {
         let format = options.format;
@@ -1485,6 +1488,10 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
         if !is_mgmt {
             simple_driver::cli::test_output::print_summary(&result, format);
         }
-        if result.success() { 0 } else { 1 }
+        if result.success() {
+            0
+        } else {
+            1
+        }
     }
 }

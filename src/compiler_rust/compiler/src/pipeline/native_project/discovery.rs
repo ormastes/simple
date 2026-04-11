@@ -4,10 +4,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use super::{
-    collect_spl_files_recursive, safe_canonicalize, same_file_path,
-    NativeProjectBuilder,
-};
+use super::{collect_spl_files_recursive, safe_canonicalize, same_file_path, NativeProjectBuilder};
 
 impl NativeProjectBuilder {
     /// Discover all .spl files in source directories.
@@ -56,15 +53,14 @@ impl NativeProjectBuilder {
         // Ensure at least the effective root for the entry file is covered.
         if resolvers.is_empty() {
             let resolver_root = self.effective_source_root_for(&canonical_entry);
-            resolvers.push(crate::module_resolver::ModuleResolver::new(self.project_root.clone(), resolver_root));
+            resolvers.push(crate::module_resolver::ModuleResolver::new(
+                self.project_root.clone(),
+                resolver_root,
+            ));
         }
 
         // Canonicalize source dirs once for the filesystem fallback.
-        let canonical_source_dirs: Vec<PathBuf> = self
-            .source_dirs
-            .iter()
-            .map(|d| safe_canonicalize(d))
-            .collect();
+        let canonical_source_dirs: Vec<PathBuf> = self.source_dirs.iter().map(|d| safe_canonicalize(d)).collect();
 
         let mut queue = VecDeque::from([canonical_entry.clone()]);
         let mut seen = HashSet::new();
@@ -93,7 +89,10 @@ impl NativeProjectBuilder {
             for resolver in &mut resolvers {
                 for dep in extract_reachable_module_paths(&module, &canonical, resolver) {
                     let dep_canonical = safe_canonicalize(&dep);
-                    if !found_deps.iter().any(|existing| same_file_path(existing, &dep_canonical)) {
+                    if !found_deps
+                        .iter()
+                        .any(|existing| same_file_path(existing, &dep_canonical))
+                    {
                         found_deps.push(dep_canonical);
                     }
                 }
@@ -104,8 +103,8 @@ impl NativeProjectBuilder {
             // directly.
             {
                 use simple_parser::ast::{
-                    AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath,
-                    MultiUse, Node, UseStmt,
+                    AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, ModDecl, ModulePath, MultiUse, Node,
+                    UseStmt,
                 };
 
                 fn segments_from_use(path: &ModulePath, target: Option<&ImportTarget>) -> Vec<Vec<String>> {
@@ -151,10 +150,7 @@ impl NativeProjectBuilder {
                         continue;
                     }
                     for src_dir in &canonical_source_dirs {
-                        let dir_name = src_dir
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("");
+                        let dir_name = src_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
                         let try_segments: Vec<&[String]> = if !segments.is_empty() && segments[0] == dir_name {
                             vec![&segments[1..], &segments[..]]

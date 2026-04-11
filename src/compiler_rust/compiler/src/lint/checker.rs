@@ -1598,7 +1598,10 @@ impl LintChecker {
                     LintName::StubImpl,
                     Span::new(0, 0, i + 1, 1),
                     "explicit placeholder function body".to_string(),
-                    Some("replace the placeholder body with a real implementation or suppress stub_impl explicitly".to_string()),
+                    Some(
+                        "replace the placeholder body with a real implementation or suppress stub_impl explicitly"
+                            .to_string(),
+                    ),
                 );
             }
 

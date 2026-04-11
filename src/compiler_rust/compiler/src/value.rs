@@ -361,18 +361,24 @@ impl CowEnv {
             0
         };
         // Count overlay keys that are NOT shadowing base keys
-        let overlay_new = self.overlay.keys().filter(|k| {
-            match &self.base {
+        let overlay_new = self
+            .overlay
+            .keys()
+            .filter(|k| match &self.base {
                 Some(b) => !b.contains_key(k.as_str()),
                 None => true,
-            }
-        }).count();
-        base_visible + overlay_new + self.overlay.keys().filter(|k| {
-            match &self.base {
-                Some(b) => b.contains_key(k.as_str()),
-                None => false,
-            }
-        }).count()
+            })
+            .count();
+        base_visible
+            + overlay_new
+            + self
+                .overlay
+                .keys()
+                .filter(|k| match &self.base {
+                    Some(b) => b.contains_key(k.as_str()),
+                    None => false,
+                })
+                .count()
     }
 
     /// Check if the environment is empty.
@@ -383,8 +389,7 @@ impl CowEnv {
         match &self.base {
             Some(b) => {
                 // All base keys must be tombstoned
-                b.len() <= self.tombstones.len()
-                    && b.keys().all(|k| self.tombstones.contains(k))
+                b.len() <= self.tombstones.len() && b.keys().all(|k| self.tombstones.contains(k))
             }
             None => true,
         }
@@ -512,8 +517,8 @@ impl Default for CowEnv {
 impl Clone for CowEnv {
     fn clone(&self) -> Self {
         CowEnv {
-            base: self.base.clone(), // Arc::clone — O(1)
-            overlay: self.overlay.clone(), // small
+            base: self.base.clone(),             // Arc::clone — O(1)
+            overlay: self.overlay.clone(),       // small
             tombstones: self.tombstones.clone(), // small
         }
     }

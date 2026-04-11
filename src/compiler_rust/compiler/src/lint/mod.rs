@@ -53,10 +53,7 @@ mod tests {
 
     fn check_code_in_file(filename: &str, code: &str) -> Vec<LintDiagnostic> {
         let module = parse_code(code);
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!("simple_lint_{}_{}", unique, filename));
         fs::write(&path, code).expect("write temp lint file");
         let mut checker = LintChecker::new().with_source_file(Some(path.clone()));
@@ -204,9 +201,7 @@ describe "demo":
         expect(true).to_equal(true)
 "#;
         let diagnostics = check_code_in_file("demo_spec.spl", code);
-        assert!(diagnostics
-            .iter()
-            .all(|d| d.lint != LintName::SSpecPlaceholderTests));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::SSpecPlaceholderTests));
     }
 
     #[test]
