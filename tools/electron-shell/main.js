@@ -54,7 +54,9 @@ function resolveSimpleBin() {
     return path.join(__dirname, '..', '..', 'bin', 'simple');
 }
 
-// Collect non-flag arguments as the entry file and its args
+// Collect non-flag arguments as the entry file and its args.
+// Strips Electron/CDP flags (--bin, --remote-debugging-port, etc.)
+// so they don't leak into the Simple subprocess command line.
 function resolveEntryArgs() {
     const args = process.argv.slice(2);
     const result = [];
@@ -66,6 +68,10 @@ function resolveEntryArgs() {
         }
         if (args[i] === '--bin') {
             skipNext = true;
+            continue;
+        }
+        // Filter out Electron/Chromium flags injected by the CDP launcher
+        if (args[i].startsWith('--remote-debugging-port')) {
             continue;
         }
         result.push(args[i]);
@@ -150,11 +156,21 @@ function spawnSimpleProcess() {
     const entryArgs = resolveEntryArgs();
 
     if (entryArgs.length === 0) {
-        debugLog('no entry args provided');
-        console.error('Usage: electron . <entry.spl> [args...]');
-        console.error('  --bin <path>   Path to Simple binary (or set SIMPLE_BIN)');
-        app.quit();
-        return;
+        // Default to the hello_electron .spl entry when no entry file is given
+        // (e.g. when launched via play_launch for CDP automation).
+        // Use the .spl file (not .ui.sdn) because it goes through run_electron()
+        // which handles Electron IPC directly.
+        const defaultSpl = path.join(projectRoot, 'examples', 'ui', 'hello_electron.spl');
+        if (fs.existsSync(defaultSpl)) {
+            debugLog('no entry args — falling back to hello_electron.spl');
+            entryArgs.push(defaultSpl);
+        } else {
+            debugLog('no entry args provided');
+            console.error('Usage: electron . <entry.spl> [args...]');
+            console.error('  --bin <path>   Path to Simple binary (or set SIMPLE_BIN)');
+            app.quit();
+            return;
+        }
     }
 
     const commandArgs = entryArgs.length > 0 && entryArgs[0].endsWith('.ui.sdn')
@@ -167,7 +183,9 @@ function spawnSimpleProcess() {
         env: {
             ...process.env,
             SIMPLE_UI_BACKEND: 'electron',
-            SIMPLE_HOME: projectRoot
+            SIMPLE_HOME: projectRoot,
+            SIMPLE_TIMEOUT_SECONDS: '0',
+            SIMPLE_EXAMPLE_ISOLATED_CHILD: '1'
         }
     });
     debugLog(`spawned simple pid=${simpleProcess.pid || 'unknown'} bin=${bin} args=${commandArgs.join(' ')}`);

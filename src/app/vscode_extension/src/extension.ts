@@ -137,19 +137,43 @@ async function createServerOptions(
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     if (!serverPath) {
-        // Auto-detect: look for simple_lsp_server wrapper relative to repo root
+        // Auto-detect: walk up from workspace root to find bin/simple or bin/simple_lsp_server
+        const fs = require('fs');
+        const binNames = ['simple_lsp_server', 'simple'];
         if (workspaceRoot) {
-            const candidates = [
-                path.join(workspaceRoot, 'bin', 'simple_lsp_server'),
-                path.join(workspaceRoot, 'bin', 'simple'),
-            ];
-            const fs = require('fs');
-            for (const candidate of candidates) {
-                try {
-                    fs.accessSync(candidate, fs.constants.X_OK);
-                    serverPath = candidate;
-                    break;
-                } catch { /* not found */ }
+            let dir = workspaceRoot;
+            for (let depth = 0; depth < 6; depth++) {
+                for (const name of binNames) {
+                    const candidate = path.join(dir, 'bin', name);
+                    try {
+                        fs.accessSync(candidate, fs.constants.X_OK);
+                        serverPath = candidate;
+                        break;
+                    } catch { /* not found */ }
+                }
+                if (serverPath) break;
+                const parent = path.dirname(dir);
+                if (parent === dir) break;
+                dir = parent;
+            }
+        }
+        // Also check extension's own location (extension may live inside the repo)
+        if (!serverPath) {
+            const extRoot = context.extensionUri.fsPath;
+            let dir = extRoot;
+            for (let depth = 0; depth < 6; depth++) {
+                for (const name of binNames) {
+                    const candidate = path.join(dir, 'bin', name);
+                    try {
+                        fs.accessSync(candidate, fs.constants.X_OK);
+                        serverPath = candidate;
+                        break;
+                    } catch { /* not found */ }
+                }
+                if (serverPath) break;
+                const parent = path.dirname(dir);
+                if (parent === dir) break;
+                dir = parent;
             }
         }
         if (!serverPath) {
@@ -170,7 +194,11 @@ async function createServerOptions(
         options: {
             env: {
                 ...process.env,
-                SIMPLE_LIB: workspaceRoot ? path.join(workspaceRoot, 'src') : process.env.SIMPLE_LIB || '',
+                // Derive SIMPLE_LIB from the resolved server binary's repo root
+                // (bin/simple → repo/src). Fall back to workspace src/ or env var.
+                SIMPLE_LIB: path.isAbsolute(serverPath)
+                    ? path.join(path.dirname(path.dirname(serverPath)), 'src')
+                    : workspaceRoot ? path.join(workspaceRoot, 'src') : process.env.SIMPLE_LIB || '',
             }
         }
     };

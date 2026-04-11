@@ -156,29 +156,21 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
     });
     (0, mocha_1.test)('Custom editor HTML uses webview CSP source and contains the source shell', () => {
         const cssUri = 'vscode-webview-resource://test/katex.min.css';
+        const webviewJsUri = 'vscode-webview-resource://test/mathEditor.js';
         const cspSource = 'vscode-webview://test-source';
-        const html = (0, mathCustomEditor_1.buildMathCustomEditorHtml)({
-            documentUri: 'file:///tmp/demo.spl',
-            sourceText: 'let eq = m{ frac(1, 2) }',
-            selectionStart: 11,
-            selectionEnd: 11,
-            hasActiveBlock: true,
-            activeBlockLabel: 'm{}',
-            activeBlockSource: 'frac(1, 2)',
-            activeBlockPretty: '(1)/(2)',
-            activeBlockRenderedHtml: '<span class="katex">demo</span>',
-            activeBlockStatusKind: 'ok',
-            activeBlockStatusMessage: 'Rendered active math block.',
-        }, cssUri, cspSource);
+        const nonce = 'dGVzdG5vbmNl';
+        const html = (0, mathCustomEditor_1.buildMathCustomEditorHtml)(cssUri, webviewJsUri, cspSource, nonce);
         assert.ok(html.includes('Simple Math Source Editor'));
-        assert.ok(html.includes('<textarea id="source"'));
+        assert.ok(html.includes('editor-container'));
         assert.ok(html.includes('Math Preview'));
         assert.ok(html.includes('Status'));
-        assert.ok(html.includes('Rendered active math block.'));
         assert.ok(html.includes(`<link rel="stylesheet" href="${cssUri}">`));
+        assert.ok(html.includes(`src="${webviewJsUri}"`));
         assert.ok(html.includes(`style-src ${cspSource} 'unsafe-inline'`));
         assert.ok(html.includes(`font-src ${cspSource}`));
         assert.ok(!html.includes(`style-src ${cssUri}`));
+        assert.ok(html.includes(`script-src ${cspSource}`), 'CSP script-src must include cspSource for external webview JS');
+        assert.ok(html.includes('MathEditorWebview.boot()'));
     });
     (0, mocha_1.test)('Custom editor state reports info status when no math block is active', () => {
         const state = (0, mathCustomEditor_1.buildMathCustomEditorState)('file:///tmp/demo.spl', 'fn main():\n    val y = 42\n', 0, 0);
@@ -213,6 +205,44 @@ function ensureMathCoreWasmArtifact(extensionRoot) {
         assert.ok(active, 'expected active math block');
         assert.strictEqual(active?.blockType, 'loss');
         assert.strictEqual(active?.content, 'sqrt(x)');
+    });
+    (0, mocha_1.test)('Complex math blocks render tall KaTeX structures (fractions, roots, multi-row)', () => {
+        const source = [
+            'let a = m{frac(frac(1, 2) + frac(3, 4), frac(5, 6) * frac(7, 8))}',
+            'let b = m{sqrt(frac(x^2 + 1, x^2 - 1))}',
+            'let c = m{cases(x, x geq 0; 0, otherwise)}',
+            'let d = m{sum(frac(1, k^2), k=1..n)}',
+            'let e = m{pi * r^2}',
+        ].join('\n');
+        const blocks = (0, mathCustomEditor_1.detectMathBlocksInSource)(source);
+        assert.strictEqual(blocks.length, 5, 'expected five math blocks');
+        // All blocks must produce non-empty renderedHtml with katex class
+        for (const block of blocks) {
+            assert.ok(block.renderedHtml.length > 0, `block "${block.content}" should have renderedHtml`);
+            assert.ok(block.renderedHtml.includes('katex'), `block "${block.content}" should contain katex class`);
+        }
+        // Nested fraction — must contain frac-line elements (vertical stacking = tall)
+        const nestedFrac = blocks[0];
+        assert.strictEqual(nestedFrac.content, 'frac(frac(1, 2) + frac(3, 4), frac(5, 6) * frac(7, 8))');
+        assert.ok(nestedFrac.renderedHtml.includes('frac-line'), 'nested fraction should render frac-line elements');
+        // Square root of fraction — must have both sqrt and frac structures
+        const sqrtFrac = blocks[1];
+        assert.strictEqual(sqrtFrac.content, 'sqrt(frac(x^2 + 1, x^2 - 1))');
+        assert.ok(sqrtFrac.renderedHtml.includes('sqrt'), 'sqrt(frac) should render sqrt element');
+        assert.ok(sqrtFrac.renderedHtml.includes('frac-line'), 'sqrt(frac) should render frac-line element');
+        // Cases/piecewise — must have multi-row table structure
+        const piecewise = blocks[2];
+        assert.strictEqual(piecewise.content, 'cases(x, x geq 0; 0, otherwise)');
+        assert.ok(piecewise.renderedHtml.includes('mtable') || piecewise.renderedHtml.includes('arraycolsep'), 'piecewise should render multi-row table structure');
+        // Summation with fraction body — must have frac-line
+        const sumFrac = blocks[3];
+        assert.strictEqual(sumFrac.content, 'sum(frac(1, k^2), k=1..n)');
+        assert.ok(sumFrac.renderedHtml.includes('frac-line'), 'sum with frac body should render frac-line');
+        // Simple inline — must NOT contain tall structures (no frac-line, no sqrt, no mtable)
+        const simple = blocks[4];
+        assert.strictEqual(simple.content, 'pi * r^2');
+        assert.ok(!simple.renderedHtml.includes('frac-line'), 'simple expression should not have frac-line');
+        assert.ok(!simple.renderedHtml.includes('mtable'), 'simple expression should not have mtable');
     });
     (0, mocha_1.test)('SVG renderer normalizes MathJax dimensions to em units', () => {
         const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-math-svg-'));

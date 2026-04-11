@@ -4,7 +4,10 @@ interface MathBlockSnapshot {
     blockType: MathBlockType;
     fullStart: number;
     fullEnd: number;
+    prefixEnd: number;
     content: string;
+    prefix: string;
+    renderedHtml: string;
 }
 type MathRenderStatusKind = 'info' | 'ok' | 'error';
 export interface MathCustomEditorState {
@@ -20,10 +23,10 @@ export interface MathCustomEditorState {
     activeBlockStatusKind: MathRenderStatusKind;
     activeBlockStatusMessage: string;
 }
-export declare function buildMathCustomEditorState(documentUri: string, sourceText: string, selectionStart: number, selectionEnd: number): MathCustomEditorState;
 export declare function detectMathBlocksInSource(text: string): MathBlockSnapshot[];
 export declare function findMathBlockAtOffset(text: string, offset: number): MathBlockSnapshot | undefined;
-export declare function buildMathCustomEditorHtml(state: MathCustomEditorState, katexCssUri?: string, cspSource?: string): string;
+export declare function buildMathCustomEditorState(documentUri: string, sourceText: string, selectionStart: number, selectionEnd: number): MathCustomEditorState;
+export declare function buildMathCustomEditorHtml(katexCssUri: string, webviewJsUri: string, cspSource: string, nonce: string): string;
 export declare class MathCustomEditorProvider implements vscode.CustomTextEditorProvider {
     private readonly extensionUri;
     static readonly viewType = "simple.mathSourceEditor";

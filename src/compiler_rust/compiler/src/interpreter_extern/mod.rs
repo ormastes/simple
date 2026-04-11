@@ -766,6 +766,7 @@ pub(crate) fn call_extern_function(
         // Aliases for snpm compatibility
         "rt_get_cwd" => file_io::rt_get_cwd(&evaluated),
         "rt_mkdir" => file_io::rt_dir_create(&evaluated),
+        "rt_mkdir_p" => file_io::rt_dir_create_all(&evaluated),
         "rt_file_list_dir" => file_io::rt_dir_list(&evaluated),
         // File descriptor operations
         "rt_file_open" => file_io::rt_file_open(&evaluated),
