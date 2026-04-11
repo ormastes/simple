@@ -85,6 +85,7 @@ pub mod error_ffi;
 pub mod span_ffi;
 pub mod rc;
 pub mod wffi;
+pub mod crypto;
 pub mod dynamic_ffi;
 #[cfg(feature = "gui")]
 pub mod winit_ffi;
@@ -401,6 +402,17 @@ pub(crate) fn call_extern_function(
         "rt_text_to_bytes" => conversion::rt_text_to_bytes_fn(&evaluated),
         "rt_bytes_to_text" => conversion::rt_bytes_to_text_fn(&evaluated),
         "rt_gui_get_glyph_8x16" => conversion::rt_gui_get_glyph_8x16_fn(&evaluated),
+
+        // SHA-1 hash functions (for WebSocket handshake)
+        "rt_sha1_new" => crypto::rt_sha1_new(&evaluated),
+        "rt_sha1_write" => crypto::rt_sha1_write(&evaluated),
+        "rt_sha1_finish" => crypto::rt_sha1_finish(&evaluated),
+        "rt_sha1_finish_bytes" => crypto::rt_sha1_finish_bytes(&evaluated),
+        "rt_sha1_reset" => crypto::rt_sha1_reset(&evaluated),
+        "rt_sha1_free" => crypto::rt_sha1_free(&evaluated),
+        // Base64 encoding/decoding
+        "rt_base64_encode" => crypto::rt_base64_encode(&evaluated),
+        "rt_base64_decode" => crypto::rt_base64_decode(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)
